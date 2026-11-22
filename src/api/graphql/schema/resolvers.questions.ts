@@ -664,7 +664,7 @@ const TASK_REF_MESSAGE = 'taskRef must be an open task assigned to the asking wo
 const OPEN_TASK_STATUSES: ReadonlySet<string> = new Set(['pending', 'started']);
 
 /**
- * #4431 (Questions S7, Vera's draft cor:agt:050:34) — the task a question blocks, by id or handle, as the stored
+ * #4431 (Questions S7, cor:agt:050:35) — the task a question blocks, by id or handle, as the stored
  * `taskId`. Accepted only when the request acts as a worker, the task is open (pending or started) and assigned to that
  * worker, and the task's App is the App of the log's memory; anything else (including a task that does not exist, or a
  * caller with no worker) is the same QUESTION_INVALID at /taskRef. Judged inside the ask's transaction, before any write.
@@ -1697,7 +1697,8 @@ export const questionFieldResolvers = {
       // The same gate as the doors, on the read client; a state no door writes to is never answerable.
       const state = v.evaluation.state;
       if (!v.shown || !v.evaluation.question || BLOCKED_STATES.has(state)) return false;
-      // At the entry limit answerAct refuses every new entry (retraction included), so no one may answer.
+      // At MAX_ANSWERS - 1 entries answerAct refuses a new answer (the last slot is kept for a take-back), so no one may
+      // answer; a retraction is refused only at MAX_ANSWERS, so this field says nothing about whether one can still be made.
       if (v.shown.answers.length >= MAX_ANSWERS - 1) return false;
       const found = await logOfQuestion(ctx.db, v.row);
       if (!found) return false;

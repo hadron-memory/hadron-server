@@ -174,6 +174,9 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // Spec 043 — Slack integration (receipts have no FK; connections FK org + app).
   await db.slackEventReceipt.deleteMany();
   await db.slackConnection.deleteMany();
+  // #597 — Telegram (receipts have no FK; connections FK org + app).
+  await db.telegramEventReceipt.deleteMany();
+  await db.telegramConnection.deleteMany();
   // hadrontool-mcp conduit registry (FKs org only).
   await db.mcpServer.deleteMany();
   // hadrontool-home-assistant registry (FKs org only).

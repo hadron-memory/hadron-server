@@ -1720,18 +1720,39 @@ export const agentMutations = {
       // auto-provisioned memory is class='personal' (plaintext USER_ID mode) or
       // 'private' (encrypted SECRET mode, 041/#516); scope by userMemoryOfAgentId
       // so free-standing user memories (agent NULL) never match.
-      const userMemory = await ctx.db.memory.findFirst({
-        where: {
-          userId: resolvedUserId,
-          userMemoryOfAgentId: resolvedAgentId,
-          class: { in: ['personal', 'private'] },
-          deletedAt: null,
-        },
-        include: { _count: { select: { nodes: true } } },
+      //
+      // #4716: the empty-check and the hard delete are ONE guarded operation
+      // (cor:dmo:050:08). The memory row is locked FOR UPDATE before counting —
+      // every node writer necessarily takes an FK key-share on that row, so the
+      // lock fences them all — and the count is its own statement AFTER the lock
+      // wait, so under READ COMMITTED's fresh statement snapshot a node that
+      // committed while we waited is seen. A memory that gained a node is not
+      // empty and is retained. The predicate stays "no node rows at all" (a
+      // soft-deleted node is still data to preserve) and the scope stays as it
+      // was. The transaction's isolation is PINNED to READ COMMITTED, not left
+      // to the server default: under REPEATABLE READ the count would reuse the
+      // pre-wait snapshot, miss the node committed during the lock wait, and
+      // the cascade would lose it — the very bug this guard closes. (SERIALIZABLE
+      // would abort the shape instead of re-snapshotting; see the #664
+      // count-then-act refinement.)
+      await ctx.db.$transaction(async (tx) => {
+        const scoped = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM memories
+          WHERE user_id = ${resolvedUserId}
+            AND user_memory_of_agent_id = ${resolvedAgentId}
+            AND class IN ('personal', 'private')
+            AND deleted_at IS NULL
+          LIMIT 1
+          FOR UPDATE`;
+        if (scoped.length === 0) return;
+        const nodes = await tx.node.count({ where: { memoryId: scoped[0].id } });
+        if (nodes === 0) {
+          await tx.memory.delete({ where: { id: scoped[0].id } });
+        }
+      }, {
+        timeout: 20_000,
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
       });
-      if (userMemory && userMemory._count.nodes === 0) {
-        await ctx.db.memory.delete({ where: { id: userMemory.id } });
-      }
 
       return updated;
     },

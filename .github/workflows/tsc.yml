@@ -11,28 +11,16 @@ name: TypeScript Type Check
 # from `schema.prisma` first to give a fresh baseline.
 
 on:
+  # No `paths:` filter, on purpose (#4819). `tsc` is a REQUIRED check: a required check that a path filter keeps from
+  # running never reports, so every PR touching no .ts/lock/schema file would wait on it forever, and a merge queue
+  # entry the same way. A type error also does not stay in the files that changed (#4706 with #4696). The job takes
+  # about 3 minutes, so running it always costs less than reasoning about when it can be skipped.
   pull_request:
-    paths:
-      - '**.ts'
-      - '**.tsx'
-      - 'tsconfig.json'
-      - 'tsconfig.*.json'
-      - 'prisma/schema.prisma'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - '.github/workflows/tsc.yml'
+  merge_group:
   push:
     branches: [main]
-    paths:
-      - '**.ts'
-      - '**.tsx'
-      - 'tsconfig.json'
-      - 'tsconfig.*.json'
-      - 'prisma/schema.prisma'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - '.github/workflows/tsc.yml'
 
+# A queue entry (merge_group) has no PR number, so it gets its own group and is never cancelled; see CLAUDE.md, Merge notes (#4819).
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

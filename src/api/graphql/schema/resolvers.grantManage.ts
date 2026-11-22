@@ -19,7 +19,7 @@
  * door does not widen it.
  */
 import { GraphQLError } from 'graphql';
-import type { Prisma } from '../../../generated/prisma/index.js';
+import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { clampListTake } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
@@ -38,12 +38,25 @@ import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { UrnNotQualifiedError } from '../../../lib/urn.js';
 import { getGrantForManager, getGrantForWorker, listGrantsForManager } from '../../../lib/grants/read.js';
 import { endGrant, GrantManageRefusal, type GrantEnder, type LockedGrant } from '../../../lib/grants/manage.js';
+import { GrantRunGone } from '../../../lib/grants/create.js';
+import { grantStateSql } from '../../../lib/grants/state.js';
+import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 
 export function manageRefusal(error: GrantManageRefusal): GraphQLError {
   return new GraphQLError(error.message, { extensions: { code: error.code } });
 }
 const notManager = () => manageRefusal(new GrantManageRefusal('GRANT_NOT_MANAGER'));
 const notFound = () => manageRefusal(new GrantManageRefusal('GRANT_NOT_FOUND'));
+
+/**
+ * #4767 (R6): the run-made arm of `withdrawGrant`'s requester match — the locked row's holder agent equals the caller-worker's
+ * role agent. FAILS CLOSED on an unread role agent: `workers.agent_id` is NOT NULL and the read runs under the worker row's
+ * FOR SHARE before this judgement, so a null here means the read never happened (a gone worker row), and `null === null`
+ * must never match a holder-less run-made row (Beatrix P2 on 99459f15; Antonio P3-2 — unreachable today, guarded anyway).
+ */
+export function runMadeRequestOfRoleAgent(row: Pick<LockedGrant, 'requestedByRunId' | 'agentId'>, roleAgentId: string | null): boolean {
+  return roleAgentId !== null && row.requestedByRunId !== null && row.agentId === roleAgentId;
+}
 
 /** An App by id or URN, or null when it is missing, malformed or soft-deleted (all one answer). Never an uninstalled-App distinction. */
 export async function resolveLiveApp(ctx: Context, appRef: string): Promise<TaskApp | null> {
@@ -169,6 +182,8 @@ export const grantManageMutations = {
     if (!readable) throw notFound();
     try { requireWritable(ctx, app); } catch (e) { if (e instanceof GraphQLError) throw notFound(); throw e; }
     const callerUserId = ctx.userId;
+    // #4767 (R6): the caller-worker's role agent, read under its row lock below, for the run-made arm of the requester match.
+    let roleAgentId: string | null = null;
     try {
       return await withAuthorizedTx(
         ctx, [{ kind: 'app', id: found.appId }],
@@ -183,8 +198,15 @@ export const grantManageMutations = {
           const ender: GrantEnder = { userId: callerUserId, workerId: reader?.workerId ?? null, sessionId: reader ? txCtx.sessionId ?? null : null };
           const authorize = (row: LockedGrant) => {
             if (row.appId !== found.appId) throw notFound();
-            // A worker requester is matched on its worker id; a person only on a request that no worker made.
-            const mine = reader ? row.requestedByWorkerId === reader.workerId : row.requestedByWorkerId === null && row.requestedByUserId === person;
+            // A worker requester is matched on its worker id; a person only on a request that no worker made. #4767 (R6): a
+            // worker session bound to the agent may also withdraw what a RUN of that agent asked for — the row's holder agent
+            // plus its run column (ruling 0255 item 21: a bound session's call is the agent's). Both are the ROW's facts, and
+            // the two arms are exclusive on a well-formed row (a run-made request records no worker), so the worker-id match
+            // above is not loosened: a worker-made request still belongs to the worker that made it. The run-made arm fails
+            // closed on an unread role agent (runMadeRequestOfRoleAgent): null never matches null.
+            const mine = reader
+              ? row.requestedByWorkerId === reader.workerId || runMadeRequestOfRoleAgent(row, roleAgentId)
+              : row.requestedByWorkerId === null && row.requestedByUserId === person;
             if (!mine) throw new GrantManageRefusal('GRANT_NOT_REQUESTER');
           };
           await endGrant(tx, ref, ender, {
@@ -205,7 +227,9 @@ export const grantManageMutations = {
             if (reader) await lockWorkersForAssignment(tx, [reader.workerId]);
             await lockAppManagerMemberships(tx, callerUserId, app);
             if (reader) {
-              await tx.$queryRaw`SELECT 1 FROM workers WHERE id = ${reader.workerId} FOR SHARE`;
+              // #4767: the role agent read under the same FOR SHARE the arm's judgment needs (a role change waits on this lock).
+              const [wk] = await tx.$queryRaw<Array<{ agent_id: string }>>`SELECT agent_id FROM workers WHERE id = ${reader.workerId} FOR SHARE`;
+              roleAgentId = wk?.agent_id ?? null;
               await lockCallerSession(tx, ctx.sessionId);
               // Open means not ended AND not past its hard expiry, on the database clock after the lock (Beckett D1); judged AGAIN just before the
               // stamp (beforeStamp below), since the grant row lock can wait past it (Dorian P2 on 9cd8772f).
@@ -224,3 +248,78 @@ export const grantManageMutations = {
     }
   },
 };
+
+/**
+ * #4767 (Grants R6; cor:acl:140:03 item 5, ruling 0255 item 21): a headless run of agent A withdraws a PENDING grant A's
+ * own run asked for (`requested_by_run_id`). The run tool `hadron_withdraw_grant` is the one door onto this; GraphQL
+ * `withdrawGrant` keeps refusing a run principal (its worker-session arm is the R6 door for sessions, above).
+ *
+ * The requester is the ROW's fact — its holder agent plus its run column — never the calling run's identity: a later run of
+ * the same agent qualifies exactly as much as the one that asked. The end names no person: `revoked_by` stays NULL,
+ * `withdrawn_at` pairs with `revoked_at` (the shape CHECK's rule), and the one WITHDRAW event carries the run, so the act is
+ * the agent's, attributed through it. The App, its org and owner and the agent are anchored as the create arm anchors them
+ * (#3753); the run row is then locked FOR SHARE and judged RUNNING in this App for this agent before the end, and the grant
+ * row lock stays the LAST lock (the manage core's rule).
+ *
+ * Concealment: every way the grant is not this agent's own run-made request — missing, another agent's, this agent's in
+ * another App, a person's or a worker's request — is the ONE GRANT_NOT_REQUESTER refusal, byte-identical to a missing id.
+ * Only GRANT_NOT_PENDING differs, and it fires after the requester match, so it tells the rightful caller what it can read
+ * anyway. A run that is not RUNNING, a principal naming another run or App, an agentless run, or a gone App/org/owner is the
+ * create arm's concealing APP_NOT_FOUND.
+ */
+export async function withdrawGrantForRun(principal: Context, run: { id: string; appId: string; agentId: string | null }, input: { grantId: string }): Promise<{ id: string; status: string }> {
+  const gone = () => new GraphQLError('App not found.', { extensions: { code: 'APP_NOT_FOUND' } });
+  if (!isRunPrincipal(principal) || principal.appId !== run.appId || principal.clientId !== `run:${run.id}`) throw gone();
+  const agentId = run.agentId;
+  if (!agentId) throw gone();
+  const app = await principal.db.app.findUnique({ where: { id: run.appId }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true } });
+  if (!app || app.deletedAt) throw gone();
+  const anchors: AuthorityAnchor[] = [
+    { kind: 'app', id: app.id },
+    ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+    ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    { kind: 'agent', id: agentId },
+  ];
+  const notRequester = () => manageRefusal(new GrantManageRefusal('GRANT_NOT_REQUESTER'));
+  try {
+    return await withAuthorizedTx(
+      principal, anchors,
+      async () => { /* the run itself is judged in the body, under these locks */ },
+      async (tx) => {
+        // The run row, locked FOR SHARE after the anchors, must still be RUNNING in this App for this agent (the create
+        // core's judgment, #3753): a run that finished refuses concealed, and one that finishes next waits on this lock.
+        const runs = await tx.$queryRaw<Array<{ app_id: string; agent_id: string | null; status: string }>>`
+          SELECT app_id, agent_id, status::text AS status FROM app_runs WHERE id = ${run.id} FOR SHARE`;
+        if (runs.length !== 1 || runs[0]!.app_id !== app.id || runs[0]!.agent_id !== agentId || runs[0]!.status !== 'RUNNING') throw new GrantRunGone();
+        const authorize = (row: LockedGrant) => {
+          // The row's own facts only: this App, this agent the holder, a request a RUN made. Every other grant answers the
+          // one refusal, byte-identical to a missing id (the tool's concealment, above).
+          if (row.appId !== app.id || row.requestedByRunId === null || row.agentId !== agentId) throw new GrantManageRefusal('GRANT_NOT_REQUESTER');
+        };
+        // The end names no person: the event carries the run, the row carries the withdrawal marker.
+        await endGrant(tx, input.grantId, { userId: null, workerId: null, sessionId: null, runId: run.id }, { kind: 'withdraw', authorize, pendingOnly: true });
+        const [ended] = await tx.$queryRaw<Array<{ state: string }>>(Prisma.sql`SELECT ${grantStateSql('g')} AS state FROM grants g WHERE g.id = ${input.grantId}`);
+        if (!ended) throw new GrantManageRefusal('GRANT_NOT_FOUND'); // unreachable under the row lock
+        return { id: input.grantId, status: ended.state.toLowerCase() };
+      },
+    );
+  } catch (error) {
+    if (error instanceof GrantRunGone) throw gone();
+    if (error instanceof GrantManageRefusal) {
+      // GRANT_NOT_FOUND (no row, or a soft-deleted App's) reads exactly like a grant that is not this agent's request.
+      throw error.code === 'GRANT_NOT_FOUND' ? notRequester() : manageRefusal(error);
+    }
+    if ((error instanceof GraphQLError && error.extensions?.code === 'FORBIDDEN') || (error instanceof Error && error.message === 'Forbidden')) {
+      // An anchor refused under the lock: the App, org, owner or agent went. A gone App/org/owner is concealed; a gone agent
+      // ended the row with its holder (the departure doors stamp in the deleting transaction), so it is not this run's to
+      // withdraw — either way the concealing answers, judged on a fresh read. A Forbidden with every anchor live propagates.
+      const agent = await principal.db.agent.findFirst({ where: { id: agentId, deletedAt: null }, select: { id: true } });
+      const liveApp = await principal.db.app.findFirst({ where: { id: app.id, deletedAt: null }, select: { id: true } });
+      const liveOrg = !app.organizationId || (await principal.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } }));
+      const liveOwner = !app.ownerUserId || (await principal.db.user.findFirst({ where: { id: app.ownerUserId, deletedAt: null }, select: { id: true } }));
+      if (!liveApp || !liveOrg || !liveOwner) throw gone();
+      if (!agent) throw notRequester();
+    }
+    throw error;
+  }
+}

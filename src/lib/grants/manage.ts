@@ -5,6 +5,8 @@
  * An end is the grant's one stamp, `revoked_at` together with `revoked_by` (the person), plus ONE `REVOKE` row in
  * `grant_events` naming the person and, for a worker's act, the worker and session. A withdrawal of a pending grant is the same
  * end, but since #4173 it is recorded as its own fact: `withdrawn_at` (equal to `revoked_at`) and a `WITHDRAW` event instead of `REVOKE`.
+ * #4767 (Grants R6): an agent's own withdrawal through a run names no person — `revoked_by` stays NULL, `withdrawn_at` is the
+ * end's other half, and the WITHDRAW event carries the run (the act is the agent's, attributed through it).
  *
  * LOCK THEN JUDGE. The grant row is locked FOR UPDATE first ({@link readGrantForUpdate}, two statements so the verdict is read on the
  * post-lock database clock), and EVERYTHING the call decides is read from the locked row: who may end it (the caller's judge, which
@@ -46,13 +48,22 @@ export interface LockedGrant {
   issuerUserId: string | null;
   requestedByUserId: string | null;
   requestedByWorkerId: string | null;
+  /** #4767: the run that asked, when a run made the request (the row's own fact, never the calling run's identity). */
+  requestedByRunId: string | null;
+  /** The AGENT holder of the row, when the holder is an agent. */
+  agentId: string | null;
   activatedAt: Date | null;
   revokedAt: Date | null;
   holderDepartedAt: Date | null;
 }
 
-/** Who ends it: the PERSON (the user-valued revoker, also for a worker's act, which records its driver), and the worker and session when a worker acted. */
-export interface GrantEnder { userId: string; workerId: string | null; sessionId: string | null }
+/**
+ * Who ends it: the PERSON (the user-valued revoker, also for a worker's act, which records its driver), and the worker and
+ * session when a worker acted. #4767 (Grants R6): a RUN has no person — its withdrawal passes `userId: null` with the run
+ * named instead; the row then records no revoker (`withdrawn_at` is the end's other half, the shape CHECK's rule) and the
+ * event attributes the act to the agent through the run. A `revoke` never does this: its caller always names a person.
+ */
+export interface GrantEnder { userId: string | null; workerId: string | null; sessionId: string | null; runId?: string | null }
 
 export interface EndGrantOptions {
   /** `withdraw` records the withdrawal marker and a WITHDRAW event; `revoke` a REVOKE event. */
@@ -72,12 +83,13 @@ export interface EndGrantOptions {
 export async function endGrant(tx: Prisma.TransactionClient, id: string, ender: GrantEnder, opts: EndGrantOptions): Promise<{ changed: boolean }> {
   const locked = await readGrantForUpdate(tx, id);
   if (!locked || locked.row.appDeletedAt !== null) throw new GrantManageRefusal('GRANT_NOT_FOUND');
-  const [extra] = await tx.$queryRaw<Array<{ issuer_user_id: string | null; requested_by_user_id: string | null; requested_by_worker_id: string | null }>>`
-    SELECT issuer_user_id, requested_by_user_id, requested_by_worker_id FROM grants WHERE id = ${id}`;
+  const [extra] = await tx.$queryRaw<Array<{ issuer_user_id: string | null; requested_by_user_id: string | null; requested_by_worker_id: string | null; requested_by_run_id: string | null; agent_id: string | null }>>`
+    SELECT issuer_user_id, requested_by_user_id, requested_by_worker_id, requested_by_run_id, agent_id FROM grants WHERE id = ${id}`;
   if (!extra) throw new GrantManageRefusal('GRANT_NOT_FOUND'); // unreachable under the row lock; explicit rather than asserted
   const row: LockedGrant = {
     id, appId: locked.row.appId, issuerUserId: extra.issuer_user_id, requestedByUserId: extra.requested_by_user_id,
-    requestedByWorkerId: extra.requested_by_worker_id, activatedAt: locked.row.activatedAt, revokedAt: locked.row.revokedAt,
+    requestedByWorkerId: extra.requested_by_worker_id, requestedByRunId: extra.requested_by_run_id, agentId: extra.agent_id,
+    activatedAt: locked.row.activatedAt, revokedAt: locked.row.revokedAt,
     holderDepartedAt: locked.row.holderDepartedAt,
   };
   await opts.authorize(row);
@@ -102,6 +114,6 @@ export async function endGrant(tx: Prisma.TransactionClient, id: string, ender: 
     WHERE id = ${id} AND revoked_at IS NULL AND holder_departed_at IS NULL
       AND ${grantStateSql('grants', Prisma.sql`t.at`)} NOT IN ('EXPIRED', 'SPENT')`);
   if (ended !== 1) return { changed: false };
-  await tx.grantEvent.create({ data: { grantId: id, appId: row.appId, action: opts.kind === 'withdraw' ? 'WITHDRAW' : 'REVOKE', actorUserId: ender.userId, workerId: ender.workerId, sessionId: ender.sessionId } });
+  await tx.grantEvent.create({ data: { grantId: id, appId: row.appId, action: opts.kind === 'withdraw' ? 'WITHDRAW' : 'REVOKE', actorUserId: ender.userId, workerId: ender.workerId, sessionId: ender.sessionId, runId: ender.runId ?? null } });
   return { changed: true };
 }

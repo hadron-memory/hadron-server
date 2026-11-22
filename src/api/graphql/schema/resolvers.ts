@@ -1,4 +1,5 @@
 import { utilizationQueries } from './resolvers.utilization.js';
+import { teamMetricsQueries } from './resolvers.teamMetrics.js';
 import { runTeamSnapshotMutations, runTeamSnapshotQueries } from './resolvers.runTeamSnapshot.js';
 import { rateLimitQueries, rateLimitMutations } from './resolvers.rateLimit.js';
 import { registerRolePickQueries } from './resolvers.registerRolePick.js';
@@ -41,6 +42,7 @@ import { appQueries } from './resolvers.query.app.js';
 import { chatQueries } from './resolvers.query.chat.js';
 import { sessionQueries } from './resolvers.query.session.js';
 import { slackQueries } from './resolvers.query.slack.js';
+import { telegramQueries } from './resolvers.query.telegram.js';
 import { mcpQueries } from './resolvers.query.mcp.js';
 import { webPollMutations, webPollQueries } from './resolvers.webPoll.js';
 import { homeAssistantQueries } from './resolvers.query.homeAssistant.js';
@@ -137,6 +139,7 @@ import { appMutations } from './resolvers.mutation.app.js';
 import { chatMutations } from './resolvers.mutation.chat.js';
 import { sessionMutations } from './resolvers.mutation.session.js';
 import { slackMutations } from './resolvers.mutation.slack.js';
+import { telegramMutations } from './resolvers.mutation.telegram.js';
 import { mcpMutations } from './resolvers.mutation.mcp.js';
 import { homeAssistantMutations } from './resolvers.mutation.homeAssistant.js';
 import { resendSenderMutations } from './resolvers.mutation.resendSender.js';
@@ -244,6 +247,7 @@ export const resolvers = {
     ...accountUsageQueries,
     ...reviewQualityQueries,
     ...utilizationQueries,
+    ...teamMetricsQueries,
     ...registerRoleCandidateQueries,
     ...registerRolePickQueries,
     ...actionRegisterIndexQueries,
@@ -258,6 +262,7 @@ export const resolvers = {
     ...teamSpecQueries,
     ...sessionQueries,
     ...slackQueries,
+    ...telegramQueries,
     ...mcpQueries,
     ...webPollQueries,
     ...homeAssistantQueries,
@@ -350,6 +355,7 @@ export const resolvers = {
     ...chatMutations,
     ...sessionMutations,
     ...slackMutations,
+    ...telegramMutations,
     ...mcpMutations,
     ...webPollMutations,
     ...homeAssistantMutations,

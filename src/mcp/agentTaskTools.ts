@@ -55,12 +55,25 @@ const MA = resolvers.Mutation as unknown as {
   setWorkerAvailability: Resolver<{ input: Record<string, unknown> }, AvailabilityRow>;
   setModelFamilyAvailability: Resolver<{ input: Record<string, unknown> }, AvailabilityRow>;
   setAgentTaskStallSchedule: Resolver<{ appRef: string; input: Record<string, unknown> }, StallScheduleView>;
+  setSaturationAlarmWakeRoles: Resolver<{ appRef: string; roles: string[] }, WakeRolesView>;
 };
 const QA = resolvers.Query as unknown as {
   teamAvailability: Resolver<{ appRef: string }, { workers: AvailabilityRow[]; families: AvailabilityRow[] }>;
   teamRoster: Resolver<{ appRef: string }, { appId: string; asOf: Date; workers: RosterRow[] }>;
   agentTaskStallSchedule: Resolver<{ appRef: string }, StallScheduleView>;
+  saturationAlarmWakeRoles: Resolver<{ appRef: string }, WakeRolesView>;
 };
+type WakeRolesView = { appId: string; roles: string[] };
+/**
+ * #4777: the MCP wake-roles tools keep the GraphQL argument names, so the mapping is the identity on `appRef` and
+ * `roles`; it drops `session` (the tool's own binding argument), which the resolver never takes. Exported to pin it
+ * directly: the tools are switched off (#3082 R1, R4: no test path back).
+ */
+export function mcpWakeRolesArgs(args: { session?: unknown; appRef: string; roles: string[] }): { appRef: string; roles: string[] } {
+  return { appRef: args.appRef, roles: args.roles };
+}
+const renderWakeRoles = (r: WakeRolesView): string =>
+  r.roles.length ? `Saturation alarms wake these roles: ${r.roles.join(', ')}.` : 'Saturation alarms wake nobody (the list is empty).';
 type StallScheduleView = Record<StallScheduleKey, number> & { updatedAt: Date | null };
 type RosterRow = Omit<import('../lib/agentTasks/roster.js').RosterEntry, 'teamPlacement'> & {
   appId: string;
@@ -619,6 +632,28 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     },
   );
 
+  // #4777 (cor:agt:060:16): the saturation-alarm wake-roles list. Disabled like every team tool (#3082 R1), ruled for this
+  // door by the gate's amendment; each delegates to the GraphQL resolver, so the two doors cannot differ.
+  off(
+    'hadron_saturation_wake_roles',
+    'Read the roles a team App\'s saturation alarms wake (cor:agt:060:16): empty by default. Readers: whoever may read the ' +
+      'App\'s roster (cor:agt:050:21).',
+    SHAPE_HADRON_SATURATION_WAKE_ROLES,
+    async ({ session, appRef }) =>
+      read(session, async (ctx) => textResult(renderWakeRoles(await QA.saturationAlarmWakeRoles({}, { appRef }, ctx)))),
+  );
+
+  off(
+    'hadron_saturation_wake_roles_set',
+    'Set the roles a team App\'s saturation alarms wake, the whole list at once (cor:agt:060:16): whoever manages the App ' +
+      'only. Names are trimmed and lower-cased and duplicates collapse; at most 32 names of 1 to 64 characters with no ":" ' +
+      'or whitespace; an empty list clears it. A change wakes nobody for an alarm already raised.',
+    SHAPE_HADRON_SATURATION_WAKE_ROLES_SET,
+    async (args) =>
+      writeOther('hadron_saturation_wake_roles_set', args.session, async (ctx) =>
+        `Set.\n\n${renderWakeRoles(await MA.setSaturationAlarmWakeRoles({}, mcpWakeRolesArgs(args), ctx))}`),
+  );
+
   off(
     'hadron_team_roster',
     HADRON_TEAM_ROSTER_DESCRIPTION,
@@ -770,6 +805,12 @@ const stallValue = (what: string) => z.number().nullable().optional().describe(`
 
 const SHAPE_HADRON_STALL_SCHEDULE_GET = { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ };
 
+const SHAPE_HADRON_SATURATION_WAKE_ROLES = { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ };
+const SHAPE_HADRON_SATURATION_WAKE_ROLES_SET = {
+  appRef: z.string().describe('The team App (id or URN).'),
+  roles: z.array(z.string()).describe('The whole list of role names; an empty list clears it.'),
+  session: SESSION_WRITE,
+};
 const SHAPE_HADRON_STALL_SCHEDULE_SET = {
   appRef: z.string().describe('The team App (id or URN).'),
   notStartedMinutes: stallValue('Minutes an assigned task may sit unstarted before it alarms (1 to 10080)'),

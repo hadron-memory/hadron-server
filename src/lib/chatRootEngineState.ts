@@ -139,6 +139,8 @@ export async function writeChatEngineState(tx: Prisma.TransactionClient, rootId:
   await tx.chatRootEngineState.update({ where: { chatRootNodeId: rootId }, data: { state: stored as Prisma.InputJsonValue } });
 }
 
+export type ChatEngineConversion = 'unchanged' | 'converted' | 'blocked';
+
 /**
  * Re-key at the existing node/memory locks; envelope shape, not the already-flipped flag, decides.
  * #3575 (rulings 0225/0227/0228): the result is a CLASSIFICATION, never a throw for an unauthenticated envelope.
@@ -148,7 +150,6 @@ export async function writeChatEngineState(tx: Prisma.TransactionClient, rootId:
  *    (never rewrapped, cleared, repaired or reseeded) and the caller reports it, content-free, as incomplete.
  * Database and key failures still throw: they are real failures, not per-row skips.
  */
-export type ChatEngineConversion = 'unchanged' | 'converted' | 'blocked';
 export async function encryptChatEngineStateWithKey(tx: Prisma.TransactionClient, rootId: string, key: import('./crypto.js').EncryptionKey): Promise<ChatEngineConversion> {
   const row = await tx.chatRootEngineState.findUnique({ where: { chatRootNodeId: rootId } });
   if (!row || isAuthenticatedDataEnvelope(row.state, key)) return 'unchanged';
@@ -168,10 +169,12 @@ export const BLOCKED_ROOT_ID_CAP = 100;
  * #3575: the content-free ENCRYPTION_INCOMPLETE for a blocked chat-engine row (the gate's extensions table plus
  * `blockedEngineStateRootIds`, ruling 0228). Names no name, ciphertext, decoded value, path, key material or cipher,
  * parser or database message. The ids are chat-root NODE ids of roots currently in the admitted memory, distinct and in
- * ascending order, at most BLOCKED_ROOT_ID_CAP; the count beside them is exact, or null when the scan did not finish.
+ * ascending order (JavaScript UTF-16 code-unit order from `.sort()`; node ids are ASCII-generated, so it matches the database's order), at most BLOCKED_ROOT_ID_CAP; the count beside them is exact, or null when the scan did not finish.
  * Callers raise it only AFTER the operation's authority and concealment checks.
+ * Two shapes carry this code: this one (`phase: 'CHAT_ENGINE_STATE'`, with the count and ids), and the legacy bare
+ * history-convergence error in encryptMemory (`{ code, memoryId }` only, no `phase`). The bare one takes precedence when both apply.
  */
-export function engineStateIncomplete(args: {
+export function buildEngineStateIncompleteError(args: {
   memoryId: string;
   operation: 'ENCRYPT_MEMORY' | 'PROMOTE_ANONYMOUS_MEMORY';
   blockedRootIds: Iterable<string>;

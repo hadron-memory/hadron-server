@@ -1,4 +1,5 @@
 import { buildAuthRateAdmission } from './auth/authRate.js';
+import { AUTH_COOKIE_NAME } from './auth/cookieName.js';
 import { isSessionSupersededError, respondSessionSuperseded } from './lib/sessionSuperseded.js';
 import { assertRateReadiness, checkRateConfiguration, cleanupRateBuckets } from './lib/rateLimit/index.js';
 import { assertEventKeysLocal } from './lib/agentTasks/eventKeyRebase.js';
@@ -140,6 +141,7 @@ import { mountCapabilitiesRoute } from './api/capabilities.js';
 import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
 import { mountSlackEventRoutes } from './api/slackEvents.js';
+import { mountTelegramEventRoutes } from './api/telegramEvents.js';
 import { mountWebFetchEventRoutes } from './api/webfetchEvents.js';
 import { buildMicrosoftAuthUrl, getMicrosoftRedirectUri } from './integrations/exchange/auth.js';
 import { buildGmailAuthUrl, getGmailRedirectUri, isGmailConnectConfigured } from './integrations/gmail/auth.js';
@@ -221,8 +223,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // configured keyring refuses boot without echoing secret values.
   readTeamRecordKeys();
   const app = express();
-  const authRate = buildAuthRateAdmission(db);
-  const userAuthRate = buildAuthRateAdmission(db, 'rest', 'bearer');
+  const authRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'none' });
+  const userAuthRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'bearer' });
 
   // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
   // which upstream proxies it can trust so `req.protocol` resolves to
@@ -562,7 +564,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       if (pending.returnTo) {
         const { exp } = decodeJwt(jwt);
         const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-        res.cookie('hadron_token', jwt, {
+        res.cookie(AUTH_COOKIE_NAME, jwt, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
@@ -716,7 +718,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       if (pending.returnTo) {
         const { exp } = decodeJwt(jwt);
         const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-        res.cookie('hadron_token', jwt, {
+        res.cookie(AUTH_COOKIE_NAME, jwt, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
@@ -883,7 +885,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       if (pending.returnTo) {
         const { exp } = decodeJwt(jwt);
         const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-        res.cookie('hadron_token', jwt, {
+        res.cookie(AUTH_COOKIE_NAME, jwt, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
@@ -1069,7 +1071,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
         });
         const { exp } = decodeJwt(jwt);
         const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-        res.cookie('hadron_token', jwt, {
+        res.cookie(AUTH_COOKIE_NAME, jwt, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
@@ -1867,6 +1869,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // (spec 043 Phase 2) — same CORE_EVENTS_TOKEN contract; dispatch dedupes
   // on (connectionId, envelopeId) because the tool's inbox is at-least-once.
   mountSlackEventRoutes(app);
+
+  // Normalized Telegram events (telegram.*) arrive here from hadrontool-telegram (#597, Telegram phase 2) — same
+  // CORE_EVENTS_TOKEN contract; dispatch claims (connectionId, eventId) because the tool's inbox is at-least-once.
+  mountTelegramEventRoutes(app);
 
   // Durable webfetch poll events (poll.triggered / expired / failed) arrive
   // from hadrontool-webfetch. The core validates the origin-run binding,

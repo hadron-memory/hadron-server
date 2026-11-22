@@ -2747,12 +2747,14 @@ export const typeDefs = `#graphql
     "True when the caller is a decider, including through an account merged into theirs (#1715)."
     viewerIsDecider: Boolean!
     """
-    #4427 — true when the caller may answer or take back an answer right now: one of the question\'s deciders, acting as
-    themselves (a person in a session bound to no worker or agent, no App key or run, no impersonation), still among the
-    log\'s deciders and able to write its memory, on a question that is not withdrawn, tampered or unverifiable
-    (hrn:node:hadronmemory.com:specs:cor:dmo:140:05). It is the capability to submit a new answer: it is false once the
-    answer history is full (the last entry is kept for taking an answer back), and it does not say that an answer stands to
-    take back (retractQuestionAnswer refuses QUESTION_NOT_ANSWERED otherwise).
+    #4427 — true when the caller may submit a NEW answer right now. The rule (hrn:node:hadronmemory.com:specs:cor:dmo:140:05,
+    Proposed where it was amended on 2026-11-18) is that a decider is a user who may write the log\'s memory, never a worker,
+    an Agent or an App key, and that this is re-checked at the moment of answering. So: one of the question\'s deciders,
+    acting as themselves (a person in a session bound to no worker or agent, no App key or run, no impersonation), still
+    among the log\'s deciders and able to write its memory, on a question that is not withdrawn, tampered or unverifiable.
+    It is not the capability to take an answer back: it is false once the answer history reaches its last free entry (that
+    entry is kept so a standing answer can still be taken back), even though the decider can still retract then, and it does
+    not say that an answer stands to take back (retractQuestionAnswer refuses QUESTION_NOT_ANSWERED otherwise).
     """
     viewerMayAnswer: Boolean!
     "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
@@ -6402,6 +6404,39 @@ export const typeDefs = `#graphql
   }
 
   """
+  One Telegram bot registered for a Hadron App (#597). APP-owned: one active
+  connection per App, so the bot a person messages names the App. The bot
+  token lives ENCRYPTED IN THE TOOL (hadrontool-telegram): it is a write-only
+  input on createTelegramConnection and no field here ever returns it.
+  """
+  type TelegramConnection {
+    id: ID!
+    "The App's owning organization."
+    organizationId: String!
+    appId: String!
+    "Telegram provider backing this connection ('telegram' today)."
+    provider: String!
+    "The bot's Telegram user id."
+    botId: String!
+    "The bot's @username, without the at sign."
+    botUsername: String!
+    displayName: String!
+    "'ACTIVE' or 'ERROR' (the tool's connection-status vocabulary)."
+    status: String!
+    lastError: String
+    createdAt: DateTime!
+    updatedAt: DateTime!
+  }
+
+  """
+  Uniform paginated list shape (hrn:node:hadronmemory.com:specs:cor:api:120).
+  """
+  type TelegramConnectionsPage {
+    items: [TelegramConnection!]!
+    total: Int!
+  }
+
+  """
   One registered EXTERNAL MCP server (hadrontool-mcp conduit registry).
   Org-owned. Static auth headers are encrypted at rest and WRITE-ONLY:
   no field here ever returns them — hasHeaders is all a reader gets.
@@ -6501,7 +6536,7 @@ export const typeDefs = `#graphql
   type SecretChangeRequest {
     """The change request id."""
     id: ID!
-    """The effective state, with expiry judged on the server clock."""
+    """The effective state, with expiry judged on the server clock: open, completed, declined (the requester declined on the ceremony page), expired, withdrawn (the requester withdrew it) or stale (the secret changed first)."""
     state: String!
     """The requested operation."""
     operation: String!
@@ -7841,7 +7876,7 @@ export const typeDefs = `#graphql
     verifiedBy: ID
     signatureId: ID
     revokedAt: DateTime
-    "#3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, V56): who revoked or withdrew it, as a user id. Only the App's manager reads it (appGrants); every other read of the grant answers null. A worker requester's withdrawal records the person driving it. Null once that account is erased."
+    "#3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, V56): who revoked or withdrew it, as a user id. Only the App's manager reads it (appGrants); every other read of the grant answers null. A worker requester's withdrawal records the person driving it. #4767: an agent's own withdrawal through a run records no person — null with the row withdrawn, the WITHDRAW event naming the run. Null once that account is erased."
     revokedByUserId: ID
     "#3711 (V56): when the holder went (a person erased, a worker retired, an agent or App deleted); a fact, not a state. Only the App's manager reads it (appGrants); every other read answers null."
     holderDepartedAt: DateTime
@@ -9211,9 +9246,9 @@ export const typeDefs = `#graphql
     appId: ID!
     "The granted memory. Null when the grant is on someone's personal or private memory and the caller is not its owner."
     memoryUrn: String
-    "The loc prefix: the loc itself and its colon-boundary descendants (reports:team-progress does not cover reports:team-progressX)."
-    prefix: String!
-    "The register line this grant cites. A citation only, never evidence that the line exists."
+    "The loc prefix: the loc itself and its colon-boundary descendants (reports:team-progress does not cover reports:team-progressX). #4734: null whenever memoryUrn is null, because a prefix names content inside a memory the caller may not know exists; never shown without its memory URN."
+    prefix: String
+    "The register line this grant cites. A citation only, never evidence that the line exists. #4734: null whenever memoryUrn is null, as prefix is."
     registerNodeUrn: String
     "The person who set it."
     grantedBy: String!
@@ -9339,6 +9374,100 @@ export const typeDefs = `#graphql
     computedAt: DateTime!
     windowHours: Int!
     combinations: [WorkerUtilization!]!
+  }
+  """
+  #4447 (S1 of #3781; hrn:node:hadronmemory.com:specs:cor:agt:150): one count of a team's task or worker flow with the ids behind it,
+  so a client can drill down and derive nothing. total is exact; ids holds at most 200 of them, and truncated is true
+  when it holds fewer than total (hrn:node:hadronmemory.com:specs:cor:api:120:04). The ids are task ids, or worker ids in the worker counts.
+  """
+  type TeamMetricsCount {
+    total: Int!
+    ids: [ID!]!
+    truncated: Boolean!
+  }
+  "The half-open window [since, until) report 4 was read over (hrn:node:hadronmemory.com:specs:cor:agt:150): since is included, until is not. The other reports ignore it."
+  type TeamMetricsWindow {
+    since: DateTime!
+    until: DateTime!
+  }
+  "A project in a metrics report: a top-level task other than AT0 (hrn:node:hadronmemory.com:specs:cor:agt:050:01), or the visible No project bucket, AT0 (noProject true; taskId and title null when the App has no AT0 row)."
+  type TeamMetricsProject {
+    handle: String!
+    taskId: ID
+    title: String
+    noProject: Boolean!
+  }
+  "One project's started owned tasks under one owner."
+  type TeamMetricsProjectGroup {
+    project: TeamMetricsProject!
+    tasks: TeamMetricsCount!
+  }
+  "One task owner's started owned tasks (hrn:node:hadronmemory.com:specs:cor:agt:150:01): grouped by the task's OWNER, never its assignee, with no role filter."
+  type TeamMetricsOwnerGroup {
+    "The owner as the sanitized task party projection, never the Worker or User object."
+    owner: AgentTaskParty
+    tasks: TeamMetricsCount!
+    "The owner's tasks by project, the No project bucket (AT0) included, at most 200 projects."
+    byProject: [TeamMetricsProjectGroup!]!
+    projectsTruncated: Boolean!
+  }
+  """
+  Report 1: STARTED owned tasks (hrn:node:hadronmemory.com:specs:cor:agt:150:01): a task names an issue reference or source, so a STARTED task that
+  tracks no external work is not counted. A snapshot at read time.
+  """
+  type TeamMetricsStartedOwned {
+    all: TeamMetricsCount!
+    "At most 200 owners; ownersTruncated says when there were more."
+    byOwner: [TeamMetricsOwnerGroup!]!
+    ownersTruncated: Boolean!
+  }
+  "One project's direct child tasks of one status."
+  type TeamMetricsChildStatus {
+    status: AgentTaskStatus!
+    tasks: TeamMetricsCount!
+  }
+  "One started project with its direct children counted by every status."
+  type TeamMetricsProjectRow {
+    project: TeamMetricsProject!
+    children: [TeamMetricsChildStatus!]!
+  }
+  "Report 2: started projects (a top-level task other than AT0, status STARTED) with child counts by status; at most 200 projects, truncated says when there were more. A snapshot at read time."
+  type TeamMetricsProjects {
+    items: [TeamMetricsProjectRow!]!
+    truncated: Boolean!
+  }
+  """
+  Report 3: worker counts at read time over the App's workers that are not retired, with worker ids.
+  active is the assignee of a STARTED task (hrn:node:hadronmemory.com:specs:cor:agt:150:02); idle is Available with no pending or started task
+  assigned (:03); overdue is the assignee of a task with a not-started, no-progress or finish-by stall alarm in effect, so an
+  acknowledged alarm or an ended episode does not count (:04); inop is a worker whose roster state is unavailable (stalled
+  included), no model family, or not launchable (:05, its roster-state clause only: no terminal-report clause is read). A worker may be in several.
+  """
+  type TeamMetricsWorkers {
+    active: TeamMetricsCount!
+    idle: TeamMetricsCount!
+    overdue: TeamMetricsCount!
+    inop: TeamMetricsCount!
+  }
+  "Report 4: tasks completed (status FINISHED, by finishedAt) and tasks started (by startedAt) in [since, until). A cancelled task is never completed."
+  type TeamMetricsFlow {
+    completed: TeamMetricsCount!
+    started: TeamMetricsCount!
+  }
+  """
+  #4447: a team's computed task and worker flow (hrn:node:hadronmemory.com:specs:cor:agt:150). startedOwned, projects and flow derive from
+  tasks and are null for a reader who may see the roster but not the App's tasks (hrn:node:hadronmemory.com:specs:cor:agt:050:21); workers
+  follows the roster audience.
+  """
+  type TeamMetrics {
+    appId: ID!
+    "The instant the snapshot reports were read at."
+    asOf: DateTime!
+    window: TeamMetricsWindow!
+    startedOwned: TeamMetricsStartedOwned
+    projects: TeamMetricsProjects
+    workers: TeamMetricsWorkers!
+    flow: TeamMetricsFlow
   }
   "#3819 — the latest no-worker match outcome of a combination inside the read's window (hrn:node:hadronmemory.com:specs:cor:agt:060:13)."
   type MatchFailure {
@@ -9754,6 +9883,12 @@ export const typeDefs = `#graphql
     agentTaskStallSchedule(appRef: ID!): AgentTaskStallSchedule!
 
     """
+    #4777 — the roles an App's saturation alarms wake (hrn:node:hadronmemory.com:specs:cor:agt:060:16): empty by default.
+    Readers: whoever may read the App's roster, with the roster's refusal byte for byte (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
+    """
+    saturationAlarmWakeRoles(appRef: ID!): SaturationAlarmWakeRoles!
+
+    """
     #1706 — every worker and model-family availability record in an App
     (hrn:node:hadronmemory.com:specs:cor:agt:060:02 / :03), each with whether it is in effect now. Readers: the
     App's task audience (interim until hrn:node:hadronmemory.com:specs:cor:agt:060:02's read question is ruled).
@@ -9767,6 +9902,8 @@ export const typeDefs = `#graphql
     the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Retired workers are left out.
     """
     teamRoster(appRef: ID!): TeamRoster!
+    "#4447 (hrn:node:hadronmemory.com:specs:cor:agt:150): server-computed counts of a team's task and worker flow, each with its ids. Reports 1-3 are snapshots; report 4 reads [since, until), defaulting to the last 7 days (an omitted until is now, an omitted since is until minus 7 days); a window over 31 days, or since after until, is BAD_USER_INPUT, judged before any read. Readers: the roster's audience; task-derived reports follow the App's task readers (hrn:node:hadronmemory.com:specs:cor:agt:050:21), and an unreadable App answers as a missing one."
+    teamMetrics(appRef: ID!, since: DateTime, until: DateTime): TeamMetrics!
     "#3819: advisory utilization in the roster audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21, hrn:node:hadronmemory.com:specs:cor:agt:060:13). Window defaults to 24h, range 1–168; tier is high/mid/low. Ranked by utilization, then the most recent failed match, then fewest eligible workers, then family, tier and role. The match-outcome record is read only through this field. The alarm.saturation alarm is raised by the stall evaluator, not by this read."
     teamUtilization(appRef: ID!, family: String, tier: String, role: String, windowHours: Int = 24): TeamUtilization!
 
@@ -10582,6 +10719,22 @@ export const typeDefs = `#graphql
     limit: 0 -> count only.
     """
     slackConnections(orgId: ID, limit: Int, offset: Int): SlackConnectionsPage!
+
+    """
+    Fetch one Telegram connection by id (#597). Returns null when the row does
+    not exist OR the caller is not a live member of its org (a revoked member
+    included): no existence disclosure.
+    """
+    telegramConnection(ref: ID!): TelegramConnection
+
+    """
+    Uniform paginated Telegram-connection list (hrn:node:hadronmemory.com:specs:cor:api:120). Default scope:
+    the caller's member orgs. orgId follows hrn:node:hadronmemory.com:specs:cor:api:100:01 (member -> that
+    org, non-member -> empty page, no disclosure, no admin bypass).
+    Bot-username-ascending order (id tiebreak); limit default 20 / cap 200;
+    limit: 0 -> count only.
+    """
+    telegramConnections(orgId: ID, limit: Int, offset: Int): TelegramConnectionsPage!
 
     """
     Fetch one registered external MCP server by id. Returns null when the
@@ -11638,7 +11791,7 @@ export const typeDefs = `#graphql
 
     """
     #3599: preview deleteWorker without deleting anything: the same act gate and typed refusals
-    (WORKER_NOT_FOUND, FORBIDDEN, WORKER_IN_USE), nothing reserved. The real delete still requires
+    (WORKER_NOT_FOUND, FORBIDDEN, WORKER_IN_USE, WORKER_CENSUS_INCOMPLETE), nothing reserved. The real delete still requires
     confirmNoExternalAttribution and may refuse if anything changed
     (hrn:node:hadronmemory.com:specs:cor:agt:020:03). A validated instruction claim is recorded
     (hrn:node:hadronmemory.com:specs:cor:dmo:050:12); the target is its subject. If the delete wins
@@ -12639,6 +12792,17 @@ export const typeDefs = `#graphql
     setAgentTaskStallSchedule(appRef: ID!, input: AgentTaskStallScheduleInput!, instruction: ActInstructionInput): AgentTaskStallSchedule!
 
     """
+    #4777 — set the roles an App's saturation alarms wake, the whole list at once (hrn:node:hadronmemory.com:specs:cor:agt:060:16): whoever
+    manages the App (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). Names are trimmed and lower-cased, duplicates collapse, and the
+    result is sorted; at most 32 names of 1 to 64 characters with no ":" or whitespace. The empty list clears it. A role no
+    worker holds is accepted. Setting the stored list again changes nothing. The list is read when an alarm is raised: a
+    change never wakes anyone for an alarm already raised. Refusals: BAD_USER_INPUT (before any other check),
+    APP_NOT_FOUND, APP_MANAGER_REQUIRED, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    #3323: the App-manager arm also admits the manager's held worker on an instruction, recorded as one app.manager-act event, ids only.
+    """
+    setSaturationAlarmWakeRoles(appRef: ID!, roles: [String!]!, instruction: ActInstructionInput): SaturationAlarmWakeRoles!
+
+    """
     #2831 S1 (hrn:node:hadronmemory.com:specs:cor:agt:060:12) - set an Agent's model group: the name is created or its whole pattern list replaced (no
     merge). Patterns are lowercase globs matched against a session's self-reported model (* any run, ? one character); an
     empty list is allowed. Whoever manages the Agent only. A group only steers matching, never authorization. Refusals:
@@ -13167,7 +13331,7 @@ export const typeDefs = `#graphql
     """
     revokeGrant(ref: ID!, instruction: ActInstructionInput): Grant!
     """
-    #3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, V57) — withdraw a grant the caller asked for, while it is still pending. Only the recorded requester: a person, or the worker session that asked. It is the grant's one end (revoked_at, with the person as revoker) and one REVOKE event; no new state is named. A withdrawal that loses the race to the signature is refused. Refusals: GRANT_NOT_FOUND (unknown and unreadable alike), GRANT_NOT_REQUESTER, GRANT_NOT_PENDING (activated). A grant already ended is returned as it is.
+    #3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, V57) — withdraw a grant the caller asked for, while it is still pending. The recorded requester: a person, the worker session that asked, or (#4767, ruling 0255 item 21) a worker session bound to the agent when a RUN of that agent asked (hrn:node:hadronmemory.com:specs:cor:acl:140:03 item 5; the run tool hadron_withdraw_grant is the run's own door onto it). A session's withdrawal is the grant's one end (revoked_at, with the driving person as revoker) and one WITHDRAW event; no new state is named. A withdrawal that loses the race to the signature is refused. Refusals: GRANT_NOT_FOUND (unknown and unreadable alike), GRANT_NOT_REQUESTER, GRANT_NOT_PENDING (activated). A grant already ended is returned as it is.
     """
     withdrawGrant(ref: ID!): Grant!
     "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — withdraw an open grant signing request. Only the requester account, from any of its sessions or workers, among the two callers who may read the grant (a bound worker in its own App, or a person who manages the App); a manager who did not ask is refused SIGNING_REQUEST_NOT_REQUESTER. Refusals: FORBIDDEN while impersonating, SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
@@ -14333,6 +14497,19 @@ export const typeDefs = `#graphql
     deleteSlackConnection(ref: ID!): Boolean!
 
     """
+    Register a Telegram bot for an App (#597). appRef accepts ID or URN
+    (hrn:node:hadronmemory.com:specs:cor:api:140); the organization is the App's own. The bot token is
+    validated live by the tool and stored encrypted THERE: core keeps identity
+    only, and no field ever returns the token. Requires ADMIN/OWNER of the
+    App's organization; every caller who may not, and an App that does not
+    exist or has no organization, get the same refusal. One active connection
+    per App.
+    """
+    createTelegramConnection(appRef: ID!, botToken: String!): TelegramConnection!
+    "Soft-delete a Telegram connection (org ADMIN/OWNER); tears down the tool side best-effort."
+    deleteTelegramConnection(ref: ID!): Boolean!
+
+    """
     Register an external MCP server (org ADMIN/OWNER). orgRef accepts ID
     or URN (cor:api:140). headers is a JSON object of static request
     headers (e.g. Authorization) — encrypted at rest, write-only, never
@@ -14387,6 +14564,13 @@ export const typeDefs = `#graphql
     origin binding). A run resolves the name via the CSS cascade
     (user -> org) at entitled scopes only; an App secret is never resolved
     by a run (hrn:node:hadronmemory.com:specs:cor:sec:020:02).
+    With protected: true the create is only STAGED: it answers the error
+    SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl, no
+    secret exists yet, and the requester's own passkey ceremony at that URL makes
+    it (hrn:node:hadronmemory.com:specs:cor:sec:070:02). A staged request lasts
+    one hour; at most 5 are open per secret name and at most 2 per requester
+    (SECRET_CHANGE_REQUEST_LIMIT, SECRET_CHANGE_REQUESTER_LIMIT). Those numbers are
+    engineering bounds, not ruled values.
     """
     createSecret(
       ownerType: String!
@@ -14405,15 +14589,35 @@ export const typeDefs = `#graphql
     any member of the App may store. Name, kind, and owner are immutable —
     the cascade and flow config reference the name; create a new name
     instead. The effective (metadata, value) pair is re-validated per kind.
+    On a PROTECTED App secret a change is only staged: it answers the error
+    SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl instead
+    of a Secret, and nothing changes until the requester completes the passkey
+    ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The expiry and the two
+    caps are as for createSecret.
     """
     updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean): Secret!
-    """Open a protection change for your own passkey ceremony. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    """
+    Turn protection on or off for an App secret, through your own passkey ceremony
+    (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The payload is a Secret only when
+    nothing needs to change (clearing protection that is not on). Otherwise the change
+    is staged and the answer is the error SECRET_PROTECTED_NEEDS_PASSKEY with
+    extensions requestId and ceremonyUrl, never a Secret: the protection changes only
+    when the requester completes the ceremony. Turning protection off needs whoever
+    manages the App. An App key, an impersonated session and a run are refused.
+    The expiry and the two caps are as for createSecret.
+    """
     setSecretProtected(ref: ID!, protected: Boolean!): Secret!
-    """Withdraw your own open change request and clear its staged value. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    """
+    Withdraw your own open change request and clear its staged value; the request then
+    reads withdrawn. Only the requester can withdraw, complete or decline a request, and
+    anyone else is answered as for a request that does not exist. Declining is done on
+    the ceremony page, with a passkey proof, and reads declined.
+    hrn:node:hadronmemory.com:specs:cor:sec:070:02
+    """
     withdrawSecretChangeRequest(id: ID!): Boolean!
 
 
-    "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person."
+    "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person. A PROTECTED App secret is only staged: the answer is the error SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl, and it is deleted only when the requester completes the passkey ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02)."
     deleteSecret(ref: ID!): Boolean!
 
     """
@@ -15475,7 +15679,9 @@ export const typeDefs = `#graphql
     #1162 — hard-delete a never-referenced miscast only.
     hrn:node:hadronmemory.com:specs:cor:dmo:050:11
     Empty normally ended and released stints are repairable; persisted
-    attribution, including tombstones/history, refuses WORKER_IN_USE.
+    attribution, including tombstones/history, refuses WORKER_IN_USE. A reference census that does not
+    finish within its bound (#4809) refuses WORKER_CENSUS_INCOMPLETE: nothing is deleted, no reference was
+    found, retry or retire.
     The requester must explicitly verify no signed commit, trailer, PR,
     comment, review or published artifact attributes work to this Worker.
     Database counts cannot prove external absence: known or uncertain
@@ -17633,7 +17839,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); alarm.saturation (#3819: task-less and workerless, with an empty chain, so it wakes nobody: a family/tier/role combination the platform could not give work to, hrn:node:hadronmemory.com:specs:cor:agt:060:14; payload is reason (no-worker or none-eligible), family, tier and role, null for a dimension the task left open; only whoever manages the App acknowledges it, and acknowledging does not end its episode); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02); question.answered, question.answer-retracted (#4431: a question that blocks the task was answered, or its answer taken back; payload is questionId, code, revision and state only, never the answer; only question.answered wakes the task\'s assignee)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); alarm.saturation (#3819: task-less and workerless: a family/tier/role combination the platform could not give work to, hrn:node:hadronmemory.com:specs:cor:agt:060:14; #4777: its chain names the App's workers whose roles its saturation-alarm list named when it was raised, each offered one wake while its episode is open, and is empty (waking nobody) when the list was, hrn:node:hadronmemory.com:specs:cor:agt:060:16; payload is reason (no-worker or none-eligible), family, tier and role, null for a dimension the task left open; only whoever manages the App acknowledges it, and acknowledging does not end its episode); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02); question.answered, question.answer-retracted (#4431: a question that blocks the task was answered, or its answer taken back; payload is questionId, code, revision and state only, never the answer; only question.answered wakes the task\'s assignee)."
     type: String!
     taskId: ID
     "The task's stored handle (hrn:node:hadronmemory.com:specs:cor:agt:050:01, Proposed). Null when taskId is null or the task no longer exists; never invented."
@@ -18859,6 +19065,16 @@ export const typeDefs = `#graphql
   type TeamAvailability {
     workers: [WorkerAvailability!]!
     families: [ModelFamilyAvailability!]!
+  }
+
+  """
+  #4777 — the roles an App's saturation alarms wake (hrn:node:hadronmemory.com:specs:cor:agt:060:16). Each worker of the App whose role
+  is listed, matched regardless of case and not retired, is offered one wake when an alarm is raised.
+  """
+  type SaturationAlarmWakeRoles {
+    appId: ID!
+    "Stored trimmed, lower-cased, de-duplicated and sorted; empty by default."
+    roles: [String!]!
   }
 
   """
