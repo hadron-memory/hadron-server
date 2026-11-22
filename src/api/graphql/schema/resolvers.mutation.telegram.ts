@@ -43,10 +43,11 @@ export const telegramMutations = {
     if (existing) throw new GraphQLError(ALREADY_CONNECTED, { extensions: { code: 'BAD_USER_INPUT' } });
 
     // The tool validates the token live and derives the bot identity; the token goes no further than this call.
-    const identity = await createTelegramToolConnection('telegram', { botToken });
+    const identity = await createTelegramToolConnection('telegram', { botToken, appId });
 
-    // KNOWN GAP (deferred, not this slice): a lost registration response leaves a tool row core cannot see (#4829). App and org
-    // deletion DO tear the tool row down (#4828, src/lib/chatToolTeardown.ts, shared with Slack).
+    // App and org deletion DO tear the tool row down (#4828, src/lib/chatToolTeardown.ts, shared with Slack). A lost
+    // registration response (#4829) is covered by the registrationKey sent above: the retry re-derives it and a tool
+    // that supports it returns the same connection.
     // EVERY failure past this point tears the tool row down, or the tool would hold an encrypted token and a poll
     // loop with no core row and no GraphQL handle to delete them.
     try {

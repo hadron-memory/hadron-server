@@ -587,7 +587,7 @@ describe('loadNodeFromFs — line endings and YAML root shape (#280)', () => {
     expect(node.id).toBe('legacy-1');
     expect(node.name).toBe('Legacy');
     expect(node.loc).toBe('org:legacy');
-    expect(node.content).toBe('Body\r\nline two');
+    expect(node.content).toBe('Body\r\nline two\r\n'); // #2584: nothing stripped
   });
 
   it.each([

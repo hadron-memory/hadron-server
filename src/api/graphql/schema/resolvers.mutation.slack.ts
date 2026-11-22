@@ -35,7 +35,7 @@ export const slackMutations = {
 
     // The tool validates both tokens live and derives the workspace + BOTH
     // bot ids; the tokens go no further than this call.
-    const identity = await createSlackToolConnection('slack', { botToken, appToken });
+    const identity = await createSlackToolConnection('slack', { botToken, appToken, appId: defaultAppId }); // appId: the App the connection serves; it is part of the registrationKey
 
     // EVERY failure past this point tears the tool row down — otherwise the
     // tool would hold encrypted tokens + a socket with no core row and no
@@ -64,7 +64,13 @@ export const slackMutations = {
         },
       });
     } catch (err) {
-      void deleteSlackToolConnection('slack', identity.id);
+      // #4829: with an idempotent registration the tool can hand back an id a LIVE core row already holds (a repeat or
+      // concurrent registration of the same install by the same App). Tear the tool row down only if no live core row
+      // holds it, or the winner's connection would point at a deleted tool row. A failed lookup skips the teardown.
+      const heldByCore = await ctx.db.slackConnection
+        .count({ where: { toolConnectionId: identity.id, deletedAt: null } })
+        .then((n) => n > 0, () => true);
+      if (!heldByCore) void deleteSlackToolConnection('slack', identity.id);
       // A concurrent duplicate hits the PARTIAL unique
       // (slack_connections_org_team_active_uniq) — same answer as the
       // pre-check, which only exists for the friendly common case.

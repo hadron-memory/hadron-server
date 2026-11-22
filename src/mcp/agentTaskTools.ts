@@ -185,11 +185,15 @@ export async function renderTask(t: TaskRow, ctx: Context, dependencies: { limit
     T.assignee(t as never, {}, ctx) as Promise<Party>,
     T.waitingOnChildren(t as never, {}, ctx),
   ]);
-  const [blockedBy, blocks] = await Promise.all([T.blockedBy(t as never, dependencies, ctx), T.blocks(t as never, dependencies, ctx)]);
+  const [blockedBy, blocks, urn] = await Promise.all([
+    T.blockedBy(t as never, dependencies, ctx), T.blocks(t as never, dependencies, ctx), T.urn(t as never, {}, ctx),
+  ]);
   const flags = [T.queued(t as never) ? 'queued' : null, waiting ? 'waiting on child tasks' : null].filter(Boolean);
   const lines = [
     // #2553: the handle first, then the id it is an alias for.
     `- ${t.handle} ${t.title} (id: ${t.id})`,
+    // #3878: the task's URN, the same address AgentTask.urn emits (GraphQL/MCP parity); omitted when it cannot compose.
+    ...(urn ? [`  urn: ${urn}`] : []),
     `  priority: ${t.priority ?? 1}`,
     `  blocked: ${t.blocked ?? false}`,
     `  blocked by (${blockedBy.total} total${blockedBy.hasMore ? ', more pages' : ''}): ${blockedBy.items.map((b) => b.id).join(', ') || 'none on this page'}`,
@@ -292,7 +296,7 @@ const party = z.object({
 }).describe('Exactly one of worker or user.');
 const taskId = z.string().describe(
   'The task id, or its handle: AT3.405 (a project, then the number within each parent; AT0.<n> is a task with no project). ' +
-    'A person who belongs to several Apps qualifies it: hrn:agenttask:<app-urn>:AT3.405. The handle is not a GitHub issue number.',
+    'A person who belongs to several Apps qualifies it with the task URN: hrn:agenttask:<app-urn>:at3.405 (either case). The handle is not a GitHub issue number.',
 );
 
 /**
