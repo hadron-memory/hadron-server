@@ -289,6 +289,18 @@ export function httpRequest(input: HttpRequestInput): Promise<HttpRequestResult>
   return runOperation<HttpRequestResult>('http-request', input);
 }
 
+/**
+ * #4882: the contract the tool declares at `GET /ops/contract` (hadrontool-webfetch#13). A build that predates it answers 404, which
+ * `runToolRequest` surfaces as a WEBFETCH_TOOL_ERROR; the gate in `webfetchContract.ts` reads every failure as "declares nothing".
+ */
+export interface WebfetchContractDeclaration {
+  contract?: unknown;
+  capabilities?: unknown;
+}
+export function getWebfetchContract(): Promise<WebfetchContractDeclaration> {
+  return runToolRequest<WebfetchContractDeclaration>('/ops/contract', 'GET');
+}
+
 /** Create one durable GET-only watch job. One request; no blind retries. */
 export function createPoll(input: CreatePollInput): Promise<CreatePollResult> {
   return runToolRequest<CreatePollResult>('/polls', 'POST', input);

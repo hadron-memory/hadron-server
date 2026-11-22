@@ -14,6 +14,7 @@ import {
   getPoll,
   listPolls,
   cancelPoll,
+  getWebfetchContract,
 } from './webfetchClient.js';
 
 const okJson = (body: unknown) =>
@@ -35,6 +36,16 @@ describe('webfetchClient', () => {
     vi.unstubAllGlobals();
     delete process.env.WEBFETCH_TOOL_URL;
     delete process.env.WEBFETCH_TOOL_TOKEN;
+  });
+
+  it('#4882 reads the declaration with a GET to /ops/contract, bearer attached, no body', async () => {
+    const f = fetchStub(async () => okJson({ contract: 'webfetch@2', capabilities: ['redirects-none'] }));
+    vi.stubGlobal('fetch', f);
+    await expect(getWebfetchContract()).resolves.toEqual({ contract: 'webfetch@2', capabilities: ['redirects-none'] });
+    const [url, init] = f.mock.calls[0]!;
+    expect(url).toBe('http://webfetch.test:8080/ops/contract');
+    expect(init).toMatchObject({ method: 'GET', headers: expect.objectContaining({ authorization: 'Bearer shhh' }) });
+    expect(init?.body).toBeUndefined();
   });
 
   it('posts fetch-url to the ops plane with the bearer token and trims a trailing slash', async () => {
