@@ -138,6 +138,12 @@ const doors: Record<string, Door> = {
     call: (instruction, c) => M.setAgentTaskStallSchedule({}, { appRef: f.app.id, input: { notStartedMinutes: 33 }, instruction }, c),
     took: async () => (await db.agentTaskStallSchedule.findUnique({ where: { appId: f.app.id } }))?.notStartedMinutes === 33,
   },
+  // #4777 (hrn:node:hadronmemory.com:specs:cor:agt:060:16): the saturation-alarm wake-roles list, the stall schedule's door shape.
+  setSaturationAlarmWakeRoles: {
+    act: 'app.saturation-wake-roles',
+    call: (instruction, c) => M.setSaturationAlarmWakeRoles({}, { appRef: f.app.id, roles: ['triager'], instruction }, c),
+    took: async () => (await db.agentTaskStallSchedule.findUnique({ where: { appId: f.app.id } }))?.saturationWakeRoles?.[0] === 'triager',
+  },
   setAppModelGroup: {
     act: 'app.model-group.set',
     call: (instruction, c) => M.setAppModelGroup({}, { appRef: f.app.id, name: 'fast', patterns: ['claude-*'], instruction }, c),
