@@ -411,7 +411,9 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
   await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
   const app = await loadLiveApp(ctx, found.ownerId);
   if (!app) throw notFound();
-  if (args.metadata === undefined && args.value === undefined && args.protected === undefined) {
+  // A GraphQL null asks for no protection change, like an omitted argument.
+  const requestedProtected = args.protected ?? undefined;
+  if (args.metadata === undefined && args.value === undefined && requestedProtected === undefined) {
     throw badInput('Pass metadata and/or value.');
   }
   const actor = secretActorOf(ctx);
@@ -430,11 +432,10 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
       const effectiveMetadata = args.metadata !== undefined ? args.metadata : secret.metadata;
       const payload = args.value === undefined ? null : validateSecretPayload(secret.kind, effectiveMetadata, args.value, { enforceValueSize: true });
       const metadata = payload?.metadata ?? validateUnchangedSecretMetadata(secret.kind, effectiveMetadata, secret.metadata);
-      // #4749: `protected: false` on a secret that is not protected asks for no protection change. It is judged AFTER the manager gate
-      // above (a caller without the right to turn protection off was refused before this point, protected or not), so only a proven
-      // manager reaches it. Left as `false` it staged a STORE request: a spent slot and a passkey ceremony for a change that does nothing.
-      const protectedChange = !secret.protected && args.protected === false ? undefined : args.protected;
-      if (protectedChange === undefined && args.metadata === undefined && args.value === undefined) return secret; // the silent no-op (FIT: no event, nothing to record)
+      // #4749: `protected: false` on an unprotected secret asks for no protection change. Judged after the manager gate above, so only a
+      // manager reaches it; left as `false` it staged a request (a spent slot and a ceremony) for nothing.
+      const protectedChange = !secret.protected && requestedProtected === false ? undefined : requestedProtected;
+      if (!secret.protected && protectedChange === undefined && args.metadata === undefined && args.value === undefined) return secret; // the silent no-op: nothing to record
       if (secret.protected || protectedChange !== undefined) {
         const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
         return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
