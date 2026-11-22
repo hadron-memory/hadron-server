@@ -2747,12 +2747,14 @@ export const typeDefs = `#graphql
     "True when the caller is a decider, including through an account merged into theirs (#1715)."
     viewerIsDecider: Boolean!
     """
-    #4427 — true when the caller may answer or take back an answer right now: one of the question\'s deciders, acting as
-    themselves (a person in a session bound to no worker or agent, no App key or run, no impersonation), still among the
-    log\'s deciders and able to write its memory, on a question that is not withdrawn, tampered or unverifiable
-    (hrn:node:hadronmemory.com:specs:cor:dmo:140:05). It is the capability to submit a new answer: it is false once the
-    answer history is full (the last entry is kept for taking an answer back), and it does not say that an answer stands to
-    take back (retractQuestionAnswer refuses QUESTION_NOT_ANSWERED otherwise).
+    #4427 — true when the caller may submit a NEW answer right now. The rule (hrn:node:hadronmemory.com:specs:cor:dmo:140:05,
+    Proposed where it was amended on 2026-11-18) is that a decider is a user who may write the log\'s memory, never a worker,
+    an Agent or an App key, and that this is re-checked at the moment of answering. So: one of the question\'s deciders,
+    acting as themselves (a person in a session bound to no worker or agent, no App key or run, no impersonation), still
+    among the log\'s deciders and able to write its memory, on a question that is not withdrawn, tampered or unverifiable.
+    It is not the capability to take an answer back: it is false once the answer history reaches its last free entry (that
+    entry is kept so a standing answer can still be taken back), even though the decider can still retract then, and it does
+    not say that an answer stands to take back (retractQuestionAnswer refuses QUESTION_NOT_ANSWERED otherwise).
     """
     viewerMayAnswer: Boolean!
     "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
