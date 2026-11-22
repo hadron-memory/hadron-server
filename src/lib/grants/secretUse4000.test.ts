@@ -59,8 +59,13 @@ describe('secret.use grant terms (#4000)', () => {
       expect(await refusal(grant({ ...values(), 'binding-prefix': prefix }))).toBe('GRANT_VALUES_INVALID');
     }
   });
-  it('refuses the delete mark on a secret.use grant (SECRET_AUTO_DELETE_NOT_AVAILABLE, ruled by Bill #132508)', async () => {
-    expect(await refusal(grant({ ...values(), 'auto-delete': 'delete' }))).toBe('SECRET_AUTO_DELETE_NOT_AVAILABLE');
+  it('accepts the delete mark on a secret.use grant when it has a limit, and refuses it without one (cor:sec:060:03)', async () => {
+    const marked = { ...values(), 'auto-delete': 'delete' };
+    expect(await refusal(grant(marked))).toBe('SECRET_AUTO_DELETE_NEEDS_LIMIT');
+    expect(await refusal(db.$transaction((tx) => createPendingGrant(tx, {
+      appId: w.appId, requester: { userId: w.userId, workerId: null, sessionId: null }, holder: { kind: 'app', id: w.appId },
+      action: 'secret.use', values: marked, reason: 'r', maxUses: 1, canReadMemory: async () => true,
+    })))).toBe('OK');
   });
   it('allows this App as holder, while refusing a different App holder', async () => {
     const appGrant = (id: string) => db.$transaction((tx) => createPendingGrant(tx, {
@@ -70,7 +75,7 @@ describe('secret.use grant terms (#4000)', () => {
     expect(await refusal(appGrant(w.appId))).toBe('OK');
     expect(await refusal(appGrant(w.app2Id))).toBe('GRANT_HOLDER_NOT_ALLOWED');
   });
-  it('creates an App-held request through the manager API and preserves the auto-delete hold', async () => {
+  it('creates an App-held request through the manager API and keeps the auto-delete limit rule', async () => {
     await db.orgMember.create({ data: { organizationId: w.orgId, userId: w.userId, role: 'ADMIN' } });
     const ctx: Context = { db, userId: w.userId, roles: [] };
     const input = { appRef: w.appId, holderKind: 'APP' as const, holderRef: w.appId, action: 'secret.use', values: values(), reason: 'r' };
@@ -78,7 +83,7 @@ describe('secret.use grant terms (#4000)', () => {
     const row = await db.grant.findUniqueOrThrow({ where: { id: result.id } });
     expect(row).toMatchObject({ granteeAppId: w.appId, action: 'secret.use', activatedAt: null });
     await expect(resolvers.Mutation.createGrant({}, { input: { ...input, values: { ...values(), 'auto-delete': 'delete' } } }, ctx))
-      .rejects.toMatchObject({ extensions: { code: 'SECRET_AUTO_DELETE_NOT_AVAILABLE' } });
+      .rejects.toMatchObject({ extensions: { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT' } });
   });
   it('refuses a worker holder: a use grant nothing could consume is never created', async () => {
     const workerGrant = () => db.$transaction((tx) => createPendingGrant(tx, {

@@ -53,8 +53,7 @@ export type GrantCreateCode =
   | 'GRANT_ACTION_UNKNOWN'
   | 'GRANT_VALUES_INVALID'
   | 'GRANT_TERMS_INVALID'
-  | 'SECRET_AUTO_DELETE_NEEDS_LIMIT'
-  | 'SECRET_AUTO_DELETE_NOT_AVAILABLE';
+  | 'SECRET_AUTO_DELETE_NEEDS_LIMIT';
 
 const MESSAGES: Record<GrantCreateCode, string> = {
   SECRET_AUTO_DELETE_NEEDS_LIMIT: 'An auto-delete mark needs a window or a read budget.',
@@ -63,7 +62,6 @@ const MESSAGES: Record<GrantCreateCode, string> = {
   GRANT_ACTION_UNKNOWN: 'That action is not registered.',
   GRANT_VALUES_INVALID: 'The values do not match the action\'s declared parameters.',
   GRANT_TERMS_INVALID: 'The grant\'s terms cannot be recorded.',
-  SECRET_AUTO_DELETE_NOT_AVAILABLE: 'Auto-delete on a read client is not available yet.',
 };
 
 /** A refusal of a create. The text is fixed for each refusal case: it never carries a submitted value or an id. */
@@ -227,11 +225,6 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     if (Array.isArray(v) && v.length > MAX_LIST_ENTRIES) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'LIST_TOO_LONG');
     if (!valueMatchesType(p.type, v)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
     if (p.refusesWildcard && v === '*') throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} refuses a wildcard`);
-  }
-
-  // A use grant never carries the delete mark (Bill, #132508): refuse it rather than sign a delete promise a run cannot honor.
-  if (action.name === 'secret.use' && (values as Record<string, unknown>)['auto-delete'] === 'delete') {
-    throw new GrantCreateRefusal('SECRET_AUTO_DELETE_NOT_AVAILABLE');
   }
 
   // V86 (#4067, ruling 0265, cor:acl:140:07): a grant may name only a node its REQUESTER can read. The signer shows every node as its

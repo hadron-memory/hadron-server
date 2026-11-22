@@ -313,4 +313,35 @@ describe('transactional secret.use (#4000)', () => {
     expect(await db.actionTicket.count({ where: { organizationId: orgId, action: 'secret.use', consumedByRunId: runCtx.run.id } })).toBe(1);
     await expect(prepare()).rejects.toMatchObject({ extensions: { code: 'SECRET_READ_CLIENT_SPENT' } });
   });
+  describe('auto-delete mark (cor:sec:060:03)', () => {
+    const mark = async (maxUses: number) => {
+      await db.$transaction(async (tx) => {
+        // A signed grant needs a real ceremony row; replica mode skips only the FK to it, this file tests the use path, not signing.
+        await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+        await tx.$executeRaw`UPDATE grants SET action_values = jsonb_set(action_values, '{auto-delete}', '"delete"'), signature_id = 'sig-1', max_uses = ${maxUses} WHERE id = ${grantId}`;
+      });
+      for (let i = 0; i < maxUses; i++) await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+    };
+    it('deletes the secret inside the use that spends the last permitted use, returning the value once', async () => {
+      await mark(1);
+      const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
+      await expect(prepare()).resolves.toMatchObject({ auth: { type: 'bearer', token: 'synthetic-canary' } });
+      expect(await db.secret.count({ where: { id: client.secretId } })).toBe(0);
+      expect(await db.secretVersion.count({ where: { secretId: client.secretId } })).toBe(0);
+      expect((await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } })).endedAt).not.toBeNull();
+      expect(await db.secretEvent.count({ where: { secretId: client.secretId, kind: 'USE', outcome: 'OK' } })).toBe(1);
+      expect(await db.secretEvent.count({ where: { secretId: client.secretId, kind: 'DELETE' } })).toBe(1);
+      expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(1);
+      await expect(prepare()).rejects.toBeDefined();
+    });
+    it('keeps the secret before the last permitted use', async () => {
+      await mark(2);
+      const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
+      await prepare();
+      expect(await db.secret.count({ where: { id: client.secretId } })).toBe(1);
+      expect(await db.secretEvent.count({ where: { secretId: client.secretId, kind: 'DELETE' } })).toBe(0);
+      await prepare();
+      expect(await db.secret.count({ where: { id: client.secretId } })).toBe(0);
+    });
+  });
 });

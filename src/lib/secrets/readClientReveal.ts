@@ -222,7 +222,7 @@ export async function prepareSecretUse(
     }
     if (!issuer) throw refusal('SECRET_READ_CLIENT_ISSUER_GONE', 'This read client has no issuer.');
     const terms = grant.values as Record<string, unknown> | null;
-    if (!terms || terms.secret !== client.secretId || terms['auto-delete'] !== 'keep' ||
+    if (!terms || terms.secret !== client.secretId || (terms['auto-delete'] !== 'keep' && terms['auto-delete'] !== 'delete') ||
         typeof terms['binding-prefix'] !== 'string' || typeof terms['binding-header'] !== 'string') throw notFound();
     const secret = await tx.secret.findUnique({ where: { id: client.secretId }, select: { id: true, name: true, kind: true, ownerId: true, ownerType: true, metadata: true } });
     if (!secret || secret.ownerType !== 'app' || secret.ownerId !== run.appId || secret.kind !== 'webfetch-auth') throw notFound();
@@ -253,6 +253,12 @@ export async function prepareSecretUse(
     const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
     await tx.secretEvent.create({ data: { ownerType: 'app', ownerId: run.appId, secretId: secret.id, secretName: secret.name,
       clientId: client.id, versionNo: latest?.versionNo ?? null, kind: 'USE', outcome: 'OK', runId: run.id } });
+    // cor:sec:060:03: a signed marked client deletes its secret inside the use that spends its last permitted use, as the reveal path does.
+    // Liveness above already required activation; the signature is checked the same way the reveal path checks it.
+    if (terms['auto-delete'] === 'delete' && grant.signatureId) {
+      const after = await tx.grant.findUniqueOrThrow({ where: { id: grant.id }, select: { maxUses: true, useCount: true } });
+      if (after.maxUses !== null && after.useCount >= after.maxUses) await deleteLockedAppSecret(tx, secret);
+    }
     return { url, auth };
   }, { afterLock: (tx) => lockAppManagerMemberships(tx, issuer ?? undefined, app) });
   } catch (error) {
