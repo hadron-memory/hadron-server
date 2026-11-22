@@ -25,6 +25,8 @@ export async function softDeleteOrganizationCore(
   db: Pick<PrismaClient, 'organization' | 'secret' | 'userInvitation' | 'orgMemberInvitation' | '$queryRaw'>,
   orgId: string,
   deletedBy?: string | null,
+  /** Who the removed chat tool connections are recorded as deleted by; defaults to `deletedBy` (deleteOrganization stamps none on the org row, but knows its actor). */
+  connectionDeletedBy?: string | null,
 ): Promise<ChatToolTeardown[]> {
   await db.organization.updateMany({
     where: { id: orgId, deletedAt: null },
@@ -34,5 +36,5 @@ export async function softDeleteOrganizationCore(
   await deleteSecretsForOwner(db, 'org', orgId);
   // #4828: the organization's Telegram and Slack registrations go in the same transaction; the CALLER asks the tools to drop their
   // side after the commit (dispatchChatToolTeardown). A row already deleted is not returned, so a repeat asks nothing.
-  return softDeleteChatToolConnections(db, { organizationId: orgId }, deletedBy ?? null);
+  return softDeleteChatToolConnections(db, { organizationId: orgId }, connectionDeletedBy ?? deletedBy ?? null);
 }

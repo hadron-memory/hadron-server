@@ -447,7 +447,7 @@ export const orgMutations = {
         ctx,
         [{ kind: 'org', id: resolvedId }],
         async (txCtx) => { requireRole(txCtx, 'ADMIN'); },
-        (tx) => softDeleteOrganizationCore(tx, resolvedId),
+        (tx) => softDeleteOrganizationCore(tx, resolvedId, undefined, ctx.userId ?? ctx.clientId ?? null),
         { lockMode: 'exclusive', allowDeletedOrg: true },
       );
       // #4828: after the commit, once authorization has been judged, ask the Telegram and Slack tools to drop their side.

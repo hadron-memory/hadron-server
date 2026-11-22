@@ -1,14 +1,19 @@
 /**
- * #4828 (#597 follow-up; hrn:node:hadronmemory.com:specs:cor:dmo:080:04, "no tool connection is ever left that no live row
- * points to"): the ONE teardown path for the chat tool registrations (Telegram and Slack) of an App or an organization that is
- * being deleted.
+ * #4828 (#597 follow-up; hrn:node:hadronmemory.com:specs:cor:dmo:080:04, "no tool connection is ever left that no live row points to"):
+ * the ONE teardown path for the chat tool registrations (Telegram and Slack) of an App or an organization that is being deleted.
+ * It NARROWS the gap; it does not close it (see the limits below).
  *
  * Two steps, split on purpose. {@link softDeleteChatToolConnections} runs INSIDE the deleting transaction: it soft-deletes every
  * LIVE row in scope with one guarded statement (`WHERE deleted_at IS NULL ... RETURNING`), so a row already deleted is neither
  * touched nor returned (never asked of the tool twice), and no live row survives the commit. {@link dispatchChatToolTeardown}
  * runs AFTER the commit, once per returned connection: authorization has already been judged, and a rolled-back delete asks the
- * tool nothing. The tool calls keep the disconnect doors' contract (best-effort, never throw, a failure is logged): the rows keep
- * their tool connection id once soft-deleted, but nothing retries an unreachable tool today (a durable retry is its own issue).
+ * tool nothing. The tool calls keep the disconnect doors' contract (best-effort, never throw, a failure is logged).
+ *
+ * LIMITS, stated: a tool that is unreachable, or a process that dies between the commit and the call, leaves an orphan tool-side
+ * registration that nothing retries. The soft-deleted row keeps its tool connection id and the failed call logs it (provider and
+ * connection id, never the token), so an operator can clean the tool side by hand; the single-connection disconnect doors refuse a
+ * connection that is already deleted (a concurrent double delete must ask the tool once), so there is no GraphQL recovery door. A
+ * durable retry and a reconciliation of registrations orphaned before this existed are #4847.
  */
 import type { Prisma } from '../generated/prisma/index.js';
 import { deleteSlackToolConnection } from './slackClient.js';

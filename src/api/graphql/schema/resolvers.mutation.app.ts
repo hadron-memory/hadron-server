@@ -623,13 +623,18 @@ export const appMutations = {
           await assertNoWorkers(ctx.db, existing.id, appUrn, 'reclaim');
           // #1468 — the delete cascades the App's memories: refused while one
           // is a stamped corpus still holding a spec.
-          await ctx.db.$transaction(async (tx) => {
+          const reclaimTeardowns = await ctx.db.$transaction(async (tx) => {
             await assertNoInstallMemories(tx, existing.id, appUrn);
             await detachAppOwnerMemories(tx, [existing.id]);
             const doomed = await tx.memory.findMany({ where: { appId: existing.id }, select: { id: true } });
             await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
+            // #4828: an App soft-deleted BEFORE its deletion tore its tool registrations down still holds live connection rows, which this
+            // hard delete would cascade away silently; collect them first, ask their tools after the commit. Rows already torn down return nothing.
+            const torn = await softDeleteChatToolConnections(tx, { appId: existing.id }, ctx.userId ?? ctx.clientId ?? null);
             await tx.app.delete({ where: { id: existing.id } });
+            return torn;
           });
+          dispatchChatToolTeardown(reclaimTeardowns);
         } else {
           // #2785: typed, like the memory collision (#2819); a plain Error is
           // masked as INTERNAL_SERVER_ERROR (cor:api:260:01). Names only the
@@ -824,13 +829,16 @@ export const appMutations = {
               // castings and recycle their permanently-reserved names.
               await assertNoWorkers(ctx.db, depCollision.id, depUrn, 'reclaim');
               // #1468 — same cascade rule as the parent App branch.
-              await ctx.db.$transaction(async (tx) => {
+              const depTeardowns = await ctx.db.$transaction(async (tx) => {
                 await assertNoInstallMemories(tx, depCollision.id, depUrn);
                 await detachAppOwnerMemories(tx, [depCollision.id]);
                 const doomed = await tx.memory.findMany({ where: { appId: depCollision.id }, select: { id: true } });
                 await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
+                const torn = await softDeleteChatToolConnections(tx, { appId: depCollision.id }, ctx.userId ?? ctx.clientId ?? null); // #4828, as above
                 await tx.app.delete({ where: { id: depCollision.id } });
+                return torn;
               });
+              dispatchChatToolTeardown(depTeardowns);
             } else {
               depUrn = `${depUrn}:${imp.importedAgentId.slice(-8)}`;
             }
