@@ -26,7 +26,7 @@ import type {
   NodePropertySort,
 } from './provider.js';
 import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
-import { vectorSearchNodes, vectorSearchChunks } from '../../services/embedding/vectors.js';
+import { vectorSearchNodes, vectorSearchChunks, vectorRanksOf } from '../../services/embedding/vectors.js';
 import { UnindexableQueryError, compileBooleanQuery } from './tsquery.js';
 import { compileNodeWhere, compileNodePropertySort } from './nodeWhere.js';
 import { regexSearchTimeoutMs } from './regexTimeout.js';
@@ -332,6 +332,20 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
       scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
     });
+  },
+
+  async vectorRanks(opts) {
+    const { ranks, stopped } = await vectorRanksOf(opts.db, {
+      filterSql: vectorFilterSql({ ...opts, limit: 0 }),
+      memoryIds: opts.memoryIds,
+      queryEmbedding: opts.queryEmbedding,
+      candidateNodeIds: opts.candidateNodeIds,
+      abstractOnly: opts.abstractOnly,
+      hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
+      scope: opts.contentScope ?? 'CONTENT', // the same default as vectorSearch, so ranks and pages share one eligibility
+      nodeIds: opts.nodeIds,
+    });
+    return { ranks, stoppedEarly: stopped };
   },
 
   vectorSearchChunks(opts: VectorSearchOpts): Promise<ChunkHit[]> {

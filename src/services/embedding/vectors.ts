@@ -411,8 +411,15 @@ export async function checkPgvectorAtBoot(db: PrismaClient): Promise<void> {
   try { await iterativeScanSupported(db); } catch { /* a boot probe must never stop the server */ }
 }
 
-/** A cancelled statement (SQLSTATE 57014) is the early stop of cor:api:090:04, never an error to the caller. */
-export function isStatementTimeout(e: unknown): boolean {
+/**
+ * A cancelled statement (SQLSTATE 57014) is the early stop of cor:api:090:04, never an error to the caller.
+ *
+ * `phase` (#4779, Bridget P3-2 on #4665) says where a P2028 came from, so the classification no longer rests on Prisma's
+ * message text: `'waiting'` = the transaction never started (its callback never ran), so `maxWait` ran out acquiring a
+ * connection, which is pool pressure and must reach error alerting; `'running'` = the callback was running, so Prisma's own
+ * interactive-transaction clock expired, which is the search running out of time. Without a phase the message decides, as before.
+ */
+export function isStatementTimeout(e: unknown, phase?: 'waiting' | 'running'): boolean {
   const err = e as { code?: string; meta?: { code?: string; message?: string }; message?: string } | null;
   const text = `${err?.message ?? ''} ${err?.meta?.message ?? ''}`;
   // A cancel by the user or an administrator (shutdown, pg_cancel_backend) is not the work budget running out.
@@ -421,35 +428,68 @@ export function isStatementTimeout(e: unknown): boolean {
   // still wins the race the search ran out of time all the same.
   // BLIND P2 (#4665, Abigail): P2028 is ALSO what Prisma raises when `maxWait` runs out acquiring a connection ("Unable to
   // start a transaction in the given time"), which is pool pressure, not the work budget: it must reach error alerting.
-  if (err?.code === 'P2028') return !/unable to start a transaction/i.test(text);
+  if (err?.code === 'P2028') return phase ? phase === 'running' : !/unable to start a transaction/i.test(text);
   return err?.meta?.code === '57014' || /statement timeout/i.test(text);
 }
 
-/**
- * Run one vector statement group in a transaction under the work budget: `SET LOCAL` statement_timeout, the
- * per-iteration horizon and (pgvector >= 0.8.0) the strict-order iterative scan, all of which die with the
- * transaction and never reach a pooled connection's session.
- */
-async function withVectorBudget<T>(
-  db: PrismaClient, candidateK: number, iterative: boolean, query: (tx: Prisma.TransactionClient) => Promise<T>,
-  budget: number | (() => number) = vectorSearchTimeoutMs(),
-): Promise<T> {
-  const budgetMs = typeof budget === 'function' ? budget() : budget;
-  return db.$transaction(async (tx) => {
-    // BLIND P2 (#4665): measured AFTER the connection is acquired, so time spent waiting for the pool is not handed to
-    // the statement a second time.
-    const stmtMs = typeof budget === 'function' ? budget() : budgetMs;
-    await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${stmtMs}`);
-    await tx.$executeRawUnsafe(`SET LOCAL hnsw.ef_search = ${hnswEfSearchFor(candidateK)}`);
-    if (iterative) {
-      await tx.$executeRawUnsafe(`SET LOCAL hnsw.iterative_scan = strict_order`);
-      // The work budget above, not a tuple count, ends a search.
-      await tx.$executeRawUnsafe(`SET LOCAL hnsw.max_scan_tuples = 2147483647`);
-    }
-    return query(tx);
+/** Prisma options for one budgeted vector transaction: its clock runs past the budget so Postgres ends the statement first. */
+function vectorTxOptions(budgetMs: number): { timeout: number; maxWait: number } {
   // Prisma's interactive-transaction clock defaults to 5 s, the same as the default budget, and the SET LOCAL
   // round-trips already spend part of it: give it room past the statement budget so Postgres ends the statement.
-  }, { timeout: budgetMs + VECTOR_TX_MARGIN_MS, maxWait: Math.min(budgetMs, VECTOR_TX_MAX_WAIT_MS) });
+  return { timeout: budgetMs + VECTOR_TX_MARGIN_MS, maxWait: Math.min(budgetMs, VECTOR_TX_MAX_WAIT_MS) };
+}
+
+/**
+ * Point the transaction's settings at the NEXT statement: `SET LOCAL` statement_timeout (what is left of the request's
+ * budget, measured now, after the connection was acquired, so pool wait is never handed to a statement a second time,
+ * BLIND P2 #4665) and the per-iteration HNSW horizon. All of it dies with the transaction and never reaches a pooled
+ * connection's session. Re-issued before every statement of the one shared transaction (#4779 P2-2).
+ */
+async function setVectorStatement(tx: Prisma.TransactionClient, stmtMs: number, candidateK: number): Promise<void> {
+  await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${stmtMs}`);
+  await tx.$executeRawUnsafe(`SET LOCAL hnsw.ef_search = ${hnswEfSearchFor(candidateK)}`);
+}
+
+/** pgvector >= 0.8.0: the strict-order iterative scan, ended by the work budget rather than a tuple count. Once per transaction. */
+async function setIterativeScan(tx: Prisma.TransactionClient): Promise<void> {
+  await tx.$executeRawUnsafe(`SET LOCAL hnsw.iterative_scan = strict_order`);
+  await tx.$executeRawUnsafe(`SET LOCAL hnsw.max_scan_tuples = 2147483647`);
+}
+
+/**
+ * The request-wide budget clock: every statement gets what is LEFT of ONE budget, so the env variable bounds the search,
+ * not each statement of a loop. Past the deadline it throws the statement-timeout shape, which is the early stop.
+ */
+function budgetClock(budgetMs: number): () => number {
+  const deadline = Date.now() + budgetMs;
+  return () => {
+    const ms = deadline - Date.now();
+    if (ms < 1) throw Object.assign(new Error('canceling statement due to statement timeout'), { meta: { code: '57014' } });
+    return Math.trunc(ms);
+  };
+}
+
+/**
+ * #4779 (P3-6, Byron on #4665) — one vector statement that is not ranked through {@link rankUnderBudget} (the COMMENTS
+ * scope's exact statements) under the same work budget, in one transaction. A timeout is the early stop: `stopped`.
+ */
+async function oneStatementUnderBudget<R>(
+  db: PrismaClient, query: (tx: Prisma.TransactionClient) => Promise<R[]>,
+): Promise<{ rows: R[]; stopped: boolean }> {
+  const budgetMs = vectorSearchTimeoutMs();
+  const left = budgetClock(budgetMs);
+  let phase: 'waiting' | 'running' = 'waiting';
+  try {
+    const rows = await db.$transaction(async (tx) => {
+      phase = 'running';
+      await setVectorStatement(tx, left(), 40);
+      return query(tx);
+    }, vectorTxOptions(budgetMs));
+    return { rows, stopped: false };
+  } catch (e) {
+    if (!isStatementTimeout(e, phase)) throw e;
+    return { rows: [], stopped: true };
+  }
 }
 
 let smallScopeRows = 20000;
@@ -464,6 +504,10 @@ export function vectorSmallScopeRows(): number { return smallScopeRows; }
 /** Test seam: move the small-scope threshold (null restores the default). */
 export function setVectorSmallScopeRowsForTests(n: number | null): void { smallScopeRows = n ?? 20000; }
 
+let annMaxK = VECTOR_ANN_MAX_K;
+/** Test seam (#4779, Riana P3-5 on #4665): lower the ANN widening ceiling so its numeric boundary can be pinned (null restores it). */
+export function setVectorAnnMaxKForTests(n: number | null): void { annMaxK = n ?? VECTOR_ANN_MAX_K; }
+
 /**
  * #2772 — rank under the ruling-0150 contract: NO candidate cap. The iterative index scan walks the HNSW index
  * until the filtered, access-scoped statement has `need` rows; when it ends short, an independent count of the
@@ -472,8 +516,20 @@ export function setVectorSmallScopeRowsForTests(n: number | null): void { smallS
  * are what the index had ranked when it stopped: HNSW is approximate even under strict_order, so they are NOT promised to
  * be a prefix of the true ranking (a different page is possible), and a full ANN page past the index's order window is
  * discarded rather than returned. They are never presented as a complete page.
+ *
+ * #4779:
+ * - P2-2: the count, every widening and the exact statement share ONE interactive transaction (one pooled connection,
+ *   one `maxWait`), with `statement_timeout` re-issued before each statement as what is left of the one budget. A search
+ *   used to open up to ~7 transactions in sequence, each a fresh chance to time out waiting for the pool (P2028, an
+ *   internal error by design). A pool wait is still an error, told apart by phase (`isStatementTimeout`).
+ * - P3-3: ANN rows are put in the exact statement's total order (`tieOrder`: distance, then the row's stable key), and a
+ *   page is taken from the walk only when no tie at the page's last distance can continue past the rows the walk
+ *   returned (`distanceOf` of the last raw row is beyond it). Otherwise the walk widens, so pages never repeat or skip
+ *   rows among equal distances.
+ *
+ * @internal exported for the #4779 unit pins; callers use {@link vectorSearchNodes} / {@link vectorSearchChunks}.
  */
-async function rankUnderBudget<R>(
+export async function rankUnderBudget<R>(
   db: PrismaClient,
   o: {
     need: number;
@@ -483,44 +539,59 @@ async function rankUnderBudget<R>(
     exact: (tx: Prisma.TransactionClient) => Promise<R[]>;
     /** The caller's own eligible vectors, counted up to `cap` (never more than `cap` rows are visited). */
     count: (tx: Prisma.TransactionClient, cap: number) => Promise<number>;
+    /** The exact statement's ORDER BY, applied to the walk's rows (P3-3). */
+    tieOrder: (a: R, b: R) => number;
+    distanceOf: (r: R) => number;
+    /** The distance of the `need`-th distinct result in rows already in `tieOrder` (undefined when fewer). */
+    pageEdge: (sorted: R[], need: number) => number | undefined;
   },
 ): Promise<{ rows: R[]; exhausted: boolean; stopped: boolean }> {
   let best: R[] = [];
   const iterative = await iterativeScanSupported(db);
-  // ONE budget for the whole request: every statement below gets what is LEFT of it, so the env variable bounds the
-  // search, not each statement of a loop.
-  const deadline = Date.now() + vectorSearchTimeoutMs();
-  const left = (): number => {
-    const ms = deadline - Date.now();
-    if (ms < 1) throw Object.assign(new Error('canceling statement due to statement timeout'), { meta: { code: '57014' } });
-    return Math.trunc(ms);
-  };
+  const budgetMs = vectorSearchTimeoutMs();
+  const left = budgetClock(budgetMs);
+  let phase: 'waiting' | 'running' = 'waiting';
   try {
-    if (iterative) {
-      // The caller's OWN eligible set, counted up to the small-scope bound (cost bounded by that bound, not by the
-      // index). A small scope never walks the global HNSW index (see vectorSmallScopeRows); a large one does.
-      const cap = vectorSmallScopeRows();
-      const eligible = await withVectorBudget(db, 40, true, (tx) => o.count(tx, cap + 1), left);
-      // A page deeper than the index's widest horizon (VECTOR_INDEX_ORDER_WINDOW) can never be served by the walk: the order of
-      // a full page past it is the index's approximate order, so ruling 0150's true page is ranked exactly. Walking the index
-      // first would only be thrown away (BLIND round 3 P2-1), so such a page goes straight to the exact statement.
-      if (eligible > cap && o.need <= VECTOR_INDEX_ORDER_WINDOW) {
-        let k = Math.max(o.k0, 1);
-        for (;;) {
-          // A hard ceiling on the widening: past it the exact statement decides.
-          if (k > VECTOR_ANN_MAX_K) break;
-          const rows = await withVectorBudget(db, k, true, (tx) => o.ann(tx, k), left);
-          best = rows;
-          if (o.distinctCount(rows) >= o.need) return { rows, exhausted: false, stopped: false };
-          if (rows.length < k) break; // the walk ended short of the set: the exact statement decides
-          k *= 4;
+    return await db.$transaction(async (tx) => {
+      phase = 'running';
+      if (iterative) {
+        await setIterativeScan(tx);
+        // The caller's OWN eligible set, counted up to the small-scope bound (cost bounded by that bound, not by the
+        // index). A small scope never walks the global HNSW index (see vectorSmallScopeRows); a large one does.
+        const cap = vectorSmallScopeRows();
+        await setVectorStatement(tx, left(), 40);
+        const eligible = await o.count(tx, cap + 1);
+        // A page deeper than the index's widest horizon (VECTOR_INDEX_ORDER_WINDOW) can never be served by the walk: the order of
+        // a full page past it is the index's approximate order, so ruling 0150's true page is ranked exactly. Walking the index
+        // first would only be thrown away (BLIND round 3 P2-1), so such a page goes straight to the exact statement.
+        if (eligible > cap && o.need <= VECTOR_INDEX_ORDER_WINDOW) {
+          let k = Math.max(o.k0, 1);
+          for (;;) {
+            // A hard ceiling on the widening: past it the exact statement decides.
+            if (k > annMaxK) break;
+            await setVectorStatement(tx, left(), k);
+            const raw = await o.ann(tx, k);
+            const rows = raw.slice().sort(o.tieOrder);
+            best = rows;
+            if (o.distinctCount(rows) >= o.need) {
+              const edge = o.pageEdge(rows, o.need);
+              const last = raw.length ? o.distanceOf(raw[raw.length - 1]!) : undefined;
+              // The walk ended short (it returned everything) or its last row lies beyond the page's last distance: no
+              // tie at that distance can be missing, so the page is in total order.
+              if (raw.length < k || edge === undefined || last === undefined || last > edge) {
+                return { rows, exhausted: false, stopped: false };
+              }
+            } else if (raw.length < k) break; // the walk ended short of the set: the exact statement decides
+            k *= 4;
+          }
         }
       }
-    }
-    best = await withVectorBudget(db, 40, false, (tx) => o.exact(tx), left);
-    return { rows: best, exhausted: o.distinctCount(best) < o.need, stopped: false };
+      await setVectorStatement(tx, left(), 40);
+      best = await o.exact(tx);
+      return { rows: best, exhausted: o.distinctCount(best) < o.need, stopped: false };
+    }, vectorTxOptions(budgetMs));
   } catch (e) {
-    if (!isStatementTimeout(e)) throw e;
+    if (!isStatementTimeout(e, phase)) throw e;
     return { rows: best, exhausted: false, stopped: true };
   }
 }
@@ -534,9 +605,88 @@ async function rankUnderBudget<R>(
 const NOT_A_STUB = Prisma.sql`AND NOT EXISTS (SELECT 1 FROM comment_meta cm_stub
       WHERE cm_stub.node_id = n.id AND cm_stub.retracted_at IS NOT NULL)`;
 
+/**
+ * #4779 (P3-6, Byron on #4665) — the deleted rule of the COMMENTS scope. It is the shared filter's own tombstone rule, not a
+ * divergence from it: that rule admits a tombstone only where `node_type <> 'comment'` (postgres.ts `tombstoneMemoryIds`;
+ * cor:dmo:110), so for every comment row it reduces to `deleted_at IS NULL`. It stays in the statement, beside the shared
+ * filter, because the filter fragment does not always carry the rule: an `includeDeleted` search with no tombstone list
+ * compiles NO deleted predicate (`vectorFilterSql`), and a deleted comment must never be a hit whatever the caller asked.
+ */
+const COMMENT_NOT_DELETED = Prisma.sql`AND n.deleted_at IS NULL`;
+
 export interface VectorHit {
   nodeId: string;
   score: number; // cosine similarity in [0,1]-ish (1 - distance)
+}
+
+/** The eligibility inputs of a node-level vector ranking (shared by {@link vectorSearchNodes} and {@link vectorRanksOf}). */
+export interface NodeVectorScope {
+  memoryIds: string[];
+  queryEmbedding: number[];
+  hasOpenThreads?: boolean | null;
+  syntheticCommentMemoryIds?: string[];
+  /** #2421: constrain summary search before ANN ranking. */
+  abstractOnly?: boolean;
+  candidateNodeIds?: string[];
+  /** #2772 — the structured filters, the caller's exclusions and the deleted rule, as a `AND ne.node_id IN (…)` fragment inside the ranking statement. */
+  filterSql?: Prisma.Sql;
+  /** #1608 — content, comments or both (see vectorSearchNodes). Absent = ALL (no restriction). */
+  scope?: 'CONTENT' | 'COMMENTS' | 'ALL';
+}
+
+/**
+ * ONE eligibility fragment (`FROM … WHERE …` over `node_embeddings ne` joined to `nodes n`) per scope, so the walk, the
+ * count, the exact statement, the COMMENTS statement and the #4779 rank lookup can never disagree on what is eligible
+ * (#3054). The structured filters and the access scope ride in it, before any offset/limit picks the page (#2772,
+ * cor:api:090:04).
+ */
+function nodeVectorEligibility(opts: NodeVectorScope): Prisma.Sql {
+  const candidateSql = opts.candidateNodeIds == null ? Prisma.empty : opts.candidateNodeIds.length
+    ? Prisma.sql`AND ne.node_id IN (${Prisma.join(opts.candidateNodeIds)})` : Prisma.sql`AND FALSE`;
+  const abstractSql = opts.abstractOnly ? Prisma.sql`AND ne.kind = 'abstract'` : Prisma.empty;
+  const threadSql = openThreadsVectorSql(opts.hasOpenThreads, opts.syntheticCommentMemoryIds);
+  const tail = Prisma.sql`WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql} ${threadSql} ${opts.filterSql ?? Prisma.empty}`;
+  if (opts.scope === 'COMMENTS') {
+    return Prisma.sql`FROM node_embeddings ne
+      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${COMMENT_NOT_DELETED} AND n.node_type = 'comment'
+      ${tail}`;
+  }
+  // #2772: with the structured filters in the query the filter owns the deleted predicate (an includeDeleted
+  // search keeps recoverable tombstones); without them a soft-deleted node is never a hit.
+  const deletedSql = opts.filterSql ? Prisma.empty : Prisma.sql`AND n.deleted_at IS NULL`;
+  // CONTENT excludes comments INSIDE the candidate scan, before any limit
+  // (#1674 review, Jane P2-2): a comment vector can never take a candidate
+  // slot from eligible content. ALL ranks everything except stub comments.
+  const scopeSql = opts.scope === 'CONTENT' ? Prisma.sql`AND n.node_type <> 'comment'` : Prisma.empty;
+  return Prisma.sql`FROM node_embeddings ne
+      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${deletedSql} ${scopeSql}
+      ${tail}`;
+}
+
+/**
+ * #4779 (P3-4, Vera's FIT condition 4c; certified fusion accepted in team chat #140476) — the EXACT node-level vector rank
+ * of each named node: its 1-based position in the order {@link vectorSearchNodes}' exact statement uses (best distance,
+ * then node id) over the SAME eligibility. Hybrid search asks it for keyword hits the vector page did not reach, so their
+ * vector RRF term is known rather than bounded and the fused page can be certified. A node with no eligible vector is
+ * absent from the map (its vector term is exactly zero). One statement under the work budget; a timeout is `stopped`.
+ * Its cost is one exact ranking of the scope, the same as the deep-page exact statement.
+ */
+export async function vectorRanksOf(
+  db: PrismaClient, opts: NodeVectorScope & { nodeIds: string[] },
+): Promise<{ ranks: Map<string, number>; stopped: boolean }> {
+  if (opts.memoryIds.length === 0 || opts.nodeIds.length === 0) return { ranks: new Map(), stopped: false };
+  const qvec = toVectorLiteral(opts.queryEmbedding);
+  const { rows, stopped } = await oneStatementUnderBudget(db, (tx) => tx.$queryRaw<{ node_id: string; rank: number }[]>`
+    WITH best AS MATERIALIZED (
+      SELECT ne.node_id, MIN(ne.embedding <=> ${qvec}::vector) AS distance
+      ${nodeVectorEligibility(opts)}
+      GROUP BY ne.node_id
+    )
+    SELECT node_id, rank FROM (
+      SELECT node_id, ROW_NUMBER() OVER (ORDER BY distance ASC, node_id ASC)::int AS rank FROM best
+    ) ranked
+    WHERE node_id IN (${Prisma.join(opts.nodeIds)})`);
+  return { ranks: new Map(rows.map((r) => [r.node_id, Number(r.rank)])), stopped };
 }
 
 /**
@@ -551,69 +701,53 @@ export interface VectorHit {
  */
 export async function vectorSearchNodes(
   db: PrismaClient,
-  opts: {
-    memoryIds: string[];
-    queryEmbedding: number[];
+  opts: NodeVectorScope & {
     limit: number;
     candidateFactor?: number;
-    hasOpenThreads?: boolean | null;
-    syntheticCommentMemoryIds?: string[];
-    /** #2421: constrain summary search before ANN ranking. */
-    abstractOnly?: boolean;
-    candidateNodeIds?: string[];
     /** #1345 / #2772 — told whether the ranking is provably complete, and whether the search stopped early (work budget). */
     onWindow?: (w: { exhausted: boolean; stoppedEarly?: boolean }) => void;
-    /** #2772 — the structured filters, the caller's exclusions and the deleted rule, as a `AND ne.node_id IN (…)` fragment inside the ranking statement. */
-    filterSql?: Prisma.Sql;
-    /** #1608 — content, comments or both (see the doc above). Absent = ALL (no restriction). */
-    scope?: 'CONTENT' | 'COMMENTS' | 'ALL';
   },
 ): Promise<VectorHit[]> {
   if (opts.memoryIds.length === 0) {
     opts.onWindow?.({ exhausted: true });
     return [];
   }
-  const candidateSql = opts.candidateNodeIds == null ? Prisma.empty : opts.candidateNodeIds.length
-    ? Prisma.sql`AND ne.node_id IN (${Prisma.join(opts.candidateNodeIds)})` : Prisma.sql`AND FALSE`;
-  const abstractSql = opts.abstractOnly ? Prisma.sql`AND ne.kind = 'abstract'` : Prisma.empty;
-  const threadSql = openThreadsVectorSql(opts.hasOpenThreads, opts.syntheticCommentMemoryIds);
+  const eligibleFrom = nodeVectorEligibility(opts);
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const windowCut = opts.limit > windowRowsMax;
   const k = Math.min(opts.limit, windowRowsMax);
+  // #4779 (Bridget P3-2 on #4665): when the window cuts the request, ONE row past it is ranked, so a result of exactly
+  // `k` rows (complete) is told apart from a cut one (a row beyond the window exists) instead of both reading as cut.
+  const kAsk = windowCut ? k + 1 : k;
   if (opts.scope === 'COMMENTS') {
-    const rows = await db.$queryRaw<{ node_id: string; distance: number }[]>`
+    // #4779 (P3-6, Byron on #4665): under the work budget like every other vector statement; a timeout is the early stop.
+    const { rows, stopped } = await oneStatementUnderBudget(db, (tx) => tx.$queryRaw<{ node_id: string; distance: number }[]>`
       SELECT ne.node_id, MIN(ne.embedding <=> ${qvec}::vector) AS distance
-      FROM node_embeddings ne
-      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql} ${threadSql} ${opts.filterSql ?? Prisma.empty}
+      ${eligibleFrom}
       GROUP BY ne.node_id
-      ORDER BY distance ASC
-      LIMIT ${k}`;
+      ORDER BY distance ASC, ne.node_id ASC
+      LIMIT ${kAsk}`);
     // Exact ranking, but a LIMITed prefix: exhausted only when it came back
     // short (#1674 review, Jane P2-3). A caller post-filtering the page widens
     // k and re-asks.
-    opts.onWindow?.({ exhausted: !(windowCut && rows.length >= k) && rows.length < k, stoppedEarly: windowCut && rows.length >= k });
-    return rows.map((r) => ({ nodeId: r.node_id, score: 1 - Number(r.distance) }));
+    const cut = windowCut && rows.length > k;
+    opts.onWindow?.({ exhausted: !stopped && !cut && rows.length < kAsk, stoppedEarly: stopped || cut });
+    return rows.slice(0, k).map((r) => ({ nodeId: r.node_id, score: 1 - Number(r.distance) }));
   }
-  // CONTENT excludes comments INSIDE the candidate scan, before any limit
-  // (#1674 review, Jane P2-2): a comment vector can never take a candidate
-  // slot from eligible content. ALL ranks everything except stub comments.
-  const scopeSql = opts.scope === 'CONTENT' ? Prisma.sql`AND n.node_type <> 'comment'` : Prisma.empty;
-  // #2772: with the structured filters in the query the filter owns the deleted predicate (an includeDeleted
-  // search keeps recoverable tombstones); without them a soft-deleted node is never a hit.
-  const deletedSql = opts.filterSql ? Prisma.empty : Prisma.sql`AND n.deleted_at IS NULL`;
-  // ONE eligibility fragment serves the iterative scan, the independent count and the exact scan (#3054), so the
-  // three can never disagree on scope. The structured filters and the access scope (`memoryIds`) ride in it,
-  // before any offset/limit picks the page (#2772, cor:api:090:04).
-  const eligibleFrom = Prisma.sql`FROM node_embeddings ne
-      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${deletedSql} ${scopeSql}
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql} ${threadSql} ${opts.filterSql ?? Prisma.empty}`;
   type NodeRow = { node_id: string; distance: number };
   const distinctNodes = (rows: NodeRow[]) => new Set(rows.map((r) => r.node_id)).size;
   const ranked = await rankUnderBudget<NodeRow>(db, {
-    need: k,
-    k0: Math.max(k, k * (opts.candidateFactor ?? 10)),
+    need: kAsk,
+    k0: Math.max(kAsk, kAsk * (opts.candidateFactor ?? 10)),
     distinctCount: distinctNodes,
+    tieOrder: (a, b) => Number(a.distance) - Number(b.distance) || (a.node_id < b.node_id ? -1 : a.node_id > b.node_id ? 1 : 0),
+    distanceOf: (r) => Number(r.distance),
+    // A node's best vector is its first appearance in total order: the `need`-th distinct node's distance.
+    pageEdge: (sorted, need) => {
+      const seen = new Set<string>();
+      for (const r of sorted) { if (!seen.has(r.node_id)) { seen.add(r.node_id); if (seen.size === need) return Number(r.distance); } }
+      return undefined;
+    },
     // Raw vectors in distance order; a node's best vector is its first appearance, so the first `k` distinct nodes
     // are exact once `k` of them are present.
     ann: (tx, kk) => tx.$queryRaw<NodeRow[]>`
@@ -628,13 +762,13 @@ export async function vectorSearchNodes(
         SELECT ne.node_id, ne.embedding <=> ${qvec}::vector AS distance
         ${eligibleFrom}
       )
-      SELECT node_id, MIN(distance) AS distance FROM cand GROUP BY node_id ORDER BY distance ASC, node_id ASC LIMIT ${k}`,
+      SELECT node_id, MIN(distance) AS distance FROM cand GROUP BY node_id ORDER BY distance ASC, node_id ASC LIMIT ${kAsk}`,
     count: async (tx, cap) => Number((await tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM (SELECT 1 ${eligibleFrom} LIMIT ${cap}) capped`)[0]?.n ?? 0),
   });
   const best = new Map<string, number>();
   for (const r of ranked.rows) if (!best.has(r.node_id)) best.set(r.node_id, Number(r.distance));
+  const cutLost = windowCut && best.size > k; // the window is only a loss when a row past it exists (#4779)
   const hits = [...best].slice(0, k).map(([nodeId, d]) => ({ nodeId, score: 1 - d }));
-  const cutLost = windowCut && hits.length >= k; // the window is only a loss when it was actually filled
   opts.onWindow?.({ exhausted: !cutLost && ranked.exhausted, stoppedEarly: ranked.stopped || cutLost });
   return hits;
 }
@@ -686,23 +820,26 @@ export async function vectorSearchChunks(
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const windowCut = opts.limit > windowRowsMax;
   const k = Math.min(opts.limit, windowRowsMax);
+  const kAsk = windowCut ? k + 1 : k; // #4779: see vectorSearchNodes
+  const deletedSql = opts.filterSql ? Prisma.empty : Prisma.sql`AND n.deleted_at IS NULL`;
   if (opts.scope === 'COMMENTS') {
-    const rows = await db.$queryRaw<{ node_id: string; chunk_index: number; char_start: number; char_end: number; chunk_text: string; distance: number }[]>`
+    // #4779 (P3-6): budgeted, as in vectorSearchNodes; the deleted rule is COMMENT_NOT_DELETED.
+    const { rows, stopped } = await oneStatementUnderBudget(db, (tx) => tx.$queryRaw<{ node_id: string; chunk_index: number; char_start: number; char_end: number; chunk_text: string; distance: number }[]>`
       SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
              ne.embedding <=> ${qvec}::vector AS distance
       FROM node_embeddings ne
-      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
+      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${COMMENT_NOT_DELETED} AND n.node_type = 'comment'
       WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB} ${threadSql} ${opts.filterSql ?? Prisma.empty}
-      ORDER BY distance ASC
-      LIMIT ${k}`;
-    opts.onWindow?.({ exhausted: !(windowCut && rows.length >= k) && rows.length < k, stoppedEarly: windowCut && rows.length >= k });
-    return rows.map((r) => ({
+      ORDER BY distance ASC, ne.node_id ASC, ne.chunk_index ASC
+      LIMIT ${kAsk}`);
+    const cut = windowCut && rows.length > k;
+    opts.onWindow?.({ exhausted: !stopped && !cut && rows.length < kAsk, stoppedEarly: stopped || cut });
+    return rows.slice(0, k).map((r) => ({
       nodeId: r.node_id, chunkIndex: Number(r.chunk_index), charStart: Number(r.char_start),
       charEnd: Number(r.char_end), chunkText: r.chunk_text, score: 1 - Number(r.distance),
     }));
   }
   const chunkScopeSql = opts.scope === 'CONTENT' ? Prisma.sql`AND n.node_type <> 'comment'` : Prisma.empty;
-  const deletedSql = opts.filterSql ? Prisma.empty : Prisma.sql`AND n.deleted_at IS NULL`;
   // #3054 / #2772: one eligibility fragment for the iterative scan, the count and the exact scan; the structured
   // filters and the access scope ride in it, before the page is chosen.
   const eligibleFrom = Prisma.sql`FROM node_embeddings ne
@@ -710,9 +847,14 @@ export async function vectorSearchChunks(
     WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB} ${threadSql} ${opts.filterSql ?? Prisma.empty}`;
   type ChunkRow = { node_id: string; chunk_index: number; char_start: number; char_end: number; chunk_text: string; distance: number };
   const ranked = await rankUnderBudget<ChunkRow>(db, {
-    need: k,
-    k0: k,
+    need: kAsk,
+    k0: kAsk,
     distinctCount: (rows) => rows.length,
+    tieOrder: (a, b) => Number(a.distance) - Number(b.distance)
+      || (a.node_id < b.node_id ? -1 : a.node_id > b.node_id ? 1 : 0)
+      || Number(a.chunk_index) - Number(b.chunk_index),
+    distanceOf: (r) => Number(r.distance),
+    pageEdge: (sorted, need) => (sorted.length >= need ? Number(sorted[need - 1]!.distance) : undefined),
     ann: (tx, kk) => tx.$queryRaw<ChunkRow[]>`
       SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
              ne.embedding <=> ${qvec}::vector AS distance
@@ -725,10 +867,10 @@ export async function vectorSearchChunks(
                ne.embedding <=> ${qvec}::vector AS distance
         ${eligibleFrom}
       )
-      SELECT * FROM cand ORDER BY distance ASC, node_id ASC, chunk_index ASC LIMIT ${k}`,
+      SELECT * FROM cand ORDER BY distance ASC, node_id ASC, chunk_index ASC LIMIT ${kAsk}`,
     count: async (tx, cap) => Number((await tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM (SELECT 1 ${eligibleFrom} LIMIT ${cap}) capped`)[0]?.n ?? 0),
   });
-  const cutLost = windowCut && ranked.rows.length >= k; // the window is only a loss when it was actually filled
+  const cutLost = windowCut && ranked.rows.length > k; // the window is only a loss when a row past it exists (#4779)
   opts.onWindow?.({ exhausted: !cutLost && ranked.exhausted, stoppedEarly: ranked.stopped || cutLost });
   return ranked.rows.slice(0, k).map((r) => ({
     nodeId: r.node_id,

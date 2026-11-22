@@ -4959,8 +4959,9 @@ export function createMcpServerInstance(
       }
       if (result.reason === 'stopped_early') {
         // #2772 (cor:api:090:04): the vector work budget ended the search before it found a page; never a silent empty.
+        // #4779 adds two causes: an uncertified hybrid order (budget or keyword ceiling) and a page still short after one re-ranking.
         return textResult(
-          `${scopePrefix}Note: the search stopped early (the vector work budget ran out, or the offset+limit window passed 20000 rows, before a page was found); narrow the filters or lower the offset. [stopped_early]\n\nFound 0 node(s).`,
+          `${scopePrefix}Note: the search stopped early (the vector work budget ran out, the offset+limit window passed 20000 rows, a hybrid ranking could not be certified inside the budget or the keyword ceiling, or a page stayed short after one re-ranking, before a page was found); narrow the filters or lower the offset. [stopped_early]\n\nFound 0 node(s).`,
         );
       }
       if (result.reason === 'embedding_unavailable') {
@@ -4978,7 +4979,7 @@ export function createMcpServerInstance(
       const noteLines: string[] = [];
       if (degradedFlags.has('stopped_early')) {
         noteLines.push(
-          'Note: the search stopped early (the vector work budget ran out, or the offset+limit window was cut at 20000 rows), so this page may be shorter than the true page. [degraded:stopped_early]',
+          'Note: the search stopped early (the vector work budget ran out, the offset+limit window was cut at 20000 rows, a hybrid ranking could not be certified inside the budget or the keyword ceiling, or a page stayed short after one re-ranking), so this page may be shorter than, or ordered differently from, the true page. [degraded:stopped_early]',
         );
       }
       if (degradedFlags.has('no_vector_index')) {

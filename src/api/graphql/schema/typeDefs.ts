@@ -344,6 +344,9 @@ export const typeDefs = `#graphql
     this search ran under lists memories you cannot read; they were dropped
     and \`scope.droppedCount\` says how many), stopped_early (#2772: a vector
     or hybrid search ran out of its work budget before the page was complete;
+    #4779: also when a hybrid page's fused order could not be certified inside
+    the work budget or the keyword leg's 2000-row ceiling, or when a page that
+    hydration left short was still short after its one deeper re-ranking;
     \`reason\` is also stopped_early when the page is empty).
     """
     degraded: String

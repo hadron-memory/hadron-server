@@ -29,7 +29,7 @@ import {
   getEmbeddingClient,
   isEmbeddingConfigured,
 } from '../../../lib/embedding/index.js';
-import { composeHybridRanking, hybridKeywordCandidates } from '../../../lib/retrieval/hybrid.js';
+import { certifiedHybridRanking, hybridKeywordCandidates } from '../../../lib/retrieval/hybrid.js';
 import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from '../../../lib/retrieval/defaultNodeTypes.js';
@@ -1806,8 +1806,9 @@ export const nodeQueries = {
         f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where || f.approvalState || f.minted != null
       );
       const page = off + finalLimit;
-      // The keyword leg of a hybrid over-fetches (its filters apply after the ranking window); the VECTOR leg does
-      // not: its filters ride in the ranking statement, so it asks for exactly the page (`runVector` below).
+      // The keyword leg of a hybrid over-fetches (its filters apply after the ranking window). A vector-mode search asks
+      // for exactly the page (its filters ride in the ranking statement); a hybrid's vector leg reads to the keyword leg's
+      // depth and the fusion is certified (#4779 P3-4, `hybridRanking` below).
       // Offset has no ceiling by design (#437: lowering it would silently return an earlier page); the work is
       // bounded instead by ONE request-wide budget (VECTOR_SEARCH_TIMEOUT_MS, `rankUnderBudget`) and limit <= 200.
       // The KEYWORD leg keeps main's 2000 ceiling on its over-fetch (ruling 0150 lifted the cap for the vector leg only).
@@ -1820,9 +1821,15 @@ export const nodeQueries = {
        * (`degraded: stopped_early`, plus `reason` when the page is empty), never a short page that looks complete.
        */
       let vectorStoppedEarly = false;
+      /** #4779: whether the last vector leg run reported its ranking exhausted (nothing deeper to fetch). */
+      let vectorExhausted = false;
       const runVector = async <T extends { nodeId: string; score: number }>(
         search: (limit: number, onWindow: (w: { exhausted: boolean; stoppedEarly?: boolean }) => void) => Promise<T[]>,
-      ): Promise<T[]> => search(page, (w) => { if (w.stoppedEarly) vectorStoppedEarly = true; });
+        depth: number = page,
+      ): Promise<T[]> => {
+        vectorExhausted = false;
+        return search(depth, (w) => { vectorExhausted = !!w.exhausted && !w.stoppedEarly; if (w.stoppedEarly) vectorStoppedEarly = true; });
+      };
       /** The envelope's (reason, degraded) for a vector-ranked result that may have stopped early. */
       const stoppedEnvelope = (hitCount: number, degraded: string | null, builtReason: string | null = null): { reason: string | null; degraded: string | null } => {
         if (!vectorStoppedEarly) return { reason: builtReason, degraded };
@@ -1837,6 +1844,8 @@ export const nodeQueries = {
         simById: Map<string, number> | null,
         reason: string | null,
         degraded: string | null,
+        /** #4779 (P3-1): filled with how many ranked nodes up to the page's end hydration dropped, and the page's size. */
+        stats?: { dropped: number; pageCount: number },
       ) => {
         ranked = applyFloor(ranked);
         const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
@@ -1877,6 +1886,13 @@ export const nodeQueries = {
         const propComparator = sortProperty ? makePropertySortComparator(sortProperty) : null;
         const byRank = rows.slice().sort((a, b) => (rankOrder.get(a.id) ?? 0) - (rankOrder.get(b.id) ?? 0));
         const pageByRank = byRank.slice(off, off + finalLimit);
+        if (stats) {
+          // #4779 (P3-1, Byron on #4665): a ranked node the hydration re-check dropped (a race since ranking, or a predicate
+          // only hydration applies) leaves the page short unless something deeper takes its place.
+          const hydrated = new Set(rows.map((r) => r.id));
+          stats.dropped = ranked.slice(0, off + finalLimit).filter((r) => !hydrated.has(r.nodeId)).length;
+          stats.pageCount = pageByRank.length;
+        }
         const pageRows = pageByRank.sort((a, b) => {
           if (propComparator) return propComparator(a, b);
           if (sort === 'loc') return a.loc.localeCompare(b.loc);
@@ -2070,10 +2086,10 @@ export const nodeQueries = {
       // same bare query. TRUE hybrid (vector present) does NOT relax: the vector
       // half already supplies recall, and relaxing would pollute the RRF inputs
       // and mislabel a vector-found result as `and_relaxed_to_or`.
-      const runKeywordRanked = async (opts: { relax?: boolean } = {}) => {
+      const runKeywordRanked = async (opts: { relax?: boolean; limit?: number } = {}) => {
         const args = {
           db: ctx.db, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter,
-          includeDeleted: !!f.includeDeleted, sort: 'relevance' as const, offset: 0, limit: fetchN,
+          includeDeleted: !!f.includeDeleted, sort: 'relevance' as const, offset: 0, limit: opts.limit ?? fetchN,
         };
         const result = await hybridKeywordCandidates(q, query => provider.lexicalSearch({ ...args, query }), !!opts.relax);
         lexicalDegraded = result.degraded;
@@ -2162,6 +2178,10 @@ export const nodeQueries = {
         }
         const eligible = new Set(parents.map((p) => p.id));
         const chunkHits = scoredChunks.filter((c) => eligible.has(c.nodeId)).slice(off, off + finalLimit);
+        // #4779 (P3-1): a passage whose parent the hydration re-check dropped, leaving the page short of a ranking that was
+        // not exhausted, is an incomplete page: flagged, never silently short.
+        if (chunkHits.length < finalLimit && !vectorExhausted
+          && scoredChunks.slice(0, off + finalLimit).some((c) => !eligible.has(c.nodeId))) vectorStoppedEarly = true;
         const pageParentIds = new Set(chunkHits.map((c) => c.nodeId));
         const parentById = new Map(parents.map((p) => [p.id, p]));
         // #1061 — chunk granularity returns passages rather than whole nodes,
@@ -2204,34 +2224,80 @@ export const nodeQueries = {
         return { hits: [], passages, total: null, reason: chunkEnv.reason, degraded: chunkEnv.degraded };
       }
 
-      const vecHits = await runVector((limit, onWindow) =>
-        provider.vectorSearch({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds, filter: sqlFilter, includeDeleted: !!f.includeDeleted, excludeNodeIds: inheritance.excludeNodeIds }),
-      );
+      const vectorOpts = { db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds, filter: sqlFilter, includeDeleted: !!f.includeDeleted, excludeNodeIds: inheritance.excludeNodeIds };
 
-      if (effectiveMode === 'vector') {
+      /**
+       * #4779 (P3-4) — the hybrid ranking for a page of `pageN` nodes, CERTIFIED (`certifiedHybridRanking`): both legs are
+       * read to the keyword leg's depth, then, while the fused order up to the page could still change, the keyword hits
+       * the vector page did not reach get their exact vector rank (one budgeted lookup), and the keyword leg widens up to
+       * its ceiling (KEYWORD_FETCH_CAP, ruling 0150 lifted no cap on it). If the order still is not certain, the vector
+       * budget ran out or the keyword ceiling was reached first: the page is flagged `stopped_early` (cor:api:090:04
+       * Proposed), never presented as the true page.
+       */
+      const hybridRanking = async (pageN: number) => {
+        const depth0 = hasStructuredFilters ? Math.min(pageN * 5, KEYWORD_FETCH_CAP) : pageN;
+        const kwCeiling = Math.max(depth0, KEYWORD_FETCH_CAP);
+        let dk = depth0;
+        const vecHits = await runVector((limit, onWindow) => provider.vectorSearch({ ...vectorOpts, limit, onWindow }), Math.max(depth0, pageN));
+        const vecLeg = { ids: vecHits.map((h) => h.nodeId), exhausted: vectorExhausted };
+        let kwHits = await runKeywordRanked({ limit: dk });
+        const ranks = new Map<string, number>();
+        const looked = new Set<string>();
+        for (;;) {
+          const kwLeg = { ids: kwHits.map((h) => h.nodeId), exhausted: kwHits.length < dk };
+          const r = certifiedHybridRanking(kwLeg, vecLeg, pageN, ranks, looked);
+          if (r.certified) return { fused: r.ranked, vecHits, exhausted: kwLeg.exhausted && vecLeg.exhausted };
+          const lookup = vecLeg.exhausted ? [] : r.vecLookup.filter((id) => !looked.has(id));
+          if (lookup.length) {
+            const res = await provider.vectorRanks({ ...vectorOpts, nodeIds: lookup });
+            for (const id of lookup) looked.add(id);
+            for (const [id, rank] of res.ranks) ranks.set(id, rank);
+            if (!res.stoppedEarly) continue;
+          } else if (r.kwUncertain && dk < kwCeiling) {
+            dk = Math.min(dk * 2, kwCeiling);
+            kwHits = await runKeywordRanked({ limit: dk });
+            continue;
+          }
+          vectorStoppedEarly = true; // the order up to the page could not be certified inside the budget / ceiling
+          return { fused: r.ranked, vecHits, exhausted: false };
+        }
+      };
+
+      /**
+       * #4779 (P3-1, Byron on #4665) — one vector or hybrid page. When hydration dropped ranked nodes and left the page short
+       * of a ranking that was not exhausted, the ranking is fetched ONCE more, deeper by the number dropped; if the page is
+       * still short it is flagged `stopped_early` (cor:api:090:04 Proposed: "whenever the page is incomplete"; Vera, team chat
+       * #140476), never returned as a silently short page.
+       */
+      const rankedPage = async (pageN: number) => {
+        const stats = { dropped: 0, pageCount: 0 };
+        if (effectiveMode === 'vector') {
+          const vecHits = await runVector((limit, onWindow) => provider.vectorSearch({ ...vectorOpts, limit, onWindow }), pageN);
+          const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
+          const built = await buildResult(vecHits.map((h) => ({ nodeId: h.nodeId, score: h.score })), simById, null, null, stats);
+          return { built, stats, exhausted: vectorExhausted };
+        }
+        // hybrid — fuse keyword + vector by RRF (keyword already relevance-ranked by FTS).
+        // The hit score is the FUSED RRF score (the value the hit was actually ranked
+        // by), not the raw vector-sim / keyword-rank the pre-#497 code attached — those
+        // aren't commensurable, so mixing them gave a misleading number and no sound
+        // within-result-set relevance signal. The cosine similarity is still carried
+        // separately on `vector.similarity` (simById below).
+        const { fused, vecHits, exhausted } = await hybridRanking(pageN);
         const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
-        const built = await buildResult(vecHits.map((h) => ({ nodeId: h.nodeId, score: h.score })), simById, null, null);
-        const env = stoppedEnvelope(built.hits.length, built.degraded, built.reason);
-        return { ...built, reason: env.reason, degraded: env.degraded };
+        const built = await buildResult(fused.map((r) => ({ nodeId: r.nodeId, score: r.score })), simById, null, mergeDegraded(null), stats);
+        return { built, stats, exhausted };
+      };
+      const shortOf = (r: { stats: { dropped: number; pageCount: number }; exhausted: boolean }) =>
+        r.stats.dropped > 0 && !r.exhausted && r.stats.pageCount < finalLimit;
+      let attempt = await rankedPage(page);
+      if (shortOf(attempt)) {
+        vectorStoppedEarly = false; // the second attempt's ranking replaces the first's, flags included
+        attempt = await rankedPage(page + attempt.stats.dropped);
+        if (shortOf(attempt)) vectorStoppedEarly = true;
       }
-
-      // hybrid — fuse keyword + vector by RRF (keyword already relevance-ranked by FTS).
-      // The hit score is the FUSED RRF score (the value the hit was actually ranked
-      // by), not the raw vector-sim / keyword-rank the pre-#497 code attached — those
-      // aren't commensurable, so mixing them gave a misleading number and no sound
-      // within-result-set relevance signal. The cosine similarity is still carried
-      // separately on `vector.similarity` (simById below).
-      const kwRanked = await runKeywordRanked();
-      const fused = composeHybridRanking(kwRanked, vecHits, Math.max(fetchN, vecHits.length));
-      const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
-      const builtHybrid = await buildResult(
-        fused.map((r) => ({ nodeId: r.nodeId, score: r.score })),
-        simById,
-        null,
-        mergeDegraded(null),
-      );
-      const hybridEnv = stoppedEnvelope(builtHybrid.hits.length, builtHybrid.degraded, builtHybrid.reason);
-      return { ...builtHybrid, reason: hybridEnv.reason, degraded: hybridEnv.degraded };
+      const env = stoppedEnvelope(attempt.built.hits.length, attempt.built.degraded, attempt.built.reason);
+      return { ...attempt.built, reason: env.reason, degraded: env.degraded };
       };
 
       // ── Spec 049 Phase 3 — a scope named in the call (D-2026-09-13-002) ──

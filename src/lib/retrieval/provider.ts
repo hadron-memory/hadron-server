@@ -192,6 +192,12 @@ export interface NodeRetrievalProvider {
   vectorSearch(opts: VectorSearchOpts): Promise<VectorHit[]>;
   vectorSearchChunks(opts: VectorSearchOpts): Promise<ChunkHit[]>;
   /**
+   * #4779 — the exact node-level vector rank (1-based, in the exact ranking's order) of each of `nodeIds`, over the SAME
+   * eligibility as {@link vectorSearch} with these options (`limit` and `onWindow` are ignored). A node with no eligible
+   * vector is absent. `stoppedEarly` when the work budget ended the lookup. Hybrid search certifies its fused page with it.
+   */
+  vectorRanks(opts: Omit<VectorSearchOpts, 'limit' | 'onWindow'> & { nodeIds: string[] }): Promise<{ ranks: Map<string, number>; stoppedEarly: boolean }>;
+  /**
    * No-query filtered browse (cor:api:090:02): the structured filter (incl. a
    * `where` predicate) applied + sorted + paged in SQL, returning ordered node
    * ids. The resolver's browse path uses this when a `where` is present (Prisma
