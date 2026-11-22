@@ -155,7 +155,8 @@ describe('addEdges far-end read gate and re-add identity (#860, Juniper)', () =>
     const hidden = await callAs(auth, 'hadron_update_node', { urn, addEdges: [{ targetUrn: t1.id, name: 'peek' }] });
     const ghost = await callAs(auth, 'hadron_update_node', { urn, addEdges: [{ targetUrn: generateId(), name: 'peek' }] });
     expect(hidden).toMatch(/^Edge target not found/);
-    expect(hidden.replace(t1.id, '<id>')).toBe(ghost.replace(/"[^"]+"/, '"<id>"').replace('<id>', '<id>'));
+    const norm = (text: string) => text.replace(/"[^"]+"/, '"<ref>"');
+    expect(norm(hidden)).toBe(norm(ghost));
     expect(await db.edge.count({ where: { sourceId: mine.id } })).toBe(0);
     // Control: a target the writer can read is added.
     const ok = await callAs(auth, 'hadron_update_node', { urn, addEdges: [{ targetUrn: mine2.id, name: 'friend' }] });
@@ -302,7 +303,7 @@ describe('removeEdges re-checks the source under the edge lock and takes deleteE
     expect(calls.map((c) => c.edgeId).sort()).toEqual([e1.id, e2.id].sort());
   });
 
-  it('a removal waits for a concurrent writer of the memory row, as deleteEdge does (memory FOR SHARE first)', async () => {
+  it('a removal waits for a concurrent writer of the memory row (behaviour pin; other locks in the transaction also cover an ordinary memory)', async () => {
     let signalHeld!: () => void;
     let signalRelease!: () => void;
     const held = new Promise<void>((r) => { signalHeld = r; });
@@ -321,6 +322,27 @@ describe('removeEdges re-checks the source under the edge lock and takes deleteE
     await holder;
     expect(await removing).toMatch(/1 removed/);
     expect(await namesOf()).toEqual(['applies-when', 'relates-to']);
+  });
+});
+
+describe('removeEdges\' refusal mappings are scoped to the removal loop (#860, BLIND delta N1)', () => {
+  it('a combined remove + content call keeps an unrelated include refusal in its own format', async () => {
+    const withRemove = await call('hadron_update_node', { urn: nodeUrnOf(source.loc), content: '{{> no-such-node-860}}', removeEdges: [e1.id] });
+    const withoutRemove = await call('hadron_update_node', { urn: nodeUrnOf(source.loc), content: '{{> no-such-node-860}}' });
+    expect(withoutRemove).toMatch(/^\[include_|^\[invalid_include|include/i);
+    expect(withRemove).toBe(withoutRemove);
+    expect(await namesOf()).toEqual(['applies-when', 'documented-by', 'relates-to']);
+  });
+
+  it('removeEdges refuses an edge whose memory is not the node\'s, as not found, in the preflight (BLIND P2 #3)', async () => {
+    const org4 = await db.organization.create({ data: { id: generateId(), name: 'e860-org4', urn: 'e860-org4' } });
+    await db.orgMember.create({ data: { organizationId: org4.id, userId: adminId, role: 'ADMIN' } });
+    const mem4 = await resolvers.Mutation.createMemory({}, { orgRef: org4.id, name: 'other-mem' }, admin());
+    // An edge of `source` whose own memory column names another memory (never written by the product; a damaged or legacy row).
+    const odd = await db.edge.create({ data: { id: generateId(), memoryId: mem4.id, sourceId: source.id, targetId: t4.id, name: 'odd', loc: `${source.loc}:odd:x` } });
+    const out = await call('hadron_update_node', { urn: nodeUrnOf(source.loc), removeEdges: [odd.id] });
+    expect(out).toBe(`Edge not found: "${odd.id}"`);
+    expect(await db.edge.count({ where: { id: odd.id } })).toBe(1);
   });
 });
 

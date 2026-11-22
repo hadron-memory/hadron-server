@@ -7354,13 +7354,15 @@ export function createMcpServerInstance(
           }
           const owned = await db.edge.findUnique({ where: { id: edgeId }, select: { sourceId: true, memoryId: true } });
           // Scoped to this node's own outgoing edges: another node's edge, in any memory, is not found here.
-          if (!owned || owned.sourceId !== existing.id) return notFound;
+          if (!owned || owned.sourceId !== existing.id || owned.memoryId !== existing.memoryId) return notFound;
           if (seen.has(edgeId)) continue;
           seen.add(edgeId);
           removeTargets.push({ edgeId, ref, memoryId: owned.memoryId });
         }
       }
       const edgeWrite = resolvedEdges !== null || resolvedAdds !== null || removeTargets !== null;
+      // True only while the removal loop runs, so its refusal mappings never reformat an unrelated refusal on a combined call.
+      let removing = false;
       const edgeReceipt = { removed: 0, added: 0, unchanged: 0 };
 
       // Spec 031 — length-cap + trim-then-check the abstract BEFORE the
@@ -7497,7 +7499,9 @@ export function createMcpServerInstance(
         try {
           await db.$transaction(async (tx) => {
             // #860: removeEdges is deleteEdge's door per item, so it takes deleteEdge's FIRST locks in deleteEdge's order: the
-            // install / Agent-definition authorities, then the memory row FOR SHARE, before any node or loc lock.
+            // install authority, or for an Agent's own system memory the Agent-definition authority (lockInstallAuthorityFirst takes
+            // it itself, so #2206's 'authority before any memory lock' holds), then the memory row FOR SHARE, before any node or
+            // loc lock. The call just below re-enters the Agent-definition authority already held in this transaction.
             if (removeTargets !== null) {
               await lockInstallAuthoritiesFirst(tx, objectCtx(), [existing.memoryId]);
               await tx.$queryRaw`SELECT id FROM memories WHERE id = ${existing.memoryId} FOR SHARE`;
@@ -7624,10 +7628,12 @@ export function createMcpServerInstance(
             if (removeTargets !== null || resolvedAdds !== null) {
               if (removeTargets !== null && removeTargets.length > 0) {
                 const txCtx = await nodeDoorTxContext(objectCtx(), tx, [updated.memoryId]);
+                removing = true;
                 for (const target of removeTargets) {
                   await deleteEdgeInDoorTx(tx, txCtx, { edgeId: target.edgeId, edgeRef: target.ref, memoryId: target.memoryId, expectedSourceId: updated.id });
                   edgeReceipt.removed += 1;
                 }
+                removing = false;
               }
               if (resolvedAdds !== null) {
                 const added = await addOutgoingEdgesInTransaction(tx, {
@@ -7667,11 +7673,11 @@ export function createMcpServerInstance(
           if (e instanceof InlineEdgeEndpointError) return refusalResult(e.message);
           if (e instanceof EdgeLocConflictError) return refusalResult(e.message);
           // #860: removeEdges' per-item refusals are deleteEdge's own, with its own text.
-          if (removeTargets !== null && e instanceof GraphQLError && (e.extensions?.code === 'EDGE_NOT_FOUND' || e.extensions?.code === 'INCLUDE_EDGE_DERIVED')) return refusalResult(e.message);
-          if (removeTargets !== null && isCommentGovernedError(e)) return refusalResult((e as Error).message);
+          if (removing && e instanceof GraphQLError && (e.extensions?.code === 'EDGE_NOT_FOUND' || e.extensions?.code === 'INCLUDE_EDGE_DERIVED')) return refusalResult(e.message);
+          if (removing && isCommentGovernedError(e)) return refusalResult((e as Error).message);
           // #860: whatever else deleteEdge's checks refuse (a boot-prompt row, write access revoked since the preflight) reaches the
           // caller as deleteEdge's own text, through the same boundary that tool uses; anything untrusted stays a fault.
-          if (removeTargets !== null && e instanceof GraphQLError) return toolErrorResult(e, () => e.message, 'hadron_update_node:removeEdges');
+          if (removing && e instanceof GraphQLError) return toolErrorResult(e, () => e.message, 'hadron_update_node:removeEdges');
           if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
           const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
