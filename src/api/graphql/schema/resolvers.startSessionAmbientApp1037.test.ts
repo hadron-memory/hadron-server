@@ -94,14 +94,24 @@ describe('#1037 — startSession resolver, explicit App reference', () => {
     expect(session.appId).toBe(appA.id);
   });
 
-  it('but an App KEY still refuses a disagreeing appRef', async () => {
-    // The same check, for the principal shape it was actually written for.
+  it('but an App KEY still refuses a disagreeing appRef — concealed as an unknown App (#4836)', async () => {
+    // The same rule, for the principal shape it was actually written for —
+    // re-typed by #4836: a key reaches only its own App, so naming any other
+    // App (existing, as here, or missing) answers the one unknown-App refusal
+    // rather than a typed SESSION_APP_MISMATCH that said the other App exists.
     const keyCtx = { db, appId: appB.id, roles: [] } as unknown as Context;
-    await expect(
-      resolvers.Mutation.startSession(
+    const attempt = resolvers.Mutation.startSession(
+      {}, { input: { id: generateId(), appRef: appA.id } }, keyCtx,
+    );
+    await expect(attempt).rejects.toThrow('App not found.');
+    try {
+      await resolvers.Mutation.startSession(
         {}, { input: { id: generateId(), appRef: appA.id } }, keyCtx,
-      ),
-    ).rejects.toThrow(/does not name the App this request is authenticated for/);
+      );
+    } catch (e) {
+      expect((e as GraphQLError).extensions?.code).toBe('APP_NOT_FOUND');
+      expect(JSON.stringify((e as GraphQLError).extensions)).toBe('{"code":"APP_NOT_FOUND"}');
+    }
   });
 
   it('a pure App-KEY principal is never re-pointed by a ref — a credential is not a selection', async () => {
