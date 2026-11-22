@@ -183,7 +183,7 @@ describe('#4716 — the interleaving: a node committed between the empty-check a
   );
 });
 
-describe('#4716 — the guard PINS read committed: a repeatable-read server default must not reopen the window', () => {
+describe('#4716 — the guard PINS read committed: a repeatable-read session default must not reopen the window', () => {
   it('under a REPEATABLE READ session default the raced node still survives', async () => {
     const f = await buildFixture();
     const memoryId = f.memory.id;
