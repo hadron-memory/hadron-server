@@ -33,10 +33,11 @@
  * transaction.
  */
 
-import type { Prisma } from '../generated/prisma/index.js';
+import { Prisma } from '../generated/prisma/index.js';
 import { mintLocalSlug } from './mintLocalSlug.js';
 import { recordUrnRename } from './urnAlias.js';
 import { reclaimTombstonedMemory } from './mintedSpecPermanence.js';
+import { isSerializationFailure } from './agentTasks/serializationFailure.js';
 
 export interface MergeOwnerUrnsArgs {
   sourceUserId: string;
@@ -197,9 +198,68 @@ export async function mergeOwnerNamespacedUrns(
     });
   }
 
-  // Move ownership of any REMAINING owned rows (soft-deleted memories/agents,
-  // uninstalled apps) so nothing dangles on the tombstoned source user. Their
-  // URN is left as-is — a dead row holds no live namespace to re-root.
+  // ── Dead rows (#709) ─────────────────────────────────────────────────────
+  // Holger's triage, "Build now" (gate issuecomment-7081773933): the source's DEAD owned rows (soft-deleted memories
+  // and agents; soft-deleted and/or uninstalled Apps) are re-rooted too, so no `source:` row is left owned by the
+  // target. A re-root is a rename and owes its alias (hrn:node:hadronmemory.com:specs:cor:urn:030:01), exactly as above;
+  // the aliased dead row stays dead (cor:urn:030:02). AFTER every live loop, so a live row is never re-minted around a
+  // dead one. Minted around EVERY holder, dead or live (and, for Apps, uninstalled too: so no two Apps share a URN and
+  // an old reference stays unambiguous), and never reclaimed: a merge always completes in its one transaction
+  // (cor:api:010:02), and a reclaim would delete an unrelated tombstone (with a node cascade) or refuse a stamped
+  // corpus. Each row is its own savepoint: if its re-root or alias write is refused, that row keeps its URN (no rename
+  // without its alias) and the merge goes on; a serialization failure still aborts the merge so the caller retries it.
+  const rerootDead = async (
+    entityType: 'MEMORY' | 'AGENT' | 'APP',
+    row: { id: string; urn: string },
+    isTaken: (urn: string) => Promise<boolean>,
+    write: (newUrn: string) => Promise<unknown>,
+  ): Promise<string | null> => {
+    const { urn: newUrn } = await mintLocalSlug({ root: newRoot, desiredSlug: slugOf(row.urn), authorRoot, isTaken });
+    await tx.$executeRawUnsafe('SAVEPOINT merge_dead_reroot');
+    try {
+      await write(newUrn);
+      await recordUrnRename(tx, { entityType, entityId: row.id, oldUrn: row.urn, newUrn });
+      await tx.$executeRawUnsafe('RELEASE SAVEPOINT merge_dead_reroot');
+      return newUrn;
+    } catch (e) {
+      if (!(e instanceof Prisma.PrismaClientKnownRequestError) || isSerializationFailure(e)) throw e;
+      await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT merge_dead_reroot');
+      return null;
+    }
+  };
+  const anyMemoryAt = (u: string) => tx.memory.findFirst({ where: { urn: u }, select: { id: true } }).then(Boolean);
+  const anyAgentAt = (u: string) => tx.agent.findFirst({ where: { urn: u }, select: { id: true } }).then(Boolean);
+  const anyAppAt = (u: string) => tx.app.findFirst({ where: { urn: u }, select: { id: true } }).then(Boolean);
+
+  const deadMems = await tx.memory.findMany({
+    where: { ownerUserId: sourceUserId, deletedAt: { not: null } }, select: { id: true, urn: true }, orderBy: { id: 'asc' },
+  });
+  for (const m of deadMems) {
+    const newUrn = await rerootDead('MEMORY', m, anyMemoryAt, (urn) =>
+      tx.memory.update({ where: { id: m.id }, data: { urn, ownerUserId: targetUserId, legacyUrn: m.urn } }));
+    // The durable node-URN rewrite below covers a re-rooted dead memory exactly as a live one.
+    if (newUrn) memRemap.push([m.urn, newUrn]);
+  }
+  // A dead agent with install memories is re-rooted like any other: an install memory pairs with its agent by id
+  // (`installOfAgentId`), and its own address was minted once, independent of the agent's URN (cor:agt:040:06).
+  const deadAgents = await tx.agent.findMany({
+    where: { ownerUserId: sourceUserId, deletedAt: { not: null } }, select: { id: true, urn: true }, orderBy: { id: 'asc' },
+  });
+  for (const a of deadAgents) {
+    await rerootDead('AGENT', a, anyAgentAt, (urn) =>
+      tx.agent.update({ where: { id: a.id }, data: { urn, ownerUserId: targetUserId, legacyUrn: a.urn } }));
+  }
+  const deadApps = await tx.app.findMany({
+    where: { ownerUserId: sourceUserId, OR: [{ deletedAt: { not: null } }, { uninstalledAt: { not: null } }] },
+    select: { id: true, urn: true }, orderBy: { id: 'asc' },
+  });
+  for (const app of deadApps) {
+    await rerootDead('APP', app, anyAppAt, (urn) =>
+      tx.app.update({ where: { id: app.id }, data: { urn, ownerUserId: targetUserId, legacyUrn: app.urn } }));
+  }
+
+  // Move ownership of any REMAINING owned rows (a dead row whose re-root was refused above) so nothing dangles on the
+  // tombstoned source user.
   await tx.memory.updateMany({ where: { ownerUserId: sourceUserId }, data: { ownerUserId: targetUserId } });
   await tx.agent.updateMany({ where: { ownerUserId: sourceUserId }, data: { ownerUserId: targetUserId } });
   await tx.app.updateMany({ where: { ownerUserId: sourceUserId }, data: { ownerUserId: targetUserId } });

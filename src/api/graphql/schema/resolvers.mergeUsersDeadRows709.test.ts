@@ -121,6 +121,8 @@ describe('#709 collisions: mint around every holder, never reclaim, the merge co
     expect((await db.agent.findUniqueOrThrow({ where: { id: tomb.id } })).urn).toBe(`${T}:notes`);
     expect((await db.memory.findUniqueOrThrow({ where: { id: tomb.systemMemoryId! } })).urn).toBe(`${T}:notes-system`);
     expect((await db.agent.findUniqueOrThrow({ where: { id: dead.id } })).urn).toBe(`${T}:notes-${S}`);
+    // The dead memory is minted around the target's DEAD memory too (re-rooted, not left behind by a refused write).
+    expect((await db.memory.findUniqueOrThrow({ where: { id: dead.systemMemoryId! } })).urn).toBe(`${T}:notes-system-${S}`);
   });
 
   it('dead App vs an uninstalled target App: minted around it too, so no two Apps share a URN', async () => {
