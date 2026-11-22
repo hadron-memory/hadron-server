@@ -6546,6 +6546,9 @@ export const typeDefs = `#graphql
     expiresAt: DateTime!
   }
 
+  "How a secret read client is used: REVEAL hands the value to a person or worker, USE injects it by reference into a run's web request."
+  enum SecretReadClientMode { REVEAL USE }
+
   """
   One named, owner-scoped secret — the general secret store (#677).
   Polymorphic owner (user | org | app). The value is encrypted at rest and
@@ -6561,10 +6564,15 @@ export const typeDefs = `#graphql
   input IssueSecretReadClientInput {
     "The App secret, by id or URN."
     secretRef: ID!
-    "WORKER: a live worker of the App (holderRef is its id). AGENT: an agent installed and licensed in the App (holderRef is its id); its live workers in the App read through the client (hrn:node:hadronmemory.com:specs:cor:sec:060:02). USER: a live App participant (holderRef is their id, omitted for the issuer); a protected secret requires a different person. APP is refused (GRANT_HOLDER_NOT_ALLOWED): an App holds no reveal path, and an App holder for use is not supported."
+    "REVEAL: WORKER: a live worker of the App (holderRef is its id). AGENT: an agent installed and licensed in the App (holderRef is its id); its live workers in the App read through the client (hrn:node:hadronmemory.com:specs:cor:sec:060:02). USER: a live App participant (holderRef is their id, omitted for the issuer); a protected secret requires a different person. APP is refused for REVEAL (GRANT_HOLDER_NOT_ALLOWED): an App holds no reveal path. USE: an AGENT installed in the App, or the App itself (a person or a worker is refused)."
     holderKind: GrantHolderKind!
     holderRef: ID
-    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refusals, in the order they are judged: holderKind APP (GRANT_HOLDER_NOT_ALLOWED); an unreadable startsAt or expiresAt (BAD_USER_INPUT); a marked request without a window or a read budget (SECRET_AUTO_DELETE_NEEDS_LIMIT); a caller who is neither an App manager nor the writer of the secret's current version (SECRET_AUTO_DELETE_NOT_ALLOWED, where an unmarked request would get FORBIDDEN or SECRET_READ_CLIENT_SUPERSEDED)."
+    "REVEAL by default; USE creates an injection-only client, used by reference from the holder's runs."
+    mode: SecretReadClientMode = REVEAL
+    "USE requires a signed HTTPS origin and path prefix and an auth header name."
+    bindingPrefix: String
+    bindingHeader: String
+    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refusals, in the order they are judged: holderKind APP in REVEAL mode (GRANT_HOLDER_NOT_ALLOWED); an unreadable startsAt or expiresAt (BAD_USER_INPUT); a marked request without a window or a read budget (SECRET_AUTO_DELETE_NEEDS_LIMIT); a caller who is neither an App manager nor the writer of the secret's current version (SECRET_AUTO_DELETE_NOT_ALLOWED, where an unmarked request would get FORBIDDEN or SECRET_READ_CLIENT_SUPERSEDED)."
     autoDelete: Boolean! = false
     startsAt: DateTime
     expiresAt: DateTime
@@ -12270,7 +12278,7 @@ export const typeDefs = `#graphql
     (on recordAgentTaskProgress; other-started and children-ended, like the three assign
     facts, are filed only to a caller who may read the App's worker state), and from #2607 task.cancel.open-children on
     cancelAgentTask, alarm.ack.outside-chain on acknowledgeAlarm, and #2733 ticker.code.unmapped on createTicker);
-    a client must tolerate unknown codes. \`text\` is
+    a client must tolerate unknown codes. Since #4793 task.create.no-source is no longer raised; it stays on the list so history recorded with it still reads. \`text\` is
     fixed per code. \`register\` appears only for a caller that has an Agent:
     { state: mapped (taskLoc, taskUrn) | unmapped | unresolved | withheld }.
     #3491 (ruling 0176): the first three are given only when the caller may read every
@@ -13611,7 +13619,7 @@ export const typeDefs = `#graphql
     createPrincipalGrant(orgRef: String!, userRef: String!, actions: [String!]!, expiresAt: String): PrincipalGrant!
     "Revoke an action grant (org-ADMIN, interactive-only; soft delete)."
     revokePrincipalGrant(ref: ID!): Boolean!
-    "Mint comm.outbound tickets into the org ledger (org-ADMIN; cor:acl:050:04)."
+    "Mint comm.outbound or secret.use tickets into the org ledger (org-ADMIN; hrn:node:hadronmemory.com:specs:cor:acl:050:04)."
     mintActionTickets(input: MintActionTicketsInput!): Int!
     "Set the stored (enforced) quota limit for a scope x action (#510) - the operator dial that previously required psql. Org-ADMIN."
     setQuotaLimit(input: SetQuotaLimitInput!): QuotaCounter!
@@ -17720,10 +17728,19 @@ export const typeDefs = `#graphql
     number within each parent down to it (hrn:node:hadronmemory.com:specs:cor:agt:050:01). "AT0" is the reserved
     project "No project": a task made with no project is AT0.<n>. An alias for the id, which stays canonical; every
     task operation that takes a task id also takes the handle. Immutable: parentage is fixed at creation. A person who
-    belongs to several Apps qualifies it as hrn:agenttask:<app-urn>:AT3.405, where the App URN is the App's urn.
-    The handle is not the number of any GitHub issue the task's source names.
+    belongs to several Apps qualifies it with the task's urn, hrn:agenttask:<app-urn>:at3.405, where the App URN is the
+    App's urn (either case is read). The handle is not the number of any GitHub issue the task's source names.
     """
     handle: String!
+    """
+    #3878: this task's URN, hrn:agenttask:<root>:<app-slug>:<handle>, for example
+    hrn:agenttask:hadronmemory.com:hadron-dev-team:at3.405 (hrn:node:hadronmemory.com:specs:cor:urn:010:01). Computed
+    when read from the App's current urn and the handle, never stored; emitted with the handle in lower case, while
+    the handle field and every display keep AT3.405. Query.resolveUrn reads it in either case, behind this task's
+    own read gate, and an old App spelling still resolves after the App is renamed. Null only when the App's urn
+    cannot form the address.
+    """
+    urn: String
     "This task's own number inside its handle (the last segment), counted per parent. Permanent: never changed, never given to another task."
     taskNumber: String!
     title: String!

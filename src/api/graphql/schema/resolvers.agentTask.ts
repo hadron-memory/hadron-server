@@ -92,12 +92,13 @@ import {
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { tickBatch } from './tickBatch.js';
-import { type Context, isAppParticipant, clampListTake, LIST_PAGE_MAX, withoutRequestCaches, pageArgs, pageEnvelope } from './resolvers.helpers.js';
+import { type Context, isAppParticipant, clampListTake, LIST_PAGE_MAX, withoutRequestCaches, pageArgs, pageEnvelope, loadAppUrn } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { getPortalBaseUrl } from '../../../lib/portalUrl.js';
-import { parseTaskHandle, composeTaskHandle, handleDepth, MAX_HANDLE_DEPTH, MAX_HANDLE_LENGTH } from '../../../lib/agentTasks/handle.js';
+import { parseTaskHandle, composeTaskHandle, handleDepth, MAX_HANDLE_DEPTH, MAX_HANDLE_LENGTH, agentTaskUrn } from '../../../lib/agentTasks/handle.js';
+import { UrnParseError, UrnNotQualifiedError } from '../../../lib/urn.js';
 import { ensureProjectZero, PROJECT_ZERO_HANDLE, rootTaskWhere } from '../../../lib/agentTasks/projectZero.js';
 import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { resolveWorkerIdByName } from './resolvers.worker.js';
@@ -623,7 +624,7 @@ async function bareHandleApp(ctx: Context, ref: string): Promise<string | null> 
     // Decided by HOW MANY Apps the caller belongs to and nothing else: never by whether any task has this number
     // (otherwise the refusal would say where a task exists).
     throw taskError('TASK_HANDLE_QUALIFY',
-      'You belong to more than one App, so a bare handle is ambiguous. Qualify it: hrn:agenttask:<app-urn>:AT<number>.', { taskId: ref });
+      'You belong to more than one App, so a bare handle is ambiguous. Qualify it: hrn:agenttask:<app-urn>:at<number>.', { taskId: ref });
   }
   return apps[0] ?? null;
 }
@@ -1738,7 +1739,8 @@ async function prepareTaskCreate(ctx: Context, input: CreateInput, inApp?: { app
     throw badInput('A backlog task has no assignee (cor:agt:050:02). Make it ready, then assign it.');
   }
   const refused = parentRef ? () => notFound(parentRef) : input.appRef ? () => appNotFound(input.appRef as string) : () => notFound(input.parentTaskId!.trim());
-  const warn: TaskWarningCode[] = source === null ? ['task.create.no-source'] : [];
+  // #4793 (Holger, 2026-11-21): a missing source raises no warning. The code stays on the closed list and in RECORDED_TASK_WARNING_CODES so history already recorded with it still reads (cor:agt:110:01).
+  const warn: TaskWarningCode[] = [];
   // #2162: a task created straight onto a worker takes that worker's per-worker lock, before any row.
   const lockedAssignee = await partyWorkerForLock(ctx, app.id, input.assignee);
   return {
@@ -3875,6 +3877,23 @@ export const agentTaskFieldResolvers = {
     },
     /** #2553: the per-App handle. Never null in the database; the column is optional only in the client type. */
     handle: (t: TaskRow) => t.handle!,
+    /**
+     * #3878 (hrn:node:hadronmemory.com:specs:cor:urn:010:01; ruling 0278): the task's URN, computed from the App's
+     * CURRENT urn and the stored handle, handle in lower case ({@link agentTaskUrn}). After an App rename only the new
+     * spelling is emitted; the old one still resolves through the App's alias map. Null only when the stored App urn
+     * cannot compose the fixed-arity URN (a wrong address is worse than none), as Worker.urn and Grant.urn do.
+     */
+    urn: async (t: TaskRow, _a: unknown, ctx: Context): Promise<string | null> => {
+      const appUrn = await loadAppUrn(ctx, t.appId);
+      if (appUrn === null) return null;
+      try {
+        return agentTaskUrn(appUrn, t.handle!);
+      } catch (error) {
+        // Only the compose refusal is null; a fault propagates (#2975, cor:api:260:01).
+        if (!(error instanceof UrnParseError || error instanceof UrnNotQualifiedError)) throw error;
+        return null;
+      }
+    },
     taskNumber: (t: TaskRow) => String(t.taskNumber),
     status: (t: TaskRow) => t.status.toUpperCase(),
     owner: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.ownerWorkerId, t.ownerUserId),

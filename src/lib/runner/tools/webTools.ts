@@ -27,6 +27,7 @@
  * and this surface passes it through unchanged.
  */
 
+import { GraphQLError } from 'graphql';
 import { fetchUrl, httpRequest, type HttpMethod, type HttpRequestInput } from '../../webfetchClient.js';
 import { redactUrl } from '../../webUrl.js';
 import type { RunToolDef } from './types.js';
@@ -122,11 +123,16 @@ export const webRequest: RunToolDef = {
       // (Copilot review, #639). Exclusivity with `body` is enforced at runtime.
       json: { description: 'Optional JSON request body — any JSON value (sent as application/json).' },
       maxBytes: { type: 'number', description: 'Optional cap on the number of response bytes read.' },
+      secretClientId: { type: 'string', description: 'Optional read-client reference for credential injection.' },
     },
     required: ['method', 'url'],
   },
   cost: 1,
   execute: async (ctx, args) => {
+    // Fail closed until the no-follow webfetch contract is available; never downgrade a client request to anonymous.
+    if (Object.prototype.hasOwnProperty.call(args, 'secretClientId')) {
+      throw new GraphQLError('Secret use is unavailable.', { extensions: { code: 'NOT_FOUND' } });
+    }
     const method = (typeof args.method === 'string' ? args.method.toUpperCase() : '') as HttpMethod;
     const url = typeof args.url === 'string' ? args.url : '';
     if (!url) throw new Error('web_request: "url" is required.');
