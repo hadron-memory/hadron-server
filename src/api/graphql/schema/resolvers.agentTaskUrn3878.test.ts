@@ -237,13 +237,18 @@ describe('#3878 resolveUrn agenttask arm', () => {
   });
 });
 
-describe('#3878 the second emission site and the hint texts say the same thing', () => {
-  it('a legacy :: App urn: AgentTask.urn and the MCP read emit the one single-colon spelling (normalized in agentTaskUrn)', async () => {
+describe('#3878 a legacy App urn, and the hint texts\' placeholder spelling', () => {
+  it('a legacy :: App urn: no address is emitted (it would not resolve), on GraphQL and the MCP read', async () => {
     const { nested } = await seed();
+    // Positive control: the stored bare form emits an address that resolves to the task.
+    const good = await urnOf(nested);
+    expect(good).toBe(`hrn:agenttask:${org.urn}:x:at1.1`);
+    expect(await resolve(good!, as(alice))).toMatchObject({ id: nested.id });
     await db.app.update({ where: { id: appX.id }, data: { urn: `${org.urn}::x` } });
-    const urn = await urnOf(nested);
-    expect(urn).toBe(`hrn:agenttask:${org.urn}:x:at1.1`);
-    expect(await renderTask(nested, as(alice))).toContain(`  urn: ${urn}`);
+    // The single-colon rewrite would not find a row stored as org::x, so it is not emitted.
+    expect(await resolve(good!, as(alice))).toBeNull();
+    expect(await urnOf(nested)).toBeNull();
+    expect(await renderTask(nested, as(alice))).not.toMatch(/^ {2}urn: /m);
   });
 
   it('the qualify refusal and the SDL show the lower-case form', async () => {

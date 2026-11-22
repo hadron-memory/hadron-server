@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { UrnParseError } from '../urn.js';
 import { agentTaskUrn, composeTaskHandle, handleDepth, MAX_HANDLE_DEPTH, parseTaskHandle } from './handle.js';
 
 const deep = (n: number) => `AT1${'.1'.repeat(n - 1)}`;
@@ -42,9 +43,9 @@ describe('parseTaskHandle (#2553)', () => {
     expect(parseTaskHandle('hrn:agenttask:a:b:AT1.0')).toBeNull();
   });
 
-  it('#3878: agentTaskUrn normalizes a legacy :: App urn itself, so every caller emits one spelling', () => {
-    expect(agentTaskUrn('hadronmemory.com::hadron-dev-team', 'AT0.388')).toBe('hrn:agenttask:hadronmemory.com:hadron-dev-team:at0.388');
-    expect(agentTaskUrn('hadronmemory.com::hadron-dev-team', 'AT0.388')).toBe(agentTaskUrn('hadronmemory.com:hadron-dev-team', 'AT0.388'));
+  it('#3878: agentTaskUrn emits the App part as stored and refuses a legacy :: App urn rather than rewriting it', () => {
+    expect(agentTaskUrn('hadronmemory.com:hadron-dev-team', 'AT0.388')).toBe('hrn:agenttask:hadronmemory.com:hadron-dev-team:at0.388');
+    expect(() => agentTaskUrn('hadronmemory.com::hadron-dev-team', 'AT0.388')).toThrow(UrnParseError);
   });
 
   it('composes a child handle from its parent', () => {
