@@ -728,6 +728,7 @@ model Organization {
   exchangeConnections    ExchangeConnection[]
   connectionFlows        ConnectionFlow[]
   slackConnections       SlackConnection[]
+  telegramConnections    TelegramConnection[]
   mcpServers             McpServer[]
   homeAssistantInstances HomeAssistantInstance[]
   resendSender           ResendSender?
@@ -3582,6 +3583,72 @@ model SlackEventReceipt {
   @@map("slack_event_receipts")
 }
 
+/// One Telegram bot registered for a Hadron App (#597, Telegram phase 2). The bot token is held ENCRYPTED IN THE
+/// TELEGRAM TOOL (hadrontool-telegram), never in core: createTelegramConnection forwards it once and this row keeps
+/// only the identity the tool derived.
+///
+/// Relationships: `organization` is the App's owning organization (an App with no organization, a user-owned App,
+/// cannot have one); `app` is the App the bot belongs to. The tool's own connection id is `toolConnectionId`.
+///
+/// Behaviour:
+/// - Owner: the App, not the organization or a user (one bot per App, so the bot a person messages names the App).
+/// - One active connection per App: the partial unique index `telegram_connections_app_active_uniq` (raw SQL, in the
+///   migration and prisma/post-push.sql); a soft-deleted row never blocks a new one.
+/// - Routing: `toolConnectionId` is unique, so an inbound event resolves to exactly one connection.
+/// - Writes need an ADMIN or OWNER of the App's organization; reads need membership of it.
+///
+/// Decision record: hrn:node:hadronmemory.com:hadron-server:reference:hadrontool-telegram (decision 2).
+model TelegramConnection {
+  id               String    @id @default(cuid())
+  organizationId   String    @map("organization_id")
+  appId            String    @map("app_id")
+  /// The telegramClient dispatch key ('telegram' today).
+  provider         String    @default("telegram")
+  /// The provider tool's connection id: the ops-call handle and the events-ingress routing key.
+  toolConnectionId String    @map("tool_connection_id")
+  /// The bot's Telegram user id, as the tool reports it (a decimal string).
+  botId            String    @map("bot_id")
+  /// The bot's @username without the at sign.
+  botUsername      String    @map("bot_username")
+  displayName      String    @map("display_name")
+  /// 'ACTIVE' | 'ERROR', the tool's connection-status vocabulary.
+  status           String    @default("ACTIVE")
+  /// Error message from the last permanent provider failure.
+  lastError        String?   @map("last_error")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  createdBy        String?   @map("created_by")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  deletedAt        DateTime? @map("deleted_at")
+  deletedBy        String?   @map("deleted_by")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  app          App          @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([toolConnectionId])
+  @@index([organizationId])
+  @@index([appId])
+  @@map("telegram_connections")
+}
+
+/// The record that one incoming Telegram event has been taken for processing, kept so the same event is not
+/// processed twice (the tool delivers at least once).
+///
+/// Relationships: none by foreign key. `connectionId` is the tool's connection id
+/// (`TelegramConnection.toolConnectionId`); `eventId` is the tool's event id (Telegram's update id for a bot).
+///
+/// Behaviour: the dispatcher inserts a row for (connection, event) first and drops the delivery when that insert
+/// meets the unique key; a consumer that throws deletes its row so the retry runs again. Old rows are swept.
+model TelegramEventReceipt {
+  id           String   @id @default(cuid())
+  connectionId String   @map("connection_id")
+  eventId      String   @map("event_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([connectionId, eventId])
+  @@index([createdAt])
+  @@map("telegram_event_receipts")
+}
+
 /// The server's record of one web-polling job that a headless run started: which run, App, agent and user the
 /// job belongs to, and under which policy. When the polling tool later reports a change, this row decides which
 /// run principal that event may wake.
@@ -4127,6 +4194,7 @@ model App {
   automationVersions      AutomationVersion[]
   connectionGrants        ConnectionGrant[]         @relation("AppConnectionGrants")
   slackConnections        SlackConnection[]
+  telegramConnections     TelegramConnection[]
   memoryConfigTemplates   MemoryConfigTemplate[]
 
   @@index([organizationId])

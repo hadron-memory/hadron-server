@@ -6404,6 +6404,39 @@ export const typeDefs = `#graphql
   }
 
   """
+  One Telegram bot registered for a Hadron App (#597). APP-owned: one active
+  connection per App, so the bot a person messages names the App. The bot
+  token lives ENCRYPTED IN THE TOOL (hadrontool-telegram): it is a write-only
+  input on createTelegramConnection and no field here ever returns it.
+  """
+  type TelegramConnection {
+    id: ID!
+    "The App's owning organization."
+    organizationId: String!
+    appId: String!
+    "Telegram provider backing this connection ('telegram' today)."
+    provider: String!
+    "The bot's Telegram user id."
+    botId: String!
+    "The bot's @username, without the at sign."
+    botUsername: String!
+    displayName: String!
+    "'ACTIVE' or 'ERROR' (the tool's connection-status vocabulary)."
+    status: String!
+    lastError: String
+    createdAt: DateTime!
+    updatedAt: DateTime!
+  }
+
+  """
+  Uniform paginated list shape (hrn:node:hadronmemory.com:specs:cor:api:120).
+  """
+  type TelegramConnectionsPage {
+    items: [TelegramConnection!]!
+    total: Int!
+  }
+
+  """
   One registered EXTERNAL MCP server (hadrontool-mcp conduit registry).
   Org-owned. Static auth headers are encrypted at rest and WRITE-ONLY:
   no field here ever returns them — hasHeaders is all a reader gets.
@@ -10586,6 +10619,22 @@ export const typeDefs = `#graphql
     slackConnections(orgId: ID, limit: Int, offset: Int): SlackConnectionsPage!
 
     """
+    Fetch one Telegram connection by id (#597). Returns null when the row does
+    not exist OR the caller is not a live member of its org (a revoked member
+    included): no existence disclosure.
+    """
+    telegramConnection(ref: ID!): TelegramConnection
+
+    """
+    Uniform paginated Telegram-connection list (hrn:node:hadronmemory.com:specs:cor:api:120). Default scope:
+    the caller's member orgs. orgId follows hrn:node:hadronmemory.com:specs:cor:api:100:01 (member -> that
+    org, non-member -> empty page, no disclosure, no admin bypass).
+    Bot-username-ascending order (id tiebreak); limit default 20 / cap 200;
+    limit: 0 -> count only.
+    """
+    telegramConnections(orgId: ID, limit: Int, offset: Int): TelegramConnectionsPage!
+
+    """
     Fetch one registered external MCP server by id. Returns null when the
     row does not exist OR the caller is not a member of its org — no
     existence disclosure.
@@ -14333,6 +14382,19 @@ export const typeDefs = `#graphql
     createSlackConnection(orgRef: ID!, appRef: ID!, botToken: String!, appToken: String!): SlackConnection!
     "Soft-delete a Slack connection (org ADMIN/OWNER); tears down the tool side best-effort."
     deleteSlackConnection(ref: ID!): Boolean!
+
+    """
+    Register a Telegram bot for an App (#597). appRef accepts ID or URN
+    (hrn:node:hadronmemory.com:specs:cor:api:140); the organization is the App's own. The bot token is
+    validated live by the tool and stored encrypted THERE: core keeps identity
+    only, and no field ever returns the token. Requires ADMIN/OWNER of the
+    App's organization; every caller who may not, and an App that does not
+    exist or has no organization, get the same refusal. One active connection
+    per App.
+    """
+    createTelegramConnection(appRef: ID!, botToken: String!): TelegramConnection!
+    "Soft-delete a Telegram connection (org ADMIN/OWNER); tears down the tool side best-effort."
+    deleteTelegramConnection(ref: ID!): Boolean!
 
     """
     Register an external MCP server (org ADMIN/OWNER). orgRef accepts ID
