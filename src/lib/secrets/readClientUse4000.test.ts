@@ -334,6 +334,30 @@ describe('transactional secret.use (#4000)', () => {
       expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(1);
       await expect(prepare()).rejects.toBeDefined();
     });
+    it('a keep client never deletes its secret, even at its last permitted use (SEC10 P2)', async () => {
+      await mark(1);
+      await db.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+        await tx.$executeRaw`UPDATE grants SET action_values = jsonb_set(action_values, '{auto-delete}', '"keep"') WHERE id = ${grantId}`;
+      });
+      const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
+      await prepare();
+      expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(1);
+      expect(await db.secret.count({ where: { id: client.secretId } })).toBe(1);
+      expect(await db.secretVersion.count({ where: { secretId: client.secretId } })).toBeGreaterThan(0);
+      expect(await db.secretEvent.count({ where: { secretId: client.secretId, kind: 'DELETE' } })).toBe(0);
+    });
+    it('a marked client with a window but no use budget does not delete on its first use (WORKER2 P3)', async () => {
+      await mark(1);
+      await db.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+        await tx.$executeRaw`UPDATE grants SET max_uses = NULL, expires_at = (clock_timestamp() AT TIME ZONE 'UTC') + interval '1 hour' WHERE id = ${grantId}`;
+      });
+      const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
+      await prepare();
+      expect(await db.secret.count({ where: { id: client.secretId } })).toBe(1);
+      expect(await db.secretEvent.count({ where: { secretId: client.secretId, kind: 'DELETE' } })).toBe(0);
+    });
     it('keeps the secret before the last permitted use', async () => {
       await mark(2);
       const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
