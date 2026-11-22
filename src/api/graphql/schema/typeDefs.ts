@@ -8490,7 +8490,7 @@ export const typeDefs = `#graphql
     SESSION_NOT_IN_APP).
 
     #4836 (hrn:node:hadronmemory.com:specs:cor:dmo:070:05, Proposed; V58;
-    cor:api:140:02's partition): a caller WITHOUT standing gets ONE refusal
+    hrn:node:hadronmemory.com:specs:cor:api:140:02's partition): a caller WITHOUT standing gets ONE refusal
     whatever the App's state and whatever the ref's form - APP_NOT_FOUND,
     "App not found." - byte-identical for a missing App, a deleted one, an
     uninstalled one, an existing one the caller cannot touch, a malformed or
