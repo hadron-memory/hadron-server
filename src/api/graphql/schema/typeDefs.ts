@@ -9375,6 +9375,100 @@ export const typeDefs = `#graphql
     windowHours: Int!
     combinations: [WorkerUtilization!]!
   }
+  """
+  #4447 (S1 of #3781; hrn:node:hadronmemory.com:specs:cor:agt:150): one count of a team's task or worker flow with the ids behind it,
+  so a client can drill down and derive nothing. total is exact; ids holds at most 200 of them, and truncated is true
+  when it holds fewer than total (hrn:node:hadronmemory.com:specs:cor:api:120:04). The ids are task ids, or worker ids in the worker counts.
+  """
+  type TeamMetricsCount {
+    total: Int!
+    ids: [ID!]!
+    truncated: Boolean!
+  }
+  "The half-open window [since, until) report 4 was read over (hrn:node:hadronmemory.com:specs:cor:agt:150): since is included, until is not. The other reports ignore it."
+  type TeamMetricsWindow {
+    since: DateTime!
+    until: DateTime!
+  }
+  "A project in a metrics report: a top-level task other than AT0 (hrn:node:hadronmemory.com:specs:cor:agt:050:01), or the visible No project bucket, AT0 (noProject true; taskId and title null when the App has no AT0 row)."
+  type TeamMetricsProject {
+    handle: String!
+    taskId: ID
+    title: String
+    noProject: Boolean!
+  }
+  "One project's started owned tasks under one owner."
+  type TeamMetricsProjectGroup {
+    project: TeamMetricsProject!
+    tasks: TeamMetricsCount!
+  }
+  "One task owner's started owned tasks (hrn:node:hadronmemory.com:specs:cor:agt:150:01): grouped by the task's OWNER, never its assignee, with no role filter."
+  type TeamMetricsOwnerGroup {
+    "The owner as the sanitized task party projection, never the Worker or User object."
+    owner: AgentTaskParty
+    tasks: TeamMetricsCount!
+    "The owner's tasks by project, the No project bucket (AT0) included, at most 200 projects."
+    byProject: [TeamMetricsProjectGroup!]!
+    projectsTruncated: Boolean!
+  }
+  """
+  Report 1: STARTED owned tasks (hrn:node:hadronmemory.com:specs:cor:agt:150:01): a task names an issue reference or source, so a STARTED task that
+  tracks no external work is not counted. A snapshot at read time.
+  """
+  type TeamMetricsStartedOwned {
+    all: TeamMetricsCount!
+    "At most 200 owners; ownersTruncated says when there were more."
+    byOwner: [TeamMetricsOwnerGroup!]!
+    ownersTruncated: Boolean!
+  }
+  "One project's direct child tasks of one status."
+  type TeamMetricsChildStatus {
+    status: AgentTaskStatus!
+    tasks: TeamMetricsCount!
+  }
+  "One started project with its direct children counted by every status."
+  type TeamMetricsProjectRow {
+    project: TeamMetricsProject!
+    children: [TeamMetricsChildStatus!]!
+  }
+  "Report 2: started projects (a top-level task other than AT0, status STARTED) with child counts by status; at most 200 projects, truncated says when there were more. A snapshot at read time."
+  type TeamMetricsProjects {
+    items: [TeamMetricsProjectRow!]!
+    truncated: Boolean!
+  }
+  """
+  Report 3: worker counts at read time over the App's workers that are not retired, with worker ids.
+  active is the assignee of a STARTED task (hrn:node:hadronmemory.com:specs:cor:agt:150:02); idle is Available with no pending or started task
+  assigned (:03); overdue is the assignee of a task with a not-started, no-progress or finish-by stall alarm in effect, so an
+  acknowledged alarm or an ended episode does not count (:04); inop is a worker whose roster state is unavailable (stalled
+  included), no model family, or not launchable (:05, its roster-state clause only: no terminal-report clause is read). A worker may be in several.
+  """
+  type TeamMetricsWorkers {
+    active: TeamMetricsCount!
+    idle: TeamMetricsCount!
+    overdue: TeamMetricsCount!
+    inop: TeamMetricsCount!
+  }
+  "Report 4: tasks completed (status FINISHED, by finishedAt) and tasks started (by startedAt) in [since, until). A cancelled task is never completed."
+  type TeamMetricsFlow {
+    completed: TeamMetricsCount!
+    started: TeamMetricsCount!
+  }
+  """
+  #4447: a team's computed task and worker flow (hrn:node:hadronmemory.com:specs:cor:agt:150). startedOwned, projects and flow derive from
+  tasks and are null for a reader who may see the roster but not the App's tasks (hrn:node:hadronmemory.com:specs:cor:agt:050:21); workers
+  follows the roster audience.
+  """
+  type TeamMetrics {
+    appId: ID!
+    "The instant the snapshot reports were read at."
+    asOf: DateTime!
+    window: TeamMetricsWindow!
+    startedOwned: TeamMetricsStartedOwned
+    projects: TeamMetricsProjects
+    workers: TeamMetricsWorkers!
+    flow: TeamMetricsFlow
+  }
   "#3819 — the latest no-worker match outcome of a combination inside the read's window (hrn:node:hadronmemory.com:specs:cor:agt:060:13)."
   type MatchFailure {
     "When the failed match was decided (the database clock)."
@@ -9808,6 +9902,8 @@ export const typeDefs = `#graphql
     the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Retired workers are left out.
     """
     teamRoster(appRef: ID!): TeamRoster!
+    "#4447 (hrn:node:hadronmemory.com:specs:cor:agt:150): server-computed counts of a team's task and worker flow, each with its ids. Reports 1-3 are snapshots; report 4 reads [since, until), defaulting to the last 7 days (an omitted until is now, an omitted since is until minus 7 days); a window over 31 days, or since after until, is BAD_USER_INPUT, judged before any read. Readers: the roster's audience; task-derived reports follow the App's task readers (hrn:node:hadronmemory.com:specs:cor:agt:050:21), and an unreadable App answers as a missing one."
+    teamMetrics(appRef: ID!, since: DateTime, until: DateTime): TeamMetrics!
     "#3819: advisory utilization in the roster audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21, hrn:node:hadronmemory.com:specs:cor:agt:060:13). Window defaults to 24h, range 1–168; tier is high/mid/low. Ranked by utilization, then the most recent failed match, then fewest eligible workers, then family, tier and role. The match-outcome record is read only through this field. The alarm.saturation alarm is raised by the stall evaluator, not by this read."
     teamUtilization(appRef: ID!, family: String, tier: String, role: String, windowHours: Int = 24): TeamUtilization!
 
