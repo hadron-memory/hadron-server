@@ -5939,7 +5939,7 @@ enum AppRunTriggerKind {
 /// webhook, a manual request, an integration event or another run. The row is the run's durable record, and it is
 /// also what allows the run to go on: every action inside the run checks the row again.
 ///
-/// Relationships: one foreign key to an owner, `agentId` to Agent (#3689): every run names an existing Agent, and
+/// Relationships: one foreign key to an owner, `agentId` to Agent (#3689): once the `app_run_agent_required` migration has applied, every run names an existing Agent, and
 /// deleting an Agent row deletes its runs. `organizationId`, `appId`, `userId`, `triggerId` and `parentRunId` are plain
 /// ids, so the database deletes nothing with them. ManualAutomationPin, WebFetchPollBinding and WebFetchEventReceipt
 /// rows point at a run, and so does the record of the prompt a run was served (a foreign key in
