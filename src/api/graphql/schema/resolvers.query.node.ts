@@ -2571,7 +2571,7 @@ export const nodeQueries = {
      * the same verbatim semantics as `usageEvents(loc: <loc>)`, bounded to
      * the memories the caller may read. It is a filter, not a lookup: an
      * unknown loc yields `[]` rather than NODE_NOT_FOUND. A bare loc cannot
-     * disambiguate the same loc in two memories; `usageEvents(nodeId: <PK|URN>)`
+     * disambiguate the same loc in two memories; `usageEvents(nodeRef: <PK|URN>)`
      * is the memory-precise form.
      *
      * Access control (#802): this resolver previously had NO gate at all —
@@ -2731,12 +2731,12 @@ export const nodeQueries = {
      */
     memoryLocSegments: async (
       _: unknown,
-      args: { memoryIds: string[]; parentLoc: string; limit?: number | null; after?: string | null },
+      args: { memoryRefs: string[]; parentLoc: string; limit?: number | null; after?: string | null },
       ctx: Context,
     ) => {
       const refuse = (msg: string) => new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
-      if (!Array.isArray(args.memoryIds) || args.memoryIds.length === 0) {
-        throw refuse('memoryLocSegments: memoryIds must name at least one memory.');
+      if (!Array.isArray(args.memoryRefs) || args.memoryRefs.length === 0) {
+        throw refuse('memoryLocSegments: memoryRefs must name at least one memory.');
       }
       if (args.parentLoc.startsWith(':') || args.parentLoc.endsWith(':') || args.parentLoc.includes('::') || args.parentLoc.includes('\0')) {
         throw refuse('memoryLocSegments: parentLoc is not a valid loc.');
@@ -2751,7 +2751,7 @@ export const nodeQueries = {
       const empty = { items: [], hasMore: false, endCursor: null };
       // Each memory is read once however many times (or by which alias) it was named: a repeat would repeat
       // its rows, break the continuation and multiply the walk (#3586 review).
-      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryIds }, null))];
+      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryRefs }, null))];
       if (gated.length === 0) return empty;
       const inheritance = await effectiveScope(ctx.db, gated);
       return readLocSegments(ctx.db, {

@@ -47,6 +47,9 @@ beforeEach(async () => {
   M = (await createDbOrgAndGraph(db, { orgName: 'a4142', graphName: 'a4142/m' })).graph as unknown as { id: string; urn: string };
   N = generateId();
   await db.node.create({ data: { id: N, memoryId: M.id, loc: 'ops:alpha', name: 'alpha' } as never });
+  // A second readable memory with a different top segment: naming only M must not list it (an empty ref list would).
+  const other = (await createDbOrgAndGraph(db, { orgName: 'a4142b', graphName: 'a4142/other' })).graph as unknown as { id: string };
+  await db.node.create({ data: { id: generateId(), memoryId: other.id, loc: 'elsewhere:x', name: 'x' } as never });
   await db.usageEvent.create({ data: { id: generateId(), type: 'read', nodeLoc: 'ops:alpha', memoryId: M.id, nodeId: N, userId: null } as never });
 });
 

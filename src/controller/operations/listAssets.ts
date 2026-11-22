@@ -1,7 +1,7 @@
 /**
  * listAssets — the uniform cross-memory asset list (#891).
  *
- * `memoryAssets(memoryId:)` answers "files in THIS memory". This answers
+ * `memoryAssets(memoryRef:)` answers "files in THIS memory". This answers
  * "every file I can reach", which is what a top-level Assets section
  * needs: its tabs are all cross-memory (my uploads / everything readable
  * / this org's), so they are FILTERS over one list rather than three

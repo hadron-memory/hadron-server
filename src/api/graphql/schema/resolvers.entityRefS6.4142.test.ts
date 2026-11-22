@@ -27,7 +27,7 @@
  * 7. `hadron_create_memory` (MCP) still maps its `org` input onto the renamed
  *    `orgRef` and emits its two prose fragments byte-identically.
  *
- * Chunk A (memory reads) waits on #4136 and is deliberately absent.
+ * Chunk A (the memory reads) is pinned in resolvers.entityRefS6A.4142.test.ts.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';

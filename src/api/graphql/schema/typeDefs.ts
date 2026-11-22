@@ -10119,48 +10119,48 @@ export const typeDefs = `#graphql
       nodeUsage(loc: 'cor:acl:010:01', limit: 20)
       usageEvents(loc: 'cor:acl:010:01', limit: 20)
 
-    Do NOT migrate to usageEvents(nodeId: <loc>): nodeId is shape-classified,
+    Do NOT migrate to usageEvents(nodeRef: <loc>): nodeRef is shape-classified,
     and a hierarchical loc with 3+ colon-separated segments (like the spec
     citation above) qualifies as node-URN shape and routes to ref resolution
     instead — NODE_NOT_FOUND, or another node's events (PR-986 review). The
     loc argument exists precisely so the migration needs no shape caveats.
 
-    usageEvents is a strict superset: nodeId accepts a PK or a fully-qualified
+    usageEvents is a strict superset: nodeRef accepts a PK or a fully-qualified
     node URN (memory-precise — a bare loc cannot disambiguate the same loc in
-    two memories), plus type filtering, memoryId scoping and offset paging. It
+    two memories), plus type filtering, memoryRef scoping and offset paging. It
     is also the surface that gets extended; nodeUsage will not grow arguments.
 
     Access control is identical and unchanged (#802) — see usageEvents below.
     Deprecated for redundancy, NOT because this field is unsafe.
     """
     nodeUsage(loc: String!, limit: Int): [UsageEvent!]!
-      @deprecated(reason: "Use usageEvents(loc: <loc>) — identical exact-match loc semantics and access scoping, plus PK/URN refs via nodeId, type filtering, memoryId scoping and paging (#802).")
+      @deprecated(reason: "Use usageEvents(loc: <loc>) — identical exact-match loc semantics and access scoping, plus PK/URN refs via nodeRef, type filtering, memoryRef scoping and paging (#802).")
 
     """
-    Usage events (most recent first), optionally filtered by type, memoryId,
-    nodeId, or time. since is inclusive and until is exclusive: since <= createdAt < until.
+    Usage events (most recent first), optionally filtered by type, memoryRef,
+    nodeRef, or time. since is inclusive and until is exclusive: since <= createdAt < until.
     Bounds must be ISO date-times with Z or an explicit offset.
     Either bound may be omitted; invalid bounds or since >= until are BAD_USER_INPUT.
     Windowing does not change scope (hrn:node:hadronmemory.com:specs:cor:acl:090:01).
 
-    Scope (#2817, hrn:node:hadronmemory.com:specs:cor:acl:090:01): naming NO resource (no memoryId,
-    nodeId or loc) reads the caller's OWN activity, the events attributed to the calling user in any
+    Scope (#2817, hrn:node:hadronmemory.com:specs:cor:acl:090:01): naming NO resource (no memoryRef,
+    nodeRef or loc) reads the caller's OWN activity, the events attributed to the calling user in any
     memory or none. An App key has no own activity and gets an empty list, not an error. Naming a resource
     reads every principal's events there, gated on READ access to the memory (#250: org membership /
     subscriptions / public / owned personal+private per spec 034; ADMIN/OWNER see all EXCEPT another
     user's personal/private memories and, per spec 047, another user's user-owned memories). A
-    memoryId the caller can't read answers MEMORY_NOT_FOUND exactly as a missing one
+    memoryRef the caller can't read answers MEMORY_NOT_FOUND exactly as a missing one
     (hrn:node:hadronmemory.com:specs:cor:api:140:03). An empty resource scope never falls back to own
     activity. An App key's resource read discloses volumes only: userId, sessionId, organizationId and
     actionArgs are null, and appId is null unless it is the key's own App. limit pages as usageEventsPage does: default 20, at most 200
     (hrn:node:hadronmemory.com:specs:cor:api:120:04).
 
-    memoryId is a memory identifier — accepts the memory's ID or URN. Results
+    memoryRef is a memory identifier — accepts the memory's ID or URN. Results
     are scoped on the denormalized UsageEvent.memoryId column (#796), so an
     event stays attributed to its memory after its node is deleted.
 
-    nodeId is a node token accepting a PK, a fully-qualified URN, or a bare
-    loc (no memoryId needed):
+    nodeRef is a node token accepting a PK, a fully-qualified URN, or a bare
+    loc (no memoryRef needed):
       - PK / URN  → resolved to a single node; scoped via its exact nodeId FK
                     (memory-precise).
       - bare loc  → exact nodeLoc match, bounded to readable memories; not
@@ -10176,7 +10176,7 @@ export const typeDefs = `#graphql
     loc works, hierarchical spec citations included), bounded to readable
     memories; not existence-checked. The migration target for the deprecated
     nodeUsage(loc:) above — same match, same gate (PR-986 review, Codex P2).
-    Mutually exclusive with nodeId (BAD_USER_INPUT when both are passed).
+    Mutually exclusive with nodeRef (BAD_USER_INPUT when both are passed).
 
     appKey (#2944, hrn:node:hadronmemory.com:specs:cor:acl:090:01 "Filtering by App key") — an App key's id.
     Keeps only the events made by requests that key authenticated; events made without a key, and every event
@@ -10189,9 +10189,9 @@ export const typeDefs = `#graphql
     only its own events there, in memories it can read. It composes with the window, type and resource filters.
     Rows stay volume-only as above.
     """
-    usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): [UsageEvent!]!
+    usageEvents(type: String, memoryRef: ID, nodeRef: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): [UsageEvent!]!
     """
-    #2212 - \`usageEvents\` as a page: the same principal gate, the same loc/nodeId rules and the same two scopes
+    #2212 - \`usageEvents\` as a page: the same principal gate, the same loc/nodeRef rules and the same two scopes
     (own activity when no resource is named, #2817), ordered newest first with an id tiebreak, with the windowed total.
     since is inclusive and until is exclusive: since <= createdAt < until.
     Bounds must be ISO date-times with Z or an explicit offset.
@@ -10199,7 +10199,7 @@ export const typeDefs = `#graphql
     hrn:node:hadronmemory.com:specs:cor:acl:090:01; paging: hrn:node:hadronmemory.com:specs:cor:api:120:04. Sizes as \`tickersPage\`.
     appKey filters by an App key exactly as on usageEvents (#2944), and the total counts the filtered rows.
     """
-    usageEventsPage(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): UsageEventPage!
+    usageEventsPage(type: String, memoryRef: ID, nodeRef: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): UsageEventPage!
 
     """
     Revision history for a node, most recent first.
@@ -10965,15 +10965,15 @@ export const typeDefs = `#graphql
     """
     #3456 (hrn:node:hadronmemory.com:specs:cor:api:090:05): one page of the distinct next loc segments
     under parentLoc ("" for the root), including a branch with no node of its own. Reads over exactly
-    the nodes findNodes would read for the same memoryIds with no query: the same readable set, access
-    intersection, defaults and inheritance. memoryIds is required and non-empty (an empty list is
+    the nodes findNodes would read for the same memories with no query: the same readable set, access
+    intersection, defaults and inheritance. memoryRefs (each an ID or URN) is required and non-empty (an empty list is
     BAD_USER_INPUT); when no entry survives the gate the answer is the empty page, never the caller's
     default scope. An unreadable, unresolvable or empty memory, and a parent with nothing at or under
     it, all give the identical empty page. Rows are grouped by memory id; inside a memory, node-backed
     segments with a position come first by position, then every other segment by name (ruling 0217).
     Default page 20, cap 200 (larger is served as 200); after is the previous page's endCursor.
     """
-    memoryLocSegments(memoryIds: [ID!]!, parentLoc: String!, limit: Int, after: String): LocSegmentsPage!
+    memoryLocSegments(memoryRefs: [ID!]!, parentLoc: String!, limit: Int, after: String): LocSegmentsPage!
 
     """
     #2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): the memories appNodes
@@ -11699,7 +11699,7 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     memoryAssets(
-      memoryId:       ID!
+      memoryRef:      ID!
       mimeType:       String
       skip:           Int = 0
       count:          Int = 20

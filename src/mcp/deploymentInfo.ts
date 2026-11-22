@@ -57,7 +57,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 //   importedAgentId -> parentAgentRef, importedAgentRef).
 // 0.13.0: #891 — new query `assets(filter, orgId, limit, offset)`, the uniform
 // cross-memory asset list (spec cor:api:120), plus the `AssetFilter` input and
-// `AssetsPage` type. A caller-detectable addition: `memoryAssets(memoryId:)`
+// `AssetsPage` type. A caller-detectable addition: `memoryAssets(memoryRef:)`
 // remains, but "every asset I can reach" was previously unanswerable.
 // 0.14.0: #1009/#1006 — caller-detectable MCP surface additions. New optional
 // `session` argument on hadron_list_workers / hadron_cast_worker /
@@ -140,7 +140,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `replaceSubtree.memoryId` is DELIBERATELY unchanged (legacy `String!`): the
 // field exists only so legacy callers reach REPLACE_SUBTREE_RETIRED instead
 // of an unknown-argument error (#4219 blind P2-A).
-// (Chunk A, the memory reads, follows #4136.)
+// (Chunk A, the memory reads, is 0.27.0.)
 //
 // 0.24.0 — BREAKING (#2027 S11): the attention API is RETIRED. The GraphQL fields
 // `teamAttention` / `teamAttentionPage` / `teamAttentionPreviewPage` /
@@ -150,7 +150,15 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // wake path (`dueWakes` / the CLI's `hadron team wakes`); the explicit
 // `markOwnTeamChatRead` mark and every wake/mark/resume rule it shared a module
 // with are unchanged.
-export const HADRON_SERVER_VERSION = '0.24.0';
+//
+// 0.27.0 — BREAKING, entity refs S6 chunk A (#4142): the GraphQL memory READS take `<entity>Ref`, no alias.
+// `usageEvents` / `usageEventsPage` (`memoryId` → `memoryRef`, `nodeId` → `nodeRef`; both stay optional `ID`),
+// `memoryAssets` (`memoryId` → `memoryRef: ID!`) and `memoryLocSegments` (`memoryIds` → `memoryRefs: [ID!]!`).
+// A lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation. Nothing else
+// changes: every field already resolved an ID or URN and keeps its gate and its refusals byte-identical; the
+// usage "provide either nodeId or loc" refusal now names `nodeRef`. (0.25.0 and 0.26.0 are claimed by
+// #4789 and #4810.)
+export const HADRON_SERVER_VERSION = '0.27.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
