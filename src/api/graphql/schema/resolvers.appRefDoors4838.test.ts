@@ -549,8 +549,17 @@ describe('#4838 — the teamRole doors\' shared resolveApp (the hard-vanish race
   // one door pins it.
   it('a row that vanishes between resolution and the read is the unknown-App answer', async () => {
     const spy = vi.spyOn(db.app, 'findUnique').mockResolvedValueOnce(null as never);
-    const e = await refusal(M.createTeamRole({}, { appRef: app.id, role: 'oncall', description: 'x' }, ctx(admin.id)));
-    spy.mockRestore();
+    let e: Parameters<typeof shape>[0];
+    try {
+      e = await refusal(M.createTeamRole({}, { appRef: app.id, role: 'oncall', description: 'x' }, ctx(admin.id)));
+      // #4884: the once-mock must have been CONSUMED by resolveApp's read of this App. Without this, a refactor that stops calling
+      // findUnique on this path leaves the mock unused and the pin green for the wrong reason (the answer would then be the real
+      // row's, not the vanished one's). Asserted before mockRestore, which clears the recorded calls.
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ where: { id: app.id } })); // the read of THIS App, not another lookup
+    } finally {
+      spy.mockRestore();
+    }
     expect(shape(e)).toEqual(CONCEALED);
   });
 });
