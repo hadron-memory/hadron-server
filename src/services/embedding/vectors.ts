@@ -432,6 +432,19 @@ export function isStatementTimeout(e: unknown, phase?: 'waiting' | 'running'): b
   return err?.meta?.code === '57014' || /statement timeout/i.test(text);
 }
 
+/**
+ * #4779 (BLIND P2-1, Elena) — the early-stop test for one budgeted vector transaction. Besides {@link isStatementTimeout}:
+ * a P2028 raised while still WAITING for a connection is the early stop, not a pool error, when the wait was cut short by
+ * the request's deadline (`txMs` below the ordinary `VECTOR_TX_MAX_WAIT_MS`): the budget ran out while queued, which is
+ * the work budget ending the search (cor:api:090:04), not the pool failing. A wait that had its full `maxWait` and still
+ * timed out stays an error that reaches alerting.
+ */
+function isVectorEarlyStop(e: unknown, phase: 'waiting' | 'running', txMs: number): boolean {
+  if (isStatementTimeout(e, phase)) return true;
+  const code = (e as { code?: string } | null)?.code;
+  return code === 'P2028' && phase === 'waiting' && txMs < VECTOR_TX_MAX_WAIT_MS;
+}
+
 /** Prisma options for one budgeted vector transaction: its clock runs past the budget so Postgres ends the statement first. */
 function vectorTxOptions(budgetMs: number): { timeout: number; maxWait: number } {
   // Prisma's interactive-transaction clock defaults to 5 s, the same as the default budget, and the SET LOCAL
@@ -482,8 +495,11 @@ async function oneStatementUnderBudget<R>(
   db: PrismaClient, query: (tx: Prisma.TransactionClient) => Promise<R[]>, deadlineAt?: number,
 ): Promise<{ rows: R[]; stopped: boolean }> {
   let phase: 'waiting' | 'running' = 'waiting';
+  let txMs = Number.POSITIVE_INFINITY;
   try {
-    const { left, txMs } = budgetClock(vectorSearchTimeoutMs(), deadlineAt);
+    const clock = budgetClock(vectorSearchTimeoutMs(), deadlineAt);
+    const left = clock.left;
+    txMs = clock.txMs;
     left(); // a request whose deadline already passed stops here, before taking a connection
     const rows = await db.$transaction(async (tx) => {
       phase = 'running';
@@ -492,7 +508,7 @@ async function oneStatementUnderBudget<R>(
     }, vectorTxOptions(txMs));
     return { rows, stopped: false };
   } catch (e) {
-    if (!isStatementTimeout(e, phase)) throw e;
+    if (!isVectorEarlyStop(e, phase, txMs)) throw e;
     return { rows: [], stopped: true };
   }
 }
@@ -532,9 +548,9 @@ export function setVectorAnnMaxKForTests(n: number | null): void { annMaxK = n ?
  *   returned (`distanceOf` of the last raw row is beyond it). Otherwise the walk widens, so pages never repeat or skip
  *   rows among equal distances.
  *
- * @internal exported for the #4779 unit pins; callers use {@link vectorSearchNodes} / {@link vectorSearchChunks}.
+ * Callers use {@link vectorSearchNodes} / {@link vectorSearchChunks}.
  */
-export async function rankUnderBudget<R>(
+async function rankUnderBudget<R>(
   db: PrismaClient,
   o: {
     need: number;
@@ -556,12 +572,17 @@ export async function rankUnderBudget<R>(
   let best: R[] = [];
   const iterative = await iterativeScanSupported(db);
   let phase: 'waiting' | 'running' = 'waiting';
+  let txMs = Number.POSITIVE_INFINITY;
   try {
-    const { left, txMs } = budgetClock(vectorSearchTimeoutMs(), o.deadlineAt);
+    const clock = budgetClock(vectorSearchTimeoutMs(), o.deadlineAt);
+    const left = clock.left;
+    txMs = clock.txMs;
     left(); // a request whose deadline already passed stops here, before taking a connection
     return await db.$transaction(async (tx) => {
       phase = 'running';
       if (iterative) {
+        // Set once for the shared transaction, so it is also in force for the exact statement below (BLIND F7): harmless,
+        // since that statement ranks a MATERIALIZED CTE with no ORDER BY the HNSW index could serve.
         await setIterativeScan(tx);
         // The caller's OWN eligible set, counted up to the small-scope bound (cost bounded by that bound, not by the
         // index). A small scope never walks the global HNSW index (see vectorSmallScopeRows); a large one does.
@@ -598,7 +619,7 @@ export async function rankUnderBudget<R>(
       return { rows: best, exhausted: o.distinctCount(best) < o.need, stopped: false };
     }, vectorTxOptions(txMs));
   } catch (e) {
-    if (!isStatementTimeout(e, phase)) throw e;
+    if (!isVectorEarlyStop(e, phase, txMs)) throw e;
     return { rows: best, exhausted: false, stopped: true };
   }
 }

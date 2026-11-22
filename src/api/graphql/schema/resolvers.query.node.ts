@@ -1849,8 +1849,11 @@ export const nodeQueries = {
         simById: Map<string, number> | null,
         reason: string | null,
         degraded: string | null,
-        /** #4779 (P3-1): filled with how many ranked nodes up to the page's end hydration dropped, and the page's size. */
-        stats?: { dropped: number; pageCount: number },
+        /**
+         * #4779 (P3-1): filled with how many ranked nodes up to the page's end hydration dropped, the page's size, and how
+         * deep into the ranking the page reached (the last page row's 1-based rank position; BLIND F2).
+         */
+        stats?: { dropped: number; pageCount: number; consumed: number },
       ) => {
         ranked = applyFloor(ranked);
         const scoreById = new Map(ranked.map((r) => [r.nodeId, r.score]));
@@ -1897,6 +1900,8 @@ export const nodeQueries = {
           const hydrated = new Set(rows.map((r) => r.id));
           stats.dropped = ranked.slice(0, off + finalLimit).filter((r) => !hydrated.has(r.nodeId)).length;
           stats.pageCount = pageByRank.length;
+          const last = pageByRank[pageByRank.length - 1];
+          stats.consumed = last ? (rankOrder.get(last.id) ?? 0) + 1 : 0;
         }
         const pageRows = pageByRank.sort((a, b) => {
           if (propComparator) return propComparator(a, b);
@@ -2265,7 +2270,8 @@ export const nodeQueries = {
             for (const id of lookup) looked.add(id);
             for (const [id, rank] of res.ranks) ranks.set(id, rank);
             if (!res.stoppedEarly) continue;
-          } else if (r.kwUncertain && dk < kwCeiling) {
+          } else if (r.kwUncertain && dk < kwCeiling && Date.now() < vectorDeadlineAt) {
+            // BLIND F3 (Elena): the widening spends the request's one budget too; past its deadline the page stops early.
             dk = Math.min(dk * 2, kwCeiling);
             kwHits = await runKeywordRanked({ limit: dk });
             continue;
@@ -2282,7 +2288,7 @@ export const nodeQueries = {
        * #140476), never returned as a silently short page.
        */
       const rankedPage = async (pageN: number) => {
-        const stats = { dropped: 0, pageCount: 0 };
+        const stats = { dropped: 0, pageCount: 0, consumed: 0 };
         if (effectiveMode === 'vector') {
           const vecHits = await runVector((limit, onWindow) => provider.vectorSearch({ ...vectorOpts, limit, onWindow }), pageN);
           const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
@@ -2300,13 +2306,20 @@ export const nodeQueries = {
         const built = await buildResult(fused.map((r) => ({ nodeId: r.nodeId, score: r.score })), simById, null, mergeDegraded(null), stats);
         return { built, stats, exhausted };
       };
-      const shortOf = (r: { stats: { dropped: number; pageCount: number }; exhausted: boolean }) =>
-        r.stats.dropped > 0 && !r.exhausted && r.stats.pageCount < finalLimit;
+      /**
+       * The page is incomplete when hydration dropped ranked nodes and either (a) the page came out short, or (b) BLIND F2
+       * (Elena): filling it reached past the depth the ranking stood behind (`depth` = the page size it was ranked for):
+       * a hybrid fused list runs longer than that depth, and its order past it is not certified, so a full page taken from
+       * there could repeat or skip nodes across pages. Neither applies when the ranking was exhausted.
+       */
+      const incomplete = (r: { stats: { dropped: number; pageCount: number; consumed: number }; exhausted: boolean }, depth: number) =>
+        r.stats.dropped > 0 && !r.exhausted && (r.stats.pageCount < finalLimit || r.stats.consumed > depth);
       let attempt = await rankedPage(page);
-      if (shortOf(attempt)) {
+      if (incomplete(attempt, page)) {
         rankingIncomplete = false; // the second attempt's ranking replaces the first's, flags included
-        attempt = await rankedPage(page + attempt.stats.dropped);
-        if (shortOf(attempt)) rankingIncomplete = true;
+        const depth = page + attempt.stats.dropped;
+        attempt = await rankedPage(depth);
+        if (incomplete(attempt, depth)) rankingIncomplete = true;
       }
       const env = stoppedEnvelope(attempt.built.hits.length, attempt.built.degraded, attempt.built.reason);
       return { ...attempt.built, reason: env.reason, degraded: env.degraded };

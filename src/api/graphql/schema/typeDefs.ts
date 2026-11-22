@@ -346,7 +346,9 @@ export const typeDefs = `#graphql
     or hybrid search ran out of its work budget before the page was complete;
     #4779: also when a hybrid page's fused order could not be certified inside
     the work budget or the keyword leg's 2000-row ceiling, or when a page that
-    hydration left short was still short after its one deeper re-ranking;
+    hydration left short (or filled past the depth its ranking was certified
+    to) was still incomplete after its one deeper re-ranking (chunk
+    granularity flags a short page without re-ranking);
     \`reason\` is also stopped_early when the page is empty).
     """
     degraded: String

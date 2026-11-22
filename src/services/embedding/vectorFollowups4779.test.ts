@@ -178,6 +178,22 @@ describe('#4779 P2-2: one interactive transaction per search', () => {
     expect(windows).toEqual([]);
   });
 
+  it('BLIND F1 (Elena): a pool wait cut short by the REQUEST deadline is the early stop, not an error', async () => {
+    setIterativeScanSupportForTests(true);
+    const fake = new Proxy(db, { get(t, p) {
+      if (p === '$transaction') return () => Promise.reject(Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' }));
+      const v = Reflect.get(t, p);
+      return typeof v === 'function' ? v.bind(t) : v;
+    } }) as typeof db;
+    const windows: any[] = [];
+    // 300 ms left of the request's budget: maxWait was capped by the deadline, so the queue wait ran the budget out.
+    expect(await vectorSearchNodes(fake, { memoryIds: [winMem], queryEmbedding: q, limit: 3, deadlineAt: Date.now() + 300, onWindow: (w) => windows.push(w) })).toEqual([]);
+    expect(windows.at(-1)).toMatchObject({ stoppedEarly: true });
+    const nodes = await vectorSearchNodes(fake, { memoryIds: [winMem], queryEmbedding: q, limit: 3, scope: 'COMMENTS', deadlineAt: Date.now() + 300, onWindow: (w) => windows.push(w) });
+    expect(nodes).toEqual([]);
+    expect(windows.at(-1)).toMatchObject({ stoppedEarly: true });
+  });
+
   it('load: concurrent shallow and deep searches on a 2-connection pool all complete (no P2028)', async () => {
     setIterativeScanSupportForTests(true);
     setVectorSmallScopeRowsForTests(10); // tieMem (60 vectors) is a large scope: shallow pages walk, deep ones rank exactly
