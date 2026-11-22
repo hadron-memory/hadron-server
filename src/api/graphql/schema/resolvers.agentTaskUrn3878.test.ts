@@ -190,6 +190,19 @@ describe('#3878 resolveUrn agenttask arm', () => {
     expect(real).toBeNull();
     expect(missing).toBeNull();
   });
+
+  it('an App alias that names two Apps is the one null, not an error (ambiguity is concealed)', async () => {
+    const { loose } = await seed();
+    const old = `${org.urn}:old`;
+    const viaAlias = `hrn:agenttask:${old}:at0.1`;
+    // Positive control: while the old spelling names App X alone, it resolves X's AT0.1.
+    await db.app.update({ where: { id: appX.id }, data: { legacyUrn: old } });
+    expect(await resolve(viaAlias, as(alice))).toMatchObject({ kind: 'agenttask', id: loose.id });
+    // App Y now carries the same old spelling, so the alias is ambiguous: alice reads both Apps, and still gets the
+    // plain null, with no error that would say the spelling names more than one App.
+    await db.app.update({ where: { id: appY.id }, data: { legacyUrn: old } });
+    await expect(resolve(viaAlias, as(alice))).resolves.toBeNull();
+  });
 });
 
 describe('#3878 the second emission site and the hint texts say the same thing', () => {
