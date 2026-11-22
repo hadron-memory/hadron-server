@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { inspect } from 'node:util';
 import { execFileSync } from 'child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { db } from '../db/client.js';
@@ -375,11 +375,18 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
     await expect(insert({ state: 'NOT_CLONED', errorClass: 'PUSH_FAILED' })).rejects.toThrow();
   });
 
-  it('(k) the migration carries a byte-identical copy of the invariants file', () => {
+  it('(k) a migration carries a byte-identical copy of the current invariants file', () => {
     const sql = readFileSync(new URL('../../../prisma/git-mirror-obligation-invariants.sql', import.meta.url), 'utf8');
-    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d.endsWith('_git_mirror_push_rejected'));
-    expect(dir).toBeDefined();
-    const migration = readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8');
-    expect(migration.endsWith(sql)).toBe(true);
+    const migrations = new URL('../../../prisma/migrations', import.meta.url);
+    // The file is the one source post-push.sql and the test globalSetup apply; a deployed
+    // database reaches the same shape ONLY through a migration, so the CURRENT bytes must end
+    // some migration verbatim (older carriers keep older copies and no longer match — that is
+    // the point: editing the file without a carrying migration goes red here). #425 moved the
+    // carrier from 20261117800000_git_mirror_push_rejected to 20261122140000_git_mirror_remove_pending.
+    const carriers = readdirSync(migrations).filter((d) => {
+      const p = new URL(`../../../prisma/migrations/${d}/migration.sql`, import.meta.url);
+      return existsSync(p) && readFileSync(p, 'utf8').endsWith(sql);
+    });
+    expect(carriers.length, 'no applied migration ends with the current invariants file — append it verbatim to the migration that changes it').toBeGreaterThan(0);
   });
 });

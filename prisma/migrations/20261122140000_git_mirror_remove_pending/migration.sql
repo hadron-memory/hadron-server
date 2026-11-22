@@ -1,15 +1,22 @@
 -- #425: node deletes propagate to the Git mirror.
 --
--- A new PENDING state for git_mirror_obligations (captured, never attempted), the shape CHECK admitting
--- it, and the two nodes triggers that capture a REMOVE debt on delete and cancel it on restore. The
--- CHECK and trigger text below is shared verbatim with prisma/git-mirror-obligation-invariants.sql
--- (applied by post-push.sql and the test globalSetup).
+-- A new PENDING state for git_mirror_obligations (captured, never attempted), and the two nodes triggers
+-- that capture a REMOVE debt on delete and cancel it on restore. The ALTER TYPE below is this migration's
+-- own; everything after it is prisma/git-mirror-obligation-invariants.sql appended VERBATIM — the one
+-- source, applied by post-push.sql and the test globalSetup, and pinned byte-identical here by
+-- src/integrations/github/mirrorObligations430.test.ts (k).
 --
 -- ALTER TYPE ... ADD VALUE cannot use the new label inside this transaction, so nothing here compares
 -- the enum to a 'PENDING' literal: the CHECK casts state to text (the 20261101020000 pattern), and the
 -- trigger bodies parse their enum labels only at first call, after commit.
 ALTER TYPE git_mirror_obligation_state ADD VALUE IF NOT EXISTS 'PENDING';
 
+-- #430: the Git-mirror obligation's shape. One source, shared verbatim with migration
+-- 20261117800000_git_mirror_push_rejected (#3234 added PUSH_REJECTED), migration
+-- 20261122140000_git_mirror_remove_pending (#425 added PENDING and the nodes triggers), and applied by
+-- post-push.sql and the test globalSetup (pinned by src/integrations/github/mirrorObligations430.test.ts
+-- and src/integrations/github/nodeDeleteMirror425.test.ts).
+--
 -- `error_class` is a CLOSED set of fixed words, never exception text: a raw Git error can carry an installation-token URL
 -- (findings:git-execfile-error-carries-auth-url), so nothing free-form is storable here. A NOT_CLONED row says so in both
 -- columns; a PENDING row (a #425 captured delete debt, born from the trigger below before any attempt) says so in both
