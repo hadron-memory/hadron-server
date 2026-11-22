@@ -45,6 +45,8 @@ export const telegramMutations = {
     // The tool validates the token live and derives the bot identity; the token goes no further than this call.
     const identity = await createTelegramToolConnection('telegram', { botToken });
 
+    // KNOWN GAPS (deferred, not this slice): a lost registration response leaves a tool row core cannot see (#4829); App or
+    // org deletion does not tear the tool row down (#4828, same as Slack).
     // EVERY failure past this point tears the tool row down, or the tool would hold an encrypted token and a poll
     // loop with no core row and no GraphQL handle to delete them.
     try {
@@ -62,11 +64,11 @@ export const telegramMutations = {
     } catch (err) {
       void deleteTelegramToolConnection('telegram', identity.id);
       // A concurrent duplicate meets the PARTIAL unique (telegram_connections_app_active_uniq): same answer as the pre-check.
-      // The partial unique on bot_id (one ACTIVE connection per bot) answers the same way, with its own sentence.
-      const e = err as { code?: string; meta?: { target?: unknown } } | null;
-      if (e?.code === 'P2002') {
-        const botTaken = JSON.stringify(e.meta?.target ?? '').includes('bot_');
-        throw new GraphQLError(botTaken ? BOT_ALREADY_CONNECTED : ALREADY_CONNECTED, { extensions: { code: 'BAD_USER_INPUT' } });
+      // Two partial uniques can refuse the write: one ACTIVE connection per App and one per bot. Do not read the driver's
+      // target spelling; ask the database which one holds: the App has a live row, or the bot is taken elsewhere.
+      if ((err as { code?: string } | null)?.code === 'P2002') {
+        const appTaken = await ctx.db.telegramConnection.findFirst({ where: { appId, deletedAt: null }, select: { id: true } });
+        throw new GraphQLError(appTaken ? ALREADY_CONNECTED : BOT_ALREADY_CONNECTED, { extensions: { code: 'BAD_USER_INPUT' } });
       }
       throw err;
     }
@@ -79,6 +81,7 @@ export const telegramMutations = {
       throw new GraphQLError('Telegram connection not found.', { extensions: { code: 'NOT_FOUND' } });
     }
     await requireOrgRole(ctx, connection.organizationId, 'ADMIN');
+    // App or org deletion does not reach this teardown (#4828, same gap as Slack); only this door does.
     // Guarded on the live row so a concurrent double delete tears the tool down once.
     const { count } = await ctx.db.telegramConnection.updateMany({
       where: { id: connection.id, deletedAt: null },

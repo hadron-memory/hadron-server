@@ -139,6 +139,12 @@ describe('createTelegramConnection', () => {
     expect(createTelegramToolConnection).not.toHaveBeenCalled();
   });
 
+  it('an API-client create (no user) records the client as the actor, like delete does', async () => {
+    const clientCtx = { db, roles: ['ADMIN'], clientId: 'client-xyz' } as unknown as Context;
+    const connection = await create(clientCtx);
+    expect(connection.createdBy).toBe('client-xyz');
+  });
+
   it('a second ACTIVE connection for the App is refused, before the tool is called', async () => {
     await create();
     vi.mocked(createTelegramToolConnection).mockClear();
