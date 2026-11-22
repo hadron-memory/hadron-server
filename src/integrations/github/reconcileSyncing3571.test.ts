@@ -6,14 +6,15 @@
  * it skip the row rather than wait or overwrite.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'fs';
-import { join } from 'path';
-import { tmpdir } from 'os';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { db } from '../db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { execGit } from './execGit.js';
 import { syncGraphFromGithub } from './syncGraphFromGithub.js';
 import { reconcileSyncingStatus } from './reconcileSyncing.js';
+import { acquireSyncRunLock, syncRunLockKey } from './syncRunLock.js';
 
 const paths = vi.hoisted(() => ({ root: '' }));
 vi.mock('../../config.js', async importOriginal => ({
@@ -48,6 +49,18 @@ async function memory(over: { organizationId?: string | null; source?: string | 
 /** The whole stored row, as the database holds it (updated_at included), so "nothing else" is checked byte for byte. */
 async function row(id: string): Promise<Record<string, unknown>> {
   return (await db.$queryRaw<Array<{ r: Record<string, unknown> }>>`SELECT to_jsonb(m) AS r FROM memories m WHERE m.id = ${id}`)[0].r;
+}
+/** Sessions holding or waiting on the memory's sync-run advisory lock right now (the key is syncRunLockKey's, never a copy of its prefix). */
+const runLockHolders = async (memoryId: string): Promise<number> => Number((await db.$queryRaw<Array<{ n: bigint }>>`
+  SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory'
+    AND objid = (hashtext(${syncRunLockKey(memoryId)}) & x'ffffffff'::bigint)::oid`)[0].n);
+/** Poll until a condition holds or the deadline passes (no fixed sleeps). */
+async function until(check: () => Promise<boolean>, ms = 10_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error('condition not reached before the deadline');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 const without = (r: Record<string, unknown>, k: string) => Object.fromEntries(Object.entries(r).filter(([key]) => key !== k));
 
@@ -145,9 +158,7 @@ describe('#3571 a sync actually in flight is never overwritten', () => {
     // The attempt finishes as its own: the reconciliation never wrote PENDING over it.
     expect((await row(id)).sync_status).toBe('ERROR');
     // And it let go of the run lock: a reconciliation now sees no running sync.
-    const locks = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory'
-      AND objid = (hashtext(${`hadron:git-sync:${id}`}) & x'ffffffff'::bigint)::oid`;
-    expect(Number(locks[0].n)).toBe(0);
+    expect(await runLockHolders(id)).toBe(0); // #4731: the key comes from syncRunLockKey, not a hard-coded prefix
   }, 30_000);
 });
 
@@ -158,5 +169,222 @@ describe('#3571 the not-attempted refusal stays write-free', () => {
     const graph = await db.memory.findUniqueOrThrow({ where: { id }, include: { organization: true } });
     expect(await syncGraphFromGithub(graph)).toMatchObject({ notAttemptedReason: 'NO_INSTALLATION' });
     expect(await row(id)).toEqual(before);
+    expect(await runLockHolders(id)).toBe(0); // #4731: no run lock was taken (and none is left)
   });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// #4731 (polish deferred from #4719): per-row failure, bounded waits, the re-check's predicates, shared versus exclusive, the
+// protocol legs the first pins left open, and a lock failure that names no host.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Hold the row's exclusive run-lock key (what a running reconciliation holds) until released. */
+async function holdExclusive(id: string): Promise<{ release: () => void; done: Promise<unknown> }> {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let held!: () => void;
+  const isHeld = new Promise<void>((resolve) => { held = resolve; });
+  const done = db.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${syncRunLockKey(id)}))`;
+    held();
+    await gate;
+  }, { timeout: 60_000 });
+  await isHeld;
+  return { release, done };
+}
+
+describe('#4731 one bad row never aborts the run', () => {
+  it('a failing row is counted and left unchanged while the others are reconciled; the log names a code, never a host or id', async () => {
+    const o = await org(true);
+    const ids = [await memory({ organizationId: o.id }), await memory({ organizationId: o.id }), await memory({ organizationId: o.id })].sort();
+    const before = await row(ids[1]);
+    const real = db.$transaction.bind(db);
+    let calls = 0;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation(((fn: unknown, opts: unknown) => {
+      calls += 1;
+      if (calls === 2) return Promise.reject(Object.assign(new Error('connect ECONNREFUSED 10.9.8.7:5432'), { code: '57P01' }));
+      return (real as (f: unknown, o: unknown) => Promise<unknown>)(fn, opts);
+    }) as never);
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const out = await reconcileSyncingStatus(db, { apply: true });
+      expect(out).toMatchObject({ candidates: 3, reconciled: 2, failed: 1, held: 0, ineligible: 0 });
+      expect(logged).toHaveBeenCalledWith('[reconcile-syncing] a row failed and was left unchanged', { code: '57P01' });
+      expect(JSON.stringify(logged.mock.calls)).not.toContain('10.9.8.7');
+    } finally { spy.mockRestore(); logged.mockRestore(); }
+    expect(await row(ids[1])).toEqual(before); // the failed row is exactly as it was
+    expect((await row(ids[0])).sync_status).toBe('PENDING');
+    expect((await row(ids[2])).sync_status).toBe('PENDING');
+    // Re-running finishes it: nothing was lost.
+    expect(await reconcileSyncingStatus(db, { apply: true })).toMatchObject({ candidates: 1, reconciled: 1, failed: 0 });
+  });
+});
+
+describe('#4731 a row transaction bounds its own lock wait', () => {
+  it('a row lock held by a slow writer makes that row fail after the timeout (the FOR UPDATE re-check), without hanging the run or touching the row', async () => {
+    const o = await org(true);
+    const blocked = await memory({ organizationId: o.id });
+    const free = await memory({ organizationId: o.id });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((resolve) => { locked = resolve; });
+    // A slow writer on the blocked row holding the WEAKEST row lock (FOR KEY SHARE, what a foreign-key insert takes): it conflicts
+    // with the reconciliation's FOR UPDATE re-check but not with its non-key UPDATE, so only that clause makes this row wait.
+    const writer = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${blocked} FOR KEY SHARE`;
+      locked();
+      await gate;
+    }, { timeout: 60_000 });
+    await isLocked;
+    const before = await row(blocked);
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const started = Date.now();
+    try {
+      const out = await reconcileSyncingStatus(db, { apply: true, lockTimeoutMs: 300 });
+      expect(out).toMatchObject({ candidates: 2, reconciled: 1, failed: 1 });
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(logged).toHaveBeenCalledWith('[reconcile-syncing] a row failed and was left unchanged', { code: expect.any(String) });
+    } finally { logged.mockRestore(); release(); await writer; }
+    expect(await row(blocked)).toEqual(before);
+    expect((await row(free)).sync_status).toBe('PENDING');
+  }, 30_000);
+
+  it('a lock timeout that is not a positive integer falls back to the default, never to "no timeout"', async () => {
+    const o = await org(true);
+    await memory({ organizationId: o.id });
+    for (const bad of [0, -5, 1.5, Number.NaN]) {
+      await db.memory.updateMany({ data: { syncStatus: 'SYNCING' } });
+      expect(await reconcileSyncingStatus(db, { apply: true, lockTimeoutMs: bad })).toMatchObject({ reconciled: 1, failed: 0 });
+    }
+  });
+});
+
+describe('#4731 the locked re-check judges every predicate, not only the installation', () => {
+  it.each([
+    ['the memory gained a source and its organization an installation', (id: string, orgId: string) => Promise.all([
+      db.memory.update({ where: { id }, data: { source: 'https://github.com/x/y' } }),
+      db.organization.update({ where: { id: orgId }, data: { githubInstallationId: 77_001 } })])],
+    ['the memory was deleted', (id: string) => db.memory.update({ where: { id }, data: { deletedAt: new Date(), deletedBy: 'test' } })],
+    ['the memory became encrypted', (id: string) => db.memory.update({ where: { id }, data: { isEncrypted: true } })],
+    ['the memory is no longer SYNCING', (id: string) => db.memory.update({ where: { id }, data: { syncStatus: 'OK' } })],
+  ])('skips as ineligible when %s between the scan and the lock', async (_label, change) => {
+    const o = await org(false);
+    const id = await memory({ organizationId: o.id, source: 'https://github.com/x/y' });
+    const out = await reconcileSyncingStatus(db, { apply: true, onCandidates: async () => { await change(id, o.id); } });
+    expect(out).toMatchObject({ candidates: 1, reconciled: 0, ineligible: 1 });
+    expect((await row(id)).sync_status).not.toBe('PENDING');
+  });
+});
+
+describe('#4731 shared (sync) versus exclusive (reconcile)', () => {
+  it('two syncs hold the key together, neither waiting on the other, and a reconciliation skips while either holds it', async () => {
+    const o = await org(false);
+    const id = await memory({ organizationId: o.id, source: 'https://github.com/x/y' });
+    const first = await acquireSyncRunLock(id);
+    const second = await Promise.race([
+      acquireSyncRunLock(id),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('the second shared holder waited on the first')), 5000)),
+    ]);
+    try {
+      expect(await runLockHolders(id)).toBe(2);
+      expect(await reconcileSyncingStatus(db, { apply: true })).toMatchObject({ candidates: 1, reconciled: 0, held: 1 });
+      await first();
+      expect(await reconcileSyncingStatus(db, { apply: true })).toMatchObject({ reconciled: 0, held: 1 }); // the second still holds it
+    } finally { await first(); await second(); }
+    expect(await reconcileSyncingStatus(db, { apply: true })).toMatchObject({ candidates: 1, reconciled: 1, held: 0 });
+  });
+
+  it('a reconciliation that finds another working the same row skips it as held, and does not wait', async () => {
+    const o = await org(false);
+    const id = await memory({ organizationId: o.id, source: 'https://github.com/x/y' });
+    const other = await holdExclusive(id);
+    try {
+      const started = Date.now();
+      expect(await reconcileSyncingStatus(db, { apply: true })).toMatchObject({ candidates: 1, reconciled: 0, held: 1 });
+      expect(Date.now() - started).toBeLessThan(5000);
+      expect((await row(id)).sync_status).toBe('SYNCING');
+    } finally { other.release(); await other.done; }
+  });
+
+  it('a sync that starts while a reconciliation holds the key waits, then stamps SYNCING and carries on', async () => {
+    const o = await org(true);
+    const id = await memory({ organizationId: o.id, source: 'https://github.com/x/y', syncStatus: 'PENDING' });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let inGit = false;
+    vi.mocked(execGit).mockImplementation(async () => { inGit = true; await gate; throw new Error('git unavailable (fixture)'); });
+    const holder = await holdExclusive(id);
+    const graph = await db.memory.findUniqueOrThrow({ where: { id }, include: { organization: true } });
+    const running = syncGraphFromGithub(graph);
+    await until(async () => (await runLockHolders(id)) === 2); // the sync is queued behind the exclusive holder
+    expect(inGit).toBe(false);
+    expect((await row(id)).sync_status).toBe('PENDING'); // it has not stamped SYNCING
+    holder.release();
+    await holder.done;
+    await until(async () => (await row(id)).sync_status === 'SYNCING' && inGit);
+    release();
+    await running;
+    expect((await row(id)).sync_status).toBe('ERROR'); // its own final write, after the wait
+    expect(await runLockHolders(id)).toBe(0);
+  }, 30_000);
+
+  it('two concurrent syncs of one memory both run (they share the key), and both let go of it', async () => {
+    const o = await org(true);
+    const id = await memory({ organizationId: o.id, source: 'https://github.com/x/y', syncStatus: 'PENDING' });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let inGit = 0;
+    vi.mocked(execGit).mockImplementation(async () => { inGit += 1; await gate; throw new Error('git unavailable (fixture)'); });
+    const graph = await db.memory.findUniqueOrThrow({ where: { id }, include: { organization: true } });
+    const both = [syncGraphFromGithub(graph), syncGraphFromGithub(graph)];
+    // The second sync holds the shared key while the first is inside its git step (the git step itself is serialised by the
+    // checkout lock, which is a different lock): neither waits on the other for the RUN lock.
+    await until(async () => inGit >= 1 && (await runLockHolders(id)) === 2);
+    release();
+    await Promise.all(both);
+    expect(await runLockHolders(id)).toBe(0);
+  }, 30_000);
+});
+
+describe('#4731 the lock is released after the final status write on every path', () => {
+  it('a sync that ends in ERROR (an early throw before any git work) leaves the key free and a final status', async () => {
+    const o = await org(true);
+    const id = await memory({ organizationId: o.id, source: 'ext::whoami', syncStatus: 'PENDING' }); // an invalid source refuses at once
+    const graph = await db.memory.findUniqueOrThrow({ where: { id }, include: { organization: true } });
+    await syncGraphFromGithub(graph);
+    expect((await row(id)).sync_status).not.toBe('SYNCING');
+    expect(await runLockHolders(id)).toBe(0);
+  });
+
+  it('a sync that completes its git step leaves the key free and a final status', async () => {
+    const o = await org(true);
+    const id = await memory({ organizationId: o.id, source: 'https://github.com/x/y', syncStatus: 'PENDING' });
+    const graph = await db.memory.findUniqueOrThrow({ where: { id }, include: { organization: true } });
+    await syncGraphFromGithub(graph); // execGit answers an empty success: OK or a later ERROR, never left SYNCING
+    expect(['OK', 'ERROR']).toContain(String((await row(id)).sync_status));
+    expect(await runLockHolders(id)).toBe(0);
+  });
+});
+
+describe('#4731 a failed run-lock connection names no host in the stored or returned error (Rook LOW)', () => {
+  it('a database connect failure stores fixed text and its code, never host:port', async () => {
+    const o = await org(true);
+    const id = await memory({ organizationId: o.id, source: 'https://github.com/x/y', syncStatus: 'PENDING' });
+    const graph = await db.memory.findUniqueOrThrow({ where: { id }, include: { organization: true } });
+    const saved = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = 'postgresql://nobody:secret-password@127.0.0.1:1/nowhere'; // nothing listens on port 1
+    let out: Awaited<ReturnType<typeof syncGraphFromGithub>>;
+    try { out = await syncGraphFromGithub(graph); } finally {
+      if (saved === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = saved;
+    }
+    const stored = (await row(id)).sync_error as string;
+    expect(stored).toMatch(/^sync failed \(internal\)( \(\w+\))?$/);
+    for (const text of [stored, String((out as { error?: string }).error)]) {
+      expect(text).not.toContain('127.0.0.1');
+      expect(text).not.toContain('secret-password');
+      expect(text).not.toContain(':1');
+    }
+    expect(stored).toBe((out as { error?: string }).error);
+  }, 30_000);
 });
