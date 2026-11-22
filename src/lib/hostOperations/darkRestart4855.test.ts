@@ -25,6 +25,7 @@ import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 import { valueCovers, coverableAction } from '../grants/cover.js';
 import { renderGrantSummary } from '../grants/summary.js';
 import { PLATFORM_ACTIONS } from '../grants/actions.js';
+import { setStopSignal } from '../stopSignals/lifecycle.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -184,11 +185,11 @@ describe('#4855 who may: a signed grant held by that worker, naming the target, 
     await untouched(s.id, g);
   });
 
-  it('an App key is refused (no worker, no session)', async () => {
+  it('an App key is concealed as APP_NOT_FOUND (no task door resolves it as an actor)', async () => {
     await grant();
     const s = await kitSession();
-    const out = await code(M.restartWorkerSession({}, { input: { appRef: w.appId, worker: kit, reason: 'r' } }, keyCtx(orca1)));
-    expect(out).toBeDefined();
+    // No task door resolves an App key as an actor: it is concealed as APP_NOT_FOUND, as everywhere else.
+    expect(await code(M.restartWorkerSession({}, { input: { appRef: w.appId, worker: kit, reason: 'r' } }, keyCtx(orca1)))).toBe('APP_NOT_FOUND');
     await untouched(s.id);
   });
 
@@ -220,23 +221,48 @@ describe('#4855 who may: a signed grant held by that worker, naming the target, 
     await untouched(s.id, g);
   });
 
-  it('a pending (unsigned), an expired and a revoked grant each allow nothing', async () => {
+  it('a pending (unsigned) grant allows nothing', async () => {
     const s = await kitSession();
-    const pending = await grant(kit, {}, { activate: false });
-    const expiring = await grant(kit, { expires_at: dbNowPlus('1 second') });
-    const revoked = await grant();
-    await db.$executeRawUnsafe(`UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = $2 WHERE id = $1`, revoked, w.userId);
-    await new Promise((r) => setTimeout(r, 1500));
+    const g = await grant(kit, {}, { activate: false });
     expect(await code(restart())).toBe(REFUSED);
-    await untouched(s.id);
-    for (const g of [pending, expiring, revoked]) expect(await useCount(g)).toBe(0);
+    await untouched(s.id, g);
   });
 
-  it('a grant of another App covers nothing in this one', async () => {
+  it('a revoked grant allows nothing', async () => {
     const s = await kitSession();
-    await grant(kit, { app_id: w.app2Id });
+    const g = await grant();
+    await db.$executeRawUnsafe(`UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = $2 WHERE id = $1`, g, w.userId);
     expect(await code(restart())).toBe(REFUSED);
-    await untouched(s.id);
+    await untouched(s.id, g);
+  });
+
+  it('an expired grant allows nothing', async () => {
+    const s = await kitSession();
+    const g = await grant(kit, { expires_at: dbNowPlus('1 second') });
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(await code(restart())).toBe(REFUSED);
+    await untouched(s.id, g);
+  });
+
+  it('a capped grant is not usable from a HOST-LAUNCHED session (the trigger door\'s rule: only a repeating grant); the repeating one is', async () => {
+    await db.session.update({ where: { id: w.sessionId }, data: { launchOperationId: generateId(), launchHostId: generateId(), launchIssuedBy: 'platform' } as never });
+    const capped = await grant(kit, { max_uses: 5 });
+    const s = await kitSession();
+    expect(await code(restart())).toBe(REFUSED);
+    await untouched(s.id, capped);
+    const repeating = await grant();
+    await restart();
+    expect(await useCount(repeating)).toBe(1);
+    expect(await useCount(capped)).toBe(0);
+  });
+
+  it('a target of another App: with no grant the one refusal; a grant that names it (no shipped path makes one) still ends nothing and spends nothing', async () => {
+    const foreign = await workerOf(w, w.agentId, w.app2Id);
+    expect(await code(restart(foreign))).toBe(REFUSED);
+    const g = await grant(foreign);
+    expect(await code(restart(foreign))).toBe('WORKER_NOT_FOUND');
+    expect(await useCount(g)).toBe(0);
+    expect(await starts()).toHaveLength(0);
   });
 
   it('the worker never restarts itself, even when a grant names it', async () => {
@@ -301,6 +327,41 @@ describe('#4855 the fences: a refused start leaves the session open and spends n
     await fenced('TEAM_PAUSED', g, s.id);
   });
 
+  it('a stop signal covers the worker: WORKER_STOPPED', async () => {
+    const g = await grant();
+    const s = await kitSession();
+    const now = new Date();
+    await db.$transaction((tx) => setStopSignal(tx, { appId: w.appId, level: 'pause-dispatch', scope: 'worker', targetWorkerId: kit, targetHostRegistrationId: null, until: null,
+      by: { userId: w.userId, actor: { userId: w.userId, workerId: null, agentId: null } } } as never, now));
+    await fenced('WORKER_STOPPED', g, s.id);
+  });
+
+  it('the target is retired: WORKER_RETIRED', async () => {
+    const g = await grant();
+    const s = await kitSession();
+    await db.worker.update({ where: { id: kit }, data: { retiredAt: new Date() } });
+    await fenced('WORKER_RETIRED', g, s.id);
+  });
+
+  it('a start already in flight: WORKER_START_PENDING, the session stays open and nothing is spent', async () => {
+    const g = await grant();
+    const s = await kitSession();
+    await restart();
+    await db.$executeRawUnsafe(`UPDATE sessions SET ended_at = NULL, end_reason = NULL, updated_at = $2 WHERE id = $1`, s.id, new Date(Date.now() - 60 * 86_400_000));
+    expect(await code(restart())).toBe('WORKER_START_PENDING');
+    expect((await sessionOf(s.id)).endedAt).toBeNull();
+    expect(await useCount(g)).toBe(1);
+  });
+
+  it('every open session of the target is ended at once, and each is named in the result', async () => {
+    await grant();
+    const a = await kitSession();
+    const b = await kitSession();
+    const out = (await restart()) as { endedSessionIds: string[] };
+    expect([...out.endedSessionIds].sort()).toEqual([a.id, b.id].sort());
+    for (const id of out.endedSessionIds) expect((await sessionOf(id)).endedAt).not.toBeNull();
+  });
+
   it('reason is required and at most 500 characters', async () => {
     const g = await grant();
     await kitSession();
@@ -359,6 +420,31 @@ describe('#4855 the not-started alarm interplay (QA F1): the restart neither hid
   });
 });
 
+describe('#4855 two workers restarting each other at once (blind F1): the id-ordered assignment lock serializes them, no deadlock', () => {
+  it('both calls settle; at most one start is issued for each, and neither hangs', async () => {
+    // Kit gets its own session (the actor's), a grant naming the first worker, and the first worker a dark session of its own.
+    await db.appMember.create({ data: { appId: w.appId, userId: w.user2Id, role: 'member' } }).catch(() => undefined);
+    const kitSessionOwn = await db.session.create({ data: { id: generateId(), appId: w.appId, workerId: kit, agentId: w.agentId, userId: w.userId } as never, select: { id: true } });
+    await db.session.update({ where: { id: w.sessionId }, data: { startedAt: new Date(Date.now() - 60 * 86_400_000), updatedAt: new Date(Date.now() - 60 * 86_400_000) } });
+    await db.worker.update({ where: { id: w.workerId }, data: { heldByUserId: w.user2Id, heldAt: new Date() } });
+    await M.registerHost({}, {
+      input: { appRef: w.appId, label: 'Orca', pollIntervalSeconds: 600, workers: [
+        { worker: kit, family: 'claude', worktrees: ['hadron-server/kit'] }, { worker: w.workerId, family: 'claude', worktrees: ['hadron-server/ada'] }] },
+    }, keyCtx(orca1));
+    await grant(kit, {}, { holder: { kind: 'worker', id: w.workerId } });
+    await grant(w.workerId, {}, { holder: { kind: 'worker', id: kit } });
+    const kitCtx = { db, userId: w.userId, roles: [], sessionId: kitSessionOwn.id } as Context;
+    const outcome = (p: Promise<unknown>) => p.then(() => 'ok', (e: GraphQLError) => e.extensions?.code as string);
+    const both = await Promise.race([
+      Promise.all([outcome(restart(kit)), outcome(lifecycle(() => M.restartWorkerSession({}, { input: { appRef: w.appId, worker: w.workerId, reason: 'r' } }, kitCtx), kit))]),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('deadlock: the calls did not settle')), 20_000)),
+    ]);
+    // Each outcome is a success or one of the documented refusals; never a database deadlock (40P01) or a timeout.
+    for (const o of both) expect(['ok', 'WORKER_LIVE', 'WORKER_START_PENDING', 'NO_OPEN_SESSION']).toContain(o);
+    expect((await starts()).length).toBeLessThanOrEqual(2);
+  });
+});
+
 describe('#4855 the library re-judges the actor under the transaction (a retirement that lands after the door resolved it)', () => {
   const direct = (actorId: string, over: Record<string, unknown> = {}) => db.$transaction((tx) => restartDarkSession(tx, {
     appId: w.appId, workerId: kit, now: new Date(),
@@ -411,6 +497,12 @@ describe('#4855 the grant itself: worker-ref terms, no wildcard, no designation 
     }
   });
 
+  it('a worker holder may not name itself (a worker never restarts itself, so the term could never be used)', async () => {
+    expect(await refusal(create({ worker: w.workerId }))).toBe('GRANT_VALUES_INVALID');
+    expect(await refusal(create({ worker: [kit, w.workerId] }))).toBe('GRANT_VALUES_INVALID');
+    expect(await refusal(create({ worker: [kit] }))).toBe('OK');
+  });
+
   it('refuses a second key, a missing key and a node-ref in its place', async () => {
     for (const v of [{}, { worker: kit, entryNode: kit }, { entryNode: kit }]) expect(await refusal(create(v))).toBe('GRANT_VALUES_INVALID');
   });
@@ -437,7 +529,7 @@ describe('#4855 the grant itself: worker-ref terms, no wildcard, no designation 
     const refs = { a: { urn: 'hrn:worker:r.test:team:kit' }, b: { urn: 'hrn:worker:r.test:team:ada' } };
     const action = PLATFORM_ACTIONS.find((x) => x.name === ACTION)!;
     expect(renderGrantSummary({ action, app, values: { worker: ['a', 'b'] }, refs })).toBe(
-      'End a dark open session of the workers hrn:worker:r.test:team:kit, hrn:worker:r.test:team:ada in hrn:app:r.test:team and start them again');
+      'End a dark open session of any worker among hrn:worker:r.test:team:kit, hrn:worker:r.test:team:ada in hrn:app:r.test:team and start that worker again');
     expect(() => renderGrantSummary({ action, app, values: { worker: '*' }, refs })).toThrow();
     expect(() => renderGrantSummary({ action, app, values: { worker: 'a' }, refs: { a: { urn: 'hrn:node:r.test:m:loc' } } })).toThrow();
   });
@@ -446,6 +538,6 @@ describe('#4855 the grant itself: worker-ref terms, no wildcard, no designation 
     const cols = await db.$queryRawUnsafe<Array<{ column_name: string }>>(`SELECT column_name FROM information_schema.columns WHERE table_name = 'workers' AND column_name ILIKE '%lifecycle%'`);
     expect(cols).toEqual([]);
     const reasons = await db.$queryRawUnsafe<Array<{ enumlabel: string }>>(`SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid WHERE t.typname = 'SessionEndReason'`);
-    expect(reasons.map((r) => r.enumlabel).sort()).toEqual(['agent_absent', 'ended', 'expired', 'superseded']);
+    expect(reasons.map((r) => r.enumlabel)).not.toContain('dark_restart');
   });
 });

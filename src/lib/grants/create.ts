@@ -250,12 +250,15 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   }
 
   // #4855: a worker-ref names a live worker of THIS App. A missing, other-App or retired worker is the same refusal as a malformed id
-  // (no existence oracle, no cross-App naming); the worker rows are locked FOR SHARE so a retirement that comes next waits and the
-  // grant's holder-gone and worker-gone paths see the row (an id the grant names is never a worker the App no longer has).
+  // (no existence oracle, no cross-App naming). The worker rows are locked FOR SHARE, so a retirement that comes next waits for this
+  // insert; a worker retired later is not reached by the grant (workersReachedByGrant) and the door re-reads the actor under its own lock.
+  // A worker holder may not name itself (a worker never restarts itself, so that term could never be used).
   for (const p of declared) {
     if (p.type !== 'worker-ref') continue;
     const v = (values as Record<string, unknown>)[p.name];
     const ids = [...new Set((Array.isArray(v) ? v : [v]).filter((x): x is string => typeof x === 'string'))];
+    if (ids.length === 0) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    if (args.holder.kind === 'worker' && ids.includes(args.holder.id)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
     const rows = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM workers WHERE id IN (${Prisma.join(ids)}) AND app_id = ${appId} AND retired_at IS NULL ORDER BY id FOR SHARE`;
     if (rows.length !== ids.length) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);

@@ -502,7 +502,7 @@ describe('#4855: signing a worker.session.restart grant', () => {
     const p = await prove(req.id, admin);
     expect(p.json.canSign).toBe(true);
     const urn = (slug: string) => `hrn:worker:${appUrn.replace(/^hrn:app:/, '')}:${slug}`;
-    expect(p.json.view.summary).toBe(`End a dark open session of the workers ${urn('gs-kit')}, ${urn('gs-worker')} in ${appUrn} and start them again`);
+    expect(p.json.view.summary).toBe(`End a dark open session of any worker among ${urn('gs-kit')}, ${urn('gs-worker')} in ${appUrn} and start that worker again`);
     const r = await post(req.id, 'complete', signingBody(p, admin), p.cookie);
     expect(r.status).toBe(200);
     expect((await grantRow(id))!.activated_at).not.toBeNull();

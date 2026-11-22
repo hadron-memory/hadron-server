@@ -27,7 +27,7 @@
  */
 
 import { GraphQLError } from 'graphql';
-import type { Prisma } from '../../generated/prisma/index.js';
+import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { coverableAction, findCoveringGrants, spendGrant } from '../grants/cover.js';
 import { sessionMayUseGrant } from '../grants/triggerGrant.js';
 import { fenceHostDecision, insertWorkerStart, LaunchRefusal, lockStartableWorker, planStart } from './launch.js';
@@ -48,6 +48,21 @@ export function restartGrantRequired(): GraphQLError {
 }
 
 /**
+ * Whether a live grant covers this actor's restart of `workerId` (unlocked, read-only; the door's gate before it takes any lock, and the
+ * library's own first judgement). The actor is the worker itself, never its role agent (the action's reach).
+ */
+export async function restartGrantHeld(
+  db: Prisma.TransactionClient | PrismaClient,
+  a: { appId: string; workerId: string; actorWorkerId: string; hostLaunched: boolean },
+): Promise<boolean> {
+  if (a.actorWorkerId === a.workerId) return false;
+  const found = await findCoveringGrants(db, {
+    appId: a.appId, action: coverableAction('worker.session.restart'), workerId: a.actorWorkerId, values: { worker: a.workerId }, order: 'CAPPED_FIRST',
+  });
+  return found.some((g) => sessionMayUseGrant(g.maxUses, a.hostLaunched));
+}
+
+/**
  * End `workerId`'s open sessions and issue its start, in the caller's transaction (which holds the authority anchors, the stop fence and the
  * target's assignment lock). Throws {@link restartGrantRequired} (authority, before anything of the target is read) or {@link LaunchRefusal}
  * (`WORKER_NOT_FOUND`, `WORKER_RETIRED`, `WORKER_NOT_HELD`, `WORKER_LIVE`, `WORKER_START_PENDING`, `NO_OPEN_SESSION`, `NO_LIVE_HOST`), which
@@ -65,10 +80,10 @@ export async function restartDarkSession(
     SELECT app_id, retired_at FROM workers WHERE id = ${a.actor.workerId} FOR SHARE`;
   if (!me || me.app_id !== a.appId || me.retired_at !== null || a.actor.workerId === a.workerId) throw restartGrantRequired();
   // Authority first, unlocked: a caller whose grant does not cover this target learns nothing about the target.
-  const covers = (lock?: 'UPDATE') => findCoveringGrants(tx, {
-    appId: a.appId, action, workerId: a.actor.workerId, values: { worker: a.workerId }, order: 'CAPPED_FIRST', ...(lock ? { lock } : {}),
+  const covers = (lock: 'UPDATE') => findCoveringGrants(tx, {
+    appId: a.appId, action, workerId: a.actor.workerId, values: { worker: a.workerId }, order: 'CAPPED_FIRST', lock,
   });
-  if ((await covers()).filter((g) => sessionMayUseGrant(g.maxUses, a.actor.hostLaunched)).length === 0) throw restartGrantRequired();
+  if (!(await restartGrantHeld(tx, { appId: a.appId, workerId: a.workerId, actorWorkerId: a.actor.workerId, hostLaunched: a.actor.hostLaunched }))) throw restartGrantRequired();
 
   await startFence();
   // The live test, not the open one: a LIVE session is never dark and is refused here; a quiet open one is the case.
@@ -81,7 +96,7 @@ export async function restartDarkSession(
   if (open.length === 0) throw new LaunchRefusal('NO_OPEN_SESSION', 'This worker has no open session, so there is nothing to restart.');
   // The host and settings are decided BEFORE anything is written: no live host lists the worker, nothing is ended and nothing is spent.
   const task = await tx.agentTask.findFirst({
-    where: { assigneeWorkerId: a.workerId, status: { in: ['pending', 'started'] } },
+    where: { appId: a.appId, assigneeWorkerId: a.workerId, status: { in: ['pending', 'started'] } },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     select: { id: true },
   });

@@ -247,14 +247,13 @@ async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: GrantRo
       // #4855: each worker the grant names shows as its canonical worker URN (the App's root and slug, the worker's stored slug). A worker
       // that is gone or of another App makes the sentence unsignable, never a guess. Retired workers still resolve (a name is never freed).
       const value = values[p.name];
+      let app: ReturnType<typeof parseUrnV2>;
+      try { app = parseUrnV2(appUrn); } catch { return null; }
       for (const id of Array.isArray(value) ? value : [value]) {
         if (typeof id !== 'string' || Object.prototype.hasOwnProperty.call(refs, id)) continue;
-        const w = await tx.worker.findFirst({ where: { id, appId: g.app_id }, select: { slug: true } });
-        if (!w) return null;
-        try {
-          const app = parseUrnV2(appUrn);
-          refs[id] = { urn: composeWorkerUrnV2(app.root, app.segments[0]!, w.slug) };
-        } catch { return null; }
+        const named = await tx.worker.findFirst({ where: { id, appId: g.app_id }, select: { slug: true } });
+        if (!named) return null;
+        try { refs[id] = { urn: composeWorkerUrnV2(app.root, app.segments[0]!, named.slug) }; } catch { return null; }
       }
       continue;
     }

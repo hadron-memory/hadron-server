@@ -123,7 +123,7 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
   {
     name: 'worker.session.restart', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'APP_MANAGER',
     parameters: [{ name: 'worker', type: 'worker-ref', refusesWildcard: true }],
-    summaryTemplate: 'End a dark open session of the workers {worker} in {app} and start them again',
+    summaryTemplate: 'End a dark open session of any worker among {worker} in {app} and start that worker again',
     reach: 'WORKER', listParameters: ['worker'],
   },
   // #4000: complete signed terms, including the HTTPS path and header the signer approves.

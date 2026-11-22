@@ -12645,8 +12645,8 @@ export const typeDefs = `#graphql
     (quiet is not dark, S4). The caller is a worker, through its own session, holding a live worker.session.restart grant
     that a person who manages the App signed and that names the target worker (no wildcard); every other caller, and a
     worker with no such grant for this target, gets the one refusal RESTART_GRANT_REQUIRED, before anything about the target
-    is read. reason is required (at most 500 characters): what was tried and why it is dark. A LIVE session is never dark
-    (WORKER_LIVE). Also refused, with nothing ended and no use of the grant spent: NO_OPEN_SESSION, WORKER_NOT_HELD,
+    is read (a caller who is no participant of the App gets APP_NOT_FOUND, as at every task door). reason is required (at most 500 characters): what was tried and why it is dark. A LIVE session is never dark
+    (WORKER_LIVE). Also refused, with nothing ended and no use of the grant spent: WORKER_NOT_FOUND (the target is gone), NO_OPEN_SESSION, WORKER_NOT_HELD,
     WORKER_RETIRED, WORKER_START_PENDING (a start is already in flight, so a restart and a fresh assignment cannot both
     launch the worker), NO_LIVE_HOST (no live host lists the worker with a worktree), TEAM_PAUSED, WORKER_STOPPED. The
     session is ended with endReason ended and no handoff; the start carries the worker's oldest open task, if any, and names
