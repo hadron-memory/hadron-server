@@ -30,6 +30,7 @@ import {
   isEmbeddingConfigured,
 } from '../../../lib/embedding/index.js';
 import { certifiedHybridRanking, hybridKeywordCandidates } from '../../../lib/retrieval/hybrid.js';
+import { vectorSearchTimeoutMs } from '../../../services/embedding/vectors.js';
 import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from '../../../lib/retrieval/defaultNodeTypes.js';
@@ -1810,7 +1811,8 @@ export const nodeQueries = {
       // for exactly the page (its filters ride in the ranking statement); a hybrid's vector leg reads to the keyword leg's
       // depth and the fusion is certified (#4779 P3-4, `hybridRanking` below).
       // Offset has no ceiling by design (#437: lowering it would silently return an earlier page); the work is
-      // bounded instead by ONE request-wide budget (VECTOR_SEARCH_TIMEOUT_MS, `rankUnderBudget`) and limit <= 200.
+      // bounded instead by ONE request-wide budget (VECTOR_SEARCH_TIMEOUT_MS: `vectorDeadlineAt` below, shared by every
+      // vector call of the request, #4779) and limit <= 200.
       // The KEYWORD leg keeps main's 2000 ceiling on its over-fetch (ruling 0150 lifted the cap for the vector leg only).
       const KEYWORD_FETCH_CAP = 2000;
       const fetchN = hasStructuredFilters ? Math.min(page * 5, KEYWORD_FETCH_CAP) : page;
@@ -1820,7 +1822,10 @@ export const nodeQueries = {
        * returns the true filtered ranking; when it had to stop early the flag is carried to the envelope
        * (`degraded: stopped_early`, plus `reason` when the page is empty), never a short page that looks complete.
        */
-      let vectorStoppedEarly = false;
+      // #4779 (BLIND P3-1): set by every cause of an incomplete vector/hybrid page: the work budget ran out, the offset+limit
+      // window was cut, a hybrid order could not be certified, or a page stayed short after its one re-ranking. Each surfaces
+      // as `stopped_early` (cor:api:090:04 Proposed: "whenever the page is incomplete").
+      let rankingIncomplete = false;
       /** #4779: whether the last vector leg run reported its ranking exhausted (nothing deeper to fetch). */
       let vectorExhausted = false;
       const runVector = async <T extends { nodeId: string; score: number }>(
@@ -1828,11 +1833,11 @@ export const nodeQueries = {
         depth: number = page,
       ): Promise<T[]> => {
         vectorExhausted = false;
-        return search(depth, (w) => { vectorExhausted = !!w.exhausted && !w.stoppedEarly; if (w.stoppedEarly) vectorStoppedEarly = true; });
+        return search(depth, (w) => { vectorExhausted = !!w.exhausted && !w.stoppedEarly; if (w.stoppedEarly) rankingIncomplete = true; });
       };
       /** The envelope's (reason, degraded) for a vector-ranked result that may have stopped early. */
       const stoppedEnvelope = (hitCount: number, degraded: string | null, builtReason: string | null = null): { reason: string | null; degraded: string | null } => {
-        if (!vectorStoppedEarly) return { reason: builtReason, degraded };
+        if (!rankingIncomplete) return { reason: builtReason, degraded };
         return { reason: hitCount === 0 ? 'stopped_early' : builtReason, degraded: [degraded, 'stopped_early'].filter(Boolean).join(',') };
       };
 
@@ -2122,6 +2127,9 @@ export const nodeQueries = {
       if (!qvec) {
         return { hits: [], passages: [], total: 0, reason: 'embedding_unavailable', degraded: null };
       }
+      // #4779 (BLIND P2-2, Bianca): ONE work budget for this request's vector work: the vector leg, a hybrid page's rank
+      // lookups and the one re-ranking all spend what is left of it (provider `deadlineAt`), never a fresh budget each.
+      const vectorDeadlineAt = Date.now() + vectorSearchTimeoutMs();
 
       // Chunk granularity (vector only) → passages, mirroring nodeSearch.
       // #1345 review (@codex P2): every structured node filter applies to the
@@ -2142,7 +2150,7 @@ export const nodeQueries = {
         // review, Codex): filter before paging so a floor drops sub-threshold
         // chunks rather than silently returning them.
         const rawChunks = await runVector((limit, onWindow) =>
-          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds, filter: sqlFilter, includeDeleted: !!f.includeDeleted, excludeNodeIds: inheritance.excludeNodeIds }),
+          provider.vectorSearchChunks({ db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, limit, onWindow, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds, filter: sqlFilter, includeDeleted: !!f.includeDeleted, excludeNodeIds: inheritance.excludeNodeIds, deadlineAt: vectorDeadlineAt }),
         );
         const scoredChunks = scoreFloor == null ? rawChunks : rawChunks.filter((c) => c.score >= scoreFloor);
         const candidateParentIds = [...new Set(scoredChunks.map((c) => c.nodeId))];
@@ -2181,7 +2189,7 @@ export const nodeQueries = {
         // #4779 (P3-1): a passage whose parent the hydration re-check dropped, leaving the page short of a ranking that was
         // not exhausted, is an incomplete page: flagged, never silently short.
         if (chunkHits.length < finalLimit && !vectorExhausted
-          && scoredChunks.slice(0, off + finalLimit).some((c) => !eligible.has(c.nodeId))) vectorStoppedEarly = true;
+          && scoredChunks.slice(0, off + finalLimit).some((c) => !eligible.has(c.nodeId))) rankingIncomplete = true;
         const pageParentIds = new Set(chunkHits.map((c) => c.nodeId));
         const parentById = new Map(parents.map((p) => [p.id, p]));
         // #1061 — chunk granularity returns passages rather than whole nodes,
@@ -2224,7 +2232,7 @@ export const nodeQueries = {
         return { hits: [], passages, total: null, reason: chunkEnv.reason, degraded: chunkEnv.degraded };
       }
 
-      const vectorOpts = { db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds, filter: sqlFilter, includeDeleted: !!f.includeDeleted, excludeNodeIds: inheritance.excludeNodeIds };
+      const vectorOpts = { db: ctx.db, queryEmbedding: qvec, memoryIds: indexedIds, contentScope, hasOpenThreads: f.hasOpenThreads, syntheticCommentMemoryIds, filter: sqlFilter, includeDeleted: !!f.includeDeleted, excludeNodeIds: inheritance.excludeNodeIds, deadlineAt: vectorDeadlineAt };
 
       /**
        * #4779 (P3-4) — the hybrid ranking for a page of `pageN` nodes, CERTIFIED (`certifiedHybridRanking`): both legs are
@@ -2244,6 +2252,10 @@ export const nodeQueries = {
         const ranks = new Map<string, number>();
         const looked = new Set<string>();
         for (;;) {
+          // BLIND P2-1 (Bianca): a short keyword leg IS an exhausted one. `lexicalSearch` is one `LIMIT dk OFFSET 0`
+          // statement with no cap, timeout or post-filter of its own (postgres.ts), and `hybridKeywordCandidates` only
+          // swaps the query (a literal fallback, itself one such statement; true hybrid never relaxes), so fewer than
+          // `dk` rows means nothing deeper matches. A lexical failure throws; it never comes back short.
           const kwLeg = { ids: kwHits.map((h) => h.nodeId), exhausted: kwHits.length < dk };
           const r = certifiedHybridRanking(kwLeg, vecLeg, pageN, ranks, looked);
           if (r.certified) return { fused: r.ranked, vecHits, exhausted: kwLeg.exhausted && vecLeg.exhausted };
@@ -2258,7 +2270,7 @@ export const nodeQueries = {
             kwHits = await runKeywordRanked({ limit: dk });
             continue;
           }
-          vectorStoppedEarly = true; // the order up to the page could not be certified inside the budget / ceiling
+          rankingIncomplete = true; // the order up to the page could not be certified inside the budget / ceiling
           return { fused: r.ranked, vecHits, exhausted: false };
         }
       };
@@ -2292,9 +2304,9 @@ export const nodeQueries = {
         r.stats.dropped > 0 && !r.exhausted && r.stats.pageCount < finalLimit;
       let attempt = await rankedPage(page);
       if (shortOf(attempt)) {
-        vectorStoppedEarly = false; // the second attempt's ranking replaces the first's, flags included
+        rankingIncomplete = false; // the second attempt's ranking replaces the first's, flags included
         attempt = await rankedPage(page + attempt.stats.dropped);
-        if (shortOf(attempt)) vectorStoppedEarly = true;
+        if (shortOf(attempt)) rankingIncomplete = true;
       }
       const env = stoppedEnvelope(attempt.built.hits.length, attempt.built.degraded, attempt.built.reason);
       return { ...attempt.built, reason: env.reason, degraded: env.degraded };

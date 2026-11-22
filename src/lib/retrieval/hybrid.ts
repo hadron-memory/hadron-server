@@ -67,6 +67,13 @@ export interface HybridLeg { ids: ReadonlyArray<string>; exhausted: boolean }
  *
  * `vecLookup` lists the keyword hits whose vector term is still unknown (look them up, then call again); `kwUncertain` says
  * the keyword leg could still change the order (widen it).
+ *
+ * Limits (BLIND P3-2, P3-5 on #4928):
+ * - "Certified" is relative to the legs as given. A vector leg served by the approximate HNSW walk (rankUnderBudget) is the
+ *   index's order, not the exact one; certification then holds for that order, the approximation ruling 0150 accepts for
+ *   any ANN page.
+ * - A certified page's node can still carry an unknown term (it is ordered by bounds that leave no doubt): its `score` is
+ *   then the known part, and its `matchedBy` names only the legs it was seen in.
  */
 export function certifiedHybridRanking(
   kw: HybridLeg,

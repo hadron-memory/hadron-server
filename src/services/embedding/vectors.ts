@@ -459,14 +459,19 @@ async function setIterativeScan(tx: Prisma.TransactionClient): Promise<void> {
 /**
  * The request-wide budget clock: every statement gets what is LEFT of ONE budget, so the env variable bounds the search,
  * not each statement of a loop. Past the deadline it throws the statement-timeout shape, which is the early stop.
+ *
+ * #4779 (BLIND P2-2, Bianca): `deadlineAt` (epoch ms) is the REQUEST's deadline when one request makes several vector
+ * calls (a hybrid page's vector leg, its rank lookups and a re-ranking all share it, set once by the resolver); a call
+ * never gets more than what is left of it, so one budget bounds the whole request, not each call.
  */
-function budgetClock(budgetMs: number): () => number {
-  const deadline = Date.now() + budgetMs;
-  return () => {
+function budgetClock(budgetMs: number, deadlineAt?: number): { left: () => number; txMs: number } {
+  const deadline = deadlineAt == null ? Date.now() + budgetMs : Math.min(Date.now() + budgetMs, deadlineAt);
+  const left = () => {
     const ms = deadline - Date.now();
     if (ms < 1) throw Object.assign(new Error('canceling statement due to statement timeout'), { meta: { code: '57014' } });
     return Math.trunc(ms);
   };
+  return { left, txMs: Math.max(1, Math.trunc(deadline - Date.now())) };
 }
 
 /**
@@ -474,17 +479,17 @@ function budgetClock(budgetMs: number): () => number {
  * scope's exact statements) under the same work budget, in one transaction. A timeout is the early stop: `stopped`.
  */
 async function oneStatementUnderBudget<R>(
-  db: PrismaClient, query: (tx: Prisma.TransactionClient) => Promise<R[]>,
+  db: PrismaClient, query: (tx: Prisma.TransactionClient) => Promise<R[]>, deadlineAt?: number,
 ): Promise<{ rows: R[]; stopped: boolean }> {
-  const budgetMs = vectorSearchTimeoutMs();
-  const left = budgetClock(budgetMs);
   let phase: 'waiting' | 'running' = 'waiting';
   try {
+    const { left, txMs } = budgetClock(vectorSearchTimeoutMs(), deadlineAt);
+    left(); // a request whose deadline already passed stops here, before taking a connection
     const rows = await db.$transaction(async (tx) => {
       phase = 'running';
       await setVectorStatement(tx, left(), 40);
       return query(tx);
-    }, vectorTxOptions(budgetMs));
+    }, vectorTxOptions(txMs));
     return { rows, stopped: false };
   } catch (e) {
     if (!isStatementTimeout(e, phase)) throw e;
@@ -544,14 +549,16 @@ export async function rankUnderBudget<R>(
     distanceOf: (r: R) => number;
     /** The distance of the `need`-th distinct result in rows already in `tieOrder` (undefined when fewer). */
     pageEdge: (sorted: R[], need: number) => number | undefined;
+    /** #4779 (BLIND P2-2): the request's deadline (see budgetClock). */
+    deadlineAt?: number;
   },
 ): Promise<{ rows: R[]; exhausted: boolean; stopped: boolean }> {
   let best: R[] = [];
   const iterative = await iterativeScanSupported(db);
-  const budgetMs = vectorSearchTimeoutMs();
-  const left = budgetClock(budgetMs);
   let phase: 'waiting' | 'running' = 'waiting';
   try {
+    const { left, txMs } = budgetClock(vectorSearchTimeoutMs(), o.deadlineAt);
+    left(); // a request whose deadline already passed stops here, before taking a connection
     return await db.$transaction(async (tx) => {
       phase = 'running';
       if (iterative) {
@@ -589,7 +596,7 @@ export async function rankUnderBudget<R>(
       await setVectorStatement(tx, left(), 40);
       best = await o.exact(tx);
       return { rows: best, exhausted: o.distinctCount(best) < o.need, stopped: false };
-    }, vectorTxOptions(budgetMs));
+    }, vectorTxOptions(txMs));
   } catch (e) {
     if (!isStatementTimeout(e, phase)) throw e;
     return { rows: best, exhausted: false, stopped: true };
@@ -632,6 +639,8 @@ export interface NodeVectorScope {
   filterSql?: Prisma.Sql;
   /** #1608 — content, comments or both (see vectorSearchNodes). Absent = ALL (no restriction). */
   scope?: 'CONTENT' | 'COMMENTS' | 'ALL';
+  /** #4779 (BLIND P2-2): the request's one deadline, epoch ms (see budgetClock). Absent = this call's own budget. */
+  deadlineAt?: number;
 }
 
 /**
@@ -685,7 +694,7 @@ export async function vectorRanksOf(
     SELECT node_id, rank FROM (
       SELECT node_id, ROW_NUMBER() OVER (ORDER BY distance ASC, node_id ASC)::int AS rank FROM best
     ) ranked
-    WHERE node_id IN (${Prisma.join(opts.nodeIds)})`);
+    WHERE node_id IN (${Prisma.join(opts.nodeIds)})`, opts.deadlineAt);
   return { ranks: new Map(rows.map((r) => [r.node_id, Number(r.rank)])), stopped };
 }
 
@@ -726,7 +735,7 @@ export async function vectorSearchNodes(
       ${eligibleFrom}
       GROUP BY ne.node_id
       ORDER BY distance ASC, ne.node_id ASC
-      LIMIT ${kAsk}`);
+      LIMIT ${kAsk}`, opts.deadlineAt);
     // Exact ranking, but a LIMITed prefix: exhausted only when it came back
     // short (#1674 review, Jane P2-3). A caller post-filtering the page widens
     // k and re-asks.
@@ -737,9 +746,11 @@ export async function vectorSearchNodes(
   type NodeRow = { node_id: string; distance: number };
   const distinctNodes = (rows: NodeRow[]) => new Set(rows.map((r) => r.node_id)).size;
   const ranked = await rankUnderBudget<NodeRow>(db, {
+    deadlineAt: opts.deadlineAt,
     need: kAsk,
     k0: Math.max(kAsk, kAsk * (opts.candidateFactor ?? 10)),
     distinctCount: distinctNodes,
+    // Must match the exact statement's `ORDER BY distance ASC, node_id ASC` below (BLIND P3-7: keep the two in step).
     tieOrder: (a, b) => Number(a.distance) - Number(b.distance) || (a.node_id < b.node_id ? -1 : a.node_id > b.node_id ? 1 : 0),
     distanceOf: (r) => Number(r.distance),
     // A node's best vector is its first appearance in total order: the `need`-th distinct node's distance.
@@ -810,6 +821,8 @@ export async function vectorSearchChunks(
     filterSql?: Prisma.Sql;
     /** #1608 — content, comments or both; COMMENTS ranks exactly. Absent = ALL. */
     scope?: 'CONTENT' | 'COMMENTS' | 'ALL';
+    /** #4779 (BLIND P2-2): the request's one deadline (see budgetClock). */
+    deadlineAt?: number;
   },
 ): Promise<ChunkHit[]> {
   if (opts.memoryIds.length === 0) {
@@ -831,7 +844,7 @@ export async function vectorSearchChunks(
       JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${COMMENT_NOT_DELETED} AND n.node_type = 'comment'
       WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB} ${threadSql} ${opts.filterSql ?? Prisma.empty}
       ORDER BY distance ASC, ne.node_id ASC, ne.chunk_index ASC
-      LIMIT ${kAsk}`);
+      LIMIT ${kAsk}`, opts.deadlineAt);
     const cut = windowCut && rows.length > k;
     opts.onWindow?.({ exhausted: !stopped && !cut && rows.length < kAsk, stoppedEarly: stopped || cut });
     return rows.slice(0, k).map((r) => ({
@@ -847,9 +860,11 @@ export async function vectorSearchChunks(
     WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB} ${threadSql} ${opts.filterSql ?? Prisma.empty}`;
   type ChunkRow = { node_id: string; chunk_index: number; char_start: number; char_end: number; chunk_text: string; distance: number };
   const ranked = await rankUnderBudget<ChunkRow>(db, {
+    deadlineAt: opts.deadlineAt,
     need: kAsk,
     k0: kAsk,
     distinctCount: (rows) => rows.length,
+    // Must match the exact statement's `ORDER BY distance ASC, node_id ASC, chunk_index ASC` below (BLIND P3-7).
     tieOrder: (a, b) => Number(a.distance) - Number(b.distance)
       || (a.node_id < b.node_id ? -1 : a.node_id > b.node_id ? 1 : 0)
       || Number(a.chunk_index) - Number(b.chunk_index),

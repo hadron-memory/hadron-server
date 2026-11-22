@@ -13,11 +13,11 @@ import { db } from '../../integrations/db/client.js';
 import { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 import { cleanDb, createDbOrgAndGraph } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
-import * as vectors from './vectors.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { getRetrievalProvider } from '../../lib/retrieval/postgres.js';
 import {
-  isStatementTimeout, setIterativeScanSupportForTests, setVectorSmallScopeRowsForTests, setVectorWindowRowsMaxForTests,
-  vectorSearchChunks, vectorSearchNodes,
+  isStatementTimeout, setIterativeScanSupportForTests, setVectorAnnMaxKForTests, setVectorSmallScopeRowsForTests,
+  setVectorWindowRowsMaxForTests, vectorSearchChunks, vectorSearchNodes,
 } from './vectors.js';
 
 const DIM = 768;
@@ -132,7 +132,7 @@ afterEach(() => {
   setIterativeScanSupportForTests(null);
   setVectorSmallScopeRowsForTests(null);
   setVectorWindowRowsMaxForTests(null);
-  (vectors as any).setVectorAnnMaxKForTests?.(null);
+  setVectorAnnMaxKForTests(null);
   delete process.env.VECTOR_SEARCH_TIMEOUT_MS;
 });
 afterAll(() => { setIterativeScanSupportForTests(null); });
@@ -221,7 +221,7 @@ describe('#4779 Riana P3-5: the ANN ceiling boundary', () => {
   it('k equal to the ceiling is still walked; only k past it hands over to the exact statement', async () => {
     setIterativeScanSupportForTests(true);
     setVectorSmallScopeRowsForTests(1);
-    (vectors as any).setVectorAnnMaxKForTests(32);
+    setVectorAnnMaxKForTests(32);
     const r = recorder();
     // need 2 distinct nodes, k0 = 2: k = 2, 8, 32 (== ceiling, walked), then 128 > ceiling => exact.
     const hits = await vectorSearchNodes(r.handle, { memoryIds: [wideMem], queryEmbedding: q, limit: 2, candidateFactor: 1 });
@@ -295,5 +295,15 @@ describe('#4779 Byron round 4: a deep page whose exact statement times out', () 
     expect(hits).toEqual([]);
     expect(windows.at(-1)).toMatchObject({ stoppedEarly: true, exhausted: false });
     expect(r.seen.some(isAnn)).toBe(false);
+  }, 60_000);
+});
+
+describe('#4779 BLIND P2-3: provider rank lookup and page share the content-scope default', () => {
+  it('with content and comments interleaved, the default (CONTENT) ranks match vectorSearch\'s positions and omit comments', async () => {
+    const provider = getRetrievalProvider();
+    const page = await provider.vectorSearch({ db, queryEmbedding: q, memoryIds: [winMem], limit: 100 });
+    const { ranks } = await provider.vectorRanks({ db, queryEmbedding: q, memoryIds: [winMem], nodeIds: [...page.map((h) => h.nodeId), ...winCommentIds] });
+    expect(page).toHaveLength(6);
+    expect(Object.fromEntries(ranks)).toEqual(Object.fromEntries(page.map((h, i) => [h.nodeId, i + 1])));
   }, 60_000);
 });

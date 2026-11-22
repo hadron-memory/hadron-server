@@ -17,7 +17,7 @@ import type { EmbeddingClient } from '../../../lib/embedding/index.js';
 import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../../../lib/embedding/index.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { reciprocalRankFusionScored } from '../../../lib/rrf.js';
-import * as hybrid from '../../../lib/retrieval/hybrid.js';
+import { certifiedHybridRanking } from '../../../lib/retrieval/hybrid.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -26,7 +26,7 @@ const DIM = 768;
 const q = () => { const v = new Array(DIM).fill(0); v[1] = 1; return v; };
 const stub: EmbeddingClient = { provider: 'test', model: 'stub-model', dim: DIM, async embed(texts: string[]) { return texts.map(() => q()); } };
 const provider = getRetrievalProvider();
-const certify = (hybrid as any).certifiedHybridRanking as undefined | typeof import('../../../lib/retrieval/hybrid.js')['certifiedHybridRanking'];
+const certify = certifiedHybridRanking;
 
 let mem: string;
 let savedUrl: string | undefined;
@@ -70,49 +70,49 @@ afterAll(() => {
 
 describe('#4779 P3-4: certifiedHybridRanking (unit)', () => {
   it('legs read 2 deep cannot certify page 2 (X, 3rd in both, may outrank both 1st-rank nodes)', () => {
-    const r = certify!({ ids: ['C', 'D'], exhausted: false }, { ids: ['A', 'B'], exhausted: false }, 2);
+    const r = certify({ ids: ['C', 'D'], exhausted: false }, { ids: ['A', 'B'], exhausted: false }, 2);
     expect(r.certified).toBe(false);
     expect(r.kwUncertain).toBe(true);
     expect(r.vecLookup.sort()).toEqual(['C', 'D']);
   });
   it('fewer candidates than the page, with legs not exhausted, is never certified (an unseen node may fill the slot)', () => {
     // P (1st in both, 2/61) beats any unseen node (at most 1/62 + 1/62), but page slot 2 is unknown.
-    const r = certify!({ ids: ['P'], exhausted: false }, { ids: ['P'], exhausted: false }, 2);
+    const r = certify({ ids: ['P'], exhausted: false }, { ids: ['P'], exhausted: false }, 2);
     expect(r.certified).toBe(false);
-    expect(certify!({ ids: ['P'], exhausted: true }, { ids: ['P'], exhausted: true }, 2).certified).toBe(true);
+    expect(certify({ ids: ['P'], exhausted: true }, { ids: ['P'], exhausted: true }, 2).certified).toBe(true);
   });
   it('LOCAL P3-1 (Bridget): a page row tied with a later inexact row\'s upper bound does not certify (the tie key could put that row first)', () => {
     // I: keyword rank 2 + vector rank 1 = 1/62 + 1/61 (exact). J: keyword rank 1, vector term unknown (vector leg 1 deep,
     // not exhausted): 1/61, at most 1/61 + 1/62 — EXACTLY I's score. If J's vector rank is 2 the two tie, and the
     // keyword-first tie key (J is keyword rank 1) puts J first: page 1 is not certain.
-    const r = certify!({ ids: ['J', 'I'], exhausted: true }, { ids: ['I'], exhausted: false }, 1);
+    const r = certify({ ids: ['J', 'I'], exhausted: true }, { ids: ['I'], exhausted: false }, 1);
     expect(r.ranked.map((x) => x.nodeId)).toEqual(['I', 'J']);
     expect(r.ranked[0]!.score).toBe(1 / 61 + 1 / 62); // the tie is exact in floating point, not approximate
     expect(r.certified).toBe(false);
     // Once J's vector rank is known, the order is exact and the page certifies.
-    expect(certify!({ ids: ['J', 'I'], exhausted: true }, { ids: ['I'], exhausted: false }, 1, new Map([['J', 5]]), new Set(['J'])).certified).toBe(true);
+    expect(certify({ ids: ['J', 'I'], exhausted: true }, { ids: ['I'], exhausted: false }, 1, new Map([['J', 5]]), new Set(['J'])).certified).toBe(true);
   });
   it('LOCAL P3-2 (Bridget): with every seen row exact, the UNSEEN-node bound alone refuses a page a not-exhausted leg could still change', () => {
     // Vector leg empty but not exhausted (e.g. stopped by the budget); keyword hits A, B looked up with NO eligible vector
     // (term exactly 0). Every seen row is exact, yet an unseen vector-only node at vector rank 1 scores 1/61 > B's 1/62.
-    const r = certify!({ ids: ['A', 'B'], exhausted: true }, { ids: [], exhausted: false }, 2, new Map(), new Set(['A', 'B']));
+    const r = certify({ ids: ['A', 'B'], exhausted: true }, { ids: [], exhausted: false }, 2, new Map(), new Set(['A', 'B']));
     expect(r.certified).toBe(false);
     // The vector leg exhausted (truly empty): nothing unseen, so the page is exact.
-    expect(certify!({ ids: ['A', 'B'], exhausted: true }, { ids: [], exhausted: true }, 2).certified).toBe(true);
+    expect(certify({ ids: ['A', 'B'], exhausted: true }, { ids: [], exhausted: true }, 2).certified).toBe(true);
   });
   it('exhausted legs are exact: certified, in RRF order with keyword-first ties', () => {
-    const r = certify!({ ids: KW, exhausted: true }, { ids: VEC, exhausted: true }, 5);
+    const r = certify({ ids: KW, exhausted: true }, { ids: VEC, exhausted: true }, 5);
     expect(r.certified).toBe(true);
     expect(r.ranked.map((x) => x.nodeId)).toEqual(trueOrder());
   });
   it('a looked-up vector rank makes the keyword term-only node exact', () => {
     // K leg exhausted ['C']; V leg ['A','B'] (not exhausted). C's vector rank looked up as 7: score 1/61 + 1/67.
-    const r = certify!({ ids: ['C'], exhausted: true }, { ids: ['A', 'B'], exhausted: false }, 1, new Map([['C', 7]]), new Set(['C']));
+    const r = certify({ ids: ['C'], exhausted: true }, { ids: ['A', 'B'], exhausted: false }, 1, new Map([['C', 7]]), new Set(['C']));
     expect(r.ranked[0]).toMatchObject({ nodeId: 'C', score: 1 / 61 + 1 / 67 });
     expect(r.certified).toBe(true);
   });
   it('looked up and absent means no eligible vector: a term of exactly 0', () => {
-    const r = certify!({ ids: ['C'], exhausted: true }, { ids: ['A'], exhausted: false }, 1, new Map(), new Set(['C']));
+    const r = certify({ ids: ['C'], exhausted: true }, { ids: ['A'], exhausted: false }, 1, new Map(), new Set(['C']));
     expect(r.ranked.find((x) => x.nodeId === 'C')!.score).toBe(1 / 61);
   });
 });
@@ -176,6 +176,53 @@ describe('#4779 SEC10 P2-1 (Rook): the vector rank lookup ranks only the eligibl
     try {
       expect(await ranksOf({ filter: { locPrefix: 'n-' } }, ['A', 'B'])).toEqual({ A: null, B: 1 });
     } finally { await db.node.update({ where: { id: id.A! }, data: { deletedAt: null } }); }
+  }, 60_000);
+});
+
+describe('#4779 BLIND P2-3 (Bianca): the rank lookup and the page ranking share one eligibility', () => {
+  for (const [name, extra] of [
+    ['default scope', {}],
+    ['ALL scope', { contentScope: 'ALL' }],
+    ['filter + exclusions', { filter: { locPrefix: 'n-' }, excludeNodeIds: [] as string[], includeDeleted: false }],
+  ] as const) {
+    it(`${name}: every node's looked-up rank is its position in vectorSearch`, async () => {
+      const opts = { db, queryEmbedding: q(), memoryIds: [mem], ...extra, ...(name === 'filter + exclusions' ? { excludeNodeIds: [id.B!] } : {}) };
+      const page = await provider.vectorSearch({ ...opts, limit: 100 } as any);
+      const { ranks } = await (provider as any).vectorRanks({ ...opts, nodeIds: Object.values(id) });
+      expect(page.length).toBeGreaterThan(5);
+      expect(Object.fromEntries(page.map((h, i) => [h.nodeId, i + 1]))).toEqual(Object.fromEntries(ranks));
+    }, 60_000);
+  }
+});
+
+describe('#4779 BLIND P2-2 (Bianca): one work budget per request, across every vector call', () => {
+  it('a hybrid page\'s vector leg and its rank lookup share ONE deadline: each later statement gets only what is left', async () => {
+    keywordLeg(KW);
+    const timeouts: number[] = [];
+    const handle = new Proxy(db, { get(t, p) {
+      const v = Reflect.get(t, p);
+      if (p !== '$transaction') return typeof v === 'function' ? v.bind(t) : v;
+      return (arg: unknown, o?: unknown) => typeof arg !== 'function' ? (t.$transaction as any)(arg, o)
+        : (t.$transaction as any)(async (tx: any) => (arg as (x: unknown) => unknown)(new Proxy(tx, { get(tt, pp) {
+            const vv = Reflect.get(tt, pp);
+            if (pp === '$executeRawUnsafe') return (sql: string, ...a: unknown[]) => {
+              const m = /SET LOCAL statement_timeout = (\d+)/.exec(sql);
+              if (m) timeouts.push(Number(m[1]));
+              return (vv as any).call(tt, sql, ...a);
+            };
+            if (pp === '$queryRaw') return async (st: TemplateStringsArray, ...a: unknown[]) => { const r = await (vv as any).call(tt, st, ...a); await new Promise((res) => setTimeout(res, 400)); return r; };
+            return typeof vv === 'function' ? vv.bind(tt) : vv;
+          } })), o);
+    } }) as typeof db;
+    const lookups = vi.spyOn(provider as any, 'vectorRanks');
+    process.env.VECTOR_SEARCH_TIMEOUT_MS = '6000';
+    try {
+      await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'hybrid', limit: 2, filter: { memoryIds: [mem] } }, { db: handle, roles: ['ADMIN'], userId: 'admin-4779' } as Context);
+    } finally { delete process.env.VECTOR_SEARCH_TIMEOUT_MS; }
+    expect(lookups).toHaveBeenCalled(); // the request made more than one vector call
+    expect(timeouts.length).toBeGreaterThanOrEqual(3);
+    expect(timeouts[0]).toBeLessThanOrEqual(6000);
+    for (let i = 1; i < timeouts.length; i++) expect(timeouts[i]!).toBeLessThanOrEqual(timeouts[i - 1]! - 350);
   }, 60_000);
 });
 

@@ -184,6 +184,12 @@ export interface VectorSearchOpts {
    * drops comments from a CONTENT result.
    */
   contentScope?: ContentScope | null;
+  /**
+   * #4779 (BLIND P2-2): the request's ONE vector work-budget deadline (epoch ms). A request that makes several vector calls
+   * (a hybrid page's leg, its rank lookups, a re-ranking) passes the same value to each, so `VECTOR_SEARCH_TIMEOUT_MS`
+   * bounds the request, not each call. Absent = each call has its own budget.
+   */
+  deadlineAt?: number;
 }
 
 export interface NodeRetrievalProvider {
