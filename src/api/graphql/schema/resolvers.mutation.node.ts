@@ -3398,8 +3398,10 @@ export const nodeMutations = {
           // role/isRunnable are nullable like the columns: null means "no role" /
           // "not runnable", never "unknown". A row missing from lockedRoles (deleted
           // since planning) reads as ungoverned here and the batch is refused with
-          // NODE_WRITE_CONFLICT by the locked deletedAt check further down. The skip counter is shared with #1331's
-          // writer-level refusal on purpose: both are "governed" in skipCounts.
+          // NODE_WRITE_CONFLICT by the locked deletedAt check further down (pinned,
+          // soft and hard, in resolvers.searchReplaceGovernance1213.test.ts #4725).
+          // The skip counter is shared with #1331's writer-level refusal on purpose:
+          // both are "governed" in skipCounts.
           if (governedKindsOf({ role, isRunnable: runnable }).length > 0 ||
             ((role || runnable === true) && await roleWritersRefusal(tx, txCtx, plan.raw.memoryId, {
               priorRole: role, nextRole: role, priorRunnable: runnable, nextRunnable: runnable,
