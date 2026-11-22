@@ -4475,7 +4475,9 @@ export const typeDefs = `#graphql
     corpusMintedAt: DateTime
     """
     Spec 033 FR-026 — timestamp at which the memory owner accepted the
-    encrypted-memory vector-inversion disclosure. Set when the caller
+    encrypted-memory vector disclosure (plaintext vectors and, when the index
+    includes content passages, the verbatim chunk text stored unencrypted in
+    node_embeddings.chunk_text; #433). Set when the caller
     passes acknowledgeVectorInversionRisk: true on updateMemory for an
     isEncrypted: true memory enabling vectorIndexEnabled for the first
     time. The portal surfaces this readback so the user can confirm
@@ -14169,7 +14171,10 @@ export const typeDefs = `#graphql
     requires \`acknowledgeVectorInversionRisk: true\` in the same call. Without
     the flag, an \`EncryptedVectorIndexNotAcknowledgedError\` is thrown carrying
     the full four-point disclosure on \`error.disclosure\` (single source of
-    truth in \`FR_026_DISCLOSURE\` — see \`src/lib/entityRef/errors.ts\`). On a
+    truth in \`FR_026_DISCLOSURE\` — see \`src/lib/entityRef/errors.ts\`). The
+    disclosure states that the vectors are stored unencrypted and, when the
+    index includes content passages, that the verbatim chunk text is stored
+    unencrypted too, and that revoking removes both. On a
     non-encrypted memory the flag is a no-op.
     """
     updateMemory(ref: ID!, name: String, urn: String, orgRef: ID, shortDescription: String, description: String, data: JSON, tags: [String!], license: String, category0: String, category1: String, category2: String, iconUrl: String, heroUrl: String, homeUrl: String, source: String, readBranch: String, writeBranch: String, visibility: MemoryVisibility, listedOnMarketplace: Boolean, vectorIndexEnabled: Boolean, embeddingSource: EmbeddingSource, acknowledgeVectorInversionRisk: Boolean, chunkTokens: Int, chunkOverlap: Int, forceFixedSize: Boolean, maxRevCount: Int, schema: JSON): Memory!
