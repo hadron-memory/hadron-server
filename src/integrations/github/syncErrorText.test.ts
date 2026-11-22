@@ -27,4 +27,10 @@ describe('#4731 syncFailureText', () => {
     expect(infrastructureFaultText('boom')).toBeNull();
     expect(infrastructureFaultText(null)).toBeNull();
   });
+
+  it('a thrown non-Error is stored as its own text, never undefined (#4731 BLIND F6)', () => {
+    expect(syncFailureText('boom')).toBe('boom');
+    expect(syncFailureText(null)).toBe('null');
+    expect(syncFailureText({ message: 'obj' })).toBe('obj');
+  });
 });

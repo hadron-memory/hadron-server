@@ -21,6 +21,7 @@ export function infrastructureFaultText(error: unknown): string | null {
     (typeof e.name === 'string' && e.name.startsWith('PrismaClient'))
     || typeof e.syscall === 'string'
     || typeof e.severity === 'string'
+    // Prisma's Pnnnn or a five-character SQLSTATE. An application error that happens to carry such a code is redacted too: the safe side.
     || (code !== undefined && /^(P\d{4}|[0-9A-Z]{5})$/.test(code));
   if (!infrastructure) return null;
   return code !== undefined && /^\w{1,32}$/.test(code) ? `${INTERNAL_SYNC_FAILURE} (${code})` : INTERNAL_SYNC_FAILURE;
@@ -28,5 +29,6 @@ export function infrastructureFaultText(error: unknown): string | null {
 
 /** What a failed sync stores in `sync_error` and returns as `error`. */
 export function syncFailureText(error: unknown): string {
-  return infrastructureFaultText(error) ?? (error as Error).message;
+  const own = typeof error === 'object' && error !== null && typeof (error as { message?: unknown }).message === 'string' ? (error as Error).message : String(error);
+  return infrastructureFaultText(error) ?? own;
 }

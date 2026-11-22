@@ -209,7 +209,7 @@ describe('#4731 one bad row never aborts the run', () => {
     try {
       const out = await reconcileSyncingStatus(db, { apply: true });
       expect(out).toMatchObject({ candidates: 3, reconciled: 2, failed: 1, held: 0, ineligible: 0 });
-      expect(logged).toHaveBeenCalledWith('[reconcile-syncing] a row failed and was left unchanged', { code: '57P01' });
+      expect(logged).toHaveBeenCalledWith('[reconcile-syncing] a row failed and was left unchanged', { code: '57P01', errorClass: 'Error' });
       expect(JSON.stringify(logged.mock.calls)).not.toContain('10.9.8.7');
     } finally { spy.mockRestore(); logged.mockRestore(); }
     expect(await row(ids[1])).toEqual(before); // the failed row is exactly as it was
@@ -249,7 +249,7 @@ describe('#4731 a row transaction bounds its own lock wait', () => {
       ]);
       expect(out).toMatchObject({ candidates: 2, reconciled: 1, failed: 1 });
       expect(Date.now() - started).toBeLessThan(10_000);
-      expect(logged).toHaveBeenCalledWith('[reconcile-syncing] a row failed and was left unchanged', { code: expect.any(String) });
+      expect(logged).toHaveBeenCalledWith('[reconcile-syncing] a row failed and was left unchanged', { code: expect.any(String), errorClass: expect.any(String) });
     } finally { logged.mockRestore(); release(); await writer; }
     expect(await row(blocked)).toEqual(before);
     expect((await row(free)).sync_status).toBe('PENDING');

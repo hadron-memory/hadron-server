@@ -57,8 +57,8 @@ export interface ReconcileSyncingOptions {
 
 const DEFAULT_LOCK_TIMEOUT_MS = 5000;
 
-function lockTimeoutMs(value: number | undefined): number {
-  return Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : DEFAULT_LOCK_TIMEOUT_MS;
+function normalizeLockTimeoutMs(value: number | undefined): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : DEFAULT_LOCK_TIMEOUT_MS;
 }
 
 /** Ids of eligible SYNCING rows at this moment; a hint only, every row is re-checked under its lock before a write. */
@@ -106,14 +106,18 @@ export async function reconcileSyncingStatus(db: PrismaClient, opts: ReconcileSy
   };
   if (!opts.apply) return result;
   await opts.onCandidates?.();
-  const timeoutMs = lockTimeoutMs(opts.lockTimeoutMs);
+  const timeoutMs = normalizeLockTimeoutMs(opts.lockTimeoutMs);
   for (const id of candidates) {
     try {
       result[await reconcileRow(db, id, timeoutMs)] += 1;
     } catch (error) {
-      // Code only, never the message (it can name the host) or the id: the run reports counts.
+      // The class and code only, never the message (it can name the host) or the id: the run reports counts, and a bug in this
+      // code's own path (a TypeError) shows as its class rather than as an anonymous failure (#4731 BLIND F2).
       result.failed += 1;
-      console.error('[reconcile-syncing] a row failed and was left unchanged', { code: (error as { code?: string } | null)?.code ?? 'unknown' });
+      const name = error instanceof Error ? error.constructor.name : typeof error;
+      console.error('[reconcile-syncing] a row failed and was left unchanged', {
+        code: (error as { code?: string } | null)?.code ?? 'unknown', errorClass: /^\w{1,64}$/.test(name) ? name : 'unknown',
+      });
     }
   }
   return result;
