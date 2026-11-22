@@ -1,3 +1,4 @@
+import { softDeleteChatToolConnections, dispatchChatToolTeardown, type ChatToolTeardown } from '../../../lib/chatToolTeardown.js';
 import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { markNewInstallPayload } from './installationPayload.js';
 import { requireInstructedAct, sameActPrincipal, type StaffActAdmission, type ActInstruction, type ActAdmission } from '../../../lib/auth/instructedAct.js';
@@ -1152,7 +1153,7 @@ export const appMutations = {
       // #3997 (cor:sec:010:01 "a secret never outlives its owner"): its App-owned secrets go in the SAME transaction, each
       // with a DELETE event, and the owner's tombstone (the durable start of the one-year event retention, R25) is written
       // when the App has events. The BEFORE DELETE trigger on `apps` covers the hard-delete paths (account erasure, URN reclaim).
-      await withAuthorizedTx(
+      const teardowns = await withAuthorizedTx(
         ctx,
         [
           { kind: 'app', id: resolvedId },
@@ -1184,13 +1185,18 @@ export const appMutations = {
             await tx.$executeRaw`INSERT INTO secret_owner_tombstones (owner_type, owner_id)
               SELECT 'app', ${resolvedId} WHERE EXISTS (SELECT 1 FROM secret_events WHERE owner_type = 'app' AND owner_id = ${resolvedId})
               ON CONFLICT DO NOTHING`;
+            // #4828 (cor:dmo:080:04): the App's Telegram bot and the Slack workspaces it is the default App of go in the same transaction;
+            // the tools are asked to drop their side after the commit. An App already deleted returns nothing here, so a repeat asks nothing.
+            return softDeleteChatToolConnections(tx, { appId: resolvedId }, ctx.userId ?? ctx.clientId ?? null);
           }
+          return [] as ChatToolTeardown[];
         },
         // #3974: Uninstalled → Deleted while uninstalled (cor:dmo:050:21), by id only. resolveAppRef never reaches an uninstalled row by URN, but one uninstalled between the resolve and the lock must not be admitted for a URN either (§10 F1).
         { lockMode: 'exclusive', allowUninstalledApp: isEntityId(ref), afterLock: async (tx) => {
           await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedId} FOR UPDATE`;
         } },
       );
+      dispatchChatToolTeardown(teardowns);
       return true;
     },
 

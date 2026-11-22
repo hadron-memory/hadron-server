@@ -20,6 +20,7 @@ import {
   SoleOrgOwnerError,
 } from '../../../controller/operations/deleteUser.js';
 import { softDeleteOrganizationCore } from '../../../controller/operations/softDeleteOrganization.js';
+import { dispatchChatToolTeardown } from '../../../lib/chatToolTeardown.js';
 import { validateOrgRoot } from '../../../lib/org/orgRoot.js';
 import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
 import {
@@ -442,13 +443,15 @@ export const orgMutations = {
       // (#677) — the ONE org soft-delete cascade, shared with deleteUser's
       // sole-member-org branch (see softDeleteOrganizationCore for the
       // idempotency + secret-sweep rationale).
-      await withAuthorizedTx(
+      const teardowns = await withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: resolvedId }],
         async (txCtx) => { requireRole(txCtx, 'ADMIN'); },
         (tx) => softDeleteOrganizationCore(tx, resolvedId),
         { lockMode: 'exclusive', allowDeletedOrg: true },
       );
+      // #4828: after the commit, once authorization has been judged, ask the Telegram and Slack tools to drop their side.
+      dispatchChatToolTeardown(teardowns);
       return true;
     },
 

@@ -1,6 +1,7 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { deleteSecretsForOwner } from '../../lib/secrets.js';
 import { revokeAllOrgInvitations } from '../../lib/auth/revokeOrgInvitations.js';
+import { softDeleteChatToolConnections, type ChatToolTeardown } from '../../lib/chatToolTeardown.js';
 
 /**
  * The ONE org soft-delete cascade (extracted from the `deleteOrganization`
@@ -16,18 +17,22 @@ import { revokeAllOrgInvitations } from '../../lib/auth/revokeOrgInvitations.js'
  * deletion is still removed.
  *
  * `db` accepts a Prisma tx client — callers own the transaction boundary.
+ * Returns the chat tool registrations this call removed, for the caller to tear down after commit (#4828).
  * `deletedBy` is recorded when provided (deleteUser passes the actor;
  * deleteOrganization historically records none and passes nothing).
  */
 export async function softDeleteOrganizationCore(
-  db: Pick<PrismaClient, 'organization' | 'secret' | 'userInvitation' | 'orgMemberInvitation'>,
+  db: Pick<PrismaClient, 'organization' | 'secret' | 'userInvitation' | 'orgMemberInvitation' | '$queryRaw'>,
   orgId: string,
   deletedBy?: string | null,
-): Promise<void> {
+): Promise<ChatToolTeardown[]> {
   await db.organization.updateMany({
     where: { id: orgId, deletedAt: null },
     data: { deletedAt: new Date(), ...(deletedBy != null ? { deletedBy } : {}) },
   });
   await revokeAllOrgInvitations(db, orgId, deletedBy ?? null);
   await deleteSecretsForOwner(db, 'org', orgId);
+  // #4828: the organization's Telegram and Slack registrations go in the same transaction; the CALLER asks the tools to drop their
+  // side after the commit (dispatchChatToolTeardown). A row already deleted is not returned, so a repeat asks nothing.
+  return softDeleteChatToolConnections(db, { organizationId: orgId }, deletedBy ?? null);
 }

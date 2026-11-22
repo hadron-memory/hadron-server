@@ -7,6 +7,7 @@ import { deleteToolConnection } from '../../lib/emailClient.js';
 import { deleteSecretsForOwner } from '../../lib/secrets.js';
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { softDeleteOrganizationCore } from './softDeleteOrganization.js';
+import { dispatchChatToolTeardown, type ChatToolTeardown } from '../../lib/chatToolTeardown.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../lib/auth/revokeOrgInvitations.js';
 import { AuthoritySnapshotStale, lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
 import { retryOnDeadlock, retryOnSerializationFailure } from '../../lib/serializableRetry.js';
@@ -142,7 +143,7 @@ export async function deleteUserAccount(
   // membership scope, takes its locks again and re-judges under them (a target the winner already erased refuses
   // "User not found", never erases twice). It is nested inside the serialization retry, so isSerializationFailure is
   // not widened for any other caller (#4318).
-  const { toolConnections, assetKeys } = await retryOnSerializationFailure(() => retryOnDeadlock(async () => {
+  const { toolConnections, chatTeardowns, assetKeys } = await retryOnSerializationFailure(() => retryOnDeadlock(async () => {
     const membershipScope = (await db.orgMember.findMany({
       where: { userId: targetUserId, deletedAt: null },
       select: { organizationId: true },
@@ -158,6 +159,8 @@ export async function deleteUserAccount(
   for (const c of toolConnections) {
     void deleteToolConnection(c.provider, c.toolConnectionId);
   }
+  // #4828: the Telegram and Slack registrations of the organizations that died with the account, the same post-commit posture.
+  dispatchChatToolTeardown(chatTeardowns);
   // Same posture for the deleted memories' files: the Asset rows went
   // with the cascade, so these keys are the last record of the bytes.
   // Post-commit and best-effort — a dead object store must log, not fail.
@@ -186,6 +189,8 @@ async function runDeletionTxn(
   audit: { auditId: string; reason: string } | null,
 ): Promise<{
   toolConnections: Array<{ provider: string; toolConnectionId: string }>;
+  /** #4828: chat tool registrations of the sole-member organizations deleted with the account, torn down post-commit. */
+  chatTeardowns: ChatToolTeardown[];
   /** Object-store keys of the deleted memories' assets — purged post-commit. */
   assetKeys: CollectedAssetKeys;
 }> {
@@ -290,8 +295,9 @@ async function runDeletionTxn(
       // the whole transaction back — NOTHING is deleted.
       if (blockers.length > 0) throw new SoleOrgOwnerError(blockers);
 
+      const chatTeardowns: ChatToolTeardown[] = [];
       for (const orgId of soleMemberOrgIds) {
-        await softDeleteOrganizationCore(tx, orgId, actorUserId);
+        chatTeardowns.push(...(await softDeleteOrganizationCore(tx, orgId, actorUserId)));
       }
       // Soft-delete every remaining live membership row (the platform-wide
       // OrgMember revocation shape — removeOrgMember; audit tuple persists).
@@ -523,6 +529,7 @@ async function runDeletionTxn(
           provider: string;
           toolConnectionId: string;
         }>,
+        chatTeardowns,
         assetKeys,
       };
     },

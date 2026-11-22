@@ -101,6 +101,24 @@ describe('#4828 deleteApp tears down that App\'s Telegram and Slack registration
   });
 });
 
+describe('#4828 a registration already deleted is never asked of its tool again', () => {
+  it('App scope: both providers\' already-deleted rows are neither returned nor re-torn', async () => {
+    await db.telegramConnection.updateMany({ where: { toolConnectionId: 'tg-b' }, data: { deletedAt: new Date() } });
+    await db.slackConnection.updateMany({ where: { toolConnectionId: 'sl-b' }, data: { deletedAt: new Date() } });
+    await M.deleteApp({}, { ref: appB.id }, ctx(admin.id));
+    await settle();
+    expect(calls()).toEqual({ telegram: [], slack: [] });
+  });
+
+  it('organization scope: the already-deleted rows of both providers are skipped, the live ones torn down once', async () => {
+    await db.telegramConnection.updateMany({ where: { toolConnectionId: 'tg-b' }, data: { deletedAt: new Date() } });
+    await db.slackConnection.updateMany({ where: { toolConnectionId: 'sl-b' }, data: { deletedAt: new Date() } });
+    await M.deleteOrganization({}, { ref: org.id }, ctx(platform.id, ['ADMIN']));
+    await settle();
+    expect(calls()).toEqual({ telegram: ['tg-a'], slack: ['sl-a'] });
+  });
+});
+
 describe('#4828 deleteOrganization tears down every registration of the organization', () => {
   it('both providers, both Apps, once each; another organization\'s connections are untouched', async () => {
     await expect(M.deleteOrganization({}, { ref: org.id }, ctx(platform.id, ['ADMIN']))).resolves.toBe(true);
