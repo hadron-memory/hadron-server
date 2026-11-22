@@ -35,9 +35,10 @@ const RP = 'localhost';
 const ORIGIN = 'http://localhost';
 const exec = (sql: string, ...params: unknown[]) => db.$executeRawUnsafe(sql, ...params);
 let w: World;
+let fetchSpy: ReturnType<typeof vi.spyOn> | undefined;
 
 beforeEach(async () => { await cleanDb(db); w = await seedWorld(); vi.mocked(writeNodeToGit).mockClear(); vi.mocked(getBusClient).mockClear(); vi.mocked(purgeCollectedAssetObjects).mockClear(); });
-afterEach(() => { vi.restoreAllMocks(); });
+afterEach(() => { fetchSpy?.mockRestore(); fetchSpy = undefined; }); // restore only what a test took; the factory mocks keep their implementations (#4811 F3)
 
 async function person(tag: string, roles: Array<'ADMIN'> = []) {
   const suffix = generateId().slice(0, 6);
@@ -149,7 +150,7 @@ describe('#4690 crossed erasures deadlock: the aborted erasure is re-run, not su
     const G1 = await signGrant(B.id, A.id); // requester A, issuer B
     const G2 = await signGrant(A.id, B.id); // requester B, issuer A
     const before = await grantState([G1, G2]);
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     const ca = counting(); const cb = counting();
     const [ra, rb] = await crossedErasures(
       () => deleteUserAccount(ca.db, { targetUserId: A.id, actorUserId: A.id }),
@@ -170,7 +171,7 @@ describe('#4690 crossed erasures deadlock: the aborted erasure is re-run, not su
     expect(vi.mocked(getBusClient)).not.toHaveBeenCalled();
     // #4811 F3: and it reaches no outside effect through any other client: no HTTP call, and the post-commit asset purge ran
     // once per erasure (2), not once per attempt.
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(fetchSpy!).not.toHaveBeenCalled();
     expect(vi.mocked(purgeCollectedAssetObjects)).toHaveBeenCalledTimes(2);
     const users = await db.user.findMany({ where: { id: { in: [A.id, B.id] } }, select: { deletedAt: true } });
     expect(users.every((u) => u.deletedAt !== null)).toBe(true);
@@ -192,8 +193,9 @@ describe('#4690 crossed erasures deadlock: the aborted erasure is re-run, not su
       () => deleteUserAccount(cb.db, { targetUserId: B.id, actorUserId: B.id }), G1, G2);
     expect(ra).toEqual({ ok: true });
     expect(rb).toEqual({ ok: true });
-    // #4811 F1: the administrator's erasure (the one that writes the audit row) is the deadlock victim: the barrier makes A's
-    // wait the older one, so Postgres's detector fires in A's backend. It ran at least twice, after a seen 40P01.
+    // #4811 F1: the administrator's erasure (the one that writes the audit row) is the deadlock victim: the barrier
+    // (crossedErasures) waits until A is queued on its requester write before h1 is released, so A's wait is the older one and
+    // Postgres's detector fires in A's backend. It ran at least twice, after a seen 40P01.
     expect(ca.counter.deadlocks).toBe(1);
     expect(ca.counter.transactions).toBeGreaterThanOrEqual(2);
     expect(cb.counter.deadlocks).toBe(0);
@@ -242,7 +244,7 @@ describe('#4690 crossed erasures deadlock: the aborted erasure is re-run, not su
   it('the counting client sees a plain erasure: one transaction, no deadlock (#4811 F7: a broken interception fails loudly)', async () => {
     const P = await person('p');
     const c = counting();
-    await deleteUserAccount(c.db, { targetUserId: P.id, actorUserId: P.id });
+    await expect(deleteUserAccount(c.db, { targetUserId: P.id, actorUserId: P.id })).resolves.toBeUndefined();
     expect(c.counter).toEqual({ transactions: 1, deadlocks: 0 });
   });
 
