@@ -172,12 +172,28 @@ describe('#3765 membership is read at the deciding statement: a demotion or remo
     for (const v of Object.values(await roster(parent, as(boss.id)))) expect(v).toBeNull();
   });
 
-  it('a soft-deleted App answers the roster to nobody it did not before', async () => {
+  // CHARACTERIZATION of built behaviour (spec FIT AT0.9779.1), not ruling 0260's contract: 0260 was asked and answered about a LIVE App and
+  // explicitly leaves open whether `null` still has a use on these fields (a schema follow-up). The split below (null for the owner-role
+  // member, a real empty answer for the true owner) is what main does today; if that follow-up flips the member's answer to the owner's,
+  // update this pin rather than defend it. The property it protects is "no leak": neither answer reveals the roster of a deleted App.
+  it('a soft-deleted App answers the roster to nobody it did not before: the exact answer per caller (characterization)', async () => {
     const parent = await lazyRow();
     await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
-    const got = await roster(parent, as(boss.id));
-    expect(got.memberCount === 0 || got.memberCount === null).toBe(true);
-    expect(got.members === null || (got.members as unknown[]).length === 0).toBe(true);
+    // the owner-role member: the deciding join requires app.deletedAt NULL, so every roster field is withheld
+    expect(await roster(parent, as(boss.id))).toEqual({
+      members: null, memberCount: null, appAgents: null, agents: null, agentId: null, agent: null, installedAgentUrn: null,
+    });
+    // the true owner: the App's members read as a real empty answer (0 and []), while the agent roster of the owner's own App still lists
+    // its install (the owner's own data, as on a live App); nothing is revealed to anyone that the owner could not read before
+    const agentUrn = (await db.agent.findUniqueOrThrow({ where: { id: agentId }, select: { urn: true } })).urn;
+    const asOwner = await roster(parent, as(owner.id));
+    expect({ ...asOwner, appAgents: asOwner.appAgents?.map((r: any) => ({ appId: r.appId, agentId: r.agentId, installMethod: r.installMethod, agent: r.agent })) }).toEqual({
+      members: [], memberCount: 0,
+      appAgents: [{ appId: app.id, agentId, installMethod: 'ROW', agent: agentId }],
+      agents: [agentId], agentId, agent: agentId, installedAgentUrn: `hrn:agent:${agentUrn}`,
+    });
+    // a plain member and a stranger: withheld as on a live App
+    for (const u of [cook.id, stranger.id]) expect(Object.values(await roster(parent, as(u))).every((v) => v === null), u).toBe(true);
   });
 });
 
