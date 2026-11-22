@@ -38,7 +38,10 @@ const DECISIONS: Record<string, Decision> = {
   'object-store-import-boundary.yml': { queue: true, why: 'advisory in the queue (not required): a whole-tree guard that failed on the merged result in the #4653 with #905 clash, so it would have caught that clash but does NOT block a merge unless the ruleset requires it (unfiltered and about 0.2 minutes, so it is a safe candidate; Holger\'s call)' },
   'workflow-guard.yml': { queue: true, why: 'advisory in the queue (not required): whole-tree over every workflow file, so two PRs adding workflows are judged together; seconds' },
   'no-unscoped-loc.yml': { queue: true, why: 'advisory in the queue (not required): whole-tree grep guard on src; seconds; a path filter, if GitHub ignores it on merge_group, only makes it run on every entry' },
-  'restore-private-cluster.yml': { queue: true, why: 'advisory in the queue (not required): no event-specific logic, about 2 minutes, runs in parallel with the suite; contents: read, no secrets' },
+  'restore-private-cluster.yml': {
+    queue: false,
+    why: 'NOT in the queue: advisory (the queue would not wait on it), and a queue run adds nothing a PR-head run does not already show. It installs PostgreSQL 16 and 17 server binaries with sudo apt and runs a private-cluster suite; it has no event-specific logic, so it could be added later, but the queue surface is kept to what gates a merge or has caught a clash.',
+  },
   'e2e-seed.yml': { queue: true, why: 'advisory in the queue (not required): no event-specific logic, about 1 minute, runs in parallel with the suite; contents: read, no secrets' },
   'migration-smoke-test.yml': { queue: true, why: 'advisory in the queue (not required, and path-filtered so it could not be required): it applies the merged tree\'s migrations to a database, which is where two PRs adding migrations clash, so it SHOWS such a clash but does not block it; about 1.5 minutes' },
   'migration-replay.yml': {
@@ -117,6 +120,26 @@ describe('merge queue workflow contract (#4819)', () => {
     const c = (load(f) as unknown as { concurrency?: { group?: string; 'cancel-in-progress'?: unknown } }).concurrency;
     expect(String(c?.group), `${f}`).toContain('github.run_id');
     expect(String(c?.['cancel-in-progress']), `${f}: must be false for a merge_group run`).toContain("github.event_name == 'pull_request'");
+  });
+
+  // A merge_group run executes the merged tree in the base repository's context. Today no queued workflow reads a
+  // repository secret and the default token is read-only; this keeps a future change from widening that unnoticed.
+  it.each(Object.entries(DECISIONS).filter(([, d]) => d.queue).map(([f]) => f))('%s (queued) references no secrets and holds no write permission', (f) => {
+    const raw = readFileSync(join(DIR, f), 'utf8');
+    expect(raw, `${f}: a queued workflow must not read a repository secret`).not.toMatch(/secrets\./);
+    const writes: string[] = [];
+    const walk = (node: unknown, path: string): void => {
+      if (node && typeof node === 'object') {
+        for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+          if (k === 'permissions') {
+            if (typeof v === 'string' && v !== 'read-all' && v !== 'none') writes.push(`${path}.permissions=${v}`);
+            if (v && typeof v === 'object') for (const [pk, pv] of Object.entries(v as Record<string, unknown>)) if (pv === 'write') writes.push(`${path}.permissions.${pk}`);
+          } else walk(v, `${path}.${k}`);
+        }
+      }
+    };
+    walk(load(f), f);
+    expect(writes, `${f}: a queued workflow must not hold a write permission`).toEqual([]);
   });
 
   it('tsc runs on pull_request, merge_group and push to main', () => {
