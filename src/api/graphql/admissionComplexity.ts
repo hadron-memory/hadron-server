@@ -142,8 +142,18 @@ export const FIXED_LIST_SIZE: Readonly<Record<string, number>> = {
  * Fields whose resolver does heavy work whatever is selected: a fixed cost added to the children's.
  * #1302: `specDocument` reads and renders the whole document for `{ markdown }` as much as for `entries`.
  */
+/**
+ * #4758: statements `App.selfJoin` pays per App it reaches on a list, MEASURED (marginal statements per added App, a list of 1 vs 5
+ * Apps, resolvers.appSelfJoinPolish4758.test.ts): 8 after the per-request batching of the App and membership reads (9 before). The
+ * rest is the shared read gate and joinApp's own decision, which this field must call rather than copy.
+ */
+export const APP_SELF_JOIN_COST = 8;
+
 export const FIXED_FIELD_COST: Readonly<Record<string, number>> = {
   'Query.specDocument': SPEC_DOCUMENT_CALL_COST,
+  // #4758: `App.selfJoin` pays the shared read gate and joinApp's own decision (two reads) for each App it reaches, on top of the
+  // batched App and membership reads; selected per row on a list, the parent's list factor multiplies this.
+  'App.selfJoin': APP_SELF_JOIN_COST,
 };
 
 export const DEFAULT_OMITTED_PAGE_SIZE = 100;

@@ -100,3 +100,36 @@ describe('#4758 item 4: the field calls the exported decision', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+describe('#4758 item 5: the cost of selfJoin selected on a list', () => {
+  it('the admission cost carries an entry for the field, added to its children', async () => {
+    const { FIXED_FIELD_COST, APP_SELF_JOIN_COST } = await import('../admissionComplexity.js');
+    expect(FIXED_FIELD_COST['App.selfJoin']).toBe(APP_SELF_JOIN_COST);
+  });
+
+  it('the App and membership reads are batched: the marginal statements per added App stay within the admission cost entry', async () => {
+    const { PrismaClient } = await import('../../../generated/prisma/index.js');
+    let statements = 0;
+    const logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
+    (logged as any).$on('query', () => { statements += 1; });
+    try {
+      const countFor = async () => {
+        statements = 0;
+        const ctx = { db: logged, userId: viewer.id, roles: ['READER'] } as unknown as Context;
+        const res = await server.executeOperation({ query: `{ apps(limit: 50) { items { id selfJoin { state role } } } }` }, { contextValue: ctx });
+        if (res.body.kind !== 'single') throw new Error('unexpected incremental response');
+        const rows = (res.body.singleResult.data as any)?.apps?.items ?? [];
+        expect(res.body.singleResult.errors).toBeUndefined();
+        expect(rows.every((r: any) => r.selfJoin?.state === 'OPEN')).toBe(true);
+        return { statements, n: rows.length };
+      };
+      const a = await countFor();
+      for (const t of ['b', 'c', 'd', 'e']) await mkApp(org.id, org.urn, t);
+      const b = await countFor();
+      expect(b.n - a.n).toBe(4);
+      // Marginal statements per added App, measured: 9 before the batching (main), 8 after. The admission cost entry must cover it.
+      const { APP_SELF_JOIN_COST } = await import('../admissionComplexity.js');
+      expect((b.statements - a.statements) / (b.n - a.n)).toBeLessThanOrEqual(APP_SELF_JOIN_COST);
+    } finally { await logged.$disconnect(); }
+  });
+});
