@@ -97,6 +97,8 @@ export interface HttpRequestInput {
   json?: unknown;
   maxBytes?: number;
   auth?: WebFetchAuth;
+  /** hadrontool-webfetch#10 (cor:web:010:02): `none` returns a 3xx as-is and never follows it, so a credential reaches no second hop. */
+  redirects?: 'follow' | 'none';
 }
 
 export interface HttpRequestResult {

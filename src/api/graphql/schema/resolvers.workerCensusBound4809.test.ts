@@ -58,6 +58,7 @@ async function seedLargeApp() {
     FROM generate_series(1, ${NODES}) i`;
 }
 
+const BOUND_MS = 1500;
 describe('#4809 bounded worker census', () => {
   it('deleteWorker on a large App completes (main: P2028 at the 5s default transaction timeout)', async () => {
     await seedLargeApp();
@@ -73,7 +74,7 @@ describe('#4809 bounded worker census', () => {
   it.each([['deleteWorker', remove], ['deleteWorkerPreview', preview]] as const)(
     '%s: an exceeded bound refuses WORKER_CENSUS_INCOMPLETE, not WORKER_IN_USE, and changes nothing',
     async (_name, call) => {
-      await seedLargeApp();
+      // #4845: a 1 ms bound trips on the first armed statement whatever the data size, so no large App is seeded.
       process.env.WORKER_CENSUS_TIMEOUT_MS = '1';
       const before = await snapshot();
       const e = await refusal(call());
@@ -100,7 +101,7 @@ describe('#4809 bounded worker census', () => {
   // statement_timeout can end it, near the budget and far from the door's transaction backstop (budget + 20 s).
   it.each([['deleteWorker', remove], ['deleteWorkerPreview', preview]] as const)(
     '%s: ONE blocked statement is cancelled by Postgres near the budget, WORKER_CENSUS_INCOMPLETE, nothing changed', async (_n, call) => {
-      process.env.WORKER_CENSUS_TIMEOUT_MS = '1500';
+      process.env.WORKER_CENSUS_TIMEOUT_MS = String(BOUND_MS);
       const holder = new pg.Client({ connectionString: process.env.DATABASE_URL });
       await holder.connect();
       try {
@@ -111,6 +112,7 @@ describe('#4809 bounded worker census', () => {
         const e = await refusal(call());
         const elapsed = Date.now() - started;
         expect(e.extensions?.code).toBe('WORKER_CENSUS_INCOMPLETE');
+        expect(elapsed).toBeGreaterThanOrEqual(BOUND_MS * 0.6); // #4845: Postgres ended it at the budget; an immediate error that also maps to INCOMPLETE must not pass
         expect(elapsed).toBeLessThan(10_000); // the transaction backstop is 21.5 s
         expect(await snapshot()).toEqual(before);
       } finally { await holder.query('ROLLBACK').catch(() => {}); await holder.end(); }
