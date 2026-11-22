@@ -11696,7 +11696,7 @@ export const typeDefs = `#graphql
 
     """
     #3599: preview deleteWorker without deleting anything: the same act gate and typed refusals
-    (WORKER_NOT_FOUND, FORBIDDEN, WORKER_IN_USE), nothing reserved. The real delete still requires
+    (WORKER_NOT_FOUND, FORBIDDEN, WORKER_IN_USE, WORKER_CENSUS_INCOMPLETE), nothing reserved. The real delete still requires
     confirmNoExternalAttribution and may refuse if anything changed
     (hrn:node:hadronmemory.com:specs:cor:agt:020:03). A validated instruction claim is recorded
     (hrn:node:hadronmemory.com:specs:cor:dmo:050:12); the target is its subject. If the delete wins
@@ -15573,7 +15573,9 @@ export const typeDefs = `#graphql
     #1162 — hard-delete a never-referenced miscast only.
     hrn:node:hadronmemory.com:specs:cor:dmo:050:11
     Empty normally ended and released stints are repairable; persisted
-    attribution, including tombstones/history, refuses WORKER_IN_USE.
+    attribution, including tombstones/history, refuses WORKER_IN_USE. A reference census that does not
+    finish within its bound (#4809) refuses WORKER_CENSUS_INCOMPLETE: nothing is deleted, no reference was
+    found, retry or retire.
     The requester must explicitly verify no signed commit, trailer, PR,
     comment, review or published artifact attributes work to this Worker.
     Database counts cannot prove external absence: known or uncertain
