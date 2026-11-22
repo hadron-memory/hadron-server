@@ -29,9 +29,18 @@ import { deriveEdgeLoc, deriveEdgeLocAlternates, compareMigratedSuffix, migrated
  * never wait on one another. The primary (runtime) spelling and the no-row answer take no lock: a row missing there
  * only makes every writer create the same runtime loc, which meets on the (loc, memory) unique.
  *
+ * BLOCKING AND ITS ERRORS. The seam can now wait: a delete or re-key of the selected row holds the caller until that
+ * writer finishes, so the caller's transaction can surface a lock timeout (P2028) or, in the one cycle the order below
+ * cannot prevent, a deadlock (40P01). That cycle: a caller that key-shares TWO migrated edges, in its own relationship
+ * order, against a writer without the channel key (`moveNodeSubtree`'s edge pass; the tombstone archive's edge update has the same
+ * shape) that re-keys the same two in its plan order. The pinned case is the move: it is the victim and aborts cleanly,
+ * and a retry succeeds.
+ * No retry is added here or in the callers: the error reaches them as any other transaction failure does, and
+ * wrapping the move in a deadlock retry is a follow-up. Pinned in `edgeLocLock4718.test.ts`.
+ *
  * It is only a lock when `db` is the caller's open transaction client; outside a transaction it ends with the statement.
  *
- * LOCK ORDER (one fixed order, every path that touches an edge row follows it):
+ * LOCK ORDER (one fixed order across paths; the order among SEVERAL edge rows is each writer's own, which is the case above):
  *   1. the memory channel key (`lockMemoriesForChannelChange`; the seam's callers hold it),
  *   2. the subtree advisory locks (`moveNodeSubtree`: destination ancestors, `lockSourceForMove`),
  *   3. the node rows and the memory fences,

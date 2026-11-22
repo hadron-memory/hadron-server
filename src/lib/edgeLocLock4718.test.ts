@@ -43,9 +43,6 @@ async function waitForRowLockWaiter() {
   throw new Error('the competing writer never blocked on the selected row');
 }
 
-/** True once another backend waits on a row lock a transaction holds (tuple/transactionid, as for FOR UPDATE on a node). */
-const waitForNodeLockWaiter = waitForRowLockWaiter;
-
 describe('derivedEdgeLocForUpsert holds the selected migrated row to commit (#4718)', () => {
   beforeEach(async () => {
     await cleanDb(db);
@@ -70,16 +67,17 @@ describe('derivedEdgeLocForUpsert holds the selected migrated row to commit (#47
 
   it('an endpoint re-key (loc update) between selection and upsert waits for the writer', async () => {
     const f = await fixture();
-    let rekeyed: Promise<unknown> | undefined;
+    let rekeyed!: Promise<unknown>;
     await db.$transaction(async (tx) => {
       const selected = await derivedEdgeLocForUpsert(tx, f.args);
-      rekeyed = db.edge.update({ where: { id: f.migrated.id }, data: { loc: 'moved:a-b:leaf' } }).catch((e: unknown) => e);
+      rekeyed = db.edge.update({ where: { id: f.migrated.id }, data: { loc: 'moved:a-b:leaf' } });
+      rekeyed.catch(() => undefined); // surfaced by the await below; this only keeps an early rejection from going unhandled
       await waitForRowLockWaiter();
       await f.upsertAt(tx, selected);
     });
-    await rekeyed;
+    await rekeyed; // a failed re-key fails the test
     const all = await db.edge.findMany({ where: { memoryId: f.graph.id, name: NAME }, select: { loc: true } });
-    expect(all).toHaveLength(1);
+    expect(all.map((r) => r.loc)).toEqual(['moved:a-b:leaf']);
   });
 
   it('a row deleted BEFORE the lock is taken is not selected: the runtime spelling, no stale loc', async () => {
@@ -130,7 +128,7 @@ describe('lock order against moveNodeSubtree (#4718)', () => {
       await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${f.source.id} FOR UPDATE`;
       moverHoldsNodes();
       // Go on once the writer has committed, or is blocked on a lock this transaction holds (a cycle then closes below).
-      await Promise.race([writerCommitted, waitForRowLockWaiter().catch(() => undefined), waitForNodeLockWaiter().catch(() => undefined)]);
+      await Promise.race([writerCommitted, waitForRowLockWaiter().catch(() => undefined)]);
       await moveNodeSubtree(tx, { source: sourceRow, destLoc: 'moved', destMemoryId: dest.id, editor: { userId: user.id } });
     }, { timeout: 15_000 });
 
@@ -148,5 +146,61 @@ describe('lock order against moveNodeSubtree (#4718)', () => {
     const all = await db.edge.findMany({ where: { name: NAME, sourceId: f.source.id }, select: { memoryId: true, loc: true } });
     expect(all).toHaveLength(1);
     expect(all[0].memoryId).toBe(dest.id);
+  });
+});
+
+describe('KNOWN, ACCEPTED: a writer key-sharing two edges against a mover re-keying both (#4718)', () => {
+  beforeEach(async () => {
+    await cleanDb(db);
+  });
+
+  // The one cycle the lock order cannot prevent: the seam caller's relationship order and moveNodeSubtree's plan order
+  // are independent. The move (no channel key) aborts with 40P01 and is retryable; the writer completes; no corruption.
+  // Pinned so the behavior is a recorded contract, not a surprise (follow-up: retryOnDeadlock around the move).
+  it('the mover aborts 40P01, the writer commits, and a retried move completes with both edges carried', async () => {
+    const { org, graph } = await createDbOrgAndGraph(db, { orgName: 'edge-lock-multi', graphName: 'edge/multi4718' });
+    const dest = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'edge-lock-multi:edge/dest', name: 'edge/dest', class: 'knowledge' },
+    });
+    const user = await db.user.create({ data: { githubId: 477001 + Math.floor(Math.random() * 9000), githubUsername: `m4718-${generateId()}`, roles: ['ADMIN'] } });
+    const { moveNodeSubtree } = await import('./nodeSubtreeMove.js');
+    const { lockMemoriesForChannelChange } = await import('./channels.js');
+    const source = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'root', name: 'root' } });
+    const t1 = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'leaf1', name: 'leaf1' } });
+    const t2 = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'leaf2', name: 'leaf2' } });
+    for (const t of [t1, t2]) {
+      await db.edge.create({ data: { id: generateId(), memoryId: graph.id, sourceId: source.id, targetId: t.id, loc: `root:a-b:${t.loc}`, name: NAME } });
+    }
+    const args = (t: typeof t1) => ({ memoryId: graph.id, sourceId: source.id, targetId: t.id, sourceLoc: 'root', targetLoc: t.loc, name: NAME });
+    const sourceRow = await db.node.findUniqueOrThrow({ where: { id: source.id } });
+    const move = (tx: Parameters<typeof moveNodeSubtree>[0]) =>
+      moveNodeSubtree(tx, { source: sourceRow, destLoc: 'moved', destMemoryId: dest.id, editor: { userId: user.id } });
+
+    let moverHolds!: () => void;
+    const moverHoldsNodes = new Promise<void>((r) => { moverHolds = r; });
+    let writerFirst!: () => void;
+    const writerHasFirst = new Promise<void>((r) => { writerFirst = r; });
+    const mover = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${source.id} FOR UPDATE`;
+      moverHolds();
+      await writerHasFirst;
+      await move(tx);
+    }, { timeout: 20_000 });
+    await moverHoldsNodes;
+    const writer = db.$transaction(async (tx) => {
+      await lockMemoriesForChannelChange(tx, [graph.id]);
+      await derivedEdgeLocForUpsert(tx, args(t2)); // the caller's order: E2 first,
+      writerFirst();
+      await new Promise((r) => setTimeout(r, 500));
+      await derivedEdgeLocForUpsert(tx, args(t1)); // then E1; the mover re-keys E1 first
+    }, { timeout: 20_000 });
+    const [m, w] = await Promise.allSettled([mover, writer]);
+    expect(w.status).toBe('fulfilled');
+    expect(m.status).toBe('rejected');
+    expect(String((m as PromiseRejectedResult).reason)).toContain('40P01');
+    // Nothing was half-moved, and the retry the caller is told to make succeeds.
+    expect((await db.edge.findMany({ where: { sourceId: source.id, memoryId: graph.id } })).length).toBe(2);
+    await db.$transaction((tx) => move(tx), { timeout: 20_000 });
+    expect(await db.edge.count({ where: { sourceId: source.id, memoryId: dest.id } })).toBe(2);
   });
 });
