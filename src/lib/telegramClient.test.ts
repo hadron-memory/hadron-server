@@ -54,7 +54,7 @@ describe('telegramClient', () => {
   });
 
   it('registers on POST /connections, sends the bearer only when set, and returns the validated identity', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, identity));
+    const fetchMock = vi.fn().mockImplementation(async () => jsonResponse(200, identity));
     vi.stubGlobal('fetch', fetchMock);
     expect(await createTelegramToolConnection('telegram', { botToken: TOKEN })).toEqual(identity);
     const [url, init] = fetchMock.mock.calls[0]!;
@@ -69,13 +69,13 @@ describe('telegramClient', () => {
 
   it('rejects an identity with an empty id or botId (it would become a routing key)', async () => {
     for (const bad of [{ ...identity, id: '' }, { ...identity, botId: ' ' }, { ...identity, provider: 'other' }]) {
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, bad)));
+      vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => jsonResponse(200, bad)));
       expect((await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN }))).code).toBe('TELEGRAM_TOOL_ERROR');
     }
   });
 
   it('passes the tool\'s typed code through as telegramErrorCode', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(422, { error: 'invalid_token', message: 'The bot token was rejected.' })));
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => jsonResponse(422, { error: 'invalid_token', message: 'The bot token was rejected.' })));
     const e = await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN }));
     expect(e.code).toBe('TELEGRAM_TOOL_ERROR');
     expect(e.ext.telegramErrorCode).toBe('invalid_token');
@@ -85,7 +85,7 @@ describe('telegramClient', () => {
   it('never lets the bot token into an error: a tool message that echoes it is scrubbed, in message and extensions', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(jsonResponse(401, { error: `bad ${TOKEN}`, message: `Unauthorized: ${TOKEN} was rejected` })),
+      vi.fn().mockImplementation(async () => jsonResponse(401, { error: `bad ${TOKEN}`, message: `Unauthorized: ${TOKEN} was rejected` })),
     );
     const e = await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN }));
     expect(JSON.stringify(e)).not.toContain(TOKEN);

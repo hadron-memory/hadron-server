@@ -136,12 +136,24 @@ describe('createTelegramConnection', () => {
     expect(await db.telegramConnection.count({ where: { deletedAt: null } })).toBe(1);
   });
 
-  it('two concurrent creates leave one row (the partial unique decides) and tear the loser\'s tool row down', async () => {
+  it('two creates that both pass the pre-check leave one row (the partial unique decides) and tear the loser\'s tool row down', async () => {
+    // Hold the first create's tool call until the second has also reached the tool: both have then passed the
+    // pre-check (no row yet), so only the partial unique index can refuse the second write.
+    let secondReachedTool!: () => void;
+    const gate = new Promise<void>((resolve) => (secondReachedTool = resolve));
     vi.mocked(createTelegramToolConnection)
-      .mockResolvedValueOnce(identity({ id: 'tool-a' }))
-      .mockResolvedValueOnce(identity({ id: 'tool-b', botId: '100' }));
+      .mockImplementationOnce(async () => {
+        await gate;
+        return identity({ id: 'tool-a' });
+      })
+      .mockImplementationOnce(async () => {
+        secondReachedTool();
+        return identity({ id: 'tool-b', botId: '100' });
+      });
     const results = await Promise.allSettled([create(), create()]);
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const loser = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect(String(loser.reason.message)).toMatch(/already has a Telegram connection/);
     expect(await db.telegramConnection.count({ where: { deletedAt: null } })).toBe(1);
     const kept = (await db.telegramConnection.findFirstOrThrow({ where: { deletedAt: null } })).toolConnectionId;
     const lost = kept === 'tool-a' ? 'tool-b' : 'tool-a';
@@ -173,6 +185,16 @@ describe('deleteTelegramConnection', () => {
     expect(row.deletedAt).not.toBeNull();
     expect(row.deletedBy).toBe(admin.id);
     expect(deleteTelegramToolConnection).toHaveBeenCalledWith('telegram', 'tool-conn-1');
+  });
+
+  it('two concurrent deletes tear the tool side down once (the soft-delete is guarded on the live row)', async () => {
+    const connection = await create();
+    const results = await Promise.all([
+      resolvers.Mutation.deleteTelegramConnection({}, { ref: connection.id }, ctxFor(admin.id)),
+      resolvers.Mutation.deleteTelegramConnection({}, { ref: connection.id }, ctxFor(owner.id)),
+    ].map((p) => p.then((v: boolean) => v, (e: Error) => e.message)));
+    expect(results.filter((r) => r === true).length).toBeGreaterThanOrEqual(1);
+    expect(deleteTelegramToolConnection).toHaveBeenCalledTimes(1);
   });
 
   it('an outsider, a revoked member, another org\'s admin and a missing id all get NOT_FOUND, byte-identical', async () => {

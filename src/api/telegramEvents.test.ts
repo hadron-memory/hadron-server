@@ -42,8 +42,9 @@ async function post(body: unknown, token?: string): Promise<Response> {
 }
 
 async function seedConnection(toolConnectionId = 'tool-conn-tg'): Promise<{ id: string }> {
-  const org = await db.organization.create({ data: { id: generateId(), name: 'tg-org', urn: 'tg-org' } });
-  const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'tg-app', urn: 'tg-org::tg-app' } });
+  const slug = `tg-${generateId()}`;
+  const org = await db.organization.create({ data: { id: generateId(), name: slug, urn: slug } });
+  const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'tg-app', urn: `${slug}::tg-app` } });
   return db.telegramConnection.create({
     data: {
       organizationId: org.id,
@@ -138,7 +139,6 @@ describe('dispatchTelegramEvent', () => {
   it('the same event id on DIFFERENT tool connections is not a duplicate', async () => {
     await seedConnection('tool-conn-tg');
     await dispatchTelegramEvent(event({ eventId: 'x' }));
-    await db.telegramConnection.deleteMany();
     await seedConnection('other-tool');
     await dispatchTelegramEvent(event({ eventId: 'x', connectionId: 'other-tool' }));
     expect(telegramEventConsumer.handler).toHaveBeenCalledTimes(2);

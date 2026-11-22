@@ -129,6 +129,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.specBacklinksPage", // #3222 (#2213 S3): pageArgs, default 20, cap 200; in PAGE_ARGS_FIELDS.
   "Query.specUnresolvedReferencesPage", // #3222: as specBacklinksPage.
   "Query.teamChatMessages",
+  "Query.telegramConnections", // #597: clampListTake default 20, cap 200 (as slackConnections).
   "Query.teamChatSearch", // #2299: as channelMessageSearch.
   "Query.teamRoles",
   "Query.teamStopSignals",
