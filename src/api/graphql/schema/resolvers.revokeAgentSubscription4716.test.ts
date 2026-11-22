@@ -20,10 +20,14 @@
  * guard (fresh count after the lock wait sees the node; memory retained).
  *
  * The isolation pin (repeatable-read default) proves the guard's transaction
- * PINS READ COMMITTED instead of inheriting the server default: under a
- * REPEATABLE READ default the count would reuse its pre-wait snapshot, miss
- * the node committed during the lock wait, and the cascade would lose it —
- * the bug this guard closes.
+ * PINS READ COMMITTED instead of inheriting the session default. Under a
+ * REPEATABLE READ default the count reuses its pre-wait snapshot and misses the
+ * node committed during the lock wait. The cascade's foreign-key check then
+ * sees the new row (the RI crosscheck) and raises 40001, and the transaction
+ * rolls back: the node is NOT silently lost, but the revocation, already
+ * committed, surfaces as an error. RR aborts here as SERIALIZABLE would (#4806).
+ * The pin asserts the default really is repeatable read on the resolver's
+ * client (#4806 F2), so it can never pass vacuously.
  *
  * The behavior pins freeze the rest of FR-029 against the guard: a still-empty
  * memory IS hard-deleted (personal and private), a live node retains it, a
@@ -98,7 +102,32 @@ async function buildFixture(memoryClass: 'personal' | 'private' = 'personal'): P
   return { org, agent, app, admin, alice, memory };
 }
 
-const ctx = (f: Fixture): Context => ({ db, roles: ['ADMIN'], userId: f.admin.id }) as Context;
+/**
+ * The resolver's context on a given client. The one cast in this file: a test client (the shared extended `db`, or the raw
+ * `rrDb` below) stands in for the request context's database handle (#4806 F5).
+ */
+const ctxOn = (client: unknown, f: Fixture): Context => ({ db: client, roles: ['ADMIN'], userId: f.admin.id }) as Context;
+const ctx = (f: Fixture): Context => ctxOn(db, f);
+
+/**
+ * Stage the competing writer: one plain node.create held uncommitted until `release()`. `inserted` resolves once the row is
+ * written, and is raced against the writer itself, so a failing insert rejects instead of hanging the test (#4806 F5).
+ */
+function heldWriter(client: Pick<PrismaClient, '$transaction'> | typeof db, memoryId: string, loc: string) {
+  let inserted!: () => void;
+  const insertedP = new Promise<void>((resolve) => { inserted = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const writer = (client as typeof db).$transaction(async (tx) => {
+    await tx.node.create({
+      data: { id: generateId(), memoryId, loc, name: 'raced write', content: 'committed between the empty-check and the hard delete' },
+    });
+    inserted();
+    await gate;
+  }, { timeout: 20_000 });
+  const ready = Promise.race([insertedP, writer.then(() => { throw new Error('writer committed before its insert was observed'); })]);
+  return { writer, ready, release };
+}
 
 const revoke = (f: Fixture) =>
   M.revokeAgentSubscription(null, { userRef: f.alice.id, agentRef: f.agent.id }, ctx(f));
@@ -123,26 +152,9 @@ describe('#4716 — the interleaving: a node committed between the empty-check a
       // insert); with the guard it is the row lock the guard takes before
       // counting. Either way the node commits strictly between the
       // empty-check and the delete.
-      let inserted!: () => void;
-      const writerInserted = new Promise<void>((resolve) => { inserted = resolve; });
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => { release = resolve; });
-      const writer = db.$transaction(async (tx) => {
-        await tx.node.create({
-          data: {
-            id: generateId(),
-            memoryId,
-            loc: 'data:raced-write',
-            name: 'raced write',
-            content: 'committed between the empty-check and the hard delete',
-          },
-        });
-        inserted();
-        await gate;
-      }, { timeout: 20_000 });
-      await writerInserted;
-
+      const { writer, ready, release } = heldWriter(db, memoryId, 'data:raced-write');
       try {
+        await ready;
         const call = revoke(f).then(() => ({ ok: true }), (error: unknown) => ({ ok: false, error }));
         // Deterministic park: the resolver's memory-row statement is the only
         // backend in this per-worker database waiting on a lock.
@@ -162,52 +174,38 @@ describe('#4716 — the interleaving: a node committed between the empty-check a
         expect(sub.revokedAt).not.toBeNull();
       } finally {
         // Idempotent: a failed assertion must never leave the writer parked
-        // until its transaction timeout.
+        // until its transaction timeout, and the writer is awaited so it never
+        // outlives the test (#4806 F5).
         release();
+        await writer.catch(() => undefined);
       }
     },
   );
 });
 
 describe('#4716 — the guard PINS read committed: a repeatable-read server default must not reopen the window', () => {
-  it('under a REPEATABLE READ database default the raced node still survives', async () => {
+  it('under a REPEATABLE READ session default the raced node still survives', async () => {
     const f = await buildFixture();
     const memoryId = f.memory.id;
 
-    // A deployment may set default_transaction_isolation = repeatable read;
-    // the guard must not inherit it (the count would reuse its pre-wait
-    // snapshot). ALTER DATABASE only reaches NEW connections, so the resolver
-    // runs on a fresh client whose pool opened under the RR default.
-    const dbName = (await db.$queryRaw<Array<{ db: string }>>`SELECT current_database() AS db`)[0].db;
-    await db.$executeRawUnsafe(`ALTER DATABASE "${dbName}" SET default_transaction_isolation TO 'repeatable read'`);
-    const rrDb = new PrismaClient();
+    // A deployment may default to repeatable read; the guard must not inherit it. The default is set per SESSION through the
+    // connection's options (#4806 F4): nothing outside this client changes, so no ALTER DATABASE (which needs ownership and
+    // lingers on connections pooled while it is set). The URL is the shared client's own source, DATABASE_URL, the per-worker
+    // database (#4806 F3), and the test checks it reached the same database.
+    const url = new URL(process.env.DATABASE_URL!);
+    url.searchParams.set('options', '-c default_transaction_isolation=repeatable\\ read');
+    const rrDb = new PrismaClient({ datasourceUrl: url.toString() });
     try {
-      let inserted!: () => void;
-      const writerInserted = new Promise<void>((resolve) => { inserted = resolve; });
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => { release = resolve; });
-      const writer = rrDb.$transaction(async (tx) => {
-        await tx.node.create({
-          data: {
-            id: generateId(),
-            memoryId,
-            loc: 'data:raced-write-rr',
-            name: 'raced write (RR default)',
-            content: 'committed between the empty-check and the hard delete',
-          },
-        });
-        inserted();
-        await gate;
-      }, { timeout: 20_000 });
-      await writerInserted;
+      const [{ iso, dbName }] = await rrDb.$queryRaw<Array<{ iso: string; dbName: string }>>`
+        SELECT current_setting('default_transaction_isolation') AS iso, current_database() AS "dbName"`;
+      expect(iso, 'the pin must run with repeatable read really in effect (#4806 F2)').toBe('repeatable read');
+      expect(dbName).toBe((await db.$queryRaw<Array<{ d: string }>>`SELECT current_database() AS d`)[0].d);
 
-      const rrCtx: Context = { db: rrDb, roles: ['ADMIN'], userId: f.admin.id } as Context;
-      const call = M.revokeAgentSubscription(
-        null,
-        { userRef: f.alice.id, agentRef: f.agent.id },
-        rrCtx,
-      ).then(() => ({ ok: true }), (error: unknown) => ({ ok: false, error }));
+      const { writer, ready, release } = heldWriter(rrDb, memoryId, 'data:raced-write-rr');
       try {
+        await ready;
+        const call = M.revokeAgentSubscription(null, { userRef: f.alice.id, agentRef: f.agent.id }, ctxOn(rrDb, f))
+          .then(() => ({ ok: true }), (error: unknown) => ({ ok: false, error }));
         await waitForLockWaitersOfType(db, 'transactionid', 1);
         release();
         await writer;
@@ -215,12 +213,16 @@ describe('#4716 — the guard PINS read committed: a repeatable-read server defa
         expect(result).toEqual({ ok: true });
         expect(await db.node.count({ where: { memoryId } })).toBe(1);
         expect(await db.memory.findUnique({ where: { id: memoryId } })).not.toBeNull();
+        const sub = await db.agentSubscription.findUniqueOrThrow({
+          where: { userId_agentId: { userId: f.alice.id, agentId: f.agent.id } },
+        });
+        expect(sub.revokedAt).not.toBeNull();
       } finally {
         release();
+        await writer.catch(() => undefined);
       }
     } finally {
       await rrDb.$disconnect();
-      await db.$executeRawUnsafe(`ALTER DATABASE "${dbName}" RESET default_transaction_isolation`);
     }
   });
 });

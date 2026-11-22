@@ -444,6 +444,17 @@ export const typeDefs = `#graphql
     memoryUrn: String!
     name: String!
     class: MemoryClass!
+    """
+    #4890: the memory's description, carried only where THIS caller could read
+    it through Memory.description — the record gate (canReadMemoryRecord) that
+    Query.memory applies, reused, never the row's own admission. Null when the
+    record gate would refuse the caller; the row is still listed, only the
+    description is withheld. The memory record is never enciphered
+    (hrn:node:hadronmemory.com:specs:cor:sec:040:03 enciphers node content
+    only), so an encrypted memory's description is carried with no key in
+    play, exactly as Memory.description serves it.
+    """
+    description: String
     "Every reason this memory is in scope. Never empty. Ordered by kind (AGENT_SYSTEM, AGENT_LINK, INHERITED_BASE, TEAM_SPACE, APP_MEMORY), then by agent install order."
     sources: [AppMemorySource!]!
     """
@@ -6746,6 +6757,18 @@ export const typeDefs = `#graphql
     from: String!
     "Whether an encrypted API key is stored; the key is never returned."
     hasApiKey: Boolean!
+    """
+    #4865 — report only. Whether the domain of the from address is verified at Resend, read
+    live through the hadrontool-resend capability tool each time this field is selected: never
+    cached, so it is current as of this read, and it costs one tool call per sender. Core never
+    calls Resend itself (hrn:node:hadronmemory.com:specs:cor:int:030:01).
+    true: Resend reports the domain verified.
+    false: Resend reports it not verified, including when Resend has no record of the domain.
+    null: the state could not be read. The caller is not a member of the sender's organization
+    (an App key may list senders, but reads null here); the tool is not configured; or the
+    lookup failed or ran past its bound of 12 seconds. A null says nothing about the domain.
+    """
+    domainVerified: Boolean
     enabled: Boolean!
     createdAt: DateTime!
     createdBy: String

@@ -67,6 +67,7 @@ import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
+import { resendSenderDomainVerified } from '../../../lib/resendSenders.js';
 import { publicAssetUrl, isPublicHotlinkEnabled } from '../../assetPublic.js';
 import { canManageAssetPublicLink, PUBLIC_LINK_MEMORY_SELECT } from '../../../lib/asset/publicLink.js';
 import {
@@ -1257,6 +1258,18 @@ export const typeResolvers = {
   ResendSender: {
     hasApiKey: (s: { apiKeyEncrypted?: string | null }) => s.apiKeyEncrypted != null,
     from: (s: { fromAddress: string }) => s.fromAddress,
+    // #4865 — authorize BEFORE the lookup. This field spends the org's Resend key at the
+    // capability tool, so it re-derives the sender's own read gate (resendSender's
+    // isOrgMemberOrAdmin) instead of trusting whatever query handed the object out: the list
+    // also answers App keys of the org, which are not members. No access, no decrypt, no call.
+    domainVerified: async (
+      s: { organizationId: string; fromAddress: string; apiKeyEncrypted: string },
+      _: unknown,
+      ctx: Context,
+    ): Promise<boolean | null> => {
+      if (!(await isOrgMemberOrAdmin(ctx, s.organizationId))) return null;
+      return resendSenderDomainVerified(s);
+    },
   },
   CompiledBootPrompt: {
     lintWarnings: (r: { node: { id: string }; revNo: number }, args: { first?: number | null; after?: string | null }, ctx: Context) =>
