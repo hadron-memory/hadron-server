@@ -199,6 +199,14 @@ describe('C10: behind the signing switch; the grant-signing capability token', (
     expect(js).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
   });
 
+  it('#4787 the signer is told a run wrote the reason: the served script carries the run sentence, not only the "Written by <name>" one (cor:acl:140:05, :07)', async () => {
+    const js = await (await fetch(`${base}/grant-signing/ceremony.js`)).text();
+    // the branch the JSON view's run flag selects: dropping `reasonAuthor.run ? <run sentence> : ...` removes this sentence from the script
+    expect(js).toContain('Written by an automated run of this App, which asked for this grant.');
+    // and the person-written sentence stays the other arm, so the two cannot be merged into one
+    expect(js).toContain(', who asked for this grant.');
+  });
+
   it('#4164 (Victor\'s build note): the page\'s reason for a withheld sentence is true for an unwritable summary too, not only an unreadable node', async () => {
     const js = await (await fetch(`${base}/grant-signing/ceremony.js`)).text();
     expect(js).toContain('its text cannot be written from its values');

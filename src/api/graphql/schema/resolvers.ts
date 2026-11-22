@@ -1,4 +1,5 @@
 import { utilizationQueries } from './resolvers.utilization.js';
+import { teamMetricsQueries } from './resolvers.teamMetrics.js';
 import { runTeamSnapshotMutations, runTeamSnapshotQueries } from './resolvers.runTeamSnapshot.js';
 import { rateLimitQueries, rateLimitMutations } from './resolvers.rateLimit.js';
 import { registerRolePickQueries } from './resolvers.registerRolePick.js';
@@ -246,6 +247,7 @@ export const resolvers = {
     ...accountUsageQueries,
     ...reviewQualityQueries,
     ...utilizationQueries,
+    ...teamMetricsQueries,
     ...registerRoleCandidateQueries,
     ...registerRolePickQueries,
     ...actionRegisterIndexQueries,

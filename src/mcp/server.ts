@@ -110,7 +110,8 @@ import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
 import { NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
 import { normalizeObjectType, normalizeRole, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
-import { deriveEdgeLoc, isAuthoredLoc } from '../lib/edgeLoc.js';
+import { deriveEdgeLoc, isAuthoredLoc, normalizeAuthoredEdgeLoc } from '../lib/edgeLoc.js';
+import { validateLocOrThrow } from '../lib/validateLocOrThrow.js';
 import { retireSpecDoor } from '../api/graphql/schema/resolvers.mutation.retireSpec.js';
 import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../lib/tombstoneArchive.js';
 import { deletePendingEdgesTargetingNodes, promotePendingEdgeForTarget, reconcilePendingEdgeCounts } from '../lib/pendingEdgePromotion.js';
@@ -786,10 +787,13 @@ export type ResolvedEdge = {
  * work uniformly.
  *
  * Pure read; writes nothing. Returns the resolved edges on success,
- * or `{ error: <user-facing string> }` when any ref doesn't resolve.
+ * or `{ error: <user-facing string> }` when any ref doesn't resolve or an
+ * authored loc is invalid (#4813: whitespace-only or padded locs are refused
+ * with the GraphQL door's own `validateLocOrThrow` message, so both doors
+ * refuse byte-identically before any write).
  * Callers run this BEFORE mutating the source node, so an unresolvable
- * target aborts the mutation cleanly without committing the source
- * upsert/update.
+ * target or an invalid loc aborts the mutation cleanly without committing
+ * the source upsert/update.
  *
  * Issue #107: prior inline logic in hadron_create_node / hadron_update_node used a
  * `targetId.includes(':')` heuristic plus `findFirst({loc})` (no
@@ -818,6 +822,20 @@ export async function resolveEdgeRefs(
 ): Promise<{ resolved: ResolvedEdge[] } | { error: string }> {
   const resolved: ResolvedEdge[] = [];
   for (const edge of edges) {
+    // #4813: the same coercion + validation the GraphQL inline-edge door applies, in the same
+    // order (loc validated before target resolution). A whitespace-only or padded loc ('  ',
+    // ' a', 'a ') is REFUSED here with the GraphQL door's own message text, BEFORE any write —
+    // previously this path stored all three as AUTHORED locs (the standalone hadron_create_edge
+    // already validated; the inline path did not). '' is no authored loc, it derives (#4738).
+    const loc = normalizeAuthoredEdgeLoc(edge.loc);
+    if (loc !== null) {
+      try {
+        validateLocOrThrow(loc, 'loc');
+      } catch (e) {
+        if (e instanceof GraphQLError && e.extensions.code === 'BAD_USER_INPUT') return { error: e.message };
+        throw e;
+      }
+    }
     try {
       const { id: targetNodeId } = await resolveNodeRefForAuth(edge.targetId, auth, sourceMemoryId);
       // Fetch the target's loc so the edge loc can be derived at write time.
@@ -833,7 +851,7 @@ export async function resolveEdgeRefs(
         targetLoc: tgt.loc,
         targetMemoryId: tgt.memoryId,
         name: edge.name ?? null,
-        loc: edge.loc || null, // #4738: '' is no authored loc, it derives
+        loc, // #4738/#4813: '' is no authored loc, it derives
         description: edge.description ?? null,
         isRunnable: edge.isRunnable ?? null,
       });

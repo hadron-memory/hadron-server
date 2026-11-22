@@ -45,9 +45,9 @@ export const telegramMutations = {
     // The tool validates the token live and derives the bot identity; the token goes no further than this call.
     const identity = await createTelegramToolConnection('telegram', { botToken, appId });
 
-    // KNOWN GAP (deferred): App or org deletion does not tear the tool row down (#4828, same as Slack). A lost
-    // registration response (#4829) is covered by the registrationKey above: the retry re-derives it and the tool returns
-    // the same connection.
+    // App and org deletion DO tear the tool row down (#4828, src/lib/chatToolTeardown.ts, shared with Slack). A lost
+    // registration response (#4829) is covered by the registrationKey sent above: the retry re-derives it and a tool
+    // that supports it returns the same connection.
     // EVERY failure past this point tears the tool row down, or the tool would hold an encrypted token and a poll
     // loop with no core row and no GraphQL handle to delete them.
     try {
@@ -88,7 +88,7 @@ export const telegramMutations = {
       throw new GraphQLError('Telegram connection not found.', { extensions: { code: 'NOT_FOUND' } });
     }
     await requireOrgRole(ctx, connection.organizationId, 'ADMIN');
-    // App or org deletion does not reach this teardown (#4828, same gap as Slack); only this door does.
+    // App and org deletion tear their connections down through the shared path in src/lib/chatToolTeardown.ts (#4828); this is the single-connection door.
     // Guarded on the live row so a concurrent double delete tears the tool down once.
     const { count } = await ctx.db.telegramConnection.updateMany({
       where: { id: connection.id, deletedAt: null },
