@@ -361,3 +361,21 @@ describe('a database fault never reads as "agent not found" (#4864, blind F1)', 
     expect(await totals()).toEqual(before);
   });
 });
+
+describe('trigger bounds and the skill-lint order (#4864, local F2/F3)', () => {
+  it('a trigger over 200 characters, or with a line break, is refused and writes nothing', async () => {
+    const before = await totals();
+    expect((await code(create(admin, 'tasks:deploy', { agent: agent.id, trigger: 'x'.repeat(201) }))).code).toBe('BAD_USER_INPUT');
+    expect((await code(create(admin, 'tasks:deploy', { agent: agent.id, trigger: 'when\ndeploying' }))).code).toBe('BAD_USER_INPUT');
+    expect(await totals()).toEqual(before);
+    expect((await code(create(admin, 'tasks:deploy', { agent: agent.id, trigger: 'x'.repeat(200) }))).code).toBe('OK');
+  });
+
+  it('the skill lint judges only the caller\'s own input, so an outsider\'s invalid skill answers BAD_USER_INPUT before the memory gate: a decision, pinned', async () => {
+    const r = await code(create(stranger, 'tasks:deploy', INDEX(), {}, sysMem, { name: 'deploy', description: '<b>bad</b>' }));
+    expect(r.code).toBe('BAD_USER_INPUT');
+    // and a VALID skill from the same outsider gets the missing-memory refusal, exactly as without the option
+    const plain = await code(create(stranger, 'tasks:deploy', null));
+    expect(await code(create(stranger, 'tasks:deploy', INDEX(), {}, sysMem, { name: 'deploy', description: 'Use when deploying.' }))).toEqual(plain);
+  });
+});

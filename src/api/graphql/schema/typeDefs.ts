@@ -7181,7 +7181,7 @@ export const typeDefs = `#graphql
   input TaskIndexInput {
     "The Agent (ID or URN) whose tasks index lists this task. The node must be created in that Agent's own system memory."
     agent: String!
-    "The edge's name: the trigger for this task, as the Agent's task list shows it."
+    "The edge's name: the trigger for this task, as the Agent's task list shows it. One line of at most 200 characters; surrounding space is trimmed."
     trigger: String!
   }
 

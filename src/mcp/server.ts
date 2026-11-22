@@ -13193,7 +13193,7 @@ const governedDoorArgs = {
 const taskCreateArgs = {
   ...governedDoorArgs,
   agent: z.string().optional().describe('The Agent (ID or URN) whose tasks index lists this task. Give it with `trigger`; the task must be created in that Agent\'s own system memory.'),
-  trigger: z.string().optional().describe('The trigger label of the tasks-index edge: what the Agent\'s task list shows for this task. Give it with `agent`.'),
+  trigger: z.string().optional().describe('The trigger label of the tasks-index edge: what the Agent\'s task list shows for this task. One line of at most 200 characters. Give it with `agent`.'),
   skill: z
     .object({ name: z.string(), description: z.string() })
     .optional()

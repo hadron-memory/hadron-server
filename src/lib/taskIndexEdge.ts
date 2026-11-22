@@ -22,6 +22,9 @@ import { HOST_CLAUDE_SKILL } from './skilldoc/hosts.js';
 export type TaskIndexInput = { agent: string; trigger: string };
 export type TaskSkillExportInput = { name: string; description: string };
 
+/** The trigger is a label in a task list, not prose: one line, bounded. */
+export const MAX_TRIGGER_LENGTH = 200;
+
 export const TASKS_INDEX_NOT_SET = 'TASKS_INDEX_NOT_SET';
 export const TASKS_INDEX_OUT_OF_SCOPE = 'TASKS_INDEX_OUT_OF_SCOPE';
 
@@ -39,6 +42,9 @@ export async function resolveTaskIndexEdge(
   }
   // Only a not-found signal reads as "no match for agentRef"; a database fault or any other error propagates as what it is
   // (#4864 blind F1). An Agent the caller may not read already answers as the same NOT_FOUND inside the resolver.
+  if (trigger.length > MAX_TRIGGER_LENGTH || /[\r\n]/.test(trigger)) {
+    throw new GraphQLError(`index.trigger is one line of at most ${MAX_TRIGGER_LENGTH} characters.`, { extensions: { code: 'BAD_USER_INPUT', field: 'index.trigger' } });
+  }
   let agent;
   try {
     agent = await resolveReadableAgentRefArg(ctx, index.agent);
