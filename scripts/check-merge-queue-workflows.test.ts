@@ -104,14 +104,34 @@ describe('merge queue workflow contract (#4819)', () => {
   });
 
   // A required check must really RUN on a merge_group event under exactly its context name. A skipped job reports as
-  // passing, a matrix renames the context to `name (1)`, and an expression in `name:` changes the string.
-  const EVENT_CONTEXT = /github\.event_name|github\.event\.pull_request|github\.base_ref|github\.head_ref/;
+  // passing, a matrix renames the context to `name (1)`, and an expression in `name:` changes the string. A job whose
+  // `needs:` dependency is skipped is skipped too, so a required job with needs must be a guarded aggregator
+  // (`if: always()` plus a check of every needed result).
+  const EVENT_CONTEXT = /github\.event_name|github\.event\.|github\.base_ref|github\.head_ref|github\.ref\b/;
+  type Job = { if?: unknown; name?: unknown; uses?: unknown; needs?: unknown; strategy?: { matrix?: unknown }; steps?: Array<Record<string, unknown>> };
+  const scan = (v: unknown): string => JSON.stringify(v ?? '');
   it.each(Object.entries(REQUIRED))('%s (required) job %s is not skipped, matrixed or renamed on a merge_group event', (f, job) => {
-    const j = load(f).jobs?.[job] as { if?: unknown; name?: unknown; strategy?: { matrix?: unknown }; steps?: Array<{ if?: unknown }> };
+    const j = load(f).jobs?.[job] as Job;
     expect(j.strategy?.matrix, `${f}: a matrix on the required job renames its context`).toBeUndefined();
+    expect(j.uses, `${f}: a required job that calls a reusable workflow gets a different check context`).toBeUndefined();
     expect(String(j.name ?? ''), `${f}: an expression in name changes the context`).not.toContain('${{');
     expect(String(j.if ?? ''), `${f}: a job-level if that reads the event context can skip the required job on merge_group`).not.toMatch(EVENT_CONTEXT);
-    for (const st of j.steps ?? []) expect(String(st.if ?? ''), `${f}: a step-level if on the event context`).not.toMatch(EVENT_CONTEXT);
+    for (const st of j.steps ?? []) {
+      for (const k of ['if', 'run', 'with', 'env']) expect(scan(st[k]), `${f}: step ${k} reads the event context`).not.toMatch(EVENT_CONTEXT);
+    }
+    const needs = ([] as unknown[]).concat(j.needs ?? []).map(String);
+    if (needs.length > 0) {
+      expect(String(j.if ?? ''), `${f}: a required job with needs must run when a dependency is skipped (if: always())`).toContain('always()');
+      const body = scan(j.steps);
+      for (const n of needs) expect(body, `${f}: the aggregator must check needs.${n}.result`).toContain(`needs.${n}.result`);
+    }
+  });
+
+  it('every needed job of a required job exists in the same workflow', () => {
+    for (const [f, job] of Object.entries(REQUIRED)) {
+      const d = load(f);
+      for (const n of ([] as unknown[]).concat((d.jobs?.[job] as Job).needs ?? []).map(String)) expect(d.jobs?.[n], `${f}: needs ${n}`).toBeDefined();
+    }
   });
 
   // "A queue entry is never cancelled by another run" is otherwise only a comment: a merge_group run has no
@@ -119,27 +139,52 @@ describe('merge queue workflow contract (#4819)', () => {
   it.each(Object.keys(REQUIRED))('%s (required) cannot cancel a queue entry: its group falls back to run_id and cancel-in-progress is gated on pull_request', (f) => {
     const c = (load(f) as unknown as { concurrency?: { group?: string; 'cancel-in-progress'?: unknown } }).concurrency;
     expect(String(c?.group), `${f}`).toContain('github.run_id');
-    expect(String(c?.['cancel-in-progress']), `${f}: must be false for a merge_group run`).toContain("github.event_name == 'pull_request'");
+    expect(String(c?.['cancel-in-progress']).replace(/\s+/g, ''), `${f}: must be false for a merge_group run`).toBe("${{github.event_name=='pull_request'}}");
   });
 
   // A merge_group run executes the merged tree in the base repository's context. Today no queued workflow reads a
-  // repository secret and the default token is read-only; this keeps a future change from widening that unnoticed.
-  it.each(Object.entries(DECISIONS).filter(([, d]) => d.queue).map(([f]) => f))('%s (queued) references no secrets and holds no write permission', (f) => {
-    const raw = readFileSync(join(DIR, f), 'utf8');
-    expect(raw, `${f}: a queued workflow must not read a repository secret`).not.toMatch(/secrets\./);
-    const writes: string[] = [];
-    const walk = (node: unknown, path: string): void => {
-      if (node && typeof node === 'object') {
-        for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
-          if (k === 'permissions') {
-            if (typeof v === 'string' && v !== 'read-all' && v !== 'none') writes.push(`${path}.permissions=${v}`);
-            if (v && typeof v === 'object') for (const [pk, pv] of Object.entries(v as Record<string, unknown>)) if (pv === 'write') writes.push(`${path}.permissions.${pk}`);
-          } else walk(v, `${path}.${k}`);
-        }
+  // repository secret and every one declares a read-only token; this keeps a future change from widening that unnoticed.
+  // The repository's default token permission is a setting the repo does not pin, so an explicit top-level
+  // `permissions:` block is required. Local reusable workflows a queued workflow calls are judged the same way.
+  const queued = Object.entries(DECISIONS).filter(([, d]) => d.queue).map(([f]) => f);
+  const writesIn = (node: unknown, path: string, out: string[]): void => {
+    if (!node || typeof node !== 'object') return;
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      if (k === 'permissions') {
+        if (typeof v === 'string' && v !== 'read-all' && v !== 'none') out.push(`${path}.permissions=${v}`);
+        if (v && typeof v === 'object') for (const [pk, pv] of Object.entries(v as Record<string, unknown>)) if (pv === 'write') out.push(`${path}.permissions.${pk}`);
+      } else writesIn(v, `${path}.${k}`, out);
+    }
+  };
+  const localCalls = (d: unknown): string[] => {
+    const out: string[] = [];
+    const w = (n: unknown): void => {
+      if (!n || typeof n !== 'object') return;
+      for (const [k, v] of Object.entries(n as Record<string, unknown>)) {
+        if (k === 'uses' && typeof v === 'string' && v.startsWith('./.github/workflows/')) out.push(v.slice('./.github/workflows/'.length));
+        else w(v);
       }
     };
-    walk(load(f), f);
-    expect(writes, `${f}: a queued workflow must not hold a write permission`).toEqual([]);
+    w(d);
+    return out;
+  };
+  it.each(queued)('%s (queued) declares an explicit read-only token, references no secrets and holds no write permission', (f) => {
+    const seen = new Set<string>();
+    const todo = [f];
+    while (todo.length > 0) {
+      const cur = todo.pop() as string;
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      const d = load(cur) as Doc & { permissions?: unknown };
+      // The parsed document, so a comment that says "no secrets" does not trip it but `secrets: inherit`,
+      // `secrets['X']`, `toJSON(secrets)` and `secrets.X` all do.
+      expect(JSON.stringify(d), `${cur} (reached from ${f}): a queued workflow must not mention a repository secret`).not.toMatch(/\bsecrets\b/);
+      expect(d.permissions, `${cur}: a queued workflow needs an explicit top-level permissions block (the repository default is not pinned)`).toBeDefined();
+      const writes: string[] = [];
+      writesIn(d, cur, writes);
+      expect(writes, `${cur}: a queued workflow must not hold a write permission`).toEqual([]);
+      todo.push(...localCalls(d));
+    }
   });
 
   it('tsc runs on pull_request, merge_group and push to main', () => {

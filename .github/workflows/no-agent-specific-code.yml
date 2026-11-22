@@ -24,6 +24,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 # A queue entry (merge_group) has no PR number, so it gets its own group and is never cancelled; see CLAUDE.md, Merge notes (#4819).
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
