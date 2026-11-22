@@ -106,6 +106,9 @@ describe('#4775 capability-tool error text (acceptance 2)', () => {
     const seen = JSON.stringify({ m: err.message, c: err.cause, x: (err.cause as GraphQLError)?.extensions, cm: (err.cause as Error)?.message, cc: ((err.cause as Error)?.cause as Error)?.message });
     expect(seen).not.toContain(CANARY);
     expect((err.cause as GraphQLError).extensions).toMatchObject({ code: 'WEBFETCH_TOOL_ERROR', webfetchErrorCode: 'fetch_failed' });
+    // The tool's own error is never kept: no originalError and no deeper cause survive on the rebuilt one (its free text may echo the value).
+    expect((err.cause as GraphQLError).originalError).toBeUndefined();
+    expect((err.cause as Error).cause).toBeUndefined();
   });
 });
 
@@ -131,7 +134,7 @@ describe('#4775 refused attempts are metered and their audit capped (item 3)', (
     const exhausted = await admitAndExecuteTool(webRequest, { method: 'GET', url: URL_OK, secretClientId: clientId }, { toolCtx: ctx }).catch((e: unknown) => e);
     // Budget zero: the use is refused with a budget code, not merely "something rejected", and nothing is sent, spent or decremented below zero.
     expect(exhausted).toBeInstanceOf(Error);
-    expect(((exhausted as Error).cause as GraphQLError | undefined)?.extensions?.code ?? (exhausted as GraphQLError).extensions?.code).toMatch(/BUDGET|TOOL_DENIED/);
+    expect(((exhausted as Error).cause as GraphQLError | undefined)?.extensions?.code ?? (exhausted as GraphQLError).extensions?.code).toBe('TOOL_DENIED');
     expect(await budget()).toBe(0);
     expect(httpRequest).not.toHaveBeenCalled();
     expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
@@ -167,8 +170,12 @@ describe('#4775 cap counts refusals only, and delete-at-last-use works through w
     await tickets(1);
     await expect(call()).resolves.toMatchObject({ status: 200, body: 'ok' });
     expect(await db.secret.count({ where: { id: secretId } })).toBe(0);
-    await expect(call()).rejects.toBeDefined();
+    const second = (await call().catch((e: unknown) => e)) as GraphQLError;
+    expect(second.extensions?.code).toBe('SECRET_READ_CLIENT_SECRET_DELETED');
     expect(httpRequest).toHaveBeenCalledTimes(1);
+    // The delete removes the secret, not the record of its use: the grant row and the OK event survive.
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(1);
+    expect(await db.secretEvent.count({ where: { clientId, kind: 'USE', outcome: 'OK' } })).toBe(1);
   });
 });
 
@@ -208,6 +215,17 @@ describe('#4775 a followed redirect withholds the response (blind P1, defense in
     const err = (await call().catch((e: unknown) => e)) as GraphQLError;
     expect(err.extensions).toMatchObject({ code: 'WEBFETCH_REDIRECT_FOLLOWED' });
     expect(JSON.stringify({ m: err.message, x: err.extensions })).not.toContain(CANARY);
+  });
+  it('a result on the same origin but another path or query is refused too (the comparison is the whole URL, not the origin)', async () => {
+    for (const finalUrl of ['https://api.example.test/v1/other', `${URL_OK}?x=1`, 'https://api.example.test/']) {
+      await tickets(1);
+      vi.mocked(httpRequest).mockResolvedValue({ method: 'GET', finalUrl, status: 200, headers: {}, contentType: null, body: `echo ${CANARY}`, truncated: false } as never);
+      const err = (await call().catch((e: unknown) => e)) as GraphQLError;
+      expect(err.extensions).toMatchObject({ code: 'WEBFETCH_REDIRECT_FOLLOWED' });
+      expect(JSON.stringify({ m: err.message, x: err.extensions })).not.toContain(CANARY);
+    }
+    // A withheld response still spends the use: the credential was sent.
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(3);
   });
   it('a result with no finalUrl is refused the same way (fail closed) and raises the operator line', async () => {
     await tickets(1);
