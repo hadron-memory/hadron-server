@@ -111,18 +111,18 @@ import {
 } from './resolvers.helpers.js';
 
 /**
+ * #4809 (cor:dmo:050:11): the census ran out of its bound. Its own code, never `WORKER_IN_USE` (no reference was found):
+ * the delete is refused, nothing is written, and the caller may retry or retire. Same on both doors.
+ */
+const censusIncomplete = (workerId: string) => new GraphQLError('The reference check for this worker did not finish in time, so it was not deleted. Retry later, or retire the worker instead.', {
+  extensions: { code: 'WORKER_CENSUS_INCOMPLETE', workerId },
+});
+
+/**
  * Backstop on slug-race retries in `castWorker` (#991). Not an allocation
  * budget — see `createWithSlug` for why it must sit far above any plausible
  * concurrent-cast count rather than at a handful.
  */
-/**
- * #4809 (cor:dmo:050:11): the census ran out of its bound. Its own code, never `WORKER_IN_USE` (no reference was found):
- * the delete is refused, nothing is written, and the caller may retry or retire. Same on both doors.
- */
-const censusIncomplete = (workerId: string) => new GraphQLError('The reference check for this worker did not finish in time, so it was not deleted. Retry, or retire the worker instead.', {
-  extensions: { code: 'WORKER_CENSUS_INCOMPLETE', workerId },
-});
-
 const SLUG_RACE_RETRY_LIMIT = 50;
 
 /**

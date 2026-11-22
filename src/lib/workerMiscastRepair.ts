@@ -63,16 +63,24 @@ export const workerCensusTransactionTimeoutMs = () => workerCensusTimeoutMs() + 
 export class WorkerCensusIncompleteError extends Error {
   constructor() { super('The reference census did not finish within its bound.'); this.name = 'WorkerCensusIncompleteError'; }
 }
-const isStatementTimeout = (e: unknown) => e instanceof Prisma.PrismaClientKnownRequestError
-  && ((e.code === 'P2010' && String(e.meta?.code) === '57014') || /statement timeout/i.test(e.message));
+/** Postgres 57014 (or its text) however Prisma wraps it: a raw query (P2010), a model query, or an unknown-request error. */
+const isStatementTimeout = (e: unknown) => {
+  if (!(e instanceof Error)) return false;
+  const meta = (e as { meta?: { code?: unknown } }).meta;
+  return String(meta?.code) === '57014' || /57014|statement timeout/i.test(e.message);
+};
+/** P2028: the door's interactive transaction (budget + 20 s) expired while the census was running; the census did not finish. */
+const isTransactionExpired = (e: unknown) => e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2028';
 
 /** Ciphertext is not an empty JSON envelope. Legacy data may lack the
  * explicit author stamp, so verify with an already resident key or fail closed.
  * Nothing decrypts for the caller and no new key is acquired. */
-async function encryptedHistoryMayReference(db: Reader, worker: { id: string }, sessionIds: string[]): Promise<boolean> {
+async function encryptedHistoryMayReference(db: Reader, worker: { id: string }, sessionIds: string[], arm: () => Promise<void>): Promise<boolean> {
+  await arm();
   const [identity] = await db.$queryRaw<Array<{ createdAt: Date }>>`SELECT created_at AS "createdAt" FROM workers WHERE id = ${worker.id}`;
   if (!identity) return true;
   const since = identity.createdAt.toISOString();
+  await arm();
   const rows = await db.$queryRaw<Array<{ memoryId: string; data: unknown }>>(Prisma.sql`
     SELECT memory_id AS "memoryId", data FROM nodes
     WHERE data ? '__enc' AND (created_at >= ${since}::timestamp OR updated_at >= ${since}::timestamp)
@@ -140,6 +148,9 @@ export async function miscastHasReferences(db: Reader, worker: { id: string; mem
   const budget = workerCensusTimeoutMs();
   const deadline = Date.now() + budget;
   const [{ previous }] = await db.$queryRaw<Array<{ previous: string }>>`SELECT current_setting('statement_timeout') AS previous`;
+  // Every statement of the census is armed with what is LEFT of the one budget (`arm()` runs before each), so a single
+  // stuck scan is cancelled by Postgres at the remaining budget; the door's transaction timeout (budget + 20 s) is only the
+  // backstop, and its P2028 is mapped to the same refusal below.
   try {
     const found = await census(db, worker, async () => {
       const left = deadline - Date.now();
@@ -149,7 +160,7 @@ export async function miscastHasReferences(db: Reader, worker: { id: string; mem
     await db.$queryRaw`SELECT set_config('statement_timeout', ${previous}, true)`;
     return found;
   } catch (e) {
-    if (isStatementTimeout(e)) throw new WorkerCensusIncompleteError();
+    if (isStatementTimeout(e) || isTransactionExpired(e)) throw new WorkerCensusIncompleteError();
     throw e;
   }
 }
@@ -204,14 +215,15 @@ async function census(db: Reader, worker: { id: string; memoryId: string | null;
     await arm();
     if (await jsonReferences(db, table, column, [worker.id, ...sessionIds], worker.id)) return true;
   }
-  await arm();
-  if (await encryptedHistoryMayReference(db, worker, sessionIds)) return true;
+  if (await encryptedHistoryMayReference(db, worker, sessionIds, arm)) return true;
   await arm();
   const commentRows = await db.$queryRaw<Array<{ present: boolean }>>(Prisma.sql`
     SELECT EXISTS (SELECT 1 FROM comment_meta WHERE author_key = ${`w:${worker.id}`} OR retracted_by = ${`w:${worker.id}`}
       OR resolved_by = ${`w:${worker.id}`} OR thread_deleted_by = ${`w:${worker.id}`}) AS present`);
   if (commentRows[0].present) return true;
+  if (!worker.memoryId) return false;
   await arm();
-  return !!(worker.memoryId && (await db.node.count({ where: { memoryId: worker.memoryId } })
-    || await db.asset.count({ where: { memoryId: worker.memoryId } })));
+  if (await db.node.count({ where: { memoryId: worker.memoryId } })) return true;
+  await arm();
+  return (await db.asset.count({ where: { memoryId: worker.memoryId } })) > 0;
 }

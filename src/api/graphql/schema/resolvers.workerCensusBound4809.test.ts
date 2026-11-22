@@ -8,6 +8,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import pg from 'pg';
+import { workerCensusTimeoutMs } from '../../../lib/workerMiscastRepair.js';
 import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
@@ -84,11 +86,42 @@ describe('#4809 bounded worker census', () => {
     for (const bad of ['0', '-5', '1.5', 'abc', '']) {
       process.env.WORKER_CENSUS_TIMEOUT_MS = bad;
       expect(await remove().then(() => 'deleted', (e: any) => e.extensions?.code)).toBe('deleted');
-      await beforeEach_recast();
+      await recastTarget();
     }
   });
 
-  it('counts every identity in ONE pass: a session id anywhere in a JSON column still refuses WORKER_IN_USE', async () => {
+  it('workerCensusTimeoutMs: only a positive integer counts', () => {
+    expect(workerCensusTimeoutMs({ WORKER_CENSUS_TIMEOUT_MS: '250' } as any)).toBe(250);
+    for (const bad of ['0', '-5', '1.5', 'abc', '', undefined]) expect(workerCensusTimeoutMs({ WORKER_CENSUS_TIMEOUT_MS: bad } as any)).toBe(20_000);
+  });
+
+  // BLIND P2-3 (#4820): the 1 ms case trips the JS deadline whether or not Postgres cancels anything. Here the JS deadline has
+  // NOT passed: a lock held on one census table by another connection makes a SINGLE statement overrun, so only the transaction-local
+  // statement_timeout can end it, near the budget and far from the door's transaction backstop (budget + 20 s).
+  it.each([['deleteWorker', remove], ['deleteWorkerPreview', preview]] as const)(
+    '%s: ONE blocked statement is cancelled by Postgres near the budget, WORKER_CENSUS_INCOMPLETE, nothing changed', async (_n, call) => {
+      process.env.WORKER_CENSUS_TIMEOUT_MS = '1500';
+      const holder = new pg.Client({ connectionString: process.env.DATABASE_URL });
+      await holder.connect();
+      try {
+        await holder.query('BEGIN');
+        await holder.query('LOCK TABLE comment_meta IN ACCESS EXCLUSIVE MODE');
+        const before = await snapshot();
+        const started = Date.now();
+        const e = await refusal(call());
+        const elapsed = Date.now() - started;
+        expect(e.extensions?.code).toBe('WORKER_CENSUS_INCOMPLETE');
+        expect(elapsed).toBeLessThan(10_000); // the transaction backstop is 21.5 s
+        expect(await snapshot()).toEqual(before);
+      } finally { await holder.query('ROLLBACK').catch(() => {}); await holder.end(); }
+    }, 60_000);
+
+  it('the worker id itself anywhere in a JSON column refuses WORKER_IN_USE', async () => {
+    await db.node.create({ data: { id: 'refw4809', memoryId: f.memory.id, loc: 'ref:w', name: 'ref', data: { who: [f.target.id] } } });
+    expect((await refusal(remove())).extensions?.code).toBe('WORKER_IN_USE');
+  });
+
+  it('every identity is counted: a session id anywhere in a JSON column still refuses WORKER_IN_USE', async () => {
     await db.$executeRaw`INSERT INTO sessions (id, app_id, agent_id, worker_id, user_id, tool, started_at, ended_at, updated_at)
       SELECT 'cs4809-' || i, ${f.app.id}, ${f.agent.id}, ${f.target.id}, ${f.holder.id}, 'vitest', now(), now(), now() FROM generate_series(1, 5) i`;
     await db.node.create({ data: { id: 'ref4809', memoryId: f.memory.id, loc: 'ref:one', name: 'ref', data: { deep: [{ x: ['cs4809-4'] }] } } });
@@ -98,7 +131,7 @@ describe('#4809 bounded worker census', () => {
   });
 });
 
-async function beforeEach_recast() {
+async function recastTarget() {
   const target = await M.castWorker({}, { appRef: f.app.id, agentRef: f.agent.id, name: `Miscast${generateId().slice(-4)}` }, ctx());
   f = { ...f, target };
 }
