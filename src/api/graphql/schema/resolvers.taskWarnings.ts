@@ -64,7 +64,7 @@ export const TASK_WARNING_TEXT: Record<TaskWarningCode, string> = {
   'task.assign.assignee-unavailable': 'The assignee is marked unavailable for work, so the task may wait.',
   'task.assign.assignee-busy': 'The assignee already has an open task.',
   'task.assign.assignee-paused': 'The assignee has paused itself, so the task may wait.',
-  'task.assign.session-open': 'The assignee has an open session, so the platform did not start it; the assignment reaches it through that session.',
+  'task.assign.session-open': 'The assignee has an open session, so the platform does not start it over that session; the assignment reaches it through that session.',
   'task.start.other-started': 'You already have another task started; starting this one does not end it.',
   'task.start.parent-ended': "This task's parent has already ended.",
   'task.progress.children-ended': 'Every child of this task has ended, so it may be ready to finish.',
@@ -145,14 +145,16 @@ export async function readAssigneeFacts(
     }),
     // The roster's own derivation (PAUSED only for a worker with a live session), for this one worker, in this tx.
     loadWorkerCheckStatuses(tx, { appId: args.appId, teamChannelId: null, workerIds: [args.workerId], now: args.now }),
-    // #4855: an OPEN session, live or quiet, as the platform's start for an assignment reads it (launch.ts, V16): then no start is issued.
-    tx.session.count({ where: { workerId: args.workerId, appId: args.appId, endedAt: null, deletedAt: null } }),
+    // #4855: an OPEN session, live or quiet, exactly as the platform's start for an assignment reads it (launch.ts `lockStartableWorker`:
+    // the roster's `bound`, any session of the worker with no end that is not deleted; cor:agt:070:08 V16, ruling 0265): then no start is issued
+    // over it. launch.test.ts pins that this fact and the start's decision agree for every session state.
+    tx.session.findFirst({ where: { workerId: args.workerId, endedAt: null, deletedAt: null }, select: { id: true } }),
   ]);
   return {
     unavailable: view.get(args.workerId)?.ownInEffect === true,
     busy: open > 0,
     paused: checks.get(args.workerId)?.pendingReason === 'PAUSED',
-    sessionOpen: openSessions > 0,
+    sessionOpen: openSessions !== null,
   };
 }
 

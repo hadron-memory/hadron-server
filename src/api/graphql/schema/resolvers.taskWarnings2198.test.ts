@@ -236,18 +236,40 @@ describe('#4855 an assignment that cannot start its worker because a session is 
     expect(codes(user)).toEqual([]);
   });
 
-  it('the text is fixed and names nothing', async () => {
+  it('the text is fixed: the same for every worker, naming no worker, id or session', async () => {
     const { TASK_WARNING_TEXT } = await import('./resolvers.taskWarnings.js');
-    expect(TASK_WARNING_TEXT['task.assign.session-open' as TaskWarningCode]).toBe(
-      'The assignee has an open session, so the platform did not start it; the assignment reaches it through that session.');
+    const text = TASK_WARNING_TEXT['task.assign.session-open'];
+    expect(text).toBe('The assignee has an open session, so the platform does not start it over that session; the assignment reaches it through that session.');
+    for (const w of [anne, liam, rook]) expect(text).not.toContain(w.id);
+    expect(text).not.toMatch(/anne|liam|rook|[0-9a-f]{12}/i);
+    // and what is filed for two different workers is the same text
+    await openSession(liam);
+    await openSession(rook);
+    const a = ctx(member.id);
+    const b = ctx(member.id);
+    await create(a, { assignee: { worker: liam.id } });
+    await create(b, { assignee: { worker: rook.id } });
+    const filed = (c: Context) => (c.taskWarnings ?? []).filter((w) => w.warning.code === 'task.assign.session-open').map((w) => w.warning.text);
+    expect(filed(a)).toEqual([text]);
+    expect(filed(b)).toEqual([text]);
+  });
+
+  it('paused (a live session) and session-open come together, in the fixed order: the assigner hears both facts', async () => {
+    await db.workerWakeSettings.create({ data: { workerId: liam.id, pausedUntil: new Date(Date.now() + 3_600_000) } });
+    await openSession(rook, new Date());
+    await openSession(liam, new Date());
+    const queued = await create(ctx(member.id), {});
+    const c = ctx(member.id);
+    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, c);
+    expect(codes(c)).toEqual(['task.assign.assignee-paused', 'task.assign.session-open']);
   });
 
   it('it is worker state: filed only to a caller the roster would show it to (the others stay silent about it)', async () => {
     const c = ctx(outsider.id);
-    await emitTaskWarnings(c, undefined, app.id, { codes: ['task.create.no-source', 'task.assign.session-open' as TaskWarningCode] });
+    await emitTaskWarnings(c, undefined, app.id, { codes: ['task.create.no-source', 'task.assign.session-open'] });
     expect(codes(c)).toEqual(['task.create.no-source']);
     const ok = ctx(member.id);
-    await emitTaskWarnings(ok, undefined, app.id, { codes: ['task.assign.session-open' as TaskWarningCode, 'task.create.no-source'] });
+    await emitTaskWarnings(ok, undefined, app.id, { codes: ['task.assign.session-open', 'task.create.no-source'] });
     expect(codes(ok)).toEqual(['task.create.no-source', 'task.assign.session-open']);
   });
 });
