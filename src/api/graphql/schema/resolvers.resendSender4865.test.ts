@@ -11,7 +11,7 @@
  */
 import { ApolloServer } from '@apollo/server';
 import { buildSchema, type GraphQLObjectType } from 'graphql';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { encryptResendApiKey } from '../../../lib/resendSenders.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -42,7 +42,7 @@ let admin: { id: string };
 let member: { id: string };
 let outsider: { id: string };
 let fetchMock: ReturnType<typeof vi.fn>;
-let warn: ReturnType<typeof vi.spyOn>;
+let warn: MockInstance<(...data: unknown[]) => void>;
 
 function ctxFor(userId: string): Context {
   return { db, roles: ['READER'], userId } as Context;
@@ -160,12 +160,19 @@ describe('#4865 SDL', () => {
     const field = sender!.getFields().domainVerified;
     expect(field, 'ResendSender.domainVerified is not in the SDL').toBeDefined();
     expect(String(field!.type)).toBe('Boolean');
+    // The description as a reader sees it, its line breaks folded.
+    const description = field!.description!.replace(/\s+/g, ' ');
     // The gate's two prose requirements: when it is null, and its staleness.
-    expect(field!.description).toContain('null');
-    expect(field!.description).toContain('never cached');
-    expect(field!.description).toContain('one tool call per sender');
-    expect(field!.description).toContain('12 seconds');
-    expect(field!.description).toContain('hrn:node:hadronmemory.com:specs:cor:int:030:01');
+    expect(description).toContain('true:');
+    expect(description).toContain('false:');
+    expect(description).toContain('null:');
+    expect(description).toContain('no record of the domain');
+    expect(description).toContain('not configured');
+    expect(description).toContain('failed or ran past its bound of 12 seconds');
+    expect(description).toContain('never cached');
+    expect(description).toContain('one tool call per sender');
+    expect(description).toContain('A null says nothing about the domain');
+    expect(description).toContain('hrn:node:hadronmemory.com:specs:cor:int:030:01');
   });
 });
 
@@ -227,7 +234,13 @@ describe('#4865 the three states, each asked of the tool with the org key inline
       { from: 'Ops <ops@beta.example>', domainVerified: false },
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(sentRequest(1).body).toEqual({ domain: 'beta.example', apiKey: 're_beta_key' });
+    // Not by call index: the two list items are resolved concurrently, so the order is not fixed.
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init.body)))).toEqual(
+      expect.arrayContaining([
+        { domain: DOMAIN, apiKey: API_KEY },
+        { domain: 'beta.example', apiKey: 're_beta_key' },
+      ]),
+    );
   });
 });
 
@@ -252,7 +265,7 @@ describe('#4865 null: the state could not be read', () => {
     );
     expect(data.resendSender).toEqual({ id: row.id, domainVerified: null });
     expect(logged()).toEqual([
-      { event: 'resend_domain_verified_unavailable', reason: 'tool_error', httpStatus: 502 },
+      { event: 'resend_domain_verified_unavailable', reason: 'tool_error', status: 502 },
     ]);
   });
 
@@ -268,6 +281,15 @@ describe('#4865 null: the state could not be read', () => {
       expect(await readField(row, ctxFor(member.id)), `HTTP ${status} ${error}`).toBeNull();
     }
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('a non-2xx answer is null even when its body looks like a verified answer', async () => {
+    const row = await rawRow((await createSender()).id);
+    fetchMock.mockResolvedValue(jsonResponse(502, { ok: true, domain: DOMAIN, status: 'verified' }));
+    expect(await readField(row, ctxFor(member.id))).toBeNull();
+    expect(logged()).toEqual([
+      { event: 'resend_domain_verified_unavailable', reason: 'tool_error', status: 502 },
+    ]);
   });
 
   it('a tool that cannot be reached answers null', async () => {
@@ -294,7 +316,7 @@ describe('#4865 null: the state could not be read', () => {
       Array.from({ length: 5 }, () => ({
         event: 'resend_domain_verified_unavailable',
         reason: 'malformed_answer',
-        httpStatus: 200,
+        status: 200,
       })),
     );
   });
@@ -305,8 +327,9 @@ describe('#4865 null: the state could not be read', () => {
     const row = await rawRow((await createSender()).id);
     const request = hangUntilAborted();
     const pending = readField(row, ctxFor(member.id));
-    const signal = await Promise.race([request, realTimeout(2_000)]);
-    expect(signal, 'the lookup never reached the tool').not.toBe('watchdog');
+    const reached = await Promise.race([request, realTimeout(2_000)]);
+    if (reached === 'watchdog' || !reached) throw new Error('the lookup never reached the tool');
+    const signal: AbortSignal = reached;
     const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
 
     await vi.advanceTimersByTimeAsync(LOOKUP_BOUND_MS - 1);
