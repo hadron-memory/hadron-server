@@ -26,6 +26,7 @@ import { valueCovers, coverableAction } from '../grants/cover.js';
 import { renderGrantSummary } from '../grants/summary.js';
 import { PLATFORM_ACTIONS } from '../grants/actions.js';
 import { setStopSignal } from '../stopSignals/lifecycle.js';
+import { sessionKeyCache } from '../sessionKeyCache.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -254,6 +255,30 @@ describe('#4855 who may: a signed grant held by that worker, naming the target, 
     await restart();
     expect(await useCount(repeating)).toBe(1);
     expect(await useCount(capped)).toBe(0);
+  });
+
+  it('a capped grant from a host-launched session learns nothing of the target either: a LIVE target still reads as the one refusal (local F4, sec P3-2)', async () => {
+    await db.session.update({ where: { id: w.sessionId }, data: { launchOperationId: generateId(), launchHostId: generateId(), launchIssuedBy: 'platform' } as never });
+    await grant(kit, { max_uses: 5 });
+    await kitSession(false);
+    expect(await code(restart())).toBe(REFUSED);
+  });
+
+  it('the ended session\'s memory keys are released once its end is durable (local F2)', async () => {
+    const evict = vi.spyOn(sessionKeyCache, 'evict');
+    await grant();
+    const s = await kitSession();
+    await restart();
+    expect(evict).toHaveBeenCalledWith(s.id);
+    evict.mockRestore();
+  });
+
+  it('a refused restart releases no keys', async () => {
+    const evict = vi.spyOn(sessionKeyCache, 'evict');
+    await kitSession();
+    expect(await code(restart())).toBe(REFUSED);
+    expect(evict).not.toHaveBeenCalled();
+    evict.mockRestore();
   });
 
   it('a target of another App: with no grant the one refusal; a grant that names it (no shipped path makes one) still ends nothing and spends nothing', async () => {
