@@ -118,34 +118,41 @@ describe('2. behavior — PK and URN both resolve; the old name is refused', () 
 });
 
 describe('3. cor:api:140:03 parity — a refused PK equals a refused URN equals a missing memory', () => {
-  const missing = 'hrn:mem:nowhere.example:does-not-exist';
+  const missingUrn = 'hrn:mem:nowhere.example:does-not-exist';
+  // A caller who PASSES the principal gate (a `roles: []` caller is refused FORBIDDEN before any memory is resolved, which would
+  // make these pins vacuous: BLIND P2-1) but cannot read M. The refusal is then the memory gate's own.
+  const reader = (): Context => ({ db, roles: ['READER'], userId: 'stranger-4142a' }) as Context;
+  /** The refusal with the caller's own ref taken out, since the usage gate echoes it (`MEMORY_NOT_FOUND: <ref>`). */
+  const redacted = (a: Answer, ref: string): unknown => a.error && { code: a.error.code, message: a.error.message.split(ref).join('<ref>') };
 
   it('usageEventsWhere (usageEvents, usageEventsPage)', async () => {
-    const run = async (m: string) => ({
-      a: await ask(stranger(), 'query($m: ID){ usageEvents(memoryRef: $m){ id } }', { m }),
-      b: await ask(stranger(), 'query($m: ID){ usageEventsPage(memoryRef: $m){ total } }', { m }),
-    });
-    const [pk, urn] = await Promise.all([run(M.id), run(M.urn)]);
-    expect(pk.a.error).not.toBeNull();
-    expect(pk.a.error?.code, 'a gate refusal, not a validation error').not.toBe('GRAPHQL_VALIDATION_FAILED');
-    expect(urn).toEqual(pk);
-    expect((await run(missing)).a.error?.code).toBe(pk.a.error?.code);
+    for (const [field, sel] of [['usageEvents', '{ id }'], ['usageEventsPage', '{ total }']] as const) {
+      const run = (m: string) => ask(reader(), `query($m: ID){ ${field}(memoryRef: $m)${sel} }`, { m });
+      const pk = await run(M.id);
+      expect(pk.error?.code, `${field}: the memory gate's refusal, not the principal gate's`).toBe('MEMORY_NOT_FOUND');
+      expect(redacted(await run(M.urn), M.urn)).toEqual(redacted(pk, M.id));
+      const gone = generateId();
+      expect(redacted(await run(gone), gone)).toEqual(redacted(pk, M.id));
+      expect(redacted(await run(missingUrn), missingUrn)).toEqual(redacted(pk, M.id));
+    }
   });
 
   it('listMemoryAssets (memoryAssets)', async () => {
-    const run = (m: string) => ask(stranger(), 'query($m: ID!){ memoryAssets(memoryRef: $m){ total } }', { m });
+    const run = (m: string) => ask(reader(), 'query($m: ID!){ memoryAssets(memoryRef: $m){ total } }', { m });
     const pk = await run(M.id);
-    expect(pk.error).not.toBeNull();
-    expect(pk.error?.code, 'a gate refusal, not a validation error').not.toBe('GRAPHQL_VALIDATION_FAILED');
+    expect(pk.error?.code, 'the memory gate NOT_FOUND, not the principal gate').toBe('NOT_FOUND');
     expect(await run(M.urn)).toEqual(pk);
-    expect((await run(missing)).error?.code).toBe(pk.error?.code);
+    expect(await run(generateId())).toEqual(pk);
+    expect(await run(missingUrn)).toEqual(pk);
   });
 
   it('resolveNodeReadScopeIds (memoryLocSegments)', async () => {
     const run = (m: string) => ask(stranger(), 'query($m: [ID!]!){ memoryLocSegments(memoryRefs: $m, parentLoc: ""){ items { segment } hasMore } }', { m: [m] });
     const pk = await run(M.id);
     expect(pk.error, 'resolved without a validation error').toBeNull();
+    expect(pk.data?.memoryLocSegments, 'an unreadable memory answers the empty page').toEqual({ items: [], hasMore: false });
     expect(await run(M.urn)).toEqual(pk);
-    expect(await run(missing)).toEqual(pk);
+    expect(await run(generateId())).toEqual(pk);
+    expect(await run(missingUrn)).toEqual(pk);
   });
 });
