@@ -131,7 +131,7 @@ describe('#4680 F4 the snippet centers on the match, within the same bound', () 
 });
 
 describe('#4680 F7 persistent pins', () => {
-  it.each(['"unclosed', 'a AND', '(', ') b', 'x OR', '-excl', '\\', '%', '_', "'", 'c:d', 'a.b*', 'and or not', 'AND', '"" ""'])(
+  it.each(['"unclosed', 'a AND', '(', ') b', 'x OR', '\\', '%', '_', "'", 'c:d', 'a.b*', 'and or not', 'AND', '"" ""'])(
     'keyword syntax and metacharacters in %j never throw and never reach the engine as another mode', async query => {
       await node('meta', { name: 'meta4680', content: 'orchard' });
       const spy = vi.spyOn(Q, 'findNodes');
@@ -139,6 +139,12 @@ describe('#4680 F7 persistent pins', () => {
       expect(Array.isArray(out.hits)).toBe(true);
       expect(spy.mock.calls[0][1]).toMatchObject({ mode: 'keyword', query: query.trim() });
     });
+
+  // #435 (ruling Holger 2026-11-22): a query that only excludes terms cannot use the index and is refused, not scanned.
+  it('a query that only excludes a term is refused as unindexable (#435), never answered from a scan', async () => {
+    await node('meta', { name: 'meta4680', content: 'orchard' });
+    await expect(call(await context(), { query: '-excl', memoryUrn: mem.urn })).rejects.toThrow(/only excludes/);
+  });
 
   it('a node URN as memoryUrn is refused before any lookup or engine call, with the one argument error', async () => {
     const engine = vi.spyOn(Q, 'findNodes');

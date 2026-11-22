@@ -242,6 +242,23 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     expect(node?.embeddingAttempts).toBe(0);
   });
 
+  it('#433 revoke on an ENCRYPTED memory removes the stored chunk rows and their verbatim chunk_text (disclosure point d is true as written)', async () => {
+    const { id } = await seedEncryptedIndexedMemory();
+    await resolvers.Mutation.updateMemory({}, { ref: id, vectorIndexEnabled: true, embeddingSource: 'contentChunks', acknowledgeVectorInversionRisk: true }, adminCtx());
+    const nodeId = generateId();
+    await db.node.create({ data: { id: nodeId, memoryId: id, loc: 'c433', name: 'c433', content: 'ciphertext-stand-in', abstract: 'a' } });
+    // a chunk row as the embed sweep writes it: kind 'chunk', the verbatim text beside its vector
+    await db.$executeRawUnsafe(`
+      INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, chunk_index, char_start, char_end, chunk_text, embedding, created_at)
+      VALUES ('${generateId()}', '${nodeId}', '${id}', 'chunk', 'test', 'stub-model', ${DIM}, 0, 0, 4, 'the verbatim chunk text', '[${[1, ...new Array(DIM - 1).fill(0)].join(',')}]'::vector, now())`);
+    const rows = async () => Number((await db.$queryRaw<{ c: bigint }[]>`SELECT COUNT(*) AS c FROM node_embeddings WHERE memory_id = ${id}`)[0]!.c);
+    const texts = async () => Number((await db.$queryRaw<{ c: bigint }[]>`SELECT COUNT(*) AS c FROM node_embeddings WHERE memory_id = ${id} AND chunk_text IS NOT NULL`)[0]!.c);
+    expect(await texts(), 'the chunk text IS stored unencrypted before the revoke').toBe(1);
+    await resolvers.Mutation.updateMemory({}, { ref: id, vectorIndexEnabled: false }, adminCtx());
+    expect(await rows(), 'revoking deletes the rows, not only the vectors').toBe(0);
+    expect(await texts(), 'and with them every stored chunk text').toBe(0);
+  });
+
   it('R132: ciphertext-only work stays visibly pending without a keyless sweep attempt', async () => {
     // Goal: pin the T024 `encrypted-no-plaintext (#206)` branch in embedNode.
     // The sweep path can't decrypt (MCP read asymmetry, #206), so when a
