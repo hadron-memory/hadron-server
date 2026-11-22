@@ -242,6 +242,16 @@ describe('skill export is opt-in (#4864)', () => {
 });
 
 describe('GraphQL and MCP agree (#4864)', () => {
+  it('the skill option on MCP writes the same enabled block, and a lint-refused block writes nothing, as on GraphQL', async () => {
+    await mcp(admin, 'hadron_create_task', { urn: nodeUrn(sysMem, 'tasks:skilled'), name: 'Skilled', content: 'steps', agent: agent.id, trigger: 'when deploying', skill: { name: 'deploy', description: 'Use when deploying the service.' } });
+    const props = (await nodesAt('tasks:skilled'))[0].properties as Record<string, any>;
+    expect(props.exports.claudeSkill).toEqual({ name: 'deploy', description: 'Use when deploying the service.', enable: true });
+    const before = await totals();
+    const out = await mcp(admin, 'hadron_create_task', { urn: nodeUrn(sysMem, 'tasks:badskill'), name: 'Bad', content: 'steps', skill: { name: 'deploy', description: '<b>bad</b> markup' } });
+    expect(out).toContain('[bad_user_input]');
+    expect(await totals()).toEqual(before);
+  });
+
   it('the same create writes the same shape, and the same refusals carry the same codes', async () => {
     const out = await mcp(admin, 'hadron_create_task', { urn: nodeUrn(sysMem, 'tasks:viaMcp'), name: 'Via MCP', content: 'steps', agent: agent.id, trigger: 'when deploying' });
     expect(out).toContain('created');

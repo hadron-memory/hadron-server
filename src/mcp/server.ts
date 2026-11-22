@@ -7648,10 +7648,13 @@ export function createMcpServerInstance(
     }
     // #4864: the tasks-index edge is the task CREATE door's own argument, not a field of the node input.
     let taskIndex: { agent: string; trigger: string } | undefined;
+    let taskSkill: { name: string; description: string } | undefined;
     if (kind === 'task' && mode === 'create') {
       const { agent, trigger } = fields as { agent?: unknown; trigger?: unknown };
       delete fields.agent;
       delete fields.trigger;
+      taskSkill = fields.skill as { name: string; description: string } | undefined;
+      delete fields.skill;
       if (agent !== undefined || trigger !== undefined) {
         if (typeof agent !== 'string' || agent.trim() === '' || typeof trigger !== 'string' || trigger.trim() === '') {
           return textResult('hadron_create_task: "agent" and "trigger" go together: name the Agent whose tasks index lists this task and the trigger label for it.');
@@ -7729,7 +7732,7 @@ export function createMcpServerInstance(
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
       )[doorName](
         {},
-        { input: { memoryId: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}), ...(taskIndex ? { index: taskIndex } : {}) },
+        { input: { memoryId: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}), ...(taskIndex ? { index: taskIndex } : {}), ...(taskSkill ? { skill: taskSkill } : {}) },
         ctx,
       );
       return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${taskIndex ? ` · listed in the tasks index of ${taskIndex.agent} (trigger: ${taskIndex.trigger.trim()})` : ''}${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
@@ -13203,6 +13206,10 @@ const taskCreateArgs = {
   ...governedDoorArgs,
   agent: z.string().optional().describe('The Agent (ID or URN) whose tasks index lists this task. Give it with `trigger`; the task must be created in that Agent\'s own system memory.'),
   trigger: z.string().optional().describe('The trigger label of the tasks-index edge: what the Agent\'s task list shows for this task. Give it with `agent`.'),
+  skill: z
+    .object({ name: z.string(), description: z.string() })
+    .optional()
+    .describe('Opt-in skill export: writes an enabled properties.exports.claudeSkill block with this name and description, checked by the skill lint (an error refuses the whole call). Omit it and no block is written.'),
 };
 
 const taskUpdateArgs = {
