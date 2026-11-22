@@ -14,6 +14,13 @@
  * A user-owned memory (no organization) with a source is not one of the ruled cases: it is counted as `uncovered`
  * and never changed.
  *
+ * One bad row never aborts the run (#4731, #4719 BLIND P3-4): each row's failure (a lock wait that times out behind a slow
+ * write, a dropped connection) is caught on its own, counted as `failed`, and the run goes on and reports it; the row
+ * is left as it was, so re-running is safe. The row transaction bounds its own waits with a `lock_timeout` (the
+ * try-lock never waits; the `FOR UPDATE` can), so a stuck row is a failed row and not a hung run. The sync's own shared
+ * lock wait is deliberately NOT bounded: it waits only for a reconciliation's one short, now time-bounded transaction,
+ * and bounding it would turn a harmless wait into a failed sync (#4719 LOCAL F2).
+ *
  * Who may run this, and any production inventory or repair, is outside the ruling and this code: it needs its own
  * explicit grant.
  */
@@ -35,6 +42,8 @@ export interface ReconcileSyncingResult {
   ineligible: number;
   /** SYNCING rows of a user-owned memory with a source: not a ruled case, never changed. */
   uncovered: number;
+  /** Candidates whose own transaction failed (apply only), for example a row lock that timed out; left unchanged, safe to re-run. */
+  failed: number;
 }
 
 export interface ReconcileSyncingOptions {
@@ -42,6 +51,14 @@ export interface ReconcileSyncingOptions {
   apply: boolean;
   /** Runs after the candidate scan and before the locked re-checks (tests use it to change state in between). */
   onCandidates?: () => Promise<void>;
+  /** How long one row's transaction may wait for a lock, in milliseconds. A positive integer; anything else is the default (5000). */
+  lockTimeoutMs?: number;
+}
+
+const DEFAULT_LOCK_TIMEOUT_MS = 5000;
+
+function lockTimeoutMs(value: number | undefined): number {
+  return Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : DEFAULT_LOCK_TIMEOUT_MS;
 }
 
 /** Ids of eligible SYNCING rows at this moment; a hint only, every row is re-checked under its lock before a write. */
@@ -63,8 +80,10 @@ async function countUncovered(db: PrismaClient): Promise<number> {
 }
 
 /** One candidate in its own short transaction: try the run lock, re-check the exact row, write sync_status only. */
-async function reconcileRow(db: PrismaClient, id: string): Promise<'reconciled' | 'held' | 'ineligible'> {
+async function reconcileRow(db: PrismaClient, id: string, timeoutMs: number): Promise<'reconciled' | 'held' | 'ineligible'> {
   return db.$transaction(async (tx) => {
+    // Local to this transaction (set_config(..., true)): it dies with the commit or rollback and never reaches a pooled session.
+    await tx.$executeRaw`SELECT set_config('lock_timeout', ${`${timeoutMs}ms`}, true)`;
     const [{ locked }] = await tx.$queryRaw<Array<{ locked: boolean }>>`
       SELECT pg_try_advisory_xact_lock(hashtext(${syncRunLockKey(id)})) AS locked`;
     if (!locked) return 'held';
@@ -83,10 +102,19 @@ async function reconcileRow(db: PrismaClient, id: string): Promise<'reconciled' 
 export async function reconcileSyncingStatus(db: PrismaClient, opts: ReconcileSyncingOptions): Promise<ReconcileSyncingResult> {
   const candidates = await scanCandidates(db);
   const result: ReconcileSyncingResult = {
-    apply: opts.apply, candidates: candidates.length, reconciled: 0, held: 0, ineligible: 0, uncovered: await countUncovered(db),
+    apply: opts.apply, candidates: candidates.length, reconciled: 0, held: 0, ineligible: 0, uncovered: await countUncovered(db), failed: 0,
   };
   if (!opts.apply) return result;
   await opts.onCandidates?.();
-  for (const id of candidates) result[await reconcileRow(db, id)] += 1;
+  const timeoutMs = lockTimeoutMs(opts.lockTimeoutMs);
+  for (const id of candidates) {
+    try {
+      result[await reconcileRow(db, id, timeoutMs)] += 1;
+    } catch (error) {
+      // Code only, never the message (it can name the host) or the id: the run reports counts.
+      result.failed += 1;
+      console.error('[reconcile-syncing] a row failed and was left unchanged', { code: (error as { code?: string } | null)?.code ?? 'unknown' });
+    }
+  }
   return result;
 }

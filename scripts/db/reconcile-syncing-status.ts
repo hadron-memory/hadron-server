@@ -16,7 +16,7 @@
  * SYNCING without the lock, so its in-flight sync would look abandoned. The lock is the only evidence of a running
  * sync; the operator, under the production grant, establishes this precondition before --apply.
  *
- * Exit codes: 0 ok (dry run or applied), 1 failed, 2 usage.
+ * Exit codes: 0 ok (dry run or applied), 1 failed or incomplete (a row failed and was left unchanged: re-run), 2 usage.
  */
 import { pathToFileURL } from 'node:url';
 import { PrismaClient } from '../../src/generated/prisma/index.js';
@@ -44,9 +44,10 @@ export async function main(argv: readonly string[], io: ReconcileSyncingToolIo):
     db = new PrismaClient({ datasourceUrl: io.env.DATABASE_URL });
     const r = await reconcileSyncingStatus(db, { apply });
     io.log(apply
-      ? `${TAG} ok candidates=${r.candidates} reconciled=${r.reconciled} held=${r.held} ineligible=${r.ineligible} uncovered=${r.uncovered}`
+      ? `${TAG} ${r.failed > 0 ? 'incomplete' : 'ok'} candidates=${r.candidates} reconciled=${r.reconciled} held=${r.held} ineligible=${r.ineligible} uncovered=${r.uncovered} failed=${r.failed}`
       : `${TAG} dry_run candidates=${r.candidates} uncovered=${r.uncovered} (pass --apply to reconcile)`);
-    return 0;
+    // #4731: a row that failed was left unchanged and the rest were reconciled; exit 1 so the operator re-runs (safe) and sees `failed`.
+    return r.failed > 0 ? 1 : 0;
   } catch (error) {
     // #4719 BLIND P2-1: name the failure so a failed connect can be told from a failed query, but print only the
     // error's class and its code (Prisma's Pnnnn, or a SQLSTATE), never its message, which can carry the URL.
