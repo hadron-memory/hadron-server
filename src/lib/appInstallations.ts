@@ -276,11 +276,15 @@ async function lockAgentRows(tx: Prisma.TransactionClient, witnesses: ReadonlySe
 export async function lockAppInstallationsFenced(tx: Prisma.TransactionClient, byApp: ReadonlyMap<string, readonly string[]>): Promise<void> {
   const witnesses = new Set<string>();
   const fence = new Set<string>();
-  const wanted = [...byApp.keys()].filter((id) => byApp.get(id)!.length > 0);
+  // ONE pass over byApp derives both collections under one filter (#4895 round 2: the App list and the fence cannot drift apart): an
+  // App with no named agents locks nothing at all, and every named agent of every App that has any is fenced, found row or not.
+  const wanted: string[] = [];
+  for (const [appId, agentIds] of byApp) {
+    if (!agentIds.length) continue;
+    wanted.push(appId);
+    for (const id of agentIds) fence.add(id);
+  }
   if (!wanted.length) return;
-  // Every named agent of every App in byApp, found row or not (#4895); the Apps still lock in id order below, and an App with no row
-  // is skipped for its install structure only.
-  for (const agentIds of byApp.values()) for (const id of agentIds) fence.add(id);
   // The Apps in the database's id order, locked in one statement (an App that does not exist locks nothing and is skipped).
   const apps = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM apps WHERE id = ANY(${wanted}) ORDER BY id FOR SHARE`;
   for (const { id: appId } of apps) {
