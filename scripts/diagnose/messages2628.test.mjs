@@ -106,15 +106,25 @@ test('missing state: the line says only that no state is found, skips capture an
   assert(!r.ran.includes('stackdown') && !r.ran.includes('purge') && !r.ran.includes('preserve'), r.ran.join());
 });
 
-test('state without this run\'s owner marker: says it belongs to another holder or was made outside this run, names the path', () => {
+test('state without this run\'s owner marker: reports the observed marker failure without attributing who created the state, names the path (#4670)', () => {
   for (const marker of ['', 'tok-other']) {
     const r = downRun(`${ownReservation}; mkdir "$state"; printf '%s' '${marker}' > "$state/diagnose-owner"`);
     assert.notEqual(r.status, 0);
     assert.match(r.stderr, /stack ownership unverified; refusing capture\/teardown; inspect private state: \S+/);
-    assert.match(r.stderr, /does not carry this run's owner marker/);
+    assert.match(r.stderr, /the owner marker at \S+\/diagnose-owner is missing, unreadable or not this run's token, which does not show who created this state/);
+    assert.doesNotMatch(r.stderr, /another holder|created outside/);
     noRemovalAdvice(r.stderr);
     assert(!r.ran.includes('stackdown') && !r.ran.includes('purge') && !r.ran.includes('preserve'), r.ran.join());
   }
+});
+
+test('a valid reservation with a dangling state symlink gets the dangling line, not the owner-marker advice (#4670, #4638 BLIND delta)', () => {
+  const r = downRun(`${ownReservation}; ln -s "$state.nowhere" "$state"`);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /the stack state path \S+ is a dangling symlink; capture and teardown skipped/);
+  assert.doesNotMatch(r.stderr, /inspect private state|owner marker|no longer holds its reservation/);
+  noRemovalAdvice(r.stderr);
+  assert(!r.ran.includes('stackdown') && !r.ran.includes('purge') && !r.ran.includes('preserve'), r.ran.join());
 });
 
 test('this run\'s state but no verified instance: says the Incus instance is missing or not marked by this run', () => {

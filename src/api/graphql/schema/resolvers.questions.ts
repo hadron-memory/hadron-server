@@ -1697,7 +1697,8 @@ export const questionFieldResolvers = {
       // The same gate as the doors, on the read client; a state no door writes to is never answerable.
       const state = v.evaluation.state;
       if (!v.shown || !v.evaluation.question || BLOCKED_STATES.has(state)) return false;
-      // At the entry limit answerAct refuses every new entry (retraction included), so no one may answer.
+      // At MAX_ANSWERS - 1 entries answerAct refuses a new answer (the last slot is kept for a take-back), so no one may
+      // answer; a retraction is refused only at MAX_ANSWERS, so this field says nothing about whether one can still be made.
       if (v.shown.answers.length >= MAX_ANSWERS - 1) return false;
       const found = await logOfQuestion(ctx.db, v.row);
       if (!found) return false;
