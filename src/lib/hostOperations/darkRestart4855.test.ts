@@ -20,6 +20,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { dbNowPlus } from '../grants/grantFixtures3668.js';
 import { seedTriggerWorld, triggerGrant, useCount, useEvents, workerOf, type TriggerWorld } from '../grants/triggerGrantFixtures3483.js';
 import { createPendingGrant } from '../grants/create.js';
+import { restartDarkSession } from './darkRestart.js';
 import { valueCovers, coverableAction } from '../grants/cover.js';
 import { renderGrantSummary } from '../grants/summary.js';
 import { PLATFORM_ACTIONS } from '../grants/actions.js';
@@ -305,6 +306,37 @@ describe('#4855 the fences: a refused start leaves the session open and spends n
     expect(await code(restart(kit, '   '))).toBe('BAD_USER_INPUT');
     expect(await code(restart(kit, 'x'.repeat(501)))).toBe('BAD_USER_INPUT');
     expect(await useCount(g)).toBe(0);
+  });
+});
+
+describe('#4855 the library re-judges the actor under the transaction (a retirement that lands after the door resolved it)', () => {
+  const direct = (actorId: string, over: Record<string, unknown> = {}) => db.$transaction((tx) => restartDarkSession(tx, {
+    appId: w.appId, workerId: kit, now: new Date(),
+    actor: { workerId: actorId, sessionId: null, hostLaunched: false, userId: w.userId, agentId: w.agentId, ...over },
+  }));
+
+  it('a retired actor with a still-live grant is refused, and nothing is ended, started or spent', async () => {
+    const g = await grant();
+    const s = await kitSession();
+    await db.worker.update({ where: { id: w.workerId }, data: { retiredAt: new Date() } });
+    expect(await code(direct(w.workerId))).toBe(REFUSED);
+    expect((await sessionOf(s.id)).endedAt).toBeNull();
+    expect(await starts()).toHaveLength(0);
+    expect(await useCount(g)).toBe(0);
+  });
+
+  it('an actor of another App holding a grant of that App is refused here', async () => {
+    const foreign = await workerOf(w, w.agentId, w.app2Id);
+    const g = await triggerGrant(w, { holder: { kind: 'worker', id: foreign }, action: ACTION, over: { action_values: { worker: kit }, max_uses: null, app_id: w.app2Id } });
+    await kitSession();
+    expect(await code(direct(foreign))).toBe(REFUSED);
+    expect(await useCount(g)).toBe(0);
+  });
+
+  it('control: the same call by the live holder succeeds', async () => {
+    await grant();
+    await kitSession();
+    expect((await direct(w.workerId)).endedSessionIds).toHaveLength(1);
   });
 });
 
