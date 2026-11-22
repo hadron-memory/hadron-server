@@ -218,6 +218,15 @@ describe('#4855 an assignment that cannot start its worker because a session is 
     expect(codes(ended)).not.toContain('task.assign.session-open');
   });
 
+  it('only the ASSIGNEE\'s own session counts: another worker\'s open session says nothing about it', async () => {
+    await openSession(rook);
+    await openSession(anne, new Date());
+    const queued = await create(ctx(member.id), {});
+    const c = ctx(member.id);
+    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, c);
+    expect(codes(c)).not.toContain('task.assign.session-open');
+  });
+
   it('a soft-deleted session is not open', async () => {
     const s = await openSession(anne);
     await db.session.update({ where: { id: s.id }, data: { deletedAt: new Date() } });
