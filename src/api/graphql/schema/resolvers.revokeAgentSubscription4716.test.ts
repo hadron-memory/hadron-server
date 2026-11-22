@@ -306,10 +306,11 @@ describe('#4716 — FR-029 behavior pins around the guard', () => {
     expect(await db.memory.findUnique({ where: { id: otherAgentMemory.id } })).not.toBeNull();
   });
 
-  // #4797: the pin above also leaves the revoked agent's OWN empty memory in place, and the guard's SELECT has no
-  // ORDER BY, so it can pick that row by heap order whether or not the agent-scope condition is there. Here the
-  // revoked agent has NO per-agent memory at all: the only candidates the user holds are out of scope, so dropping
-  // `user_memory_of_agent_id = <revoked agent>` from the WHERE is the one thing that lets the guard reach them.
+  // #4797: the pin above also leaves the revoked agent's OWN empty memory in place, so it passes whether or not the
+  // guard is scoped to the revoked agent (the guard's SELECT picks one row with no ORDER BY). Here the revoked agent
+  // has NO per-agent memory at all: the only candidates the user holds are out of scope, so an unscoped guard (the
+  // `user_memory_of_agent_id = <revoked agent>` condition dropped from the WHERE) is the one thing that lets it
+  // reach them. Verified red by that mutant, 3/3 runs, while the pin above stays green under it.
   it('with no per-agent memory, deletes neither the free-standing nor another agent\'s empty memory, and still revokes', async () => {
     const f = await buildFixture();
     await db.memory.delete({ where: { id: f.memory.id } }); // the revoked agent's own memory is gone
@@ -345,7 +346,10 @@ describe('#4716 — FR-029 behavior pins around the guard', () => {
       select: { id: true },
     });
 
-    await revoke(f); // must still succeed: nothing of the revoked agent's to delete
+    // Must still succeed: nothing of the revoked agent's to delete. The resolver returns the revoked subscription.
+    const result = (await revoke(f)) as { userId: string; agentId: string; revokedAt: Date | null };
+    expect(result).toMatchObject({ userId: f.alice.id, agentId: f.agent.id });
+    expect(result.revokedAt).not.toBeNull();
 
     const sub = await db.agentSubscription.findUniqueOrThrow({
       where: { userId_agentId: { userId: f.alice.id, agentId: f.agent.id } },
