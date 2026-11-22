@@ -152,3 +152,21 @@ describe('#4813 MCP inline-edge loc: the full refusal surface, atomically', () =
     expect(edges.map((e) => [e.loc, e.locAuthored])).toEqual([['custom', true]]);
   });
 });
+
+// #4813 LOCAL finding (a): the loc validation runs BEFORE target resolution at both doors — an edge whose loc is
+// invalid AND whose target does not exist refuses with the LOC error, never a target error. A mutant that moves the
+// validation later (or deletes it) fails here with a different refusal text.
+describe('#4813 the loc check precedes target resolution at both doors', () => {
+  const MISSING = () => `hrn:node:${mem.urn}:does-not-exist`;
+
+  it('MCP hadron_create_node: invalid loc + missing target refuses with the loc error, not a target error', async () => {
+    const mcp = mcpServer();
+    const text = await mcpRefusal(mcp, 'hadron_create_node', { urn: urn('n'), name: 'n', edges: [{ targetUrn: MISSING(), name: 'uses', loc: '  ' }] });
+    expect(text).toBe(INVALID_LOC);
+  });
+
+  it('GraphQL updateNode: invalid loc + missing target refuses with the loc error, not a target error', async () => {
+    const a = await node('a');
+    await gqlRefusal('updateNode', { id: a.id, edges: [{ targetId: MISSING(), name: 'uses', loc: ' a' }] });
+  });
+});
