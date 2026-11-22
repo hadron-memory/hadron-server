@@ -15,6 +15,7 @@ import { RegisterLookup } from '../../../lib/actionRegister/lookup.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { taskWarningsPlugin } from '../taskWarningsPlugin.js';
+import { finishableParents, finishField } from '../../../test/finishWarningCarrier.js';
 import {
   boundedRead, emitTaskWarnings, renderTaskWarnings, resolveRegisters, shapeResponseWarnings,
   MAX_WARNINGS_PER_OPERATION, MAX_WARNINGS_PER_RESPONSE, type TaskWarning, type TaskWarningCode,
@@ -145,7 +146,7 @@ describe('assignee warnings (create-with-assignee, assign, reassign)', () => {
     await create(ctx(member.id), { assignee: { worker: anne.id } });
     const c = ctx(member.id);
     await create(c, { source: undefined, assignee: { worker: anne.id } });
-    expect(codes(c)).toEqual(['task.create.no-source', 'task.assign.assignee-unavailable', 'task.assign.assignee-busy']);
+    expect(codes(c)).toEqual(['task.assign.assignee-unavailable', 'task.assign.assignee-busy']);
   });
 
   it('a worker taking work for itself, and a user assignee, are not advised', async () => {
@@ -414,11 +415,12 @@ describe('decided in the write transaction, bounded after it', () => {
     expect(await db.$queryRaw`SELECT 1 AS one`).toEqual([{ one: 1 }]);
   });
 
-  it('21 aliased creates in one worker request: all succeed, 20 warnings, one enrichment read plus one history write (no per-alias work)', async () => {
-    await registerEntry(teamMemoryId, 'task.create.no-source', 'tasks:a');
+  it('21 aliased finishes in one worker request: all succeed, 20 warnings, one enrichment read plus one history write (no per-alias work)', async () => {
+    await registerEntry(teamMemoryId, 'task.finish.open-children', 'tasks:a');
     await node(teamMemoryId, 'tasks:a', { isRunnable: true });
     const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
-    const body = Array.from({ length: 21 }, (_, i) => `a${i}: createAgentTask(input: { appRef: "${app.id}", title: "t${i}" }) { id }`).join(' ');
+    const parents = await finishableParents(M, ctx(member.id), app.id, 21, { worker: anne.id }, (fn) => asWorker(anne, teamAgentId, fn));
+    const body = parents.map((id, i) => finishField(`a${i}`, id)).join(' ');
     const spy = vi.spyOn(db, '$transaction');
     const before = spy.mock.calls.length;
     const res = await asWorker(anne, teamAgentId, () => server.executeOperation({ query: `mutation { ${body} }` }, { contextValue: ctx(member.id) }));
@@ -474,31 +476,34 @@ describe('the carrier: extensions.warnings on a real GraphQL response', () => {
   };
   const m = (alias: string, title: string, source = '') =>
     `${alias}: createAgentTask(input: { appRef: "${app.id}", title: "${title}"${source ? `, source: "${source}"` : ''} }) { id }`;
+  const asAnne = <T,>(fn: () => Promise<T>) => asWorker(anne, teamAgentId, fn);
+  const open = (n: number) => finishableParents(M, ctx(member.id), app.id, n, { worker: anne.id }, asAnne);
+  const warned = (r: { extensions?: Record<string, unknown> }) => r.extensions?.warnings as any[] | undefined;
 
   it('two aliased mutations keep their warnings apart; a clean one carries none; data is unchanged', async () => {
-    const r = await run(`mutation { a1: ${m('a1', 'one').split(': ').slice(1).join(': ')} a2: ${m('a2', 'two', 'src').split(': ').slice(1).join(': ')} }`, ctx(member.id));
+    const [p1] = await open(1);
+    const r = await asAnne(() => run(`mutation { ${finishField('a1', p1)} ${m('a2', 'two', 'src')} }`, ctx(member.id)));
     expect(r.errors).toBeUndefined();
     expect((r.data as any).a1.id).toBeTruthy();
-    expect(r.extensions?.warnings).toEqual([
-      { path: 'a1', code: 'task.create.no-source', text: expect.any(String) },
-    ]);
+    expect(warned(r)).toEqual([expect.objectContaining({ path: 'a1', code: 'task.finish.open-children', text: expect.any(String) })]);
   });
 
   it('a failed mutation in the same request carries no warning while another keeps hers', async () => {
+    const [p1] = await open(1);
     const bad = `bad: createAgentTask(input: { appRef: "${generateId()}", title: "x" }) { id }`;
-    const good = m('good', 'g').split(': ').slice(1).join(': ');
-    const r = await run(`mutation { good: ${good} ${bad} }`, ctx(member.id));
+    const r = await asAnne(() => run(`mutation { ${finishField('good', p1)} ${bad} }`, ctx(member.id)));
     expect(r.errors?.length).toBe(1);
-    expect((r.extensions?.warnings as any[]).map((w) => w.path)).toEqual(['good']);
+    expect(warned(r)!.map((w) => w.path)).toEqual(['good']);
   });
 
   it('two concurrent requests never share a collector', async () => {
+    const [px] = await open(1);
     const [x, y] = await Promise.all([
-      run(`mutation { x: ${m('x', 'x').split(': ').slice(1).join(': ')} }`, ctx(member.id)),
-      run(`mutation { y: ${m('y', 'y', 's').split(': ').slice(1).join(': ')} }`, ctx(member.id)),
+      asAnne(() => run(`mutation { ${finishField('x', px)} }`, ctx(member.id))),
+      asAnne(() => run(`mutation { ${m('y', 'y', 's')} }`, ctx(member.id))),
     ]);
-    expect((x.extensions?.warnings as any[]).map((w) => w.path)).toEqual(['x']);
-    expect(y.extensions?.warnings).toBeUndefined();
+    expect(warned(x)!.map((w) => w.path)).toEqual(['x']);
+    expect(warned(y)).toBeUndefined();
   });
 
   it('an ordinary request with no warning has no extensions.warnings (ordinary-client regression)', async () => {

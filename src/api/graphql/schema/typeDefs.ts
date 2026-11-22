@@ -12245,7 +12245,8 @@ export const typeDefs = `#graphql
     finishAgentTask may succeed WITH warnings, in the response's
     \`extensions.warnings\` (not in \`errors\`): a list of
     { path (the mutation's response key), code, text, register? }. Codes are a
-    closed list per release (task.create.no-source, task.assign.assignee-unavailable,
+    closed list per release (task.create.no-source, which is no longer raised since #4793 but stays listed so history
+    recorded with it still reads, task.assign.assignee-unavailable,
     task.assign.assignee-busy, task.assign.assignee-paused,
     task.finish.open-children, from #3267 task.start.other-started,
     task.start.parent-ended (both on startAgentTask) and task.progress.children-ended
