@@ -10,7 +10,8 @@
  * below this value too.)
  *
  * Defaults: `keepAliveTimeout` 120 s, `headersTimeout` 125 s. 120 s clears Traefik's 90 s default (Hugo's and Yuri's
- * read of alpha, hadron-server#851: no `respondingTimeouts` set) with margin; `headersTimeout` must stay above
+ * read of alpha, hadron-server#851: Traefik 3.6.10 there has no timeouts configured, so the defaults apply, backend idle-connection
+ * reuse 90 s) with margin; `headersTimeout` must stay above
  * `keepAliveTimeout` (Node's own guidance: otherwise a connection can be cut between requests).
  *
  * `HTTP_KEEP_ALIVE_TIMEOUT_MS` and `HTTP_HEADERS_TIMEOUT_MS` accept only a plain integer from 1000 to 290000 (below

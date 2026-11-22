@@ -73,4 +73,21 @@ describe('#851 index wiring', () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(() => readFileSync(process.env.HADRON_PORT_FILE!, 'utf8')).toThrow();
   });
+
+  it('warns, naming the path, when the port file cannot be written (the probe would silently fall back)', async () => {
+    process.env.HADRON_PORT_FILE = join(portDir, 'no-such-dir', 'port');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await import('./index.js');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain(process.env.HADRON_PORT_FILE);
+    expect(String(warn.mock.calls[0][0])).toMatch(/fall back to PORT, then 4000/);
+  });
+
+  it('does not warn when the port file is written', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await import('./index.js');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(warn).not.toHaveBeenCalled();
+  });
 });

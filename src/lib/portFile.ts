@@ -8,7 +8,9 @@
  * (`PORT`, then 4000, only when the file is absent). Best effort: a write failure never stops the server, and the file is
  * removed at start so a stale value from a previous run of the same container is never read.
  *
- * `HADRON_PORT_FILE` overrides the path (the probe reads the same variable); default `/tmp/hadron-server.port`.
+ * `HADRON_PORT_FILE` overrides the path (the probe reads the same variable); default `/tmp/hadron-server.port`. Set it only as
+ * a CONTAINER environment variable, never as a Doppler secret: the server reads Doppler's environment and the probe does not,
+ * so a Doppler-only value would send the two to different files.
  */
 import { rmSync, writeFileSync } from 'node:fs';
 
