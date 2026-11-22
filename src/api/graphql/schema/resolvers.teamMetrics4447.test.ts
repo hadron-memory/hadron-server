@@ -28,6 +28,7 @@ const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] });
 
 let appId: string, agentId: string, memberId: string, outsiderId: string, otherAppId: string;
 const w: Record<string, string> = {};
+const MISSING_APP = generateId(); // well-formed, no such App
 
 const COUNT = 'total ids truncated';
 const METRICS = `query($app: ID!, $since: DateTime, $until: DateTime) { teamMetrics(appRef: $app, since: $since, until: $until) {
@@ -38,8 +39,8 @@ const METRICS = `query($app: ID!, $since: DateTime, $until: DateTime) { teamMetr
   workers { active { ${COUNT} } idle { ${COUNT} } overdue { ${COUNT} } inop { ${COUNT} } }
   flow { completed { ${COUNT} } started { ${COUNT} } }
 } }`;
-async function run(vars: Record<string, unknown> = {}, userId: string | undefined = memberId, app: string = appId) {
-  const result = await server.executeOperation({ query: METRICS, variables: { app, ...vars } }, { contextValue: ctx(userId) });
+async function run(vars: Record<string, unknown> = {}, userId: string | null = memberId, app: string = appId) {
+  const result = await server.executeOperation({ query: METRICS, variables: { app, ...vars } }, { contextValue: ctx(userId ?? undefined) });
   if (result.body.kind !== 'single') throw new Error('Expected single GraphQL result');
   return result.body.singleResult;
 }
@@ -115,10 +116,10 @@ describe('#4447 report 1: started owned tasks by owner and project (cor:agt:150:
     expect(idsOf(byOwner[w.bo].tasks)).toEqual([b1.id]);
     // by project, never hiding "No project"
     const ada = Object.fromEntries(byOwner[w.ada].byProject.map((g: any) => [g.project.handle, g]));
-    expect(idsOf(ada[p1.handle].tasks)).toEqual([a1.id, a2.id].sort());
+    expect(idsOf(ada[p1.handle as string].tasks)).toEqual([a1.id, a2.id].sort());
     expect(ada.AT0.project.noProject).toBe(true);
     expect(ada.AT0.tasks.total).toBe(1);
-    expect(ada[p1.handle].project).toMatchObject({ taskId: p1.id, title: 'Project one', noProject: false });
+    expect(ada[p1.handle as string].project).toMatchObject({ taskId: p1.id, title: 'Project one', noProject: false });
   });
 
   it('a task owned by a person is grouped under that person, sanitized to the party projection', async () => {
@@ -198,6 +199,26 @@ describe('#4447 report 3: worker counts (cor:agt:150:02-:05)', () => {
     r = (await ok()).workers.overdue;
     expect(r.total).toBe(0);
   });
+  it('an alarm whose episode ended while the task is still open never counts (a not-started alarm, the task since started)', async () => {
+    const moved = await task({ owner: w.ada, assignee: w.dev1, status: 'started' });
+    const row = await db.agentTask.findUniqueOrThrow({ where: { id: moved.id } });
+    expect(await stallAlarm(row, 'stall.not-started', w.dev1)).not.toBeNull();
+    expect((await ok()).workers.overdue.total).toBe(0);
+  });
+  it('an owner-unreactive alarm in effect is not an overdue clause (cor:agt:150:04 names not-started, no-progress and finish-by)', async () => {
+    const parent = await task({ owner: w.ada, assignee: w.dev2, status: 'started' });
+    const child = await task({ owner: w.dev2, assignee: w.dev1, parent: parent.id, status: 'finished', finishedAt: ago(2 * HOUR) });
+    const childRow = await db.agentTask.findUniqueOrThrow({ where: { id: child.id } });
+    const parentRow = await db.agentTask.findUniqueOrThrow({ where: { id: parent.id } });
+    const id = await db.$transaction(async (tx) => appendAlarmEvent(tx as never, {
+      appId, taskId: parent.id, type: 'stall.owner-unreactive', episodeStart: childRow.finishedAt as Date, subjectWorkerId: w.dev2,
+      chain: [{ workerId: w.ada } as never], payload: { windowMinutes: 15, childTaskId: child.id }, createdAt: ago(HOUR),
+    }));
+    expect(id).not.toBeNull();
+    expect(parentRow.assigneeWorkerId).toBe(w.dev2);
+    const r = (await ok()).workers;
+    expect(r.overdue.total).toBe(0);
+  });
   it('a closed alarm never counts (the task finished), and an owner-unreactive alarm is not an overdue clause', async () => {
     const done = await task({ owner: w.ada, assignee: w.dev1, status: 'finished' });
     const doneRow = await db.agentTask.findUniqueOrThrow({ where: { id: done.id } });
@@ -256,7 +277,7 @@ describe('#4447 bounds', () => {
   it('refuses since after until, and a window over 31 days, as typed bad input before any read (an outsider and a missing App get the same)', async () => {
     const now = Date.now();
     for (const userId of [memberId, outsiderId]) {
-      for (const app of [appId, 'no-such-app']) {
+      for (const app of [appId, MISSING_APP]) {
         const inverted = await run({ since: new Date(now).toISOString(), until: new Date(now - HOUR).toISOString() }, userId, app);
         expect(inverted.errors?.[0]?.extensions?.code, 'since > until').toBe('BAD_USER_INPUT');
         const wide = await run({ since: new Date(now - 32 * DAY).toISOString(), until: new Date(now).toISOString() }, userId, app);
@@ -285,12 +306,12 @@ describe('#4447 bounds', () => {
 describe('#4447 audience: the roster gate, task data behind the task readers', () => {
   it('an outsider and a missing App are refused identically (APP_NOT_FOUND, no existence oracle)', async () => {
     const outsider = await run({}, outsiderId);
-    const missing = await run({}, outsiderId, 'no-such-app');
+    const missing = await run({}, outsiderId, MISSING_APP);
     expect(outsider.errors?.[0]?.extensions?.code).toBe('APP_NOT_FOUND');
-    expect(missing.errors?.[0]?.extensions?.code).toBe('APP_NOT_FOUND');
-    expect(outsider.errors?.[0]?.message.replace(appId, '<ref>')).toBe(missing.errors?.[0]?.message.replace('no-such-app', '<ref>'));
-    const anon = await run({}, undefined);
-    expect(anon.errors?.[0]?.extensions?.code).toBe('APP_NOT_FOUND');
+    expect(missing.errors?.[0]?.extensions?.code, 'missing: ' + missing.errors?.[0]?.message).toBe('APP_NOT_FOUND');
+    expect(outsider.errors?.[0]?.message.replace(appId, '<ref>')).toBe(missing.errors?.[0]?.message.replace(MISSING_APP, '<ref>'));
+    const anon = await run({}, null);
+    expect(anon.errors?.[0]?.extensions?.code, 'anon: ' + anon.errors?.[0]?.message).toBe('APP_NOT_FOUND');
   });
   it('returns the same refusal teamRoster gives an outsider', async () => {
     const roster = await server.executeOperation({ query: 'query($a: ID!){ teamRoster(appRef:$a){ appId } }', variables: { a: appId } }, { contextValue: ctx(outsiderId) });

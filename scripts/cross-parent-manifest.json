@@ -313,6 +313,18 @@
     "ReviewSlotReadiness": "value",
     "GrantSignatureStatus": "value",
     "TeamUtilization": "value",
+    "TeamMetrics": "value",
+    "TeamMetricsCount": "value",
+    "TeamMetricsWindow": "value",
+    "TeamMetricsProject": "value",
+    "TeamMetricsProjectGroup": "value",
+    "TeamMetricsOwnerGroup": "value",
+    "TeamMetricsStartedOwned": "value",
+    "TeamMetricsChildStatus": "value",
+    "TeamMetricsProjectRow": "value",
+    "TeamMetricsProjects": "value",
+    "TeamMetricsWorkers": "value",
+    "TeamMetricsFlow": "value",
     "WorkerUtilization": "value",
     "MatchFailure": "value",
     "WebPollsPage": "envelope",
@@ -2031,6 +2043,12 @@
       "class": "closed-projection",
       "projection": "AgentTaskParty",
       "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "TeamMetricsOwnerGroup.owner": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience: the roster audience, and the group exists only for a reader who may read the App's tasks, cor:agt:050:21)",
       "target": "AgentTaskParty"
     },
     "TeamCompositionWorker.worker": {
