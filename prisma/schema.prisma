@@ -3649,6 +3649,38 @@ model TelegramEventReceipt {
   @@map("telegram_event_receipts")
 }
 
+/// A durable request to drop one chat tool's side of a connection (Telegram or Slack) once core has deleted its row
+/// (#4847; hrn:node:hadronmemory.com:specs:cor:int:030:03). Recorded in the deleting transaction, attempted after the commit,
+/// retried by a sweep until the tool CONFIRMS, capped after ten attempts with one alarm.
+///
+/// Relationships: none by foreign key, on purpose. A URN reclaim hard-deletes an App and the connection rows cascade away with it;
+/// the intent must outlive them. `connectionId` is the core row it was recorded for (informational only); `toolConnectionId` is the
+/// tool's own handle for the registration, the only thing the tool call needs.
+///
+/// Behaviour: `state` PENDING until the tool answers a success (CONFIRMED) or the tenth attempt fails (CAPPED: one alarm, no more
+/// retries, an operator requeues it). `attempts` counts claims; the wait after attempt n is 5 minutes doubling to at most 6 hours.
+/// A row exists only for a deletion that happened after this table did: older orphans have no intent and are out of scope.
+model ChatToolTeardownIntent {
+  id               String    @id @default(cuid())
+  /// 'telegram' | 'slack'.
+  kind             String
+  /// The client's dispatch key ('telegram' | 'slack' today).
+  provider         String
+  toolConnectionId String    @map("tool_connection_id")
+  connectionId     String?   @map("connection_id")
+  /// 'PENDING' | 'CONFIRMED' | 'CAPPED'.
+  state            String    @default("PENDING")
+  attempts         Int       @default(0)
+  lastAttemptAt    DateTime? @map("last_attempt_at")
+  confirmedAt      DateTime? @map("confirmed_at")
+  cappedAt         DateTime? @map("capped_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@unique([kind, toolConnectionId])
+  @@index([state, lastAttemptAt])
+  @@map("chat_tool_teardown_intents")
+}
+
 /// The server's record of one web-polling job that a headless run started: which run, App, agent and user the
 /// job belongs to, and under which policy. When the polling tool later reports a change, this row decides which
 /// run principal that event may wake.

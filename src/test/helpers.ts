@@ -177,6 +177,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // #597 — Telegram (receipts have no FK; connections FK org + app).
   await db.telegramEventReceipt.deleteMany();
   await db.telegramConnection.deleteMany();
+  // #4847 — the teardown intents have no foreign key (a URN reclaim's cascade must not take them), so cleanup removes them.
+  await db.chatToolTeardownIntent.deleteMany();
   // hadrontool-mcp conduit registry (FKs org only).
   await db.mcpServer.deleteMany();
   // hadrontool-home-assistant registry (FKs org only).

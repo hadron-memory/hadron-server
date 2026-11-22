@@ -19,6 +19,7 @@ import { deleteTelegramToolConnection } from './telegramClient.js';
 import {
   CHAT_TOOL_TEARDOWN_MAX_ATTEMPTS,
   attemptChatToolTeardown,
+  chatToolTeardownIdle,
   chatToolTeardownSweepTick,
   reconcileOrphanedChatToolConnections,
   requeueCappedChatToolTeardowns,
@@ -49,7 +50,7 @@ const slack = (organizationId: string, defaultAppId: string, tool: string) => db
 const intentOf = (kind: 'telegram' | 'slack', tool: string) => db.chatToolTeardownIntent.findUniqueOrThrow({ where: { kind_toolConnectionId: { kind, toolConnectionId: tool } } });
 const intentCount = () => db.chatToolTeardownIntent.count();
 /** The teardown is fire-and-forget after commit: let the microtask queue run before reading the calls. */
-const settle = () => new Promise<void>((r) => setImmediate(r));
+const settle = () => chatToolTeardownIdle();
 const calls = () => ({ telegram: telegramDelete.mock.calls.map((c) => c[1]).sort(), slack: slackDelete.mock.calls.map((c) => c[1]).sort() });
 
 beforeEach(async () => {
@@ -207,14 +208,60 @@ describe('#4847 the wait and the cap (clause 4)', () => {
   it('an operator can requeue a capped intent (and only a capped one): it is attempted again from a clean count', async () => {
     const { id } = await runAttempts(CHAT_TOOL_TEARDOWN_MAX_ATTEMPTS - 1);
     await attemptChatToolTeardown(db, id, minutes(10_000));
-    const confirmed = await intentOf('slack', 'sl-a').catch(() => null);
-    expect(confirmed).toBeNull(); // slack was never recorded in this scenario: only the capped one exists
     expect(await requeueCappedChatToolTeardowns(db, { id })).toBe(1);
     expect(await db.chatToolTeardownIntent.findUniqueOrThrow({ where: { id } })).toMatchObject({ state: 'PENDING', attempts: 0, lastAttemptAt: null, cappedAt: null });
     telegramDelete.mockResolvedValue(true);
     await chatToolTeardownSweepTick(db, minutes(20_000));
     expect(await db.chatToolTeardownIntent.findUniqueOrThrow({ where: { id } })).toMatchObject({ state: 'CONFIRMED', attempts: 1 });
     expect(await requeueCappedChatToolTeardowns(db, { id }), 'a confirmed intent is not requeued').toBe(0);
+  });
+});
+
+describe('#4847 a crash on the last attempt cannot leave an intent PENDING forever', () => {
+  it('an intent with every attempt used and no recorded outcome is capped by the sweep once its last wait has passed, with one alarm', async () => {
+    await db.$transaction((tx) => softDeleteChatToolConnections(tx, { appId: appA.id }, null));
+    const id = (await intentOf('telegram', 'tg-a')).id;
+    // the tenth claim ran (attempts = 10, last attempt stamped) and the process died before it recorded the outcome
+    await db.chatToolTeardownIntent.update({ where: { id }, data: { attempts: CHAT_TOOL_TEARDOWN_MAX_ATTEMPTS, lastAttemptAt: T0 } });
+    telegramDelete.mockClear();
+    const early = await chatToolTeardownSweepTick(db, minutes(60)); // its last wait (6 hours) has not passed
+    expect(early.capped).toBe(0);
+    expect((await db.chatToolTeardownIntent.findUniqueOrThrow({ where: { id } })).state).toBe('PENDING');
+    const late = await chatToolTeardownSweepTick(db, minutes(7 * 60));
+    expect(late.capped).toBe(1);
+    expect(await db.chatToolTeardownIntent.findUniqueOrThrow({ where: { id } })).toMatchObject({ state: 'CAPPED' });
+    expect(alarm).toHaveBeenCalledTimes(1);
+    expect(telegramDelete, 'the exhausted intent is capped, never asked an eleventh time').not.toHaveBeenCalledWith('telegram', 'tg-a');
+    await chatToolTeardownSweepTick(db, minutes(100 * 60));
+    expect(alarm, 'and not alarmed again').toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('#4847 the state guards: only a PENDING intent is attempted, and only a PENDING one is capped', () => {
+  it('a direct attempt on a CONFIRMED or a CAPPED intent asks the tool nothing, whatever the clock says', async () => {
+    await db.$transaction((tx) => softDeleteChatToolConnections(tx, { appId: appA.id }, null));
+    const tg = (await intentOf('telegram', 'tg-a')).id;
+    const sl = (await intentOf('slack', 'sl-a')).id;
+    await db.chatToolTeardownIntent.update({ where: { id: tg }, data: { state: 'CONFIRMED', attempts: 2, lastAttemptAt: T0 } });
+    await db.chatToolTeardownIntent.update({ where: { id: sl }, data: { state: 'CAPPED', attempts: 3, lastAttemptAt: T0, cappedAt: T0 } });
+    expect(await attemptChatToolTeardown(db, tg, minutes(1_000_000))).toBe('skipped');
+    expect(await attemptChatToolTeardown(db, sl, minutes(1_000_000))).toBe('skipped');
+    expect(calls()).toEqual({ telegram: [], slack: [] });
+    expect(await intentOf('telegram', 'tg-a')).toMatchObject({ state: 'CONFIRMED', attempts: 2 });
+    expect(await intentOf('slack', 'sl-a')).toMatchObject({ state: 'CAPPED', attempts: 3 });
+  });
+
+  it('an intent confirmed by another actor while its last attempt was in flight is NOT flipped to CAPPED, and raises no alarm', async () => {
+    await db.$transaction((tx) => softDeleteChatToolConnections(tx, { appId: appA.id }, null));
+    const id = (await intentOf('telegram', 'tg-a')).id;
+    await db.chatToolTeardownIntent.update({ where: { id }, data: { attempts: CHAT_TOOL_TEARDOWN_MAX_ATTEMPTS - 1, lastAttemptAt: T0 } });
+    telegramDelete.mockImplementationOnce(async () => {
+      await db.chatToolTeardownIntent.update({ where: { id }, data: { state: 'CONFIRMED', confirmedAt: T0 } }); // someone else confirmed it meanwhile
+      return false;
+    });
+    await attemptChatToolTeardown(db, id, minutes(10_000));
+    expect((await db.chatToolTeardownIntent.findUniqueOrThrow({ where: { id } })).state).toBe('CONFIRMED');
+    expect(alarm).not.toHaveBeenCalled();
   });
 });
 
