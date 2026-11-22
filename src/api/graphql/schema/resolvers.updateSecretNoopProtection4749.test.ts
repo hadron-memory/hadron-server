@@ -20,7 +20,7 @@ let userId: string, appId: string, secretId: string;
 const ctx = (as: string = userId): Context => ({ db, userId: as, roles: [] } as unknown as Context);
 const error = async (p: Promise<unknown>) => p.then(() => { throw new Error('expected refusal'); }, (e) => e);
 const eventKinds = async () =>
-  (await db.secretEvent.findMany({ where: { ownerId: appId, secretName: 'canary' }, orderBy: { at: 'asc' }, select: { kind: true } })).map((e) => e.kind);
+  (await db.secretEvent.findMany({ where: { ownerId: appId, secretName: 'canary' }, orderBy: [{ at: 'asc' }, { seq: 'asc' }], select: { kind: true } })).map((e) => e.kind);
 const member = async () => {
   const id = (await db.user.create({ data: { email: `${generateId()}@s4.test` } })).id;
   await db.appMember.create({ data: { appId, userId: id, role: 'reader' } });
