@@ -7,6 +7,11 @@
  * `truncated` says so (cor:api:120:04), so a short list never reads as the whole one.
  *
  * Reports 1-3 are snapshots at read time and take no window; only report 4 reads `[since, until)`.
+ *
+ * Orderings (#4850), so a cut list is always the same prefix: every `ids` list is by creation (`created_at`, then `id`);
+ * report 1's owners by task count descending, then owner worker id, then owner user id (NULLs last); an owner's projects by
+ * task count descending, then project handle; report 2's projects by project number. A task's `handle` is NOT NULL in the
+ * database (prisma/agent-task-number-invariants.sql), so every project segment is a string.
  */
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { loadTeamRoster } from './roster.js';
@@ -14,12 +19,9 @@ import { alarmEpisodeKey, endedAlarmEpisodes } from './stall.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
-/** Operational dials (Holger, 2026-11-18, R2: A): retunable without a contract change. */
-export const METRICS_IDS_CAP = 200;
-export const METRICS_MAX_WINDOW_MS = 31 * 24 * 3_600_000;
-export const METRICS_DEFAULT_WINDOW_MS = 7 * 24 * 3_600_000;
-/** Groups listed per level (owners; projects per owner; started projects), one more is read to learn there were more. */
-export const METRICS_GROUP_CAP = 200;
+import { METRICS_DEFAULT_WINDOW_MS, METRICS_GROUP_CAP, METRICS_IDS_CAP, METRICS_MAX_WINDOW_DAYS, METRICS_MAX_WINDOW_MS } from './teamMetricsCaps.js';
+/** Operational dials (Holger, 2026-11-18, R2: A), in one import-free module so the SDL states the same numbers (#4850). */
+export { METRICS_DEFAULT_WINDOW_MS, METRICS_GROUP_CAP, METRICS_IDS_CAP, METRICS_MAX_WINDOW_MS } from './teamMetricsCaps.js';
 
 export type MetricsCount = { total: number; ids: string[]; truncated: boolean };
 const count = (total: number, ids: string[] | null): MetricsCount => {
@@ -43,7 +45,7 @@ export function resolveMetricsWindow(since: unknown, until: unknown, now: Date):
   const end = parse(until, 'until') ?? now;
   const start = parse(since, 'since') ?? new Date(end.getTime() - METRICS_DEFAULT_WINDOW_MS);
   if (start.getTime() > end.getTime()) throw new MetricsWindowError('since must not be after until.');
-  if (end.getTime() - start.getTime() > METRICS_MAX_WINDOW_MS) throw new MetricsWindowError('The window must not be longer than 31 days.');
+  if (end.getTime() - start.getTime() > METRICS_MAX_WINDOW_MS) throw new MetricsWindowError(`The window must not be longer than ${METRICS_MAX_WINDOW_DAYS} days.`);
   return { since: start, until: end };
 }
 
@@ -86,8 +88,14 @@ export async function loadStartedOwned(db: Db, appId: string): Promise<MetricsSt
   ]);
   const shown = owners.slice(0, METRICS_GROUP_CAP);
   const keyOf = (o: { workerId: string | null; userId: string | null }) => `${o.workerId ?? ''}|${o.userId ?? ''}`;
-  const shownKeys = new Set(shown.map(keyOf));
-  const handles = [...new Set(cells.filter((c) => shownKeys.has(keyOf(c))).map((c) => c.project))];
+  // #4850: the cells grouped by owner once (they arrive ordered by owner, then rank), so the regroup is linear in the cells.
+  const cellsByOwner = new Map<string, typeof cells>();
+  for (const c of cells) {
+    const k = keyOf(c);
+    const list = cellsByOwner.get(k);
+    if (list) list.push(c); else cellsByOwner.set(k, [c]);
+  }
+  const handles = [...new Set(shown.flatMap((o) => (cellsByOwner.get(keyOf(o)) ?? []).map((c) => c.project)))];
   const projectRows = handles.length
     ? await db.agentTask.findMany({ where: { appId, parentTaskId: null, handle: { in: handles } }, select: { id: true, handle: true, title: true } })
     : [];
@@ -100,7 +108,7 @@ export async function loadStartedOwned(db: Db, appId: string): Promise<MetricsSt
     all: count(all[0]?.total ?? 0, all[0]?.ids ?? null),
     ownersTruncated: owners.length > METRICS_GROUP_CAP,
     byOwner: shown.map((o) => {
-      const mine = cells.filter((c) => keyOf(c) === keyOf(o));
+      const mine = cellsByOwner.get(keyOf(o)) ?? [];
       return {
         workerId: o.workerId, userId: o.userId, tasks: count(o.total, o.ids),
         projectsTruncated: mine.length > METRICS_GROUP_CAP,
@@ -149,7 +157,7 @@ async function overdueWorkerIds(db: Db, appId: string, now: Date): Promise<Set<s
       AND e.type = ANY(${OVERDUE_ALARM_TYPES}::text[])
       AND t.status IN ('pending', 'started') AND t.assignee_worker_id IS NOT NULL`);
   // The roster's own classification of an ended episode: one loader, so the two cannot disagree.
-  const ended = await endedAlarmEpisodes(db as never, rows, now);
+  const ended = await endedAlarmEpisodes(db, rows, now);
   return new Set(rows.filter((r) => !(r.episodeStart && ended.has(alarmEpisodeKey(r.taskId, r.type, r.episodeStart)))).map((r) => r.workerId));
 }
 

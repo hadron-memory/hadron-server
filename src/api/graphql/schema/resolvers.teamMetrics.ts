@@ -19,15 +19,17 @@ export const teamMetricsQueries = {
   teamMetrics: async (_: unknown, args: TeamMetricsArgs, ctx: Context) => {
     // The argument checks come BEFORE admission and before any transaction (as teamUtilization's, #4497): they depend only on
     // the arguments, so they answer alike for every App, readable, concealed or missing, and disclose nothing about it.
+    // #4850: ONE clock. The snapshots are read "as of" the same instant an omitted `until` resolves to, so a client that reads
+    // window.until for an omitted until gets asOf (cor:agt:150, R1); the read itself still runs in one snapshot below.
+    const asOf = new Date();
     let window: { since: Date; until: Date };
     try {
-      window = resolveMetricsWindow(args.since, args.until, new Date());
+      window = resolveMetricsWindow(args.since, args.until, asOf);
     } catch (e) {
       if (e instanceof MetricsWindowError) throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
       throw e;
     }
     return withRosterAppRead(ctx, args.appRef, async (readCtx, app) => {
-      const asOf = new Date();
       const db = readCtx.db;
       const canReadTasks = await mayReadAppTasks(readCtx, app.id);
       const [workers, startedOwned, projects, flow] = await Promise.all([
