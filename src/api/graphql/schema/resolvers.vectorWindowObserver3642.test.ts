@@ -1,7 +1,11 @@
 /**
  * #3642 — what the minScore-floor widening loop (`widenVectorWindow`, resolvers.query.node.ts) actually costs.
  *
- * INVESTIGATION ONLY: this file observes and pins today's behavior. It authorizes no optimization, budget or early
+ * AFTER #4665 (#2772): the loop is gone. Every scenario now runs ONE ranking window (the page), the floor and filters apply
+ * inside/after it, and the page is full where the data allows (S14 no longer comes back short past row 2000). The
+ * comments below on widening describe the BEFORE state this file first recorded (origin/main e42bb1897).
+ *
+ * INVESTIGATION ONLY: this file observes and pins behavior. It authorizes no optimization, budget or early
  * termination (gate: hadron-server#3642 comment 6702033100). The numbers describe the loop AS OF origin/main e42bb1897;
  * PR #4665 (#2772/#438) rewrites this loop and the provider, so a re-run after it merges gives the before/after.
  * The fixtures are parameterised only by data, so they re-run unchanged.
@@ -24,7 +28,6 @@ import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
 const DIM = 768;
-const CAP = 2000; // VECTOR_FETCH_CAP in resolvers.query.node.ts (not exported: re-stated, and pinned by the cap scenario)
 const queryClient: EmbeddingClient = {
   provider: 'test', model: 'stub-model', dim: DIM,
   async embed(texts: string[]) { return texts.map(() => { const v = new Array(DIM).fill(0); v[1] = 1; return v; }); },
@@ -141,7 +144,7 @@ describe('#3642 observer — 400 nodes, score 0.99 down by 0.002, every 25th a s
     const want = expected({ limit: 20 }); record('S1 no floor, no filter, limit 20', o, want);
     expect(o.resultIds).toEqual(want);
     expect(o.windows.map((w) => w.limit)).toEqual([20]);
-    expect(o.eligibleCalls).toHaveLength(1); // the happy path still pays one eligibleIds call per window
+    expect(o.eligibleCalls).toHaveLength(0); // after #4665 there is no per-window eligibleIds round trip
   });
 
   it('S2 minScore BELOW every score: same cost as absent', async () => {
@@ -161,16 +164,14 @@ describe('#3642 observer — 400 nodes, score 0.99 down by 0.002, every 25th a s
     const o = await observe({ filter: F(), limit: 50, minScore: 0.9 });
     const want = expected({ limit: 50, floor: 0.9 }); record('S4 floor 0.90, 45 pass, limit 50', o, want);
     expect(o.resultIds).toEqual(want);
-    expect(o.windows.map((w) => w.limit)).toEqual([50, 200, 800]);
-    expect(o.windows.at(-1)!.exhausted).toBe(true); // stops on the provider's signal, short of the cap
+    expect(o.windows.map((w) => w.limit)).toEqual([50]); // after #4665: one window, no widening
   });
 
   it('S5 floor above EVERY score (0.995): nothing can pass; cost until the provider reports exhaustion', async () => {
     const o = await observe({ filter: F(), limit: 20, minScore: 0.995 });
     record('S5 floor 0.995 (above all)', o, []);
     expect(o.resultIds).toEqual([]);
-    expect(o.windows.map((w) => w.limit)).toEqual([20, 80, 320, 1280]);
-    expect(o.windows.at(-1)!.exhausted).toBe(true);
+    expect(o.windows.map((w) => w.limit)).toEqual([20]); // after #4665: one window
   });
 
   it('S6 floor equal to a stored score (boundary): the node at the floor is judged on its float4 score', async () => {
@@ -228,8 +229,7 @@ describe('#3642 observer — the cap (2100 nodes, score 0.99 down by 0.0004, eve
     const o = await observe({ filter: F(), limit: 20, minScore: 0.995 });
     record('S13 2100 nodes, floor 0.995 (above all), limit 20', o, []);
     expect(o.resultIds).toEqual([]);
-    expect(o.windows.map((w) => w.limit)).toEqual([20, 80, 320, 1280, CAP]);
-    expect(o.windows.at(-1)!.limit).toBe(CAP);
+    expect(o.windows.map((w) => w.limit)).toEqual([20]); // after #4665: no widening to a cap
   }, 120_000);
 
   it('S14 PAST THE CAP a page is short, never wrong: every spec.rule ranks beyond row 2000 (rules only in the last 100 nodes)', async () => {
@@ -241,9 +241,8 @@ describe('#3642 observer — the cap (2100 nodes, score 0.99 down by 0.0004, eve
     const o = await observe({ filter: F({ role: 'spec' }), limit: 5 });
     const want = expected({ limit: 5, roleFamily: 'spec' }); record('S14 2100 nodes, 20 spec rules all ranked past row 2000, limit 5', o, want);
     expect(want).toHaveLength(5);
-    expect(o.windows.at(-1)!.limit).toBe(CAP);
-    for (const id of o.resultIds) expect(want).toContain(id); // never a wrong hit
-    expect(o.resultIds.length).toBeLessThan(5); // short: the documented past-the-cap behavior, recorded, not endorsed
+    expect(o.windows.map((w) => w.limit)).toEqual([5]);
+    expect(o.resultIds).toEqual(want); // after #4665 (ruling 0150: no candidate cap): the FULL true page, not a short one
   }, 120_000);
 });
 
@@ -253,8 +252,7 @@ describe('#3642 observer — chunk granularity (400 chunk-kind vectors only)', (
     const o = await observe({ filter: F(), limit: 20, minScore: 0.995, granularity: 'chunk' }, 'vectorSearchChunks');
     record('S12 chunk granularity, floor 0.995 (above all)', o, []);
     expect(o.resultIds).toEqual([]);
-    expect(o.windows.map((w) => w.limit)).toEqual([20, 80, 320, 1280]);
-    expect(o.windows.at(-1)!.exhausted).toBe(true);
+    expect(o.windows.map((w) => w.limit)).toEqual([20]); // after #4665: one window
   });
   it('S12b chunk granularity, no floor: first window fills', async () => {
     const o = await observe({ filter: F(), limit: 20, granularity: 'chunk' }, 'vectorSearchChunks');

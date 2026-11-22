@@ -7,8 +7,10 @@
 --
 -- An identity BY DEFAULT is left alone (a re-run changes nothing). Push's exact sequence default, backed by the
 -- sequence this column owns, is replaced by the identity, which then continues above both the highest existing id and
--- the highest id the old sequence issued. Anything
--- else (an ALWAYS identity, another default, a same-name sequence the column does not own) refuses with what was found.
+-- the highest id the old sequence issued. Anything else (an ALWAYS identity, another default, a same-name sequence
+-- the column does not own, another object depending on the old sequence) refuses with what was found. A missing
+-- table and another dependent on the sequence refuse with SQLSTATE HDPRF (#3770, #4714), so a migration run that
+-- reaches them logs a refused preflight instead of crash-looping.
 -- Prisma reads the identity as autoincrement(), so a later db push leaves it (probed). The migration is the authority
 -- (ops:alpha:prisma-deploy-flow). One DO block: atomic.
 -- Pinned by src/test/migrations/stampKeyIdentity4337.test.ts and the migration replay check.
@@ -22,6 +24,10 @@ DECLARE
   issued bigint;
   top bigint;
 BEGIN
+  IF rel IS NULL THEN
+    RAISE EXCEPTION 'stamp_signing_keys does not exist in schema %; refusing to convert it (hadron-server#4337, #4714)', current_schema()
+      USING ERRCODE = 'HDPRF';
+  END IF;
   SELECT a.attidentity::text, pg_get_expr(d.adbin, d.adrelid) INTO ident, col_default
     FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
     WHERE a.attrelid = rel AND a.attname = 'id';
@@ -41,6 +47,8 @@ BEGIN
   -- sequence that shadows the schema's (a temporary one) either holds the default (this check refuses) or makes the
   -- owned one render schema-qualified (the text check refuses); with no shadow, the name resolves in current_schema(),
   -- where the owned sequence is. (The DROP stays a literal: post-push's inventory refuses DDL built at run time.)
+  -- A temporary TABLE of the same name can shadow the unqualified ALTER TABLE statements below (the temp schema is searched
+  -- first). Every case traced in review refuses safely and leaves the real table as it was (#4691 BLIND F3, #4714).
   -- The default also depends on its own column (the table's row in pg_depend), so only a SEQUENCE it depends on counts.
   SELECT dep.refobjid INTO default_seq
     FROM pg_attrdef ad JOIN pg_depend dep ON dep.classid = 'pg_attrdef'::regclass AND dep.objid = ad.oid
@@ -50,6 +58,19 @@ BEGIN
   owned_seq := pg_get_serial_sequence(quote_ident(current_schema()) || '.stamp_signing_keys', 'id')::regclass;
   IF default_seq IS DISTINCT FROM owned_seq THEN
     RAISE EXCEPTION 'stamp_signing_keys.id''s default uses a sequence other than the one the column owns; refusing to drop it (hadron-server#4337)';
+  END IF;
+  -- Nothing else may depend on the old sequence (another table's default, a view's expression): DROP SEQUENCE would refuse
+  -- with Postgres's untagged "other objects depend on it" (#4714 F2). Judged by OID, before anything changes; the id
+  -- default's own dependency is the one expected.
+  IF EXISTS (
+    SELECT 1 FROM pg_depend dep
+    WHERE dep.refclassid = 'pg_class'::regclass AND dep.refobjid = owned_seq
+      AND NOT (dep.classid = 'pg_attrdef'::regclass AND dep.objid IN (
+        SELECT ad.oid FROM pg_attrdef ad
+        WHERE ad.adrelid = rel AND ad.adnum = (SELECT attnum FROM pg_attribute WHERE attrelid = rel AND attname = 'id')))
+  ) THEN
+    RAISE EXCEPTION 'stamp_signing_keys_id_seq has dependents other than stamp_signing_keys.id''s default; refusing to drop it (hadron-server#4337, #4714)'
+      USING ERRCODE = 'HDPRF';
   END IF;
   EXECUTE $ddl$ALTER TABLE stamp_signing_keys ALTER COLUMN id DROP DEFAULT$ddl$;
   -- The highest id the old sequence has already handed out (its last value once called, else none yet), read before it

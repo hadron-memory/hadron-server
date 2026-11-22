@@ -110,7 +110,7 @@ import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
 import { NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
 import { normalizeObjectType, normalizeRole, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
-import { deriveEdgeLoc } from '../lib/edgeLoc.js';
+import { deriveEdgeLoc, isAuthoredLoc } from '../lib/edgeLoc.js';
 import { retireSpecDoor } from '../api/graphql/schema/resolvers.mutation.retireSpec.js';
 import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../lib/tombstoneArchive.js';
 import { deletePendingEdgesTargetingNodes, promotePendingEdgeForTarget, reconcilePendingEdgeCounts } from '../lib/pendingEdgePromotion.js';
@@ -833,7 +833,7 @@ export async function resolveEdgeRefs(
         targetLoc: tgt.loc,
         targetMemoryId: tgt.memoryId,
         name: edge.name ?? null,
-        loc: edge.loc ?? null,
+        loc: edge.loc || null, // #4738: '' is no authored loc, it derives
         description: edge.description ?? null,
         isRunnable: edge.isRunnable ?? null,
       });
@@ -1040,6 +1040,8 @@ export async function addEdge(args: {
         sourceId: locked.source.id,
         targetId: locked.target.id,
         loc: edgeLoc,
+        // #2947: authored iff the caller supplied the loc (even one equal to the derivation).
+        locAuthored: isAuthoredLoc(authoredLoc),
         name,
         description,
         isRunnable,
@@ -1219,6 +1221,7 @@ async function replaceOutgoingEdgesInTransaction(
         sourceId: args.sourceNodeId,
         targetId: e.targetNodeId,
         loc: e.loc ?? deriveEdgeLoc(args.sourceLoc, e.name, e.targetLoc),
+        locAuthored: isAuthoredLoc(e.loc), // #2947
         name: e.name,
         description: e.description,
         isRunnable: e.isRunnable,
@@ -4936,6 +4939,12 @@ export function createMcpServerInstance(
           `${scopePrefix}Note: this memory has no vector index — enable it on the memory to use mode:vector. [no_vector_index]\n\nFound 0 node(s).`,
         );
       }
+      if (result.reason === 'stopped_early') {
+        // #2772 (cor:api:090:04): the vector work budget ended the search before it found a page; never a silent empty.
+        return textResult(
+          `${scopePrefix}Note: the search stopped early (the vector work budget ran out, or the offset+limit window passed 20000 rows, before a page was found); narrow the filters or lower the offset. [stopped_early]\n\nFound 0 node(s).`,
+        );
+      }
       if (result.reason === 'embedding_unavailable') {
         // findNodes collapses "no endpoint configured" and "embed() failed" into
         // one code, so the note names both causes (the pre-delegation surface
@@ -4949,6 +4958,11 @@ export function createMcpServerInstance(
       // comparing the whole string.
       const degradedFlags = new Set((result.degraded ?? '').split(',').filter(Boolean));
       const noteLines: string[] = [];
+      if (degradedFlags.has('stopped_early')) {
+        noteLines.push(
+          'Note: the search stopped early (the vector work budget ran out, or the offset+limit window was cut at 20000 rows), so this page may be shorter than the true page. [degraded:stopped_early]',
+        );
+      }
       if (degradedFlags.has('no_vector_index')) {
         noteLines.push(
           'Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]',
@@ -8417,7 +8431,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
 
 Collision policy: if a live node already occupies \`targetUrn\`, the call refuses with a URN_ALREADY_EXISTS error. Pass \`overwrite: true\` to soft-delete the existing target first; the evicted row is re-stamped to \`<loc>__deleted-<full-id>\` so the unique \`(loc, memoryId)\` constraint doesn't block. Hard-overwrite isn't supported — call hadron_delete_node (hard: true) on the target first if you need that.
 
-Descendants move WITH the node (#768): a node's loc-subtree (every node whose loc is prefixed by \`<loc>:\`) is rebased onto the new loc, so children's URNs follow the parent. This works within one memory OR across memories (#781) — a different memory in \`targetUrn\` relocates the whole subtree there, carrying the moved nodes' embeddings and rewriting the edges whose source moved to the destination memory. A boundary edge to a node left behind becomes a cross-memory edge (its far endpoint is access-gated on read). A same-memory move leaves edge locs untouched (a derived denormalization; keep addressing those edges by their existing URN). A collision at any DESCENDANT slot refuses the whole move (overwrite only evicts the explicitly-named target loc).
+Descendants move WITH the node (#768): a node's loc-subtree (every node whose loc is prefixed by \`<loc>:\`) is rebased onto the new loc, so children's URNs follow the parent. This works within one memory OR across memories (#781) — a different memory in \`targetUrn\` relocates the whole subtree there, carrying the moved nodes' embeddings and rewriting the edges whose source moved to the destination memory. A boundary edge to a node left behind becomes a cross-memory edge (its far endpoint is access-gated on read). Edges that touch the moved subtree are kept in step (#2947): a DERIVED edge loc (one built from its endpoints and name) is re-derived from the new endpoints, an AUTHORED loc is left as written, and every edge URN the move changes keeps its OLD URN resolving; the response lists them. A collision at any DESCENDANT slot refuses the whole move (overwrite only evicts the explicitly-named target loc).
 
 The node's \`name\` (its human-authored display title) is PRESERVED — a move changes the address, not the title, exactly as the GraphQL \`moveNode\` mutation does (#1017). Pass \`renameToLeaf: true\` if you want the name re-derived from the new loc's terminal atom instead. Descendants' names are never rewritten either way.
 
@@ -8509,10 +8523,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // for the same-slot no-op branch, which relocates nothing.
       let relocated: MoveNodeSubtreeResult['moved'] = [];
       let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
+      let edgeUrnChanges: MoveNodeSubtreeResult['edgeUrnChanges'] = [];
       try {
         const completed = await withArchivePlanRetries(async (timeout) => {
           let relocated: MoveNodeSubtreeResult['moved'] = [];
           let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
+          let edgeUrnChanges: MoveNodeSubtreeResult['edgeUrnChanges'] = [];
           const attemptResult = await db.$transaction<MoveResult>(async (tx) => {
             let attemptAuth = auth;
             const authorizeAttempt = async () => {
@@ -8690,6 +8706,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               });
               relocated = subtreeResult.moved;
               linkWarnings = subtreeResult.linkWarnings;
+              edgeUrnChanges = subtreeResult.edgeUrnChanges;
               // #1468 — evicting the destination occupant removes it from its
               // corpus and hands its citation to another node: refused for a
               // minted spec. Checked AFTER the helper on purpose: it already holds
@@ -8745,11 +8762,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // the GraphQL moveNode path so inputs that succeed there don't time out
           // here (mirrors extractParentNodeGraph / cloneMemory).
           { timeout });
-          return { result: attemptResult, relocated, linkWarnings };
+          return { result: attemptResult, relocated, linkWarnings, edgeUrnChanges };
         });
         result = completed.result;
         relocated = completed.relocated;
         linkWarnings = completed.linkWarnings;
+        edgeUrnChanges = completed.edgeUrnChanges;
       } catch (e) {
         // #3786 (Charles QA F1, from #3776's stamped QA matrix): the move is
         // the third inline writer that can drive the #992 per-chat seq
@@ -8846,6 +8864,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       }
       if (childCount > 0) {
         lines.push(`Children: ${childCount} immediate descendant(s).`);
+      }
+      // #2947: every edge whose URN this move changed. Each old URN keeps resolving through an alias (ruling 0162).
+      if (edgeUrnChanges.length > 0) {
+        lines.push('', `Edge URNs changed (${edgeUrnChanges.length}); each old URN still resolves:`);
+        for (const c of edgeUrnChanges.slice(0, 50)) lines.push(`${c.previousUrn} -> ${c.urn}`);
+        if (edgeUrnChanges.length > 50) lines.push(`(and ${edgeUrnChanges.length - 50} more)`);
       }
       if (linkWarnings.length > 0) {
         lines.push('', `Broken content links (${linkWarnings.length}):`);

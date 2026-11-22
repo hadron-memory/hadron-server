@@ -748,6 +748,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_saturation_episodes_shape",
+      "kind": "check-constraint",
+      "file": "saturation-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_schedule_run_budgets_positive",
       "kind": "check-constraint",
       "file": "trigger-run-budget-invariants.sql",
@@ -774,7 +780,7 @@
     {
       "name": "chk_secret_change_shape",
       "kind": "check-constraint",
-      "file": "post-push.sql",
+      "file": "secret-change-requests-invariants.sql",
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
@@ -1188,7 +1194,7 @@
     {
       "name": "hadron_clear_deleted_app_changes",
       "kind": "function",
-      "file": "post-push.sql",
+      "file": "secret-change-requests-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -1254,7 +1260,7 @@
     {
       "name": "hadron_end_deleted_secret_changes",
       "kind": "function",
-      "file": "post-push.sql",
+      "file": "secret-change-requests-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -1386,7 +1392,7 @@
     {
       "name": "hadron_guard_secret_change_request",
       "kind": "function",
-      "file": "post-push.sql",
+      "file": "secret-change-requests-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -1924,15 +1930,21 @@
       "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
+      "name": "saturation_episodes_app_id_ended_at_idx",
+      "kind": "index",
+      "file": "saturation-invariants.sql",
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
       "name": "secret_change_requests_expiry",
       "kind": "index",
-      "file": "post-push.sql",
+      "file": "secret-change-requests-invariants.sql",
       "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
       "name": "secret_change_requests_secret_open",
       "kind": "index",
-      "file": "post-push.sql",
+      "file": "secret-change-requests-invariants.sql",
       "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
@@ -2026,9 +2038,15 @@
       "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
+      "name": "saturation_episodes",
+      "kind": "table",
+      "file": "saturation-invariants.sql",
+      "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
+    },
+    {
       "name": "secret_change_requests",
       "kind": "table",
-      "file": "post-push.sql",
+      "file": "secret-change-requests-invariants.sql",
       "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
@@ -2232,7 +2250,7 @@
     {
       "name": "apps.secret_changes_app_deleted",
       "kind": "trigger",
-      "file": "post-push.sql",
+      "file": "secret-change-requests-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
@@ -2628,7 +2646,7 @@
     {
       "name": "secret_change_requests.secret_change_requests_guard",
       "kind": "trigger",
-      "file": "post-push.sql",
+      "file": "secret-change-requests-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
@@ -2688,7 +2706,7 @@
     {
       "name": "secrets.secret_changes_secret_deleted",
       "kind": "trigger",
-      "file": "post-push.sql",
+      "file": "secret-change-requests-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
@@ -3181,6 +3199,18 @@
       "name": "register_entries_org_channel_worker_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "saturation_episodes_event_id_key",
+      "kind": "unique-index",
+      "file": "saturation-invariants.sql",
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "saturation_episodes_one_open_uniq",
+      "kind": "unique-index",
+      "file": "saturation-invariants.sql",
       "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {

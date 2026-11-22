@@ -20,6 +20,7 @@ import { computeDueWakes } from './dueWakes.js';
 import { isSessionDormant, isWorkerDormant } from '../sessionActivity.js';
 import { wakeStampsFor } from './postStamp.js';
 import { signWakeProof, verifyWakeProof } from './wakeProof.js';
+import { loadScaledBudget, readHostLoad } from '../../test/hostLoad.js';
 
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -767,7 +768,9 @@ describe('load', () => {
     // The page is 200 of 202 workers; Liam and Rook have no subscription and nothing to be told.
     expect(page.wakes.length).toBeGreaterThan(190);
     console.info(`dueWakes 200 workers x 3 channels: ${Math.round(elapsed)} ms`);
-    expect(elapsed).toBeLessThan(1000);
+    // #3002: 1000 ms on an idle host, scaled by the measured load factor on a loaded one (see src/test/hostLoad.ts).
+    const load = readHostLoad();
+    expect(elapsed).toBeLessThan(loadScaledBudget(1000, load));
   }, 60_000);
 });
 

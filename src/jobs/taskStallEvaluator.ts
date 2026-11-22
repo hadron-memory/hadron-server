@@ -21,6 +21,8 @@
  *      App's window, once per episode, and end the episodes that cleared (cor:agt:100:06, Proposed).
  *   8. (#2763) raise the coordinator-cadence alarm for each coordinator that made no assignment for 60 minutes while a
  *      worker in its lane was free for work, once per episode (cor:agt:050:31, Proposed).
+ *   9. (#3819 slice 1) open and end the saturation episodes, raising one task-less, chain-less alarm per episode for a
+ *      family/tier/role combination the platform could not give work to (cor:agt:060:14, :15, Proposed).
  *
  * No claim race, unlike the scheduler: every write is idempotent on its own
  * key (the episode's unique index, a conditional wake stamp, a conditional
@@ -44,12 +46,13 @@ import { recordStallPass } from '../lib/agentTasks/stallGap.js';
 import { evaluateDarkWorkers } from '../lib/agentTasks/darkWorker.js';
 import { evaluateCoordinatorCadence } from '../lib/agentTasks/coordinatorCadence.js';
 import { evaluateStaleSweeps, postPendingSweepSummaries } from '../lib/agentTasks/sweepRuns.js';
+import { evaluateSaturation } from '../lib/agentTasks/saturation.js';
 
-export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number; hostOperationsSettled: number; contextResetsEnded: number; darkRaised: number; cadenceRaised: number; staleSweepRaised: number; sweepSummariesPosted: number };
+export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number; hostOperationsSettled: number; contextResetsEnded: number; darkRaised: number; cadenceRaised: number; staleSweepRaised: number; sweepSummariesPosted: number; saturationRaised: number };
 
 /** One pass at `now`. Each step runs even when an earlier one failed. */
 export async function taskStallTick(db: PrismaClient, now = new Date()): Promise<TaskStallTickResult> {
-  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0, cadenceRaised: 0, staleSweepRaised: 0, sweepSummariesPosted: 0 };
+  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0, cadenceRaised: 0, staleSweepRaised: 0, sweepSummariesPosted: 0, saturationRaised: 0 };
   // #2022: the monotonic half of `now`'s sample, so a raise decides at its own moment (stall.ts raiseStallAlarm).
   const anchor = anchorNow();
   try {
@@ -75,6 +78,13 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
     result.staleSweepRaised = (await evaluateStaleSweeps(db, now)).length;
   } catch (err) {
     console.error('[task-stall] stale-sweep evaluation failed:', err);
+  }
+  // #3819 slice 1: the saturation episodes and their alarm (cor:agt:060:14, :15). Its alarm has no chain, so the
+  // escalation below never wakes anyone for it; it runs with the other episode passes for one ordering.
+  try {
+    result.saturationRaised = (await evaluateSaturation(db, now)).length;
+  } catch (err) {
+    console.error('[task-stall] saturation evaluation failed:', err);
   }
   // #4255 (Clark F1): a sweep summary whose deferred post was lost is posted from the persisted run.
   try {
@@ -136,7 +146,7 @@ export async function taskStallPass(db: PrismaClient, now = new Date()): Promise
     await recordStallPass(db, now);
   } catch (err) {
     console.error('[task-stall] recording the pass failed; skipping this pass:', err);
-    return { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0, cadenceRaised: 0, staleSweepRaised: 0, sweepSummariesPosted: 0 };
+    return { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0, cadenceRaised: 0, staleSweepRaised: 0, sweepSummariesPosted: 0, saturationRaised: 0 };
   }
   return taskStallTick(db, now);
 }

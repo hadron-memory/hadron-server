@@ -91,21 +91,17 @@ describe('#3315 actual candidate selection then a controlled move', () => {
     expect((await read({ query: 'zebra', mode: 'vector', granularity: 'chunk' })).passages).toEqual([]);
     expect(select).toHaveBeenCalledOnce();
   });
-  it('eligibility rechecks loc before deciding a vector window is full', async () => {
+  it('#2772: the vector ranking already applies childrenOf inside its statement, and hydration still drops a child moved after it', async () => {
     await vectors();
     const original = provider.vectorSearch.bind(provider);
-    let calls = 0;
     const select = vi.spyOn(provider, 'vectorSearch').mockImplementation(async args => {
-      calls++;
-      if (calls === 2) await db.node.update({ where: { id: nodeId }, data: { loc: 'parent:child' } });
-      const hits = await original({ ...args, onWindow: undefined });
+      const hits = await original(args);
+      // The filter ran inside the ranking statement: the child is a candidate. (There is no widening window any more.)
       expect(hits.map(h => h.nodeId)).toEqual([nodeId]);
-      // First window deliberately reports more candidates available: eligibility must reject the moved row.
-      args.onWindow?.({ exhausted: calls > 1 });
-      if (calls === 1) await move();
+      await move();
       return hits;
     });
-    expect((await read({ query: 'zebra', mode: 'vector' })).hits.map((h: any) => h.node.id)).toEqual([nodeId]);
-    expect(select).toHaveBeenCalledTimes(2);
+    expect((await read({ query: 'zebra', mode: 'vector' })).hits).toEqual([]);
+    expect(select).toHaveBeenCalledOnce();
   });
 });

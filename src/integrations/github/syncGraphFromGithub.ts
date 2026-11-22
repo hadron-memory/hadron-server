@@ -31,7 +31,7 @@ import { join, dirname } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
 import { pathUnderGraphsRoot } from '../localFs/pathUnderGraphsRoot.js';
 import { InvalidNodeNameError, loadGraphFromFs, type UnreadableFile } from '../localFs/loadGraphFromFs.js';
-import { deriveEdgeLoc, rekeyDerivedEdgeLoc } from '../../lib/edgeLoc.js';
+import { deriveEdgeLoc, isAuthoredLoc, rekeyDerivedEdgeLoc } from '../../lib/edgeLoc.js';
 import { derivedEdgeLocForUpsert } from '../../lib/edgeLocLookup.js';
 import { validateEdgeCondition } from '../../lib/edge-conditions/validator.js';
 import { entryConditionOf, validateEntryCondition } from '../../lib/edge-conditions/entryCondition.js';
@@ -1584,7 +1584,8 @@ const syncGraphFromGithubAsSystem = async (
             const beforeSource = edge.sourceId === movedRoot.id ? oldLoc : edge.source.loc;
             const beforeTarget = edge.targetId === movedRoot.id ? oldLoc : edge.target.loc;
             // #4583: each edge keeps the spelling its loc carries, so twins do not land on one loc.
-            const rekeyed = rekeyDerivedEdgeLoc(edge.loc, beforeSource, edge.name, beforeTarget, edge.source.loc, edge.target.loc);
+            // #2947: an AUTHORED loc is never rewritten, even one that equals the derivation.
+            const rekeyed = edge.locAuthored ? null : rekeyDerivedEdgeLoc(edge.loc, beforeSource, edge.name, beforeTarget, edge.source.loc, edge.target.loc);
             if (rekeyed !== null) {
               await tx.edge.update({ where: { id: edge.id }, data: { loc: rekeyed } });
             }
@@ -1675,6 +1676,7 @@ const syncGraphFromGithubAsSystem = async (
               sourceId: edgeSourceId,
               targetId: edgeTargetId,
               loc: edgeLoc,
+              locAuthored: false, // #2947: derived from the endpoints and name
               name: edge.name,
               description: edge.description ?? null,
               ...(edge.data != null ? { data: edge.data as Prisma.InputJsonValue } : {}),
@@ -1763,6 +1765,7 @@ const syncGraphFromGithubAsSystem = async (
                   sourceId: p.sourceId,
                   targetId: p.targetId,
                   loc: pLoc,
+                  locAuthored: isAuthoredLoc(p.loc), // #2947: a loc the pending edge carried was supplied
                   name: p.name,
                   description: p.description,
                   ...(p.data != null ? { data: p.data as Prisma.InputJsonValue } : {}),

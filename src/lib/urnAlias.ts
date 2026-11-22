@@ -62,10 +62,11 @@ import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { normalizeUrnForLookup } from './urn.js';
 
 /**
- * The four stored-URN entities, plus NODE for moves of a composed address.
+ * The four stored-URN entities, plus NODE and EDGE for moves of a composed address (an edge's URN changes when a move
+ * rebases its derived loc or carries it into another memory, #2947).
  * Other derived URNs inherit parent aliases through their resolver.
  */
-export type UrnAliasEntityType = 'ORGANIZATION' | 'MEMORY' | 'AGENT' | 'APP' | 'NODE';
+export type UrnAliasEntityType = 'ORGANIZATION' | 'MEMORY' | 'AGENT' | 'APP' | 'NODE' | 'EDGE';
 
 /** Why an alias row exists. See the Prisma enum for the authoritative list. */
 export type UrnAliasReason = 'RENAME' | 'ORG_RENAME_CASCADE' | 'V1_MIGRATION';

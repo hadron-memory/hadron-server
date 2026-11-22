@@ -75,11 +75,13 @@ compose() {
 }
 check_published() {
   local base="http://127.0.0.1:$E2E_PORT" body status
-  body=$(curl --fail --silent --show-error --connect-timeout 2 --max-time 10 "$base/health")
-  [[ "$body" == '{"ok":true}' ]] || { echo 'Published health response is not the Hadron stack' >&2; return 1; }
+  # #3021: readiness, not liveness. /ready answers 200 {"ok":true} (the same body as /health, so it still identifies
+  # the Hadron stack) only once the first startup has succeeded; --fail refuses its 503s (starting, startup_failed, ...).
+  body=$(curl --fail --silent --show-error --connect-timeout 2 --max-time 10 "$base/ready")
+  [[ "$body" == '{"ok":true}' ]] || { echo 'Published readiness response is not a ready Hadron stack' >&2; return 1; }
   status=$(curl --silent --show-error --connect-timeout 2 --max-time 10 -o /dev/null -w '%{http_code}' "$base/auth/dev/login?email=shared@e2e.test")
   [[ "$status" == 302 ]] || { echo "Published login handoff failed ($status)" >&2; return 1; }
-  echo 'Published health and dev-login handoff PASS'
+  echo 'Published readiness and dev-login handoff PASS'
 }
 case "$action" in
   up)

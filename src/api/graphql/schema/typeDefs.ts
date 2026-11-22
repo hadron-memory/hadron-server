@@ -158,8 +158,8 @@ export const typeDefs = `#graphql
   by as (text|number|datetime|boolean). number/datetime route through the same DB
   guards, so a missing or unparseable value sorts LAST regardless of direction;
   loc ascending breaks ties for stable pagination. Overrides the sort enum when
-  present. On vector/hybrid modes it re-orders the retrieved candidate window (the
-  ranking runs against the vector index, not the JSONB), like the sort enum does.
+  present. On vector/hybrid modes offset/limit are taken by relevance and this orders only
+  that page (#2772, hrn:node:hadronmemory.com:specs:cor:api:090:04), like the sort enum does.
   """
   input NodePropertySort {
     "Path of object keys into the column, e.g. ['stage']."
@@ -250,7 +250,7 @@ export const typeDefs = `#graphql
     both nodeType and nodeTypes (an empty string counts as set), more than 20 entries (counted
     before duplicates are dropped), and a list containing "comment" (search comments with nodeType
     or contentScope). Exact total where the mode already has one; vector and hybrid keep total
-    null and their bounded, widening candidate window. Applies to findNodes and appNodes.
+    null and have no candidate cap (the filters run inside the vector query); the one bound is on the page itself: an offset + limit window past 20000 rows is cut there and reports stopped_early. Applies to findNodes and appNodes.
     """
     nodeTypes: [String!]
     """
@@ -341,7 +341,9 @@ export const typeDefs = `#graphql
     multi-term keyword query matched nothing under AND, so it was retried as
     OR and these hits match ANY term), scope_narrowed (spec 049: the scope
     this search ran under lists memories you cannot read; they were dropped
-    and \`scope.droppedCount\` says how many).
+    and \`scope.droppedCount\` says how many), stopped_early (#2772: a vector
+    or hybrid search ran out of its work budget before the page was complete;
+    \`reason\` is also stopped_early when the page is empty).
     """
     degraded: String
     "Spec 049 (D-2026-09-13-002): what this search was produced under. Null when no scope applied (the pre-049 accessible set, optionally org-narrowed)."
@@ -1363,6 +1365,15 @@ export const typeDefs = `#graphql
 
   enum NodeMoveLinkStatus { MISSING RETARGETED AMBIGUOUS }
 
+  "#2947 - one edge whose URN a move changed (a rebased derived loc, or an authored edge carried into another memory or renumbered on a collision). Its old URN keeps resolving to the live edge through an alias."
+  type NodeMoveEdgeUrnChange {
+    edgeId: ID!
+    "The edge's URN before the move."
+    previousUrn: String!
+    "The edge's URN after the move."
+    urn: String!
+  }
+
   type NodeMoveLinkWarning {
     nodeId: ID!
     nodeLoc: String!
@@ -1487,6 +1498,8 @@ export const typeDefs = `#graphql
     id: ID!
     "#1392 — warnings from a cross-memory move. Null on other Node reads; [] when a move changes no local content links. Raw content is preserved."
     moveLinkWarnings: [NodeMoveLinkWarning!]
+    "#2947 - the edges whose URN this move changed (each old URN still resolves). Null on other Node reads; [] when the move changed no edge URN."
+    moveEdgeUrnChanges: [NodeMoveEdgeUrnChange!]
     "#1323 — current live revision. Creation is revision 1; each committed authoring change advances it. NodeRevision.revNo N is the retained snapshot of this node when revision N was current, before the edit that advanced it."
     revision: Int!
     "#1326 — attribution of this content state. Null means legacy or unknown. Task identity is redacted unless its memory is independently readable."
@@ -3280,8 +3293,9 @@ export const typeDefs = `#graphql
     installed; \`appAgents\` lists every install, an entry whose \`agent\` is null
     being an installed Agent withheld from this caller.
 
-    A caller who reaches a user-owned App only as an owner-role member gets null on
-    both for a different reason: WITHHELD (#2089). Render it as unknown.
+    null can also mean WITHHELD from this caller (#2089): an impersonated caller, or a
+    caller who reaches the App only by another route. A current owner-role member of a
+    user-owned App reads them as the owning user does (ruling 0260, #3765).
     """
     agentId: ID
     agent: Agent
@@ -3305,9 +3319,9 @@ export const typeDefs = `#graphql
     installedAgentUrn: String
     trainingMode: Boolean!
     surfaces: [String!]!
-    "The App's members. null means WITHHELD from this caller (#2089): a user-owned App's owner-role member reaches the App record but not its roster. Never read null as an empty roster. The App's owning user, and callers of an org-owned App, get the real list (a real empty list included)."
+    "The App's members. null means WITHHELD from this caller (#2089): an impersonated caller, or one who reaches a user-owned App only by an outer-object route. Never read null as an empty roster. The App's owning user, a current owner-role member of a user-owned App (ruling 0260, #3765), and callers of an org-owned App get the real list (a real empty list included)."
     members: [AppMember!]
-    "Member count. null means WITHHELD from this caller (#2089), never zero; the real count (a real 0 included) for callers who may see the roster."
+    "Member count. null means WITHHELD from this caller (#2089), never zero; the real count (a real 0 included) for callers who may see the roster, a current owner-role member of a user-owned App among them (ruling 0260, #3765)."
     memberCount: Int
     """
     The App's SHARED app-class memory (#965) — the team space the shared/team
@@ -3334,7 +3348,7 @@ export const typeDefs = `#graphql
     aiProvider: String
     "null can mean WITHHELD from this caller (#2089), not only that it is not configured."
     aiModel: String
-    "Whether an AI API key is configured for this App. null means WITHHELD from this caller (#2089): only the owning user of a user-owned App holds its AI configuration. Never read null as false; a real false means no key."
+    "Whether an AI API key is configured for this App. null means WITHHELD from this caller (#2089): only the owning user of a user-owned App holds its AI configuration, an owner-role member of it included (the one carve-out hrn:node:hadronmemory.com:specs:cor:dmo:050:12 states; ruling 0260). Never read null as false; a real false means no key."
     hasAiApiKey: Boolean
     expiresAt: DateTime
     # App-original fields
@@ -3361,9 +3375,10 @@ export const typeDefs = `#graphql
     write an AppAgent row. One App credential
     routes to all of them via the URN supplied in the request.
 
-    null means WITHHELD from this caller (#2089): a user-owned App's
-    owner-role member does not see its installation roster. Never read null as
-    no installed Agents.
+    null means WITHHELD from this caller (#2089): an impersonated caller, or one who
+    reaches a user-owned App only by an outer-object route. A current owner-role member
+    of a user-owned App reads the roster as the owning user does (ruling 0260, #3765).
+    Never read null as no installed Agents.
     """
     appAgents: [AppAgent!]
     """
@@ -3376,7 +3391,8 @@ export const typeDefs = `#graphql
     \`appAgents\`: served installation creation time, then Agent id. When any
     installed Agent is withheld, every entry shares the App date, so order is by id.
 
-    null means WITHHELD from this caller (#2089), never no Agents.
+    null means WITHHELD from this caller (#2089), never no Agents. A current owner-role member
+    of a user-owned App reads the list as the owning user does (ruling 0260, #3765).
     """
     agents: [Agent!]
     "Key inventory, only for whoever manages the App as themselves, never through a worker session, instructed or not: a nested field carries no instruction, so an instructed worker lists through appKeys / appKeysPage (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6)."
@@ -9324,16 +9340,28 @@ export const typeDefs = `#graphql
     windowHours: Int!
     combinations: [WorkerUtilization!]!
   }
-  "One current family/tier/role combination. Unknown tier has its own null row; retired workers are excluded."
+  "#3819 — the latest no-worker match outcome of a combination inside the read's window (hrn:node:hadronmemory.com:specs:cor:agt:060:13)."
+  type MatchFailure {
+    "When the failed match was decided (the database clock)."
+    at: DateTime!
+    "The coarse reason: NO_ROLE, REQUIREMENTS_EXCLUDED, NOBODY_FREE, STOP_SIGNAL or TEAM_POOL_EMPTY. Null on a row recorded without one."
+    reason: String
+  }
+  "One family/tier/role combination: one with current workers, or one with none that a no-worker outcome inside the window names (hrn:node:hadronmemory.com:specs:cor:agt:060:13). Unknown or unnamed tier has its own null row; retired workers are excluded."
   type WorkerUtilization {
-    family: String!
+    "#3819: null when the failed task left the family open (a row with workers always has one). Nullable since #3819 slice 1: a contract change."
+    family: String
+    "Null: the worker's tier is unknown, or the failed task named no tier."
     tier: String
+    "Null: the failed task named no role."
     role: String
     eligibleWorkers: Int!
     busyWorkers: Int!
     utilization: Float!
-    "Slice 1: true only for zero eligible workers (then utilization=1). Failure-only saturation reads false until the deferred match-outcome integration; no alarm is emitted by this read."
+    "True when the combination's latest match outcome inside the window is no worker, or when it has workers and none eligible; utilization is then 1 (hrn:node:hadronmemory.com:specs:cor:agt:060:13). This read writes nothing: the saturation episode and its one alarm are the stall evaluator's (hrn:node:hadronmemory.com:specs:cor:agt:060:14, hrn:node:hadronmemory.com:specs:cor:agt:060:15)."
     saturated: Boolean!
+    "The latest outcome inside the window when it is no worker; null otherwise (the record keeps only the latest outcome, so an earlier failure followed by a match is not shown)."
+    lastMatchFailure: MatchFailure
   }
 
   type Query {
@@ -9739,7 +9767,7 @@ export const typeDefs = `#graphql
     the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Retired workers are left out.
     """
     teamRoster(appRef: ID!): TeamRoster!
-    "#3819 slice 1: advisory utilization in the roster audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Window defaults to 24h, range 1–168; tier is high/mid/low. Failed-match saturation and alarms await their historical provider."
+    "#3819: advisory utilization in the roster audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21, hrn:node:hadronmemory.com:specs:cor:agt:060:13). Window defaults to 24h, range 1–168; tier is high/mid/low. Ranked by utilization, then the most recent failed match, then fewest eligible workers, then family, tier and role. The match-outcome record is read only through this field. The alarm.saturation alarm is raised by the stall evaluator, not by this read."
     teamUtilization(appRef: ID!, family: String, tier: String, role: String, windowHours: Int = 24): TeamUtilization!
 
     """
@@ -13234,6 +13262,10 @@ export const typeDefs = `#graphql
     destination. Requires write access to both the source and destination
     memories. On a cross-memory move, select Node.moveLinkWarnings to see
     raw relative content links that now miss or resolve to another node.
+    A move also keeps the edges that touch the moved subtree in step: a DERIVED
+    edge loc follows its endpoints, an authored loc is left as written, and
+    every edge URN the move changes keeps its old URN resolving; select
+    Node.moveEdgeUrnChanges to see them.
     """
     moveNode(sourceRef: ID!, targetUrn: String, targetMemoryRef: ID): Node!
     "Plan with the real move's gates and raised refusals, without locks, reconciliation, writes or mirror effects. Nodes in loc order; limit clamps to 1–1000 (default 100), with total and truncation disclosed. No edges. A point-in-time answer, not a reservation. This plan-only call is on the mutation root by rulings 0210/0211, so impersonation sessions are refused even though planning writes nothing. hrn:node:hadronmemory.com:specs:cor:api:190:03."
@@ -17592,7 +17624,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02); question.answered, question.answer-retracted (#4431: a question that blocks the task was answered, or its answer taken back; payload is questionId, code, revision and state only, never the answer; only question.answered wakes the task\'s assignee)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); alarm.saturation (#3819: task-less and workerless, with an empty chain, so it wakes nobody: a family/tier/role combination the platform could not give work to, hrn:node:hadronmemory.com:specs:cor:agt:060:14; payload is reason (no-worker or none-eligible), family, tier and role, null for a dimension the task left open; only whoever manages the App acknowledges it, and acknowledging does not end its episode); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02); question.answered, question.answer-retracted (#4431: a question that blocks the task was answered, or its answer taken back; payload is questionId, code, revision and state only, never the answer; only question.answered wakes the task\'s assignee)."
     type: String!
     taskId: ID
     "The task's stored handle (hrn:node:hadronmemory.com:specs:cor:agt:050:01, Proposed). Null when taskId is null or the task no longer exists; never invented."

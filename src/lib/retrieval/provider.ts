@@ -168,7 +168,15 @@ export interface VectorSearchOpts {
    * produce without exhaustion. A provider that never calls it is treated as
    * not exhausted.
    */
-  onWindow?: (w: { exhausted: boolean }) => void;
+  onWindow?: (w: { exhausted: boolean; stoppedEarly?: boolean }) => void;
+  /**
+   * #2772 (cor:api:090:04): the structured filters, the memory scope and the caller's exclusions run INSIDE the
+   * ranking statement, before the page is chosen; there is no candidate cap. The provider reports `stoppedEarly`
+   * through onWindow when the work budget cut the search short.
+   */
+  filter?: NodeSqlFilter;
+  includeDeleted?: boolean;
+  excludeNodeIds?: string[];
   /**
    * #1608 — a COMMENTS-scoped search is answered EXACTLY over comment vectors
    * (no ANN window), so it finds every matching comment (cor:dmo:110:08).

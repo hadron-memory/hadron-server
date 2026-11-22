@@ -49,7 +49,8 @@ const urnB = (loc: string) => `${memB.urn}:${loc}`;
 const asUser = () => ctx({ userId: user.id, roles: ['READER'] });
 
 const edge = (sourceId: string, targetId: string, memoryId: string, loc: string) =>
-  db.edge.create({ data: { id: generateId(), memoryId, sourceId, targetId, loc, name: 'rel' } });
+  // #2947: provenance is recorded, so the fixture states it: a loc built as `<source>:rel:<target>` is DERIVED, any other is authored.
+  db.edge.create({ data: { id: generateId(), memoryId, sourceId, targetId, loc, name: 'rel', locAuthored: !loc.includes(':rel:') } });
 
 beforeEach(async () => {
   vi.mocked(mirrorNodeMoveToGit).mockClear();

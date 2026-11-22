@@ -48,7 +48,7 @@ describe('#3819 utilization count/ranked slice', () => {
     await Promise.all(ids.slice(0, 3).map(w => task(w)));
     const r = await read();
     expect(r.windowHours).toBe(24);
-    expect(r.combinations).toEqual([{ family: 'claude', tier: 'mid', role: 'server-engineer', eligibleWorkers: 4, busyWorkers: 3, utilization: 0.75, saturated: false }]);
+    expect(r.combinations).toEqual([{ family: 'claude', tier: 'mid', role: 'server-engineer', eligibleWorkers: 4, busyWorkers: 3, utilization: 0.75, saturated: false, lastMatchFailure: null }]);
   });
   it('finished inside the window counts; earlier finished and mere activity do not', async () => {
     const [a,b,c] = await Promise.all([worker(),worker(),worker()]);
