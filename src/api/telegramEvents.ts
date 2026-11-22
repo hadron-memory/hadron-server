@@ -5,11 +5,12 @@
  *
  *   POST /internal/telegram-events
  *   Authorization: Bearer <CORE_EVENTS_TOKEN>
- *   { event: 'telegram.<kind>', connectionId, eventId, ... }
+ *   { event: 'telegram.<kind>', connectionId, [eventId], ... }   (eventId optional: the tool sends none today; see eventDedupeKey)
  *
  * `connectionId` is the TOOL's connection id; dispatch resolves it to the core TelegramConnection. Same posture as
  * emailEvents / slackEvents: 503 while CORE_EVENTS_TOKEN is unset (the event plane is off), 401 for a missing or wrong
- * bearer (constant-time compare), 400 for a malformed body, 202 once dispatch completed.
+ * bearer (constant-time compare), 400 for a malformed body, 202 once dispatch completed, and 503 (retryable) for a tool connection core has no live row
+ * for.
  *
  * AT-LEAST-ONCE + DEDUPE: the tool's inbox can deliver an event more than once. Dispatch CLAIMS the event first, by
  * inserting a TelegramEventReceipt keyed (connectionId, eventId): the unique key decides, so two concurrent deliveries
@@ -22,6 +23,7 @@
  * v1 attaches NO behavior: `telegramEventConsumer.handler` logs. DM bindings (telegram.start) and the group bridge
  * attach there later, without touching the tool.
  */
+import { createHash } from 'node:crypto';
 import type { Express, Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { safeEqual } from '../lib/constantTime.js';
@@ -33,8 +35,11 @@ export interface InboundTelegramEvent {
   event: string;
   /** The TOOL's connection id. */
   connectionId: string;
-  /** The tool's event id (Telegram's update id for a bot): the dedupe key. */
-  eventId: string;
+  /**
+   * The tool's event id, the dedupe key, when it sends one. The tool does NOT today (it forwards no update_id), so core
+   * derives one: see {@link eventDedupeKey}. After dispatch resolves it, this is always set.
+   */
+  eventId?: string | number;
   chatId?: string;
   text?: string;
   [extra: string]: unknown;
@@ -68,9 +73,34 @@ function isInboundTelegramEvent(body: unknown): body is InboundTelegramEvent {
     b.event.startsWith('telegram.') &&
     typeof b.connectionId === 'string' &&
     b.connectionId !== '' &&
-    typeof b.eventId === 'string' &&
-    b.eventId !== ''
+    // eventId is OPTIONAL on the wire (the tool sends none today); when present it must be a non-empty string or an
+    // integer (a Telegram update_id), normalized to a string by eventDedupeKey.
+    (b.eventId === undefined || (typeof b.eventId === 'string' && b.eventId !== '') || Number.isSafeInteger(b.eventId as unknown))
   );
+}
+
+/** JSON with object keys sorted at every level, so two byte-different spellings of one event hash alike. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const o = value as Record<string, unknown>;
+    return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+/**
+ * The dedupe key of an event. DERIVED KEY, the tool sends none: hadrontool-telegram forwards no update_id, so core
+ * hashes the canonical event JSON (a retry is byte-identical; a message carries its messageId, so distinct messages
+ * differ; two identical /start payloads from one chat collapse, harmless as redemption is idempotent). A tool-sent
+ * eventId, if one ever arrives, WINS. Option B (the tool forwards update_id as eventId) is tracked in
+ * hadron-memory/hadrontool-telegram#4.
+ */
+export function eventDedupeKey(event: InboundTelegramEvent): string {
+  if (event.eventId !== undefined && event.eventId !== null && String(event.eventId) !== '') return String(event.eventId);
+  const { eventId: _unused, ...rest } = event;
+  void _unused;
+  return `derived:${createHash('sha256').update(canonicalJson(rest)).digest('hex')}`;
 }
 
 function isUniqueViolation(err: unknown): boolean {
@@ -98,32 +128,35 @@ function pruneReceiptsOpportunistically(): void {
 }
 
 /**
- * Dispatch one inbound event: resolve the connection (an unknown or soft-deleted tool connection is logged and dropped,
- * never an error back to the tool, and leaves no receipt), claim the event id, run the consumer.
+ * Dispatch one inbound event: resolve the connection (an unknown or soft-deleted tool connection is reported as 'unknown', which the route
+ * answers 503 so the tool redelivers, and leaves no receipt), claim the event id, run the consumer.
  */
-export async function dispatchTelegramEvent(event: InboundTelegramEvent): Promise<void> {
+export async function dispatchTelegramEvent(raw: InboundTelegramEvent): Promise<'dispatched' | 'duplicate' | 'unknown'> {
+  const event: InboundTelegramEvent = { ...raw, eventId: eventDedupeKey(raw) };
   const connection = await db.telegramConnection.findFirst({
     where: { toolConnectionId: event.connectionId, deletedAt: null },
     select: { id: true, organizationId: true, appId: true, provider: true, toolConnectionId: true, botUsername: true },
   });
   if (!connection) {
-    // KNOWN GAP (deferred to #4829): an event that arrives before core's row exists (the tool starts polling at registration) is
-    // acknowledged and dropped here; closing it needs a tool-side change.
-    console.log(`[telegram-events] ${event.event} for unknown tool connection ${event.connectionId}, dropped`);
-    return;
+    // UNKNOWN is a retryable 503 at the route, not a 202: the tool advances its poll cursor only on a 2xx, so a 202 would
+    // delete an event that arrived before core's row exists (the tool starts polling at registration). Bounded: the tool
+    // dead-letters a poison update after 5 attempts, and a deleted connection stops polling itself. (The wider gap, a
+    // registration whose response was lost, is deferred to #4829.)
+    console.log(`[telegram-events] ${event.event} for unknown tool connection ${event.connectionId}, not acknowledged (retryable)`);
+    return 'unknown';
   }
   let claimId: string;
   try {
     claimId = (
       await db.telegramEventReceipt.create({
-        data: { connectionId: event.connectionId, eventId: event.eventId },
+        data: { connectionId: event.connectionId, eventId: String(event.eventId) },
         select: { id: true },
       })
     ).id;
   } catch (err) {
     if (!isUniqueViolation(err)) throw err;
     console.log(`[telegram-events] duplicate event ${event.eventId} for tool connection ${event.connectionId}, dropped`);
-    return;
+    return 'duplicate';
   }
   try {
     await telegramEventConsumer.handler(event, connection);
@@ -135,6 +168,7 @@ export async function dispatchTelegramEvent(event: InboundTelegramEvent): Promis
     throw err;
   }
   pruneReceiptsOpportunistically();
+  return 'dispatched';
 }
 
 /** Mount the internal ingress route. */
@@ -157,7 +191,11 @@ export function mountTelegramEventRoutes(app: Express): void {
     }
     // A 2xx tells the tool to delete its inbox row, so ack only after dispatch completed.
     try {
-      await dispatchTelegramEvent(req.body);
+      const outcome = await dispatchTelegramEvent(req.body);
+      if (outcome === 'unknown') {
+        res.status(503).json({ error: 'unknown connection', retryable: true });
+        return;
+      }
       res.status(202).json({ ok: true });
     } catch (err) {
       respondInternalFault(res, 'telegram-events', err);

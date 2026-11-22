@@ -91,8 +91,8 @@ describe('POST /internal/telegram-events', () => {
     expect(await db.telegramEventReceipt.count()).toBe(0);
   });
 
-  it('400s a malformed payload (no eventId, no connectionId, a non-telegram kind)', async () => {
-    expect((await post({ ...event(), eventId: undefined }, 'events-secret')).status).toBe(400);
+  it('400s a malformed payload (an empty eventId, no connectionId, a non-telegram kind)', async () => {
+    expect((await post({ ...event(), eventId: '' }, 'events-secret')).status).toBe(400);
     expect((await post({ ...event(), connectionId: '' }, 'events-secret')).status).toBe(400);
     expect((await post({ ...event(), event: 'slack.command' }, 'events-secret')).status).toBe(400);
   });
@@ -114,17 +114,67 @@ describe('POST /internal/telegram-events', () => {
     expect(await db.telegramEventReceipt.count()).toBe(1);
   });
 
-  it('an unknown toolConnectionId is logged and dropped: 202, no consumer', async () => {
+  it('an unknown toolConnectionId is NOT acknowledged: a retryable 503 (the tool advances its cursor only on 2xx), no consumer, no receipt', async () => {
     const res = await post(event({ connectionId: 'foreign-tool' }), 'events-secret');
-    expect(res.status).toBe(202);
+    expect(res.status).toBe(503);
+    expect(await db.telegramEventReceipt.count()).toBe(0);
     expect(telegramEventConsumer.handler).not.toHaveBeenCalled();
   });
 
   it('a soft-deleted connection is as unknown as a missing one', async () => {
     const conn = await seedConnection();
     await db.telegramConnection.update({ where: { id: conn.id }, data: { deletedAt: new Date() } });
-    expect((await post(event(), 'events-secret')).status).toBe(202);
+    expect((await post(event(), 'events-secret')).status).toBe(503);
     expect(telegramEventConsumer.handler).not.toHaveBeenCalled();
+  });
+});
+
+describe('the derived dedupe key (the tool sends no eventId)', () => {
+  const noId = (o: Record<string, unknown> = {}) => {
+    const { eventId: _e, ...rest } = event({ ...o });
+    void _e;
+    return rest as InboundTelegramEvent;
+  };
+
+  it('a byte-identical retry dispatches once', async () => {
+    await seedConnection();
+    const e = { ...noId(), messageId: 7 } as InboundTelegramEvent;
+    expect((await post(e, 'events-secret')).status).toBe(202);
+    expect((await post(e, 'events-secret')).status).toBe(202);
+    expect(telegramEventConsumer.handler).toHaveBeenCalledTimes(1);
+    expect(await db.telegramEventReceipt.count()).toBe(1);
+  });
+
+  it('the same event with its keys in another order is still the same event', async () => {
+    await seedConnection();
+    const a = { ...noId(), messageId: 7, from: { a: 1, b: 2 } } as InboundTelegramEvent;
+    const b = { from: { b: 2, a: 1 }, messageId: 7, ...noId() } as InboundTelegramEvent;
+    await dispatchTelegramEvent(a);
+    await dispatchTelegramEvent(b);
+    expect(telegramEventConsumer.handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('two messages with different messageId dispatch twice', async () => {
+    await seedConnection();
+    await dispatchTelegramEvent({ ...noId(), messageId: 1 } as InboundTelegramEvent);
+    await dispatchTelegramEvent({ ...noId(), messageId: 2 } as InboundTelegramEvent);
+    expect(telegramEventConsumer.handler).toHaveBeenCalledTimes(2);
+    expect(await db.telegramEventReceipt.count()).toBe(2);
+  });
+
+  it('an eventId from the tool wins over the derived key (a number is normalized to its string)', async () => {
+    await seedConnection();
+    await dispatchTelegramEvent(event({ eventId: 'upd-9' }));
+    await dispatchTelegramEvent({ ...event({ text: 'different body' }), eventId: 'upd-9' });
+    expect(telegramEventConsumer.handler).toHaveBeenCalledTimes(1); // same tool id, different payload: one event
+    await dispatchTelegramEvent({ ...noId(), eventId: 10 as unknown as string } as InboundTelegramEvent);
+    expect((await db.telegramEventReceipt.findMany({ select: { eventId: true } })).map((r) => r.eventId).sort()).toEqual(['10', 'upd-9']);
+  });
+
+  it('a wire event with no eventId is accepted (202), and a non-string non-integer eventId is a 400', async () => {
+    await seedConnection();
+    expect((await post(noId(), 'events-secret')).status).toBe(202);
+    expect((await post({ ...noId(), eventId: { x: 1 } }, 'events-secret')).status).toBe(400);
   });
 });
 
