@@ -1023,7 +1023,8 @@ export const memoryMutations = {
 
       // 033 US5 FR-026 — enabling the vector index on an encrypted memory
       // requires explicit acknowledgment of the embedding-inversion
-      // disclosure (stored vectors are plaintext + partially invertible —
+      // disclosure (stored vectors are plaintext + partially invertible, and
+      // with content passages their verbatim chunk text is stored unencrypted —
       // see FR_026_DISCLOSURE in src/lib/entityRef/errors.ts for the full
       // four-point text). The friendly typed error fires at the API
       // boundary; the chk_memory_vector_encrypted_ack CHECK is the DB-level
