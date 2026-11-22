@@ -7,7 +7,7 @@
  * writer level (cor:acl:010:03) judges the node write, and the edge's source is that node, in the same transaction.
  *
  * Fixture: an org with an Agent `eng` whose system memory holds the `tasks` index (pointed at by `tasksIndexRef`);
- * `admin` (org ADMIN) writes it, `contrib` (CONTRIBUTOR) reads and writes ordinary memory, `stranger` reads nothing.
+ * `admin` (org ADMIN) writes it, `contrib` (org READER) reads org-visible memory but cannot write it, `writer` (CONTRIBUTOR) writes org-visible memory, `stranger` reads nothing.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
@@ -115,7 +115,7 @@ describe('atomicity: a refused step writes nothing (#4864)', () => {
     await db.edge.create({ data: { id: generateId(), memoryId: sysMem.id, sourceId: other.id, targetId: indexId, name: 'x', loc: deriveEdgeLoc('tasks:deploy', 'when asked to deploy', 'tasks') } });
     const before = await totals();
     const r = await code(create(admin, 'tasks:deploy'));
-    expect(r.code).not.toBe('OK');
+    expect(r.code).toBe('EDGE_LOC_CONFLICT');
     expect(await nodesAt('tasks:deploy')).toHaveLength(0);
     expect(await totals()).toEqual(before);
   });
@@ -155,9 +155,11 @@ describe('atomicity: a refused step writes nothing (#4864)', () => {
       data: { name: 'hidden', urn: `ti-hidden-${stranger.id}`, visibility: 'PERSONAL', ownerUserId: stranger.id, systemMemoryId: sysMem.id, tasksIndexRef: indexId },
     });
     const before = await totals();
-    const unknown = await code(create(admin, 'tasks:a', { agent: 'no-such-agent', trigger: 'x' }));
+    const unknown = await code(create(admin, 'tasks:a', { agent: generateId(), trigger: 'x' }));
+    const malformed = await code(create(admin, 'tasks:m', { agent: 'no-such-agent', trigger: 'x' }));
     const unreadable = await code(create(admin, 'tasks:b', { agent: hidden.id, trigger: 'x' }));
     expect(unknown.code).toBe('NOT_FOUND');
+    expect(malformed.message).toContain('not fully qualified');   // an input-shape refusal, never read as "not found"
     expect(unreadable.code).toBe('NOT_FOUND');
     expect(await totals()).toEqual(before);
   });
@@ -165,7 +167,7 @@ describe('atomicity: a refused step writes nothing (#4864)', () => {
   it('a task created in another memory than the Agent\'s system memory writes no cross-memory edge', async () => {
     const before = await totals();
     const r = await code(create(admin, 'tasks:deploy', INDEX(), {}, otherMem));
-    expect(r.code).not.toBe('OK');
+    expect(r.code).toBe('TASKS_INDEX_OUT_OF_SCOPE');
     expect(await totals()).toEqual(before);
   });
 });
@@ -216,7 +218,7 @@ describe('governed kinds and the role input (#4864)', () => {
   it('a governed base kind through the task door stays refused, with the index input present, and writes nothing', async () => {
     const before = await totals();
     const r = await code(create(admin, 'tasks:deploy', INDEX(), { role: 'review' }));
-    expect(r.code).not.toBe('OK');
+    expect(r.code).toBe('ROLE_GOVERNED');
     expect(await totals()).toEqual(before);
   });
 
@@ -236,7 +238,8 @@ describe('skill export is opt-in (#4864)', () => {
   it('a block the skill lint refuses writes nothing', async () => {
     const before = await totals();
     const r = await code(create(admin, 'tasks:deploy', INDEX(), {}, sysMem, { name: 'deploy', description: '<b>bad</b> markup' }));
-    expect(r.code).not.toBe('OK');
+    expect(r.code).toBe('BAD_USER_INPUT');
+    expect(r.message).toContain('skill lint');
     expect(await totals()).toEqual(before);
   });
 });
@@ -285,6 +288,76 @@ describe('an App write grant never reaches the index edge (#4864)', () => {
     expect(await code(door('tasks:control'))).toEqual({ code: 'OK', message: '' });
     const before = await totals();
     expect((await code(door('tasks:deploy', INDEX()))).code).toBe('FORBIDDEN');
+    expect(await totals()).toEqual(before);
+  });
+});
+
+describe('the remaining input paths of the extended door (#4864, blind F3)', () => {
+  it('names the Agent by URN, and trims the trigger', async () => {
+    await create(admin, 'tasks:deploy', { agent: `hrn:agent:${agent.urn}`, trigger: '  when deploying  ' });
+    const row = (await nodesAt('tasks:deploy'))[0];
+    const edges = await edgesFrom(row.id);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].name).toBe('when deploying');
+  });
+
+  it('a create over a soft-deleted task at the loc still writes the edge, to the resurrected node', async () => {
+    const old = await db.node.create({ data: { id: generateId(), memoryId: sysMem.id, loc: 'tasks:deploy', name: 'old', content: '', deletedAt: new Date() } });
+    const made = await create(admin, 'tasks:deploy');
+    expect(made.id).toBe(old.id);
+    const edges = await edgesFrom(made.id);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].targetId).toBe(indexId);
+  });
+
+  it('caller edges and the index edge are both written', async () => {
+    const note = await db.node.create({ data: { id: generateId(), memoryId: sysMem.id, loc: 'notes:n', name: 'n', content: '' } });
+    const made = await create(admin, 'tasks:deploy', INDEX(), { edges: [{ targetId: note.id, name: 'see also' }] });
+    const edges = await edgesFrom(made.id);
+    expect(edges.map((e) => e.targetId).sort()).toEqual([indexId, note.id].sort());
+  });
+
+  it('a blank skill name or description is refused by the skill lint and writes nothing', async () => {
+    const before = await totals();
+    expect((await code(create(admin, 'tasks:deploy', INDEX(), {}, sysMem, { name: '', description: 'Use when deploying.' }))).code).toBe('BAD_USER_INPUT');
+    expect((await code(create(admin, 'tasks:deploy', INDEX(), {}, sysMem, { name: 'deploy', description: '' }))).code).toBe('BAD_USER_INPUT');
+    expect(await totals()).toEqual(before);
+  });
+
+  it('the skill block merges over the caller\'s own exports, keeping other hosts and keys', async () => {
+    await create(admin, 'tasks:deploy', INDEX(), { properties: { keep: 'me', exports: { codexSkill: { name: 'c', description: 'Use when c.', enable: true } } } }, sysMem, { name: 'deploy', description: 'Use when deploying the service.' });
+    const props = (await nodesAt('tasks:deploy'))[0].properties as Record<string, any>;
+    expect(props.keep).toBe('me');
+    expect(props.exports.codexSkill.name).toBe('c');
+    expect(props.exports.claudeSkill).toEqual({ name: 'deploy', description: 'Use when deploying the service.', enable: true });
+  });
+
+  it('properties that are not an object are refused when the skill option is given, never silently replaced', async () => {
+    const before = await totals();
+    const r = await code(create(admin, 'tasks:deploy', INDEX(), { properties: 'nope' }, sysMem, { name: 'deploy', description: 'Use when deploying the service.' }));
+    expect(r.code).toBe('BAD_USER_INPUT');
+    expect(await totals()).toEqual(before);
+  });
+
+  it('MCP: agent without trigger (or trigger without agent) is refused before any write, with the door\'s own message', async () => {
+    const before = await totals();
+    for (const args of [{ agent: agent.id }, { trigger: 'when deploying' }]) {
+      const out = await mcp(admin, 'hadron_create_task', { urn: nodeUrn(sysMem, 'tasks:half'), name: 'Half', content: 's', ...args });
+      expect(out).toContain('"agent" and "trigger" go together');
+    }
+    expect(await totals()).toEqual(before);
+  });
+});
+
+describe('a database fault never reads as "agent not found" (#4864, blind F1)', () => {
+  it('the fault propagates as itself and nothing is written', async () => {
+    const before = await totals();
+    const spy = vi.spyOn(db.agent, 'findUnique').mockRejectedValueOnce(new Error('connection lost'));
+    try {
+      const r = await code(create(admin, 'tasks:deploy'));
+      expect(r.code).toBe('ERR');
+      expect(r.message).toBe('connection lost');
+    } finally { spy.mockRestore(); }
     expect(await totals()).toEqual(before);
   });
 });

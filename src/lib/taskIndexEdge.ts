@@ -15,6 +15,7 @@
 import { GraphQLError } from 'graphql';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolveReadableAgentRefArg, refArgNotFoundError } from '../api/graphql/schema/resolvers.helpers.js';
+import { EntityNotFoundError } from './entityRef/errors.js';
 import { lintNode } from './skilldoc/lint.js';
 import { HOST_CLAUDE_SKILL } from './skilldoc/hosts.js';
 
@@ -36,13 +37,14 @@ export async function resolveTaskIndexEdge(
   if (!trigger) {
     throw new GraphQLError('index.trigger is required: the label the Agent\'s task list shows for this task.', { extensions: { code: 'BAD_USER_INPUT', field: 'index.trigger' } });
   }
+  // Only a not-found signal reads as "no match for agentRef"; a database fault or any other error propagates as what it is
+  // (#4864 blind F1). An Agent the caller may not read already answers as the same NOT_FOUND inside the resolver.
   let agent;
   try {
     agent = await resolveReadableAgentRefArg(ctx, index.agent);
   } catch (e) {
-    // An Agent the caller may not read answers as absent, as everywhere else.
-    if (e instanceof GraphQLError) throw e;
-    throw refArgNotFoundError('agent', String(index.agent));
+    if (e instanceof EntityNotFoundError) throw refArgNotFoundError('agent', String(index.agent));
+    throw e;
   }
   if (!agent.tasksIndexRef) {
     throw refuse(`This Agent has no tasks index: set Agent.tasksIndexRef first (setAgentIndexRefs).`, TASKS_INDEX_NOT_SET);
@@ -70,7 +72,10 @@ export function withClaudeSkillExport(
   skill: TaskSkillExportInput,
   node: { loc: string; content: string },
 ): Record<string, unknown> {
-  const base = properties && typeof properties === 'object' && !Array.isArray(properties) ? (properties as Record<string, unknown>) : {};
+  if (properties != null && (typeof properties !== 'object' || Array.isArray(properties))) {
+    throw new GraphQLError('properties must be an object when the skill export is requested.', { extensions: { code: 'BAD_USER_INPUT', field: 'properties' } });
+  }
+  const base = (properties ?? {}) as Record<string, unknown>;
   const exportsIn = base.exports && typeof base.exports === 'object' && !Array.isArray(base.exports) ? (base.exports as Record<string, unknown>) : {};
   const merged = { ...base, exports: { ...exportsIn, [HOST_CLAUDE_SKILL]: { name: skill.name, description: skill.description, enable: true } } };
   const errors = lintNode({ urn: node.loc, loc: node.loc, memoryUrn: '', isRunnable: true, content: node.content, properties: merged })

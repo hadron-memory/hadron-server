@@ -253,8 +253,8 @@ type NodeWriteInput = Omit<NodeInput, 'name'> & { name?: string };
  * #4864: the existing-loc refusal, worded for the task door's index create (the caller meant to ADD a task, so name the route for
  * changing the one that is there). Every other write keeps the message it had; the code and fields are unchanged.
  */
-function locConflictText(message: string, opts?: { taskIndex?: unknown }): string {
-  return opts?.taskIndex ? `${message} Extend that task (hadron_update_task) instead of creating it again.` : message;
+function locConflictText(message: string, opts?: { taskIndex?: TaskIndexInput }): string {
+  return opts?.taskIndex ? `${message} Extend that task (updateTaskNode, or hadron_update_task) instead of creating it again.` : message;
 }
 
 /**

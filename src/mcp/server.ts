@@ -13189,6 +13189,17 @@ const governedDoorArgs = {
   data: z.record(z.string(), z.unknown()).optional().describe('Runtime data bag'),
 };
 
+/** #4864: the CREATE door's own arguments, beside the shared ones. Absent from the update door: an edit never lists a task. */
+const taskCreateArgs = {
+  ...governedDoorArgs,
+  agent: z.string().optional().describe('The Agent (ID or URN) whose tasks index lists this task. Give it with `trigger`; the task must be created in that Agent\'s own system memory.'),
+  trigger: z.string().optional().describe('The trigger label of the tasks-index edge: what the Agent\'s task list shows for this task. Give it with `agent`.'),
+  skill: z
+    .object({ name: z.string(), description: z.string() })
+    .optional()
+    .describe('Opt-in skill export: writes an enabled properties.exports.claudeSkill block with this name and description, checked by the skill lint (an error refuses the whole call). Omit it and no block is written.'),
+};
+
 /**
  * The UPDATE doors additionally accept their own governed signal, so a
  * governed node can be RETIRED through the door that owns it. Absent from the
@@ -13201,17 +13212,6 @@ const governedDoorArgs = {
 // because the review door owns the review kind and not the task kind. A
 // description that promises an argument the gate always refuses is worse than
 // no argument.
-/** #4864: the CREATE door's own arguments, beside the shared ones. Absent from the update door: an edit never lists a task. */
-const taskCreateArgs = {
-  ...governedDoorArgs,
-  agent: z.string().optional().describe('The Agent (ID or URN) whose tasks index lists this task. Give it with `trigger`; the task must be created in that Agent\'s own system memory.'),
-  trigger: z.string().optional().describe('The trigger label of the tasks-index edge: what the Agent\'s task list shows for this task. Give it with `agent`.'),
-  skill: z
-    .object({ name: z.string(), description: z.string() })
-    .optional()
-    .describe('Opt-in skill export: writes an enabled properties.exports.claudeSkill block with this name and description, checked by the skill lint (an error refuses the whole call). Omit it and no block is written.'),
-};
-
 const taskUpdateArgs = {
   ...governedDoorArgs,
   mergeExports: z
