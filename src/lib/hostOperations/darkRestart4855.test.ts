@@ -21,6 +21,7 @@ import { dbNowPlus } from '../grants/grantFixtures3668.js';
 import { seedTriggerWorld, triggerGrant, useCount, useEvents, workerOf, type TriggerWorld } from '../grants/triggerGrantFixtures3483.js';
 import { createPendingGrant } from '../grants/create.js';
 import { restartDarkSession } from './darkRestart.js';
+import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 import { valueCovers, coverableAction } from '../grants/cover.js';
 import { renderGrantSummary } from '../grants/summary.js';
 import { PLATFORM_ACTIONS } from '../grants/actions.js';
@@ -306,6 +307,55 @@ describe('#4855 the fences: a refused start leaves the session open and spends n
     expect(await code(restart(kit, '   '))).toBe('BAD_USER_INPUT');
     expect(await code(restart(kit, 'x'.repeat(501)))).toBe('BAD_USER_INPUT');
     expect(await useCount(g)).toBe(0);
+  });
+});
+
+describe('#4855 the not-started alarm interplay (QA F1): the restart neither hides the stall nor raises a second one', () => {
+  const alarms = () => db.agentTeamEvent.findMany({ where: { type: 'stall.not-started' }, orderBy: { createdAt: 'asc' } });
+  const overdue = async () => {
+    const t = await task();
+    await db.agentTask.update({ where: { id: t.id }, data: { assignedAt: new Date(Date.now() - 3 * 3_600_000) } });
+    return t;
+  };
+
+  it('a not-started alarm raised for the task over the dark session stays open and untouched by the restart; the task row is unchanged and no second alarm follows', async () => {
+    await grant();
+    await kitSession();
+    const t = await overdue();
+    expect((await taskStallTick(db, new Date())).raised).toBeGreaterThan(0);
+    const before = await alarms();
+    expect(before).toHaveLength(1);
+    const taskBefore = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
+    await restart();
+    // The restart carries the task in its start; it does not start, reassign, release or re-time the task, and ends no alarm.
+    expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).toMatchObject({
+      status: taskBefore.status, assigneeWorkerId: kit, assignedAt: taskBefore.assignedAt, startedAt: null,
+    });
+    expect((await starts())[0]!.args).toMatchObject({ taskId: t.id });
+    expect((await alarms()).map((e) => e.id)).toEqual(before.map((e) => e.id));
+    await taskStallTick(db, new Date());
+    expect(await alarms()).toHaveLength(1);
+  });
+
+  it('once the restarted worker starts the task, the tick that sees it started raises nothing new', async () => {
+    await grant();
+    await kitSession();
+    const t = await overdue();
+    await taskStallTick(db, new Date());
+    await restart();
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'started', startedAt: new Date() } });
+    const tick = await taskStallTick(db, new Date());
+    expect(tick.raised).toBe(0);
+    expect(await alarms()).toHaveLength(1);
+  });
+
+  it('the restart is no assignment: it does not open a new not-started episode for a task that was never overdue', async () => {
+    await grant();
+    await kitSession();
+    await task();
+    await restart();
+    await taskStallTick(db, new Date());
+    expect(await alarms()).toHaveLength(0);
   });
 });
 
