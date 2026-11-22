@@ -255,6 +255,37 @@ describe('#4890 — description rides the record gate, not the row\'s audience',
       }
     }
   });
+
+  it('a memory soft-deleted between the scope snapshot and the page read stays listed, with description null', async () => {
+    // The snapshot and the page read are two queries; every scope arm drops
+    // soft-deleted memories, so the ONLY way a deleted row reaches the page
+    // is this window. `Query.memory` answers null for a soft-deleted record,
+    // so the raced row must withhold the description while staying listed
+    // (the snapshot admitted it). Proxy the snapshot's own findMany (select
+    // id only, where OR appId, no class filter — distinct from every other
+    // memory query in the walk) to soft-delete KnowA right after it admits
+    // the row, before the page read fetches it.
+    const racedMemory = new Proxy(db.memory, {
+      get: (target, prop, recv) => (prop === 'findMany'
+        ? async (args: { select?: { id?: boolean; urn?: boolean }; where?: { OR?: unknown; class?: unknown } }) => {
+            const rows = await target.findMany(args as never);
+            if (args?.select?.id === true && !args?.select?.urn && args?.where?.OR && !args?.where?.class) {
+              await db.memory.update({ where: { id: mem.KnowA! }, data: { deletedAt: new Date() } });
+            }
+            return rows;
+          }
+        : Reflect.get(target, prop, recv)),
+    });
+    const raced = await Q.appMemoryScope({}, { appRef: appId }, {
+      ...ctx('member'),
+      db: new Proxy(db, { get: (t, p, r) => (p === 'memory' ? racedMemory : Reflect.get(t, p, r)) }) as typeof db,
+    });
+    const row = (raced.items as Row[]).find((r) => r.memoryId === mem.KnowA);
+    expect(row).toBeDefined();
+    expect(row!.description).toBeNull();
+    // Parity, stated: a fresh Query.memory for the same caller answers null.
+    expect(await Q.memory({}, { ref: mem.KnowA! }, ctx('member'))).toBeNull();
+  });
 });
 
 describe('#2190 — viewerCanWrite is the viewer\'s createNode gate, not the Agent\'s link', () => {

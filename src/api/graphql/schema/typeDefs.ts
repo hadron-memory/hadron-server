@@ -444,6 +444,17 @@ export const typeDefs = `#graphql
     memoryUrn: String!
     name: String!
     class: MemoryClass!
+    """
+    #4890: the memory's description, carried only where THIS caller could read
+    it through Memory.description — the record gate (canReadMemoryRecord) that
+    Query.memory applies, reused, never the row's own admission. Null when the
+    record gate would refuse the caller; the row is still listed, only the
+    description is withheld. The memory record is never enciphered
+    (hrn:node:hadronmemory.com:specs:cor:sec:040:03 enciphers node content
+    only), so an encrypted memory's description is carried with no key in
+    play, exactly as Memory.description serves it.
+    """
+    description: String
     "Every reason this memory is in scope. Never empty. Ordered by kind (AGENT_SYSTEM, AGENT_LINK, INHERITED_BASE, TEAM_SPACE, APP_MEMORY), then by agent install order."
     sources: [AppMemorySource!]!
     """
