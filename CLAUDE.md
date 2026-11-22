@@ -313,8 +313,9 @@ break together fail in the queue and not on `main`.
   `merge_group` event (a skipped job reports as passing, a matrix renames the check), or if a required workflow could cancel a
   queue entry. A workflow whose base logic reads `github.base_ref`, the PR's labels or `github.event.before` must get its own
   `merge_group` branch first (a queue entry has none of them); `migration-replay.yml` and `graphql-sdl-parse.yml` are left out for
-  that reason today. A queued workflow also may not read `secrets.*` or hold a write permission (pinned), because a queue run
-  executes the merged tree in the base repository's context. `restore-private-cluster.yml` is off the queue too: it is advisory
+  that reason today. A queued workflow also may not mention `secrets` or declare a write permission (pinned), because a queue run
+  executes the merged tree in the base repository's context. A workflow with no `permissions:` block gets the repository default
+  token permission, which no test can read: confirm `default_workflow_permissions` is `read` before applying the ruleset. `restore-private-cluster.yml` is off the queue too: it is advisory
   and a queue run adds nothing a PR-head run does not show.
 - **`concurrency`:** a `merge_group` run has no `pull_request.number`, so its group is its own `run_id` and it is never cancelled by
   another run. Intended, and pinned by the test above.

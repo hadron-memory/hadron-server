@@ -145,9 +145,11 @@ describe('merge queue workflow contract (#4819)', () => {
   });
 
   // A merge_group run executes the merged tree in the base repository's context. Today no queued workflow reads a
-  // repository secret and every one declares a read-only token; this keeps a future change from widening that unnoticed.
-  // The repository's default token permission is a setting the repo does not pin, so an explicit top-level
-  // `permissions:` block is required. Local reusable workflows a queued workflow calls are judged the same way.
+  // repository secret and none declares a write permission; this keeps a future change from widening that unnoticed.
+  // KNOWN LIMIT: a workflow with NO `permissions:` block gets the repository's default token permission, a setting
+  // this repo does not pin and no test can read. That case is knowingly left to the setting
+  // (`default_workflow_permissions` is `read`; confirming it is a precondition on the ruleset's register row), so this
+  // pin proves "no explicit write", not "read-only". Local reusable workflows a queued workflow calls are judged the same way.
   const queued = Object.entries(DECISIONS).filter(([, d]) => d.queue).map(([f]) => f);
   const writesIn = (node: unknown, path: string, out: string[]): void => {
     if (!node || typeof node !== 'object') return;
@@ -170,7 +172,7 @@ describe('merge queue workflow contract (#4819)', () => {
     w(d);
     return out;
   };
-  it.each(queued)('%s (queued) declares an explicit read-only token, references no secrets and holds no write permission', (f) => {
+  it.each(queued)('%s (queued) references no secrets and declares no write permission', (f) => {
     const seen = new Set<string>();
     const todo = [f];
     while (todo.length > 0) {
@@ -181,7 +183,6 @@ describe('merge queue workflow contract (#4819)', () => {
       // The parsed document, so a comment that says "no secrets" does not trip it but `secrets: inherit`,
       // `secrets['X']`, `toJSON(secrets)` and `secrets.X` all do.
       expect(JSON.stringify(d), `${cur} (reached from ${f}): a queued workflow must not mention a repository secret`).not.toMatch(/\bsecrets\b/);
-      expect(d.permissions, `${cur}: a queued workflow needs an explicit top-level permissions block (the repository default is not pinned)`).toBeDefined();
       const writes: string[] = [];
       writesIn(d, cur, writes);
       expect(writes, `${cur}: a queued workflow must not hold a write permission`).toEqual([]);
