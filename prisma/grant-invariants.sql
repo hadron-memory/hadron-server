@@ -151,7 +151,8 @@ BEGIN
   END IF;
   IF TG_OP = 'INSERT' THEN
     IF NEW.activated_at IS NOT NULL OR NEW.verification_kind IS NOT NULL OR NEW.verified_by IS NOT NULL
-       OR NEW.signature_id IS NOT NULL OR NEW.revoked_by IS NOT NULL -- (revoked_at without a person or the marker is refused by chk_grants_shape's end pairing)
+       OR NEW.signature_id IS NOT NULL OR NEW.revoked_by IS NOT NULL
+       -- (a personless revoked_at is refused by chk_grants_shape's end pairing)
        OR NEW.use_count <> 0 OR NEW.version <> 1 OR NEW.holder_departed_at IS NOT NULL OR NEW.withdrawn_at IS NOT NULL THEN
       -- (#4180: a departure cause cannot arrive either: chk_grants_shape admits one only beside the departure stamp refused here)
       RAISE EXCEPTION 'grants must arrive pending' USING ERRCODE = '23514';
