@@ -84,7 +84,7 @@ import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { castTeamChoice, teamPlacement, type CastTeamArgs } from '../../../lib/workerTeamChoice.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
-import { deletePristineGeneratedTickers, miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
+import { deletePristineGeneratedTickers, miscastHasReferences, workerCensusTransactionTimeoutMs, WorkerCensusIncompleteError } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
@@ -109,6 +109,14 @@ import {
   safeCanonicalUrn,
   isMemoryReadableCached,
 } from './resolvers.helpers.js';
+
+/**
+ * #4809 (cor:dmo:050:11): the census ran out of its bound. Its own code, never `WORKER_IN_USE` (no reference was found):
+ * the delete is refused, nothing is written, and the caller may retry or retire. Same on both doors.
+ */
+const censusIncomplete = (workerId: string) => new GraphQLError('The reference check for this worker did not finish in time, so it was not deleted. Retry later, or retire the worker instead.', {
+  extensions: { code: 'WORKER_CENSUS_INCOMPLETE', workerId },
+});
 
 /**
  * Backstop on slug-race retries in `castWorker` (#991). Not an allocation
@@ -1835,7 +1843,8 @@ export const workerMutations = {
     const refuse = () => new GraphQLError('This worker has persisted references, an unreleased stint, or encrypted attribution that cannot be verified. Retire it instead.', {
       extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
     });
-    if (await miscastHasReferences(ctx.db, worker)) throw refuse();
+    // #4809: no census outside the transaction. The one inside the SERIALIZABLE transaction is the authoritative one
+    // (the fence's guarantee rests on it); an early outside run only doubled the cost of a refusal.
     try {
       await ctx.db.$transaction(async (tx) => {
         // Preserve this door's SERIALIZABLE reference fence (including uninstalled Apps), while adding
@@ -1865,8 +1874,9 @@ export const workerMutations = {
         if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
         // #2766: recorded last, so any refusal above leaves no event; the row is gone, the id stays in the history.
         await appendWorkerDeletedEvent(tx, { appId: current.appId, actor: staffingActActor(admission), instruction: staffingInstruction(admission), workerId: worker.id });
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: workerCensusTransactionTimeoutMs() });
     } catch (error) {
+      if (error instanceof WorkerCensusIncompleteError) throw censusIncomplete(worker.id);
       // The fence deliberately makes a stale SERIALIZABLE snapshot abort.
       // Raw statements report 40001/40P01 as P2010; model writes use P2034.
       if (error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -1925,8 +1935,9 @@ export const workerQueries = {
         }
         await appendStaffingInstructionClaim(tx, { appId: app.id, admission, operation: 'worker.delete-preview', workerId: worker.id });
         return { workerId: worker.id, attestationRequired: true };
-      });
+      }, { timeout: workerCensusTransactionTimeoutMs() });
     } catch (error) {
+      if (error instanceof WorkerCensusIncompleteError) throw censusIncomplete(worker.id);
       if (error instanceof GraphQLError && error.extensions.code === 'WORKER_REFERENCE_NOT_FOUND' && error.extensions.workerRef === worker.id) {
         throw workerNotFound(workerRef);
       }

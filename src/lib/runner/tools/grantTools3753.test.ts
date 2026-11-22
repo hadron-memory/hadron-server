@@ -265,6 +265,11 @@ describe('hadron_create_grant (#3753)', () => {
       expect((err as GrantCreateRefusal).code).toBe('GRANT_HOLDER_NOT_ALLOWED');
     }
     expect(await rows()).toHaveLength(0);
+    // positive control (#4787 C3): the SAME arguments with the run's own agent as holder are accepted, so the refusals above come from the
+    // holder and not from something else in the arguments (a guard that refused everything would pass the loop)
+    const id = await db.$transaction((tx) => createPendingGrant(tx, args({ kind: 'agent', id: w.agentId }) as never));
+    expect(typeof id).toBe('string');
+    expect((await rows()).map((r) => r.id)).toEqual([id]);
   });
 
   it('B14 (structural only): no non-run caller reaches the run arm: the tool refuses any principal that is not THIS run (isRunPrincipal and clientId run:<runId>), and its schema has no holder, App or activation key', async () => {
