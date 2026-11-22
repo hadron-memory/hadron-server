@@ -7,6 +7,7 @@ import { db } from './integrations/db/client.js';
 import { createReadiness } from './api/health.js';
 import { stoppingDrainWindowMs } from './lib/stoppingDrainWindow.js';
 import { applyHttpTimeouts } from './lib/httpTimeouts.js';
+import { clearPortFile, writePortFile } from './lib/portFile.js';
 import { closeHttpListenerOutcome } from './lib/httpShutdown.js';
 import { errorToken, logFailedShutdownSteps, type EmbeddingStopOutcomes, type StepOutcome } from './lib/shutdownSteps.js';
 
@@ -18,7 +19,9 @@ const readiness = createReadiness();
 
 const app = await createServer({ readiness });
 
+clearPortFile(); // #851: a stale port from a previous run of this container must never be read by the probe
 const httpServer = app.listen(port, () => {
+  writePortFile(httpServer); // #851: the HEALTHCHECK reads the bound port from here, not from its own PORT
   console.log(`hadron-server listening on http://localhost:${port}`);
   console.log(`GraphQL: http://localhost:${port}/graphql`);
   console.log(`MCP:     http://localhost:${port}/mcp`);

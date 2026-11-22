@@ -11,9 +11,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { clearPortFile, writePortFile, DEFAULT_PORT_FILE, portFilePath } from './portFile.js';
 import {
   applyHttpTimeouts,
   httpTimeoutsFromEnv,
@@ -116,9 +119,10 @@ describe('#851 Dockerfile readiness HEALTHCHECK', () => {
     expect(cmd.slice(0, 2)).toEqual(['node', '-e']);
     return cmd[2];
   };
-  const probe = (port: string | undefined) =>
+  const noFile = join(tmpdir(), `hadron-851-absent-${process.pid}`);
+  const probe = (port: string | undefined, portFile: string = noFile) =>
     new Promise<number>((resolve) => {
-      const childEnv: NodeJS.ProcessEnv = { PATH: process.env.PATH };
+      const childEnv: NodeJS.ProcessEnv = { PATH: process.env.PATH, HADRON_PORT_FILE: portFile };
       if (port !== undefined) childEnv.PORT = port;
       execFile(process.execPath, ['-e', probeScriptOf()], { env: childEnv, timeout: 10_000 }, (err) => {
         resolve(err ? ((err as NodeJS.ErrnoException & { code?: number }).code as number | undefined) ?? 1 : 0);
@@ -135,11 +139,37 @@ describe('#851 Dockerfile readiness HEALTHCHECK', () => {
     };
   };
 
-  it('probes GET /ready on the container\'s PORT and is healthy only on a 200', async () => {
+  it('falls back to the container\'s PORT when no port file exists, and is healthy only on a 200', async () => {
     const ok = await listener(200);
     expect(await probe(ok.port)).toBe(0);
     expect(ok.seen).toEqual(['/ready']);
     await ok.close();
+  });
+
+  it('follows the port the server BOUND (the port file), not its own PORT: the Doppler case', async () => {
+    // Prod: PORT is a Doppler secret in the server process only; the probe's env has none (or the image default).
+    const l = await listener(200);
+    const dir = mkdtempSync(join(tmpdir(), 'hadron-851-'));
+    const file = join(dir, 'port');
+    writeFileSync(file, `${l.port}\n`);
+    expect(await probe(undefined, file)).toBe(0);      // PORT unset in the probe: the file wins
+    expect(await probe('1', file)).toBe(0);            // a wrong PORT in the probe's env is ignored
+    expect(l.seen.length).toBe(2);
+    await l.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a port file naming a port nothing serves is not healthy, whatever PORT says', async () => {
+    const live = await listener(200);
+    const dead = await listener(200);
+    const deadPort = dead.port;
+    await dead.close();
+    const dir = mkdtempSync(join(tmpdir(), 'hadron-851-'));
+    const file = join(dir, 'port');
+    writeFileSync(file, deadPort);
+    expect(await probe(live.port, file)).toBe(1);
+    await live.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it.each([503, 500, 404, 204, 302])('is not healthy on a %i answer', async (status) => {
@@ -159,5 +189,47 @@ describe('#851 Dockerfile readiness HEALTHCHECK', () => {
     expect(probeScriptOf()).toContain('process.env.PORT||4000');
     const indexSrc = readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
     expect(indexSrc).toMatch(/Number\(process\.env\.PORT \?\? 4000\)/);
+  });
+});
+
+describe('#851 port file (what the probe reads)', () => {
+  it('records the bound port, replaces a stale value, and clears at start', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hadron-851-'));
+    const env = { HADRON_PORT_FILE: join(dir, 'port') } as NodeJS.ProcessEnv;
+    writeFileSync(env.HADRON_PORT_FILE!, '9999\n');
+    clearPortFile(env);
+    expect(() => readFileSync(env.HADRON_PORT_FILE!, 'utf8')).toThrow();
+    const server = http.createServer((_q, r) => r.end('ok'));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    expect(writePortFile(server, env)).toBe(true);
+    expect(readFileSync(env.HADRON_PORT_FILE!, 'utf8').trim()).toBe(String((server.address() as AddressInfo).port));
+    await new Promise<void>((r) => server.close(() => r()));
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('never throws: an unwritable path or a server with no port is reported false', () => {
+    const env = { HADRON_PORT_FILE: '/nonexistent-dir-851/port' } as NodeJS.ProcessEnv;
+    expect(writePortFile({ address: () => ({ port: 4000 }) }, env)).toBe(false);
+    expect(writePortFile({ address: () => null }, env)).toBe(false);
+    expect(writePortFile({ address: () => '/unix.sock' }, env)).toBe(false);
+    expect(writePortFile({ address: () => ({ port: 0 }) }, env)).toBe(false);
+    expect(writePortFile({ address: () => ({ port: -1 }) }, env)).toBe(false);
+    expect(writePortFile({ address: () => ({ port: 4000.5 }) }, env)).toBe(false);
+    expect(() => clearPortFile(env)).not.toThrow();
+  });
+
+  it('does not write a file for a non-positive port even where the path is writable', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hadron-851-'));
+    const env = { HADRON_PORT_FILE: join(dir, 'port') } as NodeJS.ProcessEnv;
+    expect(writePortFile({ address: () => ({ port: 0 }) }, env)).toBe(false);
+    expect(() => readFileSync(env.HADRON_PORT_FILE!, 'utf8')).toThrow();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('defaults to /tmp/hadron-server.port unless HADRON_PORT_FILE is set (the probe uses the same default)', () => {
+    expect(DEFAULT_PORT_FILE).toBe('/tmp/hadron-server.port');
+    expect(portFilePath({} as NodeJS.ProcessEnv)).toBe(DEFAULT_PORT_FILE);
+    const dockerfile = readFileSync(new URL('../../Dockerfile', import.meta.url), 'utf8');
+    expect(dockerfile).toContain("process.env.HADRON_PORT_FILE||'/tmp/hadron-server.port'");
   });
 });
