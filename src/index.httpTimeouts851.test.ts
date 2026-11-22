@@ -22,6 +22,8 @@ vi.mock('./integrations/db/client.js', () => ({ db: { $disconnect: vi.fn() } }))
 beforeEach(() => {
   vi.resetModules();
   state.server = undefined;
+  delete process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS;
+  delete process.env.HTTP_HEADERS_TIMEOUT_MS;
   vi.spyOn(process, 'once').mockImplementation((() => process) as typeof process.once);
 });
 afterEach(() => {

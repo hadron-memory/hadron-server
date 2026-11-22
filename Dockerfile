@@ -33,12 +33,16 @@ EXPOSE 10300
 # #851 (cor:api:270:01): READINESS, not liveness. `GET /ready` answers 200 only once the first startup has settled and
 # the database answers (503 starting / startup_failed / stopping / database_unavailable otherwise), so this check reports
 # whether the container should receive traffic. The status is a readiness signal ONLY: nothing may restart or replace the
-# container on `unhealthy` (no autoheal, no orchestrator restart-on-unhealthy). Liveness stays `/health`, which a failed
-# first sync does not fail, precisely so a degraded boot is never turned into a restart loop. The probe follows the
-# container's PORT (the server's own default, 4000, when unset) and treats anything but 200, including no connection, as
-# not ready. A long first sync and the boot-time generate/migrate/transpile run before the port opens, hence the generous
-# start period and retries. The image's own health status is advisory until a proxy or orchestrator is told to read it
-# (the Traefik side is deployment config, tracked on hadron-server#851).
+# container on `unhealthy`. Liveness stays `/health`, which a failed first sync does not fail, precisely so a degraded
+# boot is never turned into a restart loop.
+# DEPLOY CONSEQUENCE, read before shipping this image: a reader of the Docker health status acts on it. Traefik's Docker
+# provider drops a container that is `starting` or `unhealthy` from routing with no extra configuration, so under that
+# provider this check IS the routing gate (a database outage longer than start-period-free retries x interval, about
+# 75 s, takes the replica out of rotation: clients get Traefik's 404 instead of the app's 503). Docker Swarm would
+# instead REPLACE an unhealthy task, the restart loop ruled out above, so this service must not run under Swarm's health
+# handling. Plain Docker Compose or a single container only records the status. The probe follows the container's PORT
+# (the server's own default, 4000, when unset) and treats anything but 200, including no connection, as not ready. The
+# boot-time generate/migrate/transpile runs before the port opens, hence the generous start period.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=180s --retries=5 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||4000)+'/ready').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
 

@@ -2,10 +2,12 @@
  * #851: the HTTP server's keep-alive and headers timeouts.
  *
  * Node closes an idle keep-alive connection after `keepAliveTimeout` (5 s by default). A reverse proxy in front of
- * the server (Traefik reuses an idle backend connection for up to 90 s by default, Cloudflare holds longer still)
- * that reuses a connection the origin has just closed gets a reset on the next request, which the proxy surfaces as
- * an intermittent 502. Keeping the origin's window ABOVE every proxy's idle reuse removes that race: the proxy always
- * closes first.
+ * the server (Traefik reuses an idle backend connection for up to 90 s by default: its `serversTransport`
+ * `forwardingTimeouts.idleConnTimeout`, not the client-side `respondingTimeouts`) that reuses a connection the origin
+ * has just closed gets a reset on the next request, which the proxy surfaces as an intermittent 502. Keeping the
+ * origin's window ABOVE the idle reuse of the proxy that connects to it removes that race: the proxy always closes
+ * first. (On alpha that proxy is Traefik; if another proxy ever connects to the origin directly, its idle reuse must be
+ * below this value too.)
  *
  * Defaults: `keepAliveTimeout` 120 s, `headersTimeout` 125 s. 120 s clears Traefik's 90 s default (Hugo's and Yuri's
  * read of alpha, hadron-server#851: no `respondingTimeouts` set) with margin; `headersTimeout` must stay above
@@ -15,7 +17,8 @@
  * Node's default 300 s `requestTimeout`, which `headersTimeout` may not exceed). Anything else (unset, empty, signed,
  * fractional, exponent, hex, out of range) falls back to the default, so a typo can neither switch the window off nor
  * widen it past what Node accepts. A headers value that is not above the effective keep-alive value is raised to
- * keep-alive + 5 s rather than honoured, so the ordering invariant cannot be configured away.
+ * keep-alive + 5 s rather than honoured, so the ordering invariant cannot be configured away (a 290000 keep-alive
+ * therefore yields a 295000 headers value, which Node accepts).
  */
 export const HTTP_KEEP_ALIVE_TIMEOUT_DEFAULT_MS = 120_000;
 export const HTTP_HEADERS_TIMEOUT_DEFAULT_MS = 125_000;

@@ -101,6 +101,13 @@ describe('#851 Dockerfile readiness HEALTHCHECK', () => {
   });
 
   // The probe, lifted out of the instruction's exec-form CMD.
+  it('states the deploy consequence: a reader of the status acts on it (Traefik routes on it, Swarm would replace)', () => {
+    expect(dockerfile).toMatch(/DEPLOY CONSEQUENCE/);
+    expect(dockerfile).toMatch(/Traefik's Docker\s+# provider drops a container that is `starting` or `unhealthy` from routing/);
+    expect(dockerfile).toMatch(/Docker Swarm would\s+# instead REPLACE an unhealthy task/);
+    expect(dockerfile).not.toMatch(/advisory/i);
+  });
+
   // Lazy, so a missing HEALTHCHECK fails the Dockerfile pins one by one instead of the whole file at collection.
   const probeScriptOf = (): string => {
     const m = /CMD\s+(\[.*\])\s*$/m.exec(instruction);

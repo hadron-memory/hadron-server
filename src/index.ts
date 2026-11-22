@@ -31,7 +31,10 @@ const httpServer = app.listen(port, () => {
 
 // #851: keep-alive above every proxy's idle reuse (a closed-under-it connection is an intermittent 502); applied
 // before the first connection can arrive on the event loop turn after listen.
-applyHttpTimeouts(httpServer);
+{
+  const t = applyHttpTimeouts(httpServer);
+  console.log(`http timeouts: keepAliveTimeout=${t.keepAliveTimeoutMs}ms headersTimeout=${t.headersTimeoutMs}ms`);
+}
 
 // internal#4: close admission before graceful process exit. This is a lifecycle hook,
 // not a deployment/fencing action; rollout still requires the operator's cohort boundary.
