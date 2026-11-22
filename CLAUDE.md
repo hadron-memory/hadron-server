@@ -304,18 +304,23 @@ deployment state, kept in Hadron:
 and runs the required checks on that merged tree through the `merge_group` event, so two PRs that are green alone and
 break together fail in the queue and not on `main`.
 
-- **Required checks:** `test`, `tsc`, `no-agent-specific-code`, `no-station-refs` and `urn-rename-aliased`. `tsc` has no
-  `paths:` filter on any trigger on purpose: a required check that a path filter keeps from running never reports, so it
-  would block every PR (and every queue entry) that touches no `.ts` file.
-- **A new workflow needs a decision.** `scripts/check-merge-queue-workflows.test.ts` has one entry per workflow file (in
-  the queue or not, and why) and fails on a workflow that has none. A workflow whose base logic reads `github.base_ref`,
-  the PR's labels or `github.event.before` is wrong on `merge_group` (a queue entry has none of them) and must get its own
-  `merge_group` branch first. `migration-replay.yml` and `graphql-sdl-parse.yml` are left out for that reason today.
-- **`concurrency`:** a `merge_group` run has no `pull_request.number`, so its group is its own `run_id` and it is never
-  cancelled by another run. Intended.
-- **When a queue entry fails,** the queue removes it and the entries behind it rebuild without it. Read the failing check,
-  fix it on the PR branch (a new head means the review seats re-read or carry as usual), and enqueue it again. Do not
-  re-run a red required check until it turns green; a flaky shard is a finding to record, not a retry loop.
+- **Required checks:** `test`, `tsc`, `no-agent-specific-code`, `no-station-refs` and `urn-rename-aliased`. Only these gate a queue
+  entry. The other workflows that list `merge_group` report a result on the merged tree but do **not** block the merge, so a red
+  one is a finding to act on, not a stop. `tsc` has no `paths:` filter on any trigger on purpose: a required check that a path
+  filter keeps from running never reports, so it would block every PR (and every queue entry) that touches no `.ts` file.
+- **A new workflow needs a decision.** `scripts/check-merge-queue-workflows.test.ts` has one entry per workflow file (in the queue
+  or not, and why) and fails on a workflow that has none. It also fails if a required job is skipped, matrixed or renamed on a
+  `merge_group` event (a skipped job reports as passing, a matrix renames the check), or if a required workflow could cancel a
+  queue entry. A workflow whose base logic reads `github.base_ref`, the PR's labels or `github.event.before` must get its own
+  `merge_group` branch first (a queue entry has none of them); `migration-replay.yml` and `graphql-sdl-parse.yml` are left out for
+  that reason today.
+- **`concurrency`:** a `merge_group` run has no `pull_request.number`, so its group is its own `run_id` and it is never cancelled by
+  another run. Intended, and pinned by the test above.
+- **When a queue entry fails,** the queue removes it and the entries behind it rebuild without it. Read the failing check and fix
+  it on the PR branch. A new push means the reviewers who approved the old head must read the new one (or confirm that their
+  approval still holds when only comments or tests changed), and then you enqueue the PR again. Do not re-run a red required
+  check hoping it turns green: a shard that fails for a reason unrelated to your change is a known-flaky finding to record on
+  its issue, and one re-run of just that shard, with the evidence posted, is the most you do.
 - **Until the ruleset is applied,** the rule stays as it was: before a merge, run `tsc` and the focused suites on a scratch
   merge with current `main`.
 

@@ -22,8 +22,7 @@ on:
   push:
     branches: [main]
 
-# A merge_group run has no pull_request.number, so its group falls back to its own run_id and cancel-in-progress is false for it:
-# a merge queue entry is never cancelled by another run (#4819). Intended.
+# A queue entry (merge_group) has no PR number, so it gets its own group and is never cancelled; see CLAUDE.md, Merge notes (#4819).
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
