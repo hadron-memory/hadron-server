@@ -10,6 +10,7 @@ name: Object-Store Import Boundary
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
