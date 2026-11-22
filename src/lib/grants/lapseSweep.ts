@@ -27,6 +27,7 @@
  * does): the grants are the whole of this issue. Each departure records its cause (#4180): see {@link lapseCauses}.
  */
 import { Prisma as P, type PrismaClient } from '../../generated/prisma/index.js';
+import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
 import { lockAppInstallationsFenced, resolveAppInstallation } from '../appInstallations.js';
 import { ALREADY_ENDED, endAgentGrantsAtApps, type AgentDepartureReason } from './departure.js';
 import { GRANT_DB_NOW } from './live.js';
@@ -118,6 +119,11 @@ export async function sweepLapsedAgentGrants(
     for (const p of pairs) byApp.set(p.app_id, [...(byApp.get(p.app_id) ?? []), p.agent_id]);
     const departed = await db.$transaction(async (tx) => {
       const gone: Array<{ appId: string; agentId: string }> = [];
+      // #4823: stamping `holder_departed_at` revokes authority, so this takes the agent anchors EXCLUSIVELY, as every other revoker
+      // does, and BEFORE any row lock: the uninstall door holds the same anchors (then the agent row FOR SHARE, then the App FOR NO KEY
+      // UPDATE), so a sweeper that waited on the agent row while holding the App FOR SHARE cycled with it (40P01). The set is the
+      // page's pairs, the very read the loop below judges, so every agent it can touch is anchored.
+      await lockAuthorityAnchors(tx, pairs.map((p) => ({ kind: 'agent' as const, id: p.agent_id })), 'exclusive');
       await lockAppInstallationsFenced(tx, byApp); // every App's structure, then every agent in ONE global pass (#4715)
       for (const [appId, agentIds] of byApp) {
         for (const agentId of agentIds) {
