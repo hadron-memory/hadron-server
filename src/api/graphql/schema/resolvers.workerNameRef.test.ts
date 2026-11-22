@@ -188,11 +188,13 @@ describe('#990 — the staff read gate, and no roster oracle', () => {
     // `appRef` already requires isAppParticipant — the same predicate the
     // staff read gate uses — so an outsider never reaches the roster at all.
     // The in-branch gate is defense in depth for the App-key path, which
-    // skips that membership branch.
+    // skips that membership branch. #4836: the refusal is the one unknown-App
+    // answer — byte-identical to a missing App, stronger than the old
+    // FORBIDDEN, which confirmed the App exists to a caller with no standing.
     await cast('Iris');
     await expectCode(
       start({ appRef: app.id, workerRef: 'Iris' }, ctx(outsider.id)),
-      'FORBIDDEN',
+      'APP_NOT_FOUND',
     );
   });
 
