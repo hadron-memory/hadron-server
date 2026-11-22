@@ -21,10 +21,16 @@
  * swallow a member's answers. The V58 exception (a caller with reach keeps an
  * authorization refusal) is pinned on the launch-grant path, the one place
  * this mutation still refuses a caller it already told the worker exists.
+ *
+ * Red-first note (#4844 fold, LOCAL F2): these pins and the implementation
+ * landed in one commit (78af34826), so history cannot show the pins red. The
+ * rerun: with this file held and the production change reverted
+ * (`git show 78af34826^:…resolvers.mutation.session.ts`), 21 of 28 pins fail
+ * (measured 2026-11-22); the 7 that pass are the member regression pins,
+ * which are green on main by design.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { GraphQLError } from 'graphql';
-import { buildSchema, defaultFieldResolver, graphql } from 'graphql';
+import { GraphQLError, buildSchema, defaultFieldResolver, graphql } from 'graphql';
 import { createHash } from 'node:crypto';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -35,6 +41,7 @@ import { SHAPE_HADRON_START_SESSION } from '../../../mcp/toolShapes.js';
 import { startSessionAppRefRefusal } from './resolvers.mutation.session.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { formatGraphQLError } from '../formatError.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -216,6 +223,25 @@ describe('#4836 — a pure App key naming any other App gets the same unknown-Ap
     expect(s.appId).toBe(app.id);
     expect(s.userId).toBeNull();
   });
+
+  it('a pure App key naming its OWN uninstalled App by PK keeps APP_UNINSTALLED with the appId (LOCAL F3, #4844 fold)', async () => {
+    // Standing is TRUE here (a key IS its App, whatever its state), so this is
+    // not the concealed answer but the specific one — the pin the first review
+    // asked for: reach first, state after, also on the credential arm. (By URN
+    // the same App does not resolve — the #944 asymmetry pinned above.)
+    const gone = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Gone Key App', urn: `${org.urn}:gone-key`, uninstalledAt: new Date() },
+    });
+    try {
+      await startSession(ctx(undefined, gone.id), { appRef: gone.id });
+      expect.fail('expected APP_UNINSTALLED');
+    } catch (e) {
+      const g = e as GraphQLError;
+      expect(g.extensions?.code).toBe('APP_UNINSTALLED');
+      expect(g.extensions?.appId).toBe(gone.id);
+      expect(g.message).toBe('Cannot start a session in an uninstalled App.');
+    }
+  });
 });
 
 describe('#4836 — a caller WITH standing keeps the specific answers (regression pins, green on main)', () => {
@@ -325,7 +351,13 @@ describe('#4836 — the envelope through the real GraphQL schema (full execution
       expect(r.errors![0]!.extensions?.code).toBe('APP_NOT_FOUND');
     }
     expect(JSON.stringify(existing.errors![0]!.extensions)).toBe('{"code":"APP_NOT_FOUND"}');
-    expect(JSON.stringify(missing.errors)).not.toContain(CANARY);
+    // Meaningful absence (Braxton F3, #4844): each call's OWN inputs — the
+    // missing call's sent URN, the existing call's App PK — must not appear.
+    // (The old `not.toContain(CANARY)` here could never fail: the `missing`
+    // call never sent the canary.)
+    expect(JSON.stringify(missing.errors)).not.toContain('no-such-app');
+    expect(JSON.stringify(missing.errors)).not.toContain(org.urn);
+    expect(JSON.stringify(existing.errors)).not.toContain(app.id);
   });
 
   it('a canary-bearing malformed ref over the wire: the canary appears nowhere', async () => {
@@ -333,6 +365,33 @@ describe('#4836 — the envelope through the real GraphQL schema (full execution
     expect(r.errors).toHaveLength(1);
     expect(JSON.stringify(r.errors![0])).not.toContain(CANARY);
     expect(r.errors![0]!.extensions?.code).toBe('APP_NOT_FOUND');
+  });
+
+  it('a fault INSIDE the ref lookup is not folded into the unknown-App answer (the narrow catch)', async () => {
+    // Seat pins (LOCAL F1 = SEC10 P2-1, #4844 fold): broadening the catch's
+    // final `throw e;` to `throw appNotFound();` left every earlier pin green
+    // — a database fault inside resolveAppRef would read as "App not found.",
+    // an outage masked as a missing App. This pin dies on that mutant three
+    // ways: the raw fault propagates out of the resolver unchanged, the wire
+    // formatter masks it as INTERNAL_SERVER_ERROR (cor:api:260:01 — never
+    // APP_NOT_FOUND), and no session row is written.
+    const fault = new Error('sar4836: db fault inside the ref lookup');
+    const spy = vi.spyOn(db.app, 'findFirst').mockRejectedValue(fault);
+    try {
+      await expect(
+        startSession(ctx(outsider.id), { appRef: `hrn:app:${org.urn}:no-such-app` }),
+      ).rejects.toThrow('sar4836: db fault inside the ref lookup');
+      const r = await exec(`hrn:app:${org.urn}:no-such-app`, ctx(outsider.id));
+      expect(r.errors).toHaveLength(1);
+      expect(r.errors![0]!.message).not.toBe('App not found.');
+      const e = r.errors![0]!;
+      const formatted = formatGraphQLError({ message: e.message, extensions: { ...e.extensions }, path: ['startSession'] }, e);
+      expect(formatted.extensions?.code).not.toBe('APP_NOT_FOUND');
+      expect(formatted.extensions?.code).toBe('INTERNAL_SERVER_ERROR');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await db.session.count()).toBe(0);
   });
 });
 

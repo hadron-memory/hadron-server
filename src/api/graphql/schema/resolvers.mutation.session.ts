@@ -874,6 +874,13 @@ export const sessionMutations = {
             e instanceof AppNotFoundError ||
             e instanceof AmbiguousLegacyUrnError ||
             e instanceof UrnNotQualifiedError ||
+            // Defensive (SEC10 P3-1): no input reaches UrnParseError through
+            // resolveAppRef today — the qualification boundary throws
+            // UrnNotQualifiedError, parseUrnInput never throws (it falls
+            // through to type 'unknown'), and normalizeUrnForLookup is a pure
+            // string transform. Listed so the fold names the whole
+            // ref-resolution family: a future parser change that starts
+            // throwing it lands on the right side of this catch.
             e instanceof UrnParseError
           ) {
             throw appNotFound();

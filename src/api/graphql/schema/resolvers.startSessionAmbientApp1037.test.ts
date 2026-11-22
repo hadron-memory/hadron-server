@@ -10,7 +10,7 @@ import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
-import type { GraphQLError } from 'graphql';
+import { GraphQLError } from 'graphql';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -100,18 +100,21 @@ describe('#1037 — startSession resolver, explicit App reference', () => {
     // App (existing, as here, or missing) answers the one unknown-App refusal
     // rather than a typed SESSION_APP_MISMATCH that said the other App exists.
     const keyCtx = { db, appId: appB.id, roles: [] } as unknown as Context;
-    const attempt = resolvers.Mutation.startSession(
+    // One call, one non-vacuous assertion (BLIND F1, #4844 fold): the old
+    // shape ran the refusal twice, the second inside a try/catch with no
+    // `expect.fail` — had the call ever resolved, the extensions assertions
+    // were skipped and the test still passed. Capturing the rejection makes
+    // both halves assert on the same single refusal.
+    const e = await resolvers.Mutation.startSession(
       {}, { input: { id: generateId(), appRef: appA.id } }, keyCtx,
+    ).then(
+      () => { throw new Error('expected the concealed unknown-App refusal'); },
+      (x: unknown) => x,
     );
-    await expect(attempt).rejects.toThrow('App not found.');
-    try {
-      await resolvers.Mutation.startSession(
-        {}, { input: { id: generateId(), appRef: appA.id } }, keyCtx,
-      );
-    } catch (e) {
-      expect((e as GraphQLError).extensions?.code).toBe('APP_NOT_FOUND');
-      expect(JSON.stringify((e as GraphQLError).extensions)).toBe('{"code":"APP_NOT_FOUND"}');
-    }
+    expect(e).toBeInstanceOf(GraphQLError);
+    expect((e as GraphQLError).message).toBe('App not found.');
+    expect((e as GraphQLError).extensions?.code).toBe('APP_NOT_FOUND');
+    expect(JSON.stringify((e as GraphQLError).extensions)).toBe('{"code":"APP_NOT_FOUND"}');
   });
 
   it('a pure App-KEY principal is never re-pointed by a ref — a credential is not a selection', async () => {

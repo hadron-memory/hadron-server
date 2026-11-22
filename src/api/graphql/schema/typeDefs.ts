@@ -8489,21 +8489,26 @@ export const typeDefs = `#graphql
     unable to satisfy the team-chat authorship gate (cor:agt:020:04 condition b,
     SESSION_NOT_IN_APP).
 
-    #4836 (hrn:node:hadronmemory.com:specs:cor:dmo:070:05, Proposed; V58;
-    hrn:node:hadronmemory.com:specs:cor:api:140:02's partition): a caller WITHOUT standing gets ONE refusal
-    whatever the App's state and whatever the ref's form - APP_NOT_FOUND,
-    "App not found." - byte-identical for a missing App, a deleted one, an
-    uninstalled one, an existing one the caller cannot touch, a malformed or
-    ambiguous ref, and a pure App key naming any other App (a key reaches only
-    its own App). The refusal echoes no value the caller sent and carries no
-    appId. Standing is App membership - an AppMember at any role, an org member
-    with CONTRIBUTOR+ on its owning org, or the owner of a user-owned App - or
-    a pure App-key credential for exactly its own App. A caller WITH standing
+    #4836 (hrn:node:hadronmemory.com:specs:cor:dmo:070:05, Proposed): a caller
+    WITHOUT standing gets ONE refusal whatever the App's state and whatever the
+    ref's form - APP_NOT_FOUND, "App not found." - byte-identical for a missing
+    App, a deleted one, an uninstalled one, an existing one the caller cannot
+    touch, and a pure App key naming any other App (a key reaches only its own
+    App). The refusal echoes no value the caller sent and carries no appId.
+    Standing is App membership - an AppMember at any role, an org member with
+    CONTRIBUTOR+ on its owning org, or the owner of a user-owned App - or a
+    pure App-key credential for exactly its own App. A caller WITH standing
     keeps the specific answers: APP_UNINSTALLED by PK, with the appId their own
     ref resolved to (by URN an uninstalled App does not resolve at all - App
     URNs are unique only among ACTIVE rows, spec 021 FR-027 - so it reads as
     missing for everyone); and authorization refusals for an act a member may
-    not do elsewhere in this mutation stay FORBIDDEN (V58's exception).
+    not do elsewhere in this mutation stay FORBIDDEN.
+
+    Ref-RESOLUTION failures read as not-found for EVERY caller, standing or
+    not: a malformed or ambiguous ref resolves to no App, so it answers
+    APP_NOT_FOUND to a member exactly as to an outsider - the specific
+    malformed/ambiguous hints the parser can produce elsewhere do not exist
+    on this field, and no ref text is ever echoed back.
     """
     appRef: String
   }
