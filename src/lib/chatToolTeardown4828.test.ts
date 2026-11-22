@@ -119,6 +119,18 @@ describe('#4828 a registration already deleted is never asked of its tool again'
   });
 });
 
+describe('#4828 a URN reclaim over a soft-deleted App tears down the registrations its hard delete would cascade away', () => {
+  it('createApp over the URN of an App deleted BEFORE its connections were torn down asks both tools once, after commit', async () => {
+    const agent = await db.agent.create({ data: { name: 'td agent', urn: 'td-org:agent', organizationId: org.id } });
+    await db.app.update({ where: { id: appA.id }, data: { urn: 'td-org:a', deletedAt: new Date() } });
+    await M.createApp({}, { orgRef: org.id, agentRef: agent.id, name: 'a', urn: 'a' }, ctx(admin.id));
+    await settle();
+    expect(await db.app.findUnique({ where: { id: appA.id } })).toBeNull();
+    expect(calls()).toEqual({ telegram: ['tg-a'], slack: ['sl-a'] });
+    expect(await live()).toEqual({ telegram: ['tg-b', 'tg-other'], slack: ['sl-b', 'sl-other'] });
+  });
+});
+
 describe('#4828 deleteOrganization tears down every registration of the organization', () => {
   it('both providers, both Apps, once each; another organization\'s connections are untouched', async () => {
     await expect(M.deleteOrganization({}, { ref: org.id }, ctx(platform.id, ['ADMIN']))).resolves.toBe(true);
