@@ -8,8 +8,9 @@
 -- already admitted by NULL), so no existing row is refused and no HDPRF branch is needed. chk_grant_events_shape adds the
 -- event half: a WITHDRAW event names a person or a run. The one-revoke branch of hadron_guard_grant tests OLD.revoked_at
 -- instead of OLD.revoked_by, so a run-withdrawn row (revoked_by NULL) is still an ended row no statement may re-stamp.
--- The canonical invariants follow byte for byte (grantRow3668 pins it); they re-add the CHECKs and replace the guard,
--- re-validating both, and take short locks on grants, grant_events and actions, as the carriers before this one do.
+-- The canonical invariants follow byte for byte (grantRow3668 pins it); they re-add the two CHECKs and replace the guard,
+-- re-validating the CHECKs against every row, and take short locks on grants, grant_events and actions, as the carriers
+-- before this one do.
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
 -- carry it (today 20261121200000_grant_agent_withdrawal) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
@@ -163,7 +164,8 @@ BEGIN
   END IF;
   IF TG_OP = 'INSERT' THEN
     IF NEW.activated_at IS NOT NULL OR NEW.verification_kind IS NOT NULL OR NEW.verified_by IS NOT NULL
-       OR NEW.signature_id IS NOT NULL OR NEW.revoked_by IS NOT NULL -- (revoked_at without a person or the marker is refused by chk_grants_shape's end pairing)
+       OR NEW.signature_id IS NOT NULL OR NEW.revoked_by IS NOT NULL
+       -- (a personless revoked_at is refused by chk_grants_shape's end pairing)
        OR NEW.use_count <> 0 OR NEW.version <> 1 OR NEW.holder_departed_at IS NOT NULL OR NEW.withdrawn_at IS NOT NULL THEN
       -- (#4180: a departure cause cannot arrive either: chk_grants_shape admits one only beside the departure stamp refused here)
       RAISE EXCEPTION 'grants must arrive pending' USING ERRCODE = '23514';
