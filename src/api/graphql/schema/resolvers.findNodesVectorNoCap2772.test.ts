@@ -58,11 +58,28 @@ async function reference(where: string, offset: number, limit: number): Promise<
   return rows.map((r) => r.node_id);
 }
 
-async function embed(role: string, noise: number) {
+/**
+ * #4840: the fixture is DETERMINISTIC BY CONSTRUCTION. The query is e1 (dim 2), so a node whose vector is (dim2 = 1,
+ * dim3 = d) has cosine 1/sqrt(1 + d^2), a strictly decreasing function of d, and every other dimension is 0. Node k (by
+ * id order) gets d = base + k * step. The old fill used unseeded random() noise in 766 dimensions, which made the 8 spec
+ * scores near-ties redrawn each run; one near-tie swapped by the HNSW's approximate recall shifted a page by one.
+ * This does NOT make HNSW recall exact, and the assertions below are still comparisons against an exact order. What it
+ * removes is the regime that made a miss likely: 768-dimensional random noise has near-uniform distances (the hard case
+ * for graph search), while these points all lie on ONE curve (one varying coordinate), where the HNSW graph is easy to
+ * navigate and the iterative scan has a clear order to follow. The ranks are also strictly separated: every spec ranks
+ * after every near node (cosine 0.447 at most vs 0.604 at least), adjacent specs differ by about 0.017 or more, and
+ * adjacent near nodes by about 1e-5 or more (about 170x float4's relative resolution of ~6e-8), so the true order is
+ * fixed and unique, never a tie. The evidence that the flake is gone is the loop-run harness (#4840), not a proof.
+ */
+const NEAR_BASE = 0.02;
+const NEAR_STEP = 0.0005; // near d runs 0.02 .. 1.32 over NEAR_N = 2600
+const SPEC_BASE = 2;
+const SPEC_STEP = 0.5; // spec d runs 2 .. 5.5 over SPEC_N = 8
+async function embed(role: string, base: number, step: number) {
   await db.$executeRawUnsafe(`
     INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, chunk_index, char_start, char_end, chunk_text, embedding, created_at)
     SELECT md5(r.id), r.id, r.memory_id, 'chunk', 'test', 'stub-model', ${DIM}, 0, 0, 4, 'body',
-      (SELECT array_agg(CASE WHEN g = 2 THEN 1 ELSE (random() - 0.5) * ${2 * noise} END ORDER BY g)
+      (SELECT array_agg(CASE WHEN g = 2 THEN 1::float8 WHEN g = 3 THEN ${base} + (r.rn - 1) * ${step} ELSE 0::float8 END ORDER BY g)
          FROM generate_series(1, ${DIM}) g WHERE r.rn > 0)::real[]::vector, now()
     FROM (SELECT id, memory_id, row_number() OVER (ORDER BY id) AS rn FROM nodes WHERE memory_id = '${mem}' AND role = '${role}') r`);
 }
@@ -78,8 +95,8 @@ beforeAll(async () => {
   await db.memory.update({ where: { id: mem }, data: { vectorIndexEnabled: true, embeddingSource: 'contentChunks' } });
   await db.node.createMany({ data: Array.from({ length: NEAR_N }, (_, i) => ({ id: generateId(), memoryId: mem, loc: `n${i}`, name: `n${i}`, content: 'body', role: 'review' })) });
   await db.node.createMany({ data: Array.from({ length: SPEC_N }, (_, i) => ({ id: generateId(), memoryId: mem, loc: `s${i}`, name: `s${i}`, content: 'body', role: 'spec' })) });
-  await embed('review', 0.02);
-  await embed('spec', 0.1);
+  await embed('review', NEAR_BASE, NEAR_STEP);
+  await embed('spec', SPEC_BASE, SPEC_STEP);
   // Access: a plain member of the first org, and a memory of ANOTHER org (unreadable to them) whose spec nodes
   // rank AHEAD of every readable spec node.
   memberId = (await db.user.create({ data: { id: generateId(), handle: 'm2772', roles: [] } })).id;
