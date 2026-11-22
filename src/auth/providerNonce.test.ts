@@ -33,12 +33,12 @@ describe('mintProviderNonce', () => {
 describe('nonceExpectation', () => {
   it('a row with a hash is always bound, ceremony or not', () => {
     expect(nonceExpectation({ providerNonceHash: HASH })).toEqual({ bound: HASH });
-    expect(nonceExpectation({ providerNonceHash: HASH, ceremonyNonceHash: 'c' })).toEqual({ bound: HASH });
+    expect(nonceExpectation({ providerNonceHash: HASH, ceremonyNonceHash: 'c' } as { providerNonceHash: string })).toEqual({ bound: HASH });
   });
 
   it('#2282: a row WITHOUT a hash is never skipped, ceremony or not: it has no expectation and the callback refuses it', () => {
     expect(nonceExpectation({})).toBeNull();
-    expect(nonceExpectation({ ceremonyNonceHash: 'c' })).toBeNull();
+    expect(nonceExpectation({ ceremonyNonceHash: 'c' } as { providerNonceHash?: string })).toBeNull();
   });
 });
 

@@ -35,9 +35,14 @@ export type NonceExpectation = { bound: string };
  * Derive the expectation from a claimed state. A row with a hash is bound. A row WITHOUT one returns null, whether it
  * is an ordinary login row or the passkey ceremony branch (step-up), and the callback must refuse it.
  */
-export function nonceExpectation(pending: { providerNonceHash?: string; ceremonyNonceHash?: string }): NonceExpectation | null {
+export function nonceExpectation(pending: { providerNonceHash?: string }): NonceExpectation | null {
   if (pending.providerNonceHash) return { bound: pending.providerNonceHash };
   return null;
+}
+
+/** Counts the refusal of a row with no nonce hash: a passkey-ceremony row or an ordinary login row (#2282). */
+export function refuseUnboundNonce(provider: NonceProvider, pending: { ceremonyNonceHash?: string }): void {
+  recordNonceRefusal(provider, pending.ceremonyNonceHash ? 'ceremony_unbound' : 'unbound');
 }
 
 /** Refusals per provider and reason since boot, so a real-user lockout is visible. Never holds a nonce, token or sub. */

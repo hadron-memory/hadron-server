@@ -410,8 +410,11 @@ describe('#2204 OIDC nonce on the ordinary login legs', () => {
         return wrapped(i, init);
       });
       const before = { ...nonceRefusals[provider] };
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
       const cb = await finish(provider, state);
       expect(cb.status).toBe(400);
+      expect(logged).toHaveBeenCalledWith(`[auth] ${provider} login callback failed: verify_failed`);
+      logged.mockRestore();
       expect(nonceRefusals[provider].unbound).toBe(before.unbound + 1);
       expect(nonceRefusals[provider].ceremony_unbound).toBe(before.ceremony_unbound);
       expect(cb.headers.get('location') ?? '').not.toContain('/auth/callback?code=');

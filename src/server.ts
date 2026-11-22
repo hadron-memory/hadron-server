@@ -53,7 +53,7 @@ import {
   type LoginProvider,
   type NewPendingLogin,
 } from './auth/pendingLoginState.js';
-import { mintProviderNonce, nonceExpectation, recordNonceRefusal } from './auth/providerNonce.js';
+import { mintProviderNonce, nonceExpectation, refuseUnboundNonce } from './auth/providerNonce.js';
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
@@ -666,7 +666,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // exchange (#2282: no row is exempt).
     const nonceExpected = nonceExpectation(pending);
     if (!nonceExpected) {
-      recordNonceRefusal('google', pending.ceremonyNonceHash ? 'ceremony_unbound' : 'unbound');
+      refuseUnboundNonce('google', pending);
       failLoginCallback(res, 'google', 'verify_failed');
       return;
     }
@@ -833,7 +833,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // exchange (#2282: no row is exempt).
     const nonceExpected = nonceExpectation(pending);
     if (!nonceExpected) {
-      recordNonceRefusal('apple', pending.ceremonyNonceHash ? 'ceremony_unbound' : 'unbound');
+      refuseUnboundNonce('apple', pending);
       failLoginCallback(res, 'apple', 'verify_failed');
       return;
     }
