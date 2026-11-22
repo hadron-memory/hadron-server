@@ -45,7 +45,7 @@ const identity = (overrides: Record<string, unknown> = {}) => ({
 
 const ctxFor = (userId: string): Context => ({ db, roles: ['READER'], userId }) as Context;
 
-async function createUser(name: string, orgId: string | null, role: 'OWNER' | 'ADMIN' | 'READER' = 'READER', deletedAt?: Date) {
+async function createUser(name: string, orgId: string | null, role: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER' = 'READER', deletedAt?: Date) {
   const user = await db.user.create({ data: { id: generateId(), email: `${name}@tg.test`, name } });
   if (orgId) await db.orgMember.create({ data: { id: generateId(), organizationId: orgId, userId: user.id, role, deletedAt: deletedAt ?? null } });
   return user;
@@ -97,9 +97,11 @@ describe('createTelegramConnection', () => {
   });
 
   it('a plain member, a revoked member, another org\'s admin and an unknown App get the SAME refusal, and the tool is never called', async () => {
+    const contributor = await createUser('contributor', org.id, 'CONTRIBUTOR'); // the role just below ADMIN
     const messages: string[] = [];
     for (const attempt of [
       () => create(ctxFor(member.id)),
+      () => create(ctxFor(contributor.id)),
       () => create(ctxFor(revoked.id)),
       () => create(ctxFor(foreignAdmin.id)),
       () => create(ctxFor(admin.id), generateId()),
@@ -253,6 +255,8 @@ describe('telegramConnection(ref) and telegramConnections', () => {
     expect(page.total).toBe(1);
     expect(page.items[0]!.id).toBe(connection.id);
     expect(await resolvers.Query.telegramConnections({}, { orgId: org.id }, ctxFor(foreignAdmin.id))).toEqual({ items: [], total: 0 });
+    // The default (no orgId) scope is the caller's own orgs: another org's admin sees nothing of this org's connection.
+    expect(await resolvers.Query.telegramConnections({}, {}, ctxFor(foreignAdmin.id))).toEqual({ items: [], total: 0 });
     expect(await resolvers.Query.telegramConnections({}, { limit: 0 }, ctxFor(member.id))).toEqual({ items: [], total: 1 });
     expect((await resolvers.Query.telegramConnections({}, { offset: -5 }, ctxFor(member.id))).items).toHaveLength(1);
   });
