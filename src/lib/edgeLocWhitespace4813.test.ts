@@ -5,6 +5,10 @@
  * `hadron_create_node` and `hadron_update_node`) stored all three as AUTHORED locs — those pins are red on main.
  * The refusal text must be byte-identical between the doors: the GraphQL `GraphQLError.message` and the MCP refusal
  * text are the same `validateLocOrThrow('loc')` string.
+ *
+ * The second describe pins that the MCP door's refusal is the FULL `validateLocOrThrow` surface — any invalid loc
+ * (charset, over-length), not just whitespace forms — and that an edge LIST holding any invalid loc is refused
+ * atomically: no edge of the list is written (#4813 BLIND findings F1/F3).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
@@ -18,6 +22,10 @@ vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.
 /** The exact `validateLocOrThrow(loc, 'loc')` invalid-charset message both doors must emit (byte-identical parity). */
 const INVALID_LOC =
   'loc is not a valid loc: each ":"-separated segment must use letters, digits, dots, underscores or hyphens, and start and end with a letter or digit.';
+
+/** The `too-long` variant of the same refusal (an atom past 64 chars), from the same `REASON_TEXT` (#4813 BLIND F1). */
+const TOO_LONG_LOC =
+  'loc is not a valid loc: each ":"-separated segment must be at most 64 characters and the whole loc at most 512.';
 
 let user: { id: string };
 let mem: { id: string; urn: string };
@@ -100,5 +108,47 @@ describe.each([['  '], [' a'], ['a ']])('#4813 inline-edge loc %j is refused at 
     await gqlRefusal('createNode', { memoryId: mem.id, loc: 'g', name: 'g', edges: [{ targetId: urn('c'), name: 'uses', loc: form }] });
     expect(await db.node.findFirst({ where: { memoryId: mem.id, loc: 'g' } })).toBeNull();
     expect(await db.edge.count({ where: { memoryId: mem.id } })).toBe(0);
+  });
+});
+
+// #4813 BLIND F1/F3: the MCP door's refusal is the FULL validateLocOrThrow surface, not a whitespace special case —
+// one non-whitespace charset form and one over-length atom — and a list holding ANY invalid loc is refused atomically:
+// no edge of the list is written (validation loops the whole list before any write).
+describe('#4813 MCP inline-edge loc: the full refusal surface, atomically', () => {
+  it('hadron_update_node: a bad-charset loc that is not whitespace is refused with the same text (F1)', async () => {
+    const a = await node('a');
+    await node('c');
+    const mcp = mcpServer();
+    const text = await mcpRefusal(mcp, 'hadron_update_node', { urn: urn('a'), edges: [{ targetUrn: urn('c'), name: 'uses', loc: 'a!b' }] });
+    expect(text).toBe(INVALID_LOC);
+    expect(await db.edge.count({ where: { sourceId: a.id } })).toBe(0);
+  });
+
+  it('hadron_create_node: an over-64-char atom is refused with the too-long text, nothing written (F1)', async () => {
+    await node('c');
+    const mcp = mcpServer();
+    const text = await mcpRefusal(mcp, 'hadron_create_node', { urn: urn('n'), name: 'n', edges: [{ targetUrn: urn('c'), name: 'uses', loc: 'a'.repeat(65) }] });
+    expect(text).toBe(TOO_LONG_LOC);
+    expect(await db.node.findFirst({ where: { memoryId: mem.id, loc: 'n' } })).toBeNull();
+    expect(await db.edge.count({ where: { memoryId: mem.id } })).toBe(0);
+  });
+
+  it('hadron_update_node: a list [valid, invalid] is refused whole — not even the valid edge is written (F3)', async () => {
+    const a = await node('a');
+    await node('c');
+    await node('d');
+    const mcp = mcpServer();
+    await mcpWrite(mcp, 'hadron_update_node', { urn: urn('a'), edges: [{ targetUrn: urn('c'), name: 'uses', loc: 'custom' }] });
+    const text = await mcpRefusal(mcp, 'hadron_update_node', {
+      urn: urn('a'),
+      edges: [
+        { targetUrn: urn('d'), name: 'uses', loc: 'validname' },
+        { targetUrn: urn('c'), name: 'uses', loc: '  ' },
+      ],
+    });
+    expect(text).toBe(INVALID_LOC);
+    // No partial write: the refused list replaced nothing, so the staged authored edge is the whole outgoing set.
+    const edges = await db.edge.findMany({ where: { sourceId: a.id, deletedAt: null } });
+    expect(edges.map((e) => [e.loc, e.locAuthored])).toEqual([['custom', true]]);
   });
 });
