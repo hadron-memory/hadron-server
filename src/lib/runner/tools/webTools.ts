@@ -18,17 +18,18 @@
  * tool-loop's transient path from ever auto-replaying it (D-TL-6). This is the
  * run-loop half of the client's "never auto-retry non-GET" rule.
  *
- * CREDENTIALS: neither tool exposes `auth` to the LLM. Extending the secret
- * store's inject path (#677 — a `credentialName` core resolves and injects,
- * as web_poll_start does, so the secret never enters LLM context) to these
- * one-shot tools is a deferred follow-up; until it lands, runs fetch
- * anonymously. Fetched content / response bodies are
+ * CREDENTIALS: neither tool exposes `auth` to the LLM. web_request alone may name a read client (`secretClientId`, #4000 / #4775):
+ * core resolves the credential under a signed secret.use grant, injects it, asks the tool never to follow a redirect, and redacts the
+ * value from the result, the log and any error before the model sees them (best-effort: the value and its common encodings).
+ * Without a client, runs fetch anonymously. Fetched content / response bodies are
  * UNTRUSTED external input — the tool tags the envelope `source: 'external'`
  * and this surface passes it through unchanged.
  */
 
 import { GraphQLError } from 'graphql';
-import { fetchUrl, httpRequest, type HttpMethod, type HttpRequestInput } from '../../webfetchClient.js';
+import { fetchUrl, httpRequest, type HttpMethod, type HttpRequestInput, type HttpRequestResult, type WebFetchAuth } from '../../webfetchClient.js';
+import { meterRefusedSecretUse, prepareSecretUse } from '../../secrets/readClientReveal.js';
+import { redactSecretUse } from '../../secrets/secretUseRedaction.js';
 import { redactUrl } from '../../webUrl.js';
 import type { RunToolDef } from './types.js';
 
@@ -129,10 +130,6 @@ export const webRequest: RunToolDef = {
   },
   cost: 1,
   execute: async (ctx, args) => {
-    // Fail closed until the no-follow webfetch contract is available; never downgrade a client request to anonymous.
-    if (Object.prototype.hasOwnProperty.call(args, 'secretClientId')) {
-      throw new GraphQLError('Secret use is unavailable.', { extensions: { code: 'NOT_FOUND' } });
-    }
     const method = (typeof args.method === 'string' ? args.method.toUpperCase() : '') as HttpMethod;
     const url = typeof args.url === 'string' ? args.url : '';
     if (!url) throw new Error('web_request: "url" is required.');
@@ -152,10 +149,51 @@ export const webRequest: RunToolDef = {
     if (args.json !== undefined) input.json = args.json;
     const maxBytes = validMaxBytes(args.maxBytes);
     if (maxBytes != null) input.maxBytes = maxBytes;
-    const result = await httpRequest(input);
-    ctx.log(`web_request ${result.method ?? method} ${result.status} ${redactUrl(result.finalUrl ?? url)}`);
-    return result;
+    // #4775 / #4000: a named read client injects its credential. Presence, not truthiness, selects this path, so a malformed reference is
+    // refused (one uniform answer, metered) and never downgraded to an anonymous request.
+    if (!Object.prototype.hasOwnProperty.call(args, 'secretClientId')) {
+      const result = await httpRequest(input);
+      ctx.log(`web_request ${result.method ?? method} ${result.status} ${redactUrl(result.finalUrl ?? url)}`);
+      return result;
+    }
+    const prepared = await prepareSecretUse(ctx, args.secretClientId, url, headers ?? {}).catch(async (error: unknown) => {
+      await meterRefusedSecretUse(ctx, error);
+      throw error;
+    });
+    // Everything past this point holds a live credential: no throw, log line or return value may carry it (cor:sec:030:01, cor:sec:060:02).
+    // The tool is told never to follow a redirect (cor:web:010:02), so the credential reaches no second hop.
+    try {
+      const result = await httpRequest({ ...input, url: prepared.url, auth: prepared.auth, redirects: 'none' });
+      const safe = redactSecretUse(result, prepared.auth) as HttpRequestResult;
+      ctx.log(`web_request ${safe.method ?? method} ${safe.status} ${redactUrl(String(safe.finalUrl ?? url))}`);
+      return safe;
+    } catch (error) {
+      throw scrubSecretUseError(error, prepared.auth);
+    }
   },
 };
+
+/**
+ * A failure raised while a credential was in flight, rebuilt so it carries none of it (#4775, cor:web:010:02 "no leak surface").
+ * Only the tool's stable typed fields survive (the code, the webfetch error code, the status); the message is redacted, and the original
+ * error is dropped, never attached as `cause`, because its own message, extensions and cause chain are the tool's free text.
+ * Best-effort by construction: redaction matches the value and its common encodings (see `redactSecretUse`), so a remote that
+ * transforms the value in another way before echoing it is not caught.
+ */
+function scrubSecretUseError(error: unknown, auth: WebFetchAuth): Error {
+  try {
+    const raw = error instanceof Error ? error.message : String(error);
+    const message = String(redactSecretUse(raw, auth)).slice(0, 500);
+    const ext = error instanceof GraphQLError ? error.extensions : undefined;
+    const extensions: Record<string, unknown> = {};
+    for (const k of ['code', 'webfetchErrorCode', 'status'] as const) {
+      const v = ext?.[k];
+      if (typeof v === 'string' || typeof v === 'number') extensions[k] = typeof v === 'string' ? redactSecretUse(v, auth) : v;
+    }
+    return new GraphQLError(message, { extensions });
+  } catch {
+    return new GraphQLError('web_request failed.', { extensions: { code: 'WEBFETCH_TOOL_ERROR' } });
+  }
+}
 
 export const WEB_TOOLS: readonly RunToolDef[] = [webFetch, webRequest];

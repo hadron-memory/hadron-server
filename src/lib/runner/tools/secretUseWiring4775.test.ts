@@ -88,7 +88,7 @@ describe('#4775 capability-tool error text (acceptance 2)', () => {
   it('an error that carries the value reaches the run failure with none of it, in message or cause', async () => {
     await tickets(1);
     vi.mocked(httpRequest).mockRejectedValue(Object.assign(new GraphQLError(`upstream said Bearer ${CANARY} is bad`, { extensions: { code: 'WEBFETCH_TOOL_ERROR', webfetchErrorCode: 'fetch_failed', status: 502, cause: `Bearer ${CANARY}` } }), { cause: new Error(CANARY) }));
-    const err = await admitAndExecuteTool(webRequest, { method: 'GET', url: URL_OK, secretClientId: clientId }, { toolCtx: ctx }).catch((e) => e);
+    const err = (await admitAndExecuteTool(webRequest, { method: 'GET', url: URL_OK, secretClientId: clientId }, { toolCtx: ctx }).catch((e: unknown) => e)) as Error;
     expect(err).toBeInstanceOf(Error);
     const seen = JSON.stringify({ m: err.message, c: err.cause, x: (err.cause as GraphQLError)?.extensions, cm: (err.cause as Error)?.message, cc: ((err.cause as Error)?.cause as Error)?.message });
     expect(seen).not.toContain(CANARY);
