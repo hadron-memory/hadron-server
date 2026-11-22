@@ -9954,6 +9954,10 @@ export const typeDefs = `#graphql
     Readers: whoever may read the App's roster, with the roster's refusal byte for byte (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
     """
     saturationAlarmWakeRoles(appRef: ID!): SaturationAlarmWakeRoles!
+    """
+    #4921 — the App's role lists, one per purpose (link a defect, the register pick's role route, withdraw a negative review verdict). For whoever may read the App's roster, refused as the roster is (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
+    """
+    appRoleLists(appRef: ID!): AppRoleLists!
 
     """
     #1706 — every worker and model-family availability record in an App
@@ -12879,6 +12883,10 @@ export const typeDefs = `#graphql
     #3323: the App-manager arm also admits the manager's held worker on an instruction, recorded as one app.manager-act event, ids only.
     """
     setSaturationAlarmWakeRoles(appRef: ID!, roles: [String!]!, instruction: ActInstructionInput): SaturationAlarmWakeRoles!
+    """
+    #4921 — set ONE of the App's role lists, the whole list at once. Whoever manages the App only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12): a participant who does not manage it gets APP_MANAGER_REQUIRED, a caller who cannot see the App gets the missing App's answer. Names are trimmed and lower-cased and duplicates collapse; at most 32 names of 1 to 64 characters with no ':' or whitespace; an empty list clears it. Stores the list only: no door reads it yet.
+    """
+    setAppRoleList(appRef: ID!, purpose: AppRolePurpose!, roles: [String!]!, instruction: ActInstructionInput): AppRoleList!
 
     """
     #2831 S1 (hrn:node:hadronmemory.com:specs:cor:agt:060:12) - set an Agent's model group: the name is created or its whole pattern list replaced (no
@@ -19189,6 +19197,34 @@ export const typeDefs = `#graphql
   type TeamAvailability {
     workers: [WorkerAvailability!]!
     families: [ModelFamilyAvailability!]!
+  }
+
+  """
+  #4921 — what an App lists a role list for. The App names the roles; the platform names none.
+  """
+  enum AppRolePurpose {
+    "Who may link a defect to a pull request."
+    DEFECT_LINK
+    "The role route of the register pick."
+    REGISTER_PICK
+    "Who may withdraw a negative review verdict besides the reviewer who recorded it."
+    REVIEW_WITHDRAW
+  }
+
+  "#4921 — one of an App's role lists after a set."
+  type AppRoleList {
+    appId: ID!
+    purpose: AppRolePurpose!
+    "Stored trimmed, lower-cased, de-duplicated and sorted; empty by default."
+    roles: [String!]!
+  }
+
+  "#4921 — an App's role lists, each stored trimmed, lower-cased, de-duplicated and sorted; empty by default."
+  type AppRoleLists {
+    appId: ID!
+    defectLink: [String!]!
+    registerPick: [String!]!
+    reviewWithdraw: [String!]!
   }
 
   """

@@ -8352,6 +8352,15 @@ model AgentTaskStallSchedule {
   /// lower-cased, de-duplicated and sorted (at most 32 names of 1 to 64 characters, no ':' or whitespace); a worker's role
   /// matches regardless of case. Read once, in the transaction that raises the alarm: a later change wakes nobody for it.
   saturationWakeRoles      String[] @default([]) @map("saturation_wake_roles")
+  /// #4921 slice A (hrn:node:hadronmemory.com:specs:cor:agt:060:16 is the precedent) — the roles the App lists for three
+  /// purposes: whoever may link a defect to a pull request, the role route of the register pick, and whoever may withdraw
+  /// a negative review verdict besides its recorder. Whoever manages the App sets each (setAppRoleList). Empty by default,
+  /// and the platform names no role of its own. Same stored form as `saturationWakeRoles`: trimmed, lower-cased,
+  /// de-duplicated and sorted, at most 32 names of 1 to 64 characters, no ':' or whitespace; matched regardless of case.
+  /// Slice A stores them; no door reads them until slice B.
+  defectLinkRoles          String[] @default([]) @map("defect_link_roles")
+  registerPickRoles        String[] @default([]) @map("register_pick_roles")
+  reviewWithdrawRoles      String[] @default([]) @map("review_withdraw_roles")
   updatedAt                DateTime @updatedAt @map("updated_at")
   updatedBy                String?  @map("updated_by")
 
