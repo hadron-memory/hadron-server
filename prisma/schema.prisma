@@ -10216,6 +10216,8 @@ model Grant {
   /// activates one grant, so the column is unique.
   signatureId           String?   @unique @map("signature_id")
   revokedAt             DateTime? @map("revoked_at")
+  /// The person who ended it. #4767 (Grants R6): an agent's own withdrawal through a run records no person —
+  /// null with `withdrawnAt` set (the end's other half, the shape CHECK's rule).
   revokedBy             String?   @map("revoked_by")
   /// #4173 (hrn:node:hadronmemory.com:specs:cor:acl:140:03): the withdrawal marker, a FACT like `revokedAt` and never a state column. Equal to `revokedAt`, set once with
   /// the revoke stamp, on a never-activated row only. Rows withdrawn before #4173 have none and read as revoked.
@@ -10400,7 +10402,8 @@ model GrantSignature {
 ///   prisma/grant-invariants.sql).
 /// - `ACTIVATE` is written when a person's signature activates the grant and names the signer. `REVOKE` and
 ///   `WITHDRAW` are written when a person ends the grant and name that person and, when the act came through a
-///   worker's session, the worker and session. `USE` is written each time the grant is used and names the
+///   worker's session, the worker and session. A `WITHDRAW` may instead be an agent's own act through a run
+///   (#4767): it names no person and carries `runId` alone. `USE` is written each time the grant is used and names the
 ///   worker and session that used it. Each is written in the transaction of the act it records.
 /// - No code writes a `CREATE` event today, and a grant that ends because its holder went gets no event.
 /// - `at` is the database clock.
@@ -10413,7 +10416,7 @@ model GrantEvent {
   id           String   @id @default(cuid())
   grantId      String   @map("grant_id")
   appId        String   @map("app_id")
-  /// CREATE | ACTIVATE | REVOKE | USE (CHECK in grant-invariants.sql).
+  /// CREATE | ACTIVATE | REVOKE | WITHDRAW | USE (CHECK in grant-invariants.sql).
   action       String
   at           DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @db.Timestamp(3)
   actorUserId  String?  @map("actor_user_id")
