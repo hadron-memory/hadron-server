@@ -1731,10 +1731,12 @@ export const agentMutations = {
       // soft-deleted node is still data to preserve) and the scope stays as it
       // was. The transaction's isolation is PINNED to READ COMMITTED, not left
       // to the server default: under REPEATABLE READ the count would reuse the
-      // pre-wait snapshot, miss the node committed during the lock wait, and
-      // the cascade would lose it — the very bug this guard closes. (SERIALIZABLE
-      // would abort the shape instead of re-snapshotting; see the #664
-      // count-then-act refinement.)
+      // pre-wait snapshot and miss the node committed during the lock wait; the
+      // cascade's foreign-key check would then see that row and raise 40001, so
+      // the node is not lost, but the delete rolls back and the revocation,
+      // already committed, surfaces as an error. REPEATABLE READ and SERIALIZABLE
+      // both abort this shape where READ COMMITTED re-snapshots (#4806; see the
+      // #664 count-then-act refinement).
       await ctx.db.$transaction(async (tx) => {
         const scoped = await tx.$queryRaw<Array<{ id: string }>>`
           SELECT id FROM memories

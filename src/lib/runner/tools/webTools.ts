@@ -28,6 +28,7 @@
 
 import { GraphQLError } from 'graphql';
 import { fetchUrl, httpRequest, type HttpMethod, type HttpRequestInput, type HttpRequestResult, type WebFetchAuth } from '../../webfetchClient.js';
+import { assertWebfetchRedirectSafe } from '../../webfetchContract.js';
 import { meterRefusedSecretUse, prepareSecretUse } from '../../secrets/readClientReveal.js';
 import { redactSecretUse } from '../../secrets/secretUseRedaction.js';
 import { redactUrl } from '../../webUrl.js';
@@ -156,6 +157,9 @@ export const webRequest: RunToolDef = {
       ctx.log(`web_request ${result.method ?? method} ${result.status} ${redactUrl(result.finalUrl ?? url)}`);
       return result;
     }
+    // #4882: fail closed BEFORE prepareSecretUse, so a refusal precedes the secret.use ticket, the grant use-count and the secret read.
+    // It depends only on the tool's declared contract, so it is deliberately not metered as a refused use.
+    await assertWebfetchRedirectSafe();
     const prepared = await prepareSecretUse(ctx, args.secretClientId, url, headers ?? {}).catch(async (error: unknown) => {
       await meterRefusedSecretUse(ctx, error);
       throw error;

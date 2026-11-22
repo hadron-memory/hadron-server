@@ -15,6 +15,7 @@
  * The pinned-read-client row (a client pinned to a purged version refuses SUPERSEDED, never NOT_FOUND) needs S3's
  * `secret_read_clients` and is a follow-up under the epic (Bill, chat #104737).
  */
+import { bigintAsString } from '../../test/bigintJson.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -124,7 +125,7 @@ describe('purgeSupersededVersions: retention', () => {
     expect(events.map((e) => e.versionNo)).toEqual([1, 2]);
     expect(events.every((e) => e.outcome === 'OK' && e.ownerType === 'app' && e.ownerId === appId && e.secretName === 'evented')).toBe(true);
     expect(events.every((e) => e.actorUserId === null && e.workerId === null && e.sessionId === null)).toBe(true);
-    expect(JSON.stringify(events)).not.toContain('PURGE-CANARY');
+    expect(JSON.stringify(events, bigintAsString)).not.toContain('PURGE-CANARY');
   });
 
   it('touches only expired superseded rows of any App, and a second pass purges nothing', async () => {

@@ -34,7 +34,7 @@ import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from '../../../lib/retrieval/defaultNodeTypes.js';
 import { checkNodeTypesFilter, NodeTypesFilterError } from '../../../lib/retrieval/nodeTypeList.js';
-import { BooleanQueryError, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
+import { BooleanQueryError, assertQueryLength, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
 import {
   compileNodeWhere,
   compileNodePropertySort,
@@ -1792,6 +1792,8 @@ export const nodeQueries = {
       }
 
       const q = query!.trim();
+      // #435: the raw bound runs before ANY mode work (embed, regex, keyword, hybrid, and the literal fallback, which only sees a q that passed).
+      assertQueryLength(q);
       const effectiveMode = mode ?? 'hybrid';
       const lexFields = (fields ?? undefined) as LexicalField[] | undefined;
       const model = isEmbeddingConfigured() ? getEmbeddingClient().model : null;

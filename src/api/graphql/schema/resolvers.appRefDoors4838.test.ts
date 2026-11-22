@@ -518,23 +518,23 @@ describe('#4838 — createConnectionGrant (grantee ref)', () => {
   });
 });
 
-// ── resolveAppRefConcealed vs the shared fold predicate ────────────────────
-describe('#4838 — resolveAppRefConcealed vs isAppRefResolutionFailure (the intentional difference)', () => {
-  // P3 (#4871 blind delta): two fold lists live in workerRead.ts — the shared
-  // four-class predicate these doors use, and the older two-class
-  // resolveAppRefConcealed (#4836's doors). The difference is INTENTIONAL and
-  // tracked as hadron-server#4876 (the parse-error fold on those doors). This
-  // pin documents the difference so the two lists cannot drift SILENTLY: when
-  // the tracked fold lands, this pin goes red and is updated with it. (The
-  // predicate's own four-class contract is unit-pinned in workerRead.test.ts.)
-  it('a MALFORMED ref KEEPS its typed parse refusal from resolveAppRefConcealed (not the unknown-App answer)', async () => {
-    const e = await resolveAppRefConcealed(db, canary()).then(
+// ── resolveAppRefConcealed shares the fold predicate (#4876) ───────────────
+describe('#4838 / #4876 — resolveAppRefConcealed folds the same four classes as isAppRefResolutionFailure', () => {
+  // This pin used to say a malformed ref KEEPS its typed parse refusal from resolveAppRefConcealed, so the two
+  // lists could not drift silently, until #4876 landed the tracked fold. Now both answer a malformed ref with
+  // the bare unknown-App answer and no echo of the caller's value. (The predicate's own four-class contract is
+  // unit-pinned in workerRead.test.ts.)
+  it('a MALFORMED ref gets the bare unknown-App answer from resolveAppRefConcealed, no echo', async () => {
+    const value = canary();
+    const e: any = await resolveAppRefConcealed(db, value).then(
       () => {
         throw new Error('expected a refusal');
       },
       (x: unknown) => x,
     );
-    expect(e).toBeInstanceOf(UrnNotQualifiedError);
+    expect(e).not.toBeInstanceOf(UrnNotQualifiedError);
+    expect(shape(e)).toEqual(CONCEALED);
+    expect(JSON.stringify(e.toJSON())).not.toContain(value);
   });
 });
 
@@ -549,8 +549,17 @@ describe('#4838 — the teamRole doors\' shared resolveApp (the hard-vanish race
   // one door pins it.
   it('a row that vanishes between resolution and the read is the unknown-App answer', async () => {
     const spy = vi.spyOn(db.app, 'findUnique').mockResolvedValueOnce(null as never);
-    const e = await refusal(M.createTeamRole({}, { appRef: app.id, role: 'oncall', description: 'x' }, ctx(admin.id)));
-    spy.mockRestore();
+    let e: Parameters<typeof shape>[0];
+    try {
+      e = await refusal(M.createTeamRole({}, { appRef: app.id, role: 'oncall', description: 'x' }, ctx(admin.id)));
+      // #4884: the once-mock must have been CONSUMED by resolveApp's read of this App. Without this, a refactor that stops calling
+      // findUnique on this path leaves the mock unused and the pin green for the wrong reason (the answer would then be the real
+      // row's, not the vanished one's). Asserted before mockRestore, which clears the recorded calls.
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ where: { id: app.id } })); // the read of THIS App, not another lookup
+    } finally {
+      spy.mockRestore();
+    }
     expect(shape(e)).toEqual(CONCEALED);
   });
 });

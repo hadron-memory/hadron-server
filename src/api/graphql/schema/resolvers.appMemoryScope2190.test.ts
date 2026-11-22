@@ -24,7 +24,7 @@ import { resolvers, type Context } from './resolvers.js';
 
 const Q = resolvers.Query as any;
 
-type Row = { memoryId: string; memoryUrn: string; name: string; class: string; sources: Array<{ kind: string; agentId: string | null }>; viewerCanWrite: boolean };
+type Row = { memoryId: string; memoryUrn: string; name: string; class: string; description: string | null; sources: Array<{ kind: string; agentId: string | null }>; viewerCanWrite: boolean };
 
 let n: number;
 let org: { id: string; urn: string };
@@ -36,7 +36,7 @@ const mem: Record<string, string> = {};
 
 const ctx = (who: string): Context => ({ db, userId: user[who], roles: ['READER'] });
 
-async function memory(key: string, data: { orgId?: string; class?: string; appId?: string; sharedMemoryOfAgentId?: string } = {}, withNode = true) {
+async function memory(key: string, data: { orgId?: string; class?: string; appId?: string; sharedMemoryOfAgentId?: string; description?: string; isEncrypted?: boolean } = {}, withNode = true) {
   const o = data.orgId === foreignOrg?.id ? foreignOrg : org;
   mem[key] = (await db.memory.create({
     data: {
@@ -46,6 +46,10 @@ async function memory(key: string, data: { orgId?: string; class?: string; appId
       urn: `${o.urn}:${key.toLowerCase()}`,
       appId: data.appId ?? null,
       sharedMemoryOfAgentId: data.sharedMemoryOfAgentId ?? null,
+      // #4890: descriptions on the fixture rows, so the scope row's new field
+      // has real text to carry (or withhold) per the record gate.
+      description: data.description ?? null,
+      isEncrypted: data.isEncrypted ?? false,
     },
   })).id;
   if (withNode) await db.node.create({ data: { memoryId: mem[key], loc: `notes:${key.toLowerCase()}`, name: key, content: key } });
@@ -54,7 +58,7 @@ async function memory(key: string, data: { orgId?: string; class?: string; appId
 
 async function makeAgent(key: string, opts: { orgId?: string; base?: string } = {}) {
   const o = opts.orgId === foreignOrg?.id ? foreignOrg : org;
-  const sys = await db.memory.create({ data: { class: 'system', organizationId: o.id, name: `${key} system`, urn: `${o.urn}:${key}-system` } });
+  const sys = await db.memory.create({ data: { class: 'system', organizationId: o.id, name: `${key} system`, urn: `${o.urn}:${key}-system`, description: `d-sys${key}` } });
   mem[`sys${key}`] = sys.id;
   agent[key] = (await db.agent.create({
     data: { organizationId: o.id, name: key, urn: `${o.urn}:${key}`, visibility: 'ORGANIZATION', systemMemoryId: sys.id, extendsAgentId: opts.base ? agent[opts.base] : null },
@@ -117,20 +121,25 @@ beforeEach(async () => {
   }
   await db.node.create({ data: { memoryId: mem.sysRoot!, loc: 'prompts:boot', name: 'boot', content: 'boot', role: 'boot-prompt' } });
 
-  await memory('KnowA');
+  await memory('KnowA', { description: 'd-KnowA' });
   await memory('KnowShared');
   await memory('KnowEmpty', {}, false);
+  // #4890: an encrypted memory with a description — the record (name,
+  // description) is never enciphered (cor:sec:040:03 is node-level), so its
+  // scope row must carry the description with no key in play.
+  await memory('KnowEnc', { description: 'd-KnowEnc', isEncrypted: true });
   await memory('KnowB');
   await memory('KnowC', { orgId: foreignOrg.id });
   // Linked by Alpha, but in an org Alpha's tenant cannot reach: the link is a
   // limit, never a grant (cor:dmo:050:09), so it caps to nothing.
   await memory('KnowF', { orgId: foreignOrg.id });
-  await memory('TeamSpace', { class: 'app', appId, sharedMemoryOfAgentId: agent.Alpha });
+  await memory('TeamSpace', { class: 'app', appId, sharedMemoryOfAgentId: agent.Alpha, description: 'd-TeamSpace' });
   await memory('WorkerMem', { class: 'app', appId });
   await memory('OtherAppMem', { class: 'app', appId: otherAppId });
   await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId: agent.Alpha!, name: 'Iris', slug: 'iris', memoryId: mem.WorkerMem! } });
 
   await link('Alpha', 'KnowA', 'read-write');
+  await link('Alpha', 'KnowEnc');
   await link('Alpha', 'KnowShared');
   await link('Alpha', 'KnowEmpty');
   await link('Alpha', 'WorkerMem');
@@ -157,13 +166,13 @@ describe('#2190 — the inventory matches appNodes for every principal', () => {
 describe('#2190 — what is in scope, and why', () => {
   it('an org reader who is also an App member: every licensed Agent, the team space, and the inherited base', async () => {
     expect(keysOf(await scopeAll('member'))).toEqual(
-      ['KnowA', 'KnowB', 'KnowEmpty', 'KnowShared', 'TeamSpace', 'sysAlpha', 'sysBeta', 'sysCore'],
+      ['KnowA', 'KnowB', 'KnowEmpty', 'KnowEnc', 'KnowShared', 'TeamSpace', 'sysAlpha', 'sysBeta', 'sysCore'],
     );
   });
 
   it('an org reader who is not an App member gets no team space', async () => {
     expect(keysOf(await scopeAll('reader'))).toEqual(
-      ['KnowA', 'KnowB', 'KnowEmpty', 'KnowShared', 'sysAlpha', 'sysBeta', 'sysCore'],
+      ['KnowA', 'KnowB', 'KnowEmpty', 'KnowEnc', 'KnowShared', 'sysAlpha', 'sysBeta', 'sysCore'],
     );
   });
 
@@ -198,6 +207,87 @@ describe('#2190 — what is in scope, and why', () => {
   });
 });
 
+// #4890 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): the row's new
+// `description` rides the RECORD gate (`canReadMemoryRecord`, the one
+// `Query.memory` applies), never the row's own admission — a row the scope
+// lists but the record gate refuses stays listed, with the description
+// withheld. The memory record is never enciphered (cor:sec:040:03 enciphers
+// node content only), so an encrypted memory's description is carried with no
+// key in play, exactly as `Memory.description` serves it.
+describe('#4890 — description rides the record gate, not the row\'s audience', () => {
+  it('a row whose record the caller can read returns its description', async () => {
+    const rows = await scopeAll('member');
+    const by = (k: string) => rows.find((r) => r.memoryId === mem[k])!;
+    expect(by('KnowA').description).toBe('d-KnowA');
+    expect(by('KnowEnc').description).toBe('d-KnowEnc');
+    expect(by('TeamSpace').description).toBe('d-TeamSpace');
+  });
+
+  it('a row the record gate refuses is still listed, with description null', async () => {
+    // Preconditions, so the scenario cannot silently weaken: an org READER
+    // cannot open the system records (their audience is the installed/
+    // licensed Agent or a manager, never the record-only org-member shortcut,
+    // #1807), while the App lens arm above still lists them — the two gates
+    // genuinely differ for these rows.
+    expect(await Q.memory({}, { ref: mem.sysAlpha! }, ctx('reader'))).toBeNull();
+    expect(await Q.memory({}, { ref: mem.sysCore! }, ctx('reader'))).toBeNull();
+    const rows = await scopeAll('reader');
+    const sysAlpha = rows.find((r) => r.memoryId === mem.sysAlpha)!;
+    const sysCore = rows.find((r) => r.memoryId === mem.sysCore)!;
+    expect(sysAlpha.description).toBeNull();
+    expect(sysCore.description).toBeNull();
+  });
+
+  it('an encrypted memory\'s row returns the same description Memory.description returns', async () => {
+    for (const who of ['reader', 'member', 'admin']) {
+      const row = (await scopeAll(who)).find((r) => r.memoryId === mem.KnowEnc)!;
+      const record = await Q.memory({}, { ref: mem.KnowEnc! }, ctx(who));
+      expect(record?.description, who).toBe('d-KnowEnc');
+      expect(row.description, who).toBe(record!.description);
+    }
+  });
+
+  it('agrees with Query.memory row by row, for every principal', async () => {
+    for (const who of ['reader', 'member', 'external', 'admin']) {
+      for (const row of await scopeAll(who)) {
+        const record = await Q.memory({}, { ref: row.memoryId }, ctx(who));
+        expect(row.description, `${who} on ${keyOf(row.memoryId)}`).toBe(record?.description ?? null);
+      }
+    }
+  });
+
+  it('a memory soft-deleted between the scope snapshot and the page read stays listed, with description null', async () => {
+    // The snapshot and the page read are two queries; every scope arm drops
+    // soft-deleted memories, so the ONLY way a deleted row reaches the page
+    // is this window. `Query.memory` answers null for a soft-deleted record,
+    // so the raced row must withhold the description while staying listed
+    // (the snapshot admitted it). Proxy the snapshot's own findMany (select
+    // id only, where OR appId, no class filter — distinct from every other
+    // memory query in the walk) to soft-delete KnowA right after it admits
+    // the row, before the page read fetches it.
+    const racedMemory = new Proxy(db.memory, {
+      get: (target, prop, recv) => (prop === 'findMany'
+        ? async (args: { select?: { id?: boolean; urn?: boolean }; where?: { OR?: unknown; class?: unknown } }) => {
+            const rows = await target.findMany(args as never);
+            if (args?.select?.id === true && !args?.select?.urn && args?.where?.OR && !args?.where?.class) {
+              await db.memory.update({ where: { id: mem.KnowA! }, data: { deletedAt: new Date() } });
+            }
+            return rows;
+          }
+        : Reflect.get(target, prop, recv)),
+    });
+    const raced = await Q.appMemoryScope({}, { appRef: appId }, {
+      ...ctx('member'),
+      db: new Proxy(db, { get: (t, p, r) => (p === 'memory' ? racedMemory : Reflect.get(t, p, r)) }) as typeof db,
+    });
+    const row = (raced.items as Row[]).find((r) => r.memoryId === mem.KnowA);
+    expect(row).toBeDefined();
+    expect(row!.description).toBeNull();
+    // Parity, stated: a fresh Query.memory for the same caller answers null.
+    expect(await Q.memory({}, { ref: mem.KnowA! }, ctx('member'))).toBeNull();
+  });
+});
+
 describe('#2190 — viewerCanWrite is the viewer\'s createNode gate, not the Agent\'s link', () => {
   it('a read-write link does not make a memory writable for an org reader', async () => {
     const row = (await scopeAll('reader')).find((r) => r.memoryId === mem.KnowA)!;
@@ -212,13 +302,18 @@ describe('#2190 — viewerCanWrite is the viewer\'s createNode gate, not the Age
   it('agrees with createNode, row by row', async () => {
     for (const who of ['reader', 'member', 'admin']) {
       for (const row of await scopeAll(who)) {
-        let wrote = true;
+        let gateAdmitted = true;
         try {
           await (resolvers.Mutation as any).createNode({}, { input: { memoryId: row.memoryId, loc: `probe:${n}-${who}`, name: 'probe' } }, ctx(who));
-        } catch {
-          wrote = false;
+        } catch (err) {
+          // #4890 fixture: an encrypted memory's node creation needs a session
+          // key this bare resolver context cannot hold, so createNode refuses
+          // with SESSION_EXPIRED AFTER the write gate admitted. That refusal
+          // is not the gate disagreeing — viewerCanWrite reports the gate
+          // alone — so only FORBIDDEN counts as "cannot write".
+          gateAdmitted = (err as { extensions?: { code?: string } }).extensions?.code === 'SESSION_EXPIRED';
         }
-        expect(row.viewerCanWrite, `${who} on ${keyOf(row.memoryId)}`).toBe(wrote);
+        expect(row.viewerCanWrite, `${who} on ${keyOf(row.memoryId)}`).toBe(gateAdmitted);
       }
     }
   });
@@ -248,12 +343,12 @@ describe('#2190 — paging (cor:api:120:04)', () => {
   it('reports the whole scope in total, and an offset past the end returns no items', async () => {
     const page = await Q.appMemoryScope({}, { appRef: appId, limit: 2, offset: 100 }, ctx('member'));
     expect(page.items).toEqual([]);
-    expect(page.total).toBe(8);
+    expect(page.total).toBe(9);
   });
 
   it('a limit over the cap returns a page of the cap, never a refusal', async () => {
     const page = await Q.appMemoryScope({}, { appRef: appId, limit: 10_000 }, ctx('member'));
-    expect(page.items).toHaveLength(8);
+    expect(page.items).toHaveLength(9);
   });
 });
 
@@ -296,7 +391,7 @@ describe('#2190 — over the real GraphQL HTTP boundary', () => {
     expect(response.status).toBe(status);
     return response.json() as Promise<{ data?: any; errors?: Array<{ message: string; extensions?: { code?: string } }> }>;
   };
-  const SCOPE = 'query($a: ID!) { appMemoryScope(appRef: $a, limit: 200) { total items { memoryId viewerCanWrite } } }';
+  const SCOPE = 'query($a: ID!) { appMemoryScope(appRef: $a, limit: 200) { total items { memoryId description viewerCanWrite } } }';
   const NODES = 'query($a: ID!) { appNodes(appRef: $a) { memoryId } }';
 
   it('answers an external App participant whom Query.app refuses, with appNodes\' scope', async () => {
@@ -339,6 +434,15 @@ describe('#2190 — over the real GraphQL HTTP boundary', () => {
     const rows = impersonated.data.appMemoryScope.items as Row[];
     expect(rows.map((r) => r.memoryId)).toEqual(own.map((r) => r.memoryId));
     expect(rows.filter((r) => r.viewerCanWrite)).toEqual([]);
+
+    // #4890: under impersonation, each row's description is exactly what
+    // Memory.description returns under the SAME impersonation token — the row
+    // reuses the record gate rather than deciding impersonation itself.
+    for (const row of rows) {
+      const record = await post(token, 'query($r: ID!) { memory(ref: $r) { description } }', { r: row.memoryId });
+      expect(record.errors, keyOf(row.memoryId)).toBeUndefined();
+      expect(row.description, keyOf(row.memoryId)).toBe(record.data.memory?.description ?? null);
+    }
 
     const created = await post(token, 'mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }',
       { i: { memoryId: writable[0]!.memoryId, loc: `probe:imp-${n}`, name: 'probe' } }, 403);

@@ -36,15 +36,17 @@ export const appNotFound = (): GraphQLError =>
 
 /**
  * `resolveAppRef` for the App-scoped team surfaces: an absent ref answers `appNotFound()`, the same bytes a
- * non-participant gets from the gates. Narrow: only the not-found and ambiguous-legacy-URN errors convert (an
- * ambiguous reference would otherwise tell an outsider that SOME App matches it, before any participation check);
- * a database failure propagates. A caller with an ambiguous legacy URN names the App by id instead.
+ * non-participant gets from the gates. Narrow: only the four ref-resolution failures of
+ * {@link isAppRefResolutionFailure} convert (an ambiguous reference would otherwise tell an outsider that SOME App
+ * matches it, before any participation check; #4876: a malformed ref's parser error quotes the caller's value, so a
+ * pasted token would print back); a database failure propagates. A caller with an ambiguous legacy URN names the
+ * App by id instead.
  */
 export async function resolveAppRefConcealed(db: Context['db'], appRef: string): Promise<{ id: string }> {
   try {
     return await resolveAppRef(db, appRef);
   } catch (e) {
-    if (e instanceof AppNotFoundError || e instanceof AmbiguousLegacyUrnError) throw appNotFound();
+    if (isAppRefResolutionFailure(e)) throw appNotFound();
     throw e;
   }
 }
@@ -55,9 +57,8 @@ export async function resolveAppRefConcealed(db: Context['db'], appRef: string):
  * caller's value in their messages, so they fold exactly like `AppNotFoundError` /
  * `AmbiguousLegacyUrnError`; every OTHER failure — a database fault inside the lookup — stays out
  * (the narrow-catch rule, review:narrow-catch-blocks). Shared by the teamRole doors' `resolveApp` and
- * connectionGrant's grantee catch so the class list cannot drift between them. It deliberately folds
- * MORE than {@link resolveAppRefConcealed} above: that helper predates #4838 and serves doors whose
- * parse-error fold is tracked separately (hadron-server#4876). The `UrnParseError` arm is
+ * connectionGrant's grantee catch so the class list cannot drift between them. {@link resolveAppRefConcealed}
+ * uses the same predicate since #4876, so the read doors and the write doors fold one list. The `UrnParseError` arm is
  * unreachable through `resolveAppRef` TODAY — `assertFullyQualifiedUrn` is the API boundary gate and
  * throws `UrnNotQualifiedError` only, and the tolerant `parseUrnInput` never throws — it is kept for
  * a parser swap and pinned as contract, not as a reachable door path (workerRead.test.ts).

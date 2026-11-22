@@ -5,8 +5,11 @@
  * was revoked) and a soft-DELETED ORGANIZATION. Both are a read-time change in `resolveAppInstallation`, so nothing ran.
  *
  * It STAMPS (`holder_departed_at`), as every other departure does: the state is read from the recorded fact (#4173), never computed
- * from the installation at read time. It judges with the SAME predicate as the doors, `resolveAppInstallation`, under the same
- * installation locks (`lockAppInstallations`, App FOR SHARE then rows in id order), and ends with the SAME writer
+ * from the installation at read time. It judges with the SAME predicate as the doors, `resolveAppInstallation`. Per page, in one
+ * transaction, it first takes the EXCLUSIVE authority anchors of every agent on the page (`lockAuthorityAnchors`, #4823), as every
+ * revoker of authority does, so it cannot cycle with the uninstall door. Then it takes the FENCED installation locks
+ * (`lockAppInstallationsFenced`, #4715): every App's structure FOR SHARE, then the agents of all the page's Apps in one global pass,
+ * the named agents FOR NO KEY UPDATE and the witnesses FOR SHARE. It ends with the SAME writer
  * ({@link endAgentGrantsAtApps}: grant rows locked last, in id order; first end stands; the database clock reads the expiry after the
  * lock). It never stamps while an installation exists again, and the stamp is never cleared (re-licensing or restoring the org
  * revives nothing, the database guard refuses it).
