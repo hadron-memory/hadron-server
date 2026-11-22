@@ -16,28 +16,32 @@
  * gate goes, pinned here as behaviour-neutral.
  *
  * The connectionGrant grantee door is RULED DIFFERENT (Holger via Vera, team
- * chat #138453, option "No reach needed"): a connection owner does NOT need to
- * reach the grantee App — granting to a counterparty is the feature, and the
- * owner learning whether that App exists is accepted. Its slice is only the
- * echo: the grantee refusal keeps BAD_USER_INPUT and drops the ref from the
- * message, so a token pasted into appRef by mistake lands in no terminal, CI
- * log or error tracker. The byte-identical table does NOT apply to that door.
+ * chat #138453, option "No reach needed", recorded as cor:dmo:080:04): a
+ * connection owner does NOT need to reach the grantee App — granting to a
+ * counterparty is the feature, and the owner learning whether that App exists
+ * is accepted. Its slice is only the echo: the grantee refusal keeps
+ * BAD_USER_INPUT and drops the ref from the message, so a token pasted into
+ * appRef by mistake lands in no terminal, CI log or error tracker. The
+ * byte-identical table does NOT apply to that door.
  *
  * Red-first: on main the non-participant table is NOT uniform — the write
  * doors answered APP_UNINSTALLED with the appId for an uninstalled App named
  * by PK (before any reach decision), FORBIDDEN for an existing App and for a
  * pure App key naming another App (an existence oracle), and the URN parser's
  * raw echoing UrnNotQualifiedError for a malformed ref; the connectionGrant
- * door answered "Grantee App not found: '<ref>'." verbatim. The rerun with
- * this file held and the production change reverted: 9 of 32 pins fail (the
- * three non-participant tables, the three pure-App-key pins, the read door's
- * malformed fold, and the connectionGrant echo + malformed fold); the 23 that
- * pass are the keeps — participant APP_UNINSTALLED/appId, the by-URN
- * asymmetry, the deleted-App unknown answer, FORBIDDEN for a member who
- * reaches but may not edit, uninstalled read legibility, the no-reach ruling,
- * and the narrow catches (measured 2026-11-22).
+ * door answered "Grantee App not found: '<ref>'." verbatim, and let
+ * AmbiguousLegacyUrnError escape raw (AMBIGUOUS_LEGACY_URN: <ref>). The rerun
+ * with this file held and the production change reverted: 10 of 37 pins fail
+ * (the three non-participant tables, the three pure-App-key pins, the read
+ * door's malformed fold, and the connectionGrant echo + malformed +
+ * ambiguous-legacy folds); the 27 that pass are the keeps — participant
+ * APP_UNINSTALLED/appId, the by-URN asymmetry, the deleted-App unknown
+ * answer, the teamRole doors' ambiguous-legacy fold (main's
+ * resolveAppRefConcealed already folded that class), FORBIDDEN for a member
+ * who reaches but may not edit, uninstalled read legibility, the no-reach
+ * ruling, and the narrow catches (measured 2026-11-22).
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -83,8 +87,15 @@ const shape = (e: GraphQLError) => ({
   extensions: e.extensions ?? {},
 });
 /** A canary value must appear in NO serialized part of a refusal. */
-const noCanary = (e: unknown, canary: string) =>
+const assertNoCanary = (e: unknown, canary: string) =>
   expect(JSON.stringify({ message: (e as GraphQLError).message, extensions: (e as GraphQLError).extensions })).not.toContain(canary);
+
+// F7 (#4871 blind seat): the narrow-catch pins mock `db.app.findFirst` with
+// `rejectedValueOnce`; a test that fails BEFORE the once is consumed would
+// leak the spy into later tests. Restoring every spy after each test closes
+// that hole (vi.restoreAllMocks — restoreAllSpies does not exist on vitest 4;
+// the module mocks above are untouched by it).
+afterEach(() => vi.restoreAllMocks());
 
 // ── fixture ────────────────────────────────────────────────────────────────
 let suffix: string;
@@ -102,6 +113,12 @@ let orgB: { id: string; urn: string };
 let connOwner: { id: string };
 let connId: string;
 let granteeApp: { id: string; urn: string };
+// F4 (#4871 blind seat): two live Apps claiming the SAME legacyUrn. When the
+// primary URN lookup misses, resolveAppRef's alias fallback finds both and
+// throws AmbiguousLegacyUrnError — whose message ECHOES the ref
+// (`AMBIGUOUS_LEGACY_URN: <ref>`), a real fourth class for every fold, and no
+// earlier test produced it.
+let ambiguousUrn: string;
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -173,6 +190,19 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: orgB.id, name: 'ar-grantee', urn: `${orgB.urn}:grantee` },
   });
   granteeApp = { id: ga.id, urn: ga.urn };
+
+  ambiguousUrn = `${orgT.urn}:legacy-dup-${suffix}`;
+  for (const n of ['a', 'b']) {
+    await db.app.create({
+      data: {
+        id: generateId(),
+        organizationId: orgT.id,
+        name: `ar-legacy-dup-${n}`,
+        urn: `${orgT.urn}:dup-${n}-${suffix}`,
+        legacyUrn: ambiguousUrn,
+      },
+    });
+  }
 });
 
 // ── the teamRole write doors ───────────────────────────────────────────────
@@ -259,6 +289,15 @@ for (const [doorName, door] of Object.entries(writeDoors)) {
       expect(e).toBe(fault);
       expect(formatGraphQLError({ message: String((e as Error)?.message) }, e).extensions?.code).toBe('INTERNAL_SERVER_ERROR');
     });
+
+    it('an AMBIGUOUS legacy URN (two live Apps claim it) is the same unknown-App answer (a KEEP: main folded this class already)', async () => {
+      // F4: AmbiguousLegacyUrnError's message echoes the ref raw, so it must
+      // fold — and the throw is caller-INDEPENDENT, so even a participant
+      // (admin) gets the one answer; the reach gate is not what conceals it.
+      const e = await refusal(door(ambiguousUrn, ctx(admin.id)));
+      expect(shape(e)).toEqual(CONCEALED);
+      assertNoCanary(e, suffix);
+    });
   });
 }
 
@@ -267,7 +306,13 @@ describe('#4838 — teamRoles (read)', () => {
   it('a malformed ref folds into the unknown-App answer (canary in no refusal)', async () => {
     const e = await refusal(Q.teamRoles({}, { appRef: canary() }, ctx(contrib.id)));
     expect(shape(e)).toEqual(CONCEALED);
-    noCanary(e, suffix);
+    assertNoCanary(e, suffix);
+  });
+
+  it('an ambiguous legacy URN folds into the unknown-App answer too (same resolveApp)', async () => {
+    const e = await refusal(Q.teamRoles({}, { appRef: ambiguousUrn }, ctx(contrib.id)));
+    expect(shape(e)).toEqual(CONCEALED);
+    assertNoCanary(e, suffix);
   });
 
   it('a soft-deleted App is the unknown-App answer — the deleted-echo branch after the reach gate is gone, behaviour-neutral', async () => {
@@ -298,7 +343,7 @@ describe('#4838 — createConnectionGrant (grantee ref)', () => {
       const e = await refusal(create(ref, ctx(connOwner.id)));
       expect(e.extensions?.code).toBe('BAD_USER_INPUT');
       expect(e.message).toBe('Grantee App not found.');
-      noCanary(e, suffix);
+      assertNoCanary(e, suffix);
       expect(JSON.stringify(e.extensions)).not.toContain('appRef');
     }
   });
@@ -308,12 +353,22 @@ describe('#4838 — createConnectionGrant (grantee ref)', () => {
     expect(e).toBeInstanceOf(GraphQLError);
     expect(e.extensions?.code).toBe('BAD_USER_INPUT');
     expect(e.message).toBe('Grantee App not found.');
-    noCanary(e, suffix);
+    assertNoCanary(e, suffix);
+  });
+
+  it('an AMBIGUOUS legacy grantee URN folds into the no-echo answer too (main let it escape raw)', async () => {
+    // F4, and RED on main: the old grantee catch folded only AppNotFoundError,
+    // so AmbiguousLegacyUrnError escaped verbatim — AMBIGUOUS_LEGACY_URN: <ref>
+    // — echoing the ref into terminals and logs. The shared fold conceals it.
+    const e = await refusal(create(ambiguousUrn, ctx(connOwner.id)));
+    expect(e.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(e.message).toBe('Grantee App not found.');
+    assertNoCanary(e, suffix);
   });
 
   it('a grantee App the owner cannot REACH still receives the grant (the ruling: no reach needed)', async () => {
-    const g = (await create(granteeApp.id, ctx(connOwner.id))) as { id: string; granteeAppId?: string };
-    expect(g.granteeAppId ?? (await db.connectionGrant.findUniqueOrThrow({ where: { id: g.id } })).granteeAppId).toBe(granteeApp.id);
+    const g = (await create(granteeApp.id, ctx(connOwner.id))) as { id: string };
+    expect((await db.connectionGrant.findUniqueOrThrow({ where: { id: g.id } })).granteeAppId).toBe(granteeApp.id);
   });
 
   it('a fault INSIDE the grantee lookup is not folded (narrow catch)', async () => {

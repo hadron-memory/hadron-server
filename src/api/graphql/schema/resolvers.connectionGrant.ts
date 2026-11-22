@@ -4,8 +4,7 @@
 import { GraphQLError } from 'graphql';
 import { type Context, clampListTake, toISO, safeCanonicalUrn } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { AppNotFoundError, AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
-import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { generateId } from '../../../lib/id.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import {
@@ -167,17 +166,13 @@ export const connectionGrantMutations = {
       // a token pasted into appRef by mistake would land in terminals, CI logs
       // and error trackers. The typed code is unchanged (BAD_USER_INPUT), and
       // the EXISTENCE ORACLE is deliberate (Holger via Vera, team chat #138453,
-      // option "No reach needed"): a connection owner does not need to reach
-      // the grantee App — granting to a counterparty is the feature, and the
-      // owner learning whether that App exists is accepted. Only the echo
-      // goes. NARROW catch (review:narrow-catch-blocks): a database failure
-      // inside the lookup propagates.
-      if (
-        e instanceof AppNotFoundError ||
-        e instanceof AmbiguousLegacyUrnError ||
-        e instanceof UrnNotQualifiedError ||
-        e instanceof UrnParseError
-      ) {
+      // option "No reach needed"; recorded as spec cor:dmo:080:04): a
+      // connection owner does not need to reach the grantee App — granting to
+      // a counterparty is the feature, and the owner learning whether that App
+      // exists is accepted. Only the echo goes. NARROW catch
+      // (review:narrow-catch-blocks): a database failure inside the lookup
+      // propagates; the shared class list lives in isAppRefResolutionFailure.
+      if (isAppRefResolutionFailure(e)) {
         throw badInput('Grantee App not found.');
       }
       throw e;

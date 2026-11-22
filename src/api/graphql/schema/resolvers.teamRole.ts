@@ -24,10 +24,8 @@ import { listAppInstallationsWithDerivedLicense } from '../../../lib/appAgent.js
 // provenance to tidy a field with no reader.
 
 import { GraphQLError } from 'graphql';
-import { appNotFound } from '../../../lib/auth/workerRead.js';
+import { appNotFound, isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { AppNotFoundError, AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
-import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
 import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
@@ -254,17 +252,20 @@ async function resolveApp(ctx: Context, appRef: string): Promise<AppRow> {
   try {
     ({ id: appId } = await resolveAppRef(ctx.db, appRef));
   } catch (e) {
-    if (
-      e instanceof AppNotFoundError ||
-      e instanceof AmbiguousLegacyUrnError ||
-      e instanceof UrnNotQualifiedError ||
-      e instanceof UrnParseError
-    ) {
+    if (isAppRefResolutionFailure(e)) {
       throw appNotFound();
     }
     throw e;
   }
-  return ctx.db.app.findUniqueOrThrow({ where: { id: appId } }) as Promise<AppRow>;
+  // findUnique, not findUniqueOrThrow (blind review on #4871): a row that
+  // HARD-vanishes between resolution and this read (the rename-collision
+  // cleanup deletes App rows outright) must fold into the same unknown-App
+  // answer, not surface as a distinguishable INTERNAL_SERVER_ERROR. A
+  // soft-delete in that window is already concealed by the reach gate's own
+  // deletedAt arm, so only the hard-delete race arm lives here.
+  const resolved = await ctx.db.app.findUnique({ where: { id: appId } });
+  if (resolved === null) throw appNotFound();
+  return resolved as AppRow;
 }
 
 /** Shared write-path argument shape. */
@@ -332,10 +333,22 @@ async function writeTeamRole(
   // _NOT_INSTALLED) disclose the App's installed-agent topology (candidate
   // names and URNs), so they are shown only to the audience the teamRoles READ
   // already grants them to — which the reach gate above now decides BEFORE
-  // this call, unconditionally, so a locator error can simply propagate. On
-  // the success path the memory-write gate below remains the sole authority,
-  // so a generic-memory writer who is not an App participant (a cross-org
-  // subscription CONTRIBUTOR) is unaffected.
+  // this call, unconditionally, so a locator error can simply propagate.
+  //
+  // #4838 blind+§10 review, the narrowing question answered by measurement:
+  // the OLD comment here claimed "a generic-memory writer who is not an App
+  // participant (a cross-org subscription CONTRIBUTOR) is unaffected" — that
+  // was FALSE on main already. The definition-edit gate below
+  // (requireMemoryWriteAccess) routes a Team Agent's system memory EXCLUSIVELY
+  // through canManageAgentSystemMemory, whose arms are a live org ADMIN/OWNER
+  // of the owning org, the user-owned Agent's owner, and a platform
+  // ADMIN/OWNER — every one of whom the reach gate above admits
+  // (isAppParticipant covers org CONTRIBUTOR+ and platform roles; the
+  // user-owned App's owner arm covers the owner). No subscription arm reaches
+  // a system memory (memorySubscription grants are knowledge-class only), so
+  // the unconditional reach gate conceals only actors the edit gate REFUSED
+  // anyway (FORBIDDEN before, APP_NOT_FOUND now) and takes no write from any
+  // writer this door ever had. Pinned in resolvers.appRefDoors4838.test.ts.
   const teamAgent = await locateTeamAgent(ctx, app.id, args.teamAgentRef);
   if (!teamAgent.systemMemoryId) {
     throw new GraphQLError(

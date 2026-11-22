@@ -179,6 +179,10 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 //      not reach the grantee App) but no longer echoes the ref: "Grantee App not found."
 //      (was "Grantee App not found: '<ref>'."). The three local appNotFound copies
 //      (`agentTask` / `hostOperation` / `hostAssignment`) are untouched.
+//
+//      Why 0.29.0 and not 0.26.0: 0.26.0–0.28.0 are reserved numbers, taken by the
+//      concurrent surface renumbering recorded in team chat #138407 — this entry takes
+//      the next FREE number past them (blind review on #4871 asked).
 export const HADRON_SERVER_VERSION = '0.29.0';
 
 /**

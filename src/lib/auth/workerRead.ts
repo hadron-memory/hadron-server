@@ -6,6 +6,7 @@ import { listAppInstallations, resolveAppInstallation } from '../appInstallation
 import { resolveAgentRef } from '../entityRef/agentRef.js';
 import { resolveAppRef } from '../entityRef/appRef.js';
 import { AgentNotFoundError, AmbiguousLegacyUrnError, AppNotFoundError } from '../entityRef/errors.js';
+import { UrnNotQualifiedError, UrnParseError } from '../urn.js';
 import { isRunPrincipal } from './runPrincipal.js';
 import { runMayReadTeam } from './runTeamRead.js';
 
@@ -47,6 +48,22 @@ export async function resolveAppRefConcealed(db: Context['db'], appRef: string):
     throw e;
   }
 }
+
+/**
+ * Is `e` one of the four ref-RESOLUTION failures the concealed doors fold into their one unknown-App
+ * answer (#4838)? The URN parser's own errors (`UrnNotQualifiedError` / `UrnParseError`) ECHO the
+ * caller's value in their messages, so they fold exactly like `AppNotFoundError` /
+ * `AmbiguousLegacyUrnError`; every OTHER failure — a database fault inside the lookup — stays out
+ * (the narrow-catch rule, review:narrow-catch-blocks). Shared by the teamRole doors' `resolveApp` and
+ * connectionGrant's grantee catch so the class list cannot drift between them. It deliberately folds
+ * MORE than {@link resolveAppRefConcealed} above: that helper predates #4838 and serves doors whose
+ * parse-error fold is tracked separately.
+ */
+export const isAppRefResolutionFailure = (e: unknown): boolean =>
+  e instanceof AppNotFoundError ||
+  e instanceof AmbiguousLegacyUrnError ||
+  e instanceof UrnNotQualifiedError ||
+  e instanceof UrnParseError;
 
 /**
  * Is `e` one of the refusals the App read gates (`requireWorkerReadAccess`, `requireTeamChatAccess`, the profile
