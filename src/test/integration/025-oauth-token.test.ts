@@ -556,15 +556,28 @@ describe('POST /oauth/token — DB failure containment', () => {
     // async rejections; the try/catch keeps the failure local to
     // the request.
     const { rawCode, verifier, authCodeId } = await seedAuthCode();
-    // #419 adds a separate shared-rate admission before the claim. Let that
-    // transaction commit so this pin still injects failure at CLAIM+MINT.
-    const realTransaction = db.$transaction.bind(db);
+    // #419 adds a separate shared-rate admission before the claim. #4677 (item 5): name the stage
+    // instead of counting calls. The admission's callback (`tx => admitRateInTx(...)`) always runs
+    // for real; the FIRST other transaction (the claim+mint one) is the one that fails.
+    const realTransaction = db.$transaction.bind(db) as (...args: unknown[]) => Promise<unknown>;
+    const stages = { admissionRan: 0, injected: 0 };
     const spy = vi
       .spyOn(db, '$transaction')
-      .mockImplementationOnce(realTransaction)
-      .mockRejectedValueOnce(new Error('simulated DB outage'));
+      .mockImplementation(((fn: unknown, ...rest: unknown[]) => {
+        if (typeof fn === 'function' && fn.toString().includes('admitRateInTx')) {
+          stages.admissionRan += 1;
+          return realTransaction(fn, ...rest);
+        }
+        if (stages.injected === 0) {
+          stages.injected += 1;
+          return Promise.reject(new Error('simulated DB outage'));
+        }
+        return realTransaction(fn, ...rest);
+      }) as never);
     try {
       const res = await postToken(defaultFields(rawCode, verifier));
+      // The named fault fired after admission committed, exactly once.
+      expect(stages).toEqual({ admissionRan: 1, injected: 1 });
       expect(res.status).toBe(500);
       const body = (await res.json()) as Record<string, unknown>;
       expect(body.error).toBe('server_error');
