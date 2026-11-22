@@ -18,6 +18,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
+import { deleteEdgeInDoorTx, nodeDoorTxContext } from '../api/graphql/schema/resolvers.mutation.node.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -29,6 +30,11 @@ vi.mock('../lib/events/nodeWritten.js', async (orig) => ({
   ...(await orig<typeof import('../lib/events/nodeWritten.js')>()),
   publishNodeWritten: vi.fn().mockResolvedValue(undefined),
 }));
+
+vi.mock('../api/graphql/schema/resolvers.mutation.node.js', async (orig) => {
+  const real = await orig<typeof import('../api/graphql/schema/resolvers.mutation.node.js')>();
+  return { ...real, deleteEdgeInDoorTx: vi.fn(real.deleteEdgeInDoorTx) };
+});
 
 let adminId: string;
 let memId: string;
@@ -64,6 +70,7 @@ const namesOf = async (src = source) => (await edgesOf(src)).map((e) => e.name);
 
 beforeEach(async () => {
   vi.mocked(publishNodeWritten).mockClear();
+  vi.mocked(deleteEdgeInDoorTx).mockClear();
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: 'e860-org', urn: 'e860-org' } });
   const a = await db.user.create({ data: { githubId: 8601, githubUsername: 'e860-admin', roles: ['ADMIN'] } });
@@ -214,6 +221,57 @@ describe('removeEdges (#860)', () => {
     const out = await call('hadron_update_node', { urn: nodeUrnOf(source.loc), removeEdges: [pending.id] });
     expect(out).toBe(`Edge not found: "${pending.id}"`);
     expect(await db.pendingEdge.count({ where: { id: pending.id } })).toBe(1);
+  });
+});
+
+describe('removeEdges re-checks the source under the edge lock and takes deleteEdge\'s locks (#860, BLIND P2-1 and P2-2)', () => {
+  it('the shared door refuses an edge that is no longer the expected source\'s, and deletes nothing', async () => {
+    // The preflight read the edge\'s source without a lock; by the time the door holds the edge row lock the edge may be
+    // another node\'s. Modelled directly: an edge of `other`, asked for as `source`\'s.
+    const foreign = await edgeFrom(other, t1, 'foreign');
+    await expect(db.$transaction(async (tx) => {
+      const ctx = await nodeDoorTxContext(admin(), tx, [memId]);
+      await deleteEdgeInDoorTx(tx, ctx, { edgeId: foreign.id, edgeRef: foreign.id, memoryId: memId, expectedSourceId: source.id });
+    })).rejects.toMatchObject({ extensions: { code: 'EDGE_NOT_FOUND' } });
+    expect(await db.edge.count({ where: { id: foreign.id } })).toBe(1);
+    // Without the expectation (deleteEdge\'s own call) the same door deletes it: the check is the new part.
+    await db.$transaction(async (tx) => {
+      const ctx = await nodeDoorTxContext(admin(), tx, [memId]);
+      await deleteEdgeInDoorTx(tx, ctx, { edgeId: foreign.id, edgeRef: foreign.id, memoryId: memId });
+    });
+    expect(await db.edge.count({ where: { id: foreign.id } })).toBe(0);
+  });
+
+  it('removeEdges calls the shared door with this node as the expected source and the EDGE\'s own memory (BLIND P2-1, P2-3)', async () => {
+    await call('hadron_update_node', { urn: nodeUrnOf(source.loc), removeEdges: [e1.id, e2.id] });
+    const calls = vi.mocked(deleteEdgeInDoorTx).mock.calls.map((c) => c[2]);
+    expect(calls).toHaveLength(2);
+    for (const c of calls) {
+      expect(c.expectedSourceId).toBe(source.id);
+      expect(c.memoryId).toBe(memId);
+    }
+    expect(calls.map((c) => c.edgeId).sort()).toEqual([e1.id, e2.id].sort());
+  });
+
+  it('a removal waits for a concurrent writer of the memory row, as deleteEdge does (memory FOR SHARE first)', async () => {
+    let signalHeld!: () => void;
+    let signalRelease!: () => void;
+    const held = new Promise<void>((r) => { signalHeld = r; });
+    const release = new Promise<void>((r) => { signalRelease = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memId} FOR UPDATE`;
+      signalHeld();
+      await release;
+    }, { timeout: 20_000 });
+    await held;
+    let done = false;
+    const removing = call('hadron_update_node', { urn: nodeUrnOf(source.loc), removeEdges: [e2.id] }).then((out) => { done = true; return out; });
+    await new Promise((r) => setTimeout(r, 600));
+    expect(done).toBe(false);          // blocked behind the memory row lock
+    signalRelease();
+    await holder;
+    expect(await removing).toMatch(/1 removed/);
+    expect(await namesOf()).toEqual(['applies-when', 'relates-to']);
   });
 });
 

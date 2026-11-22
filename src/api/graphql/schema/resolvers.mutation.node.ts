@@ -246,9 +246,9 @@ async function assertEdgeWriteMemory(tx: Prisma.TransactionClient, edgeId: strin
 export async function deleteEdgeInDoorTx(
   tx: Prisma.TransactionClient,
   txCtx: Context,
-  args: { edgeId: string; edgeRef: string; memoryId: string },
+  args: { edgeId: string; edgeRef: string; memoryId: string; expectedSourceId?: string },
 ): Promise<void> {
-  const { edgeId, edgeRef, memoryId } = args;
+  const { edgeId, edgeRef, memoryId, expectedSourceId } = args;
   if (!(await isMemoryReadableCached(txCtx, memoryId))) {
     throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
       extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
@@ -258,6 +258,11 @@ export async function deleteEdgeInDoorTx(
   // Writer level of the edge's current source, locked before the edge.
   const lockedEdge = await lockEdgeUnderSourceWriters(tx, txCtx, edgeId);
   if (!lockedEdge || lockedEdge.deleted_at) {
+    throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
+  }
+  // #860: a caller scoped to one source's own edges (hadron_update_node removeEdges) re-checks it on the LOCKED edge: the
+  // preflight read it without a lock, and an edge re-sourced since then is another node's, so not found here.
+  if (expectedSourceId !== undefined && lockedEdge.source_id !== expectedSourceId) {
     throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
   }
   await assertEdgeWriteMemory(tx, edgeId, memoryId);

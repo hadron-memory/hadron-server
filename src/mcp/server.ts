@@ -337,6 +337,7 @@ import {
 import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { deleteEdgeInDoorTx, nodeDoorTxContext } from '../api/graphql/schema/resolvers.mutation.node.js';
+import { lockInstallAuthoritiesFirst } from '../api/graphql/schema/installMemory.js';
 import { validationTaskSetsForNodes } from '../api/graphql/schema/resolvers.validationTaskSet.js';
 import type { ValidationTaskSet } from '../lib/contentValidationReport.js';
 import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
@@ -7336,7 +7337,7 @@ export function createMcpServerInstance(
         if ('error' in r) return refusalResult(r.error);
         resolvedAdds = r.resolved;
       }
-      let removeTargets: Array<{ edgeId: string; ref: string }> | null = null;
+      let removeTargets: Array<{ edgeId: string; ref: string; memoryId: string }> | null = null;
       if (removeEdges !== undefined) {
         removeTargets = [];
         const seen = new Set<string>();
@@ -7356,7 +7357,7 @@ export function createMcpServerInstance(
           if (!owned || owned.sourceId !== existing.id) return notFound;
           if (seen.has(edgeId)) continue;
           seen.add(edgeId);
-          removeTargets.push({ edgeId, ref });
+          removeTargets.push({ edgeId, ref, memoryId: owned.memoryId });
         }
       }
       const edgeWrite = resolvedEdges !== null || resolvedAdds !== null || removeTargets !== null;
@@ -7495,6 +7496,12 @@ export function createMcpServerInstance(
         // authoritative one (Copilot on PR #1165).
         try {
           await db.$transaction(async (tx) => {
+            // #860: removeEdges is deleteEdge's door per item, so it takes deleteEdge's FIRST locks in deleteEdge's order: the
+            // install / Agent-definition authorities, then the memory row FOR SHARE, before any node or loc lock.
+            if (removeTargets !== null) {
+              await lockInstallAuthoritiesFirst(tx, objectCtx(), [existing.memoryId]);
+              await tx.$queryRaw`SELECT id FROM memories WHERE id = ${existing.memoryId} FOR SHARE`;
+            }
             // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
             await lockAgentDefinitionAuthority(tx, auth.userId ?? null, existing.memoryId);
             if (resolvedEdges !== null || resolvedAdds !== null) {
@@ -7618,7 +7625,7 @@ export function createMcpServerInstance(
               if (removeTargets !== null && removeTargets.length > 0) {
                 const txCtx = await nodeDoorTxContext(objectCtx(), tx, [updated.memoryId]);
                 for (const target of removeTargets) {
-                  await deleteEdgeInDoorTx(tx, txCtx, { edgeId: target.edgeId, edgeRef: target.ref, memoryId: updated.memoryId });
+                  await deleteEdgeInDoorTx(tx, txCtx, { edgeId: target.edgeId, edgeRef: target.ref, memoryId: target.memoryId, expectedSourceId: updated.id });
                   edgeReceipt.removed += 1;
                 }
               }
@@ -7662,6 +7669,9 @@ export function createMcpServerInstance(
           // #860: removeEdges' per-item refusals are deleteEdge's own, with its own text.
           if (removeTargets !== null && e instanceof GraphQLError && (e.extensions?.code === 'EDGE_NOT_FOUND' || e.extensions?.code === 'INCLUDE_EDGE_DERIVED')) return refusalResult(e.message);
           if (removeTargets !== null && isCommentGovernedError(e)) return refusalResult((e as Error).message);
+          // #860: whatever else deleteEdge's checks refuse (a boot-prompt row, write access revoked since the preflight) reaches the
+          // caller as deleteEdge's own text, through the same boundary that tool uses; anything untrusted stays a fault.
+          if (removeTargets !== null && e instanceof GraphQLError) return toolErrorResult(e, () => e.message, 'hadron_update_node:removeEdges');
           if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
           const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
