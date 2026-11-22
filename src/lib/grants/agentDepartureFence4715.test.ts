@@ -383,3 +383,59 @@ describe('#4715 two judges that reach the same agents through different Apps do 
     expect(settled.map((r) => r.status), JSON.stringify(settled.map((r) => (r as PromiseRejectedResult).reason?.message?.slice(0, 120)))).toEqual(['fulfilled', 'fulfilled']);
   });
 });
+
+describe('#4896 the judge locks the Apps in the database\'s id order (Anita on #4795, filed as a follow-up of #4808)', () => {
+  /**
+   * `lockAppInstallationsFenced` locks the Apps in ONE statement, `SELECT id FROM apps WHERE id = ANY(..) ORDER BY id FOR SHARE`, so two
+   * judges naming the same Apps in any order take them in the same sequence. Dropping the `ORDER BY` left every existing pin green: the
+   * agent order is pinned, the Apps' was not. This pin observes the LOCK ORDER itself, with no SQL text matched:
+   *   - two Apps whose ids sort opposite to the order they were inserted (the later-sorting one is the heap's first row);
+   *   - a holder takes the EARLIER-sorting App FOR UPDATE, so the judge must wait on it;
+   *   - while it waits, the judge holds the LATER-sorting App only if it locked in heap or input order, not id order: a NOWAIT
+   *     FOR UPDATE on that App succeeds exactly when the judge has not locked it yet.
+   * The judge's transaction turns the index and bitmap scans off, so a statement WITHOUT the ORDER BY returns the heap order (the
+   * production plan may use the primary-key index, which would hide the mutant); WITH the ORDER BY the order is the id order whatever the plan.
+   * The pin states its own precondition: if the unordered read does not come back in the opposite order, it fails loudly instead of passing.
+   * The ids are plain lowercase letters and digits, so the C collation and en_US order them alike.
+   */
+  it('the App that sorts first is locked first: a judge blocked on it holds nothing, so the App that sorts last is still free', async () => {
+    const late = (await db.app.create({ data: { id: 'appzzzz1', name: 'F App late', urn: 'f4715.example:app-late', organizationId: orgId } })).id;
+    const early = (await db.app.create({ data: { id: 'appaaaa1', name: 'F App early', urn: 'f4715.example:app-early', organizationId: orgId } })).id;
+    const noIndex = async (tx: Prisma.TransactionClient) => {
+      await tx.$executeRaw`SET LOCAL enable_indexscan = off`;
+      await tx.$executeRaw`SET LOCAL enable_indexonlyscan = off`;
+      await tx.$executeRaw`SET LOCAL enable_bitmapscan = off`;
+    };
+    const heapOrder = await db.$transaction(async (tx) => {
+      await noIndex(tx);
+      return (await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM apps WHERE id = ANY(${[late, early]})`).map((r) => r.id);
+    });
+    expect(heapOrder, 'PRECONDITION: the unordered read must return the Apps opposite to id order, or this pin cannot tell an ORDER BY from none').toEqual([late, early]);
+
+    const h = await connect();
+    await h.query('BEGIN');
+    const holderPid = Number((await h.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
+    await h.query('SELECT id FROM apps WHERE id = $1 FOR UPDATE', [early]); // the App that sorts FIRST is held
+
+    // the judge names the Apps in the opposite order to the id order too, so a statement following the input order fails the same way
+    const judge = db.$transaction(async (tx) => {
+      await noIndex(tx);
+      await lockAppInstallationsFenced(tx, new Map([[late, [agentId]], [early, [agentId]]]));
+    }, WAITS);
+    const judgeState = track(judge);
+    await waitUntilBlockedBy(holderPid); // the judge reached the held App and WAITS
+    expect(judgeState.done).toBe(false);
+
+    const probe = await connect();
+    await probe.query('BEGIN');
+    let heldByJudge: unknown;
+    try {
+      await probe.query('SELECT id FROM apps WHERE id = $1 FOR UPDATE NOWAIT', [late]);
+    } catch (e) { heldByJudge = e; }
+    await probe.query('ROLLBACK');
+    expect(heldByJudge, 'the waiting judge already holds the App that sorts LAST: it locked the Apps out of id order').toBeUndefined();
+
+    await h.query('COMMIT');
+    await judge; // and it completes once the first App is free
+  });
+});
