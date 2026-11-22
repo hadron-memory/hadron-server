@@ -67,7 +67,7 @@ async function reference(where: string, offset: number, limit: number): Promise<
  * removes is the regime that made a miss likely: 768-dimensional random noise has near-uniform distances (the hard case
  * for graph search), while these points all lie on ONE curve (one varying coordinate), where the HNSW graph is easy to
  * navigate and the iterative scan has a clear order to follow. The ranks are also strictly separated: every spec ranks
- * after every near node (cosine 0.447 at most vs 0.604 at least), adjacent specs differ by about 0.03 or more, and
+ * after every near node (cosine 0.447 at most vs 0.604 at least), adjacent specs differ by about 0.017 or more, and
  * adjacent near nodes by about 1e-5 or more (about 170x float4's relative resolution of ~6e-8), so the true order is
  * fixed and unique, never a tie. The evidence that the flake is gone is the loop-run harness (#4840), not a proof.
  */
