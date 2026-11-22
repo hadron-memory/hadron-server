@@ -50,7 +50,7 @@ async function seedConnection(toolConnectionId = 'tool-conn-tg'): Promise<{ id: 
       organizationId: org.id,
       appId: app.id,
       toolConnectionId,
-      botId: '99',
+      botId: `bot-${toolConnectionId}`,
       botUsername: 'IrisBot',
       displayName: 'Iris',
     },

@@ -136,6 +136,18 @@ describe('createTelegramConnection', () => {
     expect(await db.telegramConnection.count({ where: { deletedAt: null } })).toBe(1);
   });
 
+  it('the same bot on a second App is refused (one ACTIVE connection per bot), tears the tool row down, and a soft-deleted one does not block', async () => {
+    const first = await create();
+    const app2 = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'tg-app2', urn: 'tg-org::tg-app2' } });
+    vi.mocked(createTelegramToolConnection).mockResolvedValue(identity({ id: 'tool-conn-2' }));
+    await expect(create(undefined, app2.id)).rejects.toThrow('This bot is already connected.');
+    expect(deleteTelegramToolConnection).toHaveBeenCalledWith('telegram', 'tool-conn-2');
+    expect(await db.telegramConnection.count({ where: { deletedAt: null } })).toBe(1);
+    await db.telegramConnection.update({ where: { id: first.id }, data: { deletedAt: new Date() } });
+    vi.mocked(createTelegramToolConnection).mockResolvedValue(identity({ id: 'tool-conn-3' }));
+    await expect(create(undefined, app2.id)).resolves.toMatchObject({ appId: app2.id, botId: '99' });
+  });
+
   it('two creates that both pass the pre-check leave one row (the partial unique decides) and tear the loser\'s tool row down', async () => {
     // Hold the first create's tool call until the second has also reached the tool: both have then passed the
     // pre-check (no row yet), so only the partial unique index can refuse the second write.

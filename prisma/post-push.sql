@@ -177,6 +177,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS slack_connections_org_team_active_uniq
 -- model the WHERE clause). Synced with the 20261122000000_telegram_connection migration.
 CREATE UNIQUE INDEX IF NOT EXISTS telegram_connections_app_active_uniq
   ON telegram_connections (app_id) WHERE deleted_at IS NULL;
+-- One ACTIVE connection per bot (Telegram allows one update consumer per bot).
+CREATE UNIQUE INDEX IF NOT EXISTS telegram_connections_bot_active_uniq
+  ON telegram_connections (bot_id) WHERE deleted_at IS NULL;
 
 -- ─── 036-ai-service-config ──────────────────────────────────────────────
 -- A config belongs to exactly one owner (HadronServer / Organization /

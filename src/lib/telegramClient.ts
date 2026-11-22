@@ -160,11 +160,13 @@ export async function createTelegramToolConnection(
 export async function deleteTelegramToolConnection(provider: string, toolConnectionId: string): Promise<void> {
   try {
     const { baseUrl, token } = toolFor(provider);
-    await fetch(`${baseUrl}/connections/${encodeURIComponent(toolConnectionId)}`, {
+    const res = await fetch(`${baseUrl}/connections/${encodeURIComponent(toolConnectionId)}`, {
       method: 'DELETE',
       headers: token ? { authorization: `Bearer ${token}` } : {},
       signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
+    // fetch resolves on 4xx/5xx: a refusal (wrong bearer, tool error) leaves the tool holding the token, so say so.
+    if (!res.ok) console.error(`[telegramClient] tool disconnect refused for ${provider}/${toolConnectionId}: HTTP ${res.status}`);
   } catch (err) {
     console.error(`[telegramClient] tool disconnect failed for ${provider}/${toolConnectionId}:`, err);
   }

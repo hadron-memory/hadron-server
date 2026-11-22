@@ -103,4 +103,13 @@ describe('telegramClient', () => {
     delete process.env.TELEGRAM_TOOL_URL;
     await expect(deleteTelegramToolConnection('telegram', 'tool-1')).resolves.toBeUndefined();
   });
+
+  it('disconnect logs a tool refusal (HTTP 500) and still never throws', async () => {
+    process.env.TELEGRAM_TOOL_URL = 'http://tool.local';
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('no', { status: 500 })));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(deleteTelegramToolConnection('telegram', 'tool-1')).resolves.toBeUndefined();
+    expect(err).toHaveBeenCalledWith(expect.stringContaining('HTTP 500'));
+    err.mockRestore();
+  });
 });

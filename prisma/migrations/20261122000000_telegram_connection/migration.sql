@@ -45,6 +45,10 @@ CREATE INDEX "telegram_connections_app_id_idx" ON "telegram_connections"("app_id
 -- the WHERE clause). Mirrored in prisma/post-push.sql.
 CREATE UNIQUE INDEX "telegram_connections_app_active_uniq" ON "telegram_connections"("app_id") WHERE ("deleted_at" IS NULL);
 
+-- One ACTIVE connection per bot: Telegram allows one update consumer per bot, so the same bot on two Apps would split or
+-- steal its events. Mirrored in prisma/post-push.sql.
+CREATE UNIQUE INDEX "telegram_connections_bot_active_uniq" ON "telegram_connections"("bot_id") WHERE ("deleted_at" IS NULL);
+
 -- CreateIndex
 CREATE INDEX "telegram_event_receipts_created_at_idx" ON "telegram_event_receipts"("created_at");
 

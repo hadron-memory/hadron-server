@@ -12,6 +12,7 @@ import type { Context } from './resolvers.helpers.js';
 import { isOrgMemberOrAdmin, requireOrgRole } from './resolvers.helpers.js';
 
 const ALREADY_CONNECTED = 'This App already has a Telegram connection.';
+const BOT_ALREADY_CONNECTED = 'This bot is already connected.';
 
 export const telegramMutations = {
   /**
@@ -54,14 +55,17 @@ export const telegramMutations = {
           botId: identity.botId,
           botUsername: identity.botUsername,
           displayName: identity.displayName,
-          createdBy: ctx.userId ?? null,
+          createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
       });
     } catch (err) {
       void deleteTelegramToolConnection('telegram', identity.id);
       // A concurrent duplicate meets the PARTIAL unique (telegram_connections_app_active_uniq): same answer as the pre-check.
-      if ((err as { code?: string } | null)?.code === 'P2002') {
-        throw new GraphQLError(ALREADY_CONNECTED, { extensions: { code: 'BAD_USER_INPUT' } });
+      // The partial unique on bot_id (one ACTIVE connection per bot) answers the same way, with its own sentence.
+      const e = err as { code?: string; meta?: { target?: unknown } } | null;
+      if (e?.code === 'P2002') {
+        const botTaken = JSON.stringify(e.meta?.target ?? '').includes('bot_');
+        throw new GraphQLError(botTaken ? BOT_ALREADY_CONNECTED : ALREADY_CONNECTED, { extensions: { code: 'BAD_USER_INPUT' } });
       }
       throw err;
     }

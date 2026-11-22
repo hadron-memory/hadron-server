@@ -3286,6 +3286,12 @@
       "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
+      "name": "telegram_connections_bot_active_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
       "name": "ticker_subscriptions_live_uniq",
       "kind": "unique-index",
       "file": "ticker-invariants.sql",
