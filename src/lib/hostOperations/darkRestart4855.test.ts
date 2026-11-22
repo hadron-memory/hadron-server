@@ -8,6 +8,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
+import { Client } from 'pg';
 import { randomBytes } from 'node:crypto';
 import { db } from '../../integrations/db/client.js';
 import { serveEveryAgent } from '../../test/servedBootPrompt.js';
@@ -472,6 +473,26 @@ describe('#4855 two workers restarting each other at once (blind F1): the id-ord
     const ops = await starts();
     expect(ops.filter((o) => o.workerId === kit).length).toBeLessThanOrEqual(1);
     expect(ops.filter((o) => o.workerId === w.workerId).length).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('#4855 a worker without a covering grant takes no assignment lock on the target (local delta F1)', () => {
+  it('while another transaction holds the target\'s assignment lock, a caller with no grant is refused at once instead of waiting behind it', async () => {
+    const holder = new Client({ connectionString: process.env.DATABASE_URL });
+    await holder.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query(`SELECT pg_advisory_xact_lock(hashtext('agent-task-matcher:worker'), hashtext($1))`, [kit]);
+      await kitSession();
+      const out = await Promise.race([
+        code(restart()),
+        new Promise<string>((r) => setTimeout(() => r('WAITED_ON_THE_LOCK'), 4000)),
+      ]);
+      expect(out).toBe(REFUSED);
+    } finally {
+      await holder.query('ROLLBACK').catch(() => undefined);
+      await holder.end();
+    }
   });
 });
 
