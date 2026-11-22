@@ -6,7 +6,7 @@
  * pg_stat_activity waits, no sleeps), as in the #3851 probe. hrn:node:hadronmemory.com:specs:cor:aut:020:03 (one atomic
  * operation), hrn:node:hadronmemory.com:specs:cor:acl:140:08 (the links read as a deleted user; everything else unchanged).
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
@@ -16,7 +16,8 @@ import { grantTermsFromRow, grantTermsHash } from '../../lib/grants/terms.js';
 import { grantSignaturePayloadBytes, GRANT_SIGNATURE_PAYLOAD_V1 } from '../../lib/signing/grantPayload.js';
 import { newSigningRequestId } from '../../lib/signing/requests.js';
 import { deleteUserAccount } from './deleteUser.js';
-import { DEADLOCK_RETRIES, SERIALIZATION_RETRIES, isSerializationFailure } from '../../lib/serializableRetry.js';
+import { DEADLOCK_RETRIES, SERIALIZATION_RETRIES, isDeadlock, isSerializationFailure } from '../../lib/serializableRetry.js';
+import { purgeCollectedAssetObjects } from '../../lib/asset/purge.js';
 import { insertSoftPasskey, softPasskey } from '../../test/softPasskey.js';
 import { writeNodeToGit } from '../../integrations/github/writeNodeToGit.js';
 import { getBusClient } from '../../lib/bus/index.js';
@@ -24,13 +25,19 @@ import { waitForLockWaiters } from '../../test/lockWait.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
+// #4811 F3: the post-commit asset purge is the one outside effect an erasure always reaches; count it (the real one still runs).
+vi.mock('../../lib/asset/purge.js', async (orig) => {
+  const actual = await orig<typeof import('../../lib/asset/purge.js')>();
+  return { ...actual, purgeCollectedAssetObjects: vi.fn(actual.purgeCollectedAssetObjects) };
+});
 
 const RP = 'localhost';
 const ORIGIN = 'http://localhost';
 const exec = (sql: string, ...params: unknown[]) => db.$executeRawUnsafe(sql, ...params);
 let w: World;
 
-beforeEach(async () => { await cleanDb(db); w = await seedWorld(); vi.mocked(writeNodeToGit).mockClear(); vi.mocked(getBusClient).mockClear(); });
+beforeEach(async () => { await cleanDb(db); w = await seedWorld(); vi.mocked(writeNodeToGit).mockClear(); vi.mocked(getBusClient).mockClear(); vi.mocked(purgeCollectedAssetObjects).mockClear(); });
+afterEach(() => { vi.restoreAllMocks(); });
 
 async function person(tag: string, roles: Array<'ADMIN'> = []) {
   const suffix = generateId().slice(0, 6);
@@ -84,12 +91,25 @@ async function waitForWaiterMatching(re: RegExp, n: number, ms = 15_000) {
     await new Promise((r) => setTimeout(r, 20));
   }
 }
-/** Counts the transactions opened through the client: each attempt of the erasure opens one. */
+/**
+ * Counts, per client, the transactions opened through it (each attempt of the erasure opens one) and the ones that Postgres
+ * aborted as a deadlock (SQLSTATE 40P01, by the same structured test the retry uses), so a test can tell a deadlock re-run
+ * from a serialization re-run (#4811 F2). It intercepts only the public `$transaction` entry by name, and a break is loud:
+ * the counter would stay 0 and every count assertion here fails (pinned by the single-erasure test below, #4811 F7).
+ */
 function counting() {
-  const counter = { transactions: 0 };
+  const counter = { transactions: 0, deadlocks: 0 };
   const proxied = new Proxy(db, {
     get(target, prop, receiver) {
-      if (prop === '$transaction') return (...a: unknown[]) => { counter.transactions += 1; return (target.$transaction as (...x: unknown[]) => unknown)(...a); };
+      if (prop === '$transaction') {
+        return (...a: unknown[]) => {
+          counter.transactions += 1;
+          return (target.$transaction as (...x: unknown[]) => Promise<unknown>)(...a).catch((e: unknown) => {
+            if (isDeadlock(e)) counter.deadlocks += 1;
+            throw e;
+          });
+        };
+      }
       return Reflect.get(target, prop, receiver);
     },
   });
@@ -129,6 +149,7 @@ describe('#4690 crossed erasures deadlock: the aborted erasure is re-run, not su
     const G1 = await signGrant(B.id, A.id); // requester A, issuer B
     const G2 = await signGrant(A.id, B.id); // requester B, issuer A
     const before = await grantState([G1, G2]);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const ca = counting(); const cb = counting();
     const [ra, rb] = await crossedErasures(
       () => deleteUserAccount(ca.db, { targetUserId: A.id, actorUserId: A.id }),
@@ -140,10 +161,17 @@ describe('#4690 crossed erasures deadlock: the aborted erasure is re-run, not su
     const attempts = [ca.counter.transactions, cb.counter.transactions].sort((x, y) => x - y);
     expect(attempts[0]).toBe(1);
     expect(attempts[1]).toBeGreaterThanOrEqual(2);
+    // #4811 F2: the re-run was a DEADLOCK re-run: a 40P01 was seen, by exactly one of the two (a serialization retry alone
+    // would also give attempts >= 2).
+    expect(ca.counter.deadlocks + cb.counter.deadlocks).toBe(1);
     expect(attempts[1]).toBeLessThanOrEqual((SERIALIZATION_RETRIES + 1) * (DEADLOCK_RETRIES + 1));
     // The retried closure is database-only: it never reaches the outside effects this file mocks, on any attempt.
     expect(vi.mocked(writeNodeToGit)).not.toHaveBeenCalled();
     expect(vi.mocked(getBusClient)).not.toHaveBeenCalled();
+    // #4811 F3: and it reaches no outside effect through any other client: no HTTP call, and the post-commit asset purge ran
+    // once per erasure (2), not once per attempt.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(vi.mocked(purgeCollectedAssetObjects)).toHaveBeenCalledTimes(2);
     const users = await db.user.findMany({ where: { id: { in: [A.id, B.id] } }, select: { deletedAt: true } });
     expect(users.every((u) => u.deletedAt !== null)).toBe(true);
     const after = await grantState([G1, G2]);
@@ -153,7 +181,7 @@ describe('#4690 crossed erasures deadlock: the aborted erasure is re-run, not su
       .toEqual(before.map(({ reason, activatedAt, signatureId, verifiedBy }) => ({ reason, activatedAt, signatureId, verifiedBy })));
   });
 
-  it('a crossed erasure by an administrator with a reason keeps one audit id across the re-run: exactly one audit row', async () => {
+  it('a crossed erasure by an administrator with a reason, deadlock-aborted and re-run, leaves exactly one audit row', async () => {
     const admin = await person('admin', ['ADMIN']);
     const A = await person('a'); const B = await person('b');
     const G1 = await signGrant(B.id, A.id);
@@ -164,7 +192,13 @@ describe('#4690 crossed erasures deadlock: the aborted erasure is re-run, not su
       () => deleteUserAccount(cb.db, { targetUserId: B.id, actorUserId: B.id }), G1, G2);
     expect(ra).toEqual({ ok: true });
     expect(rb).toEqual({ ok: true });
-    expect(ca.counter.transactions + cb.counter.transactions).toBeGreaterThanOrEqual(3);
+    // #4811 F1: the administrator's erasure (the one that writes the audit row) is the deadlock victim: the barrier makes A's
+    // wait the older one, so Postgres's detector fires in A's backend. It ran at least twice, after a seen 40P01.
+    expect(ca.counter.deadlocks).toBe(1);
+    expect(ca.counter.transactions).toBeGreaterThanOrEqual(2);
+    expect(cb.counter.deadlocks).toBe(0);
+    // Not claimed: that the audit id is reused across attempts. An aborted attempt rolls its audit insert back, so a row count
+    // cannot tell a minted-once id from one minted per attempt (#4811, LOCAL F1); this pins "one row after the re-run" only.
     expect(await db.userDeletionAudit.count({ where: { targetUserId: A.id } })).toBe(1);
   });
 
@@ -173,26 +207,43 @@ describe('#4690 crossed erasures deadlock: the aborted erasure is re-run, not su
     const G3 = await signGrant(E.id, C.id); const G4 = await signGrant(F.id, D.id);
     const h3 = await holder('SELECT id FROM grants WHERE id = $1 FOR UPDATE', G3);
     const h4 = await holder('SELECT id FROM grants WHERE id = $1 FOR UPDATE', G4);
-    const ec = settle(deleteUserAccount(db, { targetUserId: C.id, actorUserId: C.id }));
-    const ed = settle(deleteUserAccount(db, { targetUserId: D.id, actorUserId: D.id }));
-    await waitForWaiterMatching(/requested_by_user_id|issuer_user_id/, 2);
-    h3.release(); h4.release(); await h3.done; await h4.done;
-    expect(await ec).toEqual({ ok: true });
-    expect(await ed).toEqual({ ok: true });
+    const cc = counting(); const cd = counting();
+    try {
+      const ec = settle(deleteUserAccount(cc.db, { targetUserId: C.id, actorUserId: C.id }));
+      const ed = settle(deleteUserAccount(cd.db, { targetUserId: D.id, actorUserId: D.id }));
+      await waitForWaiterMatching(/requested_by_user_id|issuer_user_id/, 2);
+      h3.release(); h4.release(); await h3.done; await h4.done;
+      expect(await ec).toEqual({ ok: true });
+      expect(await ed).toEqual({ ok: true });
+    } finally { h3.release(); h4.release(); await Promise.allSettled([h3.done, h4.done]); }
+    // #4811 F5: no deadlock happened (a serialization re-run under SERIALIZABLE is allowed, so the transaction count is not pinned).
+    expect([cc.counter.deadlocks, cd.counter.deadlocks]).toEqual([0, 0]);
   });
 
   it('control: the same person erased twice at once: the first completes, the second refuses as not found, never erases twice', async () => {
     const S = await person('s');
     await signGrant(w.user2Id, S.id);
     const h = await holder('SELECT id FROM users WHERE id = $1 FOR UPDATE', S.id);
-    const e1 = settle(deleteUserAccount(db, { targetUserId: S.id, actorUserId: S.id }));
-    const e2 = settle(deleteUserAccount(db, { targetUserId: S.id, actorUserId: S.id }));
-    await waitForLockWaiters(db, 1);
-    h.release(); await h.done;
-    const results = await Promise.all([e1, e2]);
+    const c1 = counting(); const c2 = counting();
+    const e1 = settle(deleteUserAccount(c1.db, { targetUserId: S.id, actorUserId: S.id }));
+    const e2 = settle(deleteUserAccount(c2.db, { targetUserId: S.id, actorUserId: S.id }));
+    let results: Awaited<typeof e1>[];
+    try {
+      await waitForLockWaiters(db, 1);
+      h.release(); await h.done;
+      results = await Promise.all([e1, e2]);
+    } finally { h.release(); await Promise.allSettled([h.done]); }
+    expect(c1.counter.deadlocks + c2.counter.deadlocks).toBe(0); // #4811 F5: refused as not found, not retried as a deadlock
     expect(results.filter((r) => r.ok)).toHaveLength(1);
     const refused = results.find((r) => !r.ok) as { ok: false; e: Error };
     expect(refused.e.message).toBe('User not found');
+  });
+
+  it('the counting client sees a plain erasure: one transaction, no deadlock (#4811 F7: a broken interception fails loudly)', async () => {
+    const P = await person('p');
+    const c = counting();
+    await deleteUserAccount(c.db, { targetUserId: P.id, actorUserId: P.id });
+    expect(c.counter).toEqual({ transactions: 1, deadlocks: 0 });
   });
 
   it('the deadlock retry does not widen isSerializationFailure for other callers (#4318)', () => {
