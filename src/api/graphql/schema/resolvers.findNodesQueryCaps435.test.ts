@@ -39,7 +39,7 @@ beforeEach(async () => {
   await mk('n:bar', 'the bar document about carpentry');
   await mk('n:foobar', 'foo and bar together in one note');
 });
-afterEach(() => resetEmbeddingClientForTests());
+afterEach(() => { vi.restoreAllMocks(); resetEmbeddingClientForTests(); });
 
 describe('#435 the raw length bound, at the findNodes entry', () => {
   it.each(['keyword', 'regex', 'vector', 'hybrid'])('%s: 513 characters is BAD_USER_INPUT, 512 is not', async (mode) => {
@@ -91,6 +91,12 @@ describe('#435 unindexable negation is refused, judged by the database', () => {
     spy.mockRestore();
   });
 
+  it('an accepted negation that matches nothing returns an honest empty result: the relax retry never rewrites a query holding NOT', async () => {
+    const r = await findNodes({ query: 'zzzunknownzzz -bar', mode: 'keyword', filter: { memoryIds: [graph.id] } });
+    expect(r.hits).toEqual([]);
+    expect(r.degraded ?? null).toBeNull();
+  });
+
   it('the relax-to-OR retry of a bare conjunction still works (its OR query is indexable)', async () => {
     const r = await findNodes({ query: 'gardening zzzunknownzzz', mode: 'keyword', filter: { memoryIds: [graph.id] } });
     expect(r.degraded).toBe('and_relaxed_to_or');
@@ -103,6 +109,13 @@ describe('#435 structure overflow degrades to the literal fallback, never a 500'
     ['65 leaves', Array.from({ length: 65 }, (_, i) => `w${i}`).join(' ')],
     ['depth 9', '((((((((( foo )))))))))'],
   ])('keyword: %s', async (_n, query) => {
+    const r = await findNodes({ query, mode: 'keyword', filter: { memoryIds: [graph.id] } });
+    expect(r.degraded).toBe('literal_fallback');
+  });
+
+  it('a quote-heavy 512-character query: the literal fallback (quotes become spaces) still fits and answers', async () => {
+    const query = '"a" '.repeat(128).trim().slice(0, 512);
+    expect(query.length).toBeLessThanOrEqual(512);
     const r = await findNodes({ query, mode: 'keyword', filter: { memoryIds: [graph.id] } });
     expect(r.degraded).toBe('literal_fallback');
   });
