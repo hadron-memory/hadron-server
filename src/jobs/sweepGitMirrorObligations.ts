@@ -1,4 +1,8 @@
-/** #430: retry only recorded failures. No write intent, cloning, startup pass, or second Git transport. */
+/**
+ * #430: retry only recorded failures. No write intent, cloning, startup pass, or second Git transport.
+ * #425: also apply PENDING captures — REMOVE debts the nodes trigger recorded at delete time, before any
+ * attempt — on the next pass, with no backoff wait.
+ */
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { existsSync } from 'fs';
 import { join } from 'path';
@@ -40,12 +44,14 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
       const candidates: DueMemory[] = await db.$queryRaw<DueMemory[]>`
         WITH due AS (
         SELECT m.id AS "memoryId", m.source, m.urn AS "memoryUrn", org.urn AS "orgUrn", m.write_branch AS "writeBranch",
-          MIN(o.last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(o.attempts - 1, 7)), 72)) AS "dueAt"
+          MIN(CASE WHEN o.state = 'PENDING' THEN o.last_attempt_at
+                   ELSE o.last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(o.attempts - 1, 7)), 72) END) AS "dueAt"
         FROM git_mirror_obligations o JOIN memories m ON m.id = o.memory_id JOIN organizations org ON org.id = m.organization_id
-        WHERE o.state IN ('FAILED', 'NOT_CLONED') AND o.attempts < ${MAX_ATTEMPTS}
+        WHERE o.state IN ('PENDING', 'FAILED', 'NOT_CLONED') AND o.attempts < ${MAX_ATTEMPTS}
           AND ${mirrorRetryBranchEligibleSql(Prisma.sql`o.branch`, Prisma.sql`m.write_branch`)}
           AND NOT m.is_encrypted AND m.source IS NOT NULL AND m.organization_id IS NOT NULL AND m.deleted_at IS NULL
-          AND o.last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(o.attempts - 1, 7)), 72) <= ${toNaiveUtc(now)}::timestamp
+          AND (CASE WHEN o.state = 'PENDING' THEN o.last_attempt_at
+                    ELSE o.last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(o.attempts - 1, 7)), 72) END) <= ${toNaiveUtc(now)}::timestamp
         GROUP BY m.id, m.source, m.urn, org.urn, m.write_branch
         ) SELECT * FROM due
         WHERE (${afterDueUtc}::timestamp IS NULL OR ("dueAt", "memoryId") > (${afterDueUtc}::timestamp, ${afterId}::text))
@@ -60,11 +66,13 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
         const rows = await db.$queryRaw<DueRow[]>`
           SELECT node_id AS "nodeId", kind, remove_loc AS "removeLoc", branch
           FROM git_mirror_obligations
-          WHERE memory_id = ${candidate.memoryId} AND state IN ('FAILED', 'NOT_CLONED')
+          WHERE memory_id = ${candidate.memoryId} AND state IN ('PENDING', 'FAILED', 'NOT_CLONED')
             AND ${mirrorRetryBranchEligibleSql(Prisma.sql`branch`, Prisma.sql`${candidate.writeBranch}`)}
             AND attempts < ${MAX_ATTEMPTS}
-            AND last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72) <= ${toNaiveUtc(now)}::timestamp
-          ORDER BY last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72),
+            AND (CASE WHEN state = 'PENDING' THEN last_attempt_at
+                      ELSE last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72) END) <= ${toNaiveUtc(now)}::timestamp
+          ORDER BY (CASE WHEN state = 'PENDING' THEN last_attempt_at
+                         ELSE last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72) END),
             node_id, kind, remove_loc, branch
           LIMIT ${remainingRows}`;
         const byBranch = new Map<string, DueRow[]>();

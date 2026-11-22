@@ -65,6 +65,8 @@ import { gitMirrorSweepTick } from '../../jobs/sweepGitMirrorObligations.js';
 import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
 import { nodeFilePath } from './nodeFrontmatter.js';
 import { memoryLocalPath } from './gitMirrorCheckout.js';
+import { writeNodeToGit } from './writeNodeToGit.js';
+import { validateMemoryNodes } from '../../lib/memoryValidation.js';
 
 const IDENT = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 const git = (cwd: string, ...args: string[]) =>
@@ -163,6 +165,16 @@ describe('#425 a node delete leaves a PENDING REMOVE obligation', () => {
     expect(await rows()).toEqual([owed(node.id, 'docs:a', 'feature/x')]);
   });
 
+  it('a {client} template write branch owes nothing: no client identity to key the debt on', async () => {
+    // The eligibility predicates accept the raw template as fitting itself, so a row keyed on it would be
+    // routed to a literal client/{client} branch (findings:raw-template-branch-fits-itself). #3042: never
+    // substitute an unknown client — a templated delete does not propagate, as on main today.
+    await setup({ repo: false, writeBranch: 'client/{client}' });
+    const node = await makeNode('docs:a');
+    await softDelete(node.id);
+    expect(await rows()).toEqual([]);
+  });
+
   it('a hard-deleted node owes the same row', async () => {
     await setup({ repo: false });
     const node = await makeNode('docs:a');
@@ -241,6 +253,35 @@ describe('#425 a node delete leaves a PENDING REMOVE obligation', () => {
     await softDelete(node.id);
     expect(await rows()).toEqual([owed(node.id, 'docs:a')]);
   });
+
+  it('a fresh capture reads as waiting for the sweep, not as a failure against the repository', async () => {
+    await setup({ repo: false });
+    const node = await makeNode('docs:a');
+    await softDelete(node.id);
+    const findings = (await validateMemoryNodes(db, memoryId)).findings.filter(f => f.kind === 'GIT_MIRROR_FAILED');
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.detail).toBe('Git mirror removal of this path is waiting for the next mirror sweep; not yet applied');
+    expect(findings[0]!.nodeLoc).toBe('docs:a');
+  });
+
+  it('a restore also cancels an own-loc row the sweep exhausted; a vacated-loc row survives', async () => {
+    await setup({ repo: false });
+    const node = await makeNode('docs:a');
+    await softDelete(node.id);
+    // Age the capture to EXHAUSTED exactly as ten failed attempts leave it: the sweep no longer selects
+    // such a row, so without this cancellation it would read as a mirror failure forever after a restore.
+    await db.gitMirrorObligation.updateMany({
+      where: { memoryId },
+      data: { state: 'EXHAUSTED', errorClass: 'PUSH_FAILED', attempts: 10 },
+    });
+    // A move's vacated-loc debt on the same node is not the node's current file: the move still owes it.
+    await db.gitMirrorObligation.create({ data: {
+      memoryId, nodeId: node.id, kind: 'REMOVE', removeLoc: 'docs:old', branch: 'hadron-updates',
+      state: 'FAILED', errorClass: 'PUSH_FAILED', attempts: 2, attemptSeq: 2n, lastAttemptAt: new Date(),
+    } });
+    await restore(node.id);
+    expect(await rows()).toEqual([expect.objectContaining({ removeLoc: 'docs:old', state: 'FAILED' as const })]);
+  });
 });
 
 describe('#425 the sweep applies a PENDING REMOVE obligation', () => {
@@ -293,6 +334,24 @@ describe('#425 the sweep applies a PENDING REMOVE obligation', () => {
     expect(await rows()).toEqual([expect.objectContaining({
       nodeId: node.id, kind: 'REMOVE' as const, removeLoc: 'docs:a', state: 'FAILED' as const, errorClass: 'BRANCH_SETUP' as const, attempts: 2,
     })]);
+  });
+
+  it('a restore after the debt was applied re-writes the file: it is never left removed', async () => {
+    await setup();
+    const root = await makeNode('');
+    const node = await makeNode('docs:a');
+    writeFrontmatterNode(join(local, 'README.md'), { id: root.id, name: 'root' }, 'root');
+    writeFrontmatterNode(nodeFilePath(local, 'docs:a'), { id: node.id, name: 'a' }, 'body');
+    commitFixtures(['README.md', 'docs/a.md']);
+    await softDelete(node.id);
+    await gitMirrorSweepTick(db, new Date(Date.now() + 60_000));
+    expect(await rows()).toEqual([]);
+    expect(git(env.bare, 'ls-tree', '-r', '--name-only', 'hadron-updates')).not.toContain('docs/a.md');
+    // The applied debt is gone; the restore runs the ordinary mirror write every writer runs, and the
+    // file comes back (item 2: never left removed).
+    const restored = await restore(node.id);
+    await writeNodeToGit({ ...restored, outgoingEdges: [] }, '', null, memoryId);
+    expect(git(env.bare, 'ls-tree', '-r', '--name-only', 'hadron-updates')).toContain('docs/a.md');
   });
 });
 
