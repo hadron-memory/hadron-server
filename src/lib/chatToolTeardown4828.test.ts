@@ -131,6 +131,20 @@ describe('#4828 a URN reclaim over a soft-deleted App tears down the registratio
   });
 });
 
+describe('#4828 the dependent-App reclaim tears down too', () => {
+  it('a required dependency whose App URN collides with a soft-deleted App holding live registrations asks both tools once', async () => {
+    const parent = await db.agent.create({ data: { name: 'td parent', urn: 'td-org:parent', organizationId: org.id } });
+    const dep = await db.agent.create({ data: { name: 'td dep', urn: 'td-org:dep', organizationId: org.id } });
+    await db.agentOrgGrant.create({ data: { orgId: org.id, agentId: dep.id, activatedAt: new Date() } });
+    await db.agentImport.create({ data: { parentAgentId: parent.id, importedAgentId: dep.id, position: 100, required: true, agentOrgGrantOrgId: org.id, agentOrgGrantAgentId: dep.id } });
+    await db.app.update({ where: { id: appB.id }, data: { urn: 'td-org:dep', deletedAt: new Date() } });
+    await M.createApp({}, { orgRef: org.id, agentRef: parent.id, name: 'fresh', urn: 'fresh' }, ctx(admin.id));
+    await settle();
+    expect(await db.app.findUnique({ where: { id: appB.id } })).toBeNull();
+    expect(calls()).toEqual({ telegram: ['tg-b'], slack: ['sl-b'] });
+  });
+});
+
 describe('#4828 deleteOrganization tears down every registration of the organization', () => {
   it('both providers, both Apps, once each; another organization\'s connections are untouched', async () => {
     await expect(M.deleteOrganization({}, { ref: org.id }, ctx(platform.id, ['ADMIN']))).resolves.toBe(true);
