@@ -156,6 +156,29 @@ describe('#4779 P3-4: hybrid pages are slices of one fused order (no repeat, no 
   }, 60_000);
 });
 
+describe('#4779 SEC10 P2-1 (Rook): the vector rank lookup ranks only the eligible set', () => {
+  // Unfiltered vector order: A, B, X, E, ... A closer node that is excluded or filtered out must not shift a rank.
+  const ranksOf = (extra: Record<string, unknown>, nodeIds: string[]) => (provider as any).vectorRanks({
+    db, queryEmbedding: q(), memoryIds: [mem], nodeIds: nodeIds.map((n) => id[n]), ...extra,
+  }).then((r: { ranks: Map<string, number> }) => Object.fromEntries(nodeIds.map((n) => [n, r.ranks.get(id[n]!) ?? null])));
+
+  it('unfiltered: the exact positions', async () => {
+    expect(await ranksOf({}, ['A', 'X', 'E'])).toEqual({ A: 1, X: 3, E: 4 });
+  }, 60_000);
+  it('the caller\'s exclusions: excluded A and B are absent and do not count ahead of X', async () => {
+    expect(await ranksOf({ excludeNodeIds: [id.A, id.B] }, ['A', 'B', 'X', 'E'])).toEqual({ A: null, B: null, X: 1, E: 2 });
+  }, 60_000);
+  it('the structured filter: only nodes it admits are ranked, among themselves', async () => {
+    expect(await ranksOf({ filter: { locPrefix: 'n-E' } }, ['A', 'E'])).toEqual({ A: null, E: 1 });
+  }, 60_000);
+  it('the deleted rule: a soft-deleted closer node is absent and does not count ahead', async () => {
+    await db.node.update({ where: { id: id.A! }, data: { deletedAt: new Date() } });
+    try {
+      expect(await ranksOf({ filter: { locPrefix: 'n-' } }, ['A', 'B'])).toEqual({ A: null, B: 1 });
+    } finally { await db.node.update({ where: { id: id.A! }, data: { deletedAt: null } }); }
+  }, 60_000);
+});
+
 describe('#4779 P3-1: a page left short by hydration', () => {
   it('vector: a ranked node dropped at hydration is replaced by one deeper re-ranking, not left as a short page', async () => {
     const original = provider.vectorSearch.bind(provider);
