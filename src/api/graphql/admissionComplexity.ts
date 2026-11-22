@@ -145,7 +145,9 @@ export const FIXED_LIST_SIZE: Readonly<Record<string, number>> = {
 /**
  * #4758: statements `App.selfJoin` pays per App it reaches on a list, MEASURED (marginal statements per added App, a list of 1 vs 5
  * Apps, resolvers.appSelfJoinPolish4758.test.ts): 8 after the per-request batching of the App and membership reads (9 before). The
- * rest is the shared read gate and joinApp's own decision, which this field must call rather than copy.
+ * batched App and membership reads cost two statements per chunk of 500 Apps, so their marginal share per App is near zero and the
+ * 8 is the shared read gate and joinApp's own decision (two reads), which this field must call rather than copy. The two per-chunk
+ * statements are a fixed per-request overhead, not part of this per-App figure.
  */
 export const APP_SELF_JOIN_COST = 8;
 

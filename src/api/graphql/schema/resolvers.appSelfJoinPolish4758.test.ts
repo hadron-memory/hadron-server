@@ -101,6 +101,14 @@ describe('#4758 item 4: the field calls the exported decision', () => {
   });
 });
 
+describe('#4758 BLIND P2-1: the facts loader never runs without a user', () => {
+  it('refuses a context with no userId instead of dropping the membership filter', async () => {
+    const { loadSelfJoinFacts } = await import('./resolvers.appSelfJoinFacts.js');
+    const ctx = { db, userId: undefined, roles: [] } as unknown as Context;
+    await expect(loadSelfJoinFacts(ctx, 'any-app')).rejects.toThrow(/authenticated user/);
+  });
+});
+
 describe('#4758 item 5: the cost of selfJoin selected on a list', () => {
   it('the admission cost carries an entry for the field, added to its children', async () => {
     const { FIXED_FIELD_COST, APP_SELF_JOIN_COST } = await import('../admissionComplexity.js');

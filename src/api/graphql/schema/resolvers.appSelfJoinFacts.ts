@@ -27,13 +27,13 @@ export interface SelfJoinFactsCache {
   batch: Batch | null;
 }
 
-async function evaluate(ctx: Context, ids: string[]): Promise<Map<string, SelfJoinFacts>> {
+async function evaluate(ctx: Context, userId: string, ids: string[]): Promise<Map<string, SelfJoinFacts>> {
   const out = new Map<string, SelfJoinFacts>();
   for (let i = 0; i < ids.length; i += APP_CHUNK) {
     const chunk = ids.slice(i, i + APP_CHUNK);
     const [apps, members] = await Promise.all([
       ctx.db.app.findMany({ where: { id: { in: chunk } }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true } }),
-      ctx.db.appMember.findMany({ where: { appId: { in: chunk }, userId: ctx.userId! }, select: { appId: true } }),
+      ctx.db.appMember.findMany({ where: { appId: { in: chunk }, userId }, select: { appId: true } }),
     ]);
     const member = new Set(members.map((m) => m.appId));
     for (const app of apps) out.set(app.id, { app, isMember: member.has(app.id) });
@@ -43,6 +43,10 @@ async function evaluate(ctx: Context, ids: string[]): Promise<Map<string, SelfJo
 
 /** The fresh App row and the caller's membership for one App; null when the App does not exist. Requires `ctx.userId`. */
 export function loadSelfJoinFacts(ctx: Context, appId: string): Promise<SelfJoinFacts | null> {
+  // BLIND P2-1: a missing user must never reach the membership read, where `userId: undefined` drops the filter and every App
+  // with any member would read isMember true. Refuse here, not only in the field resolver, so no future caller can fail open.
+  const userId = ctx.userId;
+  if (!userId) return Promise.reject(new Error('loadSelfJoinFacts requires an authenticated user'));
   const cache = (ctx.selfJoinFactsCache ??= { facts: new Map(), batch: null });
   const hit = cache.facts.get(appId);
   if (hit) return hit;
@@ -53,7 +57,7 @@ export function loadSelfJoinFacts(ctx: Context, appId: string): Promise<SelfJoin
       ids,
       done: Promise.resolve().then(() => {
         cache.batch = null;
-        return evaluate(ctx, [...ids]);
+        return evaluate(ctx, userId, [...ids]);
       }),
     };
     cache.batch = created;
