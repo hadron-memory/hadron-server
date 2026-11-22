@@ -446,6 +446,25 @@ describe('the App, its AppAgent link and its Agent are held while the write deci
     expect(await refusal(principalOf(a))).toBe(REFUSED);
   }, 30_000);
 
+  it('an App uninstall that holds first makes the judgement wait, then see the uninstall and refuse (unlink-first, #4664)', async () => {
+    const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
+    await judgeBehindHeldChange(a, (tx) => tx.app.update({ where: { id: a }, data: { uninstalledAt: new Date() } }), false);
+    expect(await refusal(principalOf(a))).toBe(REFUSED);
+  }, 30_000);
+
+  it('an Agent deletion that holds first makes the judgement wait, then see the deleted Agent and refuse (unlink-first, #4664)', async () => {
+    const own = await agent(org.id, null);
+    const a = await app({ orgId: org.id, agents: [own] });
+    await judgeBehindHeldChange(a, (tx) => tx.agent.update({ where: { id: own }, data: { deletedAt: new Date() } }), false);
+    expect(await refusal(principalOf(a))).toBe(REFUSED);
+  }, 30_000);
+
+  it('positive control: an unrelated App edit that holds first also makes the judgement wait, and the judgement then still qualifies', async () => {
+    const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
+    await judgeBehindHeldChange(a, (tx) => tx.app.update({ where: { id: a }, data: { name: 'held-edit' } }), true);
+    expect(await refusal(principalOf(a))).not.toBe(REFUSED);
+  }, 30_000);
+
   it('the race helper surfaces a fast failure of the competing change as itself, and rejects a change that never waited', async () => {
     const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
     await expect(raceHeldJudgement(a, () => Promise.reject(new Error('boom from the competing change')))).rejects.toThrow('boom from the competing change');
