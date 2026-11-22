@@ -143,10 +143,11 @@ export async function createTelegramToolConnection(
   provider: string,
   input: { botToken: string; appId: string },
 ): Promise<TelegramToolConnectionIdentity> {
-  // #4829: a core-derived registrationKey makes a retry after a lost response the SAME registration. A tool that does
-  // not know the field ignores it and behaves exactly as before (the 400 on a duplicate bot).
+  // #4829: a core-derived registrationKey lets a tool that supports it recognise a retry after a lost response as the
+  // SAME registration. A tool that does not know the field ignores it and behaves exactly as before (the 400 on a
+  // duplicate bot). The key is scrubbed from any error like the token.
   const body = { botToken: input.botToken, registrationKey: toolRegistrationKey(provider, input.appId, [input.botToken]) };
-  const identity = await postToTool<TelegramToolConnectionIdentity>(provider, '/connections', body, [input.botToken]);
+  const identity = await postToTool<TelegramToolConnectionIdentity>(provider, '/connections', body, [input.botToken, body.registrationKey]);
   const required: (keyof TelegramToolConnectionIdentity)[] = ['id', 'botId', 'botUsername', 'displayName'];
   const invalid = required.some((k) => typeof identity[k] !== 'string' || (identity[k] as string).trim() === '');
   if (invalid || identity.provider !== provider) {

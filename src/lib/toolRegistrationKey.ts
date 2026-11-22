@@ -14,10 +14,12 @@
 import { createHash } from 'node:crypto';
 
 export function toolRegistrationKey(provider: string, appId: string, credentials: readonly string[]): string {
+  // A key built without an App would be shared by every App: refuse, rather than fail late or adopt across Apps.
+  if (typeof appId !== 'string' || appId === '') throw new Error('toolRegistrationKey: appId is required');
   const h = createHash('sha256');
   // Length-prefixed parts: no choice of values can make two different inputs hash the same byte stream.
   for (const part of ['hadron-tool-registration:v1', provider, appId, ...credentials]) {
-    h.update(`${part.length}:`);
+    h.update(`${Buffer.byteLength(part)}:`); // BYTES, matching what is hashed
     h.update(part);
   }
   return h.digest('hex');

@@ -162,7 +162,70 @@ describe('#4829 lost registration response — Slack', () => {
   });
 });
 
+describe('#4829 a repeat or concurrent registration must not tear down the winner\'s tool row', () => {
+  const settle = () => new Promise((r) => setTimeout(r, 20)); // the teardown is fire-and-forget
+
+  it('Slack: the same App registering the same install again is refused and the live connection keeps its tool row', async () => {
+    const tool = fakeTool('keyed', slIdentity);
+    vi.stubGlobal('fetch', vi.fn(tool.handler));
+    const first = await createSl(appA.id);
+    await expect(createSl(appA.id)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    await settle();
+    expect(tool.live().map((r) => r.id)).toEqual([first.toolConnectionId]);
+    expect(await liveSl()).toHaveLength(1);
+  });
+
+  it('Slack: two concurrent registrations leave one core row pointing at a live tool row', async () => {
+    const tool = fakeTool('keyed', slIdentity);
+    vi.stubGlobal('fetch', vi.fn(tool.handler));
+    const results = await Promise.allSettled([createSl(appA.id), createSl(appA.id)]);
+    await settle();
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const rows = await liveSl();
+    expect(rows).toHaveLength(1);
+    expect(tool.live().map((r) => r.id)).toEqual([rows[0]!.toolConnectionId]);
+  });
+
+  it('Telegram: two concurrent registrations leave one core row pointing at a live tool row', async () => {
+    const tool = fakeTool('keyed', tgIdentity);
+    vi.stubGlobal('fetch', vi.fn(tool.handler));
+    const results = await Promise.allSettled([createTg(appA.id), createTg(appA.id)]);
+    await settle();
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const rows = await liveTg();
+    expect(rows).toHaveLength(1);
+    expect(tool.live().map((r) => r.id)).toEqual([rows[0]!.toolConnectionId]);
+  });
+});
+
+describe('#4829 the key and the credentials never reach an error', () => {
+  it('Slack: a tool that echoes its request in an error leaks neither the tokens nor the key', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_u: string, init: { body?: string }) =>
+      new Response(JSON.stringify({ error: 'boom', message: `bad request ${init.body}` }), { status: 400, headers: { 'content-type': 'application/json' } })));
+    const err = await createSl(appA.id).catch((e: unknown) => e as { message: string; extensions: Record<string, unknown> });
+    const text = JSON.stringify({ m: err.message, e: err.extensions });
+    expect(text).not.toContain('xoxb-secret-token');
+    expect(text).not.toContain('xapp-secret-token');
+    expect(text).not.toMatch(/[0-9a-f]{64}/);
+  });
+
+  it('Telegram: the key is scrubbed too', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_u: string, init: { body?: string }) =>
+      new Response(JSON.stringify({ error: 'boom', message: `bad request ${init.body}` }), { status: 400, headers: { 'content-type': 'application/json' } })));
+    const err = await createTg(appA.id).catch((e: unknown) => e as { message: string; extensions: Record<string, unknown> });
+    const text = JSON.stringify({ m: err.message, e: err.extensions });
+    expect(text).not.toContain('SECRET-tg');
+    expect(text).not.toMatch(/[0-9a-f]{64}/);
+  });
+});
+
 describe('toolRegistrationKey', () => {
+  it('refuses a missing appId and counts bytes, not UTF-16 units', () => {
+    expect(() => toolRegistrationKey('slack', '', ['x'])).toThrow(/appId/);
+    expect(toolRegistrationKey('p', 'a', ['é'])).toMatch(/^[0-9a-f]{64}$/);
+    expect(toolRegistrationKey('p', 'a', ['é', 'b'])).not.toBe(toolRegistrationKey('p', 'a', ['éb']));
+  });
+
   it('is deterministic, separates App, provider and credentials, and cannot be forged by shifting a boundary', () => {
     const k = toolRegistrationKey('slack', 'app-1', ['xoxb-a', 'xapp-b']);
     expect(k).toBe(toolRegistrationKey('slack', 'app-1', ['xoxb-a', 'xapp-b']));
