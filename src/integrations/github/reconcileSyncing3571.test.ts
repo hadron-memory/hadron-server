@@ -241,7 +241,12 @@ describe('#4731 a row transaction bounds its own lock wait', () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     const started = Date.now();
     try {
-      const out = await reconcileSyncingStatus(db, { apply: true, lockTimeoutMs: 300 });
+      // Raced against a deadline: without the row's lock_timeout the run would wait on the writer forever, and a regression must
+      // FAIL here (the finally below then frees the writer) rather than hang the suite behind a held lock.
+      const out = await Promise.race([
+        reconcileSyncingStatus(db, { apply: true, lockTimeoutMs: 300 }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('the reconciliation waited on the row lock past the deadline')), 8_000)),
+      ]);
       expect(out).toMatchObject({ candidates: 2, reconciled: 1, failed: 1 });
       expect(Date.now() - started).toBeLessThan(10_000);
       expect(logged).toHaveBeenCalledWith('[reconcile-syncing] a row failed and was left unchanged', { code: expect.any(String) });
