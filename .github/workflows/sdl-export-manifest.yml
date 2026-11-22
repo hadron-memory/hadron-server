@@ -1,0 +1,43 @@
+name: SDL Export Manifest
+
+# #4916: hadron-cli's Schema drift job builds a sparse checkout of this repository from
+# scripts/sdl-export-files.txt, the import closure of scripts/export-graphql-sdl.mjs. The guard
+# (scripts/check-sdl-export-manifest.mjs, proved by its .test.ts) fails the server PR that adds an import
+# to the export without updating the list, and its failure message names the one command that fixes it:
+#
+#     pnpm sdl:manifest --write
+#
+# No `paths:` filter, on purpose: the closure changes when ANY file in it changes, and the guard takes seconds.
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+# A queue entry (merge_group) has no PR number, so it gets its own group and is never cancelled; see CLAUDE.md, Merge notes (#4819).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  sdl-export-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No `version:` — read from package.json `packageManager` field.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: SDL export manifest matches the export's import closure
+        run: pnpm sdl:manifest

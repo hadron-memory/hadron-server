@@ -36,6 +36,7 @@ const DECISIONS: Record<string, Decision> = {
   'no-station-refs.yml': { queue: true, why: 'REQUIRED: whole-tree guard, seconds' },
   'urn-rename-aliased.yml': { queue: true, why: 'REQUIRED: whole-tree guard, seconds' },
   'object-store-import-boundary.yml': { queue: true, why: 'advisory in the queue (not required): a whole-tree guard that failed on the merged result in the #4653 with #905 clash, so it would have caught that clash but does NOT block a merge unless the ruleset requires it (unfiltered and about 0.2 minutes, so it is a safe candidate; Holger\'s call)' },
+  'sdl-export-manifest.yml': { queue: true, why: 'advisory in the queue (not required): whole-tree guard on the merged tree, so a PR adding an SDL-export import and one changing the manifest are judged together; unfiltered, seconds after install' },
   'workflow-guard.yml': { queue: true, why: 'advisory in the queue (not required): whole-tree over every workflow file, so two PRs adding workflows are judged together; seconds' },
   'no-unscoped-loc.yml': { queue: true, why: 'advisory in the queue (not required): whole-tree grep guard on src; seconds; a path filter, if GitHub ignores it on merge_group, only makes it run on every entry' },
   'restore-private-cluster.yml': {
