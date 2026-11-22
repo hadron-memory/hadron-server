@@ -1,6 +1,7 @@
 import { composeAppSecretUrnV2 } from '@hadron-memory/urn-lib-js';
 /** S5 (#4000): the complete, signed secret.use parameter set at grant creation. */
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Prisma } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -12,6 +13,7 @@ import { dropTestActions, seedWorld, type World } from './grantFixtures3668.js';
 let w: World;
 let secretId: string;
 beforeEach(async () => {
+  fault.on = false;
   process.env.SECRET_ROOT_KEY = '22'.repeat(32);
   await cleanDb(db); w = await seedWorld(); await upsertPlatformActions(db);
   secretId = generateId();
@@ -20,6 +22,15 @@ beforeEach(async () => {
   await db.$transaction((tx) => addAppSecretVersion(tx, { id: secretId, ownerId: w.appId }, payload, Buffer.byteLength(payload), { userId: w.userId, workerId: null, sessionId: null }));
 });
 afterAll(async () => { await cleanDb(db); await dropTestActions(); await db.$executeRawUnsafe(`DELETE FROM actions WHERE name IN ('secret.reveal', 'secret.use')`); });
+const fault = vi.hoisted(() => ({ on: false }));
+vi.mock('../secrets/appSecrets.js', async (orig) => {
+  const actual = await orig<typeof import('../secrets/appSecrets.js')>();
+  const { Prisma: P } = await import('../../generated/prisma/index.js');
+  return { ...actual, currentAppSecretValue: (...a: Parameters<typeof actual.currentAppSecretValue>) => {
+    if (fault.on) return Promise.reject(new P.PrismaClientInitializationError('db down', 't'));
+    return actual.currentAppSecretValue(...a);
+  } };
+});
 const values = () => ({ secret: secretId, 'auto-delete': 'keep', 'binding-prefix': 'https://api.example.test/v1', 'binding-header': 'Authorization' });
 const grant = (v: unknown) => db.$transaction((tx) => createPendingGrant(tx, {
   appId: w.appId, requester: { userId: w.userId, workerId: null, sessionId: null }, holder: { kind: 'app', id: w.appId },
@@ -53,6 +64,13 @@ describe('secret.use grant terms (#4000)', () => {
     expect(await refusal(grant(values()))).toBe('GRANT_VALUES_INVALID');
     await db.$executeRaw`UPDATE secrets SET metadata = '{"type":"basic","urlPrefix":"https://api.example.test/"}'::jsonb WHERE id = ${secretId}`;
     expect(await refusal(grant(values()))).toBe('GRANT_VALUES_INVALID');
+  });
+  it('an outage while judging the binding propagates as itself, never as GRANT_VALUES_INVALID (#4775)', async () => {
+    fault.on = true;
+    const out = await grant(values()).then(() => 'OK', (e: unknown) => e);
+    expect(out).toBeInstanceOf(Prisma.PrismaClientInitializationError);
+    fault.on = false;
+    expect(await refusal(grant({ ...values(), 'binding-prefix': 'https://other.example.test/v1' }))).toBe('GRANT_VALUES_INVALID');
   });
   it('refuses a prefix that ends in a bare ? or # (blind P3-4)', async () => {
     for (const prefix of ['https://api.example.test/v1?', 'https://api.example.test/v1#']) {

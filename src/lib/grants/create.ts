@@ -1,5 +1,6 @@
 import { isSecretUseHeaderName, isSecretUsePrefix } from '../secrets/useBinding.js';
 import { currentAppSecretValue, lockSecretRow } from '../secrets/appSecrets.js';
+import { isStoreFault } from '../secrets/storeFault.js';
 import { assertSecretUseHeader, assertUrlWithinPrefix } from '../runner/secrets.js';
 /**
  * #3690 PR 2 (Grants S2a create; cor:acl:140:05 Create, :03 pending, :01, :02; rulings 0099, 0253, 0255 items 6 and 20): the ONE
@@ -264,7 +265,8 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
         const metadata = secret.metadata as Record<string, unknown> | null;
         if (!metadata || typeof metadata.urlPrefix !== 'string' || metadata.type !== (value as { type?: unknown }).type) throw new Error('metadata');
         assertUrlWithinPrefix((values as Record<string, unknown>)['binding-prefix'] as string, metadata.urlPrefix);
-      } catch {
+      } catch (e) {
+        if (isStoreFault(e)) throw e; // #4775: a database outage is not an invalid binding
         throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'Invalid secret use binding');
       }
     }

@@ -14,6 +14,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { appendAlarmEvent } from '../../../lib/agentTasks/events.js';
+import { METRICS_DEFAULT_WINDOW_MS, METRICS_GROUP_CAP, METRICS_IDS_CAP, METRICS_MAX_WINDOW_MS } from '../../../lib/agentTasks/teamMetrics.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
@@ -228,6 +229,18 @@ describe('#4447 report 3: worker counts (cor:agt:150:02-:05)', () => {
     await stallAlarm(openRow, 'stall.owner-unreactive', w.dev2);
     expect((await ok()).workers.overdue.total).toBe(0);
   });
+  it('#4850: a finish-by alarm in effect makes its assignee overdue; acknowledging it stops the count (cor:agt:150:04)', async () => {
+    const late = await db.agentTask.create({ data: { appId, title: 'Late', ownerWorkerId: w.ada, assigneeWorkerId: w.dev2, assignedAt: ago(48 * HOUR),
+      status: 'started', startedAt: ago(30 * HOUR), finishBy: ago(2 * HOUR), source: 'https://example.test/late' } });
+    const id = await db.$transaction(async (tx) => appendAlarmEvent(tx as never, {
+      appId, taskId: late.id, type: 'stall.finish-by', episodeStart: late.finishBy as Date, subjectWorkerId: w.dev2,
+      chain: [{ workerId: w.ada } as never], payload: { windowMinutes: 60 }, createdAt: ago(HOUR),
+    }));
+    expect(id).not.toBeNull();
+    expect((await ok()).workers.overdue).toMatchObject({ total: 1, ids: [w.dev2], truncated: false }); // the assignee, never the owner Ada
+    await db.$executeRaw`UPDATE agent_team_events SET acknowledged_at = now(), acknowledged_by_worker_id = ${w.ada} WHERE id = ${id}`;
+    expect((await ok()).workers.overdue.total).toBe(0);
+  });
 });
 
 describe('#4447 report 4: completed and started in [since, until)', () => {
@@ -342,7 +355,7 @@ describe('#4447 audience: the roster gate, task data behind the task readers', (
 });
 
 describe('#4447 cost: the query count does not grow with workers or tasks', () => {
-  it('reads with the same number of statements for 4 and for 14 workers, and 3 and 30 tasks', async () => {
+  it('reads with the same number of statements for 4 and for 14 workers, and 3 and 33 tasks', async () => {
     const logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
     const seen: string[] = [];
     logged.$on('query', (e: { query: string }) => { seen.push(e.query); });
@@ -382,5 +395,102 @@ describe('#4447 SDL', () => {
       expect(assertObjectType(schema.getType(t)).description, `${t} is described`).toBeTruthy();
     }
     expect(Object.keys(assertObjectType(schema.getType('TeamMetricsCount')).getFields()).sort()).toEqual(['ids', 'total', 'truncated']);
+  });
+});
+
+/**
+ * #4850 (follow-ups from the #4848 seats). The appId pins are cross-App isolation proofs: every App numbers its own projects
+ * from AT1, so a lookup by handle that loses its App scope would attach another App's project to this one.
+ */
+describe('#4850 same-App only: a same-handle project in another App never appears in any report (cor:agt:150, cor:agt:050:01)', () => {
+  it("report 1's project title, report 2's started projects and report 4's window read this App's rows only", async () => {
+    const ours = await project('Our project');
+    const mine = await task({ owner: w.ada, assignee: w.dev1, parent: ours.id });
+    // The other App's AT1, created later (so a lookup that drops the App would find it last and, unordered, could pick it).
+    const stranger = await worker('Stranger', { app: otherAppId });
+    const theirs = await task({ owner: stranger, assignee: stranger, status: 'started', title: 'FOREIGN-4850-TITLE', source: null, app: otherAppId });
+    const theirChild = await task({ owner: stranger, assignee: stranger, parent: theirs.id, status: 'finished', app: otherAppId, finishedAt: ago(HOUR) });
+    const theirStarted = await task({ owner: stranger, assignee: stranger, parent: theirs.id, status: 'started', app: otherAppId });
+    expect(theirs.handle, 'both Apps number their first project AT1').toBe(ours.handle);
+    const d = await ok();
+    const cell = d.startedOwned.byOwner[0].byProject.find((g: any) => g.project.handle === ours.handle);
+    expect(cell.project).toMatchObject({ taskId: ours.id, title: 'Our project' });
+    expect(idsOf(cell.tasks)).toEqual([mine.id]);
+    expect(d.projects.items.map((i: any) => i.project.taskId)).toEqual([ours.id]);
+    expect(d.flow.completed.total).toBe(0);
+    expect(idsOf(d.flow.started)).toEqual([ours.id, mine.id].sort());
+    const text = JSON.stringify(d);
+    for (const foreign of ['FOREIGN-4850-TITLE', theirs.id, theirChild.id, theirStarted.id, stranger]) expect(text).not.toContain(foreign);
+  });
+});
+
+describe('#4850 truncation: a short list never reads as the whole one (cor:api:120:04)', () => {
+  it('more than 200 owners: 200 groups and ownersTruncated', async () => {
+    const people = Array.from({ length: 201 }, () => ({ id: generateId(), handle: `mt-${generateId()}` }));
+    await db.user.createMany({ data: people });
+    await db.agentTask.createMany({ data: people.map((u, i) => ({ appId, title: `Owner ${i}`, ownerUserId: u.id, assigneeWorkerId: w.dev1,
+      assignedAt: ago(HOUR), status: 'started', startedAt: ago(HOUR), source: `https://example.test/o${i}` })) });
+    const r = (await ok()).startedOwned;
+    expect(r.all).toMatchObject({ total: 201, truncated: true });
+    expect(r.all.ids).toHaveLength(200);
+    expect(r.byOwner).toHaveLength(200);
+    expect(r.ownersTruncated).toBe(true);
+  });
+  it('one owner across more than 200 projects: 200 project groups and projectsTruncated; more than 200 started projects: truncated', async () => {
+    await db.agentTask.createMany({ data: Array.from({ length: 201 }, (_, i) => ({ appId, title: `P${i}`, ownerWorkerId: w.ada, assigneeWorkerId: w.ada,
+      assignedAt: ago(HOUR), status: 'started', startedAt: ago(HOUR) })) });
+    const parents = await db.agentTask.findMany({ where: { appId, parentTaskId: null, taskNumber: { gt: 0 } }, select: { id: true } });
+    expect(parents).toHaveLength(201);
+    await db.agentTask.createMany({ data: parents.map((p, i) => ({ appId, title: `C${i}`, parentTaskId: p.id, ownerWorkerId: w.bo, assigneeWorkerId: w.dev1,
+      assignedAt: ago(HOUR), status: 'started', startedAt: ago(HOUR), source: `https://example.test/c${i}` })) });
+    const d = await ok();
+    const bo = d.startedOwned.byOwner.find((g: any) => g.owner.id === w.bo);
+    expect(bo.tasks).toMatchObject({ total: 201, truncated: true });
+    expect(bo.byProject).toHaveLength(200);
+    expect(bo.projectsTruncated).toBe(true);
+    expect(d.projects.items).toHaveLength(200);
+    expect(d.projects.truncated).toBe(true);
+  });
+  it("a project's children and report 4's counts cap their ids at 200 with the exact total", async () => {
+    const p = await project('Big');
+    await db.agentTask.createMany({ data: Array.from({ length: 203 }, (_, i) => ({ appId, title: `F${i}`, parentTaskId: p.id, ownerWorkerId: w.ada,
+      assigneeWorkerId: w.dev1, assignedAt: ago(3 * HOUR), status: 'finished', startedAt: ago(2 * HOUR), finishedAt: ago(HOUR), resultOutcome: 'succeeded' })) });
+    const d = await ok();
+    const finished = d.projects.items[0].children.find((c: any) => c.status === 'FINISHED').tasks;
+    expect(finished).toMatchObject({ total: 203, truncated: true });
+    expect(new Set(finished.ids).size).toBe(200);
+    expect(d.flow.completed).toMatchObject({ total: 203, truncated: true });
+    expect(d.flow.completed.ids).toHaveLength(200);
+    expect(d.flow.started).toMatchObject({ total: 204, truncated: true }); // the project itself started in the window too
+  });
+});
+
+describe('#4850 one clock: an omitted until is the instant the snapshots were read', () => {
+  it('window.until equals asOf when until is omitted', async () => {
+    const d = await ok();
+    expect(d.window.until).toBe(d.asOf);
+    expect(new Date(d.window.until).getTime() - new Date(d.window.since).getTime()).toBe(7 * DAY);
+  });
+});
+
+describe('#4850 SDL: the owner is the party projection and the caps come from the constants', () => {
+  const schema = buildASTSchema(typeof typeDefs === 'string' ? parse(typeDefs) : typeDefs);
+  it('TeamMetricsOwnerGroup.owner is AgentTaskParty (kind, id, name, urn), never a Worker or User', () => {
+    const owner = assertObjectType(schema.getType('TeamMetricsOwnerGroup')).getFields().owner;
+    expect(String(owner.type)).toBe('AgentTaskParty');
+    expect(Object.keys(assertObjectType(schema.getType('AgentTaskParty')).getFields()).sort()).toEqual(['id', 'kind', 'name', 'urn']);
+  });
+  it('every cap the SDL states is the value the code enforces', () => {
+    const desc = (t: string, f?: string) => {
+      const type = assertObjectType(schema.getType(t));
+      return (f ? type.getFields()[f].description : type.description) ?? '';
+    };
+    expect(desc('TeamMetricsCount')).toContain(`at most ${METRICS_IDS_CAP} of them`);
+    expect(desc('TeamMetricsOwnerGroup', 'byProject')).toContain(`at most ${METRICS_GROUP_CAP} projects`);
+    expect(desc('TeamMetricsStartedOwned', 'byOwner')).toContain(`At most ${METRICS_GROUP_CAP} owners`);
+    expect(desc('TeamMetricsProjects')).toContain(`at most ${METRICS_GROUP_CAP} projects`);
+    const query = assertObjectType(schema.getType('Query')).getFields().teamMetrics.description ?? '';
+    expect(query).toContain(`the last ${METRICS_DEFAULT_WINDOW_MS / DAY} days`);
+    expect(query).toContain(`over ${METRICS_MAX_WINDOW_MS / DAY} days`);
   });
 });

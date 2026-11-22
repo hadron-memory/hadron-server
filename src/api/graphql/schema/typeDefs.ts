@@ -1,3 +1,4 @@
+import { METRICS_DEFAULT_WINDOW_DAYS, METRICS_GROUP_CAP, METRICS_IDS_CAP, METRICS_MAX_WINDOW_DAYS } from '../../../lib/agentTasks/teamMetricsCaps.js';
 /**
  * #4464 stage 1 — the deprecation notice for the App's own `role`, applied to
  * exactly three places: the `App.role` field and the `role` arg of
@@ -9397,7 +9398,7 @@ export const typeDefs = `#graphql
   }
   """
   #4447 (S1 of #3781; hrn:node:hadronmemory.com:specs:cor:agt:150): one count of a team's task or worker flow with the ids behind it,
-  so a client can drill down and derive nothing. total is exact; ids holds at most 200 of them, and truncated is true
+  so a client can drill down and derive nothing. total is exact; ids holds at most ${METRICS_IDS_CAP} of them, and truncated is true
   when it holds fewer than total (hrn:node:hadronmemory.com:specs:cor:api:120:04). The ids are task ids, or worker ids in the worker counts.
   """
   type TeamMetricsCount {
@@ -9427,7 +9428,7 @@ export const typeDefs = `#graphql
     "The owner as the sanitized task party projection, never the Worker or User object."
     owner: AgentTaskParty
     tasks: TeamMetricsCount!
-    "The owner's tasks by project, the No project bucket (AT0) included, at most 200 projects."
+    "The owner's tasks by project, the No project bucket (AT0) included, at most ${METRICS_GROUP_CAP} projects."
     byProject: [TeamMetricsProjectGroup!]!
     projectsTruncated: Boolean!
   }
@@ -9437,7 +9438,7 @@ export const typeDefs = `#graphql
   """
   type TeamMetricsStartedOwned {
     all: TeamMetricsCount!
-    "At most 200 owners; ownersTruncated says when there were more."
+    "At most ${METRICS_GROUP_CAP} owners; ownersTruncated says when there were more."
     byOwner: [TeamMetricsOwnerGroup!]!
     ownersTruncated: Boolean!
   }
@@ -9451,7 +9452,7 @@ export const typeDefs = `#graphql
     project: TeamMetricsProject!
     children: [TeamMetricsChildStatus!]!
   }
-  "Report 2: started projects (a top-level task other than AT0, status STARTED) with child counts by status; at most 200 projects, truncated says when there were more. A snapshot at read time."
+  "Report 2: started projects (a top-level task other than AT0, status STARTED) with child counts by status; at most ${METRICS_GROUP_CAP} projects, truncated says when there were more. A snapshot at read time."
   type TeamMetricsProjects {
     items: [TeamMetricsProjectRow!]!
     truncated: Boolean!
@@ -9922,7 +9923,7 @@ export const typeDefs = `#graphql
     the App's task audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21). Retired workers are left out.
     """
     teamRoster(appRef: ID!): TeamRoster!
-    "#4447 (hrn:node:hadronmemory.com:specs:cor:agt:150): server-computed counts of a team's task and worker flow, each with its ids. Reports 1-3 are snapshots; report 4 reads [since, until), defaulting to the last 7 days (an omitted until is now, an omitted since is until minus 7 days); a window over 31 days, or since after until, is BAD_USER_INPUT, judged before any read. Readers: the roster's audience; task-derived reports follow the App's task readers (hrn:node:hadronmemory.com:specs:cor:agt:050:21), and an unreadable App answers as a missing one."
+    "#4447 (hrn:node:hadronmemory.com:specs:cor:agt:150): server-computed counts of a team's task and worker flow, each with its ids. Reports 1-3 are snapshots; report 4 reads [since, until), defaulting to the last ${METRICS_DEFAULT_WINDOW_DAYS} days (an omitted until is now, an omitted since is until minus ${METRICS_DEFAULT_WINDOW_DAYS} days); a window over ${METRICS_MAX_WINDOW_DAYS} days, or since after until, is BAD_USER_INPUT, judged before any read. Readers: the roster's audience; task-derived reports follow the App's task readers (hrn:node:hadronmemory.com:specs:cor:agt:050:21), and an unreadable App answers as a missing one."
     teamMetrics(appRef: ID!, since: DateTime, until: DateTime): TeamMetrics!
     "#3819: advisory utilization in the roster audience (hrn:node:hadronmemory.com:specs:cor:agt:050:21, hrn:node:hadronmemory.com:specs:cor:agt:060:13). Window defaults to 24h, range 1–168; tier is high/mid/low. Ranked by utilization, then the most recent failed match, then fewest eligible workers, then family, tier and role. The match-outcome record is read only through this field. The alarm.saturation alarm is raised by the stall evaluator, not by this read."
     teamUtilization(appRef: ID!, family: String, tier: String, role: String, windowHours: Int = 24): TeamUtilization!
@@ -11785,6 +11786,12 @@ export const typeDefs = `#graphql
     is no such question, and the read is a plain list of definitions. teamAgentRef disambiguates when more than one installed agent
     carries a roles: branch (TEAM_AGENT_AMBIGUOUS otherwise); an encrypted
     system memory without an active session key refuses SESSION_EXPIRED.
+
+    #4838: the appRef refusals are concealed (see createTeamRole): reach first,
+    state after — an unreadable, missing, deleted or malformed ref all answer
+    the one APP_NOT_FOUND "App not found." with no ref echoed. An uninstalled
+    App's roles stay readable for a participant (the roster stays legible);
+    only the write doors refuse APP_UNINSTALLED.
     """
     teamRoles(appRef: ID!, teamAgentRef: ID, limit: Int, offset: Int): TeamRolesPage!
 
@@ -13603,6 +13610,12 @@ export const typeDefs = `#graphql
     duplicates are collapsed. expiresAt is optional; when supplied it must be
     a future ISO-8601 timestamp with an explicit timezone. appRef is a PK or
     App URN. A missing or unreadable connection answers NOT_FOUND.
+
+    #4838: a grantee App that is missing, deleted or malformed answers
+    BAD_USER_INPUT "Grantee App not found." with NO ref echoed. The existence
+    oracle on this refusal is deliberate (a connection owner need not reach
+    the grantee App — granting to a counterparty is the feature): an App the
+    owner cannot reach still receives the grant.
     """
     createConnectionGrant(connectionRef: String!, appRef: String!, scopes: [String!]!, expiresAt: String): ConnectionGrant!
     "Revoke a connection grant you created (soft delete). Owner-only."
@@ -15745,6 +15758,17 @@ export const typeDefs = `#graphql
     invariants to run, because names are not allocated — a cast supplies its
     own and workers_app_name_uniq is the sole arbiter. Any data.names left on
     an existing node is historical and is neither read nor rewritten.
+
+    #4838 (hrn:node:hadronmemory.com:specs:cor:dmo:070:05, Proposed): the appRef
+    refusals on this door are concealed and reach-gated, the same rule
+    startSession runs. A caller without standing for the App their appRef names
+    — a non-participant, a pure App key naming another App, or a ref that is
+    missing, deleted, uninstalled or malformed — gets ONE answer,
+    byte-identical across every state: APP_NOT_FOUND with the message
+    "App not found.", no ref echoed, no appId in extensions. A participant
+    keeps the state answers: APP_UNINSTALLED with the appId for an uninstalled
+    App named by PK, and FORBIDDEN from the definition-edit gate for a member
+    who reaches but may not edit.
     """
     createTeamRole(
       appRef: ID!
@@ -15755,7 +15779,8 @@ export const typeDefs = `#graphql
 
     """
     #960 — edit a roles:<role> definition. Omitted fields preserve. Unknown
-    role: WORKER_ROLE_NOT_FOUND. Same authorization as createTeamRole.
+    role: WORKER_ROLE_NOT_FOUND. Same authorization as createTeamRole, and the
+    same #4838 concealed appRef refusals (see createTeamRole).
 
     #1024: \`repos\` sets the role's repo affinity. Omitted PRESERVES; an empty
     array CLEARS; explicit \`null\` is treated as OMITTED, not as a clear — worth
@@ -15787,7 +15812,8 @@ export const typeDefs = `#graphql
     #1002 — retire a roles:<role> definition. Soft-deletes the role node and
     any sub-nodes under it (roles:<role>:notes is content OF the role), so the
     subtree is recoverable. Unknown role: WORKER_ROLE_NOT_FOUND. Same
-    authorization as createTeamRole.
+    authorization as createTeamRole, and the same #4838 concealed appRef
+    refusals (see createTeamRole).
 
     #1050: unconditional. The minted-name check, TEAM_ROLE_IN_USE, transferTo's
     one-step supersede, the post-delete recheck and the restore compensation

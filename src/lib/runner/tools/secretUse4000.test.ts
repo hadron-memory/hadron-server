@@ -53,27 +53,11 @@ describe('S5 secret.use public run-tool boundary', () => {
     expect(schema.properties).not.toHaveProperty('auth');
   });
 
-  it('refuses a request that names a secret client and sends nothing outbound while the use path is dark (does not pin the client lookup, #4775)', async () => {
-    await expect(webRequest.execute(ctx, {
-      method: 'GET', url: 'https://api.example.test/v1/orders',
-      secretClientId: generateId(),
-    })).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
-    expect(httpRequest).not.toHaveBeenCalled();
-    expect(ctx.log).not.toHaveBeenCalled();
-  });
-
-  it('refuses a request with a null, empty or non-string client reference and sends nothing outbound while the use path is dark (does not pin the client lookup, #4775)', async () => {
-    for (const secretClientId of [null, '', 17]) {
-      await expect(webRequest.execute(ctx, { method: 'GET', url: 'https://api.example.test/v1/orders', secretClientId }))
-        .rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
-    }
-    expect(httpRequest).not.toHaveBeenCalled();
-  });
-
-  it('checks policy without charging outside the transaction and fails closed before outbound', async () => {
+  // The client-lookup refusals (unknown id, malformed reference, another App's client) are pinned against the wired path in secretUseWiring4775.test.ts.
+  it('checks policy at cost 0 (the use is charged inside its transaction) and refuses an unknown client before outbound', async () => {
     const gate = vi.fn(async () => true);
     await expect(admitAndExecuteTool(webRequest, { method: 'GET', url: 'https://api.example.test/v1/orders', secretClientId: 'synthetic' },
-      { toolCtx: ctx, onToolCall: gate })).rejects.toThrow(/Secret use is unavailable/);
+      { toolCtx: ctx, onToolCall: gate })).rejects.toThrow(/No such read client/);
     expect(gate).toHaveBeenCalledExactlyOnceWith('tool.web_request', 0);
     expect(httpRequest).not.toHaveBeenCalled();
   });
