@@ -1,4 +1,3 @@
-import { buildAuthRateAdmission } from './authRate.js';
 /**
  * Spec 025-oauth-for-mcp Phase 2 — MCP-compliant OAuth 2.1
  * Authorization Server.
@@ -33,6 +32,8 @@ import { buildAuthRateAdmission } from './authRate.js';
  *     auth issues no secret; we MUST explicitly declare `["none"]`.
  */
 
+import { AUTH_COOKIE_NAME } from './cookieName.js';
+import { buildAuthRateAdmission } from './authRate.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Express, NextFunction, Request, RequestHandler, Response } from 'express';
 import express, { Router } from 'express';
@@ -687,7 +688,7 @@ function buildAuthorizeCsrfProtection(): DoubleCsrfUtilities {
   return doubleCsrf({
     getSecret: () => secret,
     getSessionIdentifier: (req) => {
-      const token = req.cookies?.hadron_token;
+      const token = req.cookies?.[AUTH_COOKIE_NAME];
       if (typeof token !== 'string' || token.length === 0) return 'anonymous';
       try {
         const payload = decodeJwt(token);
@@ -727,7 +728,7 @@ async function getUserIdFromCookie(req: Request): Promise<string | null> {
  * issuing transaction rechecks it under the user authority anchor.
  */
 async function getSessionFromCookie(req: Request): Promise<{ userId: string; signInId: string | null } | null> {
-  const token = req.cookies?.hadron_token;
+  const token = req.cookies?.[AUTH_COOKIE_NAME];
   if (typeof token !== 'string' || token.length === 0) return null;
   try {
     const payload = await verifyAuthenticatedJwt(token, db);
@@ -1486,7 +1487,7 @@ async function handleAuthorizeEmailCodePost(req: Request, res: Response): Promis
     });
     const { exp } = decodeJwt(jwt);
     const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-    res.cookie('hadron_token', jwt, {
+    res.cookie(AUTH_COOKIE_NAME, jwt, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
@@ -1863,8 +1864,8 @@ export interface OAuthRouteOptions {
 
 export function buildOAuthRouter(opts: OAuthRouteOptions = {}): Router {
   const router = Router();
-  const authRate = buildAuthRateAdmission(db, 'oauth', 'cookie');
-  const tokenRate = buildAuthRateAdmission(db, 'oauth');
+  const authRate = buildAuthRateAdmission(db, { protocol: 'oauth', credential: 'cookie' });
+  const tokenRate = buildAuthRateAdmission(db, { protocol: 'oauth', credential: 'none' });
 
   router.get('/.well-known/oauth-protected-resource', handleProtectedResourceMetadata);
   router.get('/.well-known/oauth-authorization-server', handleAuthorizationServerMetadata);
