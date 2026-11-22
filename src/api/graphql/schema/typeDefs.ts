@@ -11785,6 +11785,12 @@ export const typeDefs = `#graphql
     is no such question, and the read is a plain list of definitions. teamAgentRef disambiguates when more than one installed agent
     carries a roles: branch (TEAM_AGENT_AMBIGUOUS otherwise); an encrypted
     system memory without an active session key refuses SESSION_EXPIRED.
+
+    #4838: the appRef refusals are concealed (see createTeamRole): reach first,
+    state after — an unreadable, missing, deleted or malformed ref all answer
+    the one APP_NOT_FOUND "App not found." with no ref echoed. An uninstalled
+    App's roles stay readable for a participant (the roster stays legible);
+    only the write doors refuse APP_UNINSTALLED.
     """
     teamRoles(appRef: ID!, teamAgentRef: ID, limit: Int, offset: Int): TeamRolesPage!
 
@@ -13603,6 +13609,12 @@ export const typeDefs = `#graphql
     duplicates are collapsed. expiresAt is optional; when supplied it must be
     a future ISO-8601 timestamp with an explicit timezone. appRef is a PK or
     App URN. A missing or unreadable connection answers NOT_FOUND.
+
+    #4838: a grantee App that is missing, deleted or malformed answers
+    BAD_USER_INPUT "Grantee App not found." with NO ref echoed. The existence
+    oracle on this refusal is deliberate (a connection owner need not reach
+    the grantee App — granting to a counterparty is the feature): an App the
+    owner cannot reach still receives the grant.
     """
     createConnectionGrant(connectionRef: String!, appRef: String!, scopes: [String!]!, expiresAt: String): ConnectionGrant!
     "Revoke a connection grant you created (soft delete). Owner-only."
@@ -15745,6 +15757,17 @@ export const typeDefs = `#graphql
     invariants to run, because names are not allocated — a cast supplies its
     own and workers_app_name_uniq is the sole arbiter. Any data.names left on
     an existing node is historical and is neither read nor rewritten.
+
+    #4838 (hrn:node:hadronmemory.com:specs:cor:dmo:070:05, Proposed): the appRef
+    refusals on this door are concealed and reach-gated, the same rule
+    startSession runs. A caller without standing for the App their appRef names
+    — a non-participant, a pure App key naming another App, or a ref that is
+    missing, deleted, uninstalled or malformed — gets ONE answer,
+    byte-identical across every state: APP_NOT_FOUND with the message
+    "App not found.", no ref echoed, no appId in extensions. A participant
+    keeps the state answers: APP_UNINSTALLED with the appId for an uninstalled
+    App named by PK, and FORBIDDEN from the definition-edit gate for a member
+    who reaches but may not edit.
     """
     createTeamRole(
       appRef: ID!
@@ -15755,7 +15778,8 @@ export const typeDefs = `#graphql
 
     """
     #960 — edit a roles:<role> definition. Omitted fields preserve. Unknown
-    role: WORKER_ROLE_NOT_FOUND. Same authorization as createTeamRole.
+    role: WORKER_ROLE_NOT_FOUND. Same authorization as createTeamRole, and the
+    same #4838 concealed appRef refusals (see createTeamRole).
 
     #1024: \`repos\` sets the role's repo affinity. Omitted PRESERVES; an empty
     array CLEARS; explicit \`null\` is treated as OMITTED, not as a clear — worth
@@ -15787,7 +15811,8 @@ export const typeDefs = `#graphql
     #1002 — retire a roles:<role> definition. Soft-deletes the role node and
     any sub-nodes under it (roles:<role>:notes is content OF the role), so the
     subtree is recoverable. Unknown role: WORKER_ROLE_NOT_FOUND. Same
-    authorization as createTeamRole.
+    authorization as createTeamRole, and the same #4838 concealed appRef
+    refusals (see createTeamRole).
 
     #1050: unconditional. The minted-name check, TEAM_ROLE_IN_USE, transferTo's
     one-step supersede, the post-delete recheck and the restore compensation
