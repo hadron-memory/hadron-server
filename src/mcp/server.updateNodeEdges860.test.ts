@@ -141,6 +141,55 @@ describe('addEdges (#860)', () => {
   });
 });
 
+describe('addEdges far-end read gate and re-add identity (#860, Juniper)', () => {
+  it('a non-admin writer cannot point an edge at a node in a memory they cannot read, and learns nothing from the refusal', async () => {
+    const org3 = await db.organization.create({ data: { id: generateId(), name: 'e860-org3', urn: 'e860-org3' } });
+    const u3 = await db.user.create({ data: { githubId: 8604, githubUsername: 'e860-writer', roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: org3.id, userId: u3.id, role: 'ADMIN' } });
+    const own = await resolvers.Mutation.createMemory({}, { orgRef: org3.id, name: 'own' }, { db, roles: ['READER'], userId: u3.id } as Context);
+    const mine = await db.node.create({ data: { id: generateId(), memoryId: own.id, loc: 'mine', name: 'mine', ownerRepo: 'x/y', tags: [] } });
+    const mine2 = await db.node.create({ data: { id: generateId(), memoryId: own.id, loc: 'mine2', name: 'mine2', ownerRepo: 'x/y', tags: [] } });
+    const auth: AuthContext = { userId: u3.id, roles: ['READER'], clientId: `user:${u3.id}` };
+    const urn = `${own.urn.replace(':', '::')}::mine`;
+    // t1 lives in the admin's memory, which this writer cannot read: the same text as a target that does not exist.
+    const hidden = await callAs(auth, 'hadron_update_node', { urn, addEdges: [{ targetUrn: t1.id, name: 'peek' }] });
+    const ghost = await callAs(auth, 'hadron_update_node', { urn, addEdges: [{ targetUrn: generateId(), name: 'peek' }] });
+    expect(hidden).toMatch(/^Edge target not found/);
+    expect(hidden.replace(t1.id, '<id>')).toBe(ghost.replace(/"[^"]+"/, '"<id>"').replace('<id>', '<id>'));
+    expect(await db.edge.count({ where: { sourceId: mine.id } })).toBe(0);
+    // Control: a target the writer can read is added.
+    const ok = await callAs(auth, 'hadron_update_node', { urn, addEdges: [{ targetUrn: mine2.id, name: 'friend' }] });
+    expect(ok).toMatch(/1 added/);
+    expect(await db.edge.count({ where: { sourceId: mine.id } })).toBe(1);
+  });
+
+  it.each([
+    ['name', { name: 'applies-when-OTHER' }],
+    ['description', { description: 'a different description' }],
+    ['isRunnable', { isRunnable: true }],
+  ])('re-adding the same loc and target with a different %s is a conflict, not unchanged', async (_field, change) => {
+    const row = await db.edge.findUniqueOrThrow({ where: { id: e1.id } });
+    const out = await call('hadron_update_node', {
+      urn: nodeUrnOf(source.loc),
+      addEdges: [{ targetUrn: t1.id, name: row.name ?? undefined, loc: e1.loc, ...change }],
+    });
+    expect(out).toContain('edge_loc_conflict');
+    const after = await db.edge.findUniqueOrThrow({ where: { id: e1.id } });
+    expect(after.name).toBe(row.name);
+    expect(after.description).toBe(row.description);
+    expect(after.isRunnable).toBe(row.isRunnable);
+  });
+
+  it('re-adding the identical edge (same loc, target, name, description, isRunnable) is unchanged', async () => {
+    const row = await db.edge.findUniqueOrThrow({ where: { id: e1.id } });
+    const out = await call('hadron_update_node', {
+      urn: nodeUrnOf(source.loc),
+      addEdges: [{ targetUrn: t1.id, name: row.name ?? undefined, loc: e1.loc }],
+    });
+    expect(out).toMatch(/0 added, 1 unchanged/);
+  });
+});
+
 describe('removeEdges (#860)', () => {
   it('removes only the named edge, by id', async () => {
     const out = await call('hadron_update_node', { urn: nodeUrnOf(source.loc), removeEdges: [e2.id] });
