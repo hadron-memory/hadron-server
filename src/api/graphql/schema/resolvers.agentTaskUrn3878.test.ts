@@ -11,7 +11,6 @@ import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { qualifiedTaskHandle } from '../../../lib/agentTasks/handle.js';
 import { renderTask } from '../../../mcp/agentTaskTools.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -239,9 +238,12 @@ describe('#3878 resolveUrn agenttask arm', () => {
 });
 
 describe('#3878 the second emission site and the hint texts say the same thing', () => {
-  it('qualifiedTaskHandle emits the same lower-case URN as AgentTask.urn', async () => {
+  it('a legacy :: App urn: AgentTask.urn and the MCP read emit the one single-colon spelling (normalized in agentTaskUrn)', async () => {
     const { nested } = await seed();
-    expect(qualifiedTaskHandle(appX.urn, 'AT1.1')).toBe(await urnOf(nested));
+    await db.app.update({ where: { id: appX.id }, data: { urn: `${org.urn}::x` } });
+    const urn = await urnOf(nested);
+    expect(urn).toBe(`hrn:agenttask:${org.urn}:x:at1.1`);
+    expect(await renderTask(nested, as(alice))).toContain(`  urn: ${urn}`);
   });
 
   it('the qualify refusal and the SDL show the lower-case form', async () => {
@@ -258,6 +260,15 @@ describe('#3878 MCP task read carries the URN', () => {
     const { nested } = await seed();
     const text = await renderTask(nested, as(alice));
     expect(text).toContain(`  urn: hrn:agenttask:${org.urn}:x:at1.1`);
+  });
+
+  it('omits the urn line when the App urn cannot compose the fixed-arity URN, and the read still renders', async () => {
+    const { nested } = await seed();
+    await db.app.update({ where: { id: appX.id }, data: { urn: `${org.urn}:x:legacy` } });
+    expect(await urnOf(nested)).toBeNull();
+    const text = await renderTask(nested, as(alice));
+    expect(text).toContain(`- AT1.1 nested (id: ${nested.id})`);
+    expect(text).not.toMatch(/^ {2}urn: /m);
   });
 });
 

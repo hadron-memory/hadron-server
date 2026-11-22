@@ -98,7 +98,7 @@ import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/er
 import { isId } from '../../../lib/entityRef/shape.js';
 import { getPortalBaseUrl } from '../../../lib/portalUrl.js';
 import { parseTaskHandle, composeTaskHandle, handleDepth, MAX_HANDLE_DEPTH, MAX_HANDLE_LENGTH, agentTaskUrn } from '../../../lib/agentTasks/handle.js';
-import { normalizeUrnForLookup, UrnParseError, UrnNotQualifiedError } from '../../../lib/urn.js';
+import { UrnParseError, UrnNotQualifiedError } from '../../../lib/urn.js';
 import { ensureProjectZero, PROJECT_ZERO_HANDLE, rootTaskWhere } from '../../../lib/agentTasks/projectZero.js';
 import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { resolveWorkerIdByName } from './resolvers.worker.js';
@@ -3886,7 +3886,7 @@ export const agentTaskFieldResolvers = {
       const appUrn = await loadAppUrn(ctx, t.appId);
       if (appUrn === null) return null;
       try {
-        return agentTaskUrn(normalizeUrnForLookup(appUrn), t.handle!);
+        return agentTaskUrn(appUrn, t.handle!);
       } catch (error) {
         // Only the compose refusal is null; a fault propagates (#2975, cor:api:260:01).
         if (!(error instanceof UrnParseError || error instanceof UrnNotQualifiedError)) throw error;
