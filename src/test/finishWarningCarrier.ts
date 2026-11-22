@@ -5,19 +5,23 @@
  */
 type Mutations = { createAgentTask: (...a: any[]) => Promise<any>; startAgentTask: (...a: any[]) => Promise<any> };
 
-/** N parents, each assigned to `assignee`, started, with one open child. `as` wraps the calls that must run as that assignee. */
+/** The assignee of a created task: a user or a worker id. */
+export type Assignee = { user: string } | { worker: string };
+
+/**
+ * N parents, each assigned to `assignee`, started, with one open child. `as` wraps the calls that must run as that assignee.
+ * The parents are independent, so they are built concurrently (the 60 sequential mutations of 21 parents were what forced long timeouts).
+ */
 export async function finishableParents(
-  M: Mutations, ctx: unknown, appRef: string, n: number, assignee: Record<string, string>,
+  M: Mutations, ctx: unknown, appRef: string, n: number, assignee: Assignee,
   as: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn(),
 ): Promise<string[]> {
-  const ids: string[] = [];
-  for (let i = 0; i < n; i++) {
+  return Promise.all(Array.from({ length: n }, async (_, i) => {
     const parent = await M.createAgentTask({}, { input: { appRef, title: `parent ${i}`, assignee } }, ctx);
     await as(() => M.startAgentTask({}, { taskId: parent.id }, ctx));
     await as(() => M.createAgentTask({}, { input: { parentTaskId: parent.id, title: `child ${i}` } }, ctx));
-    ids.push(parent.id);
-  }
-  return ids;
+    return parent.id as string;
+  }));
 }
 
 /** One aliased finish: raises `task.finish.open-children` while the task has an open child. */

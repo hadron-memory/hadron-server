@@ -15,7 +15,7 @@ import { loadStallInputs } from '../../../lib/agentTasks/stall.js';
 import * as warnings from './resolvers.taskWarnings.js';
 import * as workerGate from './resolvers.worker.js';
 import { appendTaskEvent } from '../../../lib/agentTasks/events.js';
-import { finishableParents, finishField } from '../../../test/finishWarningCarrier.js';
+import { finishableParents, finishField, type Assignee } from '../../../test/finishWarningCarrier.js';
 useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
@@ -39,7 +39,7 @@ async function graphql(query: string, c = ctx()) {
 // #4793: a source-less create no longer warns, so the recorded-warning carrier is finishing a started task that still has an open child
 // (task.finish.open-children, the one recorded code a mutation still raises). `field` finishes one such parent.
 const field = finishField;
-const parentsFor = (n: number, assignee: Record<string, string> = { user: user.id }, as?: <T>(fn: () => Promise<T>) => Promise<T>) =>
+const parentsFor = (n: number, assignee: Assignee = { user: user.id }, as?: <T>(fn: () => Promise<T>) => Promise<T>) =>
   finishableParents(M, ctx(), app.id, n, assignee, as);
 const RECORDED = 'task.finish.open-children';
 

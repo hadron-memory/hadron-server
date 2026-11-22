@@ -12257,15 +12257,14 @@ export const typeDefs = `#graphql
     finishAgentTask may succeed WITH warnings, in the response's
     \`extensions.warnings\` (not in \`errors\`): a list of
     { path (the mutation's response key), code, text, register? }. Codes are a
-    closed list per release (task.create.no-source, which is no longer raised since #4793 but stays listed so history
-    recorded with it still reads, task.assign.assignee-unavailable,
+    closed list per release (task.create.no-source, task.assign.assignee-unavailable,
     task.assign.assignee-busy, task.assign.assignee-paused,
     task.finish.open-children, from #3267 task.start.other-started,
     task.start.parent-ended (both on startAgentTask) and task.progress.children-ended
     (on recordAgentTaskProgress; other-started and children-ended, like the three assign
     facts, are filed only to a caller who may read the App's worker state), and from #2607 task.cancel.open-children on
     cancelAgentTask, alarm.ack.outside-chain on acknowledgeAlarm, and #2733 ticker.code.unmapped on createTicker);
-    a client must tolerate unknown codes. \`text\` is
+    a client must tolerate unknown codes. Since #4793 task.create.no-source is no longer raised; it stays on the list so history recorded with it still reads. \`text\` is
     fixed per code. \`register\` appears only for a caller that has an Agent:
     { state: mapped (taskLoc, taskUrn) | unmapped | unresolved | withheld }.
     #3491 (ruling 0176): the first three are given only when the caller may read every

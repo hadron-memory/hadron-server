@@ -244,10 +244,10 @@ describe('the final response cap', () => {
     const NODES = 15;
     // #4793: a source-less create no longer warns; a finish with an open child is the task-side carrier.
     const parents = await finishableParents(M, ctx(), appId, TASKS, { user: userId });
-    const task = (i: number) => finishField(`t${i}`, parents[i]);
+    const finish = (i: number) => finishField(`t${i}`, parents[i]);
     const node = (i: number) => `n${i}: createNode(input: { memoryId: "${memoryId}", loc: "pinned-${i}", name: "pinned ${i}", content: "${pin()}" }) { id }`;
     const aliases = [
-      ...Array.from({ length: TASKS }, (_, i) => task(i)),
+      ...Array.from({ length: TASKS }, (_, i) => finish(i)),
       ...Array.from({ length: NODES }, (_, i) => node(i)),
     ];
     expect(TASKS + NODES).toBeGreaterThan(MAX_WARNINGS_PER_RESPONSE);
@@ -262,5 +262,5 @@ describe('the final response cap', () => {
     ]);
     // Every write committed even where its advice was cut.
     expect(await db.node.count({ where: { memoryId, loc: { startsWith: 'pinned-' } } })).toBe(NODES);
-  }, 60_000); // #4793: the finishable parents are set up inside the test
+  }, 30_000); // #4793: the finishable parents are set up inside the test
 });
