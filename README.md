@@ -4,7 +4,7 @@ The server behind [Hadron](https://hadronmemory.com), a memory platform for peop
 It serves a GraphQL API, an [MCP](https://modelcontextprotocol.io) endpoint, and the
 background jobs that keep both running, on top of PostgreSQL with the pgvector extension.
 
-This repository is public and MIT-licensed (see [LICENSE](LICENSE)). It is the server only:
+This repository is public and AGPL-3.0-licensed (see [LICENSE](LICENSE)). It is the server only:
 the web portal and the command-line client live in their own repositories.
 
 > **Public and private material.** Everything in this repository is public. Hadron itself,
@@ -180,4 +180,4 @@ database, for trying a change end to end without touching your development datab
 
 ## License
 
-[MIT](LICENSE)
+[AGPL-3.0](LICENSE)

@@ -8,7 +8,7 @@ Before anything else:
 - **Security problems** are not filed as issues. Follow [SECURITY.md](SECURITY.md).
 - **Conduct problems** go to the address in the [Code of Conduct](CODE_OF_CONDUCT.md).
 - By contributing you agree that your contribution is released under the project's
-  [MIT license](LICENSE).
+  [AGPL-3.0 license](LICENSE).
 
 ## Start with an issue
 
