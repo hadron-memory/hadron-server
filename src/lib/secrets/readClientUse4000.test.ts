@@ -1,4 +1,5 @@
 /** #4000: the run's use spend is atomic with its ticket and never grants another App or agent access. */
+import { bigintAsString } from '../../test/bigintJson.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -44,7 +45,7 @@ describe('transactional secret.use (#4000)', () => {
     const audit = await db.secretEvent.findMany({ where: { clientId, kind: 'USE' } });
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({ outcome: 'ACTION_TICKET_REQUIRED', runId: runCtx.run.id });
-    expect(JSON.stringify(audit)).not.toContain('synthetic-canary');
+    expect(JSON.stringify(audit, bigintAsString)).not.toContain('synthetic-canary');
     expect((await db.appRun.findUniqueOrThrow({ where: { id: runCtx.run.id } })).budgetActions).toBe(3);
   });
   it('refuses policy denial and exhausted budget without spending a ticket or grant', async () => {

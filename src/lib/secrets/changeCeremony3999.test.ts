@@ -1,3 +1,4 @@
+import { bigintAsString } from '../../test/bigintJson.js';
 import * as deletion from './autoDelete.js';
 import * as secretRows from './appSecrets.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
@@ -302,7 +303,7 @@ describe('#3999 wire error and canary boundary',()=>{
    if(coercion.body.kind==='single')expect(coercion.body.singleResult.errors?.[0].extensions?.code).toBe('BAD_USER_INPUT');
    expect(JSON.stringify(coercion.body)).not.toContain(canary);
    expect(await db.secretEvent.findMany({where:{secretId}})).not.toEqual([]);
-   expect(JSON.stringify(await db.secretEvent.findMany({where:{secretId}}))).not.toContain(canary);
+   expect(JSON.stringify(await db.secretEvent.findMany({where:{secretId}}), bigintAsString)).not.toContain(canary);
    expect(JSON.stringify(calls)).not.toContain(canary);
   }finally{await api.stop();for(const spy of spies)spy.mockRestore();}
  });

@@ -681,7 +681,7 @@ export const secretQueries = {
     const [items, total] = await Promise.all([
       take === 0
         ? Promise.resolve([])
-        : ctx.db.secretEvent.findMany({ where, orderBy: [{ at: 'desc' }, { id: 'desc' }], take, skip: Math.max(0, args.offset ?? 0) }),
+        : ctx.db.secretEvent.findMany({ where, orderBy: [{ at: 'desc' }, { seq: 'desc' }], take, skip: Math.max(0, args.offset ?? 0) }),
       ctx.db.secretEvent.count({ where }),
     ]);
     return { items, total };
