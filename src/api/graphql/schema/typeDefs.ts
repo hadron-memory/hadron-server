@@ -6501,7 +6501,7 @@ export const typeDefs = `#graphql
   type SecretChangeRequest {
     """The change request id."""
     id: ID!
-    """The effective state, with expiry judged on the server clock."""
+    """The effective state, with expiry judged on the server clock: open, completed, declined (the requester declined on the ceremony page), expired, withdrawn (the requester withdrew it) or stale (the secret changed first)."""
     state: String!
     """The requested operation."""
     operation: String!
@@ -14387,6 +14387,13 @@ export const typeDefs = `#graphql
     origin binding). A run resolves the name via the CSS cascade
     (user -> org) at entitled scopes only; an App secret is never resolved
     by a run (hrn:node:hadronmemory.com:specs:cor:sec:020:02).
+    With protected: true the create is only STAGED: it answers the error
+    SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl, no
+    secret exists yet, and the requester's own passkey ceremony at that URL makes
+    it (hrn:node:hadronmemory.com:specs:cor:sec:070:02). A staged request lasts
+    one hour; at most 5 are open per secret name and at most 2 per requester
+    (SECRET_CHANGE_REQUEST_LIMIT, SECRET_CHANGE_REQUESTER_LIMIT). Those numbers are
+    engineering bounds, not ruled values.
     """
     createSecret(
       ownerType: String!
@@ -14405,15 +14412,35 @@ export const typeDefs = `#graphql
     any member of the App may store. Name, kind, and owner are immutable —
     the cascade and flow config reference the name; create a new name
     instead. The effective (metadata, value) pair is re-validated per kind.
+    On a PROTECTED App secret a change is only staged: it answers the error
+    SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl instead
+    of a Secret, and nothing changes until the requester completes the passkey
+    ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The expiry and the two
+    caps are as for createSecret.
     """
     updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean): Secret!
-    """Open a protection change for your own passkey ceremony. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    """
+    Turn protection on or off for an App secret, through your own passkey ceremony
+    (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The payload is a Secret only when
+    nothing needs to change (clearing protection that is not on). Otherwise the change
+    is staged and the answer is the error SECRET_PROTECTED_NEEDS_PASSKEY with
+    extensions requestId and ceremonyUrl, never a Secret: the protection changes only
+    when the requester completes the ceremony. Turning protection off needs whoever
+    manages the App. An App key, an impersonated session and a run are refused.
+    The expiry and the two caps are as for createSecret.
+    """
     setSecretProtected(ref: ID!, protected: Boolean!): Secret!
-    """Withdraw your own open change request and clear its staged value. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    """
+    Withdraw your own open change request and clear its staged value; the request then
+    reads withdrawn. Only the requester can withdraw, complete or decline a request, and
+    anyone else is answered as for a request that does not exist. Declining is done on
+    the ceremony page, with a passkey proof, and reads declined.
+    hrn:node:hadronmemory.com:specs:cor:sec:070:02
+    """
     withdrawSecretChangeRequest(id: ID!): Boolean!
 
 
-    "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person."
+    "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person. A PROTECTED App secret is only staged: the answer is the error SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl, and it is deleted only when the requester completes the passkey ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02)."
     deleteSecret(ref: ID!): Boolean!
 
     """
