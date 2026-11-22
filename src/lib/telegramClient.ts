@@ -146,6 +146,8 @@ export async function createTelegramToolConnection(
   const required: (keyof TelegramToolConnectionIdentity)[] = ['id', 'botId', 'botUsername', 'displayName'];
   const invalid = required.some((k) => typeof identity[k] !== 'string' || (identity[k] as string).trim() === '');
   if (invalid || identity.provider !== provider) {
+    // The tool already holds the token and a poll loop under this id: tear it down, or nothing in core can reach it.
+    if (typeof identity.id === 'string' && identity.id.trim() !== '') void deleteTelegramToolConnection(provider, identity.id);
     throw new GraphQLError('Telegram service returned an invalid connection identity.', {
       extensions: { code: 'TELEGRAM_TOOL_ERROR', provider },
     });

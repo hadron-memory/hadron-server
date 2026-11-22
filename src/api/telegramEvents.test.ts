@@ -145,6 +145,14 @@ describe('dispatchTelegramEvent', () => {
     expect(await db.telegramEventReceipt.count()).toBe(2);
   });
 
+  it('a database fault on the claim (not a duplicate) propagates: no ACK, no consumer, no receipt', async () => {
+    await seedConnection();
+    vi.spyOn(db.telegramEventReceipt, 'create').mockRejectedValueOnce(new Error('db down'));
+    await expect(dispatchTelegramEvent(event({ eventId: 'fault' }))).rejects.toThrow('db down');
+    expect(telegramEventConsumer.handler).not.toHaveBeenCalled();
+    expect(await db.telegramEventReceipt.count()).toBe(0);
+  });
+
   it('a consumer that throws releases the claim, so the tool\'s retry runs it again', async () => {
     await seedConnection();
     vi.mocked(telegramEventConsumer.handler).mockRejectedValueOnce(new Error('boom'));

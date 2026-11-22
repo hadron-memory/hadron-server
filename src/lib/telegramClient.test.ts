@@ -97,6 +97,16 @@ describe('telegramClient', () => {
     expect(JSON.stringify(u)).not.toContain('SECRET-bot-token');
   });
 
+  it('an identity that fails the shape check is refused AND its tool row is torn down (the tool already holds the token)', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: { method: string }) =>
+      init.method === 'POST' ? jsonResponse(200, { ...identity, botUsername: '' }) : new Response('{}', { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const e = await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN }));
+    expect(e.code).toBe('TELEGRAM_TOOL_ERROR');
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/connections/tool-1'), expect.objectContaining({ method: 'DELETE' })));
+  });
+
   it('disconnect is best effort: it never throws, unconfigured or unreachable', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('down')));
     await expect(deleteTelegramToolConnection('telegram', 'tool-1')).resolves.toBeUndefined();

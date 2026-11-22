@@ -127,6 +127,16 @@ describe('createTelegramConnection', () => {
     expect(createTelegramToolConnection).not.toHaveBeenCalled();
   });
 
+  it('an AMBIGUOUS App ref (one alias, two live Apps) is refused as Forbidden, like an unknown App', async () => {
+    const app2 = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'tg-app-b', urn: 'tg-org::tg-app-b' } });
+    for (const id of [app.id, app2.id]) {
+      await db.urnAlias.create({ data: { id: generateId(), urn: 'tg-org:amb', entityType: 'APP', entityId: id, reason: 'RENAME' } });
+    }
+    await expect(create(ctxFor(foreignAdmin.id), 'hrn:app:tg-org:amb')).rejects.toThrow('Forbidden');
+    await expect(create(ctxFor(admin.id), 'hrn:app:tg-org:amb')).rejects.toThrow('Forbidden');
+    expect(createTelegramToolConnection).not.toHaveBeenCalled();
+  });
+
   it('a second ACTIVE connection for the App is refused, before the tool is called', async () => {
     await create();
     vi.mocked(createTelegramToolConnection).mockClear();

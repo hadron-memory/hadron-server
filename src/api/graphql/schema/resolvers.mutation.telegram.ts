@@ -5,7 +5,7 @@
  */
 import { GraphQLError } from 'graphql';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { createTelegramToolConnection, deleteTelegramToolConnection } from '../../../lib/telegramClient.js';
 import type { Context } from './resolvers.helpers.js';
@@ -30,7 +30,8 @@ export const telegramMutations = {
     try {
       appId = (await resolveAppRef(ctx.db, appRef)).id;
     } catch (err) {
-      if (err instanceof AppNotFoundError) throw authorizationDenied();
+      // An ambiguous legacy URN names two Apps: another org's admin must not tell it apart from an unknown App.
+      if (err instanceof AppNotFoundError || err instanceof AmbiguousLegacyUrnError) throw authorizationDenied();
       throw err;
     }
     const app = await ctx.db.app.findUnique({ where: { id: appId }, select: { organizationId: true } });
