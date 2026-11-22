@@ -114,8 +114,8 @@ describe('#435 structure overflow degrades to the literal fallback, never a 500'
   });
 
   it('a quote-heavy 512-character query: the literal fallback (quotes become spaces) still fits and answers', async () => {
-    const query = '"a" '.repeat(128).trim().slice(0, 512);
-    expect(query.length).toBeLessThanOrEqual(512);
+    const query = `${'"a" '.repeat(127)}"aa"`;
+    expect(query.length).toBe(512);
     const r = await findNodes({ query, mode: 'keyword', filter: { memoryIds: [graph.id] } });
     expect(r.degraded).toBe('literal_fallback');
   });

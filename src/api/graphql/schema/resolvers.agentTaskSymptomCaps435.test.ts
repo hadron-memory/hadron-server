@@ -24,7 +24,7 @@ beforeEach(async () => {
   await db.node.create({ data: { memoryId: memory.id, loc: 'tasks:one', name: 'one', isRunnable: true, abstract: 'recover the unicorn' } });
 });
 const list = (symptom: string) => Q.agentTaskList({}, { ref: agentId, symptom }, ctx);
-const code = (p: Promise<unknown>) => p.then(() => undefined, (e: any) => e?.extensions?.code);
+const code = (p: Promise<unknown>) => p.then(() => undefined, (e: any) => e?.extensions?.code ?? `UNTYPED:${e?.name}`);
 
 it('a 513-character symptom is BAD_USER_INPUT; 512 is searched', async () => {
   expect(await code(list('x'.repeat(513)))).toBe('BAD_USER_INPUT');
@@ -45,7 +45,7 @@ it.each([
   ['a nested-parenthesis symptom (over the depth cap)', '((((((((( unicorn )))))))))'],
 ])('%s degrades to the literal fallback instead of throwing', async (_n, symptom) => {
   expect(symptom.length).toBeLessThanOrEqual(512);
-  expect(await code(list(symptom))).toBeUndefined();
+  await expect(list(symptom)).resolves.toBeDefined();
 });
 it('an unindexable symptom (only negation) is BAD_USER_INPUT, never a silent empty list', async () => {
   expect(await code(list('-unicorn'))).toBe('BAD_USER_INPUT');
