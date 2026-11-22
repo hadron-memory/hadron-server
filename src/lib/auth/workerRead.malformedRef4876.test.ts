@@ -15,7 +15,7 @@ const SECRET = 'hdr_user_CANARY';
 describe('resolveAppRefConcealed folds exactly the ref-shape failures', () => {
   const folded: Array<[string, () => Error]> = [
     ['UrnParseError', () => new UrnParseError(SECRET, 'invalid-segment-shape')],
-    ['UrnNotQualifiedError', () => new UrnNotQualifiedError(SECRET, 'app')],
+    ['UrnNotQualifiedError', () => new UrnNotQualifiedError(SECRET, undefined, 'app')],
     ['AppNotFoundError', () => new AppNotFoundError(SECRET)],
     ['AmbiguousLegacyUrnError', () => new AmbiguousLegacyUrnError(SECRET, ['a', 'b'] as never)],
   ];
