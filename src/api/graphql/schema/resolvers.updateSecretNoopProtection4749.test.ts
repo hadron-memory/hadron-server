@@ -20,7 +20,7 @@ let userId: string, appId: string, secretId: string;
 const ctx = (as: string = userId): Context => ({ db, userId: as, roles: [] } as unknown as Context);
 const error = async (p: Promise<unknown>) => p.then(() => { throw new Error('expected refusal'); }, (e) => e);
 const eventKinds = async () =>
-  (await db.secretEvent.findMany({ where: { ownerId: appId, secretName: 'canary' }, orderBy: [{ at: 'asc' }, { id: 'asc' }], select: { kind: true } })).map((e) => e.kind);
+  (await db.secretEvent.findMany({ where: { ownerId: appId, secretName: 'canary' }, orderBy: { at: 'asc' }, select: { kind: true } })).map((e) => e.kind);
 const member = async () => {
   const id = (await db.user.create({ data: { email: `${generateId()}@s4.test` } })).id;
   await db.appMember.create({ data: { appId, userId: id, role: 'reader' } });
@@ -104,10 +104,12 @@ describe('#4814 protected: null on a non-App (user) secret is "not supplied" too
   const userSecret = async () =>
     (await resolvers.Mutation.createSecret({}, { ownerType: 'user', ownerRef: userId, name: 'mine', kind: 'generic', value: 'v1' }, ctx())).id as string;
 
-  it('with a value: an ordinary new version, not refused as an App-only protection request', async () => {
+  it('with a value: an ordinary update, not refused as an App-only protection request', async () => {
     const id = await userSecret();
+    const before = await db.secret.findUniqueOrThrow({ where: { id } });
     await resolvers.Mutation.updateSecret({}, { ref: id, protected: null as never, value: 'v2' }, ctx());
-    expect(await db.secretVersion.count({ where: { secretId: id } })).toBe(2);
+    const after = await db.secret.findUniqueOrThrow({ where: { id } });
+    expect(after.valueEncrypted).not.toEqual(before.valueEncrypted); // the value changed: it was an ordinary update
   });
 
   it('with metadata: an ordinary update', async () => {

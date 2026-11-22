@@ -306,9 +306,11 @@ export const secretMutations = {
     }
     if (secret.ownerType === 'app') return updateAppSecret(ctx, secret, args);
     await requireSecretOwnerWrite(ctx, secret.ownerType as SecretOwnerType, secret.ownerId);
-    if (args.protected !== undefined) throw badInput('Protection is available only for App secrets.');
+    // An explicit null on a field that is not nullable in storage is "not supplied" (cor:api:210:01), as on the App door.
+    const requestedProtected = args.protected ?? undefined;
+    if (requestedProtected !== undefined) throw badInput('Protection is available only for App secrets.');
 
-    if (args.metadata === undefined && args.value === undefined && args.protected === undefined) {
+    if (args.metadata === undefined && args.value === undefined) {
       throw badInput('Pass metadata and/or value.');
     }
     const effectiveValue = args.value !== undefined ? args.value : decryptSecretValue(secret);
