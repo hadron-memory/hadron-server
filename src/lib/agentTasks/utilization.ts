@@ -1,21 +1,29 @@
 /**
- * #3819 slice 1 (cor:agt:060:01/:02/:04, cor:agt:050:21), Vera V1–V5/V8 and Xabat6762777653: current eligible workers grouped by binding family/tier/role,
- * and whether each held work during the window. Advisory only; never a matching or authorization input.
- * Failure-driven saturation, match-outcome history and alarm episodes await their separate provider/integration.
+ * #3819 slice 1 (hrn:node:hadronmemory.com:specs:cor:agt:060:13, cor:agt:060:01/:02/:04, cor:agt:050:21), Vera V1-V5/V8,
+ * V37-V43 and Xabat6762777653: current eligible workers grouped by binding family/tier/role, whether each held work during
+ * the window, and the combination's latest match outcome inside the window (#3825's record, read only here, behind the
+ * roster gate: V37). Advisory only; never a matching or authorization input. The saturation EPISODE and its alarm are
+ * `saturation.ts`'s (cor:agt:060:14, :15); this read never writes.
  */
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { loadWorkerWorkStates } from './matcher.js';
 import { tierOf, type ModelTier } from './family.js';
+import { latestMatchOutcomes, type LatestMatchOutcome } from './matchOutcomes.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
+/** The latest no-worker outcome of a combination inside the window: when it was decided and its coarse reason. */
+export interface MatchFailure { at: Date; reason: string | null }
 export interface UtilizationCombination {
-  family: string;
+  /** Null: the failed task left the family open (gate ruling 7067106396; a worker row always has one). */
+  family: string | null;
   tier: ModelTier | null;
   role: string | null;
   eligibleWorkers: number;
   busyWorkers: number;
   utilization: number;
   saturated: boolean;
+  /** Null unless the combination's LATEST outcome inside the window is no worker (the record is latest-only). */
+  lastMatchFailure: MatchFailure | null;
 }
 export interface UtilizationFilters { family?: string | null; tier?: ModelTier | null; role?: string | null }
 const HOUR = 3_600_000;
@@ -74,42 +82,86 @@ async function busyWorkersInWindow(db: Db, appId: string, since: Date, now: Date
 }
 
 const nameCompare = (a: string | null, b: string | null): number => (a ?? '') < (b ?? '') ? -1 : (a ?? '') > (b ?? '') ? 1 : 0;
-/** V5 without the deferred failed-match dimension: least eligible, then names break equal-utilization ties. */
+/**
+ * V5: utilization highest first; then the most recent failed match first (a row with none after every row with one);
+ * then fewest eligible workers; then family, tier and role by name.
+ */
 export function compareUtilization(a: UtilizationCombination, b: UtilizationCombination): number {
-  return b.utilization - a.utilization || a.eligibleWorkers - b.eligibleWorkers
+  const failed = (r: UtilizationCombination) => r.lastMatchFailure?.at.getTime() ?? -Infinity;
+  return b.utilization - a.utilization || (failed(a) === failed(b) ? 0 : failed(b) > failed(a) ? 1 : -1)
+    || a.eligibleWorkers - b.eligibleWorkers
     || nameCompare(a.family, b.family) || nameCompare(a.tier, b.tier) || nameCompare(a.role, b.role);
+}
+
+/**
+ * The key a combination has in both worlds: a worker row's (family, tier, role) and a match outcome's, where an open
+ * dimension is none (V41) and the role compares case-insensitively (`combinationsOf`).
+ */
+export const combinationKey = (c: { family: string | null; tier: string | null; role: string | null }): string =>
+  JSON.stringify([c.family ?? '', c.tier ?? '', (c.role ?? '').toLowerCase()]);
+
+type WorkerState = Awaited<ReturnType<typeof loadWorkerWorkStates>>[number];
+export interface WorkerCombination { family: string; tier: ModelTier | null; role: string | null; workers: string[]; eligible: string[] }
+
+/**
+ * The current, non-retired workers of one App grouped by family/tier/role, with which of them are eligible: not marked
+ * unavailable themselves and their family not paused (`ModelFamilyAvailability`, V42). The ONE eligibility predicate the
+ * read and the saturation evaluator share. An unbound multi-host worker contributes to each family it can run.
+ */
+export function groupWorkerCombinations(workers: WorkerState[], filters: UtilizationFilters = {}): Map<string, WorkerCombination> {
+  const groups = new Map<string, WorkerCombination>();
+  for (const worker of workers) {
+    const tier = tierOf(worker.bindingModel);
+    for (const family of worker.families) {
+      if ((filters.family != null && filters.family !== family) || (filters.tier != null && filters.tier !== tier)
+          || (filters.role != null && filters.role !== worker.role)) continue;
+      const key = combinationKey({ family, tier, role: worker.role });
+      let group = groups.get(key);
+      if (!group) {
+        group = { family, tier, role: worker.role, workers: [], eligible: [] };
+        groups.set(key, group);
+      }
+      group.workers.push(worker.id);
+      if (worker.availability.ownInEffect || worker.availability.familyAvailable.get(family) !== true) continue;
+      group.eligible.push(worker.id);
+    }
+  }
+  return groups;
 }
 
 /**
  * One admitted App/read snapshot. Current binding or live host families and the shared effective-availability
  * predicate define the eligible denominator, independently of task load or session quietness. Retired workers
  * are absent from the same shared loader the roster uses. An unbound multi-host worker can contribute to each family.
+ *
+ * #3819 slice 1 (cor:agt:060:13, V41/V43): a combination is SATURATED when its latest outcome inside the window is no
+ * worker, or when it has workers and none eligible; utilization is then 1. A combination with no workers appears only
+ * through a no-worker outcome inside the window (an open dimension is a null on the row). Window: the read's own.
  */
 export async function loadTeamUtilization(db: Db, appId: string, now: Date, windowHours: number, filters: UtilizationFilters) {
-  const [workers, busy] = await Promise.all([
+  const [workers, busy, outcomes] = await Promise.all([
     loadWorkerWorkStates(db, appId, now),
     busyWorkersInWindow(db, appId, new Date(now.getTime() - windowHours * HOUR), now),
+    // `undefined` does not narrow; a filter is never the open dimension here (the arguments have no way to ask for it).
+    latestMatchOutcomes(db, appId, { windowHours, family: filters.family ?? undefined, tier: filters.tier ?? undefined, role: filters.role ?? undefined }),
   ]);
-  const groups = new Map<string, UtilizationCombination>();
-  for (const worker of workers) {
-    const tier = tierOf(worker.bindingModel);
-    for (const family of worker.families) {
-      if ((filters.family != null && filters.family !== family) || (filters.tier != null && filters.tier !== tier)
-          || (filters.role != null && filters.role !== worker.role)) continue;
-      const key = JSON.stringify([family, tier, worker.role]);
-      let row = groups.get(key);
-      if (!row) {
-        row = { family, tier, role: worker.role, eligibleWorkers: 0, busyWorkers: 0, utilization: 0, saturated: false };
-        groups.set(key, row);
-      }
-      if (worker.availability.ownInEffect || worker.availability.familyAvailable.get(family) !== true) continue;
-      row.eligibleWorkers++;
-      if (busy.has(worker.id)) row.busyWorkers++;
-    }
+  const latest = new Map<string, LatestMatchOutcome>(outcomes.map((o) => [combinationKey(o), o]));
+  const rows = new Map<string, UtilizationCombination>();
+  for (const [key, group] of groupWorkerCombinations(workers, filters)) {
+    rows.set(key, {
+      family: group.family, tier: group.tier, role: group.role, eligibleWorkers: group.eligible.length,
+      busyWorkers: group.eligible.filter((id) => busy.has(id)).length, utilization: 0, saturated: false, lastMatchFailure: null,
+    });
   }
-  for (const row of groups.values()) {
-    row.saturated = row.eligibleWorkers === 0;
+  for (const [key, o] of latest) {
+    if (o.outcome !== 'NO_WORKER' || rows.has(key)) continue;
+    rows.set(key, { family: o.family, tier: o.tier as ModelTier | null, role: o.role, eligibleWorkers: 0, busyWorkers: 0, utilization: 0, saturated: false, lastMatchFailure: null });
+  }
+  for (const [key, row] of rows) {
+    const o = latest.get(key);
+    row.lastMatchFailure = o?.outcome === 'NO_WORKER' ? { at: o.decidedAt, reason: o.reason } : null;
+    row.saturated = row.lastMatchFailure !== null || row.eligibleWorkers === 0;
     row.utilization = row.saturated ? 1 : row.busyWorkers / row.eligibleWorkers;
   }
-  return { appId, computedAt: now, windowHours, combinations: [...groups.values()].sort(compareUtilization) };
+  return { appId, computedAt: now, windowHours, combinations: [...rows.values()].sort(compareUtilization) };
 }

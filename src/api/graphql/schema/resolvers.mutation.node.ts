@@ -779,7 +779,7 @@ async function writeNodeCoreRaw(
               targetLoc: tgt.loc,
               targetMemoryId: tgt.memoryId,
               name: e.name ?? null,
-              loc: e.loc ?? null,
+              loc: e.loc || null, // #4738: '' is no authored loc, it derives
               description: e.description ?? null,
               isRunnable: e.isRunnable ?? null,
             });
