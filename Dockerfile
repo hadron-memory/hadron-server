@@ -46,7 +46,7 @@ EXPOSE 10300
 # 4000, are only the fallback while no file exists. Anything but a 200, including no connection, is not ready. The
 # boot-time generate/migrate/transpile runs before the port opens, hence the generous start period.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=180s --retries=5 \
-  CMD ["node", "-e", "let p;try{p=require('fs').readFileSync(process.env.HADRON_PORT_FILE||'/tmp/hadron-server.port','utf8').trim()}catch{}fetch('http://127.0.0.1:'+(p||process.env.PORT||4000)+'/ready').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
+  CMD ["node", "-e", "let p;try{p=require('fs').readFileSync(process.env.HADRON_PORT_FILE||'/tmp/hadron-server.port','utf8').trim()}catch{}if(!/^[0-9]+$/.test(p||''))p=undefined;fetch('http://127.0.0.1:'+(p||process.env.PORT||4000)+'/ready').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
 
 # Generate client, apply any pending migrations, then start — all at runtime
 # when DATABASE_URL is available. `migrate deploy` is the production-grade

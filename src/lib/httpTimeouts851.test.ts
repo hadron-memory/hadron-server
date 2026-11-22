@@ -159,6 +159,17 @@ describe('#851 Dockerfile readiness HEALTHCHECK', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it.each(['abc', '40 00', '4000.5', '-1', ''])('a port file holding %j is ignored and the probe falls back to PORT', async (junk) => {
+    const l = await listener(200);
+    const dir = mkdtempSync(join(tmpdir(), 'hadron-851-'));
+    const file = join(dir, 'port');
+    writeFileSync(file, junk);
+    expect(await probe(l.port, file)).toBe(0);
+    expect(l.seen).toEqual(['/ready']);
+    await l.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('a port file naming a port nothing serves is not healthy, whatever PORT says', async () => {
     const live = await listener(200);
     const dead = await listener(200);
@@ -222,6 +233,8 @@ describe('#851 port file (what the probe reads)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'hadron-851-'));
     const env = { HADRON_PORT_FILE: join(dir, 'port') } as NodeJS.ProcessEnv;
     expect(writePortFile({ address: () => ({ port: 0 }) }, env)).toBe(false);
+    expect(writePortFile({ address: () => ({ port: 4000.5 }) }, env)).toBe(false);
+    expect(writePortFile({ address: () => ({ port: -3 }) }, env)).toBe(false);
     expect(() => readFileSync(env.HADRON_PORT_FILE!, 'utf8')).toThrow();
     rmSync(dir, { recursive: true, force: true });
   });

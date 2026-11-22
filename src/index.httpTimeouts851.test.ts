@@ -9,6 +9,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({ server: undefined as undefined | { keepAliveTimeout: number; headersTimeout: number }, listenCallback: true }));
 let portDir = '';
+// The first case in this file pays a cold `import('./index.js')` (vi.resetModules() discards the graph each time): over the 5 s default
+// on a loaded shared host, as #3849 found for the sibling index tests.
+vi.setConfig({ testTimeout: 30_000 });
 vi.mock('./instrument.js', () => ({}));
 vi.mock('./lib/automation/config.js', () => ({}));
 vi.mock('./server.js', () => ({
