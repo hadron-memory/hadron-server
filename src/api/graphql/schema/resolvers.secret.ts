@@ -411,7 +411,9 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
   await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
   const app = await loadLiveApp(ctx, found.ownerId);
   if (!app) throw notFound();
-  if (args.metadata === undefined && args.value === undefined && args.protected === undefined) {
+  // A GraphQL null asks for no protection change, like an omitted argument.
+  const requestedProtected = args.protected ?? undefined;
+  if (args.metadata === undefined && args.value === undefined && requestedProtected === undefined) {
     throw badInput('Pass metadata and/or value.');
   }
   const actor = secretActorOf(ctx);
@@ -430,11 +432,15 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
       const effectiveMetadata = args.metadata !== undefined ? args.metadata : secret.metadata;
       const payload = args.value === undefined ? null : validateSecretPayload(secret.kind, effectiveMetadata, args.value, { enforceValueSize: true });
       const metadata = payload?.metadata ?? validateUnchangedSecretMetadata(secret.kind, effectiveMetadata, secret.metadata);
-      if (secret.protected || args.protected !== undefined) {
+      // #4749: `protected: false` on an unprotected secret asks for no protection change. Judged after the manager gate above, so only a
+      // manager reaches it; left as `false` it staged a request (a spent slot and a ceremony) for nothing.
+      const protectedChange = !secret.protected && requestedProtected === false ? undefined : requestedProtected;
+      if (!secret.protected && protectedChange === undefined && args.metadata === undefined && args.value === undefined) return secret; // the silent no-op: nothing to record
+      if (secret.protected || protectedChange !== undefined) {
         const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
         return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
           metadata: metadata as never, operation: 'STORE', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0), valueJson: payload?.valueJson, sizeBytes: payload?.sizeBytes,
-          protectedResult: args.protected, writeVersion: args.value !== undefined });
+          protectedResult: protectedChange, writeVersion: args.value !== undefined });
       }
       let versionNo: number | null = null;
       if (payload) versionNo = await addAppSecretVersion(tx, secret, payload.valueJson, payload.sizeBytes, actor);

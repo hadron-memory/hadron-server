@@ -151,6 +151,7 @@
     "ConnectionStart": "value",
     "ConnectionFlow": "value",
     "SlackConnectionsPage": "envelope",
+    "TelegramConnectionsPage": "envelope",
     "McpServersPage": "envelope",
     "McpServerTool": "value",
     "SecretsPage": "envelope",
@@ -1975,6 +1976,12 @@
       "audience": "live org members (resolveOrgScope memberOrgIds); slackConnection(ref) admits isOrgMemberOrAdmin of the owning org",
       "resolver": "src/api/graphql/schema/resolvers.query.slack.ts::isOrgMemberOrAdmin",
       "target": "SlackConnection"
+    },
+    "TelegramConnectionsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "live org members (resolveOrgScope memberOrgIds); telegramConnection(ref) admits isOrgMemberOrAdmin of the owning org",
+      "resolver": "src/api/graphql/schema/resolvers.query.telegram.ts::isOrgMemberOrAdmin",
+      "target": "TelegramConnection"
     },
     "SpecCorpusMintReport.unresolvedFeedback": {
       "class": "parent-implies-child",

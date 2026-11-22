@@ -42,7 +42,7 @@ export { teamChatRead } from './teamChatTools.js';
 export { hadronTeamSnapshot } from './teamSnapshotTools.js';
 export { githubIssueSnapshot } from './githubTools.js';
 export { hadronRecordContentValidation } from './contentValidationTools.js';
-export { hadronListGrants, hadronCreateGrant } from './grantTools.js';
+export { hadronListGrants, hadronCreateGrant, hadronWithdrawGrant } from './grantTools.js';
 export type { RunToolDef, RunToolContext };
 
 /** The author's printf — lands on the hop's trail element (D-TL-2). */
@@ -88,7 +88,7 @@ export const hadronFail: RunToolDef = {
 export const ALWAYS_ON_TOOLS: readonly RunToolDef[] = [hadronLog, hadronFail];
 
 /** Run tools that exist only while signing is on (`signingSurfacePolicy().signing`, read per call). */
-const SIGNING_GATED_TOOLS: ReadonlySet<string> = new Set(['hadron_create_grant']);
+const SIGNING_GATED_TOOLS: ReadonlySet<string> = new Set(['hadron_create_grant', 'hadron_withdraw_grant']);
 
 const REGISTRY = new Map<string, RunToolDef>(
   [

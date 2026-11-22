@@ -140,6 +140,7 @@ import { mountCapabilitiesRoute } from './api/capabilities.js';
 import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
 import { mountSlackEventRoutes } from './api/slackEvents.js';
+import { mountTelegramEventRoutes } from './api/telegramEvents.js';
 import { mountWebFetchEventRoutes } from './api/webfetchEvents.js';
 import { buildMicrosoftAuthUrl, getMicrosoftRedirectUri } from './integrations/exchange/auth.js';
 import { buildGmailAuthUrl, getGmailRedirectUri, isGmailConnectConfigured } from './integrations/gmail/auth.js';
@@ -1867,6 +1868,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // (spec 043 Phase 2) — same CORE_EVENTS_TOKEN contract; dispatch dedupes
   // on (connectionId, envelopeId) because the tool's inbox is at-least-once.
   mountSlackEventRoutes(app);
+
+  // Normalized Telegram events (telegram.*) arrive here from hadrontool-telegram (#597, Telegram phase 2) — same
+  // CORE_EVENTS_TOKEN contract; dispatch claims (connectionId, eventId) because the tool's inbox is at-least-once.
+  mountTelegramEventRoutes(app);
 
   // Durable webfetch poll events (poll.triggered / expired / failed) arrive
   // from hadrontool-webfetch. The core validates the origin-run binding,

@@ -338,7 +338,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
   const startAuthRate = buildAuthRateAdmission(db, 'rest', 'bearer');
   const pendingStates = new Map<
     string,
-    { orgId: string; userId: string; redirect: string; origin: ExchangeStartOrigin; flowId: string | null; loginHint?: string; expiresAt: number }
+    { orgId: string; userId: string; redirect: string; origin: ExchangeStartOrigin; flowId: string | null; expiresAt: number }
   >();
 
   // #477 Sink 2 — mailbox-connect OAuth start. The portal calls this
@@ -548,7 +548,6 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       redirect: started.redirect,
       origin: started.origin,
       flowId: started.flowId,
-      loginHint: started.loginHint ?? undefined,
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
 

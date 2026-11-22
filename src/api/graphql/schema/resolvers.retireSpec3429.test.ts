@@ -11,6 +11,9 @@ import { observeTransactionBackend, waitForAdvisoryWaiter } from '../../../test/
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { generateId } from '../../../lib/id.js';
 import { acquireLockSet } from '../../../lib/nodeSubtreeLock.js';
+import { generateDataKey, isCiphertext } from '../../../lib/crypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { decryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -501,7 +504,7 @@ describe('#3429 rollback after the node write (blind P3)', () => {
       await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION fail_retire_edge_3429() RETURNS trigger LANGUAGE plpgsql AS $f$
         BEGIN
           -- Fails only when the retirement UPDATE of the SOURCE is already visible in this transaction.
-          IF EXISTS (SELECT 1 FROM nodes WHERE id = NEW.source_id AND tags::text LIKE '%superseded%') THEN
+          IF EXISTS (SELECT 1 FROM nodes WHERE id = NEW.source_id AND 'superseded' = ANY(tags)) THEN
             RAISE EXCEPTION 'forced failure after the node write';
           END IF;
           RAISE EXCEPTION 'trigger fired BEFORE the node write';
@@ -589,3 +592,57 @@ describe('#3429 access lost while the door waits for its locks (blind, unresolve
     expect(await outcome).toBe('NODE_NOT_FOUND');
   });
 });
+
+// #4686 (the §10 read of #4669, P3 F1): the door composes the banner and abstract from the DECRYPTED copy when the spec's memory is
+// encrypted, and refuses SESSION_EXPIRED, writing nothing, when no session key is cached. cor:spc:010:02 (an encrypted memory, "each
+// refusal writes nothing"), cor:sec:040:03 (content and abstract are enciphered, tags are plaintext), cor:sec:040:04 (an expired holding is absent).
+describe('#4686 a spec in an encrypted memory', () => {
+  const enciphered = async () => {
+    await db.memory.update({ where: { id: mem.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+    const key = generateDataKey();
+    sessionKeyCache.set('retire-encrypted-4686', mem.id, key);
+    return key;
+  };
+
+  it('with a cached key a rescind writes the composed text, enciphered at rest and readable decrypted', async () => {
+    const key = await enciphered();
+    try {
+      const x = await spec('enc:010:01');
+      const before = await db.node.findUniqueOrThrow({ where: { id: x.id } });
+      expect(isCiphertext(before.content!), 'the fixture spec is enciphered before the retirement').toBe(true);
+      const out = await rescind(x.id);
+      const stored = await db.node.findUniqueOrThrow({ where: { id: x.id } });
+      expect(isCiphertext(stored.content!), 'content is enciphered at rest').toBe(true);
+      expect(isCiphertext(stored.abstract!), 'abstract is enciphered at rest').toBe(true);
+      expect(stored.content).not.toContain('Rescinded');
+      expect(stored.abstract).not.toContain('RESCINDED');
+      expect(stored.tags).toEqual(['spec', 'superseded']); // tags are plaintext (cor:sec:040:03)
+      const plain = decryptNodeFieldsWithKey({ content: stored.content, abstract: stored.abstract }, key);
+      const date = plain.abstract!.match(/^RESCINDED \((\d{4}-\d\d-\d\d)\); do not apply\. Superseded by policy Historical: The old rule\.$/)?.[1];
+      expect(date, plain.abstract!).toBeDefined();
+      expect(plain.content).toBe(
+        `# Title enc:010:01\n\n> **⚠️ Rescinded** (${date}, Superseded by policy), no successor. **Do not apply.** Retained as a tombstone; the citation is never renumbered.\n\nBody of enc:010:01.`,
+      );
+      // The historical text is the DECRYPTED original abstract, never the ciphertext of it.
+      expect(plain.abstract).toContain('The old rule.');
+      expect(plain.abstract).not.toContain('enc:');
+      expect(stored.revSeq).toBe(before.revSeq + 1);
+      expect(out.node.tags).toEqual(['spec', 'superseded']);
+    } finally { sessionKeyCache.clear(); }
+  });
+
+  it('with no cached key the door refuses SESSION_EXPIRED and writes nothing (a revision, a tag, an edge)', async () => {
+    await enciphered();
+    try {
+      const x = await spec('enc:010:02');
+      const y = await spec('enc:010:03');
+      const before = await snap(x.id);
+      sessionKeyCache.clear(); // the holding is gone at the moment of use
+      expect(await codeOf(rescind(x.id))).toBe('SESSION_EXPIRED');
+      expect(await codeOf(supersede(x.id, y.id))).toBe('SESSION_EXPIRED');
+      expect(await snap(x.id)).toBe(before);
+      expect(await db.edge.count({ where: { sourceId: x.id } })).toBe(0);
+    } finally { sessionKeyCache.clear(); }
+  });
+});
+

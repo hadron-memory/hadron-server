@@ -15,6 +15,7 @@ on:
       - 'src/auth/**'
       - 'src/server.ts'
       - 'prisma/schema.prisma'
+  merge_group:
   push:
     branches: [main]
     paths:

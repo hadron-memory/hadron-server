@@ -2747,12 +2747,14 @@ export const typeDefs = `#graphql
     "True when the caller is a decider, including through an account merged into theirs (#1715)."
     viewerIsDecider: Boolean!
     """
-    #4427 — true when the caller may answer or take back an answer right now: one of the question\'s deciders, acting as
-    themselves (a person in a session bound to no worker or agent, no App key or run, no impersonation), still among the
-    log\'s deciders and able to write its memory, on a question that is not withdrawn, tampered or unverifiable
-    (hrn:node:hadronmemory.com:specs:cor:dmo:140:05). It is the capability to submit a new answer: it is false once the
-    answer history is full (the last entry is kept for taking an answer back), and it does not say that an answer stands to
-    take back (retractQuestionAnswer refuses QUESTION_NOT_ANSWERED otherwise).
+    #4427 — true when the caller may submit a NEW answer right now. The rule (hrn:node:hadronmemory.com:specs:cor:dmo:140:05,
+    Proposed where it was amended on 2026-11-18) is that a decider is a user who may write the log\'s memory, never a worker,
+    an Agent or an App key, and that this is re-checked at the moment of answering. So: one of the question\'s deciders,
+    acting as themselves (a person in a session bound to no worker or agent, no App key or run, no impersonation), still
+    among the log\'s deciders and able to write its memory, on a question that is not withdrawn, tampered or unverifiable.
+    It is not the capability to take an answer back: it is false once the answer history reaches its last free entry (that
+    entry is kept so a standing answer can still be taken back), even though the decider can still retract then, and it does
+    not say that an answer stands to take back (retractQuestionAnswer refuses QUESTION_NOT_ANSWERED otherwise).
     """
     viewerMayAnswer: Boolean!
     "Account merges the stored user ids follow: the record keeps the merged-away id (#1715)."
@@ -6402,6 +6404,39 @@ export const typeDefs = `#graphql
   }
 
   """
+  One Telegram bot registered for a Hadron App (#597). APP-owned: one active
+  connection per App, so the bot a person messages names the App. The bot
+  token lives ENCRYPTED IN THE TOOL (hadrontool-telegram): it is a write-only
+  input on createTelegramConnection and no field here ever returns it.
+  """
+  type TelegramConnection {
+    id: ID!
+    "The App's owning organization."
+    organizationId: String!
+    appId: String!
+    "Telegram provider backing this connection ('telegram' today)."
+    provider: String!
+    "The bot's Telegram user id."
+    botId: String!
+    "The bot's @username, without the at sign."
+    botUsername: String!
+    displayName: String!
+    "'ACTIVE' or 'ERROR' (the tool's connection-status vocabulary)."
+    status: String!
+    lastError: String
+    createdAt: DateTime!
+    updatedAt: DateTime!
+  }
+
+  """
+  Uniform paginated list shape (hrn:node:hadronmemory.com:specs:cor:api:120).
+  """
+  type TelegramConnectionsPage {
+    items: [TelegramConnection!]!
+    total: Int!
+  }
+
+  """
   One registered EXTERNAL MCP server (hadrontool-mcp conduit registry).
   Org-owned. Static auth headers are encrypted at rest and WRITE-ONLY:
   no field here ever returns them — hasHeaders is all a reader gets.
@@ -6501,7 +6536,7 @@ export const typeDefs = `#graphql
   type SecretChangeRequest {
     """The change request id."""
     id: ID!
-    """The effective state, with expiry judged on the server clock."""
+    """The effective state, with expiry judged on the server clock: open, completed, declined (the requester declined on the ceremony page), expired, withdrawn (the requester withdrew it) or stale (the secret changed first)."""
     state: String!
     """The requested operation."""
     operation: String!
@@ -7841,7 +7876,7 @@ export const typeDefs = `#graphql
     verifiedBy: ID
     signatureId: ID
     revokedAt: DateTime
-    "#3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, V56): who revoked or withdrew it, as a user id. Only the App's manager reads it (appGrants); every other read of the grant answers null. A worker requester's withdrawal records the person driving it. Null once that account is erased."
+    "#3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, V56): who revoked or withdrew it, as a user id. Only the App's manager reads it (appGrants); every other read of the grant answers null. A worker requester's withdrawal records the person driving it. #4767: an agent's own withdrawal through a run records no person — null with the row withdrawn, the WITHDRAW event naming the run. Null once that account is erased."
     revokedByUserId: ID
     "#3711 (V56): when the holder went (a person erased, a worker retired, an agent or App deleted); a fact, not a state. Only the App's manager reads it (appGrants); every other read answers null."
     holderDepartedAt: DateTime
@@ -9211,9 +9246,9 @@ export const typeDefs = `#graphql
     appId: ID!
     "The granted memory. Null when the grant is on someone's personal or private memory and the caller is not its owner."
     memoryUrn: String
-    "The loc prefix: the loc itself and its colon-boundary descendants (reports:team-progress does not cover reports:team-progressX)."
-    prefix: String!
-    "The register line this grant cites. A citation only, never evidence that the line exists."
+    "The loc prefix: the loc itself and its colon-boundary descendants (reports:team-progress does not cover reports:team-progressX). #4734: null whenever memoryUrn is null, because a prefix names content inside a memory the caller may not know exists; never shown without its memory URN."
+    prefix: String
+    "The register line this grant cites. A citation only, never evidence that the line exists. #4734: null whenever memoryUrn is null, as prefix is."
     registerNodeUrn: String
     "The person who set it."
     grantedBy: String!
@@ -10582,6 +10617,22 @@ export const typeDefs = `#graphql
     limit: 0 -> count only.
     """
     slackConnections(orgId: ID, limit: Int, offset: Int): SlackConnectionsPage!
+
+    """
+    Fetch one Telegram connection by id (#597). Returns null when the row does
+    not exist OR the caller is not a live member of its org (a revoked member
+    included): no existence disclosure.
+    """
+    telegramConnection(ref: ID!): TelegramConnection
+
+    """
+    Uniform paginated Telegram-connection list (hrn:node:hadronmemory.com:specs:cor:api:120). Default scope:
+    the caller's member orgs. orgId follows hrn:node:hadronmemory.com:specs:cor:api:100:01 (member -> that
+    org, non-member -> empty page, no disclosure, no admin bypass).
+    Bot-username-ascending order (id tiebreak); limit default 20 / cap 200;
+    limit: 0 -> count only.
+    """
+    telegramConnections(orgId: ID, limit: Int, offset: Int): TelegramConnectionsPage!
 
     """
     Fetch one registered external MCP server by id. Returns null when the
@@ -13167,7 +13218,7 @@ export const typeDefs = `#graphql
     """
     revokeGrant(ref: ID!, instruction: ActInstructionInput): Grant!
     """
-    #3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, V57) — withdraw a grant the caller asked for, while it is still pending. Only the recorded requester: a person, or the worker session that asked. It is the grant's one end (revoked_at, with the person as revoker) and one REVOKE event; no new state is named. A withdrawal that loses the race to the signature is refused. Refusals: GRANT_NOT_FOUND (unknown and unreadable alike), GRANT_NOT_REQUESTER, GRANT_NOT_PENDING (activated). A grant already ended is returned as it is.
+    #3711 (hrn:node:hadronmemory.com:specs:cor:acl:140:05, V57) — withdraw a grant the caller asked for, while it is still pending. The recorded requester: a person, the worker session that asked, or (#4767, ruling 0255 item 21) a worker session bound to the agent when a RUN of that agent asked (hrn:node:hadronmemory.com:specs:cor:acl:140:03 item 5; the run tool hadron_withdraw_grant is the run's own door onto it). A session's withdrawal is the grant's one end (revoked_at, with the driving person as revoker) and one WITHDRAW event; no new state is named. A withdrawal that loses the race to the signature is refused. Refusals: GRANT_NOT_FOUND (unknown and unreadable alike), GRANT_NOT_REQUESTER, GRANT_NOT_PENDING (activated). A grant already ended is returned as it is.
     """
     withdrawGrant(ref: ID!): Grant!
     "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — withdraw an open grant signing request. Only the requester account, from any of its sessions or workers, among the two callers who may read the grant (a bound worker in its own App, or a person who manages the App); a manager who did not ask is refused SIGNING_REQUEST_NOT_REQUESTER. Refusals: FORBIDDEN while impersonating, SIGNING_REQUEST_NOT_FOUND, SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
@@ -14333,6 +14384,19 @@ export const typeDefs = `#graphql
     deleteSlackConnection(ref: ID!): Boolean!
 
     """
+    Register a Telegram bot for an App (#597). appRef accepts ID or URN
+    (hrn:node:hadronmemory.com:specs:cor:api:140); the organization is the App's own. The bot token is
+    validated live by the tool and stored encrypted THERE: core keeps identity
+    only, and no field ever returns the token. Requires ADMIN/OWNER of the
+    App's organization; every caller who may not, and an App that does not
+    exist or has no organization, get the same refusal. One active connection
+    per App.
+    """
+    createTelegramConnection(appRef: ID!, botToken: String!): TelegramConnection!
+    "Soft-delete a Telegram connection (org ADMIN/OWNER); tears down the tool side best-effort."
+    deleteTelegramConnection(ref: ID!): Boolean!
+
+    """
     Register an external MCP server (org ADMIN/OWNER). orgRef accepts ID
     or URN (cor:api:140). headers is a JSON object of static request
     headers (e.g. Authorization) — encrypted at rest, write-only, never
@@ -14387,6 +14451,13 @@ export const typeDefs = `#graphql
     origin binding). A run resolves the name via the CSS cascade
     (user -> org) at entitled scopes only; an App secret is never resolved
     by a run (hrn:node:hadronmemory.com:specs:cor:sec:020:02).
+    With protected: true the create is only STAGED: it answers the error
+    SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl, no
+    secret exists yet, and the requester's own passkey ceremony at that URL makes
+    it (hrn:node:hadronmemory.com:specs:cor:sec:070:02). A staged request lasts
+    one hour; at most 5 are open per secret name and at most 2 per requester
+    (SECRET_CHANGE_REQUEST_LIMIT, SECRET_CHANGE_REQUESTER_LIMIT). Those numbers are
+    engineering bounds, not ruled values.
     """
     createSecret(
       ownerType: String!
@@ -14405,15 +14476,35 @@ export const typeDefs = `#graphql
     any member of the App may store. Name, kind, and owner are immutable —
     the cascade and flow config reference the name; create a new name
     instead. The effective (metadata, value) pair is re-validated per kind.
+    On a PROTECTED App secret a change is only staged: it answers the error
+    SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl instead
+    of a Secret, and nothing changes until the requester completes the passkey
+    ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The expiry and the two
+    caps are as for createSecret.
     """
     updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean): Secret!
-    """Open a protection change for your own passkey ceremony. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    """
+    Turn protection on or off for an App secret, through your own passkey ceremony
+    (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The payload is a Secret only when
+    nothing needs to change (clearing protection that is not on). Otherwise the change
+    is staged and the answer is the error SECRET_PROTECTED_NEEDS_PASSKEY with
+    extensions requestId and ceremonyUrl, never a Secret: the protection changes only
+    when the requester completes the ceremony. Turning protection off needs whoever
+    manages the App. An App key, an impersonated session and a run are refused.
+    The expiry and the two caps are as for createSecret.
+    """
     setSecretProtected(ref: ID!, protected: Boolean!): Secret!
-    """Withdraw your own open change request and clear its staged value. hrn:node:hadronmemory.com:specs:cor:sec:070:02"""
+    """
+    Withdraw your own open change request and clear its staged value; the request then
+    reads withdrawn. Only the requester can withdraw, complete or decline a request, and
+    anyone else is answered as for a request that does not exist. Declining is done on
+    the ceremony page, with a passkey proof, and reads declined.
+    hrn:node:hadronmemory.com:specs:cor:sec:070:02
+    """
     withdrawSecretChangeRequest(id: ID!): Boolean!
 
 
-    "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person."
+    "Hard-delete a secret, every version with it; referencing runs fail their resolution loud (or fall through the cascade) afterwards. An unprotected App secret is deleted by its creator or whoever manages the App, each as a person. A PROTECTED App secret is only staged: the answer is the error SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl, and it is deleted only when the requester completes the passkey ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02)."
     deleteSecret(ref: ID!): Boolean!
 
     """

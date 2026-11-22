@@ -27,7 +27,7 @@
  * does): the grants are the whole of this issue. Each departure records its cause (#4180): see {@link lapseCauses}.
  */
 import { Prisma as P, type PrismaClient } from '../../generated/prisma/index.js';
-import { lockAppInstallations, resolveAppInstallation } from '../appInstallations.js';
+import { lockAppInstallationsFenced, resolveAppInstallation } from '../appInstallations.js';
 import { ALREADY_ENDED, endAgentGrantsAtApps, type AgentDepartureReason } from './departure.js';
 import { GRANT_DB_NOW } from './live.js';
 
@@ -118,8 +118,8 @@ export async function sweepLapsedAgentGrants(
     for (const p of pairs) byApp.set(p.app_id, [...(byApp.get(p.app_id) ?? []), p.agent_id]);
     const departed = await db.$transaction(async (tx) => {
       const gone: Array<{ appId: string; agentId: string }> = [];
+      await lockAppInstallationsFenced(tx, byApp); // every App's structure, then every agent in ONE global pass (#4715)
       for (const [appId, agentIds] of byApp) {
-        await lockAppInstallations(tx, appId, agentIds);
         for (const agentId of agentIds) {
           if (!(await resolveAppInstallation(tx, appId, agentId))) gone.push({ appId, agentId });
         }

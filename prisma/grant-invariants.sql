@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (today 20261121150000_grant_lapse_departure_causes) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (today 20261121200000_grant_agent_withdrawal) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -18,7 +18,9 @@
 --     its max_uses), with nothing else moving but updated_at. The caller holds the row FOR UPDATE and writes the USE event;
 --   * it ends ONCE, by revoked_at stamped together with revoked_by, or by its HOLDER going: holder_departed_at is stamped
 --     (NULL to a time, never back) by the AFTER DELETE triggers below on every hard delete of a holder row, and by the
---     deleting code on the soft deletes (an erased person, a retired worker, a deleted agent or App). The first end stands:
+--     deleting code on the soft deletes (an erased person, a retired worker, a deleted agent or App). #4767 (Grants R6):
+--     an agent's own withdrawal through a run names no person, so withdrawn_at (the same instant, on a row never
+--     activated) pairs with revoked_at instead. The first end stands:
 --     a row already revoked, departed, expired or spent (an ACTIVATED row past its expiry or at its count) is not stamped (ruling 0259).
 --     A departure records its CAUSE (holder_departure_reason, #4180) in the same statement, never afterwards; the cause must
 --     fit the holder's kind and what happened to the holder. A stamp with no cause is admitted (the previous image's) and stays so;
@@ -42,7 +44,16 @@ ALTER TABLE grants ADD CONSTRAINT chk_grants_shape CHECK (
   (max_uses IS NULL OR use_count <= max_uses) AND
   version >= 1 AND
   (starts_at IS NULL OR expires_at IS NULL OR starts_at < expires_at) AND
-  (revoked_at IS NULL) = (revoked_by IS NULL) AND
+  -- #4767 (Grants R6): an end names a person, or carries the withdrawal marker, or both (a person's withdrawal) — never
+  -- neither. An agent's withdrawal through a run records no person: withdrawn_at pairs with revoked_at instead; a REVOKE
+  -- still names a person (an end with neither a revoker nor the marker is refused), and a revoker only ever lands on an
+  -- ended row. The marker admits a personless end only on a RUN-MADE row (Rook SEC10 on #4803, defense in depth: the code
+  -- already restricts personless ends to the run door, and the database refuses one on a person's or a worker's request —
+  -- every pre-#4767 withdrawn row has its revoker, so none is refused by this). A marker with no end (withdrawn_at set,
+  -- revoked_at NULL) stays admitted exactly as before #4767: the equal-timestamp line below reads such a row as NULL, a
+  -- CHECK passes on NULL, and the #4001 lifecycle negative control rides that tolerance.
+  (revoked_by IS NULL OR revoked_at IS NOT NULL) AND
+  (revoked_at IS NULL OR revoked_by IS NOT NULL OR (withdrawn_at IS NOT NULL AND requested_by_run_id IS NOT NULL)) AND
   (revoked_by IS NULL OR revoked_by <> '') AND
   (withdrawn_at IS NULL OR (withdrawn_at = revoked_at AND activated_at IS NULL)) AND
   -- #4180: a departure cause only on a departed row, and only a cause of the holder's own kind (codes carry no wording, R5).
@@ -140,7 +151,7 @@ BEGIN
   END IF;
   IF TG_OP = 'INSERT' THEN
     IF NEW.activated_at IS NOT NULL OR NEW.verification_kind IS NOT NULL OR NEW.verified_by IS NOT NULL
-       OR NEW.signature_id IS NOT NULL OR NEW.revoked_by IS NOT NULL -- (revoked_at alone is refused by the pair CHECK)
+       OR NEW.signature_id IS NOT NULL OR NEW.revoked_by IS NOT NULL -- (revoked_at without a person or the marker is refused by chk_grants_shape's end pairing)
        OR NEW.use_count <> 0 OR NEW.version <> 1 OR NEW.holder_departed_at IS NOT NULL OR NEW.withdrawn_at IS NOT NULL THEN
       -- (#4180: a departure cause cannot arrive either: chk_grants_shape admits one only beside the departure stamp refused here)
       RAISE EXCEPTION 'grants must arrive pending' USING ERRCODE = '23514';
@@ -209,10 +220,10 @@ BEGIN
   IF ROW(NEW.activated_at, NEW.verification_kind, NEW.signature_id) IS DISTINCT FROM ROW(OLD.activated_at, OLD.verification_kind, OLD.signature_id) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
-  -- The one revoke: stamped once, together with its revoker (the shape CHECK pairs the two).
+  -- The one revoke: stamped once, together with its revoker (the shape CHECK pairs the two). #4767: a run-withdrawn row has
+  -- revoked_by NULL, so the already-ended test is on revoked_at itself, not on the revoker the row may not carry.
   IF NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
-    -- (an already-revoked row has revoked_by set: the pair CHECK makes OLD.revoked_at redundant here)
-    IF NEW.revoked_at IS NULL OR OLD.revoked_by IS NOT NULL THEN
+    IF NEW.revoked_at IS NULL OR OLD.revoked_at IS NOT NULL THEN
       RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
     END IF;
   ELSIF NEW.revoked_by IS DISTINCT FROM OLD.revoked_by THEN
@@ -389,6 +400,9 @@ FOR EACH ROW EXECUTE FUNCTION hadron_grant_import_parent_gone();
 ALTER TABLE grant_events DROP CONSTRAINT IF EXISTS chk_grant_events_shape;
 ALTER TABLE grant_events ADD CONSTRAINT chk_grant_events_shape CHECK (
   action IN ('CREATE', 'ACTIVATE', 'REVOKE', 'WITHDRAW', 'USE') AND grant_id <> '' AND (actor_user_id IS NULL OR actor_user_id <> '')
+  -- #4767 (R6): a WITHDRAW event attributes its act — a person, or the run that made it the agent's (Beatrix P3-1 on #4803,
+  -- the event half of the row's run-made-only marker above). endGrant is the one writer and always names one of the two.
+  AND (action <> 'WITHDRAW' OR actor_user_id IS NOT NULL OR run_id IS NOT NULL)
 );
 CREATE OR REPLACE FUNCTION hadron_append_only_grant_event() RETURNS trigger
 LANGUAGE plpgsql AS $$
