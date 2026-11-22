@@ -14,10 +14,16 @@ export const WEBFETCH_REQUIRED_CAPABILITY = 'redirects-none' as const;
 export const WEBFETCH_CONTRACT_TTL_MS = 5 * 60_000;
 
 let okUntil = 0;
+/** The tool URL the cached pass was read from: a changed WEBFETCH_TOOL_URL invalidates it (blind P3). */
+let okFor: string | undefined;
+/** One declaration read in flight at a time, so a burst of credentialed calls makes one GET (blind P3). */
+let inflight: Promise<void> | undefined;
 
-/** Test hook: forget a cached pass. */
+/** Test hook: forget a cached pass and any read in flight. */
 export function resetWebfetchContractCache(): void {
   okUntil = 0;
+  okFor = undefined;
+  inflight = undefined;
 }
 
 function mismatch(): GraphQLError {
@@ -27,21 +33,41 @@ function mismatch(): GraphQLError {
   );
 }
 
-/**
- * Throw WEBFETCH_TOOL_CONTRACT_MISMATCH unless the configured tool declares the contract. Only a matching answer is cached (5 minutes);
- * a failure is never cached, so a tool upgraded a moment later passes on the next call without a restart.
- */
-export async function assertWebfetchRedirectSafe(now: number = Date.now()): Promise<void> {
-  if (now < okUntil) return;
-  let declared;
+type Refusal = 'unreachable' | 'undeclared' | 'wrong_version' | 'missing_capability';
+
+/** Operator line with a fixed shape: the reason only, never the URL, the declared body or the cause text (the cause can name the tool). */
+function refuse(reason: Refusal): never {
+  console.warn('[webfetchContract] credentialed request refused', { reason });
+  throw mismatch();
+}
+
+async function readDeclaration(now: number, url: string | undefined): Promise<void> {
+  let declared: Awaited<ReturnType<typeof getWebfetchContract>> | undefined;
   try {
     declared = await getWebfetchContract();
   } catch {
-    throw mismatch();
+    refuse('unreachable');
   }
   const caps = declared?.capabilities;
-  if (declared?.contract !== WEBFETCH_CONTRACT_VERSION || !Array.isArray(caps) || !caps.includes(WEBFETCH_REQUIRED_CAPABILITY)) {
-    throw mismatch();
-  }
+  if (declared?.contract === undefined && caps === undefined) refuse('undeclared');
+  if (declared?.contract !== WEBFETCH_CONTRACT_VERSION) refuse('wrong_version');
+  if (!Array.isArray(caps) || !caps.includes(WEBFETCH_REQUIRED_CAPABILITY)) refuse('missing_capability');
   okUntil = now + WEBFETCH_CONTRACT_TTL_MS;
+  okFor = url;
+}
+
+/**
+ * Throw WEBFETCH_TOOL_CONTRACT_MISMATCH unless the configured tool declares the contract. Only a matching answer is cached (5 minutes, for
+ * the tool URL it was read from); a failure is never cached, so a tool upgraded a moment later passes on the next call without a restart.
+ * The version must match exactly: a future `webfetch@3` is refused until core is taught it (a deliberate, ruled fail-closed choice).
+ */
+export async function assertWebfetchRedirectSafe(now: number = Date.now()): Promise<void> {
+  const url = process.env.WEBFETCH_TOOL_URL;
+  if (now < okUntil && okFor === url) return;
+  if (!inflight) {
+    inflight = readDeclaration(now, url).finally(() => {
+      inflight = undefined;
+    });
+  }
+  await inflight;
 }

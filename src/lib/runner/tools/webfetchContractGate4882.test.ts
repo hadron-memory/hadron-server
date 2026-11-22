@@ -25,7 +25,9 @@ vi.mock('../../secrets/appSecrets.js', async (orig) => {
 });
 vi.mock('../../webfetchClient.js', () => ({ httpRequest: vi.fn(), fetchUrl: vi.fn(), getWebfetchContract: vi.fn() }));
 import { httpRequest, getWebfetchContract } from '../../webfetchClient.js';
-import { resetWebfetchContractCache } from '../../webfetchContract.js';
+import { assertWebfetchRedirectSafe, resetWebfetchContractCache, WEBFETCH_CONTRACT_TTL_MS } from '../../webfetchContract.js';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { webRequest } from './webTools.js';
 import { admitAndExecuteTool } from '../toolAdmission.js';
 
@@ -143,6 +145,79 @@ describe('#4882 the arms that gain no refusal (both arms)', () => {
     expect(getWebfetchContract).not.toHaveBeenCalled();
   });
   it('a malformed secretClientId is still the uniform refusal, not the contract code, once the tool declares it', async () => {
-    await expect(call({ secretClientId: 7 })).rejects.not.toMatchObject({ extensions: { code: 'WEBFETCH_TOOL_CONTRACT_MISMATCH' } });
+    const e = (await call({ secretClientId: 7 }).then(() => undefined, (x: unknown) => x)) as GraphQLError | undefined;
+    expect(e).toBeInstanceOf(GraphQLError);
+    expect(e!.extensions.code).not.toBe('WEBFETCH_TOOL_CONTRACT_MISMATCH');
+  });
+});
+
+describe('#4882 cache lifetime (SEC10 and blind P3s)', () => {
+  it('a cached pass expires at the TTL on an injected clock and is read again', async () => {
+    const t0 = 1_000_000;
+    await assertWebfetchRedirectSafe(t0);
+    await assertWebfetchRedirectSafe(t0 + WEBFETCH_CONTRACT_TTL_MS - 1);
+    expect(getWebfetchContract).toHaveBeenCalledTimes(1);
+    await assertWebfetchRedirectSafe(t0 + WEBFETCH_CONTRACT_TTL_MS);
+    expect(getWebfetchContract).toHaveBeenCalledTimes(2);
+  });
+  it('a changed WEBFETCH_TOOL_URL drops the cached pass', async () => {
+    const before = process.env.WEBFETCH_TOOL_URL;
+    try {
+      process.env.WEBFETCH_TOOL_URL = 'http://tool-a.test';
+      await assertWebfetchRedirectSafe(5);
+      process.env.WEBFETCH_TOOL_URL = 'http://tool-b.test';
+      await assertWebfetchRedirectSafe(6);
+      expect(getWebfetchContract).toHaveBeenCalledTimes(2);
+    } finally {
+      if (before === undefined) delete process.env.WEBFETCH_TOOL_URL; else process.env.WEBFETCH_TOOL_URL = before;
+    }
+  });
+  it('a burst of concurrent calls makes ONE declaration read', async () => {
+    await Promise.all([assertWebfetchRedirectSafe(9), assertWebfetchRedirectSafe(9), assertWebfetchRedirectSafe(9)]);
+    expect(getWebfetchContract).toHaveBeenCalledTimes(1);
+  });
+  it('a failed in-flight read is shared by the burst and is not cached for the next call', async () => {
+    vi.mocked(getWebfetchContract).mockRejectedValueOnce(new Error('down'));
+    const r = await Promise.allSettled([assertWebfetchRedirectSafe(9), assertWebfetchRedirectSafe(9)]);
+    expect(r.map((x) => x.status)).toEqual(['rejected', 'rejected']);
+    expect(getWebfetchContract).toHaveBeenCalledTimes(1);
+    await expect(assertWebfetchRedirectSafe(9)).resolves.toBeUndefined();
+  });
+});
+
+describe('#4882 the refusal leaves an operator line with a fixed shape', () => {
+  it.each([
+    ['unreachable', () => vi.mocked(getWebfetchContract).mockRejectedValue(new Error('http://secret-host.test 404'))],
+    ['undeclared', () => vi.mocked(getWebfetchContract).mockResolvedValue({} as never)],
+    ['wrong_version', () => vi.mocked(getWebfetchContract).mockResolvedValue({ contract: 'webfetch@3', capabilities: ['redirects-none'] } as never)],
+    ['missing_capability', () => vi.mocked(getWebfetchContract).mockResolvedValue({ contract: 'webfetch@2', capabilities: [] } as never)],
+  ])('%s logs the reason only', async (reason, arrange) => {
+    arrange();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await refused(assertWebfetchRedirectSafe());
+    expect(warn).toHaveBeenCalledExactlyOnceWith('[webfetchContract] credentialed request refused', { reason });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('secret-host');
+    warn.mockRestore();
+  });
+});
+
+describe('#4882 no other path of the run tools can attach a credential (blind P2-2)', () => {
+  it('web_request ignores a caller-supplied auth argument and sends none without secretClientId', async () => {
+    await call({ secretClientId: undefined, auth: { type: 'bearer', token: 'x' } }).catch(() => undefined);
+    await webRequest.execute(ctx, { method: 'GET', url: URL_OK, auth: { type: 'bearer', token: 'x' } });
+    for (const [input] of vi.mocked(httpRequest).mock.calls) expect(input).not.toHaveProperty('auth');
+  });
+  it('only webTools.ts calls httpRequest/fetchUrl/checkUrl outside the client, and only its gated call site passes auth', () => {
+    const root = join(__dirname, '..', '..', '..');
+    const files: string[] = [];
+    const walk = (d: string) => { for (const n of readdirSync(d)) { const f = join(d, n); if (statSync(f).isDirectory()) walk(f); else if (/\.ts$/.test(n) && !/\.test\.ts$/.test(n)) files.push(f); } };
+    walk(root);
+    const callers = files.filter((f) => /\b(httpRequest|fetchUrl|checkUrl)\(/.test(readFileSync(f, 'utf8')) && !f.endsWith('lib/webfetchClient.ts'));
+    expect(callers.map((f) => f.slice(root.length + 1)).sort()).toEqual(['lib/runner/tools/webTools.ts']);
+    const src = readFileSync(join(root, 'lib/runner/tools/webTools.ts'), 'utf8');
+    const authSites = src.split('\n').filter((l) => /\b(httpRequest|fetchUrl|checkUrl)\(.*\bauth\b/.test(l));
+    expect(authSites).toHaveLength(1);
+    expect(src.indexOf('await assertWebfetchRedirectSafe()')).toBeGreaterThan(-1);
+    expect(src.indexOf('await assertWebfetchRedirectSafe()')).toBeLessThan(src.indexOf(authSites[0]!));
   });
 });
