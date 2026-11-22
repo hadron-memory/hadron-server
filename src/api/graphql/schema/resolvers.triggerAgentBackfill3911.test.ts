@@ -60,7 +60,7 @@ const read = async (t: { schedule: string; webhook: string; poll: string }) => (
 async function migrate(): Promise<string> {
   const client = new Client({ connectionString: process.env.DATABASE_URL! });
   const notices: string[] = [];
-  client.on('notice', n => notices.push(n.message));
+  client.on('notice', n => notices.push(String(n.message)));
   await client.connect();
   try { await client.query(MIGRATION); } finally { await client.end(); }
   return notices.join('\n');
