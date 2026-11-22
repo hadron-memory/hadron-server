@@ -341,14 +341,25 @@ async function writeTeamRole(
   // was FALSE on main already. The definition-edit gate below
   // (requireMemoryWriteAccess) routes a Team Agent's system memory EXCLUSIVELY
   // through canManageAgentSystemMemory, whose arms are a live org ADMIN/OWNER
-  // of the owning org, the user-owned Agent's owner, and a platform
-  // ADMIN/OWNER — every one of whom the reach gate above admits
-  // (isAppParticipant covers org CONTRIBUTOR+ and platform roles; the
-  // user-owned App's owner arm covers the owner). No subscription arm reaches
-  // a system memory (memorySubscription grants are knowledge-class only), so
-  // the unconditional reach gate conceals only actors the edit gate REFUSED
-  // anyway (FORBIDDEN before, APP_NOT_FOUND now) and takes no write from any
-  // writer this door ever had. Pinned in resolvers.appRefDoors4838.test.ts.
+  // of the agent's owning org, the user-owned Agent's owner, and a platform
+  // ADMIN/OWNER. Platform roles are participants (isAppParticipant's org arm
+  // honors them), and no subscription arm reaches a system memory
+  // (memorySubscription grants are knowledge-class only), so a cross-org
+  // subscription CONTRIBUTOR was FORBIDDEN here on main and is the unknown-App
+  // answer now — concealed, never dispossessed. The user-owned Agent's owner
+  // arm cannot escape the App's own audience either: a user-owned agent is
+  // PERSONAL-visibility only (createAgentCore) and createAgentOrgGrant
+  // licenses only PUBLIC agents, so it never sits in an org App — its owner
+  // arm only ever coincides with a user-owned App's owner, whom
+  // isAppParticipant admits. The ONE writers this door loses: the org
+  // ADMIN/OWNER of a FOREIGN PUBLIC agent an App installed (a personal App
+  // may install one outright; an org App via createAgentOrgGrant) — on main
+  // they edited this register here without participating in that App. The
+  // reach rule (V58 keys reach on App participation) conceals them on THIS
+  // door while the generic node surface — updateNode /
+  // hadron_update_node_data, gated on memory write access alone — stays open
+  // to them: the register keeps its writers; this door is what the
+  // concealment takes. Both actors pinned in resolvers.appRefDoors4838.test.ts.
   const teamAgent = await locateTeamAgent(ctx, app.id, args.teamAgentRef);
   if (!teamAgent.systemMemoryId) {
     throw new GraphQLError(

@@ -57,7 +57,10 @@ export async function resolveAppRefConcealed(db: Context['db'], appRef: string):
  * (the narrow-catch rule, review:narrow-catch-blocks). Shared by the teamRole doors' `resolveApp` and
  * connectionGrant's grantee catch so the class list cannot drift between them. It deliberately folds
  * MORE than {@link resolveAppRefConcealed} above: that helper predates #4838 and serves doors whose
- * parse-error fold is tracked separately.
+ * parse-error fold is tracked separately (hadron-server#4876). The `UrnParseError` arm is
+ * unreachable through `resolveAppRef` TODAY — `assertFullyQualifiedUrn` is the API boundary gate and
+ * throws `UrnNotQualifiedError` only, and the tolerant `parseUrnInput` never throws — it is kept for
+ * a parser swap and pinned as contract, not as a reachable door path (workerRead.test.ts).
  */
 export const isAppRefResolutionFailure = (e: unknown): boolean =>
   e instanceof AppNotFoundError ||

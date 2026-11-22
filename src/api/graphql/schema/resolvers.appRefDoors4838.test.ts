@@ -31,15 +31,18 @@
  * raw echoing UrnNotQualifiedError for a malformed ref; the connectionGrant
  * door answered "Grantee App not found: '<ref>'." verbatim, and let
  * AmbiguousLegacyUrnError escape raw (AMBIGUOUS_LEGACY_URN: <ref>). The rerun
- * with this file held and the production change reverted: 10 of 37 pins fail
- * (the three non-participant tables, the three pure-App-key pins, the read
- * door's malformed fold, and the connectionGrant echo + malformed +
- * ambiguous-legacy folds); the 27 that pass are the keeps — participant
- * APP_UNINSTALLED/appId, the by-URN asymmetry, the deleted-App unknown
- * answer, the teamRole doors' ambiguous-legacy fold (main's
- * resolveAppRefConcealed already folded that class), FORBIDDEN for a member
- * who reaches but may not edit, uninstalled read legibility, the no-reach
- * ruling, and the narrow catches (measured 2026-11-22).
+ * with this file held and the production change reverted: 15 of 44 pins fail
+ * (the three non-participant tables, the three pure-App-key pins, the three
+ * cross-org subscription-CONTRIBUTOR pins, the foreign-agent org-ADMIN
+ * concealment, the hard-vanish race arm, the read door's malformed fold, and
+ * the connectionGrant echo + malformed + ambiguous-legacy folds); the 29 that
+ * pass are the keeps — participant APP_UNINSTALLED/appId, the by-URN
+ * asymmetry, the deleted-App unknown answer, the teamRole doors'
+ * ambiguous-legacy fold (main's resolveAppRefConcealed already folded that
+ * class), FORBIDDEN for a member who reaches but may not edit, the
+ * user-owned-App owner's FORBIDDEN, uninstalled read legibility, the no-reach
+ * ruling, resolveAppRefConcealed's kept parse refusal, and the narrow catches
+ * (measured 2026-11-22).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
@@ -47,6 +50,9 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { requireMemoryWriteAccess } from './resolvers.helpers.js';
+import { resolveAppRefConcealed } from '../../../lib/auth/workerRead.js';
+import { UrnNotQualifiedError } from '../../../lib/urn.js';
 import { formatGraphQLError } from '../formatError.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -93,8 +99,7 @@ const assertNoCanary = (e: unknown, canary: string) =>
 // F7 (#4871 blind seat): the narrow-catch pins mock `db.app.findFirst` with
 // `rejectedValueOnce`; a test that fails BEFORE the once is consumed would
 // leak the spy into later tests. Restoring every spy after each test closes
-// that hole (vi.restoreAllMocks — restoreAllSpies does not exist on vitest 4;
-// the module mocks above are untouched by it).
+// that hole (the module mocks above are untouched by it).
 afterEach(() => vi.restoreAllMocks());
 
 // ── fixture ────────────────────────────────────────────────────────────────
@@ -119,6 +124,15 @@ let granteeApp: { id: string; urn: string };
 // (`AMBIGUOUS_LEGACY_URN: <ref>`), a real fourth class for every fold, and no
 // earlier test produced it.
 let ambiguousUrn: string;
+// F3 (#4871 blind delta seat, the actor its verdict asked for): a CROSS-ORG
+// subscription CONTRIBUTOR — a CONTRIBUTOR of a second org holding a
+// CONTRIBUTOR MemorySubscription to orgT's free-standing knowledge memory.
+// They are a REAL generic-memory writer of orgT's shared knowledge (the
+// subscription arm of requireMemoryWriteAccess admits them) with no arm that
+// reaches the Team Agent's system memory and no participation in the App.
+let subOrg: { id: string };
+let subContrib: { id: string };
+let sharedKnowledge: { id: string };
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -192,6 +206,29 @@ beforeEach(async () => {
   granteeApp = { id: ga.id, urn: ga.urn };
 
   ambiguousUrn = `${orgT.urn}:legacy-dup-${suffix}`;
+  subOrg = await db.organization.create({
+    data: { id: generateId(), name: 'ar-sub-org', urn: `ar-sub-${suffix}.com` },
+  });
+  subContrib = await mkUser(5, 'subcontrib');
+  await db.orgMember.create({
+    data: { id: generateId(), organizationId: subOrg.id, userId: subContrib.id, role: 'CONTRIBUTOR' },
+  });
+  // Free-standing (appId NULL): an App-scoped knowledge memory is barred from
+  // the subscription write arm (#653), so the grant must name the org's shared
+  // knowledge — exactly the memory class a cross-org subscriber can write.
+  sharedKnowledge = await db.memory.create({
+    data: {
+      id: generateId(),
+      organizationId: orgT.id,
+      urn: `${orgT.urn}:shared-km`,
+      name: 'shared-km',
+      class: 'knowledge',
+      visibility: 'ORGANIZATION',
+    },
+  });
+  await db.memorySubscription.create({
+    data: { memoryId: sharedKnowledge.id, organizationId: subOrg.id, role: 'CONTRIBUTOR' },
+  });
   for (const n of ['a', 'b']) {
     await db.app.create({
       data: {
@@ -242,6 +279,18 @@ for (const [doorName, door] of Object.entries(writeDoors)) {
     it('a pure App key naming ANOTHER App gets the same unknown-App answer', async () => {
       const e = await refusal(door(app.id, ctx(undefined, granteeApp.id)));
       expect(shape(e)).toEqual(CONCEALED);
+    });
+
+    it('a cross-org subscription CONTRIBUTOR — a generic-memory writer, not a participant — gets the same unknown-App answer', async () => {
+      // F3 (#4871 blind delta): the actor is a real writer in orgT's ecosystem
+      // (the subscription arm of the write gate admits them to the org's
+      // free-standing knowledge memory — asserted, so the actor is not a
+      // dressed-up outsider) yet holds no arm that reaches the Team Agent's
+      // system memory and no App participation. On main the edit gate answered
+      // them FORBIDDEN — an existence oracle; the reach rule gives them the one
+      // unknown-App answer, byte-identical to every other non-participant's.
+      await requireMemoryWriteAccess(ctx(subContrib.id), sharedKnowledge.id);
+      expect(shape(await refusal(door(app.id, ctx(subContrib.id))))).toEqual(CONCEALED);
     });
 
     it('a PARTICIPANT naming an uninstalled App by PK keeps APP_UNINSTALLED with the appId', async () => {
@@ -300,6 +349,89 @@ for (const [doorName, door] of Object.entries(writeDoors)) {
     });
   });
 }
+
+// ── a foreign PUBLIC Team Agent in a user-owned App ────────────────────────
+describe('#4838 — a foreign org\'s PUBLIC Team Agent in a user-owned App (the edit-gate org arm vs the reach rule)', () => {
+  // The one edit-gate arm the reach rule does not admit, in its one reachable
+  // shape. A user-owned agent is PERSONAL-visibility only (createAgentCore),
+  // and createAgentOrgGrant licenses only PUBLIC agents — so a user-owned
+  // agent can NEVER sit in an org App, and its owner arm only ever coincides
+  // with a user-owned App's owner, whom isAppParticipant admits. But a
+  // personal App may install a FOREIGN org's PUBLIC agent outright
+  // (requirePersonalAppAgentInstall's PUBLIC arm; an org App reaches the same
+  // shape through createAgentOrgGrant). That agent's org ADMIN/OWNER write its
+  // system memory (the org arm of canManageAgentSystemMemory), so on MAIN this
+  // door served them on an App they hold no participation in; the reach rule
+  // (V58 keys reach on App participation) conceals them HERE while the generic
+  // node surface — updateNode / hadron_update_node_data, gated on memory write
+  // access alone — stays open to them: the register keeps its writers, this
+  // door is what the concealment takes.
+  let soloOwner: { id: string };
+  let fOrg: { id: string; urn: string };
+  let fAdmin: { id: string };
+  let pubAgent: { id: string; systemMemoryId: string };
+  let soloApp: { id: string };
+
+  beforeEach(async () => {
+    soloOwner = await db.user.create({
+      data: {
+        id: generateId(),
+        githubId: 98311,
+        githubUsername: `ar-solo-${suffix}`,
+        handle: 'ar-solo',
+        roles: ['READER'],
+      },
+    });
+    fOrg = await db.organization.create({
+      data: { id: generateId(), name: 'ar-foreign-org', urn: `ar-foreign-${suffix}.com` },
+    });
+    fAdmin = await db.user.create({
+      data: { id: generateId(), githubId: 98312, githubUsername: `ar-fadmin-${suffix}`, roles: ['READER'] },
+    });
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: fOrg.id, userId: fAdmin.id, role: 'ADMIN' },
+    });
+    const created = await M.createAgent(
+      {},
+      { orgRef: fOrg.id, name: 'AR Public Team Agent', visibility: 'PUBLIC' },
+      ctx(fAdmin.id),
+    );
+    pubAgent = { id: created.id, systemMemoryId: created.systemMemoryId };
+    await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: pubAgent.systemMemoryId,
+        loc: 'roles:pub-role',
+        name: 'pub-role',
+        description: 'A role the agent\'s org edits',
+      },
+    });
+    soloApp = await db.app.create({
+      data: { id: generateId(), ownerUserId: soloOwner.id, name: 'AR Solo App', urn: `solo-${generateId().slice(-8)}:app` },
+    });
+    await db.appAgent.create({ data: { appId: soloApp.id, agentId: pubAgent.id } });
+  });
+
+  it('the agent\'s org ADMIN — an edit-gate writer, not a participant — is concealed on the door and keeps the generic node surface', async () => {
+    // The other door first, as the capability claim: fAdmin writes the
+    // register through the generic surface (the org arm of the memory write
+    // gate), at this head exactly as on main.
+    const updated = await M.updateNode(
+      {},
+      { input: { memoryId: pubAgent.systemMemoryId, loc: 'roles:pub-role', description: 'edited through the generic surface' } },
+      ctx(fAdmin.id),
+    );
+    expect(updated).toBeTruthy();
+    // This door on main SERVED them (the write succeeded); the reach rule
+    // gives them the one unknown-App answer, byte-identical.
+    expect(shape(await refusal(M.createTeamRole({}, { appRef: soloApp.id, role: 'oncall', description: 'x' }, ctx(fAdmin.id))))).toEqual(CONCEALED);
+  });
+
+  it('the user-owned App\'s OWNER reaches (the owner arm) and keeps FORBIDDEN from the edit gate — the register is the foreign org\'s', async () => {
+    const e = await refusal(M.createTeamRole({}, { appRef: soloApp.id, role: 'oncall', description: 'x' }, ctx(soloOwner.id)));
+    expect(e.extensions?.code).toBe('FORBIDDEN');
+  });
+});
 
 // ── the teamRoles read door ────────────────────────────────────────────────
 describe('#4838 — teamRoles (read)', () => {
@@ -383,5 +515,42 @@ describe('#4838 — createConnectionGrant (grantee ref)', () => {
     spy.mockRestore();
     expect(e).toBe(fault);
     expect(formatGraphQLError({ message: String((e as Error)?.message) }, e).extensions?.code).toBe('INTERNAL_SERVER_ERROR');
+  });
+});
+
+// ── resolveAppRefConcealed vs the shared fold predicate ────────────────────
+describe('#4838 — resolveAppRefConcealed vs isAppRefResolutionFailure (the intentional difference)', () => {
+  // P3 (#4871 blind delta): two fold lists live in workerRead.ts — the shared
+  // four-class predicate these doors use, and the older two-class
+  // resolveAppRefConcealed (#4836's doors). The difference is INTENTIONAL and
+  // tracked as hadron-server#4876 (the parse-error fold on those doors). This
+  // pin documents the difference so the two lists cannot drift SILENTLY: when
+  // the tracked fold lands, this pin goes red and is updated with it. (The
+  // predicate's own four-class contract is unit-pinned in workerRead.test.ts.)
+  it('a MALFORMED ref KEEPS its typed parse refusal from resolveAppRefConcealed (not the unknown-App answer)', async () => {
+    const e = await resolveAppRefConcealed(db, canary()).then(
+      () => {
+        throw new Error('expected a refusal');
+      },
+      (x: unknown) => x,
+    );
+    expect(e).toBeInstanceOf(UrnNotQualifiedError);
+  });
+});
+
+// ── the resolveApp hard-vanish race arm ────────────────────────────────────
+describe('#4838 — the teamRole doors\' shared resolveApp (the hard-vanish race arm)', () => {
+  // Anita + Rook on the #4871 delta (surviving mutant / unpinned arm): a row
+  // that HARD-vanishes between resolution and resolveApp's read (the
+  // rename-collision cleanup deletes App rows outright) must fold into the one
+  // unknown-App answer, not surface as a distinguishable INTERNAL_SERVER_ERROR.
+  // Mocked rather than raced: the window is between two awaits, so the once-
+  // mock IS the interleaving. resolveApp is shared by all three write doors;
+  // one door pins it.
+  it('a row that vanishes between resolution and the read is the unknown-App answer', async () => {
+    const spy = vi.spyOn(db.app, 'findUnique').mockResolvedValueOnce(null as never);
+    const e = await refusal(M.createTeamRole({}, { appRef: app.id, role: 'oncall', description: 'x' }, ctx(admin.id)));
+    spy.mockRestore();
+    expect(shape(e)).toEqual(CONCEALED);
   });
 });
