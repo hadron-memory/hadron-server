@@ -101,7 +101,7 @@ describe('#4758 item 4: the field calls the exported decision', () => {
   });
 });
 
-describe('#4758 BLIND P2-1: the facts loader never runs without a user', () => {
+describe('#4758: the facts loader never runs without a user', () => {
   it('refuses a context with no userId instead of dropping the membership filter', async () => {
     const { loadSelfJoinFacts } = await import('./resolvers.appSelfJoinFacts.js');
     const ctx = { db, userId: undefined, roles: [] } as unknown as Context;

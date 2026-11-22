@@ -43,7 +43,7 @@ async function evaluate(ctx: Context, userId: string, ids: string[]): Promise<Ma
 
 /** The fresh App row and the caller's membership for one App; null when the App does not exist. Requires `ctx.userId`. */
 export function loadSelfJoinFacts(ctx: Context, appId: string): Promise<SelfJoinFacts | null> {
-  // BLIND P2-1: a missing user must never reach the membership read, where `userId: undefined` drops the filter and every App
+  // #4758: a missing user must never reach the membership read, where `userId: undefined` drops the filter and every App
   // with any member would read isMember true. Refuse here, not only in the field resolver, so no future caller can fail open.
   const userId = ctx.userId;
   if (!userId) return Promise.reject(new Error('loadSelfJoinFacts requires an authenticated user'));
