@@ -678,7 +678,10 @@ export const appRunMutations = {
         // The guard judges the row AS IT WILL BE: an edit that leaves an enabled schedule with no Agent is refused the
         // same way, so `agentRef: null` (clear) on an enabled row, alone or with `enabled: true`, cannot recreate the state.
         // Clearing the Agent together with `enabled: false` stays allowed (a disabled null-agent row is the V71 state).
-        if ((input.enabled ?? existing.enabled) && (agentId === undefined ? existing.agentId : agentId) == null) {
+        // Only the two edits that can PRODUCE the state are judged (turning it on, or clearing the Agent); an unrelated edit
+        // (a rename) of a row already in that state is not refused.
+        if ((input.enabled ?? existing.enabled) && (input.enabled === true || input.agentRef === null)
+          && (agentId === undefined ? existing.agentId : agentId) == null) {
           agentId = await resolveTriggerAgent(txCtx, existing.appId, null);
         }
         if (input.policy != null && parsePolicyLink(input.policy) == null) {
