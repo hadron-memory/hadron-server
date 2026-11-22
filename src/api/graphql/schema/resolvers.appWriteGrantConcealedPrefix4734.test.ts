@@ -183,3 +183,42 @@ describe('#4734 CONTROLS: a viewer who may see the memory keeps URN, prefix and 
     expect(made.memoryUrn).not.toBeNull();
   });
 });
+
+describe('#4734 PIN: every path that returns an AppMemoryWriteGrant goes through project() (nested fields included)', () => {
+  const schema = buildSchema(typeDefs);
+  const reaches = (t: any): boolean => {
+    const name = t.toString().replace(/[\[\]!]/g, '');
+    return name === "AppMemoryWriteGrant";
+  };
+
+  it('the type is reachable from exactly three fields: the list, the give door and the revoke door (no nested path, no other type holds one)', () => {
+    const holders: string[] = [];
+    for (const [tn, type] of Object.entries(schema.getTypeMap())) {
+      if (tn.startsWith('__') || !('getFields' in type)) continue;
+      for (const [fn, field] of Object.entries((type as any).getFields())) {
+        if (reaches((field as any).type)) holders.push(`${tn}.${fn}`);
+      }
+    }
+    expect(holders.sort()).toEqual(['Mutation.revokeAppMemoryWriteGrant', 'Mutation.setAppMemoryWriteGrant', 'Query.appMemoryWriteGrants']);
+  });
+
+  it('the type has no field resolver of its own (nothing can re-read the row and bypass the projection), and no other type or union/interface contains it', () => {
+    expect((resolvers as any).AppMemoryWriteGrant).toBeUndefined();
+    for (const [tn, type] of Object.entries(schema.getTypeMap())) {
+      if (tn.startsWith('__')) continue;
+      const members = (type as any).getTypes?.() ?? [];
+      expect(members.map((m: any) => m.name)).not.toContain('AppMemoryWriteGrant');
+    }
+    expect(Object.keys((schema.getType('AppMemoryWriteGrant') as any).getFields()).sort()).toEqual(
+      ['appId', 'createdAt', 'grantedBy', 'id', 'memoryUrn', 'notEffective', 'notEffectiveReason', 'prefix', 'registerNodeUrn', 'revokedAt', 'revokedBy'].sort());
+  });
+
+  it('all three doors, as a concealed viewer, yield the concealed shape (give on a concealed memory is refused, so no row leaves it)', async () => {
+    const f = await fixture();
+    const row = await rowOn(f, f.personal.id);
+    const out = await M.revokeAppMemoryWriteGrant({}, { id: row.id }, actingAs(f.peer));
+    expect([out.memoryUrn, out.prefix, out.registerNodeUrn]).toEqual([null, null, null]);
+    expect(await Q.appMemoryWriteGrants({}, { appRef: f.app.id, includeRevoked: true }, actingAs(f.peer))).toEqual([]);
+    await expect(M.setAppMemoryWriteGrant({}, { appRef: f.app.id, memoryRef: f.personal.urn, prefix: PREFIX }, actingAs(f.peer))).rejects.toBeDefined();
+  });
+});
