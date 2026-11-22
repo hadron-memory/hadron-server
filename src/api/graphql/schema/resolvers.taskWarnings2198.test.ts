@@ -82,12 +82,12 @@ beforeEach(async () => {
 });
 
 describe('task.create.no-source', () => {
-  it('fires on a create with no source (blank counts), still creates, and not when a source is given', async () => {
+  it('no longer fires (#4793, Holger 2026-11-21): a source-less create, blank included, still creates and warns nothing', async () => {
     for (const source of [undefined, '', '   ']) {
       const c = ctx(member.id);
       const t = await create(c, { source });
       expect(t.id).toBeTruthy();
-      expect(codes(c)).toEqual(['task.create.no-source']);
+      expect(codes(c)).toEqual([]);
     }
     const c = ctx(member.id);
     await create(c, { source: 'https://example.test/x' });
