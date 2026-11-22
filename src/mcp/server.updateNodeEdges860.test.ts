@@ -204,6 +204,28 @@ describe('removeEdges (#860)', () => {
   });
 });
 
+describe('pending edges are left alone (#860, Victor\'s FIT)', () => {
+  it('addEdges and removeEdges never touch the source\'s pending edges (only an `edges` replace drops them)', async () => {
+    const pending = await db.pendingEdge.create({
+      data: { id: generateId(), sourceId: source.id, targetId: 'not:there:yet', name: 'later', loc: `${source.loc}:later:nt` },
+    });
+    const out = await call('hadron_update_node', {
+      urn: nodeUrnOf(source.loc),
+      removeEdges: [e1.id],
+      addEdges: [{ targetUrn: t4.id, name: 'seen-with' }],
+    });
+    expect(out).toMatch(/edges: 1 added, 0 unchanged, 1 removed/);
+    expect(await db.pendingEdge.count({ where: { id: pending.id } })).toBe(1);
+    // Add alone and remove alone likewise.
+    await call('hadron_update_node', { urn: nodeUrnOf(source.loc), addEdges: [{ targetUrn: t4.id, name: 'again' }] });
+    await call('hadron_update_node', { urn: nodeUrnOf(source.loc), removeEdges: [e2.id] });
+    expect(await db.pendingEdge.count({ where: { id: pending.id } })).toBe(1);
+    // The replace path is the one that drops it (the contract the tool text states).
+    await call('hadron_update_node', { urn: nodeUrnOf(source.loc), edges: [{ targetUrn: t1.id, name: 'applies-when' }] });
+    expect(await db.pendingEdge.count({ where: { id: pending.id } })).toBe(0);
+  });
+});
+
 describe('add and remove together (#860)', () => {
   it('removes first, then adds, in one call and one event', async () => {
     const out = await call('hadron_update_node', {
