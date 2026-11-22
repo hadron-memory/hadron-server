@@ -23,6 +23,9 @@ import { createPendingGrant, type CreateGrantArgs } from './create.js';
 import { DB_NOW, insertGrantUnguarded, raw, type World } from './grantFixtures3668.js';
 
 const EDIT = 'bootprompt.source.edit';
+// Prisma's default interactive-transaction timeout is 5 s, the same as the budget waitUntilBlockedBy allows a waiter: a transaction that
+// WAITS on a lock by design must outlive that wait, or a slow runner rolls it back for the wrong reason (#4808, blind P2).
+const WAITS = { timeout: 30_000, maxWait: 30_000 } as const;
 
 let orgId: string;
 let admin: { id: string };
@@ -68,7 +71,7 @@ async function connect(): Promise<Client> {
 
 /** A transaction that stays OPEN after `body` ran, until `commit()` or `rollback()`, with its backend pid and the body's value. */
 interface HeldTx<T> { pid: number; value: T; done: Promise<T>; commit: () => void; rollback: () => void }
-const releasers: Array<() => void> = [];
+const releasers: Array<{ release: () => void; settled: Promise<unknown> }> = [];
 async function holdTx<T>(body: (tx: Prisma.TransactionClient) => Promise<T>): Promise<HeldTx<T>> {
   let finish!: (commit: boolean) => void;
   const gate = new Promise<boolean>((resolve) => { finish = resolve; });
@@ -80,17 +83,18 @@ async function holdTx<T>(body: (tx: Prisma.TransactionClient) => Promise<T>): Pr
     ready({ pid, value });
     if (!(await gate)) throw new Error('rolled back by the test');
     return value;
-  }, { timeout: 30_000, maxWait: 30_000 });
-  const settled = done.catch(() => undefined); // a rollback is expected; never an unhandled rejection
-  releasers.push(() => finish(false));
+  }, WAITS);
+  // a rollback is expected: the cleanup awaits this settled copy so nothing is left running into the next test
+  releasers.push({ release: () => finish(false), settled: done.catch(() => undefined) });
   const { pid, value } = await Promise.race([readyP, done.then(() => { throw new Error('the held transaction ended before it was held'); })]);
-  void settled;
   return { pid, value, done, commit: () => finish(true), rollback: () => finish(false) };
 }
 
 // A failed pin must not leave its connection or held transaction holding locks for the next test's cleanup.
 afterEach(async () => {
-  for (const release of releasers.splice(0)) release();
+  const held = releasers.splice(0);
+  for (const h of held) h.release();
+  await Promise.all(held.map((h) => h.settled));
   for (const c of opened.splice(0)) { await c.query('ROLLBACK').catch(() => undefined); await c.end().catch(() => undefined); }
 });
 
@@ -128,7 +132,7 @@ const openCreate = (holder: string = agentId) => holdTx((tx) => createPendingGra
 const uninstallBody = (tx: Prisma.TransactionClient) =>
   tx.appAgent.delete({ where: { appId_agentId: { appId, agentId } } })
     .then(() => endGrantsOfAgentsNoLongerInstalled(tx, [{ appId, agentId }], admin.id, 'AGENT_UNINSTALLED'));
-const uninstallDoor = () => db.$transaction(uninstallBody);
+const uninstallDoor = () => db.$transaction(uninstallBody, WAITS);
 
 describe('#4715 the departure door fences a concurrent agent-grant create', () => {
   it('create first: the door waits for the uncommitted create, then judges and ends the committed grant', async () => {
@@ -159,7 +163,7 @@ describe('#4715 the departure door fences a concurrent agent-grant create', () =
 
   it('door first: the real create waits on the agent row, then reads the install gone and is refused; no grant is written', async () => {
     const door = await holdTx(uninstallBody); // the door has judged the agent gone and not committed
-    const create = db.$transaction((tx) => createPendingGrant(tx, createArgs()));
+    const create = db.$transaction((tx) => createPendingGrant(tx, createArgs()), WAITS);
     const createState = track(create);
     const outcome = create.then(() => 'created', (e: { code?: string }) => e.code ?? 'threw');
     await waitUntilBlockedBy(door.pid); // the create reached the agent row and WAITS
@@ -210,7 +214,7 @@ describe('#4808 coverage the first pins lacked (Jimmy F5)', () => {
   it('judge against judge: two doors judging the same gone agent end the grant ONCE and the first end stands', async () => {
     const id = await grant();
     const first = await holdTx(uninstallBody); // judged, ended, not committed
-    const second = db.$transaction((tx) => endGrantsOfAgentsNoLongerInstalled(tx, [{ appId, agentId }], admin.id, 'AGENT_UNINSTALLED'));
+    const second = db.$transaction((tx) => endGrantsOfAgentsNoLongerInstalled(tx, [{ appId, agentId }], admin.id, 'AGENT_UNINSTALLED'), WAITS);
     const secondState = track(second);
     await waitUntilBlockedBy(first.pid); // the second judge WAITS on the agent row the first holds
     expect(secondState.done, 'the second judge must wait, not judge around the first').toBe(false);
