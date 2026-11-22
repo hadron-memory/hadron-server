@@ -18,6 +18,14 @@
  * WHAT IS RECORDED. `issuedBy: platform`, no task, and `issuedReason: DESIRED_RUNNING`. The operation's `args` are the
  * same as any start's, so the host contract does not change.
  *
+ * ALREADY RUNNING (#4933, cor:agt:070:08 rev 21 and cor:agt:070:01). No platform start with no task is issued for a worker
+ * whose Agent the host already runs: the host would refuse it ("an agent this host launched is still running") and
+ * every minute would add a failed start, until the trip below stopped it. What the host has reported decides it: the
+ * worker's stored terminal report (#2771) names THIS host, is fresh (`TERMINAL_FRESH_MS`), and shows an agent there (not
+ * `dark`, and not an agent-absent reason). The state is logged once when it is first seen and again when it changes
+ * (`already-running`, then `starting` once the agent is gone), never as a failure, and it counts toward no trip and
+ * raises no alarm. A stale, missing or other-host report decides nothing, so the start goes ahead as before.
+ *
  * THE TRIP. Three failed platform starts of a worker in the last hour stop this loop starting it (counted under the
  * worker row lock, so two passes agree), and raise ONE task-less `alarm.start-failing` to its reporting line, nearest
  * first (App managers only when that line is empty, as the dark-worker alarm). The episode table only de-duplicates:
@@ -47,6 +55,41 @@ export const DESIRED_RUNNING = 'DESIRED_RUNNING';
 /** This many failed platform starts inside the window stop further desired-state starts of the worker. */
 export const START_FAILURE_LIMIT = 3;
 export const START_FAILURE_WINDOW_MS = 60 * 60_000;
+/**
+ * #4933: how long a host's terminal report keeps saying the agent runs. The host's sweep reports every minute, so five
+ * minutes tolerates a few missed reports and still lets a host that stopped reporting be started again.
+ */
+export const TERMINAL_FRESH_MS = 5 * 60_000;
+/** Terminal reasons that say no agent is on the terminal, whatever the status (hadron-cli#1187 codes). */
+const AGENT_ABSENT_REASONS: ReadonlySet<string> = new Set(['no_terminal', 'bare_shell', 'no_agent']);
+
+type StoredTerminal = { host?: { id?: string }; status?: string; reason?: string | null; checkedAt?: string } | null;
+
+/** Does the host's last report say it runs this worker's agent right now? (#4933) */
+export function hostRunsAgent(terminal: StoredTerminal, hostId: string, now: Date): boolean {
+  if (!terminal || terminal.host?.id !== hostId) return false;
+  if (terminal.status === 'dark' || (terminal.reason != null && AGENT_ABSENT_REASONS.has(terminal.reason))) return false;
+  if (terminal.status !== 'busy' && terminal.status !== 'idle' && terminal.status !== 'locked') return false;
+  const at = terminal.checkedAt ? Date.parse(terminal.checkedAt) : NaN;
+  return Number.isFinite(at) && now.getTime() - at <= TERMINAL_FRESH_MS && at <= now.getTime() + 2 * 60_000;
+}
+
+/** The last state logged per worker, so a state is logged when first seen and when it changes, never every pass. */
+const loggedState = new Map<string, 'already-running' | 'starting'>();
+/** For tests: forget what was logged. */
+export function resetDesiredStartStateLog(): void {
+  loggedState.clear();
+}
+function noteState(a: { appId: string; workerId: string; hostId: string }, state: 'already-running' | 'starting'): void {
+  if (loggedState.get(a.workerId) === state) return;
+  loggedState.set(a.workerId, state);
+  console.info(
+    state === 'already-running'
+      ? '[desired-start] no start issued: the host already runs this worker\'s agent (already running)'
+      : '[desired-start] starting a worker whose agent the host does not run',
+    a,
+  );
+}
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -118,7 +161,7 @@ async function recentFailures(db: Db, workerId: string, now: Date): Promise<numb
 
 /**
  * Start one worker if it is still startable once every fence is held (file header). `issued` when a start was
- * inserted, `tripped` when the failure limit stopped it, `no-host` when this host has no live registration listing a
+ * inserted, `running` when the host already runs its agent (#4933), `tripped` when the failure limit stopped it, `no-host` when this host has no live registration listing a
  * worktree for it (the caller tries the worker's next host), `skipped` otherwise.
  */
 export async function startDesiredWorker(
@@ -126,7 +169,7 @@ export async function startDesiredWorker(
   a: { appId: string; workerId: string; hostId: string },
   now: Date,
   anchor: number = anchorNow(),
-): Promise<'issued' | 'tripped' | 'skipped' | 'no-host'> {
+): Promise<'issued' | 'tripped' | 'skipped' | 'no-host' | 'running'> {
   try {
     const owner = await db.app.findUnique({ where: { id: a.appId }, select: { organizationId: true, ownerUserId: true } });
     return await db.$transaction(async (tx) => {
@@ -149,6 +192,12 @@ export async function startDesiredWorker(
       // session since the pass's read wins.
       const row = (await loadHostDesiredState(tx, a.appId, a.hostId, afterWaits(now, anchor)))?.workers.find((w) => w.workerId === a.workerId);
       if (!row || !startable(row)) return 'skipped';
+      // #4933: before the failure count, so a worker the host already runs is neither started nor tripped nor alarmed.
+      const reported = (await tx.worker.findUnique({ where: { id: a.workerId }, select: { terminal: true } }))?.terminal as StoredTerminal;
+      if (hostRunsAgent(reported, a.hostId, now)) {
+        noteState(a, 'already-running');
+        return 'running';
+      }
       if ((await recentFailures(tx, a.workerId, now)) >= START_FAILURE_LIMIT) return 'tripped';
       await fenceHostDecision(tx, a.appId);
       const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, now, a.hostId)).find((r) => r.worktrees.length > 0);
@@ -162,6 +211,7 @@ export async function startDesiredWorker(
         settings: await startSettingsFor(tx, a.workerId, null, reg),
         taskId: null, issuer: { issuedBy: 'platform' }, hold, issuedReason: DESIRED_RUNNING,
       });
+      noteState(a, 'starting');
       return 'issued';
     });
   } catch (err) {
