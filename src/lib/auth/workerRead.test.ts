@@ -28,19 +28,20 @@ describe('isAppRefResolutionFailure (#4838 shared fold predicate)', () => {
   });
 });
 
-describe('resolveAppRefConcealed (the intentional two-class fold)', () => {
-  // The difference from isAppRefResolutionFailure is deliberate and tracked as
-  // hadron-server#4876 (the #4836 doors' parse-error fold): a malformed ref
-  // KEEPS its typed parse refusal here. The db argument is never touched — the
-  // ref throws inside the boundary gate before any lookup.
-  it('a malformed ref keeps UrnNotQualifiedError (not the unknown-App answer)', async () => {
-    const e = await resolveAppRefConcealed(undefined as never, 'canary not a urn').then(
+describe('resolveAppRefConcealed (#4876: the same four-class fold)', () => {
+  // A malformed ref gets the bare unknown-App answer with NO echo of the caller's value. The db argument is never
+  // touched: the ref throws inside the boundary gate before any lookup. A database fault still propagates (pinned
+  // in workerRead.malformedRef4876.test.ts).
+  it('a malformed ref answers the bare unknown-App answer, no echo', async () => {
+    const e: any = await resolveAppRefConcealed(undefined as never, 'canary not a urn').then(
       () => {
         throw new Error('expected a refusal');
       },
       (x: unknown) => x,
     );
-    expect(e).toBeInstanceOf(UrnNotQualifiedError);
-    expect(e).not.toBeInstanceOf(UrnParseError);
+    expect(e).not.toBeInstanceOf(UrnNotQualifiedError);
+    expect(e.message).toBe('App not found.');
+    expect(e.extensions).toEqual({ code: 'APP_NOT_FOUND' });
+    expect(JSON.stringify(e.toJSON())).not.toContain('canary');
   });
 });
