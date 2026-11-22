@@ -127,6 +127,23 @@ describe('#4828 deleteOrganization tears down every registration of the organiza
     expect(await live()).toEqual({ telegram: ['tg-other'], slack: ['sl-other'] });
   });
 
+  it('records who deleted the organization on every connection it cascaded (both providers)', async () => {
+    await M.deleteOrganization({}, { ref: org.id }, ctx(platform.id, ['ADMIN']));
+    const t = await db.telegramConnection.findMany({ where: { organizationId: org.id } });
+    const sl = await db.slackConnection.findMany({ where: { organizationId: org.id } });
+    expect(t.map((r) => r.deletedBy)).toEqual([platform.id, platform.id]);
+    expect(sl.map((r) => r.deletedBy)).toEqual([platform.id, platform.id]);
+  });
+
+  it('two concurrent organization deletes ask each tool once between them', async () => {
+    await Promise.allSettled([
+      M.deleteOrganization({}, { ref: org.id }, ctx(platform.id, ['ADMIN'])),
+      M.deleteOrganization({}, { ref: org.id }, ctx(platform.id, ['ADMIN'])),
+    ]);
+    await settle();
+    expect(calls()).toEqual({ telegram: ['tg-a', 'tg-b'], slack: ['sl-a', 'sl-b'] });
+  });
+
   it('judges the platform-admin gate first, and deleting it again asks the tools nothing more', async () => {
     await expect(M.deleteOrganization({}, { ref: org.id }, ctx(member.id))).rejects.toThrow();
     await settle();
