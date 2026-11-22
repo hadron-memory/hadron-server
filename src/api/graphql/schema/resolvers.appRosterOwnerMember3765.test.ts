@@ -14,7 +14,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { APP_INCLUDE } from './resolvers.helpers.js';
+import { APP_INCLUDE, isUserOwnedAppOwnerMember } from './resolvers.helpers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -194,6 +194,16 @@ describe('#3765 membership is read at the deciding statement: a demotion or remo
     });
     // a plain member and a stranger: withheld as on a live App
     for (const u of [cook.id, stranger.id]) expect(Object.values(await roster(parent, as(u))).every((v) => v === null), u).toBe(true);
+  });
+});
+
+describe('#3765 the deciding statement itself refuses a deleted App, whatever row the caller holds', () => {
+  it('a row loaded before the delete committed (deletedAt still null in memory) is refused by the join, not trusted', async () => {
+    const stale = await lazyRow();
+    expect(stale.deletedAt).toBeNull();
+    expect(await isUserOwnedAppOwnerMember(as(boss.id), stale), 'live App: admitted').toBe(true);
+    await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
+    expect(await isUserOwnedAppOwnerMember(as(boss.id), stale), 'deleted after the row was loaded: refused').toBe(false);
   });
 });
 
