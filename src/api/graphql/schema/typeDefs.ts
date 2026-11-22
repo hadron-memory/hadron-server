@@ -8414,7 +8414,9 @@ export const typeDefs = `#graphql
       Which refusal you get depends on WHERE the denial happens, and clients
       should not assume one code covers both: a caller who supplied appRef has
       already been checked against the same participant predicate, so an
-      outsider is refused FORBIDDEN there, before any name is read. Only a
+      outsider is refused APP_NOT_FOUND there (#4836: the one unknown-App
+      answer, "App not found." — the App's existence is not confirmed to
+      them), before any name is read. Only a
       denial at the in-branch staff gate — reachable when the App came from an
       App-key credential rather than appRef — is masked as WORKER_NOT_FOUND,
       indistinguishable from an App with no such worker.
@@ -8485,18 +8487,28 @@ export const typeDefs = `#graphql
     URN. Resolves to Session.appId - the pivot that was previously stamped ONLY
     from an App-key credential, which made a user-started session structurally
     unable to satisfy the team-chat authorship gate (cor:agt:020:04 condition b,
-    SESSION_NOT_IN_APP). The caller must be a member of that App: an AppMember
-    at any role, an org member with CONTRIBUTOR+ on its owning org, or the
-    owner of a user-owned App. Unknown or deleted App: BAD_USER_INPUT;
-    non-member: FORBIDDEN. An App-key credential wins - if the caller
-    authenticated as an App and appRef names a DIFFERENT App, the call is
-    refused (SESSION_APP_MISMATCH).
+    SESSION_NOT_IN_APP).
 
-    Uninstalled Apps differ by ref form, because App URNs are only unique
-    among ACTIVE rows (spec 021 FR-027: one live App plus N uninstalled
-    history rows may share a URN). By URN an uninstalled App is simply not
-    found - BAD_USER_INPUT - since there is no single row the URN names; by
-    PK it is found and refused APP_UNINSTALLED.
+    #4836 (hrn:node:hadronmemory.com:specs:cor:dmo:070:05, Proposed): a caller
+    WITHOUT standing gets ONE refusal whatever the App's state and whatever the
+    ref's form - APP_NOT_FOUND, "App not found." - byte-identical for a missing
+    App, a deleted one, an uninstalled one, an existing one the caller cannot
+    touch, and a pure App key naming any other App (a key reaches only its own
+    App). The refusal echoes no value the caller sent and carries no appId.
+    Standing is App membership - an AppMember at any role, an org member with
+    CONTRIBUTOR+ on its owning org, or the owner of a user-owned App - or a
+    pure App-key credential for exactly its own App. A caller WITH standing
+    keeps the specific answers: APP_UNINSTALLED by PK, with the appId their own
+    ref resolved to (by URN an uninstalled App does not resolve at all - App
+    URNs are unique only among ACTIVE rows, spec 021 FR-027 - so it reads as
+    missing for everyone); and authorization refusals for an act a member may
+    not do elsewhere in this mutation stay FORBIDDEN.
+
+    Ref-RESOLUTION failures read as not-found for EVERY caller, standing or
+    not: a malformed or ambiguous ref resolves to no App, so it answers
+    APP_NOT_FOUND to a member exactly as to an outsider - the specific
+    malformed/ambiguous hints the parser can produce elsewhere do not exist
+    on this field, and no ref text is ever echoed back.
     """
     appRef: String
   }
