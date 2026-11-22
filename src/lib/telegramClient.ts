@@ -1,4 +1,5 @@
 import { GraphQLError } from 'graphql';
+import { toolRegistrationKey } from './toolRegistrationKey.js';
 
 /**
  * Client for the Telegram capability tool (#597; hadrontool-telegram). On the emailClient / slackClient pattern:
@@ -140,9 +141,12 @@ export interface TelegramToolConnectionIdentity {
  */
 export async function createTelegramToolConnection(
   provider: string,
-  input: { botToken: string },
+  input: { botToken: string; appId: string },
 ): Promise<TelegramToolConnectionIdentity> {
-  const identity = await postToTool<TelegramToolConnectionIdentity>(provider, '/connections', input, [input.botToken]);
+  // #4829: a core-derived registrationKey makes a retry after a lost response the SAME registration. A tool that does
+  // not know the field ignores it and behaves exactly as before (the 400 on a duplicate bot).
+  const body = { botToken: input.botToken, registrationKey: toolRegistrationKey(provider, input.appId, [input.botToken]) };
+  const identity = await postToTool<TelegramToolConnectionIdentity>(provider, '/connections', body, [input.botToken]);
   const required: (keyof TelegramToolConnectionIdentity)[] = ['id', 'botId', 'botUsername', 'displayName'];
   const invalid = required.some((k) => typeof identity[k] !== 'string' || (identity[k] as string).trim() === '');
   if (invalid || identity.provider !== provider) {

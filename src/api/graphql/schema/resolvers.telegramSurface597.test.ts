@@ -83,7 +83,7 @@ describe('createTelegramConnection', () => {
       status: 'ACTIVE',
       createdBy: admin.id,
     });
-    expect(createTelegramToolConnection).toHaveBeenCalledWith('telegram', { botToken: BOT_TOKEN });
+    expect(createTelegramToolConnection).toHaveBeenCalledWith('telegram', { botToken: BOT_TOKEN, appId: app.id });
     const raw = await db.telegramConnection.findUniqueOrThrow({ where: { id: connection.id } });
     expect(JSON.stringify(raw)).not.toContain('SECRET-bot-token');
     // No read surface can return it: the SDL type has no token-shaped field.

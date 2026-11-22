@@ -43,7 +43,7 @@ describe('telegramClient', () => {
     delete process.env.TELEGRAM_TOOL_URL;
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
-    const e = await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN }));
+    const e = await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN, appId: 'app-1' }));
     expect(e.code).toBe('TELEGRAM_TOOL_NOT_CONFIGURED');
     expect((await codeOf(runTelegramOperation('telegram', 'send-message', {}))).code).toBe('TELEGRAM_TOOL_NOT_CONFIGURED');
     expect(fetchMock).not.toHaveBeenCalled();
@@ -56,27 +56,27 @@ describe('telegramClient', () => {
   it('registers on POST /connections, sends the bearer only when set, and returns the validated identity', async () => {
     const fetchMock = vi.fn().mockImplementation(async () => jsonResponse(200, identity));
     vi.stubGlobal('fetch', fetchMock);
-    expect(await createTelegramToolConnection('telegram', { botToken: TOKEN })).toEqual(identity);
+    expect(await createTelegramToolConnection('telegram', { botToken: TOKEN, appId: 'app-1' })).toEqual(identity);
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe('http://telegram-tool.test:8080/connections');
-    expect(JSON.parse(init.body)).toEqual({ botToken: TOKEN });
+    expect(JSON.parse(init.body)).toEqual({ botToken: TOKEN, registrationKey: expect.stringMatching(/^[0-9a-f]{64}$/) });
     expect(init.headers.authorization).toBeUndefined();
 
     process.env.TELEGRAM_TOOL_TOKEN = 'shared';
-    await createTelegramToolConnection('telegram', { botToken: TOKEN });
+    await createTelegramToolConnection('telegram', { botToken: TOKEN, appId: 'app-1' });
     expect(fetchMock.mock.calls[1]![1].headers.authorization).toBe('Bearer shared');
   });
 
   it('rejects an identity with an empty id or botId (it would become a routing key)', async () => {
     for (const bad of [{ ...identity, id: '' }, { ...identity, botId: ' ' }, { ...identity, provider: 'other' }]) {
       vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => jsonResponse(200, bad)));
-      expect((await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN }))).code).toBe('TELEGRAM_TOOL_ERROR');
+      expect((await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN, appId: 'app-1' }))).code).toBe('TELEGRAM_TOOL_ERROR');
     }
   });
 
   it('passes the tool\'s typed code through as telegramErrorCode', async () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => jsonResponse(422, { error: 'invalid_token', message: 'The bot token was rejected.' })));
-    const e = await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN }));
+    const e = await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN, appId: 'app-1' }));
     expect(e.code).toBe('TELEGRAM_TOOL_ERROR');
     expect(e.ext.telegramErrorCode).toBe('invalid_token');
     expect(e.ext.status).toBe(422);
@@ -87,12 +87,12 @@ describe('telegramClient', () => {
       'fetch',
       vi.fn().mockImplementation(async () => jsonResponse(401, { error: `bad ${TOKEN}`, message: `Unauthorized: ${TOKEN} was rejected` })),
     );
-    const e = await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN }));
+    const e = await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN, appId: 'app-1' }));
     expect(JSON.stringify(e)).not.toContain(TOKEN);
     expect(JSON.stringify(e)).not.toContain('SECRET-bot-token');
 
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error(`connect failed for ${TOKEN}`)));
-    const u = await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN }));
+    const u = await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN, appId: 'app-1' }));
     expect(u.code).toBe('TELEGRAM_TOOL_UNREACHABLE');
     expect(JSON.stringify(u)).not.toContain('SECRET-bot-token');
   });
@@ -102,7 +102,7 @@ describe('telegramClient', () => {
       init.method === 'POST' ? jsonResponse(200, { ...identity, botUsername: '' }) : new Response('{}', { status: 200 }),
     );
     vi.stubGlobal('fetch', fetchMock);
-    const e = await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN }));
+    const e = await codeOf(createTelegramToolConnection('telegram', { botToken: TOKEN, appId: 'app-1' }));
     expect(e.code).toBe('TELEGRAM_TOOL_ERROR');
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/connections/tool-1'), expect.objectContaining({ method: 'DELETE' })));
   });

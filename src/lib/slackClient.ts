@@ -1,4 +1,5 @@
 import { GraphQLError } from 'graphql';
+import { toolRegistrationKey } from './toolRegistrationKey.js';
 
 /**
  * Client for the Slack capability tool (spec 043; hadrontool-slack). Mirrors
@@ -148,9 +149,15 @@ export interface SlackToolConnectionIdentity {
  */
 export async function createSlackToolConnection(
   provider: string,
-  input: { botToken: string; appToken: string },
+  input: { botToken: string; appToken: string; appId: string },
 ): Promise<SlackToolConnectionIdentity> {
-  const identity = await postToTool<SlackToolConnectionIdentity>(provider, '/connections', input);
+  // #4829: see telegramClient. A tool that ignores registrationKey behaves exactly as before.
+  const body = {
+    botToken: input.botToken,
+    appToken: input.appToken,
+    registrationKey: toolRegistrationKey(provider, input.appId, [input.botToken, input.appToken]),
+  };
+  const identity = await postToTool<SlackToolConnectionIdentity>(provider, '/connections', body);
   const required: (keyof SlackToolConnectionIdentity)[] = ['id', 'teamId', 'teamName', 'botUserId', 'botId'];
   const invalid = required.some((k) => typeof identity[k] !== 'string' || (identity[k] as string).trim() === '');
   if (invalid || identity.provider !== provider) {
