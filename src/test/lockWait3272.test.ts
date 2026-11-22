@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from './helpers.js';
 import pg from 'pg';
-import { HOLDER_ROW_CAP, describeLockHolders, withLockHolders } from './lockWait.js';
+import { HOLDER_ROW_CAP, describeLockHoldersRenamed, withLockHolders } from './lockWait.js';
 
 let memoryId: string;
 let nodeId: string;
@@ -90,7 +90,7 @@ describe('#3272 withLockHolders', () => {
     expect((err!.cause as { meta?: { code?: string } }).meta?.code).toBe('55P03');
   });
 
-  describe('describeLockHolders: the cap cannot push the holder out', () => {
+  describe('describeLockHoldersRenamed: the cap cannot push the holder out', () => {
     const noise: Array<{ release: () => void; done: Promise<unknown> }> = [];
     let client: pg.Client | undefined;
     afterEach(async () => {
@@ -124,7 +124,7 @@ describe('#3272 withLockHolders', () => {
       await client.query('SELECT id FROM nodes WHERE id = $1 FOR UPDATE /* holderfresh3272 */', [nodeId]);
       const holderPid = (await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
       expect(Math.max(...noisePids), 'premise: the noise backends were created before the holder').toBeLessThan(holderPid);
-      const found = await describeLockHolders(db, 'nodes');
+      const found = await describeLockHoldersRenamed(db, 'nodes');
       expect(found.rows).toHaveLength(HOLDER_ROW_CAP);
       expect(found.truncated).toBe(true);
       expect(found.rows[0]).toMatchObject({ pid: holderPid, relation: 'nodes' });
@@ -141,7 +141,7 @@ describe('#3272 withLockHolders', () => {
 
     it('a quiet database is not flagged truncated', async () => {
       await holdNodeRow();
-      expect((await describeLockHolders(db, 'nodes')).truncated).toBe(false);
+      expect((await describeLockHoldersRenamed(db, 'nodes')).truncated).toBe(false);
     });
   });
 });
