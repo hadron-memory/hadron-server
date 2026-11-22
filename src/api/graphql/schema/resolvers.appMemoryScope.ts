@@ -22,6 +22,7 @@ import { getAppMemoryCandidates, filterReadableMemoryIds, type AgentProvenance }
 import { type AuthContext } from '../../../middleware/auth.js';
 import {
   clampListTake,
+  filterReadableMemoryRecords,
   isAppParticipant,
   isOwnerOrOrgMember,
   requireMemoryWriteAccess,
@@ -248,12 +249,22 @@ export async function resolveAppNodeScope(ctx: Context, appRef: string): Promise
   return { appId: resolvedAppId, inheritance, sources };
 }
 
-/** One row of `appMemoryScope`: a leaf, never a nested Memory or Agent (cor:dmo:050:17). */
+/**
+ * One row of `appMemoryScope`: a leaf, never a nested Memory or Agent
+ * (cor:dmo:050:17). `description` is the memory's description WHERE THE
+ * RECORD GATE (`canReadMemoryRecord`, the one `Query.memory` applies) admits
+ * this caller, null otherwise — #4890's deliberate two-gate shape: the row's
+ * own audience (scope admission, which `name` rides) is WIDER than the record
+ * gate, and handing `description` the row's audience would be the #552
+ * widening class. A row the record gate refuses is still listed; only its
+ * description is withheld.
+ */
 export type AppScopedMemoryRow = {
   memoryId: string;
   memoryUrn: string;
   name: string;
   class: string;
+  description: string | null;
   sources: AppMemorySource[];
   viewerCanWrite: boolean;
 };
@@ -264,6 +275,13 @@ export type AppScopedMemoryRow = {
  * per cor:api:120:04 with the shared list clamp. `viewerCanWrite` runs the
  * exact `createNode` gate with this request's own context, for the page's rows
  * only: a FORBIDDEN denial reads false, and any other failure fails the field.
+ * `description` (#4890) rides the RECORD gate, not the row's admission: the
+ * page's rows are batched through `filterReadableMemoryRecords` (the list form
+ * of the exact `canReadMemoryRecord` `Query.memory` applies), so a row's
+ * description is what `Memory.description` would return this caller, and null
+ * otherwise — including under impersonation, which the shared gate decides.
+ * The memory record is never enciphered (cor:sec:040:03 enciphers node
+ * content only), so there is no key logic here: no session key, no nulling.
  */
 export async function appMemoryScopePage(
   ctx: Context,
@@ -275,13 +293,26 @@ export async function appMemoryScopePage(
   if (!scope) return { items: [], total: 0 };
   const rows = await ctx.db.memory.findMany({
     where: { id: { in: [...scope.sources.keys()] } },
-    select: { id: true, urn: true, name: true, class: true },
+    // Every field `canReadMemoryRecord` reads is selected (an omitted one can
+    // fail that gate OPEN, #1104), plus `deletedAt`: `Query.memory` answers
+    // null for a soft-deleted record, so its description is withheld too.
+    select: {
+      id: true, urn: true, name: true, class: true, description: true,
+      userId: true, ownerUserId: true, organizationId: true, appId: true,
+      userMemoryOfAgentId: true, deletedAt: true,
+    },
   });
   const ordered = rows
     .map((m) => ({ ...m, memoryUrn: safeCanonicalUrn('memory', m.urn) }))
     .sort((a, b) => (a.memoryUrn < b.memoryUrn ? -1 : a.memoryUrn > b.memoryUrn ? 1 : 0));
   const skip = Math.max(0, offset ?? 0);
   const page = ordered.slice(skip, skip + clampListTake(limit));
+  // The record gate for the page's rows only (the same bounding
+  // `viewerCanWrite` uses), batched so membership and access-set queries are
+  // shared per request rather than repeated per row.
+  const openableIds = new Set(
+    (await filterReadableMemoryRecords(ctx, page.filter((m) => !m.deletedAt))).map((m) => m.id),
+  );
   const items: AppScopedMemoryRow[] = [];
   for (const m of page) {
     items.push({
@@ -289,6 +320,7 @@ export async function appMemoryScopePage(
       memoryUrn: m.memoryUrn,
       name: m.name,
       class: m.class,
+      description: openableIds.has(m.id) ? m.description : null,
       sources: scope.sources.get(m.id)!,
       viewerCanWrite: await viewerCanWrite(ctx, m.id),
     });
