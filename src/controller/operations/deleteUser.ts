@@ -141,8 +141,8 @@ export async function deleteUserAccount(
   // helper runDeletionTxn calls takes `tx`; the asset purge, tool-connection teardown and deletion notice run below,
   // after commit), so the attempt is re-run: retryOnDeadlock wraps the scope read and the transaction, so every attempt
   // re-reads the membership scope, takes its locks again and re-judges under them (a target the winner already erased
-  // refuses "User not found", never erases twice). It is nested inside the serialization retry, so isSerializationFailure is
-  // not widened for any other caller (#4318).
+  // refuses "User not found", never erases twice). It is nested inside the serialization retry, so
+  // isSerializationFailure is not widened for any other caller (#4318).
   const { toolConnections, chatTeardowns, assetKeys } = await retryOnSerializationFailure(() => retryOnDeadlock(async () => {
     const membershipScope = (await db.orgMember.findMany({
       where: { userId: targetUserId, deletedAt: null },
