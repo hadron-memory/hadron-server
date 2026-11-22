@@ -7,7 +7,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../id.js';
 import type { RunToolContext } from './types.js';
-vi.mock('../../webfetchClient.js', () => ({ httpRequest: vi.fn(), fetchUrl: vi.fn() }));
+vi.mock('../../webfetchClient.js', () => ({ httpRequest: vi.fn(), fetchUrl: vi.fn(), getWebfetchContract: vi.fn().mockResolvedValue({ contract: 'webfetch@2', capabilities: ['redirects-none'] }) }));
 import { httpRequest } from '../../webfetchClient.js';
 import { webRequest } from './webTools.js';
 import { admitAndExecuteTool } from '../toolAdmission.js';
