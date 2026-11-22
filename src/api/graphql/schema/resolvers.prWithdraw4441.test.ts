@@ -23,7 +23,8 @@ const M = resolvers.Mutation as Record<string, (...args: any[]) => Promise<any>>
 const Q = settledTeamEventQueries(resolvers.Query, db) as Record<string, (...args: any[]) => Promise<any>>;
 const H = 'a'.repeat(40), H2 = 'b'.repeat(40);
 const RECEIPT = 'https://example.test/pull/1#issuecomment-1';
-let owner: any, author: any, reviewer: any, other: any, manager: any, outsider: any, app: any, build: any, peter: any, sam: any, agentId: string;
+let owner: any, author: any, reviewer: any, other: any, manager: any, outsider: any, app: any, build: any, peter: any, sam: any, mo: any, agentId: string;
+const live = { kind: 'LIVE_CHAT', ref: 'client-chat:turn-4441' };
 const ctx = (userId: string, extra: Partial<Context> = {}): Context => ({ db, userId, roles: ['READER'], ...extra }) as Context;
 const code = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; } catch (e: any) { return e.extensions?.code ?? String(e); } };
 /** A worker acting through its bound session: the request user is its holder and the request actor is the worker. */
@@ -74,6 +75,7 @@ beforeEach(async () => {
   };
   peter = await worker('Peter', 'coordinator', owner.id);
   sam = await worker('Sam', 'server-engineer', owner.id);
+  mo = await worker('Mo', 'server-engineer', manager.id); // a worker whose holder manages the App
   build = await M.createAgentTask!({}, { input: { appRef: app.id, title: 'Build', source: 'synthetic', assignee: { user: author.id }, references: [{ kind: 'PULL_REQUEST', target: 'https://github.com/example/project/pull/1' }] } }, ctx(owner.id));
 });
 
@@ -160,6 +162,65 @@ describe('#4441 the withdraw verb: who, on what, and the record', () => {
     const blind = await seat('blind', H, other.id); await M.startAgentTask!({}, { taskId: blind.id }, ctx(other.id)); await finish(blind, other.id);
     expect(await code(withdraw(blind, ctx(other.id)))).toBe('REVIEW_VERDICT_NOT_NEGATIVE');
     expect(await code(withdraw(build, ctx(manager.id)))).toBe('REVIEW_SEAT_UNASSIGNED');
+  });
+});
+
+/** A seat assigned to worker `w`, whose verdict `w` records through its own session, then finishes. */
+async function workerNegative(w: any, slot = 'blind') {
+  const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: slot, assignee: { worker: w.id }, source: 'synthetic' } }, ctx(author.id));
+  await M.assignReviewSeat!({}, { taskRef: t.id, slot, head: H }, ctx(author.id));
+  await asWorker(w, (c) => M.startAgentTask!({}, { taskId: t.id }, c));
+  await asWorker(w, (c) => M.recordReviewVerdict!({}, { taskRef: t.id, head: H, verdict: 'CHANGES_REQUESTED', receipt: RECEIPT }, c));
+  await asWorker(w, (c) => M.finishAgentTask!({}, { taskId: t.id, result: { outcome: 'reviewed' } }, c));
+  return t;
+}
+
+describe('#4441 worker reviewers, the instructed manager arm, and who the record names (Gloria BLIND F1, F2, F7)', () => {
+  it('a worker that recorded the negative withdraws it through its own session; the event names the worker', async () => {
+    await schedule(['blind']); await freeze();
+    const t = await workerNegative(sam);
+    expect(await code(asWorker(sam, (c) => withdraw(t, c)))).toBe('RESOLVED');
+    const [w] = await withdrawals(t);
+    expect(w).toMatchObject({ actorWorkerId: sam.id });
+  });
+
+  it('the worker\'s holder acting as themselves is not the verdict\'s actor, and is refused', async () => {
+    await schedule(['blind']); await freeze();
+    const t = await workerNegative(sam);
+    expect(await code(withdraw(t, ctx(owner.id)))).toBe('REVIEW_WITHDRAW_FORBIDDEN');
+    expect(await withdrawals(t)).toHaveLength(0);
+  });
+
+  it('a worker whose holder manages the App withdraws only with an instruction, and that writes one app.manager-act row', async () => {
+    const { blind } = await negativeBlind();
+    expect(await code(asWorker(mo, (c) => withdraw(blind, c)))).toBe('REVIEW_WITHDRAW_FORBIDDEN');
+    expect(await withdrawals(blind)).toHaveLength(0);
+    expect(await code(asWorker(mo, (c) => withdraw(blind, c, H, { instruction: live })))).toBe('RESOLVED');
+    expect((await withdrawals(blind))[0]).toMatchObject({ actorWorkerId: mo.id });
+    const acts = await db.agentTeamEvent.findMany({ where: { appId: app.id, type: 'app.manager-act' } });
+    expect(acts).toHaveLength(1);
+    expect(acts[0].payload).toMatchObject({ act: 'review.verdict-withdraw' });
+  });
+
+  it('the record names who withdrew: the coordinator worker, or the managing person (no worker)', async () => {
+    const { blind } = await negativeBlind();
+    await asWorker(peter, (c) => withdraw(blind, c));
+    expect((await withdrawals(blind))[0]).toMatchObject({ actorWorkerId: peter.id });
+    await schedule(['local', 'blind', 'qa']);
+    const qa = await seat('qa', H, other.id); await verdict(qa, 'FAIL', H, other.id); await finish(qa, other.id);
+    await withdraw(qa, ctx(manager.id));
+    expect((await withdrawals(qa))[0]).toMatchObject({ actorUserId: manager.id, actorWorkerId: null });
+    expect(await db.agentTeamEvent.count({ where: { appId: app.id, type: 'app.manager-act' } })).toBe(0); // a person acting directly: no instructed-act record
+  });
+
+  it.each([
+    ['a malformed head', { head: 'abc' }],
+    ['a receipt with a control character', { receipt: 'bad\u0007receipt' }],
+  ])('%s is BAD_USER_INPUT, with nothing written', async (_label, extra) => {
+    const { blind } = await negativeBlind();
+    const { head, ...rest } = extra as { head?: string };
+    expect(await code(withdraw(blind, ctx(other.id), head ?? H, rest))).toBe('BAD_USER_INPUT');
+    expect(await withdrawals(blind)).toHaveLength(0);
   });
 });
 

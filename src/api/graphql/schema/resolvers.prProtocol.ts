@@ -82,7 +82,7 @@ const NEGATIVE_VERDICTS = ['CHANGES_REQUESTED', 'FAIL', 'REFUSED'] as const;
 const isNegative = (verdict: unknown) => (NEGATIVE_VERDICTS as readonly string[]).includes(String(verdict));
 /** #4441: whether this verdict event was withdrawn (review.verdict.withdrawn naming it, in the task's own App). */
 const withdrawalOf = (tx: Prisma.TransactionClient, appId: string, taskId: string, verdictEventId: string) =>
-  tx.agentTeamEvent.findFirst({ where: { appId, taskId, type: 'review.verdict.withdrawn', payload: { path: ['verdictEventId'], equals: verdictEventId } }, select: { id: true } });
+  tx.agentTeamEvent.findFirst({ where: { appId, taskId, type: 'review.verdict.withdrawn', payload: { path: ['verdictEventId'], equals: verdictEventId } }, orderBy: [...newest], select: { id: true } });
 /** The task's latest verdict at `head` is negative and was not withdrawn (#4441): the one predicate every negative-seat guard reads. */
 async function negativeAtHead(tx: Prisma.TransactionClient, appId: string, taskId: string, head: string): Promise<boolean> {
   const prior = await verdictAtHead(tx, appId, taskId, head);
@@ -109,7 +109,7 @@ async function negativeHead(tx: Prisma.TransactionClient, build: Pick<TaskRow, '
       JOIN agent_tasks t ON t.id = e.task_id AND t.app_id = ${build.appId} AND t.parent_task_id = ${build.id}
       WHERE e.app_id = ${build.appId} AND e.type = 'review.verdict' AND e.payload->>'head' = ${head}
       ORDER BY e.task_id, e.created_at DESC, e.id DESC
-    ) latest WHERE latest.payload->>'verdict' IN ('CHANGES_REQUESTED', 'FAIL', 'REFUSED')
+    ) latest WHERE latest.payload->>'verdict' IN (${Prisma.join([...NEGATIVE_VERDICTS])})
       -- #4441: a negative withdrawn by its holder or the coordinator no longer blocks the head.
       AND NOT EXISTS (SELECT 1 FROM agent_team_events w
         WHERE w.app_id = ${build.appId} AND w.task_id = latest.task_id AND w.type = 'review.verdict.withdrawn'
@@ -380,6 +380,8 @@ export const prProtocolMutations = {
       const head = headValue(args.head);
       if (head !== assigned.head) throw taskError('REVIEW_HEAD_MISMATCH', `The verdict head differs from the assigned head. Record at the head the seat was bound to. If the seat truly cannot record, ${RECEIPT_IF_UNBINDABLE}`);
       const prior = await verdictAtHead(tx, row.appId, row.id, head);
+      // #4441: no withdrawal check here, on purpose: a withdrawal needs a FINISHED seat and a verdict needs a live one,
+      // so a seat that can take a verdict can never hold a withdrawn negative. A path that reopens a seat must revisit this.
       if (prior && isNegative(data(prior).verdict)
         && !sameEventActor(prior, { workerId: currentActor().workerId, userId: c.userId ?? null })) {
         throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'Only the actor who recorded a negative verdict may re-rate it at the same head.');
@@ -416,7 +418,7 @@ export const prProtocolMutations = {
       const coordinator = !holder && actor.kind === 'worker' && await workerHasRole(tx, actor.workerId, app.id, ['coordinator']);
       const manager = !holder && !coordinator && await actorManagesApp(c, app, actor, actor.instructed);
       if (!holder && !coordinator && !manager) {
-        throw taskError('REVIEW_WITHDRAW_FORBIDDEN', 'Only the reviewer who recorded the negative verdict, or the coordinator, withdraws it. Nothing was written.');
+        throw taskError('REVIEW_WITHDRAW_FORBIDDEN', 'Only the reviewer who recorded the negative verdict, a coordinator worker, or whoever manages the App (a worker whose holder does, with an instruction) withdraws it. Nothing was written.');
       }
       await appendTaskEvent(tx, { appId: app.id, taskId: row.id, actor: eventActor(c.userId), event: {
         type: 'review.verdict.withdrawn', slot: assigned.slot, head, verdictEventId: prior.id, verdict: data(prior).verdict as ReviewVerdict, receipt,
