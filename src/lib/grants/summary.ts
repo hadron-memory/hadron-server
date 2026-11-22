@@ -1,3 +1,4 @@
+import { isSecretUseHeaderName, isSecretUsePrefix } from '../secrets/useBinding.js';
 /**
  * #3742 (Grants S1d, cor:acl:140:02 Summary, cor:acl:140:07 What the signer reads): the one function that writes a grant's
  * summary, from the action's template, the grant's App and the grant's values, and from nothing else: not the requester's
@@ -113,6 +114,13 @@ export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters =
     for (const entry of entries) {
       if (entry === undefined || entry === null || entry === '') throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
       if (entry === '*' || typeof entry === 'object') throw new GrantSummaryError('WILDCARD', `summary placeholder {${name}} has a wildcard or structured value`);
+      if (param.type === 'https-prefix' || param.type === 'header-name') {
+        if (Array.isArray(value) || !(param.type === 'https-prefix' ? isSecretUsePrefix(entry) : isSecretUseHeaderName(entry))) {
+          throw new GrantSummaryError('NOT_CANONICAL', `summary placeholder {${name}} has an invalid binding`);
+        }
+        written.push(entry as string);
+        continue;
+      }
       if (param.type === 'secret-mark') {
         // A mark is its own words, not a reference: there is nothing to resolve, and a list of marks names nothing.
         if (Array.isArray(value)) throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a list value`);
