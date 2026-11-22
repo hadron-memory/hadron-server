@@ -116,6 +116,8 @@ describe('merge queue workflow contract (#4819)', () => {
     expect(j.uses, `${f}: a required job that calls a reusable workflow gets a different check context`).toBeUndefined();
     expect(String(j.name ?? ''), `${f}: an expression in name changes the context`).not.toContain('${{');
     expect(String(j.if ?? ''), `${f}: a job-level if that reads the event context can skip the required job on merge_group`).not.toMatch(EVENT_CONTEXT);
+    // Any job-level if other than the aggregator's always() can skip the required job on a queue entry.
+    expect(j.if === undefined || String(j.if).trim() === 'always()', `${f}: a required job may have no job-level if except always()`).toBe(true);
     for (const st of j.steps ?? []) {
       for (const k of ['if', 'run', 'with', 'env']) expect(scan(st[k]), `${f}: step ${k} reads the event context`).not.toMatch(EVENT_CONTEXT);
     }
