@@ -25,27 +25,25 @@ export function mintProviderNonce(): { nonce: string; nonceHash: string } {
 }
 
 /**
- * What the callback expects of the token. `legacyUnbound` is ONLY for an ordinary login row minted before #2204
- * shipped: its authorize request carried no nonce, so there is nothing to compare. A row older than one
- * `LOGIN_STATE_TTL_MS` cannot exist after deploy, and the DB refuses to insert a new one without a hash.
- * TODO(#2204 follow-up): delete this branch one TTL after deploy.
+ * What the callback expects of the token: the stored hash of the nonce it must carry. There is no "skip" variant
+ * (#2282): a row without a hash has no expectation (`null` from `nonceExpectation`) and the callback refuses it
+ * before any exchange.
  */
-export type NonceExpectation = { bound: string } | { legacyUnbound: true };
+export type NonceExpectation = { bound: string };
 
 /**
- * Derive the expectation from a claimed state. A row with a hash is always bound. Only a row WITHOUT one skips, and
- * never on the passkey ceremony branch (step-up): that returns null, which the callback must refuse.
+ * Derive the expectation from a claimed state. A row with a hash is bound. A row WITHOUT one returns null, whether it
+ * is an ordinary login row or the passkey ceremony branch (step-up), and the callback must refuse it.
  */
 export function nonceExpectation(pending: { providerNonceHash?: string; ceremonyNonceHash?: string }): NonceExpectation | null {
   if (pending.providerNonceHash) return { bound: pending.providerNonceHash };
-  if (pending.ceremonyNonceHash) return null;
-  return { legacyUnbound: true };
+  return null;
 }
 
 /** Refusals per provider and reason since boot, so a real-user lockout is visible. Never holds a nonce, token or sub. */
-export const nonceRefusals: Record<NonceProvider, Record<'missing' | 'mismatch' | 'ceremony_unbound', number>> = {
-  google: { missing: 0, mismatch: 0, ceremony_unbound: 0 },
-  apple: { missing: 0, mismatch: 0, ceremony_unbound: 0 },
+export const nonceRefusals: Record<NonceProvider, Record<'missing' | 'mismatch' | 'ceremony_unbound' | 'unbound', number>> = {
+  google: { missing: 0, mismatch: 0, ceremony_unbound: 0, unbound: 0 },
+  apple: { missing: 0, mismatch: 0, ceremony_unbound: 0, unbound: 0 },
 };
 
 export function recordNonceRefusal(provider: NonceProvider, reason: keyof (typeof nonceRefusals)['google']): void {
@@ -55,10 +53,9 @@ export function recordNonceRefusal(provider: NonceProvider, reason: keyof (typeo
 
 /**
  * Check the token's `nonce` claim. A bound row refuses a missing, empty, non-string or different nonce, with no
- * exception for any provider. Throws a fixed-text error that carries neither the nonce nor the token.
+ * exception for any provider (an empty `bound` included). Throws a fixed-text error that carries neither the nonce nor the token.
  */
 export function enforceIdTokenNonce(provider: NonceProvider, claim: unknown, expected: NonceExpectation): void {
-  if ('legacyUnbound' in expected) return;
   if (typeof claim !== 'string' || claim === '') {
     recordNonceRefusal(provider, 'missing');
     throw new Error('ID token nonce missing or mismatched');

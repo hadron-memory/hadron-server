@@ -8,6 +8,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { exportJWK, exportPKCS8, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'jose';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { nonceRefusals } from '../auth/providerNonce.js';
 
 const sent = vi.hoisted(() => [] as Array<{ to: string; url: string }>);
 vi.mock('../auth/email.js', async (importOriginal) => ({
@@ -392,19 +393,40 @@ describe('#2204 OIDC nonce on the ordinary login legs', () => {
     expect(await db.user.count({ where: { email: `${provider}-bad@example.test` } })).toBe(0);
   });
 
-  it('a legacy row (no hash, minted before #2204) is the only one that signs in without a nonce', async () => {
+  // #2282: a row with no nonce hash is refused before any token exchange, never skipped. The CHECK refuses the
+  // insert for a NEW row, so the row is seeded with the constraint dropped (and re-applied after).
+  it.each(['google', 'apple'] as const)('%s: an ordinary row with no nonce hash is refused before any exchange, creates no user and burns the state', async (provider) => {
+    const state = 'l'.repeat(32);
     await db.$executeRaw`ALTER TABLE pending_login_states DROP CONSTRAINT chk_pending_login_provider_nonce`;
     try {
-      await db.pendingLoginState.create({ data: { state: 'l'.repeat(32), provider: 'google', redirect: '/', clientState: CLIENT_STATE, expiresAt: new Date(Date.now() + 60_000) } });
-      claims.google = { sub: 'g-legacy', email: 'legacy@example.test', email_verified: true };
-      expect((await finish('google', 'l'.repeat(32))).status).toBe(302);
+      await db.pendingLoginState.create({ data: { state, provider, redirect: '/', clientState: CLIENT_STATE, expiresAt: new Date(Date.now() + 60_000) } });
+      // The row really is hashless (the harness is not passing vacuously).
+      expect((await db.pendingLoginState.findUniqueOrThrow({ where: { state } })).providerNonceHash).toBeNull();
+      claims[provider] = { sub: `${provider}-legacy`, email: `${provider}-legacy@example.test`, email_verified: true };
+      const exchanged = vi.fn();
+      const wrapped = globalThis.fetch;
+      vi.stubGlobal('fetch', async (i: string | URL | Request, init?: RequestInit) => {
+        if (String(i).includes('oauth2.googleapis.com') || String(i).includes('appleid.apple.com')) exchanged();
+        return wrapped(i, init);
+      });
+      const before = { ...nonceRefusals[provider] };
+      const cb = await finish(provider, state);
+      expect(cb.status).toBe(400);
+      expect(nonceRefusals[provider].unbound).toBe(before.unbound + 1);
+      expect(nonceRefusals[provider].ceremony_unbound).toBe(before.ceremony_unbound);
+      expect(cb.headers.get('location') ?? '').not.toContain('/auth/callback?code=');
+      expect(exchanged).not.toHaveBeenCalled();
+      expect(await db.pendingLoginState.findUnique({ where: { state } })).toBeNull();
+      expect(await db.user.count({ where: { email: `${provider}-legacy@example.test` } })).toBe(0);
     } finally {
+      await db.pendingLoginState.deleteMany();
       for (const stmt of readFileSync('prisma/login-nonce-invariants.sql', 'utf8').split(/;\s*\n/).filter((x) => x.includes('ALTER TABLE'))) await db.$executeRawUnsafe(stmt);
     }
-    // A bound row never skips: the same token shape is refused.
-    const { state } = await start('google');
-    claims.google = { sub: 'g-legacy2', email: 'legacy2@example.test', email_verified: true };
-    expect((await finish('google', state)).status).toBe(500);
+  });
+
+  it('the database refuses a new hashless google or apple row once the guard is back (the harness above must drop it to seed one)', async () => {
+    await expect(db.pendingLoginState.create({ data: { state: 'k'.repeat(32), provider: 'google', redirect: '/', expiresAt: new Date(Date.now() + 60_000) } }))
+      .rejects.toThrow(/chk_pending_login_provider_nonce/);
   });
 });
 

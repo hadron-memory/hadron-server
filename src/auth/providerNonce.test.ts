@@ -36,8 +36,8 @@ describe('nonceExpectation', () => {
     expect(nonceExpectation({ providerNonceHash: HASH, ceremonyNonceHash: 'c' })).toEqual({ bound: HASH });
   });
 
-  it('only a row WITHOUT a hash skips, and never on the ceremony branch', () => {
-    expect(nonceExpectation({})).toEqual({ legacyUnbound: true });
+  it('#2282: a row WITHOUT a hash is never skipped, ceremony or not: it has no expectation and the callback refuses it', () => {
+    expect(nonceExpectation({})).toBeNull();
     expect(nonceExpectation({ ceremonyNonceHash: 'c' })).toBeNull();
   });
 });
@@ -62,8 +62,9 @@ describe('enforceIdTokenNonce', () => {
     expect(() => enforceIdTokenNonce('apple', nonceHash, bound)).toThrow('ID token nonce missing or mismatched');
   });
 
-  it('skips only a legacy-unbound row, whatever the claim', () => {
-    expect(() => enforceIdTokenNonce('google', undefined, { legacyUnbound: true })).not.toThrow();
+  it('#2282: even an empty bound hash never skips the check', () => {
+    expect(() => enforceIdTokenNonce('google', undefined, { bound: '' })).toThrow('ID token nonce missing or mismatched');
+    expect(() => enforceIdTokenNonce('apple', 'anything', { bound: '' })).toThrow('ID token nonce missing or mismatched');
   });
 
   it('counts refusals per provider and never logs the nonce, the hash or the token', () => {
@@ -117,7 +118,7 @@ describe('the pending row', () => {
       .resolves.toBe(1);
   });
 
-  it('a legacy NULL google row (minted before the guard) is still claimable, and is the only way to be NULL', async () => {
+  it('a legacy NULL google row (minted before the guard) is still claimable, but carries no expectation (#2282)', async () => {
     await db.$executeRaw`ALTER TABLE pending_login_states DROP CONSTRAINT chk_pending_login_provider_nonce`;
     try {
       await db.pendingLoginState.create({ data: { state: 's8', provider: 'google', redirect: '/', expiresAt: expiresAt() } });
@@ -127,7 +128,7 @@ describe('the pending row', () => {
     // Re-adding the guard NOT VALID neither scans nor rejects the old row.
     const claim = await claimPendingLoginState('s8', 'google');
     expect(claim).toMatchObject({ ok: true });
-    if (claim.ok) expect(nonceExpectation(claim.pending)).toEqual({ legacyUnbound: true });
+    if (claim.ok) expect(nonceExpectation(claim.pending)).toBeNull();
   });
 });
 
