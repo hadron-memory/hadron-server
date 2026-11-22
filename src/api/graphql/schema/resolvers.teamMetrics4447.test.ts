@@ -466,10 +466,63 @@ describe('#4850 truncation: a short list never reads as the whole one (cor:api:1
 });
 
 describe('#4850 one clock: an omitted until is the instant the snapshots were read', () => {
-  it('window.until equals asOf when until is omitted', async () => {
-    const d = await ok();
+  it('window.until equals asOf when until is omitted, however many times anything reads the clock (#4889: deterministic)', async () => {
+    // #4889 (LOCAL F1 on #4881, BLIND F1 on #4902): every argument-less `new Date()` steps the clock a full minute, so ANY two
+    // clock reads in the resolver answer different instants, wherever they sit relative to admission or each other. Only the
+    // no-argument constructor steps; Date.now(), parsing and Prisma's own timers are untouched. Red against the two-clock
+    // resolver main had before #4881 (8b88848a5), recorded in the PR.
+    const RealDate = Date;
+    let clock = RealDate.now();
+    class SteppingDate extends RealDate {
+      constructor(...args: unknown[]) {
+        if (args.length === 0) { clock += 60_000; super(clock); } else super(...(args as [string | number | Date]));
+      }
+    }
+    vi.stubGlobal('Date', SteppingDate);
+    let d: any;
+    try { d = await ok(); } finally { vi.unstubAllGlobals(); }
     expect(d.window.until).toBe(d.asOf);
     expect(new Date(d.window.until).getTime() - new Date(d.window.since).getTime()).toBe(7 * DAY);
+  });
+});
+
+/**
+ * #4889 (§10 note N-1 on #4881): two app_id predicates that the rest of each query already confines, pinned with fixtures that
+ * only they exclude: a child of THIS App's project that lives in another App, and an alarm in another App whose task names
+ * THIS App's worker as assignee. Neither shape is made by the platform's own writers; the pins hold the defense in depth.
+ */
+describe('#4889 same-App only: the redundant app_id predicates (cor:agt:150)', () => {
+  it("report 2 counts a project's children in this App only, even a foreign row naming this App's project as parent", async () => {
+    const ours = await project('Our project');
+    const mine = await task({ owner: w.ada, assignee: w.dev1, parent: ours.id, status: 'pending' });
+    const stranger = await worker('Stranger', { app: otherAppId });
+    const foreign = await task({ owner: stranger, assignee: stranger, parent: ours.id, status: 'pending', app: otherAppId });
+    const row = (await ok()).projects.items.find((i: any) => i.project.taskId === ours.id);
+    expect(row, 'this App\'s project is listed').toBeDefined();
+    const pending = row.children.find((c: any) => c.status === 'PENDING');
+    expect(pending, 'a PENDING bucket is present').toBeDefined();
+    // idsOf is a sorted copy of ids: exactly this App's child, so the foreign row is not among them.
+    expect(idsOf(pending.tasks)).toEqual([mine.id]);
+    expect(foreign.id).not.toBe(mine.id);
+  });
+  it("an alarm in another App never makes this App's worker overdue, even on a task naming that worker", async () => {
+    // The treatment and the control differ only in the App: owner a worker of that App, assignee this App's w.dev1, the
+    // owner on the chain, a not-started alarm whose episode is the task's assignment. Checked in two steps so the first
+    // failure names which half broke.
+    const notStarted = async (app: string, owner: string) => {
+      const t = await task({ owner, assignee: w.dev1, status: 'pending', app });
+      expect(t.assignedAt, 'the fixture task is assigned').not.toBeNull();
+      const alarmId = await db.$transaction(async (tx) => appendAlarmEvent(tx as never, {
+        appId: app, taskId: t.id, type: 'stall.not-started', episodeStart: t.assignedAt!, subjectWorkerId: w.dev1,
+        chain: [{ workerId: owner } as never], payload: { windowMinutes: 15 }, createdAt: ago(HOUR),
+      }));
+      expect(alarmId, 'the alarm is recorded').not.toBeNull();
+    };
+    const stranger = await worker('Stranger', { app: otherAppId });
+    await notStarted(otherAppId, stranger);
+    expect((await ok()).workers.overdue.total, 'a foreign-App alarm does not count').toBe(0);
+    await notStarted(appId, w.ada);
+    expect((await ok()).workers.overdue, 'the same alarm in this App does count').toMatchObject({ total: 1, ids: [w.dev1] });
   });
 });
 
