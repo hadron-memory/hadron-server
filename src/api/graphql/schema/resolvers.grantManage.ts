@@ -48,6 +48,16 @@ export function manageRefusal(error: GrantManageRefusal): GraphQLError {
 const notManager = () => manageRefusal(new GrantManageRefusal('GRANT_NOT_MANAGER'));
 const notFound = () => manageRefusal(new GrantManageRefusal('GRANT_NOT_FOUND'));
 
+/**
+ * #4767 (R6): the run-made arm of `withdrawGrant`'s requester match — the locked row's holder agent equals the caller-worker's
+ * role agent. FAILS CLOSED on an unread role agent: `workers.agent_id` is NOT NULL and the read runs under the worker row's
+ * FOR SHARE before this judgement, so a null here means the read never happened (a gone worker row), and `null === null`
+ * must never match a holder-less run-made row (Beatrix P2 on 99459f15; Antonio P3-2 — unreachable today, guarded anyway).
+ */
+export function runMadeRequestOfRoleAgent(row: Pick<LockedGrant, 'requestedByRunId' | 'agentId'>, roleAgentId: string | null): boolean {
+  return roleAgentId !== null && row.requestedByRunId !== null && row.agentId === roleAgentId;
+}
+
 /** An App by id or URN, or null when it is missing, malformed or soft-deleted (all one answer). Never an uninstalled-App distinction. */
 export async function resolveLiveApp(ctx: Context, appRef: string): Promise<TaskApp | null> {
   let id: string;
@@ -192,10 +202,10 @@ export const grantManageMutations = {
             // worker session bound to the agent may also withdraw what a RUN of that agent asked for — the row's holder agent
             // plus its run column (ruling 0255 item 21: a bound session's call is the agent's). Both are the ROW's facts, and
             // the two arms are exclusive on a well-formed row (a run-made request records no worker), so the worker-id match
-            // above is not loosened: a worker-made request still belongs to the worker that made it.
+            // above is not loosened: a worker-made request still belongs to the worker that made it. The run-made arm fails
+            // closed on an unread role agent (runMadeRequestOfRoleAgent): null never matches null.
             const mine = reader
-              ? row.requestedByWorkerId === reader.workerId
-                || (row.requestedByRunId !== null && row.agentId === roleAgentId)
+              ? row.requestedByWorkerId === reader.workerId || runMadeRequestOfRoleAgent(row, roleAgentId)
               : row.requestedByWorkerId === null && row.requestedByUserId === person;
             if (!mine) throw new GrantManageRefusal('GRANT_NOT_REQUESTER');
           };

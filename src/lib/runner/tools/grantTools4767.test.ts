@@ -186,4 +186,28 @@ describe('hadron_withdraw_grant (#4767)', () => {
     }
     expect(await rows()).toHaveLength(0);
   });
+
+  it('R10: a gone anchor under the lock is concealed (Rook P3-1, Beatrix P3-2): a deleted agent answers GRANT_NOT_REQUESTER, a gone org or owner the create arm\'s APP_NOT_FOUND; nothing is ever written', async () => {
+    const asker = await mintRun(w.appId, w.agentId);
+    const { id } = await ask(asker);
+    // A gone ORG: the anchor's liveness re-read denies under the lock; the fresh reads conceal it as the create arm does.
+    await db.organization.update({ where: { id: w.orgId }, data: { deletedAt: new Date() } });
+    expect(await refused(pull(asker, id))).toBe('APP_NOT_FOUND');
+    await db.organization.update({ where: { id: w.orgId }, data: { deletedAt: null } });
+    // A gone OWNER (the App becomes user-owned after the ask — the org/owner XOR forces the flip — and the anchors follow
+    // the App row the withdrawal reads).
+    await db.app.update({ where: { id: w.appId }, data: { organizationId: null, ownerUserId: w.user2Id } });
+    await db.user.update({ where: { id: w.user2Id }, data: { deletedAt: new Date() } });
+    expect(await refused(pull(asker, id))).toBe('APP_NOT_FOUND');
+    await db.user.update({ where: { id: w.user2Id }, data: { deletedAt: null } });
+    await db.app.update({ where: { id: w.appId }, data: { organizationId: w.orgId, ownerUserId: null } });
+    // A gone AGENT: its grants are not this run's to withdraw any more — the requester refusal, not the App's.
+    await db.agent.update({ where: { id: w.agentId }, data: { deletedAt: new Date() } });
+    expect(await refused(pull(asker, id))).toBe('GRANT_NOT_REQUESTER');
+    const [row] = await rows();
+    expect(row.revoked_at).toBeNull();
+    expect(row.withdrawn_at).toBeNull();
+    expect(row.holder_departed_at).toBeNull(); // a raw soft delete stamps nothing; only the code doors do
+    expect(await events()).toHaveLength(0);
+  });
 });

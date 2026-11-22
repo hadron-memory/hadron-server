@@ -20,6 +20,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { USER_API_KEY_PREFIX, hashUserApiKey } from '../../../middleware/auth.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { DB_NOW, dropTestActions, insertGrant, insertGrantUnguarded, raw, seedReadableNodes, seedWorld, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { grantManageMutations, runMadeRequestOfRoleAgent } from './resolvers.grantManage.js';
 import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -98,7 +99,7 @@ describe('worker-session withdrawal of a run-made grant (#4767)', () => {
     expect(await events(id)).toMatchObject([{ action: 'WITHDRAW', actor_user_id: memberId, worker_id: w.workerId, session_id: workerSession, run_id: null }]);
   });
 
-  it('W2: one answer for every grant the caller cannot read: unknown id, another agent\'s run-made grant, this agent\'s in another App, a session bound to another agent; a person who cannot read it too', async () => {
+  it('W2: one answer for every grant the caller cannot read: unknown id, another agent\'s run-made grant, this agent\'s in another App, a session bound to another agent (manager-driven or not); a person who cannot read it too', async () => {
     const mine = await runPending(); // kept untouched
     const other = await db.agent.create({ data: { organizationId: w.orgId, name: 'b', urn: `${w.orgUrn}:b-${generateId().slice(0, 6)}` } });
     const foreignApp = await db.app.findUniqueOrThrow({ where: { id: w.app2Id } });
@@ -108,9 +109,19 @@ describe('worker-session withdrawal of a run-made grant (#4767)', () => {
     const otherWorker = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: w.appId, agentId: other.id, name: 'q', slug: `q-${generateId().slice(0, 6)}` } })).id;
     await db.worker.update({ where: { id: otherWorker }, data: { heldByUserId: managerId } });
     const otherSession = (await db.session.create({ data: { id: generateId(), appId: w.appId, userId: managerId, workerId: otherWorker, agentId: other.id } })).id;
+    // A NON-manager's session on a worker of another agent (Beatrix P3-5): the role agent differs from the holder, and the
+    // caller is a plain member, so neither the manager read nor the worker-id arm can carry it.
+    const otherWorker2 = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: w.appId, agentId: other.id, name: 'q2', slug: `q2-${generateId().slice(0, 6)}` } })).id;
+    await db.worker.update({ where: { id: otherWorker2 }, data: { heldByUserId: memberId } });
+    const otherSession2 = (await db.session.create({ data: { id: generateId(), appId: w.appId, userId: memberId, workerId: otherWorker2, agentId: other.id } })).id;
     const answers = new Set<string>();
-    for (const [id, sess] of [[generateId(), workerSession], [foreign, workerSession], [elsewhere, workerSession], [mine, otherSession], [generateId(), null]] as Array<[string, string | null]>) {
-      const r = await post(sess === otherSession ? managerKey : memberKey, sess, WITHDRAW, { r: id });
+    // The last two cases are PERSONS (no session): an unknown id, and a member who cannot read `mine` (not manager, holder,
+    // requester or issuer — Beatrix P3-3: a person who cannot read it, not a second unknown id).
+    for (const [id, sess, key] of [
+      [generateId(), workerSession, memberKey], [foreign, workerSession, memberKey], [elsewhere, workerSession, memberKey],
+      [mine, otherSession, managerKey], [mine, otherSession2, memberKey], [generateId(), null, memberKey], [mine, null, memberKey],
+    ] as Array<[string, string | null, string]>) {
+      const r = await post(key, sess, WITHDRAW, { r: id });
       answers.add(`${code(r)}|${r.errors?.[0]?.message}`);
     }
     expect(answers.size).toBe(1);
@@ -144,5 +155,25 @@ describe('worker-session withdrawal of a run-made grant (#4767)', () => {
     expect(code(await post(memberKey, workerSession, WITHDRAW, { r: id }))).toBe('GRANT_NOT_PENDING');
     expect((await grantRows())[0].revoked_at).toBeNull();
     expect(await events(id)).toHaveLength(0);
+  });
+
+  it('W6: GraphQL withdrawGrant keeps refusing a run principal (#4767: the run tool is the one run door): GRANT_NOT_FOUND, nothing written (Beatrix P3-4)', async () => {
+    const id = await runPending();
+    // The Riana P2-1 convention (resolvers.grantManager3711.test.ts): a hand-built run-principal context, resolver-level.
+    const runCtx = { db, userId: memberId, appId: w.appId, organizationId: w.orgId, clientId: `run:${generateId()}`, roles: [] } as never;
+    await expect(grantManageMutations.withdrawGrant(null, { ref: id }, runCtx)).rejects.toMatchObject({ extensions: { code: 'GRANT_NOT_FOUND' } });
+    expect((await grantRows())[0].revoked_at).toBeNull();
+    expect(await events(id)).toHaveLength(0);
+  });
+
+  it('W7: the run-made arm fails closed on an unread role agent — null never matches, not even a holder-less run-made row (Beatrix P2-1, Antonio P3-2)', () => {
+    // The state is unreachable through the door (workers.agent_id is NOT NULL; the read runs under the worker row's FOR
+    // SHARE before the judgement; a gone worker row is refused by the reader gate first), so the arm is pinned directly:
+    // the first line is the mutant the guard exists to kill (drop `roleAgentId !== null` and it answers true).
+    expect(runMadeRequestOfRoleAgent({ requestedByRunId: 'r', agentId: null }, null)).toBe(false);
+    expect(runMadeRequestOfRoleAgent({ requestedByRunId: 'r', agentId: 'a' }, null)).toBe(false);
+    expect(runMadeRequestOfRoleAgent({ requestedByRunId: null, agentId: 'a' }, 'a')).toBe(false);
+    expect(runMadeRequestOfRoleAgent({ requestedByRunId: null, agentId: null }, 'a')).toBe(false);
+    expect(runMadeRequestOfRoleAgent({ requestedByRunId: 'r', agentId: 'a' }, 'a')).toBe(true);
   });
 });

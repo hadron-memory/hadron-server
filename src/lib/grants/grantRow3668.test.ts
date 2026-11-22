@@ -93,6 +93,15 @@ describe('one App, one registered action, a reason', () => {
     expect(row.revoked_at).not.toBeNull();
     expect(row.withdrawn_at).toEqual(row.revoked_at);
   });
+  // Rook SEC10 on #4803 (defense in depth): the marker admits a personless end only on a RUN-MADE row — the database, not
+  // only the code, refuses a personless withdrawal of a person's or a worker's request.
+  it('a personless end rides only a run-made request: withdrawn_at with no revoker on a worker-made row is refused', async () => {
+    const workerMade = await insertGrant(w, { user_id: null, agent_id: w.agentId, requested_by_worker_id: w.workerId });
+    const personMade = await insertGrant(w, { user_id: null, agent_id: w.agentId, requested_by_user_id: w.userId });
+    for (const id of [workerMade, personMade]) {
+      await refused(exec(`UPDATE grants SET revoked_at = ${DB_NOW}, withdrawn_at = ${DB_NOW}, updated_at = ${DB_NOW} WHERE id = $1`, id), /chk_grants_shape/);
+    }
+  });
   it('an agent-withdrawn row ends once: re-stamping it or retrofitting a revoker onto it is refused (#4767)', async () => {
     const id = await insertGrant(w, { user_id: null, agent_id: w.agentId, requested_by_run_id: 'run_x' });
     await exec(`UPDATE grants SET revoked_at = ${DB_NOW}, withdrawn_at = ${DB_NOW}, updated_at = ${DB_NOW} WHERE id = $1`, id);
