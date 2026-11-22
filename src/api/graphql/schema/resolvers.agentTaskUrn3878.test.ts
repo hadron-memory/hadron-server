@@ -33,7 +33,7 @@ vi.mock('../../../lib/agentTasks/handle.js', async (importOriginal) => {
   };
 });
 
-afterEach(() => { vi.restoreAllMocks(); });
+afterEach(() => { vi.restoreAllMocks(); runGrant.value = false; });
 
 const M = resolvers.Mutation as any;
 const Q = resolvers.Query as any;
