@@ -4,9 +4,10 @@
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   computeClosure,
   compare,
@@ -15,7 +16,8 @@ import {
   REGENERATE_COMMAND,
 } from './check-sdl-export-manifest.mjs';
 
-const SCRIPT = join(process.cwd(), 'scripts', 'check-sdl-export-manifest.mjs');
+const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
+const SCRIPT = join(REPO, 'scripts', 'check-sdl-export-manifest.mjs');
 const roots: string[] = [];
 afterAll(() => roots.forEach((r) => rmSync(r, { recursive: true, force: true })));
 
@@ -44,6 +46,9 @@ describe('import forms (each pulls src/b.ts into the closure)', () => {
     'dynamic import() with a literal': "export const f = () => import('./b.js');\n",
     'dynamic import() with a template literal': 'export const f = () => import(`./b.js`);\n',
     'type-position import()': "export type T = typeof import('./b.js');\n",
+    'import x = require()': "import b = require('./b.js');\nexport default b;\n",
+    'literal require()': "declare const require: any;\nexport const b = require('./b.js');\n",
+    'literal import.meta.resolve()': "export const u = import.meta.resolve('./b.js');\n",
   };
   for (const [name, body] of Object.entries(forms)) {
     it(name, () => {
@@ -55,11 +60,46 @@ describe('import forms (each pulls src/b.ts into the closure)', () => {
     });
   }
 
-  it('excludes bare packages, node: builtins and #aliases', () => {
+  it('excludes node: builtins, bare builtins and the allowed package (graphql, with a subpath too)', () => {
     const root = fixture({
-      'src/a.ts': "import { buildSchema } from 'graphql';\nimport fs from 'node:fs';\nimport z from '#alias';\nimport p from '@scope/pkg/sub';\n",
+      'src/a.ts': "import { buildSchema } from 'graphql';\nimport { x } from 'graphql/language';\nimport fs from 'node:fs';\nimport p from 'path';\nimport f from 'fs/promises';\n",
     });
-    expect(closure(root).files).toEqual(['scripts/export-graphql-sdl.mjs', 'src/a.ts']);
+    expect(closure(root)).toEqual({ files: ['scripts/export-graphql-sdl.mjs', 'src/a.ts'], errors: [] });
+  });
+
+  it('fails closed on a package the CLI job does not install, a scoped one too (#4916 blind P2-4)', () => {
+    const root = fixture({ 'src/a.ts': "import _ from 'lodash';\nimport p from '@scope/pkg/sub';\n" });
+    const { errors } = closure(root);
+    expect(errors).toHaveLength(2);
+    expect(errors[0]).toContain("'lodash' is a package the CLI's SDL export job does not install");
+    expect(errors[1]).toContain("'@scope/pkg/sub'");
+    expect(run(root).status).toBe(1);
+  });
+
+  it('fails closed on a #alias (blind P2-1)', () => {
+    const root = fixture({ 'src/a.ts': "import z from '#alias';\n" });
+    expect(closure(root).errors[0]).toContain("'#alias' is a package.json imports alias");
+  });
+
+  it('fails closed on a syntax error instead of counting only what the parser kept (blind P2-3)', () => {
+    const root = fixture({ 'src/a.ts': "import './b.js';\nexport const = ;\n", 'src/b.ts': '' });
+    const { errors } = closure(root);
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0]).toContain('src/a.ts:2: syntax error');
+    // --write must refuse, so a partial closure is never baked into the manifest.
+    expect(run(root, '--write').status).toBe(1);
+    expect(existsSync(join(root, 'scripts/sdl-export-files.txt'))).toBe(false);
+  });
+
+  it('fails closed on a non-literal require() and import.meta.resolve()', () => {
+    const root = fixture({ 'src/a.ts': 'declare const require: any;\ndeclare const n: string;\nrequire(n);\nimport.meta.resolve(n);\n' });
+    expect(closure(root).errors).toHaveLength(2);
+  });
+
+  it('usage: an option that swallows another option, and an unknown one, exit 2', () => {
+    const root = fixture({ 'src/a.ts': '' });
+    expect(run(root, '--entry', '--write').status).toBe(2);
+    expect(run(root, '--bogus').status).toBe(2);
   });
 
   it('resolves .js to the .ts next to it, and extensionless and index specifiers', () => {
@@ -125,7 +165,7 @@ describe('the guard CLI on a fixture tree', () => {
     expect(readFileSync(join(root, 'scripts/sdl-export-files.txt'), 'utf8')).toBe(first);
   });
 
-  it('MUTANT: a path dropped from the manifest fails and names the regenerate command', () => {
+  it('DRIFT (mutant): a path dropped from the manifest fails and names the regenerate command', () => {
     const root = fixture(files);
     run(root, '--write');
     const p = join(root, 'scripts/sdl-export-files.txt');
@@ -136,7 +176,7 @@ describe('the guard CLI on a fixture tree', () => {
     expect(r.stderr).toContain(REGENERATE_COMMAND);
   });
 
-  it('MUTANT: an import added without updating the manifest fails and names the regenerate command', () => {
+  it('DRIFT (mutant): an import added without updating the manifest fails and names the regenerate command', () => {
     const root = fixture(files);
     run(root, '--write');
     writeFileSync(join(root, 'src/b.ts'), "import './c.js';\n");
@@ -169,14 +209,16 @@ describe('the guard CLI on a fixture tree', () => {
 
 describe('the real repository', () => {
   it('the committed manifest matches the closure byte-for-byte, and today it is the three known files', () => {
-    const { files, errors } = computeClosure({ root: process.cwd(), entry: 'scripts/export-graphql-sdl.mjs' });
+    const { files, errors } = computeClosure({ root: REPO, entry: 'scripts/export-graphql-sdl.mjs' });
     expect(errors).toEqual([]);
+    // Pinned on purpose, the one assertion not derived from the code under test: when the export legitimately
+    // gains an import, update this list together with `pnpm sdl:manifest --write`.
     expect(files).toEqual([
       'scripts/export-graphql-sdl.mjs',
       'src/api/graphql/schema/typeDefs.ts',
       'src/lib/agentTasks/teamMetricsCaps.ts',
     ]);
-    expect(readFileSync('scripts/sdl-export-files.txt', 'utf8')).toBe(renderManifest(files));
+    expect(readFileSync(join(REPO, 'scripts/sdl-export-files.txt'), 'utf8')).toBe(renderManifest(files));
     expect(spawnSync('node', [SCRIPT], { encoding: 'utf8' }).status).toBe(0);
   });
 });
