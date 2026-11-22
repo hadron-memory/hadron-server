@@ -219,6 +219,29 @@ describe('#4829 the key and the credentials never reach an error', () => {
   });
 });
 
+describe('#4829 every credential is part of the key', () => {
+  const keyFor = async (create: () => Promise<unknown>) => {
+    let key = '';
+    vi.stubGlobal('fetch', vi.fn(async (_u: string, init: { body?: string }) => {
+      key = (JSON.parse(init.body ?? '{}') as { registrationKey: string }).registrationKey;
+      return new Response(JSON.stringify({ error: 'x', message: 'x' }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }));
+    await create().catch(() => undefined);
+    return key;
+  };
+  const sl = (botToken: string, appToken: string) => () =>
+    resolvers.Mutation.createSlackConnection({}, { orgRef: org.id, appRef: appA.id, botToken, appToken }, ctxFor(admin.id));
+
+  it('Slack: the same bot token with a different app token produces a different key (no adoption)', async () => {
+    const a = await keyFor(sl('xoxb-same', 'xapp-one'));
+    const b = await keyFor(sl('xoxb-same', 'xapp-two'));
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(b).toMatch(/^[0-9a-f]{64}$/);
+    expect(a).not.toBe(b);
+    expect(await keyFor(sl('xoxb-same', 'xapp-one'))).toBe(a);
+  });
+});
+
 describe('toolRegistrationKey', () => {
   it('refuses a missing appId and counts bytes, not UTF-16 units', () => {
     expect(() => toolRegistrationKey('slack', '', ['x'])).toThrow(/appId/);

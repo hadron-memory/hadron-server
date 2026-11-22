@@ -35,7 +35,7 @@ export const slackMutations = {
 
     // The tool validates both tokens live and derives the workspace + BOTH
     // bot ids; the tokens go no further than this call.
-    const identity = await createSlackToolConnection('slack', { botToken, appToken, appId: defaultAppId }) // the App the connection serves; part of the registrationKey;
+    const identity = await createSlackToolConnection('slack', { botToken, appToken, appId: defaultAppId }); // appId: the App the connection serves; it is part of the registrationKey
 
     // EVERY failure past this point tears the tool row down — otherwise the
     // tool would hold encrypted tokens + a socket with no core row and no
