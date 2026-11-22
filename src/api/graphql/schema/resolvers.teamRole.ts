@@ -24,7 +24,10 @@ import { listAppInstallationsWithDerivedLicense } from '../../../lib/appAgent.js
 // provenance to tidy a field with no reader.
 
 import { GraphQLError } from 'graphql';
-import { resolveAppRefConcealed } from '../../../lib/auth/workerRead.js';
+import { appNotFound } from '../../../lib/auth/workerRead.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { AppNotFoundError, AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
+import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
 import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
@@ -237,7 +240,30 @@ type AppRow = {
 };
 
 async function resolveApp(ctx: Context, appRef: string): Promise<AppRow> {
-  const { id: appId } = await resolveAppRefConcealed(ctx.db, appRef);
+  // #4838: the ref-RESOLUTION failures fold into the one unknown-App answer on
+  // these doors — the same arm startSession runs (#4836). The URN parser's own
+  // errors (UrnParseError / UrnNotQualifiedError) ECHO the caller's value in
+  // their messages, so a token pasted into appRef by mistake would print into a
+  // terminal, CI log or error tracker, and a "malformed" vs "missing"
+  // distinction would confirm which App URNs resolve. NARROW catch
+  // (review:narrow-catch-blocks): a database failure inside the lookup
+  // propagates — an outage reported as a missing App is the one thing this
+  // fold must never hide. The shared parser is untouched; memory/node
+  // not-found keeps its echo (cor:api:140:03).
+  let appId: string;
+  try {
+    ({ id: appId } = await resolveAppRef(ctx.db, appRef));
+  } catch (e) {
+    if (
+      e instanceof AppNotFoundError ||
+      e instanceof AmbiguousLegacyUrnError ||
+      e instanceof UrnNotQualifiedError ||
+      e instanceof UrnParseError
+    ) {
+      throw appNotFound();
+    }
+    throw e;
+  }
   return ctx.db.app.findUniqueOrThrow({ where: { id: appId } }) as Promise<AppRow>;
 }
 
@@ -285,33 +311,32 @@ async function writeTeamRole(
 ) {
   const role = normalizeRoleSlug(args.role);
   const app = await resolveApp(ctx, args.appRef);
-  if (app.deletedAt) {
-    throw new GraphQLError(`App not found: ${args.appRef}`, {
-      extensions: { code: 'BAD_USER_INPUT' },
-    });
-  }
+  // #4838 (cor:dmo:070:05 Proposed; V58 — #4836's rule on these doors): REACH
+  // FIRST, state after (cor:api:140:02's partition). The read gate answers a
+  // soft-deleted App (the resolve-then-read race arm — resolution already
+  // excludes soft-deleted rows on both paths) and every non-participant with
+  // the one unknown-App answer, byte-identical across every App state: no ref
+  // echoed, no appId in extensions, so the refusal is no existence or state
+  // oracle. Only a participant reaches the APP_UNINSTALLED arm below (an
+  // uninstalled App is unreachable by URN at resolution — the #944 asymmetry —
+  // so a member naming one by PK still earns the specific refusal), and a
+  // member who reaches but may not edit keeps FORBIDDEN from the
+  // definition-edit gate further down, exactly as before.
+  await requireWorkerReadAccess(ctx, app);
   if (app.uninstalledAt) {
     throw new GraphQLError('Cannot edit team roles of an uninstalled App.', {
       extensions: { code: 'APP_UNINSTALLED', appId: app.id },
     });
   }
-  // Locate the Team Agent, HOLDING any locator error until an App-scoped
-  // gate has passed (#984 review, Copilot): TEAM_AGENT_NOT_FOUND /
-  // _AMBIGUOUS / _NOT_INSTALLED disclose the App's installed-agent topology
-  // (candidate names and URNs), and on this failure path there is no system
-  // memory to run the real write gate against — so the errors are shown only
-  // to the audience the teamRoles READ already grants them to
-  // (requireWorkerReadAccess); everyone else gets FORBIDDEN. On the success
-  // path the memory-write gate below remains the sole authority, so a
-  // generic-memory writer who is not an App participant (a cross-org
+  // Locate the Team Agent. Its own errors (TEAM_AGENT_NOT_FOUND / _AMBIGUOUS /
+  // _NOT_INSTALLED) disclose the App's installed-agent topology (candidate
+  // names and URNs), so they are shown only to the audience the teamRoles READ
+  // already grants them to — which the reach gate above now decides BEFORE
+  // this call, unconditionally, so a locator error can simply propagate. On
+  // the success path the memory-write gate below remains the sole authority,
+  // so a generic-memory writer who is not an App participant (a cross-org
   // subscription CONTRIBUTOR) is unaffected.
-  let teamAgent: Awaited<ReturnType<typeof locateTeamAgent>>;
-  try {
-    teamAgent = await locateTeamAgent(ctx, app.id, args.teamAgentRef);
-  } catch (e) {
-    await requireWorkerReadAccess(ctx, app);
-    throw e;
-  }
+  const teamAgent = await locateTeamAgent(ctx, app.id, args.teamAgentRef);
   if (!teamAgent.systemMemoryId) {
     throw new GraphQLError(
       `Team Agent ${teamAgent.name} has no system memory to hold role definitions.`,
@@ -502,26 +527,19 @@ async function deleteTeamRoleImpl(
 ) {
   const role = normalizeRoleSlug(args.role);
   const app = await resolveApp(ctx, args.appRef);
-  if (app.deletedAt) {
-    throw new GraphQLError(`App not found: ${args.appRef}`, {
-      extensions: { code: 'BAD_USER_INPUT' },
-    });
-  }
+  // #4838: reach first, state after — same arm as writeTeamRole above (the
+  // one unknown-App answer for a deleted App and every non-participant; only a
+  // participant learns APP_UNINSTALLED).
+  await requireWorkerReadAccess(ctx, app);
   if (app.uninstalledAt) {
     throw new GraphQLError('Cannot edit team roles of an uninstalled App.', {
       extensions: { code: 'APP_UNINSTALLED', appId: app.id },
     });
   }
-  // Same hold-the-locator-error posture as writeTeamRole: TEAM_AGENT_* names
-  // the App's installed-agent topology, so it is shown only to the audience
-  // the teamRoles read already grants it to.
-  let teamAgent: Awaited<ReturnType<typeof locateTeamAgent>>;
-  try {
-    teamAgent = await locateTeamAgent(ctx, app.id, args.teamAgentRef);
-  } catch (e) {
-    await requireWorkerReadAccess(ctx, app);
-    throw e;
-  }
+  // Same posture as writeTeamRole: TEAM_AGENT_* names the App's
+  // installed-agent topology, and the reach gate above has already decided
+  // that audience, so a locator error propagates.
+  const teamAgent = await locateTeamAgent(ctx, app.id, args.teamAgentRef);
   if (!teamAgent.systemMemoryId) {
     throw new GraphQLError(
       `Team Agent ${teamAgent.name} has no system memory to hold role definitions.`,
@@ -720,13 +738,12 @@ export const teamRoleQueries = {
     ctx: Context,
   ) => {
     const app = await resolveApp(ctx, appRef);
-    // #3977: the read gate decides can-reach first and answers a deleted App as an absent one.
+    // #3977: the read gate decides can-reach first and answers a deleted App
+    // as an absent one (appNotFound() on its deletedAt arm), so the
+    // BAD_USER_INPUT deleted-echo branch that used to sit after it was dead
+    // code — removed by #4838 with a pin that the answer stays
+    // APP_NOT_FOUND · "App not found." for a deleted App.
     await requireWorkerReadAccess(ctx, app);
-    if (app.deletedAt) {
-      throw new GraphQLError(`App not found: ${appRef}`, {
-        extensions: { code: 'BAD_USER_INPUT' },
-      });
-    }
     const teamAgent = await locateTeamAgent(ctx, app.id, teamAgentRef);
     if (!teamAgent.systemMemoryId) {
       return { items: [], total: 0 };

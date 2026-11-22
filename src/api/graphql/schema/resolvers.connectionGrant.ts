@@ -4,7 +4,8 @@
 import { GraphQLError } from 'graphql';
 import { type Context, clampListTake, toISO, safeCanonicalUrn } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AppNotFoundError, AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
+import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
 import { generateId } from '../../../lib/id.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import {
@@ -161,7 +162,24 @@ export const connectionGrantMutations = {
     try {
       ({ id: granteeAppId } = await resolveAppRef(ctx.db, appRef));
     } catch (e) {
-      if (e instanceof AppNotFoundError) throw badInput(`Grantee App not found: '${appRef}'.`);
+      // #4838: the grantee ref's failures answer WITHOUT echoing the caller's
+      // value — the URN parser's errors put it verbatim in their messages, so
+      // a token pasted into appRef by mistake would land in terminals, CI logs
+      // and error trackers. The typed code is unchanged (BAD_USER_INPUT), and
+      // the EXISTENCE ORACLE is deliberate (Holger via Vera, team chat #138453,
+      // option "No reach needed"): a connection owner does not need to reach
+      // the grantee App — granting to a counterparty is the feature, and the
+      // owner learning whether that App exists is accepted. Only the echo
+      // goes. NARROW catch (review:narrow-catch-blocks): a database failure
+      // inside the lookup propagates.
+      if (
+        e instanceof AppNotFoundError ||
+        e instanceof AmbiguousLegacyUrnError ||
+        e instanceof UrnNotQualifiedError ||
+        e instanceof UrnParseError
+      ) {
+        throw badInput('Grantee App not found.');
+      }
       throw e;
     }
 

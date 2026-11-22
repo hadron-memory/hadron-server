@@ -97,8 +97,8 @@ let teamAgent: { id: string; systemMemoryId: string };
 let app: { id: string; urn: string };
 // The connectionGrant side: an owner with a connection in orgA, grantee Apps
 // in a DIFFERENT org (cross-org counterparty delegation is the feature).
-let orgA: { id: string };
-let orgB: { id: string };
+let orgA: { id: string; urn: string };
+let orgB: { id: string; urn: string };
 let connOwner: { id: string };
 let connId: string;
 let granteeApp: { id: string; urn: string };
@@ -182,7 +182,9 @@ const writeDoors: Record<string, (appRef: string, c: Context) => Promise<unknown
   deleteTeamRole: (appRef, c) => M.deleteTeamRole({}, { appRef, role: 'frontend-engineer' }, c),
 };
 
-const CANARY = `canary-${suffix} not a urn`;
+/** Built per test: `suffix` is assigned by beforeEach, so a module-level
+ * constant would interpolate `undefined` at import time. */
+const canary = () => `canary-${suffix} not a urn`;
 
 for (const [doorName, door] of Object.entries(writeDoors)) {
   describe(`#4838 — ${doorName}`, () => {
@@ -194,7 +196,7 @@ for (const [doorName, door] of Object.entries(writeDoors)) {
       // deleted); every refusal must be the SAME bytes.
       const missingUrn = `${orgT.urn}:ghost-${suffix}`;
       const answers: ReturnType<typeof shape>[] = [];
-      for (const ref of [generateId(), missingUrn, CANARY, app.id]) {
+      for (const ref of [generateId(), missingUrn, canary(), app.id]) {
         answers.push(shape(await refusal(door(ref, ctx(outsider.id)))));
       }
       await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
@@ -255,7 +257,7 @@ for (const [doorName, door] of Object.entries(writeDoors)) {
       );
       spy.mockRestore();
       expect(e).toBe(fault);
-      expect(formatGraphQLError(e as Error).extensions?.code).toBe('INTERNAL_SERVER_ERROR');
+      expect(formatGraphQLError({ message: String((e as Error)?.message) }, e).extensions?.code).toBe('INTERNAL_SERVER_ERROR');
     });
   });
 }
@@ -263,7 +265,7 @@ for (const [doorName, door] of Object.entries(writeDoors)) {
 // ── the teamRoles read door ────────────────────────────────────────────────
 describe('#4838 — teamRoles (read)', () => {
   it('a malformed ref folds into the unknown-App answer (canary in no refusal)', async () => {
-    const e = await refusal(Q.teamRoles({}, { appRef: CANARY }, ctx(contrib.id)));
+    const e = await refusal(Q.teamRoles({}, { appRef: canary() }, ctx(contrib.id)));
     expect(shape(e)).toEqual(CONCEALED);
     noCanary(e, suffix);
   });
@@ -302,7 +304,7 @@ describe('#4838 — createConnectionGrant (grantee ref)', () => {
   });
 
   it('a MALFORMED grantee ref folds into the same no-echo BAD_USER_INPUT answer (canary in no refusal)', async () => {
-    const e = await refusal(create(CANARY, ctx(connOwner.id)));
+    const e = await refusal(create(canary(), ctx(connOwner.id)));
     expect(e).toBeInstanceOf(GraphQLError);
     expect(e.extensions?.code).toBe('BAD_USER_INPUT');
     expect(e.message).toBe('Grantee App not found.');
@@ -325,6 +327,6 @@ describe('#4838 — createConnectionGrant (grantee ref)', () => {
     );
     spy.mockRestore();
     expect(e).toBe(fault);
-    expect(formatGraphQLError(e as Error).extensions?.code).toBe('INTERNAL_SERVER_ERROR');
+    expect(formatGraphQLError({ message: String((e as Error)?.message) }, e).extensions?.code).toBe('INTERNAL_SERVER_ERROR');
   });
 });
