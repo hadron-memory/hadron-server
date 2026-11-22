@@ -115,6 +115,18 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
     // reads on the passkey page and reaches no worker; an App holder has no reveal path (S5, #4000).
     reach: 'WORKER_OR_ROLE_AGENT',
   },
+  // #4000: complete signed terms, including the HTTPS path and header the signer approves.
+  {
+    name: 'secret.use', source: 'PLATFORM', tool: 'web_request', enforcement: 'SERVER', issuerRule: 'SECRET_READ_CLIENT',
+    parameters: [
+      { name: 'secret', type: 'secret-ref', refusesWildcard: true },
+      { name: 'auto-delete', type: 'secret-mark', refusesWildcard: true },
+      { name: 'binding-prefix', type: 'https-prefix', refusesWildcard: true },
+      { name: 'binding-header', type: 'header-name', refusesWildcard: true },
+    ],
+    summaryTemplate: 'Use the secret {secret} of {app} at {binding-prefix} with header {binding-header}, and {auto-delete}',
+    reach: 'NO_WORKER',
+  },
 ];
 
 export interface UpsertResult { inserted: number; updated: number; unchanged: number }

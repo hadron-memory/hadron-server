@@ -48,7 +48,7 @@
     "@aws-sdk/client-sagemaker-runtime": "^3.1171.0",
     "@aws-sdk/s3-request-presigner": "^3.1171.0",
     "@hadron-memory/access-control": "0.3.0",
-    "@hadron-memory/urn-lib-js": "0.0.22",
+    "@hadron-memory/urn-lib-js": "0.0.23",
     "@modelcontextprotocol/sdk": "^1.32.0",
     "@mozilla/readability": "^0.6.0",
     "@nats-io/jetstream": "^3.4.0",

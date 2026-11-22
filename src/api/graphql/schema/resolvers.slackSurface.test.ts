@@ -99,7 +99,7 @@ describe('createSlackConnection', () => {
       botId: 'B0BOT',
       status: 'ACTIVE',
     });
-    expect(createSlackToolConnection).toHaveBeenCalledWith('slack', { botToken: 'xoxb-secret', appToken: 'xapp-secret' });
+    expect(createSlackToolConnection).toHaveBeenCalledWith('slack', { botToken: 'xoxb-secret', appToken: 'xapp-secret', appId: app.id });
     // The row carries no token in any column.
     const raw = await db.slackConnection.findUniqueOrThrow({ where: { id: connection.id } });
     expect(JSON.stringify(raw)).not.toContain('xoxb-secret');
