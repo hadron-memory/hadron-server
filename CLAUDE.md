@@ -297,6 +297,28 @@ deployment state, kept in Hadron:
 | `CORE_EVENTS_TOKEN` | #396/#667 — internal provider-event ingress (`POST /internal/email-events`, `/internal/slack-events`, `/internal/webfetch-events`) | none (unset ⇒ each ingress answers 503; its event plane is off) | Shared bearer presented by capability tools when delivering normalized events. Webfetch poll events are deduped on `(jobId,snapshotHash,kind)`, validated against the immutable core routing binding, and acknowledged only after an INTEGRATION AppRun plus completed-dispatch receipt are durable; external excerpts are framed as untrusted content before entering run data. |
 | `BASE_URL` | Ten localhost-default consumers use `src/lib/baseUrl.ts:getProjectBaseUrl` (login callbacks, verification/fresh-sign-in mail, passkey notices, Exchange/Gmail/Calendar/Drive callbacks). | Shared helper: `http://localhost:${process.env.PORT \|\| 4000}`. Empty BASE_URL/PORT falls back; `/` is unset only under NODE_ENV=test. | Configured nonempty values are returned byte-for-byte, without normalization or validation. The four provider callbacks now honor PORT. `src/auth/oauth.ts` remains separate: strict boot validator and per-request origin fallback. `src/api/assetPublic.ts` and `src/mcp/deploymentInfo.ts` keep their no-default semantics. Strongly recommended in production so emitted URLs agree; this helper does not replace OAuth strict validation. **OAuth strict shape:** `<scheme>://<host>[:<port>]`, lowercase scheme; no trailing slash, path, query, fragment, whitespace, underscore or IPv6 brackets; malformed values fail boot. Without BASE_URL, OAuth metadata derives its origin from per-request headers and depends on `trust proxy` plus `X-Forwarded-Proto` being honored at every upstream hop (EF-003: a misconfigured hop can emit HTTP links rejected by clients). |
 
+## Merge notes (merge queue, #4819)
+
+`main` is meant to merge through a GitHub **merge queue** once the repository admin has applied the ruleset described in
+#4819 (the exact settings are in that PR's body). The queue builds `main` plus the entry, and plus the entries ahead of it,
+and runs the required checks on that merged tree through the `merge_group` event, so two PRs that are green alone and
+break together fail in the queue and not on `main`.
+
+- **Required checks:** `test`, `tsc`, `no-agent-specific-code`, `no-station-refs` and `urn-rename-aliased`. `tsc` has no
+  `paths:` filter on any trigger on purpose: a required check that a path filter keeps from running never reports, so it
+  would block every PR (and every queue entry) that touches no `.ts` file.
+- **A new workflow needs a decision.** `scripts/check-merge-queue-workflows.test.ts` has one entry per workflow file (in
+  the queue or not, and why) and fails on a workflow that has none. A workflow whose base logic reads `github.base_ref`,
+  the PR's labels or `github.event.before` is wrong on `merge_group` (a queue entry has none of them) and must get its own
+  `merge_group` branch first. `migration-replay.yml` and `graphql-sdl-parse.yml` are left out for that reason today.
+- **`concurrency`:** a `merge_group` run has no `pull_request.number`, so its group is its own `run_id` and it is never
+  cancelled by another run. Intended.
+- **When a queue entry fails,** the queue removes it and the entries behind it rebuild without it. Read the failing check,
+  fix it on the PR branch (a new head means the review seats re-read or carry as usual), and enqueue it again. Do not
+  re-run a red required check until it turns green; a flaky shard is a finding to record, not a retry loop.
+- **Until the ruleset is applied,** the rule stays as it was: before a merge, run `tsc` and the focused suites on a scratch
+  merge with current `main`.
+
 ## Seed fixtures (post-008-agent-installation)
 
 `prisma/seed.ts` is anonymized — no real PII. The fixture set is built around
