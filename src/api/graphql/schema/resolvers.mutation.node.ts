@@ -74,7 +74,7 @@ import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
-import { deriveEdgeLoc, isAuthoredLoc } from '../../../lib/edgeLoc.js';
+import { deriveEdgeLoc, isAuthoredLoc, normalizeAuthoredEdgeLoc } from '../../../lib/edgeLoc.js';
 import {
   liveEdgeEndpointSet,
   lockEdgeEndpointMemories,
@@ -738,8 +738,12 @@ async function writeNodeCoreRaw(
       if (input.edges !== undefined) {
         resolvedEdges = [];
         for (const e of input.edges) {
-          if (e.loc != null && e.loc !== '') {
-            validateLocOrThrow(e.loc, 'loc');
+          // #4813: one helper decides what "nothing authored" means ('' included, #4738);
+          // a non-null loc is validated before any write — the same refusal the
+          // MCP inline-edge door (resolveEdgeRefs) gives, byte-identically.
+          const edgeLoc = normalizeAuthoredEdgeLoc(e.loc);
+          if (edgeLoc !== null) {
+            validateLocOrThrow(edgeLoc, 'loc');
           }
           try {
             const { id: targetNodeId } = await resolveNodeRefForCaller(ctx, e.targetId, input.memoryId);
@@ -779,7 +783,7 @@ async function writeNodeCoreRaw(
               targetLoc: tgt.loc,
               targetMemoryId: tgt.memoryId,
               name: e.name ?? null,
-              loc: e.loc || null, // #4738: '' is no authored loc, it derives
+              loc: edgeLoc, // #4738/#4813: '' is no authored loc, it derives
               description: e.description ?? null,
               isRunnable: e.isRunnable ?? null,
             });
