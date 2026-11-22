@@ -35,6 +35,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
+import { resolveTaskIndexEdge, withClaudeSkillExport, type TaskIndexInput, type TaskSkillExportInput } from '../../../lib/taskIndexEdge.js';
 import { assertEdgeSourceWritersById, assertRoleWritersForNodes, assertRoleWritersForWrite, lockEdgeUnderSourceWriters, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../../lib/specCorpus.js';
 import { carryGovernedSignals } from '../../../lib/governedSignals.js';
@@ -249,6 +250,14 @@ type NodeWriteMode = 'create' | 'update' | 'upsert';
 type NodeWriteInput = Omit<NodeInput, 'name'> & { name?: string };
 
 /**
+ * #4864: the existing-loc refusal, worded for the task door's index create (the caller meant to ADD a task, so name the route for
+ * changing the one that is there). Every other write keeps the message it had; the code and fields are unchanged.
+ */
+function locConflictText(message: string, opts?: { taskIndex?: TaskIndexInput }): string {
+  return opts?.taskIndex ? `${message} Extend that task (updateTaskNode, or hadron_update_task) instead of creating it again.` : message;
+}
+
+/**
  * Why did an update-by-PK match no row? Extracted so the decision is testable
  * even though the race that reaches it is not (@copilot, PR #1198).
  *
@@ -391,6 +400,12 @@ async function writeNodeCoreRaw(
      * over a tombstone revives existing history and takes the normal gate (Beckett LOCAL delta of #2989). No other caller passes it.
      */
     copiesSeq?: boolean;
+    /**
+     * #4864 — set only by the task door's CREATE (`createTaskNode(input, index)`): the Agent whose tasks index lists the new
+     * task, and the trigger. The edge to that index is resolved after the memory's gates, merged into the write's inline
+     * edges and written in this write's one transaction.
+     */
+    taskIndex?: TaskIndexInput;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -431,7 +446,7 @@ async function writeNodeCoreRaw(
       // never answers.
       const carriesIncludeTag = typeof input.content === 'string' && input.content.includes('{{>');
       const grantDestination: WriteDestination | undefined =
-        input.edges === undefined && !carriesIncludeTag ? { loc: input.loc, verb: mode } : undefined;
+        input.edges === undefined && !carriesIncludeTag && !opts?.taskIndex ? { loc: input.loc, verb: mode } : undefined;
       const authorizeWrite = async (authCtx: Context) => {
         const gate = () => requireMemoryWriteAccess(authCtx, resolvedMemoryId, grantDestination);
         if (!conceal) {
@@ -640,7 +655,7 @@ async function writeNodeCoreRaw(
       // in create mode is refused by the mode gate below regardless.
       if (mode === 'create' && existing && !existing.deletedAt) {
         const collision = new NodeLocConflictError(input.loc, input.memoryId);
-        throw new GraphQLError(collision.message, {
+        throw new GraphQLError(locConflictText(collision.message, opts), {
           extensions: { code: collision.name, loc: collision.loc, memoryId: collision.memoryId },
         });
       }
@@ -706,7 +721,7 @@ async function writeNodeCoreRaw(
       const isResurrect = mode === 'create' && !!existing?.deletedAt;
       if (mode === 'create' && existing && !existing.deletedAt) {
         const err = new NodeLocConflictError(input.loc, input.memoryId);
-        throw new GraphQLError(err.message, {
+        throw new GraphQLError(locConflictText(err.message, opts), {
           extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
         });
       }
@@ -726,6 +741,10 @@ async function writeNodeCoreRaw(
       // Spec 037: edges are first-class. Carry the target's loc so the
       // edge loc can be derived (<sourceLoc>:<name>:<targetLoc>) when the
       // caller doesn't author one; validate any author-supplied loc here.
+      // #4864: the task door's index edge joins the inline edges here, after every memory gate and the existing-loc refusal.
+      if (opts?.taskIndex) {
+        input.edges = [...(input.edges ?? []), await resolveTaskIndexEdge(ctx, input.memoryId, opts.taskIndex)];
+      }
       let resolvedEdges: Array<{
         targetNodeId: string;
         targetLoc: string;
@@ -1626,7 +1645,7 @@ async function writeNodeCoreRaw(
 
             if (mode === 'create' && authoritative && !authoritative.deletedAt) {
               const err = new NodeLocConflictError(input.loc, input.memoryId);
-              throw new GraphQLError(err.message, {
+              throw new GraphQLError(locConflictText(err.message, opts), {
                 extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
               });
             }
@@ -1642,7 +1661,7 @@ async function writeNodeCoreRaw(
               }
               if (mode === 'create' && !authoritative.deletedAt) {
                 const err = new NodeLocConflictError(input.loc, input.memoryId);
-                throw new GraphQLError(err.message, {
+                throw new GraphQLError(locConflictText(err.message, opts), {
                   extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
                 });
               }
@@ -2760,13 +2779,25 @@ export const nodeMutations = {
       GOVERNED_KINDS.filter((entry) => !entry.operationsOnly).flatMap((entry) => [
         [
           entry.doors.create,
-          async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
-            writeNodeCore(input, ctx, 'create', {
+          async (
+            _: unknown,
+            { input, index, skill }: { input: CreateNodeInput; index?: TaskIndexInput | null; skill?: TaskSkillExportInput | null },
+            ctx: Context,
+          ) => {
+            // #4864: only the task door declares `index` and `skill` in the SDL; this keeps a direct call from
+            // smuggling them onto another kind's door.
+            const task = entry.kind === 'task';
+            const written = task && skill
+              ? { ...input, properties: withClaudeSkillExport(input.properties, skill, { loc: input.loc, content: input.content ?? '' }) }
+              : input;
+            return writeNodeCore(written, ctx, 'create', {
               authoring: authoringFromRequest(ctx, input.authoredWith),
               ownsKind: entry.kind,
               governedContext: 'node-write',
               concealUnreadable: { entity: 'memory', ref: input.memoryId },
-            }),
+              ...(task && index ? { taskIndex: index } : {}),
+            });
+          },
         ],
         [
           entry.doors.update,
