@@ -53,6 +53,12 @@ export interface MergeOwnerUrnsArgs {
   sourceHandle: string | null;
 }
 
+/**
+ * #709: the Prisma codes a dead row's re-root may be refused with, leaving that row un-rooted: a unique violation
+ * (P2002) or a failed constraint (P2004). Every other error aborts the merge.
+ */
+const REFUSABLE_CODES = new Set(['P2002', 'P2004']);
+
 /** Strip the root (everything up to the first colon) off an owner URN. */
 function slugOf(urn: string): string {
   const colon = urn.indexOf(':');
@@ -206,8 +212,12 @@ export async function mergeOwnerNamespacedUrns(
   // dead one. Minted around EVERY holder, dead or live (and, for Apps, uninstalled too: so no two Apps share a URN and
   // an old reference stays unambiguous), and never reclaimed: a merge always completes in its one transaction
   // (cor:api:010:02), and a reclaim would delete an unrelated tombstone (with a node cascade) or refuse a stamped
-  // corpus. Each row is its own savepoint: if its re-root or alias write is refused, that row keeps its URN (no rename
-  // without its alias) and the merge goes on; a serialization failure still aborts the merge so the caller retries it.
+  // corpus. Each row is its own savepoint: if its re-root or alias write is refused by a DATA CONFLICT (a unique or
+  // constraint violation, `REFUSABLE_CODES`), that row keeps its URN (no rename without its alias), one
+  // `merge.dead_reroot_refused` line names it, and the merge goes on. Anything else (a serialization failure, a
+  // foreign-key or missing-row error, which mean a bug or a race the caller must retry) aborts the merge.
+  // The one savepoint name is reused because the rows are re-rooted strictly one after another, each released or rolled
+  // back before the next; `mintLocalSlug` runs before it on purpose: it only reads (`isTaken`), so it needs no rollback.
   const rerootDead = async (
     entityType: 'MEMORY' | 'AGENT' | 'APP',
     row: { id: string; urn: string },
@@ -222,8 +232,9 @@ export async function mergeOwnerNamespacedUrns(
       await tx.$executeRawUnsafe('RELEASE SAVEPOINT merge_dead_reroot');
       return newUrn;
     } catch (e) {
-      if (!(e instanceof Prisma.PrismaClientKnownRequestError) || isSerializationFailure(e)) throw e;
+      if (!(e instanceof Prisma.PrismaClientKnownRequestError) || isSerializationFailure(e) || !REFUSABLE_CODES.has(e.code)) throw e;
       await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT merge_dead_reroot');
+      console.warn(JSON.stringify({ event: 'merge.dead_reroot_refused', entityType, entityId: row.id, code: e.code }));
       return null;
     }
   };

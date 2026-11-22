@@ -20,14 +20,14 @@ import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 /** Fail the alias write for one chosen old URN, as a database refusal would. */
-const failAliasFor = vi.hoisted(() => ({ urn: null as string | null }));
+const failAliasFor = vi.hoisted(() => ({ urn: null as string | null, code: 'P2002' }));
 vi.mock('../../../lib/urnAlias.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../../lib/urnAlias.js')>();
   return {
     ...real,
     recordUrnRename: async (dbArg: Parameters<typeof real.recordUrnRename>[0], params: Parameters<typeof real.recordUrnRename>[1]) => {
       if (failAliasFor.urn && params.oldUrn === failAliasFor.urn) {
-        throw new Prisma.PrismaClientKnownRequestError('alias write refused (test)', { code: 'P2010', clientVersion: 'test' });
+        throw new Prisma.PrismaClientKnownRequestError('alias write refused (test)', { code: failAliasFor.code, clientVersion: 'test' });
       }
       return real.recordUrnRename(dbArg, params);
     },
@@ -42,7 +42,7 @@ const S = 'merge-source', T = 'merge-target';
 async function agentOf(owner: { id: string }, name: string) {
   return resolvers.Mutation.createAgent({}, { name }, ctxFor(owner.id));
 }
-const kill = {
+const softDelete = {
   memory: (id: string) => db.memory.update({ where: { id }, data: { deletedAt: new Date() } }),
   agent: (id: string) => db.agent.update({ where: { id }, data: { deletedAt: new Date() } }),
 };
@@ -56,7 +56,7 @@ const rowCounts = async () => ({ memories: await db.memory.count(), agents: awai
 const aliases = (entityId: string) => db.urnAlias.findMany({ where: { entityId } });
 
 beforeEach(async () => {
-  failAliasFor.urn = null;
+  failAliasFor.urn = null; failAliasFor.code = 'P2002';
   await cleanDb(db);
   source = await db.user.create({ data: { id: generateId(), handle: S, roles: ['READER'] } });
   target = await db.user.create({ data: { id: generateId(), handle: T, roles: ['READER'] } });
@@ -65,7 +65,7 @@ beforeEach(async () => {
 describe('#709 dead owned rows are re-rooted onto the target', () => {
   it('a dead agent and its dead system memory end at the target root, with legacyUrn and an alias each', async () => {
     const agent = await agentOf(source, 'Notes');
-    await kill.agent(agent.id); await kill.memory(agent.systemMemoryId!);
+    await softDelete.agent(agent.id); await softDelete.memory(agent.systemMemoryId!);
     await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
     const a = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
     expect(a).toMatchObject({ urn: `${T}:notes`, ownerUserId: target.id, legacyUrn: `${S}:notes` });
@@ -84,11 +84,11 @@ describe('#709 dead owned rows are re-rooted onto the target', () => {
     const a = await app(source, 'team', state);
     await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
     expect(await db.app.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ urn: `${T}:team`, ownerUserId: target.id, legacyUrn: `${S}:team` });
-    expect((await aliases(a.id)).map((x) => x.urn)).toEqual([`${S}:team`]);
+    expect((await aliases(a.id)).map((x) => [x.urn, x.replacedByUrn])).toEqual([[`${S}:team`, `${T}:team`]]);
   });
 
   it('no source-rooted row is owned by the target after the merge', async () => {
-    const agent = await agentOf(source, 'Notes'); await kill.agent(agent.id); await kill.memory(agent.systemMemoryId!);
+    const agent = await agentOf(source, 'Notes'); await softDelete.agent(agent.id); await softDelete.memory(agent.systemMemoryId!);
     const live = await agentOf(source, 'Live');
     await app(source, 'gone', { deleted: true }); await app(source, 'off', { uninstalled: true });
     await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
@@ -103,7 +103,7 @@ describe('#709 dead owned rows are re-rooted onto the target', () => {
 describe('#709 collisions: mint around every holder, never reclaim, the merge completes', () => {
   it('dead vs LIVE: the target\'s live holder keeps its URN; the dead source row is re-minted; no row is deleted', async () => {
     const mine = await agentOf(target, 'Notes');
-    const dead = await agentOf(source, 'Notes'); await kill.agent(dead.id); await kill.memory(dead.systemMemoryId!);
+    const dead = await agentOf(source, 'Notes'); await softDelete.agent(dead.id); await softDelete.memory(dead.systemMemoryId!);
     const before = await rowCounts();
     await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
     expect(await rowCounts()).toEqual(before);
@@ -113,8 +113,8 @@ describe('#709 collisions: mint around every holder, never reclaim, the merge co
   });
 
   it('dead vs DEAD: the target\'s own tombstone is never reclaimed; the dead source row is re-minted around it', async () => {
-    const tomb = await agentOf(target, 'Notes'); await kill.agent(tomb.id); await kill.memory(tomb.systemMemoryId!);
-    const dead = await agentOf(source, 'Notes'); await kill.agent(dead.id); await kill.memory(dead.systemMemoryId!);
+    const tomb = await agentOf(target, 'Notes'); await softDelete.agent(tomb.id); await softDelete.memory(tomb.systemMemoryId!);
+    const dead = await agentOf(source, 'Notes'); await softDelete.agent(dead.id); await softDelete.memory(dead.systemMemoryId!);
     const before = await rowCounts();
     await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
     expect(await rowCounts()).toEqual(before);
@@ -137,7 +137,7 @@ describe('#709 collisions: mint around every holder, never reclaim, the merge co
     await agentOf(target, 'Notes');
     const liveSrc = await agentOf(source, 'Notes');
     // A dead source agent already holding the slug the live one will be re-minted to.
-    const dead = await agentOf(source, `Notes ${S}`); await kill.agent(dead.id);
+    const dead = await agentOf(source, `Notes ${S}`); await softDelete.agent(dead.id);
     expect(dead.urn).toBe(`${S}:notes-${S}`);
     await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
     expect((await db.agent.findUniqueOrThrow({ where: { id: liveSrc.id } })).urn).toBe(`${T}:notes-${S}`);
@@ -148,8 +148,12 @@ describe('#709 collisions: mint around every holder, never reclaim, the merge co
 
 describe('#709 aliases, install memories, durable refs and a failed alias', () => {
   it('an old source reference reaches the re-rooted dead row through the alias, and it stays not found', async () => {
-    const agent = await agentOf(source, 'Notes'); await kill.agent(agent.id);
+    const agent = await agentOf(source, 'Notes'); await softDelete.agent(agent.id);
     await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
+    // The alias exists and names the re-rooted dead row (Jimmy F4: observable, not just a rejection)…
+    expect(await db.urnAlias.findMany({ where: { urn: `${S}:notes`, entityType: 'AGENT' }, select: { entityId: true, replacedByUrn: true } }))
+      .toEqual([{ entityId: agent.id, replacedByUrn: `${T}:notes` }]);
+    // …and the row it leads to stays dead: not found by the old reference or by the new one.
     await expect(resolveAgentRef(db, `hrn:agent:${S}:notes`)).rejects.toThrow();
     await expect(resolveAgentRef(db, `hrn:agent:${T}:notes`)).rejects.toThrow();
   });
@@ -161,14 +165,14 @@ describe('#709 aliases, install memories, durable refs and a failed alias', () =
       id: generateId(), ownerUserId: source.id, urn: `${S}:team-install`, name: 'Install', class: 'system',
       appId: a.id, installOfAgentId: agent.id, isInstallMemory: true,
     } });
-    await kill.agent(agent.id);
+    await softDelete.agent(agent.id);
     await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
     expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).urn).toBe(`${T}:helper`);
     expect(await db.memory.findFirst({ where: { appId: a.id, installOfAgentId: agent.id } })).toMatchObject({ id: install.id, urn: `${T}:team-install` });
   });
 
   it('a durable entry_node_urn into a re-rooted dead memory is rewritten, as for a live one', async () => {
-    const agent = await agentOf(source, 'Notes'); await kill.memory(agent.systemMemoryId!);
+    const agent = await agentOf(source, 'Notes'); await softDelete.memory(agent.systemMemoryId!);
     const org = await db.organization.create({ data: { name: 'Sched', urn: `sched-${generateId()}.test` } });
     const a = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Sched', urn: `${org.urn}:sched` } });
     const sched = await db.agentSchedule.create({ data: {
@@ -179,9 +183,42 @@ describe('#709 aliases, install memories, durable refs and a failed alias', () =
     expect((await db.agentSchedule.findUniqueOrThrow({ where: { id: sched.id } })).entryNodeUrn).toBe(`hrn:node:${T}:notes-system:flows:start`);
   });
 
+  it('a refused dead MEMORY keeps its URN, and a durable ref into it stays consistent with it (not rewritten)', async () => {
+    const agent = await agentOf(source, 'Notes'); await softDelete.memory(agent.systemMemoryId!);
+    const org = await db.organization.create({ data: { name: 'Sched', urn: `sched-${generateId()}.test` } });
+    const a = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Sched', urn: `${org.urn}:sched` } });
+    const sched = await db.agentSchedule.create({ data: {
+      id: generateId(), organizationId: org.id, appId: a.id, name: 'nightly', runAt: new Date(Date.now() + 3_600_000),
+      entryNodeUrn: `hrn:node:${S}:notes-system:flows:start`,
+    } });
+    failAliasFor.urn = `${S}:notes-system`;
+    await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
+    expect(await db.memory.findUniqueOrThrow({ where: { id: agent.systemMemoryId! } })).toMatchObject({ urn: `${S}:notes-system`, legacyUrn: null, ownerUserId: target.id });
+    expect((await db.agentSchedule.findUniqueOrThrow({ where: { id: sched.id } })).entryNodeUrn).toBe(`hrn:node:${S}:notes-system:flows:start`);
+  });
+
+  it('a refused dead APP keeps its URN and still moves owner', async () => {
+    const gone = await app(source, 'team', { deleted: true });
+    failAliasFor.urn = `${S}:team`;
+    await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
+    expect(await db.app.findUniqueOrThrow({ where: { id: gone.id } })).toMatchObject({ urn: `${S}:team`, legacyUrn: null, ownerUserId: target.id });
+  });
+
+  it.each([
+    ['a serialization failure (the caller retries)', 'P2034'],
+    ['a foreign-key violation (a bug, not a refusal)', 'P2003'],
+    ['a missing row (a bug, not a refusal)', 'P2025'],
+  ])('%s during a dead re-root aborts the whole merge, with nothing moved', async (_label, code) => {
+    const agent = await agentOf(source, 'Notes'); await softDelete.agent(agent.id);
+    failAliasFor.urn = `${S}:notes`; failAliasFor.code = code;
+    await expect(mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id })).rejects.toThrow();
+    expect(await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).toMatchObject({ urn: `${S}:notes`, ownerUserId: source.id });
+    expect((await db.user.findUniqueOrThrow({ where: { id: source.id } })).deletedAt).toBeNull();
+  });
+
   it('a dead row whose alias write fails keeps its URN (no rename without its alias); the rest of the merge completes', async () => {
-    const stuck = await agentOf(source, 'Stuck'); await kill.agent(stuck.id);
-    const fine = await agentOf(source, 'Fine'); await kill.agent(fine.id);
+    const stuck = await agentOf(source, 'Stuck'); await softDelete.agent(stuck.id);
+    const fine = await agentOf(source, 'Fine'); await softDelete.agent(fine.id);
     failAliasFor.urn = `${S}:stuck`;
     await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id });
     expect(await db.agent.findUniqueOrThrow({ where: { id: stuck.id } })).toMatchObject({ urn: `${S}:stuck`, ownerUserId: target.id, legacyUrn: null });
