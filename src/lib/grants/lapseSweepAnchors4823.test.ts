@@ -10,6 +10,11 @@
  *
  * Pins: (1) the cycle itself on two real connections (red on main: a 40P01 on one side); (2) the call shape, on the real sweeper: the
  * anchors are exclusive, name EVERY agent of the page across Apps, and come BEFORE the installation locks.
+ *
+ * The door's lock sequence that pin (1) stands in for is owned by `uninstallAgentFromAppCore`
+ * (src/api/graphql/schema/resolvers.helpers.ts): `withAuthorizedTx` takes the exclusive anchors and the anchor rows FOR SHARE
+ * (src/api/graphql/schema/authorizedTx.ts), then its afterLock takes the App FOR NO KEY UPDATE. The anchor keys come from
+ * `authorityAnchorDomain`, the scheme `lockAuthorityAnchors` uses, so a change to the scheme moves both (#4874).
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from 'pg';
@@ -20,9 +25,11 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { upsertPlatformActions } from './actions.js';
 import { DB_NOW, insertGrantUnguarded, raw, type World } from './grantFixtures3668.js';
+import { authorityAnchorDomain } from '../auth/authorityAnchors.js';
 import { sweepLapsedAgentGrants } from './lapseSweep.js';
 
-const EDIT = 'bootprompt.source.edit';
+/** The grant action the fixtures carry: a boot-prompt source edit grant held by the agent. */
+const BOOTPROMPT_EDIT_ACTION = 'bootprompt.source.edit';
 const WAIT_MS = 500;
 
 let orgId: string;
@@ -62,10 +69,14 @@ afterEach(async () => {
   for (const c of opened.splice(0)) { await c.query('ROLLBACK').catch(() => undefined); await c.end().catch(() => undefined); }
 });
 
-const grantFor = (app: string, agent: string) => insertGrantUnguarded({ appId: app, userId: admin.id } as unknown as World, {
-  user_id: null, agent_id: agent, action: EDIT, action_values: { sourceNode: nodeId }, max_uses: null, expires_at: null,
+/** The fixture World for one App: insertGrantUnguarded reads only appId and userId; the rest name nothing here. */
+const worldFor = (app: string): World => ({ orgUrn: 's4823.example', orgId, appId: app, app2Id: '', userId: admin.id, user2Id: '', agentId: '', workerId: '', sessionId: '' });
+
+/** An active, passkey-verified grant held by `agent` in `app`, inserted past the guard (the sweeper is what is under test). */
+const grantFor = (app: string, agent: string): Promise<string> => insertGrantUnguarded(worldFor(app), {
+  user_id: null, agent_id: agent, action: BOOTPROMPT_EDIT_ACTION, action_values: { sourceNode: nodeId }, max_uses: null, expires_at: null,
   activated_at: raw(DB_NOW), verification_kind: 'passkey', verified_by: admin.id, issuer_user_id: admin.id,
-} as never);
+});
 
 async function connect(): Promise<Client> {
   const c = new Client({ connectionString: process.env.DATABASE_URL });
@@ -73,11 +84,16 @@ async function connect(): Promise<Client> {
   opened.push(c);
   return c;
 }
-const settles = async (p: Promise<unknown>, ms = WAIT_MS): Promise<boolean> => {
-  let done = false;
-  void p.then(() => { done = true; }, () => { done = true; });
+/**
+ * Where a promise stands after `ms`: still pending, fulfilled, or rejected WITH its reason (#4874 F3), so a waiter that failed
+ * instead of waiting is reported as the failure it is, never as "settled".
+ */
+type Standing = { state: 'pending' } | { state: 'fulfilled' } | { state: 'rejected'; reason: string };
+const standing = async (p: Promise<unknown>, ms = WAIT_MS): Promise<Standing> => {
+  let now: Standing = { state: 'pending' };
+  void p.then(() => { now = { state: 'fulfilled' }; }, (e: unknown) => { now = { state: 'rejected', reason: String((e as Error)?.message ?? e).slice(0, 200) }; });
   await new Promise((r) => setTimeout(r, ms));
-  return done;
+  return now;
 };
 
 describe('#4823 the lapse sweeper does not cycle with the uninstall door', () => {
@@ -86,13 +102,13 @@ describe('#4823 the lapse sweeper does not cycle with the uninstall door', () =>
     // The uninstall door's locks, as withAuthorizedTx takes them: exclusive anchors (app, agent), the anchor rows FOR SHARE.
     const door = await connect();
     await door.query('BEGIN');
-    await door.query(`SELECT pg_advisory_xact_lock(hashtext('authorization:agent'), hashtext($1))`, [agentId]);
-    await door.query(`SELECT pg_advisory_xact_lock(hashtext('authorization:app'), hashtext($1))`, [appId]);
+    await door.query('SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))', [authorityAnchorDomain('agent'), agentId]);
+    await door.query('SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))', [authorityAnchorDomain('app'), appId]);
     await door.query('SELECT id FROM apps WHERE id = $1 FOR SHARE', [appId]);
     await door.query('SELECT id FROM agents WHERE id = $1 FOR SHARE', [agentId]);
 
     const sweep = sweepLapsedAgentGrants(db);
-    expect(await settles(sweep), 'the sweeper must be waiting behind the door, not past it').toBe(false);
+    expect(await standing(sweep), 'the sweeper must be waiting behind the door: not past it, and not failed').toEqual({ state: 'pending' });
 
     // afterLock: the App FOR NO KEY UPDATE. Without the anchor the sweeper holds the App FOR SHARE and waits on the agent row: a cycle.
     const doorDone = door.query('SELECT id FROM apps WHERE id = $1 FOR NO KEY UPDATE', [appId]).then(() => door.query('COMMIT'));
@@ -141,13 +157,39 @@ describe('#4823 the sweeper takes the exclusive agent anchors for its whole page
     await grantFor(appId, agentId);
     await grantFor(app2, agent2);
     const realAnchors = anchors.lockAuthorityAnchors;
-    const pages: string[][] = [];
+    const pages: Array<{ ids: string[]; mode: string }> = [];
     vi.spyOn(anchors, 'lockAuthorityAnchors').mockImplementation(async (tx, list, mode) => {
-      pages.push(list.map((a) => a.id).sort());
+      pages.push({ ids: list.map((a) => a.id).sort(), mode });
       return realAnchors(tx, list, mode);
     });
     await sweepLapsedAgentGrants(db, { batchSize: 1 });
     expect(pages).toHaveLength(2);
-    expect(pages.flat().sort()).toEqual([agentId, agent2].sort());
+    expect(pages.map((p) => p.mode), 'every page anchors exclusively (#4874 F4)').toEqual(['exclusive', 'exclusive']);
+    expect(pages.flatMap((p) => p.ids).sort()).toEqual([agentId, agent2].sort());
+  });
+
+  it('one agent in two Apps on one page: one exclusive anchor call naming only that agent, both pairs judged (#4874 F4)', async () => {
+    const app2 = await mkApp('s-app-2');
+    await db.appAgent.create({ data: { appId: app2, agentId } });
+    await grantFor(appId, agentId);
+    await grantFor(app2, agentId);
+    const realAnchors = anchors.lockAuthorityAnchors;
+    const calls: Array<{ ids: string[]; mode: string }> = [];
+    vi.spyOn(anchors, 'lockAuthorityAnchors').mockImplementation(async (tx, list, mode) => {
+      calls.push({ ids: list.map((a) => a.id), mode });
+      return realAnchors(tx, list, mode); // orderedAnchors de-duplicates, so the agent's anchor is taken once
+    });
+    const out = await sweepLapsedAgentGrants(db);
+    expect(out.pairsJudged).toBe(2);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.mode).toBe('exclusive');
+    expect(new Set(calls[0]!.ids)).toEqual(new Set([agentId]));
+  });
+
+  it('an empty page never opens the transaction: no anchor is taken when there is nothing to judge (#4874 F4)', async () => {
+    const spy = vi.spyOn(anchors, 'lockAuthorityAnchors');
+    const out = await sweepLapsedAgentGrants(db);
+    expect(out.pairsJudged).toBe(0);
+    expect(spy).not.toHaveBeenCalled();
   });
 });
