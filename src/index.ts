@@ -6,6 +6,7 @@ import { controller } from './controller/controller.js';
 import { db } from './integrations/db/client.js';
 import { createReadiness } from './api/health.js';
 import { stoppingDrainWindowMs } from './lib/stoppingDrainWindow.js';
+import { applyHttpTimeouts } from './lib/httpTimeouts.js';
 import { closeHttpListenerOutcome } from './lib/httpShutdown.js';
 import { errorToken, logFailedShutdownSteps, type EmbeddingStopOutcomes, type StepOutcome } from './lib/shutdownSteps.js';
 
@@ -27,6 +28,10 @@ const httpServer = app.listen(port, () => {
     console.error('Startup graph sync failed:', err);
   });
 });
+
+// #851: keep-alive above every proxy's idle reuse (a closed-under-it connection is an intermittent 502); applied
+// before the first connection can arrive on the event loop turn after listen.
+applyHttpTimeouts(httpServer);
 
 // internal#4: close admission before graceful process exit. This is a lifecycle hook,
 // not a deployment/fencing action; rollout still requires the operator's cohort boundary.

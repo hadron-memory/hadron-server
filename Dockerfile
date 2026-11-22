@@ -30,6 +30,18 @@ COPY scripts ./scripts/
 ENV NODE_ENV=production
 EXPOSE 10300
 
+# #851 (cor:api:270:01): READINESS, not liveness. `GET /ready` answers 200 only once the first startup has settled and
+# the database answers (503 starting / startup_failed / stopping / database_unavailable otherwise), so this check reports
+# whether the container should receive traffic. The status is a readiness signal ONLY: nothing may restart or replace the
+# container on `unhealthy` (no autoheal, no orchestrator restart-on-unhealthy). Liveness stays `/health`, which a failed
+# first sync does not fail, precisely so a degraded boot is never turned into a restart loop. The probe follows the
+# container's PORT (the server's own default, 4000, when unset) and treats anything but 200, including no connection, as
+# not ready. A long first sync and the boot-time generate/migrate/transpile run before the port opens, hence the generous
+# start period and retries. The image's own health status is advisory until a proxy or orchestrator is told to read it
+# (the Traefik side is deployment config, tracked on hadron-server#851).
+HEALTHCHECK --interval=15s --timeout=5s --start-period=180s --retries=5 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||4000)+'/ready').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
+
 # Generate client, apply any pending migrations, then start — all at runtime
 # when DATABASE_URL is available. `migrate deploy` is the production-grade
 # command: it applies only the migration files in prisma/migrations/ that
