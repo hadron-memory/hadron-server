@@ -12289,16 +12289,17 @@ export const typeDefs = `#graphql
     \`extensions.warnings\` (not in \`errors\`): a list of
     { path (the mutation's response key), code, text, register? }. Codes are a
     closed list per release (task.create.no-source, task.assign.assignee-unavailable,
-    task.assign.assignee-busy, task.assign.assignee-paused,
+    task.assign.assignee-busy, task.assign.assignee-paused, task.assign.session-open (#4855: the
+    assignee has an open session, live or quiet, so the platform did not start it; the assignment reaches it there),
     task.finish.open-children, from #3267 task.start.other-started,
     task.start.parent-ended (both on startAgentTask) and task.progress.children-ended
-    (on recordAgentTaskProgress; other-started and children-ended, like the three assign
+    (on recordAgentTaskProgress; other-started and children-ended, like the four assign
     facts, are filed only to a caller who may read the App's worker state), and from #2607 task.cancel.open-children on
     cancelAgentTask, alarm.ack.outside-chain on acknowledgeAlarm, and #2733 ticker.code.unmapped on createTicker);
     a client must tolerate unknown codes. Since #4793 task.create.no-source is no longer raised; it stays on the list so history recorded with it still reads. \`text\` is
     fixed per code. \`register\` appears only for a caller that has an Agent:
     { state: mapped (taskLoc, taskUrn) | unmapped | unresolved | withheld }.
-    #3491 (ruling 0176): the first three are given only when the caller may read every
+    #3491 (ruling 0176): the first four are given only when the caller may read every
     system memory on the chains looked up (the Team Agent's and the caller's own Agent's),
     as for every action answer (hrn:node:hadronmemory.com:specs:cor:agt:110:03);
     otherwise, or when the lookup fails or runs out of time, it is { state: withheld },

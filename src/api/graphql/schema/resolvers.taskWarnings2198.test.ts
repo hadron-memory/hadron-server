@@ -218,6 +218,14 @@ describe('#4855 an assignment that cannot start its worker because a session is 
     expect(codes(ended)).not.toContain('task.assign.session-open');
   });
 
+  it('a soft-deleted session is not open', async () => {
+    const s = await openSession(anne);
+    await db.session.update({ where: { id: s.id }, data: { deletedAt: new Date() } });
+    const c = ctx(member.id);
+    await create(c, { assignee: { worker: anne.id } });
+    expect(codes(c)).not.toContain('task.assign.session-open');
+  });
+
   it('a worker taking work for itself is not advised, and a user assignee is not either', async () => {
     await openSession(anne);
     const self = ctx(member.id);

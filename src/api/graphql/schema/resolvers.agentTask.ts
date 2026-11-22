@@ -2850,6 +2850,8 @@ async function assigneeAdvice(
   if (facts.unavailable) warn.push('task.assign.assignee-unavailable');
   if (facts.busy) warn.push('task.assign.assignee-busy');
   if (facts.paused) warn.push('task.assign.assignee-paused');
+  // #4855: the start for this assignment is skipped over an open session (S4); say so instead of failing silently.
+  if (facts.sessionOpen) warn.push('task.assign.session-open');
 }
 
 /**
