@@ -675,7 +675,10 @@ export const appRunMutations = {
         // #3911 (V71): a row the migration disabled for want of an Agent cannot be re-enabled until one is named. The
         // edit is judged as a creation is (V70): the App's single installed Agent is recorded, else RUN_AGENT_REQUIRED
         // (several) or BOOT_PROMPT_NOT_SET (none), before any write. A row that already names an Agent is untouched.
-        if (input.enabled === true && (agentId === undefined ? existing.agentId : agentId) == null) {
+        // The guard judges the row AS IT WILL BE: an edit that leaves an enabled schedule with no Agent is refused the
+        // same way, so `agentRef: null` (clear) on an enabled row, alone or with `enabled: true`, cannot recreate the state.
+        // Clearing the Agent together with `enabled: false` stays allowed (a disabled null-agent row is the V71 state).
+        if ((input.enabled ?? existing.enabled) && (agentId === undefined ? existing.agentId : agentId) == null) {
           agentId = await resolveTriggerAgent(txCtx, existing.appId, null);
         }
         if (input.policy != null && parsePolicyLink(input.policy) == null) {

@@ -133,6 +133,48 @@ describe('#3911 V71: the migration', () => {
   });
 });
 
+describe('#3911 V71: the imports half of "installed"', () => {
+  async function imp(parent: string, child: string) {
+    await db.agentOrgGrant.create({ data: { orgId, agentId: child, activatedAt: new Date() } });
+    await db.agentImport.create({ data: { parentAgentId: parent, importedAgentId: child, position: 1, required: true, agentOrgGrantOrgId: orgId, agentOrgGrantAgentId: child } });
+  }
+  it('a physical install plus an Agent it imports are two installed Agents: disabled, not filled', async () => {
+    const appId = await app('imp-two', [agentA]);
+    await imp(agentA, agentB);
+    const t = await triggers(appId, null);
+    await migrate();
+    const r = await read(t);
+    expect([r.schedule.agentId, r.schedule.enabled]).toEqual([null, false]);
+    expect([r.webhook.agentId, r.webhook.enabled]).toEqual([null, false]);
+  });
+  it('an imported Agent that was deleted is not counted: filled from the physical install', async () => {
+    const appId = await app('imp-deleted', [agentA]);
+    await imp(agentA, agentB);
+    await db.agent.update({ where: { id: agentB }, data: { deletedAt: new Date() } });
+    const t = await triggers(appId, null);
+    await migrate();
+    expect((await read(t)).schedule.agentId).toBe(agentA);
+  });
+  it('an install on a deleted App is not counted: the live install fills', async () => {
+    const live = await app('app-live', [agentA]);
+    const t = await triggers(live, null);
+    const dead = await app('app-dead', [agentB]);
+    await db.app.update({ where: { id: dead }, data: { deletedAt: new Date() } });
+    await migrate();
+    expect((await read(t)).schedule.agentId).toBe(agentA);
+  });
+  it('a fill and a disable stamp updated_at, and a second run changes nothing', async () => {
+    const t = await triggers(await app('stamp', [agentA]), null);
+    const before = await read(t);
+    await migrate();
+    const once = await read(t);
+    expect(once.schedule.updatedAt!.getTime()).toBeGreaterThan(before.schedule.updatedAt!.getTime());
+    expect(once.webhook.updatedAt!.getTime()).toBeGreaterThan(before.webhook.updatedAt!.getTime());
+    expect(await migrate()).toContain('schedules filled=0 disabled=0; webhooks filled=0 disabled=0; web_poll_bindings filled=0 cancelled=0');
+    expect(await read(t)).toEqual(once);
+  });
+});
+
 describe('#3911 V71: re-enabling a disabled schedule', () => {
   const enable = (id: string, extra: Record<string, unknown> = {}) =>
     M.updateAgentSchedule({}, { id, input: { enabled: true, ...extra } }, ctx());
@@ -156,6 +198,21 @@ describe('#3911 V71: re-enabling a disabled schedule', () => {
     await db.appAgent.create({ data: { appId, agentId: agentA } as never });
     await enable(t.schedule, { agentRef: agentA });
     expect((await read(t)).schedule.enabled).toBe(true);
+  });
+
+  it('clearing the Agent of an ENABLED schedule is refused the same way (agentRef: null no longer recreates a null-agent enabled row)', async () => {
+    const t = await triggers(await app('clear-several', [agentA, agentB]), agentA);
+    expect(await code(M.updateAgentSchedule({}, { id: t.schedule, input: { agentRef: null } }, ctx()))).toBe('RUN_AGENT_REQUIRED');
+    expect(await code(M.updateAgentSchedule({}, { id: t.schedule, input: { agentRef: null, enabled: true } }, ctx()))).toBe('RUN_AGENT_REQUIRED');
+    const r = (await read(t)).schedule;
+    expect([r.agentId, r.enabled]).toEqual([agentA, true]);
+  });
+
+  it('clearing the Agent together with enabled: false is allowed (the V71 state)', async () => {
+    const t = await triggers(await app('clear-off', [agentA, agentB]), agentA);
+    await M.updateAgentSchedule({}, { id: t.schedule, input: { agentRef: null, enabled: false } }, ctx());
+    const r = (await read(t)).schedule;
+    expect([r.agentId, r.enabled]).toEqual([null, false]);
   });
 
   it('a schedule that names an Agent re-enables as before', async () => {
