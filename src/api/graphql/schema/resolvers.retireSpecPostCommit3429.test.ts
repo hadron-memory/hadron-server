@@ -17,6 +17,14 @@ vi.mock('../../../lib/events/nodeWritten.js', async (importOriginal) => {
   } };
 });
 
+// A rejecting edge mirror once armed: the async post-commit effect, whose promise rejection the door's guard must catch.
+const mirrorArm = vi.hoisted(() => ({ on: false }));
+vi.mock('../../../integrations/github/mirrorEdgeSource.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../integrations/github/mirrorEdgeSource.js')>();
+  return { ...actual, mirrorEdgeSourceAfterCommit: (...a: Parameters<typeof actual.mirrorEdgeSourceAfterCommit>) =>
+    mirrorArm.on ? Promise.reject(new Error('edge mirror failed after commit')) : actual.mirrorEdgeSourceAfterCommit(...a) };
+});
+
 let admin: { id: string };
 let memoryId: string;
 const ctx = (): Context => ({ db, userId: admin.id, roles: [] });
@@ -26,6 +34,7 @@ const spec = async (loc: string) => (await resolvers.Mutation.createSpecNode(nul
 
 beforeEach(async () => {
   arm.on = false;
+  mirrorArm.on = false;
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: 'Post Org', urn: 'post-org.example' } });
   admin = await db.user.create({ data: { githubId: 342921, githubUsername: 'post-admin', roles: [] } });
@@ -44,9 +53,31 @@ describe('#3429 failures after the commit', () => {
       } } as never, ctx()) as { node: { tags: string[] }; successorEdge: unknown };
       expect(out.node.tags).toContain('superseded');
       expect(out.successorEdge).not.toBeNull();
-      expect(logged.mock.calls.some((c) => String(c[0]).includes('[retireSpec] post-commit'))).toBe(true);
+      // The effect-specific report: this message AND the injected error, not any '[retireSpec] post-commit' line.
+      expect(logged.mock.calls.some((c) => String(c[0]).includes('[retireSpec] post-commit effect failed after the retirement committed:')
+        && c[1] instanceof Error && c[1].message === 'announcement failed after commit')).toBe(true);
     } finally { arm.on = false; logged.mockRestore(); }
     expect((await db.node.findUniqueOrThrow({ where: { id: x.id } })).tags).toContain('superseded');
     expect(await db.edge.count({ where: { sourceId: x.id, name: 'superseded-by', deletedAt: null } })).toBe(1);
   });
+
+  it('a REJECTING edge mirror (an async effect) is logged with its own message and the caller still gets the committed retirement', async () => {
+    const x = await spec('p:mx'); const y = await spec('p:my');
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mirrorArm.on = true;
+    try {
+      const out = await resolvers.Mutation.retireSpec(null, { input: {
+        ref: x.id, form: 'SUPERSEDE', successorRef: y.id, expectedRevision: (await db.node.findUniqueOrThrow({ where: { id: x.id } })).revSeq,
+      } } as never, ctx()) as { node: { tags: string[] }; successorEdge: unknown };
+      expect(out.node.tags).toContain('superseded');
+      expect(out.successorEdge).not.toBeNull();
+      expect(logged.mock.calls.some((c) => String(c[0]).includes('[retireSpec] post-commit edge mirror failed after the retirement committed:')
+        && c[1] instanceof Error && c[1].message === 'edge mirror failed after commit')).toBe(true);
+      // the synchronous-effect report is a different message: this case must not be satisfied by it
+      expect(logged.mock.calls.some((c) => String(c[0]).includes('post-commit effect failed'))).toBe(false);
+    } finally { mirrorArm.on = false; logged.mockRestore(); }
+    expect((await db.node.findUniqueOrThrow({ where: { id: x.id } })).tags).toContain('superseded');
+    expect(await db.edge.count({ where: { sourceId: x.id, name: 'superseded-by', deletedAt: null } })).toBe(1);
+  });
 });
+
