@@ -183,7 +183,7 @@ describe('#4716 — the interleaving: a node committed between the empty-check a
   );
 });
 
-describe('#4716 — the guard PINS read committed: a repeatable-read server default must not reopen the window', () => {
+describe('#4716 — the guard PINS read committed: a repeatable-read session default must not reopen the window', () => {
   it('under a REPEATABLE READ session default the raced node still survives', async () => {
     const f = await buildFixture();
     const memoryId = f.memory.id;
@@ -304,6 +304,59 @@ describe('#4716 — FR-029 behavior pins around the guard', () => {
     });
     expect(sub.revokedAt).not.toBeNull();
     expect(await db.memory.findUnique({ where: { id: f.memory.id } })).toBeNull();
+    expect(await db.memory.findUnique({ where: { id: freeStanding.id } })).not.toBeNull();
+    expect(await db.memory.findUnique({ where: { id: otherAgentMemory.id } })).not.toBeNull();
+  });
+
+  // #4797: the pin above also leaves the revoked agent's OWN empty memory in place, so it passes whether or not the
+  // guard is scoped to the revoked agent (the guard's SELECT picks one row with no ORDER BY). Here the revoked agent
+  // has NO per-agent memory at all: the only candidates the user holds are out of scope, so an unscoped guard (the
+  // `user_memory_of_agent_id = <revoked agent>` condition dropped from the WHERE) is the one thing that lets it
+  // reach them. Verified red by that mutant, 3/3 runs, while the pin above stays green under it.
+  it('with no per-agent memory, deletes neither the free-standing nor another agent\'s empty memory, and still revokes', async () => {
+    const f = await buildFixture();
+    await db.memory.delete({ where: { id: f.memory.id } }); // the revoked agent's own memory is gone
+    const otherAgent = await db.agent.create({
+      data: { id: generateId(), organizationId: f.org.id, urn: `other-${generateId()}`, name: 'other-agent' },
+    });
+    const freeStanding = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: f.org.id,
+        urn: `${f.org.urn}:free-standing-2`,
+        name: 'free-standing-2',
+        userId: f.alice.id,
+        userMemoryOfAgentId: null,
+        appId: null,
+        class: 'personal',
+        visibility: null,
+      },
+      select: { id: true },
+    });
+    const otherAgentMemory = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: f.org.id,
+        urn: `${f.org.urn}:personal-other-agent-2`,
+        name: 'personal-other-agent-2',
+        userId: f.alice.id,
+        userMemoryOfAgentId: otherAgent.id,
+        appId: f.app.id,
+        class: 'personal',
+        visibility: null,
+      },
+      select: { id: true },
+    });
+
+    // Must still succeed: nothing of the revoked agent's to delete. The resolver returns the revoked subscription.
+    const result = (await revoke(f)) as { userId: string; agentId: string; revokedAt: Date | null };
+    expect(result).toMatchObject({ userId: f.alice.id, agentId: f.agent.id });
+    expect(result.revokedAt).not.toBeNull();
+
+    const sub = await db.agentSubscription.findUniqueOrThrow({
+      where: { userId_agentId: { userId: f.alice.id, agentId: f.agent.id } },
+    });
+    expect(sub.revokedAt).not.toBeNull();
     expect(await db.memory.findUnique({ where: { id: freeStanding.id } })).not.toBeNull();
     expect(await db.memory.findUnique({ where: { id: otherAgentMemory.id } })).not.toBeNull();
   });
