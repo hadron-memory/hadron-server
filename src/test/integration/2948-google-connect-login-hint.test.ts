@@ -80,8 +80,8 @@ afterAll(async () => {
   }
 });
 
-beforeEach(async () => {
-  vi.mocked(createToolConnection).mockReset();
+/** A clean world: the admin, a member, the org and another org, the Google env. Each test starts from one (#4684). */
+async function resetWorld(): Promise<void> {
   await cleanDb(db);
   const admin = await db.user.create({ data: { githubId: 29481, githubUsername: 'hint-admin', roles: ['READER'] } });
   adminId = admin.id;
@@ -94,6 +94,11 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: orgId, userId: adminId, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: orgId, userId: memberId, role: 'CONTRIBUTOR' } });
   Object.assign(process.env, GOOGLE_ENV);
+}
+
+beforeEach(async () => {
+  vi.mocked(createToolConnection).mockReset();
+  await resetWorld();
 });
 
 /** POST /auth/<route>/start as the admin, with an optional body extension. */
@@ -108,6 +113,7 @@ async function start(route: string, extra: Record<string, unknown> = {}): Promis
 }
 
 /** Seed a connection row (the hint's scope: own, live, Google-provider, in-org). */
+let toolSeq = 0;
 function seedConnection(args: {
   userId: string;
   organizationId: string;
@@ -122,7 +128,7 @@ function seedConnection(args: {
       mailboxEmail: args.mailboxEmail,
       displayName: args.mailboxEmail,
       provider: args.provider,
-      toolConnectionId: `tool-${args.provider}`,
+      toolConnectionId: `tool-${args.provider}-${++toolSeq}`,
       syncStatus: 'OK',
       createdBy: args.userId,
       deletedAt: args.deletedAt ?? null,
@@ -215,19 +221,27 @@ describe('#2948 hint scope — own live Google connection in that org, else ONE 
     await seedConnection({ userId: adminId, organizationId: orgId, mailboxEmail: OWN_GMAIL, provider: 'ms-exchange' });
   });
 
-  it('refuses every out-of-scope shape with the same typed 400, before any nonce row exists', async () => {
+  // #4684: one test per shape, each from its own clean world (beforeEach), never accumulating seeds.
+  it.each(REFUSALS)('refuses %s with the typed 400, before any nonce row exists', async (name, seed, extra) => {
+    await seed();
+    const res = await start('gmail', extra);
+    expect(res.status, name).toBe(400);
+    expect(await res.text(), name).toBe(JSON.stringify({ error: 'invalid_account_hint' }));
+    // Before the nonce: the refusal writes no handoff row of any kind.
+    expect(await handoffRowCount(), name).toBe(0);
+  });
+
+  // One refusal shape for every cause: byte-identical bodies, no oracle. Each cause runs in its own reset world.
+  it('answers every out-of-scope shape with one byte-identical body', async () => {
     const bodies: string[] = [];
     for (const [name, seed, extra] of REFUSALS) {
+      await resetWorld();
       await seed();
       const res = await start('gmail', extra);
       expect(res.status, name).toBe(400);
-      const body = await res.text();
-      bodies.push(body);
-      expect(JSON.parse(body), name).toEqual({ error: 'invalid_account_hint' });
-      // Before the nonce: the refusal writes no handoff row of any kind.
-      expect(await handoffRowCount(), name).toBe(0);
+      bodies.push(await res.text());
     }
-    // One refusal shape for every cause: byte-identical bodies, no oracle.
+    expect(bodies).toHaveLength(REFUSALS.length);
     expect(new Set(bodies).size).toBe(1);
   });
 
