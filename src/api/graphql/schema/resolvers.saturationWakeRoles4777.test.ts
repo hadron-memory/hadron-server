@@ -19,7 +19,7 @@ import type { Requirements } from '../../../lib/agentTasks/matcher.js';
 import { pendingTaskWakes } from '../../../lib/agentTasks/taskWakes.js';
 import { computeDueWakes } from '../../../lib/tickers/dueWakes.js';
 import { DISABLED_TEAM_TOOLS } from '../../../mcp/disabledTools.js';
-import { registerAgentTaskTools } from '../../../mcp/agentTaskTools.js';
+import { mcpWakeRolesArgs, registerAgentTaskTools } from '../../../mcp/agentTaskTools.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -182,7 +182,10 @@ describe('#4777 the list: empty by default, set by whoever manages the App (cor:
   it('the App key is admitted or refused exactly as on setAgentTaskStallSchedule', async () => {
     const precedent = await failure(M.setAgentTaskStallSchedule({}, { appRef: appId, input: { notStartedMinutes: 33 } }, keyCtx()));
     const mine = await failure(setRoles(['triager'], keyCtx()));
+    // Both REFUSE (an App key never manages, cor:dmo:050:12), so equal codes cannot be two RESOLVEDs.
+    expect(precedent, 'the precedent refuses the App key').not.toBeNull();
     expect(mine?.extensions?.code).toBe(precedent?.extensions?.code);
+    expect(await stored()).toEqual([]);
   });
 
   it('writing the stored list again (in any order or spelling) changes nothing: no write, no new updatedAt', async () => {
@@ -319,6 +322,19 @@ describe('#4777 the wake (cor:agt:060:16; the wake record is agent_team_alarm_sc
     expect((await pendingTaskWakes(db, [t], new Date())).get(t)).toEqual([expect.objectContaining({ eventId: alarm.id })]);
   });
 
+  it('the wake follows the open episode: once a match ends the episode, the undelivered wake is no longer due', async () => {
+    const t = await worker('triager');
+    await setRoles(['triager'], ctx(ownerId));
+    await saturate();
+    await evaluate();
+    expect((await pendingTaskWakes(db, [t], new Date())).get(t)).toHaveLength(1);
+    await recordMatchOutcome(db, appId, SERVER_MID, 'MATCHED', null);
+    await evaluate();
+    const [alarm] = await alarms();
+    expect((await db.saturationEpisode.findFirstOrThrow({ where: { eventId: alarm.id } })).endedAt).not.toBeNull();
+    expect((await pendingTaskWakes(db, [t], new Date())).size).toBe(0);
+  });
+
   it('a woken listed worker is not YOUR_MOVE on the roster (the wake is an offer; only a manager acknowledges)', async () => {
     const t = await worker('triager');
     await setRoles(['triager'], ctx(ownerId));
@@ -347,5 +363,11 @@ describe('#4777 the MCP door: registered disabled, as the team cut requires (#30
   it('the set and read tools are registered through the team cut, never listed', () => {
     registerAgentTaskTools({} as never, { db, auth: {} } as never);
     expect(DISABLED_TEAM_TOOLS).toEqual(expect.arrayContaining(['hadron_saturation_wake_roles_set', 'hadron_saturation_wake_roles']));
+  });
+
+  it('the set tool forwards appRef and roles unchanged and drops its own session argument', () => {
+    expect(mcpWakeRolesArgs({ session: 's-1', appRef: 'team-app', roles: [' Triager ', 'qa'] })).toEqual({ appRef: 'team-app', roles: [' Triager ', 'qa'] });
+    expect(mcpWakeRolesArgs({ appRef: 'team-app', roles: [] })).toEqual({ appRef: 'team-app', roles: [] });
+    expect(Object.keys(mcpWakeRolesArgs({ session: 's-1', appRef: 'a', roles: ['x'] })).sort()).toEqual(['appRef', 'roles']);
   });
 });

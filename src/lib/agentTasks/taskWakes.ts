@@ -224,18 +224,22 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
                         WHERE x.task_id = t.id AND x.app_id = t.app_id AND x.actor_worker_id = t.assignee_worker_id AND x.created_at >= e.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
         AND ${undelivered('t.assignee_worker_id', 'e.id', '0')}`),
     // #4777 (cor:agt:060:16): a saturation alarm wakes EVERY worker its chain names, each through its own row, all woken
-    // when the alarm was raised: never the highest position only, and never a climb. Acknowledging it changes nothing
-    // else (:16), so an acknowledged alarm's wake stays due until delivered; the App must still be live. Words only: the
-    // nudge names the combination from the payload, never evidence. Who is never due (cor:agt:080:11) is the caller's.
+    // when the alarm was raised: never the highest position only, and never a climb. The wake is due while the alarm's
+    // saturation episode is open (like the dark-worker alarm's): once the combination can be given work again there is
+    // nothing to wake for, and the scan starts from the open episodes only (at most one per combination). Acknowledging
+    // changes nothing else (:16), so an acknowledged alarm's wake stays due while its episode is open. The App must be
+    // live. Words only: the nudge names the combination from the payload, never evidence. Who is never due
+    // (cor:agt:080:11) is the caller's.
     db.$queryRaw<(Row & { chainIndex: number })[]>(Prisma.sql`
       SELECT (e.chain -> s.chain_index ->> 'workerId') AS "workerId", e.id AS "taskId", e.id AS "eventId", e.type,
              'Saturation: no work could be given to ' || COALESCE(e.payload ->> 'family', 'any family') || ' / '
                || COALESCE(e.payload ->> 'tier', 'any tier') || ' / ' || COALESCE(e.payload ->> 'role', 'any role') AS title,
              'SATURATION' AS handle, e.created_at AS at, s.chain_index AS "chainIndex"
-      FROM agent_team_events e
+      FROM saturation_episodes ep
+      JOIN agent_team_events e ON e.id = ep.event_id AND e.app_id = ep.app_id
       JOIN agent_team_alarm_schedule s ON s.event_id = e.id AND s.woken_at IS NOT NULL
       JOIN workers w ON w.id = (e.chain -> s.chain_index ->> 'workerId') AND w.app_id = e.app_id
-      WHERE e.type = ${SATURATION_EVENT_TYPE} AND e.severity = 'alarm'
+      WHERE ep.ended_at IS NULL AND e.type = ${SATURATION_EVENT_TYPE} AND e.severity = 'alarm'
         AND (e.chain -> s.chain_index ->> 'workerId') IN (${ids})
         AND ${liveApp('e')}
         AND ${undelivered("(e.chain -> s.chain_index ->> 'workerId')", 'e.id', 's.chain_index')}`),

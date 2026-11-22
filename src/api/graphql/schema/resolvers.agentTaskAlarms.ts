@@ -557,17 +557,17 @@ async function stallWindowsView(ctx: Context, appId: string) {
 
 export const agentTaskAlarmQueries = {
   /** An App's effective stall windows, for its task audience (cor:agt:050:21). */
+  agentTaskStallSchedule: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+    const { app } = await resolveParticipatedApp(ctx, appRef);
+    return stallWindowsView(ctx, app.id);
+  },
+
   /**
    * #4777 (hrn:node:hadronmemory.com:specs:cor:agt:060:16): the App's saturation-alarm wake-roles list, for whoever may
    * read its roster, through the roster's gate and its refusal byte for byte (cor:agt:050:21, :23).
    */
   saturationAlarmWakeRoles: (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
     withRosterAppRead(ctx, appRef, (readCtx, app) => saturationWakeRolesView(readCtx.db, app.id)),
-
-  agentTaskStallSchedule: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
-    const { app } = await resolveParticipatedApp(ctx, appRef);
-    return stallWindowsView(ctx, app.id);
-  },
 
   /**
    * Every availability record in an App — its workers' and its model
