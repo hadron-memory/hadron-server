@@ -12,7 +12,6 @@ import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
-import { shapeResponseWarnings } from './resolvers.taskWarnings.js';
 import { taskWarningsPlugin } from '../taskWarningsPlugin.js';
 import { setStopSignal } from '../../../lib/stopSignals/lifecycle.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
@@ -94,13 +93,12 @@ describe('#2653 createAgentTasks (cor:agt:050:06 creating several at once)', () 
     expect(await db.agentTeamEvent.count({ where: { appId } })).toBe(before);
   });
 
-  it('files each task\'s warnings after commit under its own position, and none for a refused call', async () => {
+  it('a source-less batch warns nothing yet creates every task, and a refused call carries none', async () => {
     const c = ctx();
     await batch([item({ source: null }), item(), item({ source: null })], c);
-    const paths = (c.taskWarnings ?? []).map(w => [w.path, w.warning.code]);
-    expect(paths).toEqual([['createAgentTasks.1', 'task.create.no-source'], ['createAgentTasks.3', 'task.create.no-source']]);
-    // A mutation that errored contributes none, its per-task paths included.
-    expect(shapeResponseWarnings(c.taskWarnings ?? [], new Set(['createAgentTasks']))).toEqual([]);
+    // #4793: a source-less create warns nothing, and the source-less tasks at positions 1 and 3 are still created.
+    expect((c.taskWarnings ?? []).map(w => [w.path, w.warning.code])).toEqual([]);
+    expect(await db.agentTask.count({ where: { appId, title: 'Synthetic task' } })).toBe(3);
     const refused = ctx();
     await refusal(() => batch([item({ source: null }), item({ assignee: { user: outsiderId } })], refused));
     expect(refused.taskWarnings ?? []).toEqual([]);
@@ -236,7 +234,7 @@ describe('#2653 createAgentTasks (cor:agt:050:06 creating several at once)', () 
     const ok = await run({ a: appId, t: [{ task: { title: 'One' } }, { task: { title: 'Two', source: 'https://example.test/2' }, blockedByPositions: [1] }] });
     expect(ok.errors).toBeUndefined();
     expect((ok.data as any).seats).toMatchObject([{ handle: 'AT0.1', title: 'One', blocked: false }, { handle: 'AT0.2', title: 'Two', blocked: true }]);
-    expect((ok.extensions as any)?.warnings).toEqual([expect.objectContaining({ path: 'seats.1', code: 'task.create.no-source' })]);
+    expect((ok.extensions as any)?.warnings).toBeUndefined(); // #4793: a source-less create warns nothing
     const bad = await run({ a: appId, t: [{ task: { title: 'One' } }, { task: { title: 'Two', assignee: { user: outsiderId } } }] });
     expect(bad.errors?.[0]?.extensions).toMatchObject({ code: 'TASK_ASSIGNEE_INVALID', position: 2 });
     expect((bad.extensions as any)?.warnings).toBeUndefined();

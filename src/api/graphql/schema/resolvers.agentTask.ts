@@ -1739,7 +1739,8 @@ async function prepareTaskCreate(ctx: Context, input: CreateInput, inApp?: { app
     throw badInput('A backlog task has no assignee (cor:agt:050:02). Make it ready, then assign it.');
   }
   const refused = parentRef ? () => notFound(parentRef) : input.appRef ? () => appNotFound(input.appRef as string) : () => notFound(input.parentTaskId!.trim());
-  const warn: TaskWarningCode[] = source === null ? ['task.create.no-source'] : [];
+  // #4793 (Holger, 2026-11-21): a missing source raises no warning. The code stays on the closed list and in RECORDED_TASK_WARNING_CODES so history already recorded with it still reads (cor:agt:110:01).
+  const warn: TaskWarningCode[] = [];
   // #2162: a task created straight onto a worker takes that worker's per-worker lock, before any row.
   const lockedAssignee = await partyWorkerForLock(ctx, app.id, input.assignee);
   return {
