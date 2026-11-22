@@ -150,7 +150,19 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // wake path (`dueWakes` / the CLI's `hadron team wakes`); the explicit
 // `markOwnTeamChatRead` mark and every wake/mark/resume rule it shared a module
 // with are unchanged.
-export const HADRON_SERVER_VERSION = '0.24.0';
+//
+// 0.25.0 — #4836 (cor:dmo:070:05 Proposed; V58): startSession's `appRef` refusals are
+//      concealed and re-typed. A caller without standing for the named App — a non-member,
+//      an anonymous caller, a malformed/ambiguous ref, or a pure App key naming any other
+//      App — gets ONE answer: APP_NOT_FOUND · "App not found.", byte-identical for a
+//      missing, deleted, uninstalled and existing-but-inaccessible App, echoing no ref and
+//      carrying no appId. Was: BAD_USER_INPUT · "App not found: <ref>" (missing/deleted,
+//      echoing the value), FORBIDDEN (existing, non-member — an existence oracle), the
+//      URN parser's echoing typed errors (malformed), and SESSION_APP_MISMATCH (an App key
+//      naming another App — that code is GONE from this door). A caller with standing
+//      keeps APP_UNINSTALLED by PK, with the appId. `hadron_start_session` (MCP) never
+//      took an appRef, so the MCP tool surface is unchanged.
+export const HADRON_SERVER_VERSION = '0.25.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
