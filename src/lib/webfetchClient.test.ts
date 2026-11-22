@@ -55,6 +55,15 @@ describe('webfetchClient', () => {
     expect(JSON.parse(init!.body as string)).toEqual({ url: 'https://x.example', format: 'markdown' });
   });
 
+  it('puts redirects:none and the inline auth on the wire for http-request (#4775 blind P1)', async () => {
+    const fetchMock = fetchStub(async () => okJson({ method: 'GET', finalUrl: 'https://x', status: 302, headers: {}, contentType: null, body: '', truncated: false }));
+    vi.stubGlobal('fetch', fetchMock);
+    await httpRequest({ method: 'GET', url: 'https://x', auth: { type: 'bearer', token: 't' }, redirects: 'none' });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('http://webfetch.test:8080/ops/http-request');
+    expect(JSON.parse(init!.body as string)).toMatchObject({ redirects: 'none', auth: { type: 'bearer', token: 't' } });
+  });
+
   it('omits the authorization header when no token is set', async () => {
     delete process.env.WEBFETCH_TOOL_TOKEN;
     const fetchMock = fetchStub(async () => okJson({ finalUrl: 'https://x', status: 204, contentType: null }));

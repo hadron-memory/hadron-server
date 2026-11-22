@@ -5,7 +5,12 @@ import { Prisma } from '../../generated/prisma/index.js';
  * A catch that turns "this secret cannot be used" into a refusal must let these through, so an outage never reads as
  * "invalid binding" or "secret unavailable" (#1955).
  */
+const INFRASTRUCTURE_CODES = new Set(['P1001', 'P1002', 'P1008', 'P1017', 'P2024', 'P2028', 'P2034']);
+
 export function isStoreFault(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError || error instanceof Prisma.PrismaClientUnknownRequestError ||
-    error instanceof Prisma.PrismaClientInitializationError || error instanceof Prisma.PrismaClientRustPanicError;
+  // A known-request error is an outage only for the connection class (cannot reach, timed out, closed, pool exhausted, transaction
+  // aborted, write conflict). A missing row (P2025) or a constraint (P2002, P2003) is a judgment about data, so it keeps its own path.
+  if (error instanceof Prisma.PrismaClientKnownRequestError) return INFRASTRUCTURE_CODES.has(error.code);
+  return error instanceof Prisma.PrismaClientUnknownRequestError || error instanceof Prisma.PrismaClientInitializationError ||
+    error instanceof Prisma.PrismaClientRustPanicError;
 }

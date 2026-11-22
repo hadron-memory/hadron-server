@@ -6,6 +6,8 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
+import { Prisma } from '../../../generated/prisma/index.js';
+import { isStoreFault } from '../../secrets/storeFault.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../id.js';
@@ -114,16 +116,57 @@ describe('#4775 refused attempts are metered and their audit capped (item 3)', (
     expect(await budget()).toBe(before! - 2);
     expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
     await db.appRun.update({ where: { id: ctx.run.id }, data: { budgetActions: 0 } });
-    await expect(call()).rejects.toBeDefined();
+    await tickets(1);
+    const exhausted = await admitAndExecuteTool(webRequest, { method: 'GET', url: URL_OK, secretClientId: clientId }, { toolCtx: ctx }).catch((e: unknown) => e);
+    // Budget zero: the use is refused with a budget code, not merely "something rejected", and nothing is sent, spent or decremented below zero.
+    expect(exhausted).toBeInstanceOf(Error);
+    expect(((exhausted as Error).cause as GraphQLError | undefined)?.extensions?.code ?? (exhausted as GraphQLError).extensions?.code).toMatch(/BUDGET|TOOL_DENIED/);
     expect(await budget()).toBe(0);
+    expect(httpRequest).not.toHaveBeenCalled();
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(0);
   });
   it('past the per-client bound a refusal is counted and not stored; the answer is unchanged and a success is still recorded', async () => {
     const secretId = (await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } })).secretId;
     await db.secretEvent.createMany({ data: Array.from({ length: 100 }, () => ({ ownerType: 'app', ownerId: appId, secretId, secretName: 'token', clientId, kind: 'USE', outcome: 'ACTION_TICKET_REQUIRED', runId: ctx.run.id })) });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     await expect(call()).rejects.toMatchObject({ extensions: { code: 'ACTION_TICKET_REQUIRED' } });
     expect(await db.secretEvent.count({ where: { clientId, kind: 'USE' } })).toBe(100);
+    expect(warn).toHaveBeenCalledExactlyOnceWith('[secretUse] refusal audit cap reached', expect.objectContaining({ clientId, outcome: 'ACTION_TICKET_REQUIRED', cap: 100 }));
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(CANARY);
+    warn.mockRestore();
     await tickets(1);
     await expect(call()).resolves.toMatchObject({ status: 200 });
     expect(await db.secretEvent.count({ where: { clientId, kind: 'USE', outcome: 'OK' } })).toBe(1);
+  });
+});
+
+describe('#4775 a store fault is not a refusal (blind P2)', () => {
+  it('classifies only connection-class Prisma errors as faults; a missing row or a constraint is a judgment', () => {
+    const known = (code: string) => new Prisma.PrismaClientKnownRequestError('x', { code, clientVersion: 't' });
+    for (const c of ['P1001', 'P1002', 'P1008', 'P1017', 'P2024', 'P2028', 'P2034']) expect(isStoreFault(known(c))).toBe(true);
+    for (const c of ['P2025', 'P2002', 'P2003']) expect(isStoreFault(known(c))).toBe(false);
+    expect(isStoreFault(new Prisma.PrismaClientInitializationError('x', 't'))).toBe(true);
+    expect(isStoreFault(new Error('x'))).toBe(false);
+  });
+  it('an outage during the use propagates as itself: not metered, not audited as REFUSED, nothing sent', async () => {
+    await tickets(1);
+    const before = await budget();
+    const fault = new Prisma.PrismaClientInitializationError('db down', 't');
+    const spy = vi.spyOn(db, '$transaction').mockRejectedValueOnce(fault);
+    await expect(call()).rejects.toBe(fault);
+    spy.mockRestore();
+    expect(await budget()).toBe(before);
+    expect(await db.secretEvent.count({ where: { clientId, kind: 'USE' } })).toBe(0);
+    expect(httpRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe('#4775 a followed redirect withholds the response (blind P1, defense in depth)', () => {
+  it('a result from another origin is refused, never returned, and carries no value', async () => {
+    await tickets(1);
+    vi.mocked(httpRequest).mockResolvedValue({ method: 'GET', finalUrl: 'https://evil.example.test/steal', status: 200, headers: {}, contentType: null, body: `echo ${CANARY}`, truncated: false } as never);
+    const err = (await call().catch((e: unknown) => e)) as GraphQLError;
+    expect(err.extensions).toMatchObject({ code: 'WEBFETCH_REDIRECT_FOLLOWED' });
+    expect(JSON.stringify({ m: err.message, x: err.extensions })).not.toContain(CANARY);
   });
 });

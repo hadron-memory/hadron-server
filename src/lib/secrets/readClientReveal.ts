@@ -306,7 +306,10 @@ async function prepareSecretUseOnce(
     const audited = known as { ownerId: string; secretId: string; secretName: string } | null;
     const rawCode = error instanceof GraphQLError ? error.extensions?.code : undefined;
     const outcome = typeof rawCode === 'string' && /^[A-Z0-9_]{1,64}$/.test(rawCode) ? rawCode : 'REFUSED';
-    if (audited && await belowRefusalAuditCap(tool, clientId)) {
+    if (audited && !(await belowRefusalAuditCap(tool, clientId))) {
+      // Over the cap a refusal is not stored, but it is never silent: one fixed-shape line (no value, no message) an operator can alarm on.
+      console.warn('[secretUse] refusal audit cap reached', { clientId, secretId: audited.secretId, ownerId: audited.ownerId, outcome, cap: SECRET_USE_REFUSAL_AUDIT_CAP });
+    } else if (audited) {
       await tool.db.secretEvent.create({ data: { ownerType: 'app', ownerId: audited.ownerId, secretId: audited.secretId,
         secretName: audited.secretName, clientId, kind: 'USE', outcome, runId: run.id } }).catch((auditError: unknown) => {
         console.error('[secretUse] audit write failed', { secretId: audited.secretId, ownerId: audited.ownerId, outcome, errorCode: auditErrorCode(auditError) });

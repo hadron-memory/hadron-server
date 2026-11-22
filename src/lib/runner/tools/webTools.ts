@@ -164,6 +164,11 @@ export const webRequest: RunToolDef = {
     // The tool is told never to follow a redirect (cor:web:010:02), so the credential reaches no second hop.
     try {
       const result = await httpRequest({ ...input, url: prepared.url, auth: prepared.auth, redirects: 'none' });
+      // Defense in depth for a tool that ignores redirects:'none': if the answer came from another origin the credential may have
+      // reached it. It cannot be unsent, so the response is refused (never returned to the model) and the failure says why.
+      if (typeof result.finalUrl === 'string' && !sameOrigin(result.finalUrl, prepared.url)) {
+        throw new GraphQLError('web_request: the tool followed a redirect while a credential was in flight; the response is withheld.', { extensions: { code: 'WEBFETCH_REDIRECT_FOLLOWED' } });
+      }
       const safe = redactSecretUse(result, prepared.auth) as HttpRequestResult;
       ctx.log(`web_request ${safe.method ?? method} ${safe.status} ${redactUrl(String(safe.finalUrl ?? url))}`);
       return safe;
@@ -172,6 +177,10 @@ export const webRequest: RunToolDef = {
     }
   },
 };
+
+function sameOrigin(a: string, b: string): boolean {
+  try { return new URL(a).origin === new URL(b).origin; } catch { return false; }
+}
 
 /**
  * A failure raised while a credential was in flight, rebuilt so it carries none of it (#4775, cor:web:010:02 "no leak surface").
