@@ -52,7 +52,6 @@ function toolFor(provider: string): { baseUrl: string; token?: string } {
   return { baseUrl: baseUrl.replace(/\/+$/, ''), token: process.env[cfg.tokenEnv] || undefined };
 }
 
-/** POST a JSON body to the provider tool with timeout + typed error mapping. */
 /** Replace every occurrence of each secret in `text` (a secret is a short opaque string, so a plain split is exact). */
 function scrub(text: string, secrets: readonly string[]): string {
   let out = text;
@@ -60,6 +59,7 @@ function scrub(text: string, secrets: readonly string[]): string {
   return out;
 }
 
+/** POST a JSON body to the provider tool with timeout + typed error mapping. `secrets` never reach an error. */
 async function postToTool<T>(provider: string, path: string, body: unknown, secrets: readonly string[] = []): Promise<T> {
   const { baseUrl, token } = toolFor(provider);
   const controller = new AbortController();

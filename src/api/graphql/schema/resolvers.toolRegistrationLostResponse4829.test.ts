@@ -22,6 +22,12 @@ interface ToolRow { id: string; identity: string; key: string | null; deleted: b
 /** A stateful fake of the tool's POST/DELETE /connections. `dropNext` makes the NEXT POST commit and then lose its response. */
 function fakeTool(mode: Mode, identityOf: (body: Record<string, unknown>) => { identity: string; body: Record<string, unknown> }) {
   const rows: ToolRow[] = [];
+  // `holdPosts(n)`: the first n POSTs are answered only once all n have arrived, so n callers are past their pre-checks
+  // and all hold the tool's answer before any of them writes its core row (a deterministic race, no timing).
+  let hold = 0;
+  let arrived = 0;
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((r) => { release = r; });
   let dropNext = false;
   let seq = 0;
   const handler = async (url: string, init: { method?: string; body?: string }) => {
@@ -33,6 +39,7 @@ function fakeTool(mode: Mode, identityOf: (body: Record<string, unknown>) => { i
       return json(200, { deleted: true });
     }
     const input = JSON.parse(init.body ?? '{}') as Record<string, unknown>;
+    if (hold > 0 && ++arrived >= hold) release();
     const { identity, body } = identityOf(input);
     const key = mode === 'keyed' && typeof input.registrationKey === 'string' ? input.registrationKey : null;
     const existing = rows.find((r) => !r.deleted && r.identity === identity);
@@ -46,13 +53,14 @@ function fakeTool(mode: Mode, identityOf: (body: Record<string, unknown>) => { i
       rows.push(row);
       out = json(201, { ...body, id: row.id });
     }
+    if (hold > 0 && arrived <= hold) await gate;
     if (dropNext && out.ok) {
       dropNext = false;
       throw new TypeError('fetch failed'); // the tool committed; the response never arrived
     }
     return out;
   };
-  return { rows, live: () => rows.filter((r) => !r.deleted), dropNext: () => { dropNext = true; }, handler };
+  return { rows, live: () => rows.filter((r) => !r.deleted), dropNext: () => { dropNext = true; }, holdPosts: (n: number) => { hold = n; }, handler };
 }
 
 const ctxFor = (userId: string): Context => ({ db, roles: ['READER'], userId }) as Context;
@@ -178,6 +186,7 @@ describe('#4829 a repeat or concurrent registration must not tear down the winne
   it('Slack: two concurrent registrations leave one core row pointing at a live tool row', async () => {
     const tool = fakeTool('keyed', slIdentity);
     vi.stubGlobal('fetch', vi.fn(tool.handler));
+    tool.holdPosts(2);
     const results = await Promise.allSettled([createSl(appA.id), createSl(appA.id)]);
     await settle();
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
@@ -189,6 +198,7 @@ describe('#4829 a repeat or concurrent registration must not tear down the winne
   it('Telegram: two concurrent registrations leave one core row pointing at a live tool row', async () => {
     const tool = fakeTool('keyed', tgIdentity);
     vi.stubGlobal('fetch', vi.fn(tool.handler));
+    tool.holdPosts(2);
     const results = await Promise.allSettled([createTg(appA.id), createTg(appA.id)]);
     await settle();
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
