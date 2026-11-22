@@ -68,7 +68,7 @@ export class WorkerCensusIncompleteError extends Error {
 const isStatementTimeout = (e: unknown) => {
   if (!(e instanceof Error)) return false;
   const meta = (e as { meta?: { code?: unknown } }).meta;
-  return String(meta?.code) === '57014' || /57014|statement timeout/i.test(e.message);
+  return String(meta?.code) === '57014' || /\b57014\b|canceling statement due to statement timeout/i.test(e.message);
 };
 /** P2028: the door's interactive transaction (budget + 20 s) expired while the census was running; the census did not finish. */
 const isTransactionExpired = (e: unknown) => e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2028';
