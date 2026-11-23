@@ -1,6 +1,6 @@
 /** #4512 / cor:spc:030:02 "Authored ids": an authored id equal to an assigned anchor is removed; any other authored text stays. */
 import { describe, expect, it } from 'vitest';
-import { renderSpecDocument, type DocInput, type DocPart } from './render.js';
+import { neutraliseAssignedIds, renderSpecDocument, type DocInput, type DocPart } from './render.js';
 
 const part = (loc: string, body: string | null, name = 'Rule: Entry'): DocPart => ({
   loc, name, body, isPlaceholder: false, superseded: false, supersededBy: [], approval: { state: 'NOT_APPROVED' }, minted: false,
@@ -39,12 +39,13 @@ describe('#4512 authored ids equal to an assigned anchor', () => {
     expect(count(out, 'id="fx-110-a-b-2"')).toBe(1);
     expect(out.indexOf('id="fx-110-a-b-2"')).toBeLessThan(out.indexOf('## Rule: Entry [fx:110:a:b]'));
   });
-  it('the Feature body and the Feature tail are neutralised as well', () => {
-    const feature = part('fx:110', '<a id="fx-110-a"></a>head\n---\n<a id="fx-110-a"></a>tail', 'Feature: F');
+  it('the Feature body and the Feature tail are neutralised as well, the tail after the Rules section', () => {
+    const feature = part('fx:110', '<a id="fx-110-a"></a>head\n\n---\n\n<a id="fx-110-a"></a>tail', 'Feature: F');
     const out = renderSpecDocument(doc([part('fx:110:a', 'x')], feature));
     expect(count(out, 'id="fx-110-a"')).toBe(1);
-    expect(out).toContain('head');
-    expect(out).toContain('tail');
+    expect(out.indexOf('head')).toBeLessThan(out.indexOf('# Rules'));
+    expect(out.indexOf('tail')).toBeGreaterThan(out.indexOf('## Rule: Entry [fx:110:a]'));
+    expect(out.endsWith('<a></a>tail\n')).toBe(true);
   });
   it('an unassigned authored id is untouched', () => {
     const body = '<a id="my-own-anchor"></a>\n\ntext <span id="fx-110-zzz">z</span>';
@@ -57,12 +58,61 @@ describe('#4512 authored ids equal to an assigned anchor', () => {
     const out = renderSpecDocument(doc([part('fx:110:a', body)]));
     expect(count(out, 'id="fx-110-a"')).toBe(4);
   });
-  it('an attribute VALUE that mentions an id is not an id', () => {
-    const out = renderSpecDocument(doc([part('fx:110:a', '<a title=\'id="fx-110-a"\' href="#x">l</a>')]));
-    expect(out).toContain('<a title=\'id="fx-110-a"\' href="#x">l</a>');
+  it('an attribute VALUE that mentions an id is not an id, and the real id beside it still goes', () => {
+    const out = renderSpecDocument(doc([part('fx:110:a', '<a title="see id=fx-110-a here" id="fx-110-a" href="#x">l</a>')]));
+    expect(out).toContain('<a title="see id=fx-110-a here" href="#x">l</a>');
+    expect(count(out, 'id="fx-110-a"')).toBe(1);
   });
   it('a body with no colliding id renders byte-for-byte as before', () => {
     const out = renderSpecDocument(doc([part('fx:110:a', 'Rule body.')]));
+    const rich = 'a <b>x</b>  <div  class = "c"\tdata-x=\'1\'>t</div>\r\n\r\n`code <a id="other">` ~ <br/>';
+    const same = renderSpecDocument(doc([part('fx:110:a', rich)]));
+    expect(same).toBe(renderSpecDocument(doc([part('fx:110:a', rich)])));
+    expect(same).toContain(rich.replace(/\r\n/g, '\r\n'));
     expect(out).toBe('# Feature: F [fx:110]\n\nsynthetic:specs · rendered 2026-11-06T00:00Z\n\nReadiness: 2 specs · 0 approved · 0 minted · 0 superseded · no open questions\n\nFeature body.\n\n# Rules\n\n<a id="fx-110-a"></a>\n\n## Rule: Entry [fx:110:a]\nApproval: NOT_APPROVED · Mint: unminted\n\nRule body.\n');
+  });
+});
+
+describe('#4512 the scanner on its own (review findings)', () => {
+  const A = new Set(['fx-110-a']);
+  const run = (t: string) => neutraliseAssignedIds(t, A);
+  it('a stray backtick in an earlier paragraph does not hide an id in a later one', () => {
+    expect(run('it`s odd\n\n<a id="fx-110-a"></a> and `code` x')).toBe('it`s odd\n\n<a></a> and `code` x');
+  });
+  it('a stray backtick does not eat the opener of a real code span', () => {
+    expect(run('a ` b\n\n`<a id="fx-110-a"></a>`')).toBe('a ` b\n\n`<a id="fx-110-a"></a>`');
+  });
+  it('backtick runs of different lengths are not a code span', () => {
+    expect(run('``<a id="fx-110-a"></a>`')).toBe('``<a></a>`');
+    expect(run('``<a id="fx-110-a"></a>``')).toBe('``<a id="fx-110-a"></a>``');
+  });
+  it('an escaped backtick does not open a span', () => {
+    expect(run('\\`<a id="fx-110-a"></a>`')).toBe('\\`<a></a>`');
+  });
+  it('a backtick inside an attribute value does not hide a real id', () => {
+    expect(run('<a title="`" id="fx-110-a"></a> `')).toBe('<a title="`"></a> `');
+  });
+  it('no separator or a slash before the attribute', () => {
+    expect(run('<div class="x"id="fx-110-a">')).toBe('<div class="x">');
+    expect(run('<div/id="fx-110-a">')).toBe('<div/>');
+  });
+  it('text inside another attribute value is never cut', () => {
+    expect(run('<div class="x"title="see id=fx-110-a">')).toBe('<div class="x"title="see id=fx-110-a">');
+  });
+  it('prose with < and apostrophes does not hide a real tag', () => {
+    expect(run('a <b, don\'t <a id="fx-110-a"></a> it\'s fine <br>')).toBe('a <b, don\'t <a></a> it\'s fine <br>');
+  });
+  it('an escaped tag is shown text and stays', () => {
+    expect(run('\\<a id="fx-110-a">')).toBe('\\<a id="fx-110-a">');
+  });
+  it('a numeric character reference in the id is decoded before comparing', () => {
+    expect(run('<a id="fx&#45;110-a"></a>')).toBe('<a></a>');
+    expect(run('<a id="fx&#x2d;110-zz"></a>')).toBe('<a id="fx&#x2d;110-zz"></a>');
+  });
+  it('is linear on hostile input', () => {
+    const t0 = Date.now();
+    run('<a'.repeat(20000) + '\n\n' + '`'.repeat(20000) + '<a id="x" '.repeat(5000) + '"'.repeat(20000));
+    run('`a '.repeat(20000));
+    expect(Date.now() - t0).toBeLessThan(1500);
   });
 });

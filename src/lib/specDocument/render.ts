@@ -164,39 +164,116 @@ export function splitAtClosingRule(text: string): { body: string; tail: string }
   return { body: text, tail: '' };
 }
 
-/** One HTML start tag, quote-aware so a `>` inside an attribute value does not end it. */
-const HTML_TAG = /<[A-Za-z][^\s/>]*(?:"[^"]*"|'[^']*'|[^'">])*>/g;
-/** One attribute inside a start tag: name, then an optional quoted or bare value. */
-const HTML_ATTR = /\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
-/** An inline code span (CommonMark 6.1): a backtick run, anything, the same run. */
-const CODE_SPAN = /(`+)(?:(?!\1)[\s\S])+?\1(?!`)/g;
+const BACKTICK_RUN = /`+/g;
+const isWs = (c: string): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+const ATTR_NAME_STOP = /[\s"'<>/=]/;
+const BARE_VALUE_STOP = /[\s"'=<>`]/;
 
-/** `tag` without every `id` attribute whose value is in `assigned`; every other byte stays. */
-function dropAssignedIds(tag: string, assigned: ReadonlySet<string>): string {
-  const nameEnd = /^<[A-Za-z][^\s/>]*/.exec(tag)![0].length;
-  const rest = tag.slice(nameEnd);
-  return `${tag.slice(0, nameEnd)}${rest.replace(HTML_ATTR, (all, name: string, dq?: string, sq?: string, bare?: string) => (
-    name.toLowerCase() === 'id' && assigned.has(dq ?? sq ?? bare ?? '') ? '' : all
-  ))}`;
+/** The text of a numeric character reference decoded (`&#45;`, `&#x2d;`), so an encoded id compares as the browser reads it. */
+function decodeNumericRefs(v: string): string {
+  return v.replace(/&#(?:[xX]([0-9a-fA-F]{1,6})|([0-9]{1,7}));/g, (all, hex?: string, dec?: string) => {
+    const cp = hex !== undefined ? parseInt(hex, 16) : parseInt(dec as string, 10);
+    return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : all;
+  });
+}
+
+/**
+ * One start tag at `i` (`text[i] === '<'`), parsed in one forward pass: a name, then attributes separated by
+ * whitespace, `/` or nothing (a browser accepts `class="x"id="y"`), each a name with an optional quoted or
+ * bare value. Returns the tag's end and the spans of the `id` attributes to drop, or null when it is not a
+ * well-formed tag (the `<` is then plain text). It never leaves the block, so a quote cannot pair across paragraphs.
+ */
+function scanTag(text: string, i: number, assigned: ReadonlySet<string>): { end: number; cuts: Array<[number, number]> } | null {
+  let j = i + 1;
+  if (!/[A-Za-z]/.test(text[j] ?? '')) return null;
+  while (j < text.length && /[A-Za-z0-9-]/.test(text[j])) j += 1;
+  const cuts: Array<[number, number]> = [];
+  for (;;) {
+    const gapStart = j;
+    while (j < text.length && (isWs(text[j]) || text[j] === '/')) j += 1;
+    if (j >= text.length) return null;
+    if (text[j] === '>') return { end: j + 1, cuts };
+    const nameStart = j;
+    while (j < text.length && !ATTR_NAME_STOP.test(text[j])) j += 1;
+    if (j === nameStart) return null;
+    const name = text.slice(nameStart, j);
+    let k = j;
+    while (k < text.length && isWs(text[k])) k += 1;
+    let value: string | null = null;
+    if (text[k] === '=') {
+      k += 1;
+      while (k < text.length && isWs(text[k])) k += 1;
+      const q = text[k];
+      if (q === '"' || q === "'") {
+        const close = text.indexOf(q, k + 1);
+        if (close < 0) return null;
+        value = text.slice(k + 1, close);
+        j = close + 1;
+      } else {
+        const vs = k;
+        while (k < text.length && !BARE_VALUE_STOP.test(text[k])) k += 1;
+        if (k === vs) return null;
+        value = text.slice(vs, k);
+        j = k;
+      }
+    }
+    if (name.toLowerCase() === 'id' && value !== null && assigned.has(decodeNumericRefs(value))) {
+      // Drop the attribute and the whitespace before it (a `/` or no separator stays, so the tag still parses).
+      let from = nameStart;
+      while (from > gapStart && isWs(text[from - 1])) from -= 1;
+      cuts.push([from, j]);
+    }
+  }
+}
+
+/** One paragraph (no blank line inside), left to right in one pass; code spans and escapes are skipped as the CommonMark rules read them. */
+function neutraliseBlock(text: string, assigned: ReadonlySet<string>): string {
+  if (!/id/i.test(text)) return text;
+  const runs = new Map<number, number[]>();
+  for (const m of text.matchAll(BACKTICK_RUN)) (runs.get(m[0].length) ?? runs.set(m[0].length, []).get(m[0].length)!).push(m.index);
+  const next = new Map<number, number>();
+  let out = '';
+  let i = 0;
+  let copied = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '`') {
+      let k = i;
+      while (text[k] === '`') k += 1;
+      const len = k - i;
+      const at = runs.get(len) ?? [];
+      let p = next.get(len) ?? 0;
+      while (p < at.length && at[p] < k) p += 1;
+      next.set(len, p);
+      // A closer is a run of exactly the same length after the opener; none means the backticks are plain text.
+      i = p < at.length ? at[p] + len : k;
+      continue;
+    }
+    if (c === '<') {
+      const tag = scanTag(text, i, assigned);
+      if (tag) {
+        for (const [from, to] of tag.cuts) { out += text.slice(copied, from); copied = to; }
+        i = tag.end;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
 }
 
 /**
  * #4512 (cor:spc:030:02 "Authored ids"): an `id` in authored text that equals an anchor assigned in this
  * document is removed, so the server's own `<a id>` element is the only carrier. Only the attribute goes;
- * the rest of the authored text is as written. An id that is not an assigned anchor is left alone, and so
- * is text in fenced code or an inline code span (it is shown, not parsed as an element).
+ * every other byte is as written. An id that is not an assigned anchor is left alone, and so is text in fenced
+ * code, an inline code span or an escaped tag (shown, not parsed as an element). Limits: an indented code
+ * block is not recognised as code, and a character reference other than a numeric one in an id is not decoded.
+ * Linear in the text: one forward pass per paragraph.
  */
 export function neutraliseAssignedIds(text: string, assigned: ReadonlySet<string>): string {
   if (assigned.size === 0 || !/id/i.test(text)) return text;
-  const chunk = (c: string): string => {
-    let out = '';
-    let last = 0;
-    for (const m of c.matchAll(CODE_SPAN)) {
-      out += c.slice(last, m.index).replace(HTML_TAG, (t) => dropAssignedIds(t, assigned)) + m[0];
-      last = m.index + m[0].length;
-    }
-    return out + c.slice(last).replace(HTML_TAG, (t) => dropAssignedIds(t, assigned));
-  };
+  const chunk = (c: string): string => c.split(/(\n[ \t]*\n)/).map((part, n) => (n % 2 === 1 ? part : neutraliseBlock(part, assigned))).join('');
   const out: string[] = [];
   let pending: string[] = [];
   let fence: OpenFence | null = null;
@@ -293,10 +370,10 @@ const stateLine = (p: DocPart): string => `Approval: ${approvalText(p.approval)}
 const heading = (p: DocPart): string => (p.name === p.loc || p.name.startsWith(`${p.loc} `) ? p.name : `${p.name} [${p.loc}]`);
 
 /** The part's body as shown, or null when it shows none (placeholder, superseded, empty). */
-function shownBody(p: DocPart, shift: boolean, links: ReadonlyMap<string, LinkResolution>, anchors: ReadonlyMap<string, string>): string | null {
+function shownBody(p: DocPart, shift: boolean, links: ReadonlyMap<string, LinkResolution>, anchors: ReadonlyMap<string, string>, assigned: ReadonlySet<string>): string | null {
   if (p.isPlaceholder || p.superseded || p.body == null) return null;
   const { body } = splitAtClosingRule(p.body);
-  const cleaned = neutraliseAssignedIds(renderLinks(cleanBody(body, shift), links, anchors), new Set(anchors.values()));
+  const cleaned = neutraliseAssignedIds(renderLinks(cleanBody(body, shift), links, anchors), assigned);
   return cleaned === '' ? null : cleaned;
 }
 
@@ -306,6 +383,7 @@ const renderedStamp = (d: Date): string => `${d.toISOString().slice(0, 16)}Z`;
 export function renderSpecDocument(input: DocInput): string {
   const { feature, parts, links } = input;
   const anchors = assignAnchors(inDocumentOrder(parts));
+  const assigned: ReadonlySet<string> = new Set(anchors.values());
   const all = [feature, ...parts];
   const openQuestions = all
     .filter((p) => !p.isPlaceholder && !p.superseded && p.body != null && hasOpenQuestions(splitAtClosingRule(p.body).body))
@@ -323,7 +401,7 @@ export function renderSpecDocument(input: DocInput): string {
   ];
   if (feature.isPlaceholder) blocks.push('Placeholder.');
   else {
-    const featureBody = shownBody({ ...feature, superseded: false }, false, links, anchors);
+    const featureBody = shownBody({ ...feature, superseded: false }, false, links, anchors, assigned);
     if (featureBody) blocks.push(featureBody);
   }
 
@@ -338,14 +416,14 @@ export function renderSpecDocument(input: DocInput): string {
       } else if (p.isPlaceholder) {
         blocks.push(`${head}\n\nPlaceholder.`);
       } else {
-        const body = shownBody(p, true, links, anchors);
+        const body = shownBody(p, true, links, anchors, assigned);
         blocks.push(body ? `${head}\n\n${body}` : head);
       }
     }
   }
 
   if (!feature.isPlaceholder && feature.body != null) {
-    const tail = neutraliseAssignedIds(renderLinks(trimNewlines(splitAtClosingRule(feature.body).tail), links, anchors), new Set(anchors.values()));
+    const tail = neutraliseAssignedIds(renderLinks(trimNewlines(splitAtClosingRule(feature.body).tail), links, anchors), assigned);
     if (tail !== '') blocks.push(tail);
   }
   return `${blocks.join('\n\n')}\n`;
