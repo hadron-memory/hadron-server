@@ -35,7 +35,8 @@ const addRule = (role: string, data: Record<string, unknown> = {}) =>
 const check = (c: Context, input: Record<string, unknown>) => Q.nodeAuthoringCheck({}, { input }, c);
 const code = async (p: Promise<unknown>) => {
   const e = await p.then(() => null, (error: unknown) => error);
-  return e instanceof GraphQLError ? e.extensions?.code : e;
+  if (e instanceof GraphQLError) return e.extensions?.code;
+  return (e as { code?: string } | null)?.code ?? e; // the typed not-found errors carry `code`
 };
 const refusedWrite = async (p: Promise<unknown>) => {
   const e = await p.then(() => null, (error: unknown) => error);
