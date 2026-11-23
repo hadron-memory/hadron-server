@@ -7,7 +7,7 @@
  * is everything the live marks/wakes path shares the module with: the explicit
  * `markOwnTeamChatRead` mutation, the read-cursor advance machinery, the
  * lapsed-session resume rules, the incarnation fence, `mayStillDriveWorkerApp`
- * and the wake-proof secret (which is why `attentionTokenSecret` survives).
+ * and the wake-proof secret (which is why `workerProofSecret` survives).
  *
  * RED on main (the API is still served); GREEN only when the removal is real.
  */
@@ -78,7 +78,7 @@ describe('#2027 S11: the attention API is retired', () => {
 
   it('the paged-attention scan codec and the poll entry points are deleted', () => {
     expect(fs.existsSync(new URL('../../../lib/teamAttentionPage.ts', import.meta.url))).toBe(false);
-    const lib = sourceWithoutComments('../../../lib/teamAttention.ts');
+    const lib = sourceWithoutComments('../../../lib/ownWorkerSessions.ts');
     for (const gone of [
       'getTeamAttention',
       'teamAttentionPage',

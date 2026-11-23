@@ -3,9 +3,9 @@
  * share: the explicit `markOwnTeamChatRead`, the read-cursor advance behind a
  * served team-chat read (`maybeAdvanceOwnChannelRead`), the lapsed-session resume
  * rules (#1617 B), the Channel incarnation fence (#2181), `mayStillDriveWorkerApp`
- * and the wake-proof secret (`attentionTokenSecret`).
+ * and the wake-proof secret (`workerProofSecret`).
  *
- * The attention POLL that gave the module its name — the v1 one-shot `teamAttention`,
+ * The attention POLL this module used to be named for (#4509 renamed it) — the v1 one-shot `teamAttention`,
  * the #1384 paged successor and the switchover — was retired by #2027 S11; its scan
  * engine, signed tokens and continuation codec are gone. What bounds every door here
  * is still the caller's own live Worker session and current App participation. This
@@ -77,10 +77,30 @@ export async function fenceChannelIncarnation(tx: Prisma.TransactionClient, chan
  * (`hadron-wake-proof-v1`, `hadron-batch-proof-v1`), so the two never share a
  * key. The v2 paged-attention codec that also consumed this secret was retired
  * with the attention API (#2027 S11). */
-export function attentionTokenSecret(): string {
-  const secret = process.env.TEAM_ATTENTION_TOKEN_SECRET || process.env.JWT_SECRET;
+export function workerProofSecret(): string {
+  // #4509: the new name first, the old one for one deprecation cycle, then the existing JWT_SECRET fallback.
+  const secret = process.env[PROOF_SECRET_ENV] || legacyProofSecret() || process.env.JWT_SECRET;
   if (!secret) fail('The team-attention token signer is not configured.', 'TEAM_ATTENTION_NOT_CONFIGURED');
   return secret;
+}
+
+/** The proof secret's env name since #4509. */
+export const PROOF_SECRET_ENV = 'WORKER_PROOF_TOKEN_SECRET';
+/** Its name before #4509, still read for one deprecation cycle (the follow-up drops it). */
+export const LEGACY_PROOF_SECRET_ENV = 'TEAM_ATTENTION_TOKEN_SECRET';
+let legacyEnvWarned = false;
+/** For tests: let the once-per-process warning fire again. */
+export function resetLegacyProofSecretWarning(): void {
+  legacyEnvWarned = false;
+}
+/** The old name's value, with one warning per process (names only, never a value) when it is the one being used. */
+function legacyProofSecret(): string | undefined {
+  const value = process.env[LEGACY_PROOF_SECRET_ENV];
+  if (value && !legacyEnvWarned) {
+    legacyEnvWarned = true;
+    console.warn(`[config] ${LEGACY_PROOF_SECRET_ENV} is deprecated: set ${PROOF_SECRET_ENV} instead; the old name is read for one more release cycle.`);
+  }
+  return value || undefined;
 }
 
 /**

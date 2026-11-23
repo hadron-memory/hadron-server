@@ -34,8 +34,7 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import type { ActAdmission, ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
-import { UrnNotQualifiedError } from '../../../lib/urn.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { getGrantForManager, getGrantForWorker, listGrantsForManager } from '../../../lib/grants/read.js';
 import { endGrant, GrantManageRefusal, type GrantEnder, type LockedGrant } from '../../../lib/grants/manage.js';
 import { GrantRunGone } from '../../../lib/grants/create.js';
@@ -64,7 +63,7 @@ export async function resolveLiveApp(ctx: Context, appRef: string): Promise<Task
   try {
     ({ id } = await resolveAppRef(ctx.db, appRef));
   } catch (e) {
-    if (e instanceof AppNotFoundError || e instanceof UrnNotQualifiedError) return null;
+    if (isAppRefResolutionFailure(e)) return null;
     throw e;
   }
   const app = await loadApp(ctx, id);

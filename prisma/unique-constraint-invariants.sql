@@ -20,30 +20,30 @@ BEGIN;
 
 DO $$
 DECLARE
-  rel regclass := to_regclass(quote_ident(current_schema()) || '.coordinator_cadence_episodes');
+  rel regclass := to_regclass(quote_ident(current_schema()) || '.lead_cadence_episodes');
   def text;
   idx regclass;
   idx_unique boolean;
   idx_valid boolean;
   idx_def text;
 BEGIN
-  SELECT pg_get_constraintdef(oid) INTO def FROM pg_constraint WHERE conrelid = rel AND conname = 'coordinator_cadence_episodes_event_id_key';
+  SELECT pg_get_constraintdef(oid) INTO def FROM pg_constraint WHERE conrelid = rel AND conname = 'lead_cadence_episodes_event_id_key';
   IF def = 'UNIQUE (event_id)' THEN
     RETURN;
   ELSIF def IS NOT NULL THEN
-    RAISE EXCEPTION 'coordinator_cadence_episodes.coordinator_cadence_episodes_event_id_key exists as %, not UNIQUE (event_id) (hadron-server#4333)', def;
+    RAISE EXCEPTION 'lead_cadence_episodes.lead_cadence_episodes_event_id_key exists as %, not UNIQUE (event_id) (hadron-server#4333)', def;
   END IF;
   SELECT i.indexrelid, i.indisunique, i.indisvalid, pg_get_indexdef(i.indexrelid) INTO idx, idx_unique, idx_valid, idx_def
-    FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = rel AND c.relname = 'coordinator_cadence_episodes_event_id_key';
+    FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = rel AND c.relname = 'lead_cadence_episodes_event_id_key';
   IF idx IS NULL THEN
-    EXECUTE $ddl$ALTER TABLE coordinator_cadence_episodes ADD CONSTRAINT coordinator_cadence_episodes_event_id_key UNIQUE (event_id)$ddl$;
+    EXECUTE $ddl$ALTER TABLE lead_cadence_episodes ADD CONSTRAINT lead_cadence_episodes_event_id_key UNIQUE (event_id)$ddl$;
     RETURN;
   END IF;
   IF NOT (idx_unique AND idx_valid) OR substr(idx_def, strpos(idx_def, ' ON ')) IS DISTINCT FROM
-     ' ON ' || quote_ident(current_schema()) || '.coordinator_cadence_episodes USING btree (event_id)' THEN
-    RAISE EXCEPTION 'index coordinator_cadence_episodes_event_id_key is not the plain unique index the constraint needs: % (hadron-server#4333)', idx_def;
+     ' ON ' || quote_ident(current_schema()) || '.lead_cadence_episodes USING btree (event_id)' THEN
+    RAISE EXCEPTION 'index lead_cadence_episodes_event_id_key is not the plain unique index the constraint needs: % (hadron-server#4333)', idx_def;
   END IF;
-  EXECUTE $ddl$ALTER TABLE coordinator_cadence_episodes ADD CONSTRAINT coordinator_cadence_episodes_event_id_key UNIQUE USING INDEX coordinator_cadence_episodes_event_id_key$ddl$;
+  EXECUTE $ddl$ALTER TABLE lead_cadence_episodes ADD CONSTRAINT lead_cadence_episodes_event_id_key UNIQUE USING INDEX lead_cadence_episodes_event_id_key$ddl$;
 END $$;
 
 DO $$

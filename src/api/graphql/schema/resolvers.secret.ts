@@ -49,7 +49,8 @@ import { forbiddenError } from '../../../lib/refusals.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { admitOperationRate } from '../../../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import {
@@ -129,7 +130,8 @@ async function resolveSecretOwnerRef(
         return (await resolveAppRef(ctx.db, ownerRef)).id;
       } catch (err) {
         // A missing App and one the caller may not use answer the same, so the ref is no existence oracle.
-        if (err instanceof AppNotFoundError || err instanceof AmbiguousLegacyUrnError) throw authorizationDenied();
+        // #4893: the whole shared resolution list folds — a malformed ref is the same refusal.
+        if (isAppRefResolutionFailure(err)) throw authorizationDenied();
         throw err;
       }
     }
@@ -639,8 +641,18 @@ export const secretQueries = {
     let ownerId: string;
     try {
       ownerId = await resolveSecretOwnerRef(ctx, ownerType, args.ownerRef);
-    } catch {
-      return { items: [], total: 0 };
+    } catch (e) {
+      // #4893/#2975: a name-resolution failure on any owner arm — typed miss, malformed or
+      // ambiguous ref — is the empty page, as is a typed refusal an arm already folded: the App
+      // arm's one denial for missing-and-not-yours is authorizationDenied(), whose code (FORBIDDEN,
+      // src/lib/auth/authorizationDenied.ts) is what this matches — while an App that resolves but
+      // is not the caller's answers the same page below, at canSeeSecretOwner. Anything else —
+      // argument validation, a database fault — is none of those and propagates: the bare catch
+      // that used to swallow it made a dead database indistinguishable from an empty owner.
+      if ((e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN') || refNamesNothing(e, { ambiguousNamesNothing: true })) {
+        return { items: [], total: 0 };
+      }
+      throw e;
     }
     if (!(await canSeeSecretOwner(ctx, ownerType, ownerId))) return { items: [], total: 0 };
     if (ownerType === 'app') await admitOperationRate(ctx, ctx.db, 'OTHER_READS', appRateIdentity(ctx));

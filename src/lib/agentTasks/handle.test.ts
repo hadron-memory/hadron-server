@@ -48,6 +48,16 @@ describe('parseTaskHandle (#2553)', () => {
     expect(() => agentTaskUrn('hadronmemory.com::hadron-dev-team', 'AT0.388')).toThrow(UrnParseError);
   });
 
+  it('#4860 D1: an App urn that is not exactly <root>:<slug> (wrong arity) is refused, not composed', () => {
+    for (const bad of ['a:b:c', 'a:', ':b', 'nocolon', '']) {
+      expect(() => agentTaskUrn(bad, 'AT0.1'), bad).toThrow(UrnParseError);
+    }
+  });
+
+  it('#4860 F1: an upper-case App slug is emitted as stored (only the handle is folded to lower case)', () => {
+    expect(agentTaskUrn('hadronmemory.com:Hadron-Dev-Team', 'AT3.405')).toBe('hrn:agenttask:hadronmemory.com:Hadron-Dev-Team:at3.405');
+  });
+
   it('composes a child handle from its parent', () => {
     expect(composeTaskHandle(null, 3)).toBe('AT3');
     expect(composeTaskHandle('AT3', 405n)).toBe('AT3.405');

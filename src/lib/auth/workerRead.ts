@@ -62,6 +62,12 @@ export async function resolveAppRefConcealed(db: Context['db'], appRef: string):
  * unreachable through `resolveAppRef` TODAY — `assertFullyQualifiedUrn` is the API boundary gate and
  * throws `UrnNotQualifiedError` only, and the tolerant `parseUrnInput` never throws — it is kept for
  * a parser swap and pinned as contract, not as a reachable door path (workerRead.test.ts).
+ *
+ * NOT an alias of `refNamesNothing({ ambiguousNamesNothing: true })`, deliberately (Elena F11 on
+ * #4948): that list matches the `EntityNotFoundError` BASE — every entity's typed miss — while this
+ * one matches `AppNotFoundError` alone. A door that resolves TWO refs in one try and folded the base
+ * would turn an unknown AGENT (or memory, or org) into its unknown-APP answer; keeping this list
+ * App-narrow is what makes a two-arm door's catch safe to write. Do not merge them.
  */
 export const isAppRefResolutionFailure = (e: unknown): boolean =>
   e instanceof AppNotFoundError ||

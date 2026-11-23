@@ -35,6 +35,7 @@ import { clientReportedChatModel } from '../../../lib/bootPrompt/chatModel.js';
 import { applyPlatformVariables } from '../../../lib/personaDescription.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { canChatWithAgent } from './agentChatAccess.js';
 
@@ -213,7 +214,7 @@ export async function readAgentServedBootPrompt(
     try {
       appId = (await resolveAppRef(ctx.db, args.appRef)).id;
     } catch (err) {
-      if (err instanceof AppNotFoundError) throw masked();
+      if (isAppRefResolutionFailure(err)) throw masked();
       throw err;
     }
     const app = await loadApp(ctx, appId);

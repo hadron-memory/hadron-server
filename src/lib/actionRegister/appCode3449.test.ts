@@ -73,7 +73,7 @@ describe('reserved App event code namespace', () => {
   it('walks every production source and keeps exactly the legacy App event types', () => {
     const { found, rawPaths } = census(true);
     expect(found).toEqual(legacy);
-    expect(rawPaths).toEqual(['src/lib/agentTasks/coordinatorCadence.ts', 'src/lib/agentTasks/darkWorker.ts', 'src/lib/agentTasks/events.ts', 'src/lib/agentTasks/postLimit.ts', 'src/lib/agentTasks/saturation.ts', 'src/lib/agentTasks/sweepRuns.ts', 'src/lib/desiredState/desiredStart.ts'].sort());
+    expect(rawPaths).toEqual(['src/lib/agentTasks/leadCadence.ts', 'src/lib/agentTasks/darkWorker.ts', 'src/lib/agentTasks/events.ts', 'src/lib/agentTasks/postLimit.ts', 'src/lib/agentTasks/saturation.ts', 'src/lib/agentTasks/sweepRuns.ts', 'src/lib/desiredState/desiredStart.ts'].sort());
     expect(TICK_CODE_PREFIX).toBe('tick.');
   });
   it('#4458 the pre-filter skips nothing the full walk would see (differential against the unfiltered census)', { timeout: 60_000 }, () => {

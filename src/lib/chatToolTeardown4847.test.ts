@@ -10,14 +10,17 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as Sentry from '@sentry/node';
+import { Prisma } from '../generated/prisma/index.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { deleteSlackToolConnection } from './slackClient.js';
 import { deleteTelegramToolConnection } from './telegramClient.js';
+import { startChatToolTeardownSweepLoop } from '../jobs/sweepChatToolTeardown.js';
 import {
   CHAT_TOOL_TEARDOWN_MAX_ATTEMPTS,
+  CHAT_TOOL_TEARDOWN_SWEEP_BATCH,
   attemptChatToolTeardown,
   chatToolTeardownIdle,
   chatToolTeardownSweepTick,
@@ -381,12 +384,16 @@ describe('#4847 blind P2: a tool connection id is never reused, so the one-inten
     let thrown = false;
     const faulty = new Proxy(db, { get: (target, prop, receiver) => {
       if (prop !== '$queryRaw') return Reflect.get(target, prop, receiver);
-      return (strings: TemplateStringsArray, ...values: unknown[]) => {
-        if (!thrown && Array.isArray(strings) && strings.join('?').includes('SET attempts = attempts + 1') && values.includes(first)) {
+      // The claim is a Prisma.Sql object (#4945: the shared due fragment), not a tagged template: read its text and values either way.
+      return (strings: TemplateStringsArray | Prisma.Sql, ...rest: unknown[]) => {
+        const isSql = !Array.isArray(strings);
+        const text = isSql ? (strings as Prisma.Sql).sql : (strings as TemplateStringsArray).join('?');
+        const values = isSql ? (strings as Prisma.Sql).values : rest;
+        if (!thrown && text.includes('SET attempts = attempts + 1') && values.includes(first)) {
           thrown = true;
           return Promise.reject(new Error('simulated database fault'));
         }
-        return (target.$queryRaw as any)(strings, ...values);
+        return (target.$queryRaw as any)(strings, ...rest);
       };
     } }) as typeof db;
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -405,5 +412,73 @@ describe('#4847 blind P2: a tool connection id is never reused, so the one-inten
     expect(await attemptChatToolTeardown(db, id, minutes(1_000_000))).toBe('skipped');
     expect(telegramDelete).not.toHaveBeenCalled();
     expect((await intentOf('telegram', 'tg-a')).attempts).toBe(CHAT_TOOL_TEARDOWN_MAX_ATTEMPTS);
+  });
+});
+
+describe('#4945 the state CHECK admits exactly the three states the code writes', () => {
+  const insert = (tool: string, state: string) => db.$executeRawUnsafe(
+    `INSERT INTO chat_tool_teardown_intents (id, kind, provider, tool_connection_id, state, attempts, created_at) VALUES ($1, 'telegram', 'telegram', $2, $3, 0, now())`, generateId(), tool, state);
+  it('PENDING, CONFIRMED and CAPPED insert; anything else, and an update to anything else, is refused by chk_chat_tool_teardown_state', async () => {
+    await insert('s-1', 'PENDING'); await insert('s-2', 'CONFIRMED'); await insert('s-3', 'CAPPED');
+    await expect(insert('s-4', 'pending')).rejects.toThrow(/chk_chat_tool_teardown_state/);
+    await expect(insert('s-5', 'DONE')).rejects.toThrow(/chk_chat_tool_teardown_state/);
+    await expect(db.$executeRawUnsafe(`UPDATE chat_tool_teardown_intents SET state = 'FAILED' WHERE tool_connection_id = 's-1'`)).rejects.toThrow(/chk_chat_tool_teardown_state/);
+    expect(await intentCount()).toBe(3);
+  });
+  it('every state the code itself writes passes the constraint (PENDING to CONFIRMED, PENDING to CAPPED, a requeue back to PENDING)', async () => {
+    await db.$transaction((tx) => softDeleteChatToolConnections(tx, { appId: appA.id }, null));
+    await attemptChatToolTeardown(db, (await intentOf('telegram', 'tg-a')).id, minutes(0));
+    expect((await intentOf('telegram', 'tg-a')).state).toBe('CONFIRMED');
+    telegramDelete.mockResolvedValue(false);
+    await db.$transaction((tx) => softDeleteChatToolConnections(tx, { appId: appB.id }, null));
+    const id = (await intentOf('telegram', 'tg-b')).id;
+    await db.$executeRaw`UPDATE chat_tool_teardown_intents SET attempts = ${CHAT_TOOL_TEARDOWN_MAX_ATTEMPTS - 1} WHERE id = ${id}`;
+    expect(await attemptChatToolTeardown(db, id, minutes(10_000))).toBe('capped');
+    expect(await requeueCappedChatToolTeardowns(db, { id })).toBe(1);
+    expect((await intentOf('telegram', 'tg-b')).state).toBe('PENDING');
+  });
+});
+
+describe('#4945 the sweep takes one batch, never-attempted first, and leaves the rest for the next pass', () => {
+  it('SWEEP_BATCH intents per pass: the never-attempted go first, the older retries wait, and the next pass takes them', async () => {
+    const fresh = CHAT_TOOL_TEARDOWN_SWEEP_BATCH;
+    for (let i = 0; i < fresh; i++) {
+      await db.chatToolTeardownIntent.create({ data: { id: `a-${String(i).padStart(3, '0')}`, kind: 'telegram', provider: 'telegram', toolConnectionId: `fresh-${i}` } });
+    }
+    // Retries that are due, with ids that sort AFTER the fresh ones: only the ordering (NULLS FIRST), not the id, can keep them out.
+    for (let i = 0; i < 5; i++) {
+      await db.chatToolTeardownIntent.create({ data: { id: `z-${i}`, kind: 'telegram', provider: 'telegram', toolConnectionId: `retry-${i}`, attempts: 1, lastAttemptAt: new Date('2026-11-01T00:00:00Z') } });
+    }
+    const first = await chatToolTeardownSweepTick(db, minutes(0));
+    expect(first).toMatchObject({ attempted: CHAT_TOOL_TEARDOWN_SWEEP_BATCH, confirmed: CHAT_TOOL_TEARDOWN_SWEEP_BATCH });
+    expect(calls().telegram.every((t) => t.startsWith('fresh-'))).toBe(true);
+    expect(await db.chatToolTeardownIntent.count({ where: { state: 'PENDING' } })).toBe(5);
+    const second = await chatToolTeardownSweepTick(db, minutes(0));
+    expect(second).toMatchObject({ attempted: 5, confirmed: 5 });
+    expect(await db.chatToolTeardownIntent.count({ where: { state: 'PENDING' } })).toBe(0);
+  });
+});
+
+describe('#4945 a confirmed call whose outcome write fails is retried by the sweep, never lost', () => {
+  it('the claim stands, the intent stays PENDING, the failure is thrown to the caller (logged by dispatch), and the next due pass asks again and confirms', async () => {
+    await db.$transaction((tx) => softDeleteChatToolConnections(tx, { appId: appA.id }, null));
+    const id = (await intentOf('telegram', 'tg-a')).id;
+    const failingWrite = { $queryRaw: db.$queryRaw.bind(db), $executeRaw: async () => { throw new Error('outcome write failed'); } } as unknown as typeof db;
+    await expect(attemptChatToolTeardown(failingWrite, id, minutes(0))).rejects.toThrow('outcome write failed');
+    expect(telegramDelete).toHaveBeenCalledTimes(1);
+    expect(await intentOf('telegram', 'tg-a')).toMatchObject({ state: 'PENDING', attempts: 1, confirmedAt: null });
+    // The App's Slack intent (never attempted) is due at once; the Telegram intent's wait (5 minutes) has not passed.
+    await chatToolTeardownSweepTick(db, minutes(4));
+    expect(telegramDelete, 'not due before its 5 minutes').toHaveBeenCalledTimes(1);
+    await chatToolTeardownSweepTick(db, minutes(6));
+    expect(telegramDelete).toHaveBeenCalledTimes(2);
+    expect(await intentOf('telegram', 'tg-a')).toMatchObject({ state: 'CONFIRMED', attempts: 2 });
+  });
+});
+
+describe('#4945 the sweep loop never holds a draining process open', () => {
+  it('the initial timer is unref\'d (the interval it starts already was)', () => {
+    const timer = startChatToolTeardownSweepLoop(db, { initialDelayMs: 2_000_000_000, intervalMs: 2_000_000_000 });
+    try { expect(timer.hasRef()).toBe(false); } finally { clearTimeout(timer); }
   });
 });

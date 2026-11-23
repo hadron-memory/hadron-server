@@ -62,6 +62,7 @@ import {
 import { compileTemplate } from '../../../lib/template.js';
 import { chargeRequestServed, resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
+import { foreignIncludeReader } from '../../../lib/includes/foreignIncludeReader.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { appMemoryScopePage, resolveAppNodeScope } from './resolvers.appMemoryScope.js';
@@ -699,6 +700,8 @@ export const nodeQueries = {
       // executes — Mustache via compileTemplate, routing edges skipped — not
       // the legacy MCP bundle, which does a literal replaceAll and inlines
       // every edge. A preview that disagrees with the run is worse than none.
+      // #4689: foreign URN includes resolve under the caller's own read access (cor:dmo:150:04).
+      const foreignReader = foreignIncludeReader(ctx.db, ctx);
       const bundle = await assembleRunNodePrompt(
         { ...node, outgoingEdges: visibleEdges } as never,
         stringArgs,
@@ -707,7 +710,7 @@ export const nodeQueries = {
             loadMemoryUrn(ctx, memoryId).then((u: string | null) => u ?? memoryId),
           // #40: each compiled piece is served, so it counts toward the request's aggregate.
           compileTemplate: (content: string, data: Record<string, string> | null, memoryId: string) =>
-            compileTemplate(content, data, memoryId, ctx.db, {}).then(text => chargeRequestServed(ctx, content, text)),
+            compileTemplate(content, data, memoryId, ctx.db, {}, undefined, { foreignReader }).then(text => chargeRequestServed(ctx, content, text)),
           // visibleEdges was already filtered through this caller's read gate.
           includeTarget: target => !!target,
           onTargetInlined: (target) => inlined.push(target),
@@ -1078,7 +1081,7 @@ export const nodeQueries = {
         }
         case 'agenttask': {
           // #3878 (hrn:node:hadronmemory.com:specs:cor:urn:010:01; ruling 0278): hrn:agenttask:<root>:<app-slug>:<handle>,
-          // the URN AgentTask.urn emits (handle in lower case), read in either case. The leaf is the HANDLE only: the
+          // the URN AgentTask.urn emits (handle in lower case); the HANDLE is read in either case, the App part as written. The leaf is the HANDLE only: the
           // task-id leaf was never built and no qualified task-id URN resolves (cor:urn:010:01), so the wider task
           // reference form (targetHasKindForm) is not inherited. The App is resolved by reference, so a renamed App's
           // old spelling still resolves; then Query.agentTask's own gate decides (withReadableTask: a participant, the
@@ -1087,6 +1090,8 @@ export const nodeQueries = {
           try {
             const parsed = parseUrnV2(baseUrn); // fixed 'agenttask' arity: [app-slug, leaf]
             const leaf = parseTaskHandle(parsed.segments[1]);
+            // Deliberate guard: a single URN segment cannot carry the colon an App-qualified handle needs, so
+            // appUrn is null here today; refuse anything else rather than trust that.
             if (!leaf || leaf.appUrn !== null) return null;
             qualified = `hrn:agenttask:${parsed.root}:${parsed.segments[0]!}:${leaf.handle}`;
           } catch (error) {
@@ -1098,7 +1103,7 @@ export const nodeQueries = {
               ctx,
               qualified,
               async (_c, { task, app }) => ({ kind: 'agenttask', id: task.id, organizationId: app.organizationId }),
-              true,
+              true, // allowRun: a run in the task's own App may read it
             );
           } catch (error) {
             // A name-resolution outcome on the App reference is the uniform refusal; a fault propagates (#2975).

@@ -57,4 +57,29 @@ describe('requeue-chat-tool-teardown', () => {
     expect((await run([], {})).code).toBe(2);
     expect(await db.chatToolTeardownIntent.count({ where: { state: 'CAPPED' } })).toBe(1);
   });
+
+  it('#4945: --id WITHOUT --apply is a dry run of that one intent: it lists it alone, requeues nothing, and says so for an id that is not capped', async () => {
+    const a = await intent('t-a', 'CAPPED'); const b = await intent('t-b', 'CAPPED'); const p = await intent('t-p', 'PENDING', 3);
+    const one = await run(['--id', a.id]);
+    expect(one.code).toBe(0);
+    expect(one.lines.filter((l) => l.includes(' capped id='))).toHaveLength(1);
+    expect(one.lines.join('\n')).toContain(`id=${a.id}`);
+    expect(one.lines.join('\n')).not.toContain(`id=${b.id}`);
+    expect(one.lines.at(-1)).toContain('dry_run capped=1');
+    expect((await run(['--id', p.id])).lines.at(-1)).toContain('dry_run capped=0');
+    expect((await run(['--id', 'no-such-intent'])).lines.at(-1)).toContain('dry_run capped=0');
+    expect(await db.chatToolTeardownIntent.count({ where: { state: 'CAPPED' } })).toBe(2);
+    expect(await db.chatToolTeardownIntent.findUniqueOrThrow({ where: { id: p.id } })).toMatchObject({ state: 'PENDING', attempts: 3 });
+  });
+
+  it('#4945: a failure logs what failed (error name and Prisma code), never the connection URL or a secret, and exits 1 writing nothing', async () => {
+    await intent('t-x', 'CAPPED');
+    const secretUrl = 'postgresql://nobody:hunter2-4945@invalid.invalid:1/none'; // never resolves: no connection is attempted against a real host
+    const { code, lines } = await run(['--all', '--apply'], { DATABASE_URL: secretUrl });
+    expect(code).toBe(1);
+    const out = lines.join('\n');
+    expect(out).toMatch(/db\.chat_tool_teardown_requeue\.failed name=\w+ code=[\w-]+$/m);
+    expect(out).not.toMatch(/hunter2|invalid\.invalid|postgresql:/);
+    expect(await db.chatToolTeardownIntent.count({ where: { state: 'CAPPED' } })).toBe(1);
+  });
 });

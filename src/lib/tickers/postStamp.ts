@@ -19,7 +19,7 @@
 import type { Prisma } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { managesApp } from '../auth/appManagement.js';
-import { mayStillDriveWorkerApp } from '../teamAttention.js';
+import { mayStillDriveWorkerApp } from '../ownWorkerSessions.js';
 import { BROADCAST_MENTION_TOKENS } from '../mentionToken.js';
 import { GRANT_SUBSCRIBE_WORKERS } from './bounds.js';
 import { liveCaller } from './liveCaller.js';

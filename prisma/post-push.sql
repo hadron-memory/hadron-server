@@ -958,8 +958,8 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- #2755: the dark-worker alarm's window, episodes and their worker fence (the fence function is #1162's, above).
 \ir dark-alarm-invariants.sql
 
--- #2763: the coordinator-cadence alarm's episodes and first-observed clocks (after the #1162 fence function).
-\ir coordinator-cadence-invariants.sql
+-- #2763, #4375: the lead-cadence alarm's episodes and first-observed clocks (after the #1162 fence function).
+\ir lead-cadence-invariants.sql
 
 -- #3934: the recorded end of an alarm's escalation is written once.
 \ir alarm-escalation-end-invariants.sql
@@ -1076,3 +1076,9 @@ ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
 \ir secret-read-client-own-worker.sql
 -- #4001: finite auto-delete terms, after the grants and read-client invariants.
 \ir secret-auto-delete-invariants.sql
+
+-- #4945 (cor:int:030:03 clause 4): a chat tool teardown intent's state is one of the three the code writes
+-- (Prisma cannot model the CHECK; the migration carries the same statements, behind an HDPRF preflight).
+ALTER TABLE chat_tool_teardown_intents DROP CONSTRAINT IF EXISTS chk_chat_tool_teardown_state;
+ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_state
+  CHECK (state IN ('PENDING', 'CONFIRMED', 'CAPPED'));
