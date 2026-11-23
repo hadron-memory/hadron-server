@@ -249,4 +249,17 @@ describe('#4512 the scanner on its own (review findings)', () => {
     expect(run('<a x="\n\n<b id="fx-110-a">')).toBe('<a x="\n\n<b>');
     expect(run('<a\n\nsee id=fx-110-a here')).toBe('<a\n\nsee id=fx-110-a here'); // the stray < does not make the next paragraph a tag
   });
+
+  it('F11: a slash between attributes in an HTML block', () => {
+    expect(run('<div title="x"/id="fx-110-a">')).toBe('<div title="x"/>');
+    expect(run('<div hidden/id="fx-110-a">')).toBe('<div hidden/>');
+    expect(run('<div a=b /id="fx-110-a">')).toBe('<div a=b />');
+  });
+  it('F12: nested blockquote markers, a marker before the name, bare CR line breaks', () => {
+    expect(run('> > <a\n> >id="fx-110-a">x</a>')).toBe('> > <a\n> >>x</a>');
+    expect(run('> <a id=\n> > "fx-110-a">x</a>')).toBe('> <a>x</a>');
+    expect(run('<a\r>id="fx-110-a">x</a>')).toBe('<a\r>>x</a>');
+    expect(run('<a\r\r<b id="fx-110-a">')).toBe('<a\r\r<b>');
+    expect(run('<a id=\r> "fx-110-a">x</a>')).toBe('<a>x</a>');
+  });
 });

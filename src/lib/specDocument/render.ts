@@ -174,11 +174,11 @@ function decodeNumericRefs(v: string): string {
 
 /**
  * One `id` attribute: the name, `=`, then a quoted or bare value. The name counts only at an attribute position: start of
- * text, after whitespace, a quote or a slash (the slash only where the caller finds it inside a tag), or after a
- * blockquote marker at a line start; a blockquote marker at a line start between `=` and the value is skipped as well,
+ * text, after whitespace, a quote or a slash (the slash only where the caller finds it inside a tag), or after the
+ * blockquote markers that open a line; such markers between `=` and the value are skipped as well,
  * as the renderer drops it. Linear: no nested quantifier, each alternative stops at a delimiter.
  */
-const ID_ATTR = /(?<=^|[ \t\r\n\f"'/]|\n[ \t]{0,3}>)id[ \t\r\n\f]*=(?:[ \t\r\n\f]|(?<=\n[ \t]{0,3})>)*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/gi;
+const ID_ATTR = /(?<=^|[ \t\r\n\f"'/]|[\r\n][ \t]{0,3}(?:>[ \t]?)+)id[ \t\r\n\f]*=(?:[ \t\r\n\f]|(?<=[\r\n][ \t]{0,3}(?:>[ \t]?)*)>)*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/gi;
 const isWs = (c: string | undefined): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
 
 /** `<name` ending at whitespace, `/` or `>` (so an autolink `<https://x>` is no tag), or `</`, `<!`, `<?`. */
@@ -196,16 +196,18 @@ function tagZones(text: string): Uint8Array {
   let state = Z_TEXT;
   let quote = '';
   let lineBlank = true;
+  let markers = true; // the line so far is only whitespace and `>`: those `>` are blockquote markers
   for (let i = 0; i < text.length; i += 1) {
     const c = text[i];
-    if (c === '\n') { if (lineBlank) state = Z_TEXT; lineBlank = true; z[i] = state; continue; }
-    const atLineStart = lineBlank;
+    if (c === '\n' || (c === '\r' && text[i + 1] !== '\n')) { if (lineBlank) state = Z_TEXT; lineBlank = true; markers = true; z[i] = state; continue; }
+    const atLineStart = markers && c === '>';
     if (c !== ' ' && c !== '\t' && c !== '\r') lineBlank = false;
+    if (c !== ' ' && c !== '\t' && c !== '\r' && c !== '>') markers = false;
     if (state === Z_TEXT) {
       if (c === '<' && TAG_OPEN.test(text.slice(i, i + 80))) { state = Z_TAG; z[i] = Z_TAG; }
     } else if (state === Z_TAG) {
       z[i] = Z_TAG;
-      if (c === '>' && !atLineStart) state = Z_TEXT; // a `>` that opens a line is a blockquote marker, not the tag's end
+      if (c === '>' && !atLineStart) state = Z_TEXT; // a `>` among a line's leading markers is a blockquote marker, not the tag's end
       else if (c === '"' || c === "'") { state = Z_QUOTED; quote = c; z[i] = Z_QUOTED; }
     } else {
       z[i] = Z_QUOTED;
