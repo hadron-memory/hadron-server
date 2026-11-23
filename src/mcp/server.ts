@@ -13016,6 +13016,13 @@ async function openOrRejectMcpSession(
 //   - its stored selections (`prepareMcpPrincipal`, keyed by client id header or OAuth client).
 // Nothing is remembered between two requests of one client: a selection made by a caller with no stored-selection key
 // lasts for that one request. A named session supplying the App and memory is the next slice (plan H1/H2).
+//
+// Known limits, and why the mode is off (each must be settled before it is turned on):
+//   - The stored selection is read on EVERY request, so two chats that present one credential (two conversations in
+//     one connector) move each other's App and memory between calls, with no warning. Sessionful serving reads it only
+//     when a connection is opened. Pinned in server.sessionless2605.test.ts; the session handle (H1/H2) fixes it.
+//   - No bound on requests in flight (plan Q6). That includes `subscriptions/listen`, a long-lived SSE response over
+//     POST, which the 405 does not stop and the stopping-drain shutdown close (#3797) does not track.
 
 /** The exact value that selects sessionless serving. Anything else, including unset, is today's sessionful serving. */
 export const MCP_SERVING_MODE_SESSIONLESS = 'sessionless';
@@ -13074,7 +13081,8 @@ async function dispatchMcpSessionlessRequest(req: Request, res: Response): Promi
     return;
   }
 
-  // The same refusals, in the same order, as a connection being opened (openOrRejectMcpSession).
+  // The same refusals, in the same order, as a connection being opened (openOrRejectMcpSession), with one difference:
+  // a failed credential lookup answers 503 here, where the sessionful open lets the error propagate.
   let auth: AuthContext;
   try {
     auth = (await resolveCredentialContextWithStatus(req, db)).auth;

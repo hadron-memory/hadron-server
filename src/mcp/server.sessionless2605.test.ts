@@ -36,6 +36,7 @@ afterAll(async () => {
 });
 
 let appA: { id: string; urn: string };
+let appB: { id: string; urn: string };
 let user: { id: string };
 
 const mintKey = async (issuedVia: string) =>
@@ -46,7 +47,7 @@ beforeEach(async () => {
   const suffix = generateId().slice(-8);
   const org = await db.organization.create({ data: { id: generateId(), name: 'sl-org', urn: `sl-${suffix}.com` } });
   appA = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'App A', urn: `${org.urn}:app-a` } });
-  const appB = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'App B', urn: `${org.urn}:app-b` } });
+  appB = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'App B', urn: `${org.urn}:app-b` } });
   user = await db.user.create({ data: { id: generateId(), githubId: 26051, githubUsername: `sl-${suffix}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: user.id, role: 'CONTRIBUTOR' } });
   // Two Apps, so App scope is ambiguous without a selection and a carried selection is observable.
@@ -242,6 +243,20 @@ describe('#2605 sessionless serving', () => {
     expect(set.json.result.content[0].text).toContain('Active App set to');
     const next = await post(call('hadron_list_memories'), { key });
     expect(next.json.result.content[0].text).toContain('no active App');
+  });
+
+  // KNOWN LIMIT, pinned so the session-handle slice (plan H1/H2) changes it on purpose. Two chats in one connector
+  // present the same credential, so they share one stored selection, and here it is read on EVERY request: chat 1's
+  // next call lands in the App chat 2 picked, with no warning. Sessionful serving reads it only when a connection is
+  // opened. This is why the mode must stay off until a session handle carries each chat's context.
+  it('KNOWN LIMIT: two chats on one OAuth client move each other\'s selection, request by request', async () => {
+    sessionless();
+    const connector = await mintKey('oauth:dcr_claude_ai');
+    await post(call('hadron_set_active_app', { app: appA.urn }), { key: connector }); // chat 1
+    await post(call('hadron_set_active_app', { app: appB.urn }), { key: connector }); // chat 2
+    const chat1Next = await post(call('hadron_list_memories'), { key: connector });
+    expect(chat1Next.json.result.content[0].text).toContain(appB.urn);
+    expect(chat1Next.json.result.content[0].text).not.toContain(appA.urn);
   });
 
   it('answers an unknown tool with a JSON-RPC error and a bad argument with an error result', async () => {
