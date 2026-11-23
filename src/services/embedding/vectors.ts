@@ -370,7 +370,7 @@ export function setIterativeScanSupportForTests(v: boolean | null): void {
  * `pg_extension`; on an older version (or a failed read) it logs ONE `vector.iterative_scan_unsupported` line and
  * the search uses the exact scan instead, still under the work budget. This never refuses to start anything.
  */
-export function iterativeScanSupported(db: PrismaClient): Promise<boolean> {
+export function iterativeScanSupported(db: Pick<PrismaClient, '$queryRaw'> | Prisma.TransactionClient): Promise<boolean> {
   if (iterativeScanOverride != null) {
     if (!iterativeScanOverride) logIterativeUnsupported('stubbed');
     return Promise.resolve(iterativeScanOverride);
@@ -589,7 +589,6 @@ async function rankUnderBudget<R>(
   },
 ): Promise<{ rows: R[]; exhausted: boolean; stopped: boolean }> {
   let best: R[] = [];
-  const iterative = await iterativeScanSupported(db);
   let phase: 'waiting' | 'running' = 'waiting';
   let txMs = Number.POSITIVE_INFINITY;
   let deadline = Number.POSITIVE_INFINITY;
@@ -600,9 +599,15 @@ async function rankUnderBudget<R>(
     txMs = clock.txMs;
     deadline = clock.deadline;
     cappedByRequest = clock.cappedByRequest;
-    left(); // a request whose deadline already passed stops here, before taking a connection
+    left(); // a request whose deadline already passed stops here, before taking a connection (or probing)
     return await db.$transaction(async (tx) => {
       phase = 'running';
+      // #4938 N2 (Celine, QA on #4928): the version probe runs INSIDE the budgeted transaction, first, so its wait for a
+      // connection is this transaction's deadline-capped `maxWait`. Outside it, a cold probe (a fresh process, or a failed
+      // one, which is not cached) waited Prisma's `pool_timeout` (10 s by default) on a saturated pool, whatever the deadline.
+      // It runs before any SET LOCAL: with no statement_timeout of its own it cannot be cut mid-transaction (a failed
+      // statement would abort the transaction under every statement after it); the transaction's own clock bounds it.
+      const iterative = await iterativeScanSupported(tx);
       if (iterative) {
         // Set once for the shared transaction, so it is also in force for the exact statement below (BLIND F7): harmless,
         // since that statement ranks a MATERIALIZED CTE with no ORDER BY the HNSW index could serve.
