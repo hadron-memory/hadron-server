@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1086,6 +1086,38 @@ describe('CLI entry and single instance', () => {
       });
       expect(nested).toContain('taking over');
       expect(readFileSync(join(stateDir, 'lock'), 'utf8')).toBe(String(first.pid));
+      release();
+      expect(existsSync(join(stateDir, 'lock.takeover'))).toBe(false);
+    } finally { first.kill(); }
+  });
+
+  // #4297 (2026-11-23 merge-queue sighting, the takeover-race sibling): a pid from `spawn` is not yet a recognizable
+  // ticker-wake. libuv resumes the parent when the child's exec begins (the close-on-exec pipe closes, or the vfork parent
+  // is released), and the kernel fills in the new /proc cmdline only later in the same exec, so under load a contender can
+  // read an empty cmdline and judge a live holder gone. This holder models that window deterministically and wider: a
+  // shell that sleeps, then execs the ticker-wake holder, with the marker in the environment so the shell's own cmdline
+  // does not carry it. The pid is used the moment spawn returns, as the takeover tests did.
+  const spawnLateIdentity = (): ChildProcess => spawn('sh', ['-c',
+    `sleep 0.5; exec node -e "process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)" "$HOLDER_MARKER"`,
+  ], { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, HOLDER_MARKER: 'ticker-wake' } });
+  /** A nested contender's own pid: above PID_MAX_LIMIT (2^22), so it is never a live process and never the holder's pid. */
+  const NOT_A_PID = 4_194_305;
+
+  it('stale-lock takeover race with a holder whose identity appears after spawn returns: the nested contender is told "taking over" (#4297)', async () => {
+    const stateDir = join(dir, 'ticker-wake');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'lock'), '999999999');
+    const first = spawnLateIdentity();
+    try {
+      let nested = '';
+      let atDecision: HolderSnapshot | undefined;
+      const release = acquireLock(stateDir, first.pid!, {
+        beforeUnlink: () => {
+          atDecision = snapshotOf(first.pid);
+          try { acquireLock(stateDir, NOT_A_PID); nested = 'GOT'; } catch (e) { nested = (e as Error).message; }
+        },
+      });
+      expect(nested, `takeover owner at the nested decision: ${JSON.stringify(atDecision)}`).toContain('taking over');
       release();
       expect(existsSync(join(stateDir, 'lock.takeover'))).toBe(false);
     } finally { first.kill(); }
