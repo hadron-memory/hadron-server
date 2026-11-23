@@ -18,6 +18,9 @@ import { generateId } from '../../../lib/id.js';
 import { composeNodeUrn } from '../../../lib/urn.js';
 import { resolvers, type Context } from './resolvers.js';
 import { RUN_CLIENT_PREFIX } from '../../../lib/auth/runPrincipal.js';
+import { generateDataKey } from '../../../lib/crypto.js';
+import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -201,6 +204,48 @@ describe('#317 — a run-kernel hop is not the door (LOCAL F1)', () => {
     await expect(resolvers.Mutation.runTask({}, { nodeRef: urn, args: {} }, adminCtx())).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },
     });
+  });
+});
+
+describe('#317 — an encrypted memory\'s data.args (SECURITY P3)', () => {
+  async function mkEncryptedTask(): Promise<{ urn: string; memoryId: string; key: ReturnType<typeof generateDataKey> }> {
+    const key = generateDataKey();
+    const mem = await db.memory.create({
+      data: { id: generateId(), organizationId: orgId, name: 'ta-enc', urn: 'ta-org::ta-enc', class: 'knowledge', isEncrypted: true },
+    });
+    const enc = encryptNodeFieldsWithKey({ abstract: null, content: 'Process {{file_path}}', data: { args: ARGS } }, key);
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: mem.id, loc: 'tasks:enc', isLink: false, name: 'enc', nodeType: 'task', isRunnable: true,
+        content: enc.content, abstract: enc.abstract, data: enc.data as never, tags: [],
+      },
+    });
+    return { urn: composeNodeUrn(mem.urn, 'tasks:enc'), memoryId: mem.id, key };
+  }
+
+  it('with the session key cached the encrypted data.args is read and a missing required argument is refused', async () => {
+    const { urn, memoryId, key } = await mkEncryptedTask();
+    sessionKeyCache.set('s-317', memoryId, key);
+    try {
+      await expect(resolvers.Mutation.runTask({}, { nodeRef: urn, args: {} }, adminCtx())).rejects.toMatchObject({
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+      await expect(
+        resolvers.Mutation.runTask({}, { nodeRef: urn, args: { file_path: 'a', mode: 'm' } }, adminCtx()),
+      ).resolves.toContain('Process a');
+    } finally {
+      sessionKeyCache.clear();
+    }
+  });
+
+  it('without the key the ciphertext data is not an object: this guard refuses nothing (unchanged pre-#317 behaviour)', async () => {
+    const { urn } = await mkEncryptedTask();
+    sessionKeyCache.clear();
+    const err = (await resolvers.Mutation.runTask({}, { nodeRef: urn, args: {} }, adminCtx()).then(
+      () => null,
+      (e: unknown) => e,
+    )) as { extensions?: { code?: string } } | null;
+    expect(err?.extensions?.code).not.toBe('BAD_USER_INPUT');
   });
 });
 
