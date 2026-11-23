@@ -24,7 +24,7 @@
  * worker's stored terminal report (#2771) names THIS host, is fresh (`TERMINAL_FRESH_MS`), and shows an agent there (not
  * `busy`, `idle` or `locked`, and not an agent-absent reason). The state is logged once when it is first seen and again when it changes
  * (`already running`, then `starting` once the agent is gone; after the transaction commits), never as a failure, and it counts toward no trip and
- * raises no alarm. A stale, missing or other-host report decides nothing, so the start goes ahead as before.
+ * raises no alarm. A stale or missing report decides nothing, so the start goes ahead as before.
  *
  * THE TRIP. Three failed platform starts of a worker in the last hour stop this loop starting it (counted under the
  * worker row lock, so two passes agree), and raise ONE task-less `alarm.start-failing` to its reporting line, nearest
@@ -73,11 +73,13 @@ function asTerminal(value: unknown): StoredTerminal | null {
 }
 
 /**
- * Does the host's last report say it runs this worker's agent right now? (#4933) Only `busy`, `idle` and `locked` show
+ * Does a host's last report say its agent runs right now? (#4933) ANY host's report counts, not only the one the pass is
+ * about to start on: the stored report names the one host the agent is on, and a start on another registered host would
+ * make a second agent (the loop tries the worker's hosts in id order, so the reporting host may not be first). Only `busy`, `idle` and `locked` show
  * an agent (so `dark` and any status this code does not know say no), unless the reason says the agent is absent.
  */
-export function hostRunsAgent(terminal: StoredTerminal | null, hostId: string, now: Date): boolean {
-  if (!terminal || terminal.host?.id !== hostId) return false;
+export function hostRunsAgent(terminal: StoredTerminal | null, now: Date): boolean {
+  if (!terminal) return false;
   if (terminal.status !== 'busy' && terminal.status !== 'idle' && terminal.status !== 'locked') return false;
   if (terminal.reason != null && AGENT_ABSENT_REASONS.has(terminal.reason)) return false;
   const at = terminal.checkedAt ? Date.parse(terminal.checkedAt) : NaN;
@@ -94,7 +96,7 @@ export function resetDesiredStartStateLog(): void {
  * Log a state change once, AFTER the transaction that decided it committed (a rolled-back decision must not be
  * remembered): `already running` when first seen, and `starting` when a start is issued for a worker last seen running.
  */
-function noteOutcome(a: { appId: string; workerId: string; hostId: string }, outcome: string): void {
+function noteOutcome(a: { appId: string; workerId: string; hostId: string }, outcome: Awaited<ReturnType<typeof startDesiredWorker>>): void {
   if (outcome === 'running' && !loggedRunning.has(a.workerId)) {
     loggedRunning.add(a.workerId);
     console.info('[desired-start] no start issued: the host already runs this worker\'s agent (already running)', a);
@@ -207,7 +209,7 @@ export async function startDesiredWorker(
       if (!row || !startable(row)) return 'skipped';
       // #4933: before the failure count, so a worker the host already runs is neither started nor tripped nor alarmed.
       const reported = asTerminal((await tx.worker.findUnique({ where: { id: a.workerId }, select: { terminal: true } }))?.terminal);
-      if (hostRunsAgent(reported, a.hostId, now)) return 'running';
+      if (hostRunsAgent(reported, now)) return 'running';
       if ((await recentFailures(tx, a.workerId, now)) >= START_FAILURE_LIMIT) return 'tripped';
       await fenceHostDecision(tx, a.appId);
       const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, now, a.hostId)).find((r) => r.worktrees.length > 0);

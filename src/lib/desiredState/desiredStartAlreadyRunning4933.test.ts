@@ -161,10 +161,6 @@ describe('#4933: when the host does not run the agent, the worker is started as 
     await report({ status: 'idle', ageMs: TERMINAL_FRESH_MS + 60_000 });
     expect(await startsWith()).toBe(1);
   });
-  it('a report from another host: the agent is not on this one', async () => {
-    await report({ status: 'idle', host: 'orca2' });
-    expect(await startsWith()).toBe(1);
-  });
   it('three failed starts still trip a worker the host does not run (the trip is unchanged)', async () => {
     for (const m of [10, 20, 30]) await failedStart(m);
     await tick();
@@ -176,24 +172,24 @@ describe('#4933: hostRunsAgent, directly', () => {
   const now = new Date('2026-11-23T00:00:00Z');
   const t = (o: Record<string, unknown>) => ({ host: { id: 'h' }, status: 'idle', reason: null, checkedAt: new Date(now.getTime() - 1000).toISOString(), ...o });
   it('says yes for a fresh busy, idle or locked report on the same host', () => {
-    for (const status of ['busy', 'idle', 'locked']) expect(hostRunsAgent(t({ status }), 'h', now)).toBe(true);
+    for (const status of ['busy', 'idle', 'locked']) expect(hostRunsAgent(t({ status }), now)).toBe(true);
+    expect(hostRunsAgent(t({ host: { id: 'anywhere-else' } }), now)).toBe(true);
   });
-  it('says no for null, another host, dark, an unknown status, a missing, junk, stale or future checkedAt', () => {
-    expect(hostRunsAgent(null, 'h', now)).toBe(false);
-    expect(hostRunsAgent(t({}), 'other', now)).toBe(false);
-    expect(hostRunsAgent(t({ status: 'dark' }), 'h', now)).toBe(false);
-    expect(hostRunsAgent(t({ status: 'asleep' }), 'h', now)).toBe(false);
-    expect(hostRunsAgent(t({ checkedAt: undefined }), 'h', now)).toBe(false);
-    expect(hostRunsAgent(t({ checkedAt: 'junk' }), 'h', now)).toBe(false);
-    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() - TERMINAL_FRESH_MS - 1).toISOString() }), 'h', now)).toBe(false);
-    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() + 10 * 60_000).toISOString() }), 'h', now)).toBe(false);
+  it('says no for null, dark, an unknown status, a missing, junk, stale or future checkedAt', () => {
+    expect(hostRunsAgent(null, now)).toBe(false);
+    expect(hostRunsAgent(t({ status: 'dark' }), now)).toBe(false);
+    expect(hostRunsAgent(t({ status: 'asleep' }), now)).toBe(false);
+    expect(hostRunsAgent(t({ checkedAt: undefined }), now)).toBe(false);
+    expect(hostRunsAgent(t({ checkedAt: 'junk' }), now)).toBe(false);
+    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() - TERMINAL_FRESH_MS - 1).toISOString() }), now)).toBe(false);
+    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() + 10 * 60_000).toISOString() }), now)).toBe(false);
   });
   it('the future tolerance is inclusive too', () => {
-    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS).toISOString() }), 'h', now)).toBe(true);
-    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS + 1).toISOString() }), 'h', now)).toBe(false);
+    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS).toISOString() }), now)).toBe(true);
+    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS + 1).toISOString() }), now)).toBe(false);
   });
   it('the freshness boundary is inclusive', () => {
-    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() - TERMINAL_FRESH_MS).toISOString() }), 'h', now)).toBe(true);
+    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() - TERMINAL_FRESH_MS).toISOString() }), now)).toBe(true);
   });
 });
 
@@ -220,7 +216,7 @@ describe('#4933: the state is logged once when first seen and again when it chan
     }
   });
 
-  it('an ordinary first start logs nothing, and running again after a restart of the state logs once more', async () => {
+  it('an ordinary first start logs nothing; once its agent runs and the start fails, running is logged', async () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     try {
       await tick();
@@ -234,7 +230,7 @@ describe('#4933: the state is logged once when first seen and again when it chan
     }
   });
 
-  it('a rolled-back decision is not remembered: nothing is logged when the transaction fails', async () => {
+  it('a decision whose transaction then fails is not logged (the real transaction runs, then the commit is made to throw)', async () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
@@ -258,11 +254,25 @@ describe('#4933: the state is logged once when first seen and again when it chan
 });
 
 describe('#4933: a worker registered on two hosts, one of which runs its agent', () => {
-  it('no start on the other host either: the agent is up on one of them', async () => {
+  // The loop tries a worker's hosts in id order, so orca1 comes first whichever host reported.
+  it.each(['orca1', 'orca2'])('the agent is on %s: no start on either host (no second agent)', async (host) => {
     await registerOrca2();
-    await report({ status: 'idle', host: 'orca1' });
+    await report({ status: 'idle', host });
     await tick();
     expect(await starts(), 'a second agent was started on the other host').toHaveLength(0);
+  });
+
+  it('the report is from a host the worker is not registered on: still no start (the agent is up somewhere)', async () => {
+    await report({ status: 'idle', host: 'orca7' });
+    await tick();
+    expect(await starts()).toHaveLength(0);
+  });
+
+  it('the agent is gone (dark report): it starts, on the first host', async () => {
+    await registerOrca2();
+    await report({ status: 'dark', reason: 'no_terminal', host: 'orca2' });
+    await tick();
+    expect((await starts()).map((o) => o.hostId)).toEqual(['orca1']);
   });
 });
 
@@ -272,7 +282,7 @@ describe('#4933: every terminal reason has a decided meaning, so a new one canno
   const now = new Date('2026-11-23T00:00:00Z');
   const t = (reason: string) => ({ host: { id: 'h' }, status: 'locked', reason, checkedAt: now.toISOString() });
   it.each([...TERMINAL_REASONS])('locked with %s', (reason) => {
-    expect(hostRunsAgent(t(reason), 'h', now)).toBe(!absent.has(reason));
+    expect(hostRunsAgent(t(reason), now)).toBe(!absent.has(reason));
   });
   it('the table names only reasons that exist', () => {
     for (const r of absent) expect(TERMINAL_REASONS).toContain(r);
