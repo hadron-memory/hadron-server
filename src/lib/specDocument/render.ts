@@ -166,7 +166,8 @@ export function splitAtClosingRule(text: string): { body: string; tail: string }
 
 /** The text of a numeric character reference decoded (`&#45;`, `&#x2d;`, and without the `;`), so an encoded id compares as a browser reads it. */
 function decodeNumericRefs(v: string): string {
-  return v.replace(/&#(?:[xX]0*([0-9a-fA-F]{1,6})|0*([0-9]{1,7}));?/g, (all, hex?: string, dec?: string) => {
+  // The named references for the characters an anchor can hold besides letters and digits (`.`, `_`, `-`).
+  return v.replace(/&(period|lowbar|UnderBar|hyphen|dash);/g, (_a, n: string) => (n === 'period' ? '.' : n === 'hyphen' || n === 'dash' ? '-' : '_')).replace(/&#(?:[xX]0*([0-9a-fA-F]{1,6})|0*([0-9]{1,7}));?/g, (all, hex?: string, dec?: string) => {
     const cp = hex !== undefined ? parseInt(hex, 16) : parseInt(dec as string, 10);
     return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : all;
   });
@@ -187,7 +188,7 @@ const ID_ATTR = /(?<![\w:.?&=#;-])id[\s>]*=[\s>]*(?:"([^"]*)"|'([^']*)'|([^\s"'<
  * new live id, leave a blank line inside a tag or change the Markdown around it, and a `data-id` is never an anchor
  * target. Nothing about tags, quotes, code, comments or blocks is judged: an assigned id written anywhere (code sample,
  * comment, prose, URL path) is renamed too, and the worst case is a slightly altered sample, never a second element
- * carrying a server anchor. Limits: named character references in an id are not decoded, and a URL query key is not
+ * carrying a server anchor. Limits: of the named character references only those for `.`, `_` and `-` are decoded (numeric ones, zero-padded or not, are), and a URL query key is not
  * an attribute (`?id=`, `&id=`, `#id=`) and is left alone.
  */
 export function neutraliseAssignedIds(text: string, assigned: ReadonlySet<string>): string {
@@ -293,14 +294,21 @@ const heading = (p: DocPart): string => (p.name === p.loc || p.name.startsWith(`
 function shownBody(p: DocPart, shift: boolean, links: ReadonlyMap<string, LinkResolution>, anchors: ReadonlyMap<string, string>, assigned: ReadonlySet<string>): string | null {
   if (p.isPlaceholder || p.superseded || p.body == null) return null;
   const { body } = splitAtClosingRule(p.body);
-  const cleaned = neutraliseAssignedIds(renderLinks(cleanBody(body, shift), links, anchors), assigned);
+  const cleaned = renderLinks(cleanBody(body, shift), links, anchors);
   return cleaned === '' ? null : cleaned;
 }
 
 /** The `YYYY-MM-DDTHH:MMZ` form of the render time. */
 const renderedStamp = (d: Date): string => `${d.toISOString().slice(0, 16)}Z`;
 
-export function renderSpecDocument(input: DocInput): string {
+/** Marks where the server writes its own `<a id>`; authored NUL is replaced by U+FFFD on the way in (as CommonMark does), so no authored text can forge one. */
+const ANCHOR_MARK = '\u0000';
+const ANCHOR_PLACEHOLDER = /\u0000([^\u0000]*)\u0000/g;
+const noNul = (t: string): string => t.replace(/\u0000/g, '\uFFFD');
+const cleanPart = (p: DocPart): DocPart => ({ ...p, loc: noNul(p.loc), name: noNul(p.name), body: p.body == null ? null : noNul(p.body) });
+
+export function renderSpecDocument(rawInput: DocInput): string {
+  const input: DocInput = { ...rawInput, memory: noNul(rawInput.memory), feature: cleanPart(rawInput.feature), parts: rawInput.parts.map(cleanPart) };
   const { feature, parts, links } = input;
   const anchors = assignAnchors(inDocumentOrder(parts));
   const assigned: ReadonlySet<string> = new Set(anchors.values());
@@ -317,7 +325,7 @@ export function renderSpecDocument(input: DocInput): string {
   ].join(' · ');
 
   const blocks: string[] = [
-    `# ${neutraliseAssignedIds(heading(feature), assigned)}\n\n${input.memory} · rendered ${renderedStamp(input.renderedAt)}\n\nReadiness: ${readiness}`,
+    `# ${heading(feature)}\n\n${input.memory} · rendered ${renderedStamp(input.renderedAt)}\n\nReadiness: ${readiness}`,
   ];
   if (feature.isPlaceholder) blocks.push('Placeholder.');
   else {
@@ -330,7 +338,8 @@ export function renderSpecDocument(input: DocInput): string {
     if (members.length === 0) continue;
     blocks.push(`# ${g.heading}`);
     for (const p of members) {
-      const head = `<a id="${anchors.get(p.loc)}"></a>\n\n## ${neutraliseAssignedIds(heading(p), assigned)}\n${stateLine(p)}`;
+      // The server's own anchor is a placeholder here, so the one neutralising pass over the whole document cannot touch it.
+      const head = `${ANCHOR_MARK}${anchors.get(p.loc)}${ANCHOR_MARK}\n\n## ${heading(p)}\n${stateLine(p)}`;
       if (p.superseded) {
         blocks.push(`${head}\n\n${p.supersededBy.length ? `Superseded by ${p.supersededBy.join(', ')}.` : 'Superseded.'}`);
       } else if (p.isPlaceholder) {
@@ -343,8 +352,11 @@ export function renderSpecDocument(input: DocInput): string {
   }
 
   if (!feature.isPlaceholder && feature.body != null) {
-    const tail = neutraliseAssignedIds(renderLinks(trimNewlines(splitAtClosingRule(feature.body).tail), links, anchors), assigned);
+    const tail = renderLinks(trimNewlines(splitAtClosingRule(feature.body).tail), links, anchors);
     if (tail !== '') blocks.push(tail);
   }
-  return `${blocks.join('\n\n')}\n`;
+  // One pass over everything the document shows, so two authored pieces that join across a blank line cannot form an id
+  // that neither held alone (a part body ending `<pre id` and a Feature tail starting `="X">`); then the anchors go in.
+  const text = neutraliseAssignedIds(`${blocks.join('\n\n')}\n`, assigned);
+  return text.replace(ANCHOR_PLACEHOLDER, (_all, anchor: string) => `<a id="${anchor}"></a>`);
 }

@@ -128,6 +128,24 @@ describe('#4512 review probes: no live assigned id', () => {
     expect(run('<a id="fx&#0000000045;110-a">')).toBe('<a data-id="fx&#0000000045;110-a">');
     expect(live('<a id="fx&#0000045;110-a"> <a id="fx&#x00002D;110-a">')).toBe(false);
   });
+  it('H1 (local full): named references for . _ - and a long zero padding decode before the match', () => {
+    const named = new Set(['fx-110-a.b_c']);
+    const r = (t: string): string => neutraliseAssignedIds(t, named);
+    expect(r('<a id="fx-110-a&period;b&lowbar;c">')).toBe('<a data-id="fx-110-a&period;b&lowbar;c">');
+    expect(r('<a id="fx&hyphen;110&dash;a.b&UnderBar;c">')).toBe('<a data-id="fx&hyphen;110&dash;a.b&UnderBar;c">');
+    expect(r('<a id="fx&#00000045;110-a.b_c">')).toBe('<a data-id="fx&#00000045;110-a.b_c">');
+  });
+  it('H2 (local full): two authored pieces joined by a blank line cannot form a live id between them', () => {
+    const feature = part('fx:110', 'Head.\n\n---\n\n="fx-110-a">tail</pre>', 'Feature: F');
+    const out = renderSpecDocument(doc([part('fx:110:a', 'text <pre id')], feature));
+    expect(count(out, ' id="fx-110-a"')).toBe(1);
+    expect(out).toContain('<pre data-id\n\n="fx-110-a">tail</pre>'.replace('data-id\n\n="fx', 'data-id\n\n="fx'));
+  });
+  it('an authored NUL cannot forge the server anchor mark', () => {
+    const out = renderSpecDocument(doc([part('fx:110:a', 'x \u0000forged\u0000 y')]));
+    expect(out).not.toContain('<a id="forged">');
+    expect(out).toContain('x \uFFFDforged\uFFFD y');
+  });
   it('F5 (blind full): an entity-encoded query separator is not an attribute', () => {
     expect(run('see https://x.test/p?a=1&amp;id=fx-110-a now')).toBe('see https://x.test/p?a=1&amp;id=fx-110-a now');
   });
