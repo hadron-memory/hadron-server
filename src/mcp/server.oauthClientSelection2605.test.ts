@@ -245,6 +245,28 @@ describe('#2605 — the per-user fallback, OAuth callers only', () => {
     expect({ appId: own.appId, memoryId: own.memoryId }).toEqual({ appId: appB.id, memoryId: null });
   });
 
+  it('concurrent first opens of one new OAuth client all start from the copy (the lost race re-reads it)', async () => {
+    // Several opens of a client with no row race to create its copy; the unique (user, client key) keeps one, and
+    // every loser must read that copy rather than come up with nothing.
+    const desktop = await mintKey(userA.id, 'oauth:dcr_desktop');
+    await select(desktop, appA);
+    for (let round = 0; round < 5; round++) {
+      const phone = await mintKey(userA.id, `oauth:dcr_phone_${round}`);
+      const texts = await Promise.all(Array.from({ length: 6 }, () => scopeOnReconnect(phone)));
+      for (const text of texts) expect(text).toContain(appA.urn);
+    }
+  });
+
+  it('a copied App the user can no longer reach is not restored to the client that adopts it', async () => {
+    const desktop = await mintKey(userA.id, 'oauth:dcr_desktop');
+    await select(desktop, appA);
+    // Access to App A goes: its AppMember row, and the org membership that could also make the user a participant.
+    await db.appMember.deleteMany({ where: { appId: appA.id, userId: userA.id } });
+    await db.orgMember.updateMany({ where: { userId: userA.id }, data: { deletedAt: new Date() } });
+    const phone = await mintKey(userA.id, 'oauth:dcr_phone');
+    expect(await scopeOnReconnect(phone)).not.toContain(appA.urn);
+  });
+
   it("another user's OAuth client never starts from this user's selection", async () => {
     const a = await mintKey(userA.id, 'oauth:dcr_desktop');
     const b = await mintKey(userB.id, 'oauth:dcr_phone');
