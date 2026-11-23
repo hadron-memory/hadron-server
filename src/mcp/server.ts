@@ -2745,8 +2745,10 @@ export function createMcpServerInstance(
       }
       const cbIndex = args.length - 1;
       const callback = args[cbIndex] as ToolCallback;
-      // The parameter shape is the first plain object after the name (a
-      // description string may precede it; annotations may follow it).
+      // The parameter shape is the first plain object after the name. Since SDK
+      // 2.x (#2605) the only accepted form is (name, description, shape,
+      // handler): registerLegacyTool refuses any other at registration, so a
+      // tool that adds annotations fails at boot until the shim learns them.
       const shapeIndex = args.findIndex((a, i) => i > 0 && i < cbIndex && typeof a === 'object' && a !== null);
       if (shapeIndex < 0) {
         throw new Error(`#1701: tool ${name} is gated as a writer but declares no parameter shape to carry session`);

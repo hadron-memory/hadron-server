@@ -151,6 +151,10 @@ describe('#2260 per-session state stays per-session', () => {
       }
     }
     expect(unshared, 'fields rebuilt per instance (keep any that depend on session state inline, and list them in the PR)').toEqual([]);
+    // #2605 (SDK 2.x): the `z.object` wrapping each shape is shared too (objectSchemaFor's cache, ./hadronMcpServer.ts),
+    // not rebuilt per tool per instance.
+    const unsharedObjects = names.filter((n) => regB[n].inputSchema !== regA[n].inputSchema);
+    expect(unsharedObjects, 'object schemas rebuilt per instance').toEqual([]);
 
     // Snapshot the whole shared graph (JSON Schema covers nested definitions, defaults and bounds), drive both
     // instances through registration + real invocations, and compare again.
