@@ -1081,7 +1081,7 @@ export const nodeQueries = {
         }
         case 'agenttask': {
           // #3878 (hrn:node:hadronmemory.com:specs:cor:urn:010:01; ruling 0278): hrn:agenttask:<root>:<app-slug>:<handle>,
-          // the URN AgentTask.urn emits (handle in lower case), read in either case. The leaf is the HANDLE only: the
+          // the URN AgentTask.urn emits (handle in lower case); the HANDLE is read in either case, the App part as written. The leaf is the HANDLE only: the
           // task-id leaf was never built and no qualified task-id URN resolves (cor:urn:010:01), so the wider task
           // reference form (targetHasKindForm) is not inherited. The App is resolved by reference, so a renamed App's
           // old spelling still resolves; then Query.agentTask's own gate decides (withReadableTask: a participant, the
@@ -1090,6 +1090,8 @@ export const nodeQueries = {
           try {
             const parsed = parseUrnV2(baseUrn); // fixed 'agenttask' arity: [app-slug, leaf]
             const leaf = parseTaskHandle(parsed.segments[1]);
+            // Deliberate guard: a single URN segment cannot carry the colon an App-qualified handle needs, so
+            // appUrn is null here today; refuse anything else rather than trust that.
             if (!leaf || leaf.appUrn !== null) return null;
             qualified = `hrn:agenttask:${parsed.root}:${parsed.segments[0]!}:${leaf.handle}`;
           } catch (error) {
@@ -1101,7 +1103,7 @@ export const nodeQueries = {
               ctx,
               qualified,
               async (_c, { task, app }) => ({ kind: 'agenttask', id: task.id, organizationId: app.organizationId }),
-              true,
+              true, // allowRun: a run in the task's own App may read it
             );
           } catch (error) {
             // A name-resolution outcome on the App reference is the uniform refusal; a fault propagates (#2975).
