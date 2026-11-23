@@ -15,7 +15,7 @@ import { sessionKeyCache } from './sessionKeyCache.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
 import type { AuthContext } from '../middleware/auth.js';
-import { resumableOwnWorkerIds } from './teamAttention.js';
+import { resumableOwnWorkerIds } from './ownWorkerSessions.js';
 
 vi.mock('./bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -125,6 +125,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  delete process.env.WORKER_PROOF_TOKEN_SECRET;
   delete process.env.TEAM_ATTENTION_TOKEN_SECRET;
   sessionKeyCache.clear();
 });
@@ -531,7 +532,7 @@ describe('worker session reads and mark-read (resolver level; was the MCP parity
     const impersonationSessionId = '00000000000000000000000000004507';
     const impersonation = { orgId: org.id, actorUserId: otherUser.id, sessionId: impersonationSessionId, expiresAt: new Date(Date.now() + 60_000) };
     // Pin the specific resolvePilotApp guard as well as the observable refusal below.
-    const source = readFileSync(new URL('./teamAttention.ts', import.meta.url), 'utf8');
+    const source = readFileSync(new URL('./ownWorkerSessions.ts', import.meta.url), 'utf8');
     const pilotGuard = source.slice(source.indexOf('async function resolvePilotApp('), source.indexOf('let id:', source.indexOf('async function resolvePilotApp(')));
     expect(pilotGuard).toMatch(/if\s*\(\s*!ctx\.userId\s*\|\|\s*ctx\.impersonation\s*\)\s*fail\([^\n]*'FORBIDDEN'/);
     await expect(M.markOwnTeamChatRead({}, args, userCtx({ impersonation })))

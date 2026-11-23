@@ -422,7 +422,7 @@ import {
   markOwnTeamChatRead,
   maybeAdvanceOwnChannelRead,
   resumableOwnWorkerIds,
-} from '../lib/teamAttention.js';
+} from '../lib/ownWorkerSessions.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import { edgeDisplayOrder, edgeRunOrder } from '../lib/edgeOrder.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';

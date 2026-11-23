@@ -123,7 +123,7 @@ import {
   toCandidates,
   writeResumeClaim,
 } from '../../../lib/resumeClaims.js';
-import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from '../../../lib/teamAttention.js';
+import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from '../../../lib/ownWorkerSessions.js';
 import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';

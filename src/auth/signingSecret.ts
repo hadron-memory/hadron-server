@@ -2,8 +2,8 @@
  * #421: the production strength guard for `JWT_SECRET`.
  *
  * `JWT_SECRET` signs every sign-in token and webhook platform token, and it
- * is the fallback for the team-attention HMAC signer
- * (`TEAM_ATTENTION_TOKEN_SECRET`), the OAuth CSRF HMAC (`CSRF_SECRET`) and
+ * is the fallback for the worker wake/batch proof HMAC signer
+ * (`WORKER_PROOF_TOKEN_SECRET`, or its pre-#4509 name `TEAM_ATTENTION_TOKEN_SECRET`), the OAuth CSRF HMAC (`CSRF_SECRET`) and
  * the team-chat monitor checkpoints. A weak value makes all of them
  * forgeable, so production refuses to boot without a strong one. Checking
  * `JWT_SECRET` itself covers every fallback: whichever consumer falls back,
