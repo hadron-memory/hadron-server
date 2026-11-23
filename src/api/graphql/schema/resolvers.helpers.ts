@@ -1207,7 +1207,6 @@ export async function filterReadableMemoryRecords<T extends Parameters<typeof ca
  * adding a field here without selecting it, or selecting one the gate does not
  * read, fails type-checking; a caller that spreads the constant into its
  * Prisma `select` can never leave a gate field out and fail the gate OPEN.
- * The gate does not read `sharedMemoryOfAgentId` (#4905 F1).
  */
 export type MemoryRecordGateRow = {
   id: string;

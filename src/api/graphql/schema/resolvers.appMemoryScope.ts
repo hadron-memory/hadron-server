@@ -289,29 +289,35 @@ export async function appMemoryScopePage(
 ): Promise<{ items: AppScopedMemoryRow[]; total: number }> {
   const scope = await resolveAppNodeScope(ctx, appRef);
   if (!scope) return { items: [], total: 0 };
-  // The order key only: the scope's ids with their URNs. Everything else is
-  // fetched for the PAGE's ids below, so a wide scope does not read every
-  // description and gate field to return one page (#4905 F2).
+  // The order key only: the scope's ids with their URNs, loaded and sorted in
+  // full for each page request (pagination is not pushed to the database), but
+  // without descriptions or gate fields, which are fetched for the PAGE's ids
+  // below (#4905 F2). The sort is by URN with the id as a tie-break, so equal
+  // keys cannot reorder between requests.
   const keys = await ctx.db.memory.findMany({
     where: { id: { in: [...scope.sources.keys()] } },
     select: { id: true, urn: true },
   });
   const ordered = keys
     .map((m) => ({ id: m.id, memoryUrn: safeCanonicalUrn('memory', m.urn) }))
-    .sort((a, b) => (a.memoryUrn < b.memoryUrn ? -1 : a.memoryUrn > b.memoryUrn ? 1 : 0));
+    .sort((a, b) => (a.memoryUrn < b.memoryUrn ? -1 : a.memoryUrn > b.memoryUrn ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const skip = Math.max(0, offset ?? 0);
   const pageKeys = ordered.slice(skip, skip + clampListTake(limit));
+  if (pageKeys.length === 0) return { items: [], total: ordered.length };
   const pageRows = await ctx.db.memory.findMany({
     where: { id: { in: pageKeys.map((k) => k.id) } },
-    // The record gate's whole field list comes from ONE shared constant (an
-    // omitted gate field can fail the gate OPEN, #1104, and now fails
-    // type-checking instead), plus what the row carries and `deletedAt`:
-    // `Query.memory` answers null for a soft-deleted record, so its
-    // description is withheld too.
+    // The record gate's whole field list comes from ONE shared constant, so a
+    // gate field omitted by a caller that spreads it fails type-checking
+    // rather than failing the gate open (#1104). A caller that hand-writes its
+    // own select does not get that protection. `deletedAt` is added because
+    // `Query.memory` answers null for a soft-deleted record: its description
+    // is withheld too.
     select: { ...MEMORY_RECORD_GATE_SELECT, name: true, description: true, deletedAt: true },
   });
   const byId = new Map(pageRows.map((m) => [m.id, m]));
-  // A row hard-deleted between the two reads has nothing to show: dropped.
+  // A row hard-deleted between the two reads has nothing to show and is
+  // dropped, so a page can come back shorter than `limit` while `total` still
+  // counts it: a short page is not an end marker, `total` and `offset` are.
   const page = pageKeys.flatMap((k) => {
     const m = byId.get(k.id);
     return m ? [{ ...m, memoryUrn: k.memoryUrn }] : [];
@@ -322,17 +328,20 @@ export async function appMemoryScopePage(
     (await filterReadableMemoryRecords(ctx, page.filter((m) => !m.deletedAt))).map((m) => m.id),
   );
   // `viewerCanWrite` is the exact createNode gate per row (no batched form
-  // exists); the rows run together, like the record gate above.
-  const writable = await Promise.all(page.map((m) => viewerCanWrite(ctx, m.id)));
-  const items: AppScopedMemoryRow[] = page.map((m, i) => ({
-    memoryId: m.id,
-    memoryUrn: m.memoryUrn,
-    name: m.name,
-    class: m.class,
-    description: readableIds.has(m.id) ? m.description : null,
-    sources: scope.sources.get(m.id)!,
-    viewerCanWrite: writable[i]!,
-  }));
+  // exists), run one row at a time as before: the first failure in page order
+  // fails the field, and a page never queues a burst on the pool.
+  const items: AppScopedMemoryRow[] = [];
+  for (const m of page) {
+    items.push({
+      memoryId: m.id,
+      memoryUrn: m.memoryUrn,
+      name: m.name,
+      class: m.class,
+      description: readableIds.has(m.id) ? m.description : null,
+      sources: scope.sources.get(m.id)!,
+      viewerCanWrite: await viewerCanWrite(ctx, m.id),
+    });
+  }
   return { items, total: ordered.length };
 }
 
