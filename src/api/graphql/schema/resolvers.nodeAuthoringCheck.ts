@@ -31,7 +31,7 @@ import { isMemoryReadableCached } from './resolvers.helpers.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { mayRecordIn } from './resolvers.validationTaskSet.js';
 
-interface NodeAuthoringCheckInput {
+export interface NodeAuthoringCheckInput {
   ref?: string | null;
   memoryId?: string | null;
   loc?: string | null;
