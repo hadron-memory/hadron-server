@@ -2297,7 +2297,7 @@ export const nodeQueries = {
        * still short it is flagged `stopped_early` (cor:api:090:04 Proposed: "whenever the page is incomplete"; Vera, team chat
        * #140476), never returned as a silently short page.
        */
-      const rankedPage = async (pageN: number) => {
+      const rankedPage = async (pageN: number, certifiedPrefixOnly = false) => {
         const stats = { dropped: 0, pageCount: 0, consumed: 0 };
         if (effectiveMode === 'vector') {
           const vecHits = await runVector((limit, onWindow) => provider.vectorSearch({ ...vectorOpts, limit, onWindow }), pageN);
@@ -2313,7 +2313,15 @@ export const nodeQueries = {
         // separately on `vector.similarity` (simById below).
         const { fused, vecHits, exhausted } = await hybridRanking(pageN);
         const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
-        const built = await buildResult(fused.map((r) => ({ nodeId: r.nodeId, score: r.score })), simById, null, mergeDegraded(null), stats);
+        // #4938 F6 (Elena, BLIND on #4928 at 5ad0665b): the re-ranking pages ONLY the prefix it was certified for. Past
+        // `pageN` the fused order is not certified, so a re-ranked page that hydration drops would fill from there could hold
+        // the wrong rows, or the right rows in the wrong order, which stopped_early (a SHORT page) does not describe. There
+        // is no further re-ranking to catch it, so such a page is left short and flagged instead. (A first attempt that fills
+        // past its depth is already caught: it triggers the re-ranking and is never served in its place, BLIND F1.) With
+        // BOTH legs exhausted every fused term is exact, so the whole list is the true order and nothing is cut: cutting it
+        // there would leave a silently short page (incomplete() never flags an exhausted ranking).
+        const ranked = certifiedPrefixOnly && !exhausted ? fused.slice(0, pageN) : fused;
+        const built = await buildResult(ranked.map((r) => ({ nodeId: r.nodeId, score: r.score })), simById, null, mergeDegraded(null), stats);
         return { built, stats, exhausted };
       };
       /**
@@ -2330,7 +2338,7 @@ export const nodeQueries = {
         rankingIncomplete = false; // the second attempt's ranking replaces the first's, flags included
         // BLIND N1 (Elena): deep enough to cover where the first page actually reached, not only page + the drops counted.
         const depth = Math.max(page + first.stats.dropped, first.stats.consumed);
-        attempt = await rankedPage(depth);
+        attempt = await rankedPage(depth, true);
         if (incomplete(attempt, depth)) rankingIncomplete = true;
         // LOCAL F1 (Abigail): a re-ranking that stopped early (e.g. it started past the request deadline) and came back with
         // a smaller page must not replace the usable first page; keep the first, flagged incomplete as it already was.
