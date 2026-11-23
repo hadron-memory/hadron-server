@@ -10,8 +10,6 @@
 import { GraphQLError } from 'graphql';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
-import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
-import { UrnNotQualifiedError } from '../../../lib/urn.js';
 import { isMemoryReadableCached, type Context } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveGrantPerson, resolveGrantReader } from './resolvers.grant.js';

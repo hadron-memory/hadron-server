@@ -83,17 +83,18 @@ export async function withInstallMemory<T>(
   if (!ctx.userId || isRunPrincipal(ctx)) throw memoryWriteForbidden();
   // #4893: the APP arm folds every ref-resolution failure into the door's own unknown-App
   // answer (the participant gates below already collapse a missing App and one this caller
-  // may not reach); the Agent arm keeps its typed miss — its ref is the caller's own Agent.
-  // resolveInstallTarget itself stays raw for its other callers.
+  // may not reach); the Agent arm keeps its typed miss and its typed parse contract — its
+  // ref is the caller's own Agent, and folding the agent arm here would answer "App not
+  // found" for a reachable, managed App (Elena F1 on #4948: one try around both arms did
+  // exactly that). resolveInstallTarget itself stays raw for its other callers.
   let appId: string;
-  let agentId: string;
   try {
     appId = (await resolveAppRef(ctx.db, target.appRef)).id;
-    agentId = (await resolveAgentRef(ctx.db, target.agentRef)).id;
   } catch (e) {
     if (isAppRefResolutionFailure(e)) throw new AppNotFoundError(target.appRef);
     throw e;
   }
+  const agentId = (await resolveAgentRef(ctx.db, target.agentRef)).id;
   const app = await ctx.db.app.findUnique({
     where: { id: appId },
     select: { id: true, organizationId: true, ownerUserId: true },

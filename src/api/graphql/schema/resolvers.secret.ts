@@ -50,6 +50,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { admitOperationRate } from '../../../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import {
@@ -640,8 +641,15 @@ export const secretQueries = {
     let ownerId: string;
     try {
       ownerId = await resolveSecretOwnerRef(ctx, ownerType, args.ownerRef);
-    } catch {
-      return { items: [], total: 0 };
+    } catch (e) {
+      // #4893/#2975: a name-resolution failure on any owner arm — typed miss, malformed or
+      // ambiguous ref — is the empty page, as is a typed refusal an arm already folded (the App
+      // arm's one denial for missing-and-not-yours). A database fault is none of those: the bare
+      // catch that used to swallow it made a dead database indistinguishable from an empty owner.
+      if (e instanceof GraphQLError || refNamesNothing(e, { ambiguousNamesNothing: true })) {
+        return { items: [], total: 0 };
+      }
+      throw e;
     }
     if (!(await canSeeSecretOwner(ctx, ownerType, ownerId))) return { items: [], total: 0 };
     if (ownerType === 'app') await admitOperationRate(ctx, ctx.db, 'OTHER_READS', appRateIdentity(ctx));

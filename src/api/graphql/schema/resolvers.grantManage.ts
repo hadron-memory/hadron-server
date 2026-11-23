@@ -35,8 +35,6 @@ import type { ActAdmission, ActInstruction } from '../../../lib/auth/instructedA
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
-import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
-import { UrnNotQualifiedError } from '../../../lib/urn.js';
 import { getGrantForManager, getGrantForWorker, listGrantsForManager } from '../../../lib/grants/read.js';
 import { endGrant, GrantManageRefusal, type GrantEnder, type LockedGrant } from '../../../lib/grants/manage.js';
 import { GrantRunGone } from '../../../lib/grants/create.js';

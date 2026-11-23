@@ -8,7 +8,7 @@ import { runAuthContext, isRunPrincipal } from '../../../lib/auth/runPrincipal.j
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { workerBoundActor } from '../../../lib/grants/triggerGrant.js';
-import { AppNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
