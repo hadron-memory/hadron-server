@@ -15,7 +15,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-import { METRICS_IDS_CAP } from '../../../lib/agentTasks/teamMetrics.js';
+import { METRICS_IDS_CAP, attachMetricNames } from '../../../lib/agentTasks/teamMetrics.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
@@ -130,7 +130,7 @@ describe('#4992 every drilled id carries its name, same call', () => {
     expect(nameOf(d.flow.completed, f1.id)).toBe('Gamma finished');
     expect(nameOf(d.flow.started, t1.id)).toBe('Alpha task');
     expect(nameOf(d.workers.active, w.dev1)).toBe('Dev1');
-    expect(nameOf(d.workers.idle, w.ada)).toBe('Ada');
+    expect(nameOf(d.workers.idle, w.bo)).toBe('Bo');
     for (const c of allCounts(d)) {
       expect(c.named.map((n) => n.id)).toEqual(c.ids);
       expect(c.named.every((n) => typeof n.name === 'string' && n.name.length > 0)).toBe(true);
@@ -152,7 +152,7 @@ describe('#4992 every drilled id carries its name, same call', () => {
       expect(d.startedOwned).toBeNull();
       expect(d.projects).toBeNull();
       expect(d.flow).toBeNull();
-      expect(nameOf(d.workers.idle, w.ada)).toBe('Ada');
+      expect(nameOf(d.workers.idle, w.bo)).toBe('Bo');
       expect(JSON.stringify(d)).not.toContain('Secret task title');
     } finally { spy.mockRestore(); }
   });
@@ -173,11 +173,8 @@ describe('#4992 every drilled id carries its name, same call', () => {
     expect(json).not.toContain('Stranger task');
   });
   it('a count cut at 200 ids names exactly those 200, with the exact total and truncated unchanged', async () => {
-    const o = w.ada;
-    await db.agentTask.createMany({ data: Array.from({ length: METRICS_IDS_CAP + 5 }, (_, i) => ({
-      id: generateId(), appId, title: `Bulk ${i}`, ownerWorkerId: o, status: 'started', startedAt: ago(HOUR), source: 'https://example.test/x',
-      createdAt: new Date(Date.now() - 10 * HOUR + i * 1000),
-    })) });
+    const rows = Array.from({ length: METRICS_IDS_CAP + 5 }, (_, i) => ({ id: generateId(), appId, title: `Bulk ${i}`, ownerWorkerId: w.ada, assigneeWorkerId: w.dev1, assignedAt: ago(HOUR), status: 'started', startedAt: ago(HOUR), source: `https://example.test/${i}`, createdAt: new Date(Date.now() - 10 * HOUR + i * 1000) }));
+    await db.agentTask.createMany({ data: rows });
     const all = (await ok()).startedOwned.all as Cnt;
     expect(all.total).toBe(METRICS_IDS_CAP + 5);
     expect(all.truncated).toBe(true);
@@ -185,6 +182,26 @@ describe('#4992 every drilled id carries its name, same call', () => {
     expect(all.named).toHaveLength(METRICS_IDS_CAP);
     expect(all.named.map((n) => n.id)).toEqual(all.ids);
     expect(all.named[0].name).toBe('Bulk 0');
+  });
+});
+
+describe('#4992 the name read is bound to the App', () => {
+  it("an id of another App (a task or a worker) reads as a missing one: its name stays null, and a same-App id beside it is named", async () => {
+    const stranger = await worker('Stranger Worker', { app: otherAppId });
+    const foreign = await task({ owner: stranger, assignee: stranger, app: otherAppId, title: 'Stranger task' });
+    const mine = await task({ owner: w.ada, assignee: w.dev1, title: 'Mine' });
+    const mk = (ids: string[]): Cnt => ({ total: ids.length, ids, truncated: false, named: ids.map((id) => ({ id, name: null })) });
+    const tasks = mk([foreign.id, mine.id]);
+    const workers = mk([stranger, w.dev1]);
+    await attachMetricNames(db, appId, { tasks: [tasks], workers: [workers] });
+    expect(tasks.named).toEqual([{ id: foreign.id, name: null }, { id: mine.id, name: 'Mine' }]);
+    expect(workers.named).toEqual([{ id: stranger, name: null }, { id: w.dev1, name: 'Dev1' }]);
+  });
+  it('a report that is not passed is never named, whatever ids it holds (the gate decides what is passed)', async () => {
+    const t = await task({ owner: w.ada, assignee: w.dev1, title: 'Not passed' });
+    const c: Cnt = { total: 1, ids: [t.id], truncated: false, named: [{ id: t.id, name: null }] };
+    await attachMetricNames(db, appId, { workers: [] });
+    expect(c.named[0].name).toBeNull();
   });
 });
 

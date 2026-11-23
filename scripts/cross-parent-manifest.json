@@ -315,6 +315,7 @@
     "TeamUtilization": "value",
     "TeamMetrics": "value",
     "TeamMetricsCount": "value",
+    "TeamMetricsNamedId": "value",
     "TeamMetricsWindow": "value",
     "TeamMetricsProject": "value",
     "TeamMetricsProjectGroup": "value",
