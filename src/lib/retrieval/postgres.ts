@@ -235,6 +235,11 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
     // #4938 N3: a caller-given budget bounds the ranking statement the way regexSearch's does (a transaction-local
     // statement_timeout on the statement's own connection). The querytree() probe above reads no table.
     const budget = opts.statementTimeoutMs;
+    // A budget Postgres cannot take (NaN, Infinity, past INT_MAX ms) would fail the SET LOCAL as a syntax or range error,
+    // which no caller reads as a cut: refuse it loudly here instead (the one caller passes a bounded, positive remainder).
+    if (budget != null && !(Number.isFinite(budget) && budget <= 2_147_483_647)) {
+      throw new RangeError(`lexicalSearch: statementTimeoutMs must be a finite number of milliseconds up to 2147483647`);
+    }
     const rows = budget == null
       ? await opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(sql, ...params)
       : (await opts.db.$transaction([

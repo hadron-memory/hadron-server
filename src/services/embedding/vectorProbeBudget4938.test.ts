@@ -8,9 +8,9 @@
  * deadline. The probe now runs inside the budgeted transaction, so the deadline bounds its wait like every other vector
  * statement, and a request whose deadline already passed never takes a connection to probe.
  */
-import { describe, it, expect, afterEach } from 'vitest';
-import { PrismaClient } from '../../generated/prisma/index.js';
-import { setIterativeScanSupportForTests, vectorSearchNodes } from './vectors.js';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { PrismaClient, Prisma } from '../../generated/prisma/index.js';
+import { setIterativeScanSupportForTests, setIterativeScanProbeSqlForTests, vectorSearchNodes } from './vectors.js';
 
 const DIM = 768;
 const q = Array.from({ length: DIM }, (_, i) => (i === 1 ? 1 : 0));
@@ -82,6 +82,78 @@ describe('#4938 N2 — the version probe waits under the request deadline, not p
       expect(Date.now() - t0).toBeLessThan(200);
       await held;
     } finally {
+      await client.$disconnect();
+    }
+  }, 20000);
+});
+
+/**
+ * #4938 BLIND P2 (Billie, at 548c0cb9): the probe now runs INSIDE the budgeted transaction, and its failure is caught and
+ * answered "exact scan". But a statement that fails inside a Postgres transaction aborts it (25P02): without a savepoint
+ * the exact statement after the caught failure is refused, and the search throws instead of falling back.
+ */
+describe('#4938 BLIND P2 — a probe that fails inside the transaction leaves it usable', () => {
+  afterEach(() => { setIterativeScanProbeSqlForTests(null); });
+
+  it('a probe raising a SQL error falls back to the exact scan in the same transaction (red: 25P02, the search throws)', async () => {
+    const client = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL! });
+    try {
+      setIterativeScanSupportForTests(null); // the real probe path, uncached
+      setIterativeScanProbeSqlForTests(Prisma.sql`SELECT (1 / 0)::text AS extversion`); // a real SQL error (22012)
+      let w: { exhausted: boolean; stoppedEarly?: boolean } | undefined;
+      const hits = await vectorSearchNodes(client, {
+        memoryIds: ['00000000000000000000000000000000'], queryEmbedding: q, limit: 10,
+        onWindow: (x) => { w = x; },
+      });
+      expect(hits).toEqual([]);
+      expect(w).toEqual({ exhausted: true, stoppedEarly: false });
+    } finally {
+      await client.$disconnect();
+    }
+  }, 20000);
+
+  it('a failed probe is not cached: the next search probes again (and a healthy probe still answers)', async () => {
+    const client = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL! });
+    try {
+      setIterativeScanSupportForTests(null);
+      setIterativeScanProbeSqlForTests(Prisma.sql`SELECT (1 / 0)::text AS extversion`);
+      await vectorSearchNodes(client, { memoryIds: ['00000000000000000000000000000000'], queryEmbedding: q, limit: 10 });
+      setIterativeScanProbeSqlForTests(null);
+      let w: { exhausted: boolean; stoppedEarly?: boolean } | undefined;
+      const hits = await vectorSearchNodes(client, {
+        memoryIds: ['00000000000000000000000000000000'], queryEmbedding: q, limit: 10, onWindow: (x) => { w = x; },
+      });
+      expect(hits).toEqual([]);
+      expect(w?.stoppedEarly ?? false).toBe(false);
+    } finally {
+      await client.$disconnect();
+    }
+  }, 20000);
+});
+
+/**
+ * #4938 LOCAL P3-1 (Beryl, at 548c0cb9): the probe must run on the TRANSACTION's client. Probed on the pool instead, from
+ * inside the transaction, it waits for a second connection: on a one-connection pool that is the one the transaction
+ * holds, so the probe waits pool_timeout (3 s here) and fails. The held-pool pins above cannot see this (the transaction
+ * itself never gets a connection there, so the probe never runs).
+ */
+describe('#4938 LOCAL P3-1 — the probe runs on the transaction client', () => {
+  it('a cold probe on a free one-connection pool answers inside the transaction, without a second connection (red: ~pool_timeout)', async () => {
+    const client = onePool();
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((m: unknown) => { errors.push(String(m)); });
+    try {
+      await client.$queryRaw`SELECT 1`;
+      setIterativeScanSupportForTests(null); // cold: the real probe runs in this search
+      const t0 = Date.now();
+      const hits = await vectorSearchNodes(client, {
+        memoryIds: ['00000000000000000000000000000000'], queryEmbedding: q, limit: 10, deadlineAt: Date.now() + 10_000,
+      });
+      expect(hits).toEqual([]);
+      expect(Date.now() - t0).toBeLessThan(2000); // pool_timeout is 3000
+      expect(errors.filter((e) => e.includes('iterative_scan_probe_failed'))).toEqual([]);
+    } finally {
+      spy.mockRestore();
       await client.$disconnect();
     }
   }, 20000);

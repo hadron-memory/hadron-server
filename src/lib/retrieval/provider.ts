@@ -134,9 +134,11 @@ export interface LexicalSearchOpts {
   offset?: number;
   limit: number;
   /**
-   * #4938 N3 — a statement budget (ms) for the ranking statement, applied as a transaction-local `statement_timeout` on
-   * its own connection (it never reaches a pooled session). A cancelled statement throws the statement-timeout shape;
-   * the caller decides what a cut means. Omit = no budget of its own (the default, unchanged).
+   * #4938 N3 — a statement budget (ms) for the ranking statement, applied as a transaction-local `statement_timeout`
+   * (it dies with the transaction, so it never reaches a pooled session). It bounds the STATEMENT only: the wait for a
+   * pooled connection before it is Prisma's ordinary `pool_timeout`, not this budget. A cancelled statement throws the
+   * statement-timeout shape; the caller decides what a cut means. A finite value up to 2147483647; anything else is
+   * refused with a RangeError. Omit = no budget of its own (the default, unchanged).
    */
   statementTimeoutMs?: number;
 }

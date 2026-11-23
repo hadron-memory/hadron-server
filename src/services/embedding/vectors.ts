@@ -365,22 +365,46 @@ export function setIterativeScanSupportForTests(v: boolean | null): void {
   iterativeScanProbe = null;
 }
 
+const PROBE_SQL = Prisma.sql`SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
+let probeSql: Prisma.Sql = PROBE_SQL;
+/** Test seam (#4938, BLIND P2 at 548c0cb9): replace the probe's statement, e.g. with one that raises a SQL error (null restores it). */
+export function setIterativeScanProbeSqlForTests(sql: Prisma.Sql | null): void {
+  probeSql = sql ?? PROBE_SQL;
+  iterativeScanProbe = null;
+}
+
 /**
  * #2772 — does this database's pgvector support the iterative index scan? Read once per process from
  * `pg_extension`; on an older version (or a failed read) it logs ONE `vector.iterative_scan_unsupported` line and
  * the search uses the exact scan instead, still under the work budget. This never refuses to start anything.
  */
-export function iterativeScanSupported(db: Pick<PrismaClient, '$queryRaw'> | Prisma.TransactionClient): Promise<boolean> {
+export function iterativeScanSupported(
+  db: Pick<PrismaClient, '$queryRaw' | '$executeRaw'> | Prisma.TransactionClient,
+  opts: { inTransaction?: boolean } = {},
+): Promise<boolean> {
   if (iterativeScanOverride != null) {
     if (!iterativeScanOverride) logIterativeUnsupported('stubbed');
     return Promise.resolve(iterativeScanOverride);
   }
   iterativeScanProbe ??= (async () => {
     let version: string | null;
+    // #4938 BLIND P2 (Billie, at 548c0cb9): inside a transaction a failed statement aborts it (25P02), so the caught
+    // failure below would still refuse every statement after it. A SAVEPOINT around the probe lets the catch roll back to
+    // it and leave the caller's transaction usable for the exact scan. Only a cold probe pays for it: a cached answer
+    // never reaches this closure.
+    const inTx = opts.inTransaction === true;
     try {
-      const rows = await db.$queryRaw<{ extversion: string }[]>`SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
+      if (inTx) await db.$executeRaw`SAVEPOINT vector_version_probe`;
+      const rows = await db.$queryRaw<{ extversion: string }[]>(probeSql);
+      if (inTx) await db.$executeRaw`RELEASE SAVEPOINT vector_version_probe`;
       version = rows[0]?.extversion ?? null;
     } catch {
+      if (inTx) {
+        // A rollback that fails too (the connection is gone, or the transaction's own clock ended it) leaves the
+        // transaction unusable: the caller's next statement then fails loudly with the real cause. Never throw from here:
+        // this probe's promise is shared, and another request awaiting it must not inherit this transaction's failure.
+        try { await db.$executeRaw`ROLLBACK TO SAVEPOINT vector_version_probe`; } catch { /* surfaced by the next statement */ }
+      }
       // A failed read says nothing about the version (the database may not be reachable yet at boot): do NOT
       // remember it, so the next search probes again instead of running every query exact until restart.
       iterativeScanProbe = null;
@@ -632,7 +656,7 @@ async function rankUnderBudget<R>(
       // one, which is not cached) waited Prisma's `pool_timeout` (10 s by default) on a saturated pool, whatever the deadline.
       // It runs before any SET LOCAL: with no statement_timeout of its own it cannot be cut mid-transaction (a failed
       // statement would abort the transaction under every statement after it); the transaction's own clock bounds it.
-      const iterative = await iterativeScanSupported(tx);
+      const iterative = await iterativeScanSupported(tx, { inTransaction: true });
       if (iterative) {
         // Set once for the shared transaction, so it is also in force for the exact statement below (BLIND F7): harmless,
         // since that statement ranks a MATERIALIZED CTE with no ORDER BY the HNSW index could serve.
@@ -867,19 +891,6 @@ export interface ChunkHit {
   score: number; // cosine similarity in [0,1]-ish (1 - distance)
 }
 
-/**
- * Spec 033 US2 (T041) — chunk-level vector search returning passages.
- *
- * Returns one row per matching chunk vector (NOT collapsed to node),
- * carrying the locator metadata a RAG consumer needs for
- * context-stuffing: span text + character offset + chunk index + parent
- * node URN (the caller resolves node URN from `nodeId`).
- *
- * Implementation matches embedding-worker.md's "chunk-level" query:
- * ORDER BY <=> cosine-distance LIMIT $candidateK, with the memoryIds +
- * kind='chunk' filter narrowing the index walk. Soft-deleted nodes are
- * filtered via the JOIN, then we truncate to k.
- */
 /** The chunk path's scope: the parts of {@link vectorSearchChunks}' options its eligibility reads. */
 export interface ChunkVectorScope {
   memoryIds: string[];
@@ -915,6 +926,19 @@ export function chunkVectorEligibility(opts: ChunkVectorScope): Prisma.Sql {
     ${tail}`;
 }
 
+/**
+ * Spec 033 US2 (T041) — chunk-level vector search returning passages.
+ *
+ * Returns one row per matching chunk vector (NOT collapsed to node),
+ * carrying the locator metadata a RAG consumer needs for
+ * context-stuffing: span text + character offset + chunk index + parent
+ * node URN (the caller resolves node URN from `nodeId`).
+ *
+ * Implementation matches embedding-worker.md's "chunk-level" query:
+ * ORDER BY <=> cosine-distance LIMIT $candidateK, with the memoryIds +
+ * kind='chunk' filter narrowing the index walk. Soft-deleted nodes are
+ * filtered via the JOIN, then we truncate to k.
+ */
 export async function vectorSearchChunks(
   db: PrismaClient,
   opts: {

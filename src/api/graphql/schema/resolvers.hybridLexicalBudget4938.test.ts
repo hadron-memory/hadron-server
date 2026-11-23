@@ -97,11 +97,24 @@ describe('#4938 N3 — the keyword widening runs under the remaining vector budg
     expect(elapsed).toBeLessThan(2500);
   }, 60_000);
 
-  it('the lexical budget is the statement\'s own: a fast widening under it completes and is not flagged by the budget', async () => {
-    // With a generous budget and the real (unslowed) statement, the widening returns normally: the budget only cuts.
+  it('lexicalSearch with a budget: a fast statement completes, a slow one is cancelled (57014), and the budget never leaks', async () => {
+    // Provider-level, not the resolver: with a generous budget the real (unslowed) statement returns normally (the budget
+    // only cuts), and a slowed one is cancelled by Postgres.
+    const sessionTimeout = async () => (await db.$queryRawUnsafe<{ statement_timeout: string }[]>('SHOW statement_timeout'))[0].statement_timeout;
+    const before = await sessionTimeout();
     const rows = await realLexical({ db, memoryIds: [mem], query: 'body', sort: 'relevance', offset: 0, limit: 50, statementTimeoutMs: 5000 });
     expect(rows).toHaveLength(N);
     await expect(realLexical({ db: slowDb, memoryIds: [mem], query: 'body', sort: 'relevance', offset: 0, limit: 50, statementTimeoutMs: 200 }))
       .rejects.toMatchObject({ meta: expect.objectContaining({ code: '57014' }) });
+    // SET LOCAL dies with its transaction: the pooled session's own setting is unchanged after both (BLIND P3-9 at 548c0cb9).
+    expect(await sessionTimeout()).toBe(before);
+    expect(before).not.toBe('200ms');
+  }, 60_000);
+
+  it('a budget Postgres cannot take is refused loudly before any statement (BLIND P3-2 at 548c0cb9)', async () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648]) {
+      await expect(realLexical({ db, memoryIds: [mem], query: 'body', sort: 'relevance', offset: 0, limit: 5, statementTimeoutMs: bad }))
+        .rejects.toBeInstanceOf(RangeError);
+    }
   }, 60_000);
 });
