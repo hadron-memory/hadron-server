@@ -132,11 +132,58 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 //      already-migrated client whose variables declare `$o: String` or
 //      `String!` now fails VARIABLE VALIDATION on those nine — retyping the
 //      variables to `ID!` is part of the migration, not optional.
+//  Naming rule (#4357 P3-B, in the words of cor:api:140:01 and the ref-param-naming
+//  convention): `ref` when the field names one entity and it is obvious which,
+//  `<entity>Ref` otherwise, so `deleteMemory(ref)` beside `encryptMemory(memoryRef)`
+//  is within the rule. For codegen users (P3-D): `userRef: ID!` takes an id, an
+//  email, a handle or an hrn:user URN.
 // `replaceSubtree.memoryId` is DELIBERATELY unchanged (legacy `String!`): the
 // field exists only so legacy callers reach REPLACE_SUBTREE_RETIRED instead
 // of an unknown-argument error (#4219 blind P2-A).
 // (Chunk A, the memory reads, follows #4136.)
-export const HADRON_SERVER_VERSION = '0.23.0';
+//
+// 0.24.0 — BREAKING (#2027 S11): the attention API is RETIRED. The GraphQL fields
+// `teamAttention` / `teamAttentionPage` / `teamAttentionPreviewPage` /
+// `teamAttentionSwitchoverPreview` and the `confirmTeamAttentionSwitchover`
+// mutation are gone, and with them the `hadron_team_attention*` MCP tools
+// (already wire-disabled by #3082). A router still polling must move to the
+// wake path (`dueWakes` / the CLI's `hadron team wakes`); the explicit
+// `markOwnTeamChatRead` mark and every wake/mark/resume rule it shared a module
+// with are unchanged.
+//
+// 0.25.0 — #4836 (cor:dmo:070:05 Proposed; V58): startSession's `appRef` refusals are
+//      concealed and re-typed. A caller without standing for the named App — a non-member,
+//      an anonymous caller, a malformed/ambiguous ref, or a pure App key naming any other
+//      App — gets ONE answer: APP_NOT_FOUND · "App not found.", byte-identical for a
+//      missing, deleted, uninstalled and existing-but-inaccessible App, echoing no ref and
+//      carrying no appId. Was: BAD_USER_INPUT · "App not found: <ref>" (missing/deleted,
+//      echoing the value), FORBIDDEN (existing, non-member — an existence oracle), the
+//      URN parser's echoing typed errors (malformed), and SESSION_APP_MISMATCH (an App key
+//      naming another App — that code is GONE from this door). A caller with standing
+//      keeps APP_UNINSTALLED by PK, with the appId. `hadron_start_session` (MCP) never
+//      took an appRef, so the MCP tool surface is unchanged.
+//
+// 0.29.0 — #4838 (the other App-ref doors; same rule as 0.25.0): the teamRole write doors
+//      (`createTeamRole` / `updateTeamRole` / `deleteTeamRole`) and the `teamRoles` read
+//      conceal their `appRef` refusals the same way — reach first, state after. A caller
+//      without standing gets the one APP_NOT_FOUND · "App not found." answer for a missing,
+//      deleted, uninstalled (by PK) or existing-but-inaccessible App and for a malformed or
+//      ambiguous ref, echoing no ref and carrying no appId; a participant keeps
+//      APP_UNINSTALLED with the appId, and a member who reaches but may not edit keeps
+//      FORBIDDEN. Was: BAD_USER_INPUT · "App not found: <ref>" for a deleted App (echoing;
+//      reachable only in the resolve-then-read race), APP_UNINSTALLED with the appId
+//      BEFORE any reach decision for an uninstalled App named by PK (an existence and
+//      state oracle), FORBIDDEN for an existing App, and the URN parser's echoing typed
+//      errors for a malformed ref. `createConnectionGrant`'s grantee refusal keeps its
+//      code (BAD_USER_INPUT) and its deliberate existence oracle (a connection owner need
+//      not reach the grantee App) but no longer echoes the ref: "Grantee App not found."
+//      (was "Grantee App not found: '<ref>'."). The three local appNotFound copies
+//      (`agentTask` / `hostOperation` / `hostAssignment`) are untouched.
+//
+//      Why 0.29.0 and not 0.26.0: 0.26.0–0.28.0 are reserved numbers, taken by the
+//      concurrent surface renumbering recorded in team chat #138407 — this entry takes
+//      the next FREE number past them (blind review on #4871 asked).
+export const HADRON_SERVER_VERSION = '0.29.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

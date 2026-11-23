@@ -20,7 +20,7 @@ import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
 import { getMemoryEncryptionInfo } from '../../../lib/nodeCrypto.js';
 import { resolvers, type Context } from './resolvers.js';
-import { maybeAdvanceOwnChannelRead } from '../../../lib/teamAttention.js';
+import { maybeAdvanceOwnChannelRead } from '../../../lib/ownWorkerSessions.js';
 import { recordMentionsWorker } from '../../../lib/mentionsReadResolution.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 

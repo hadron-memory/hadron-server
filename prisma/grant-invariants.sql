@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (20261118100000_grant_use_count_bound) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (today 20261121200000_grant_agent_withdrawal) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -18,8 +18,12 @@
 --     its max_uses), with nothing else moving but updated_at. The caller holds the row FOR UPDATE and writes the USE event;
 --   * it ends ONCE, by revoked_at stamped together with revoked_by, or by its HOLDER going: holder_departed_at is stamped
 --     (NULL to a time, never back) by the AFTER DELETE triggers below on every hard delete of a holder row, and by the
---     deleting code on the soft deletes (an erased person, a retired worker, a deleted agent or App). The first end stands:
---     a row already revoked, departed, expired or spent (an ACTIVATED row past its expiry or at its count) is not stamped (ruling 0259);
+--     deleting code on the soft deletes (an erased person, a retired worker, a deleted agent or App). #4767 (Grants R6):
+--     an agent's own withdrawal through a run names no person, so withdrawn_at (the same instant, on a row never
+--     activated) pairs with revoked_at instead. The first end stands:
+--     a row already revoked, departed, expired or spent (an ACTIVATED row past its expiry or at its count) is not stamped (ruling 0259).
+--     A departure records its CAUSE (holder_departure_reason, #4180) in the same statement, never afterwards; the cause must
+--     fit the holder's kind and what happened to the holder. A stamp with no cause is admitted (the previous image's) and stays so;
 --   * an erased issuer's or requester's link goes: issuer_user_id or requested_by_user_id becomes NULL and the reason stays (cor:acl:140:08), and only when that
 --     person is ERASED (the users row is soft-deleted, or gone), never for a live person;
 --   * along a user merge ALREADY recorded in user_merges (mergeUsers writes that row before it rewrites links; the
@@ -40,9 +44,28 @@ ALTER TABLE grants ADD CONSTRAINT chk_grants_shape CHECK (
   (max_uses IS NULL OR use_count <= max_uses) AND
   version >= 1 AND
   (starts_at IS NULL OR expires_at IS NULL OR starts_at < expires_at) AND
-  (revoked_at IS NULL) = (revoked_by IS NULL) AND
+  -- #4767 (Grants R6): an end names a person, or carries the withdrawal marker, or both (a person's withdrawal) — never
+  -- neither. An agent's withdrawal through a run records no person: withdrawn_at pairs with revoked_at instead; a REVOKE
+  -- still names a person (an end with neither a revoker nor the marker is refused), and a revoker only ever lands on an
+  -- ended row. The marker admits a personless end only on a RUN-MADE row (Rook SEC10 on #4803, defense in depth: the code
+  -- already restricts personless ends to the run door, and the database refuses one on a person's or a worker's request —
+  -- every pre-#4767 withdrawn row has its revoker, so none is refused by this). A marker with no end (withdrawn_at set,
+  -- revoked_at NULL) stays admitted exactly as before #4767: the equal-timestamp line below reads such a row as NULL, a
+  -- CHECK passes on NULL, and the #4001 lifecycle negative control rides that tolerance.
+  (revoked_by IS NULL OR revoked_at IS NOT NULL) AND
+  (revoked_at IS NULL OR revoked_by IS NOT NULL OR (withdrawn_at IS NOT NULL AND requested_by_run_id IS NOT NULL)) AND
   (revoked_by IS NULL OR revoked_by <> '') AND
-  (withdrawn_at IS NULL OR (withdrawn_at = revoked_at AND activated_at IS NULL))
+  (withdrawn_at IS NULL OR (withdrawn_at = revoked_at AND activated_at IS NULL)) AND
+  -- #4180: a departure cause only on a departed row, and only a cause of the holder's own kind (codes carry no wording, R5).
+  -- (No CASE here: a top-level END reads as a transaction end to scripts/db/migrationTransaction.ts; with exactly one holder,
+  -- chk_grants_exactly_one_holder, the OR of the four arms is the same rule.)
+  (holder_departure_reason IS NULL OR (holder_departed_at IS NOT NULL AND (
+     (user_id IS NOT NULL AND holder_departure_reason IN ('USER_ERASED', 'ORG_LEFT', 'ORG_REMOVED'))
+     OR (worker_id IS NOT NULL AND holder_departure_reason IN ('WORKER_RETIRED', 'WORKER_DELETED'))
+     OR (agent_id IS NOT NULL AND holder_departure_reason IN ('AGENT_DELETED', 'AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED',
+                                                              'AGENT_IMPORTER_DELETED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED',
+                                                              'AGENT_LICENSE_EXPIRED', 'ORG_DELETED'))
+     OR (grantee_app_id IS NOT NULL AND holder_departure_reason = 'APP_DELETED'))))
 );
 -- True when `old_id` was merged into `new_id` (a recorded merge), the only proof a person link may move on.
 CREATE OR REPLACE FUNCTION hadron_grant_link_merged(old_id text, new_id text) RETURNS boolean
@@ -78,12 +101,46 @@ LANGUAGE sql STABLE AS $$
                     ELSE ia.organization_id = ap.organization_id END)
 $$;
 
+-- #4180 (Antonio N1): ONE statement of whether a departure cause agrees with what happened to the holder. The guard refuses a
+-- cause that does not fit; every stamping door and trigger records through hadron_fit_departure_cause, which uses this same
+-- function, so the two can never drift. A person who LEFT or was REMOVED is still a live account, an ERASED one is not; a retired
+-- worker's row is still there, a DELETED one's is gone; a DELETED agent is gone or soft-deleted, one that lost its installation is
+-- not. (The kind is chk_grants_shape's; a grantee App's only cause is APP_DELETED.)
+CREATE OR REPLACE FUNCTION hadron_departure_cause_fits(p_reason text, p_user_id text, p_worker_id text, p_agent_id text) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  SELECT CASE
+    WHEN p_reason IN ('ORG_LEFT', 'ORG_REMOVED')
+      THEN EXISTS (SELECT 1 FROM users u WHERE u.id = p_user_id AND u.deleted_at IS NULL)
+    WHEN p_reason = 'USER_ERASED'
+      THEN NOT EXISTS (SELECT 1 FROM users u WHERE u.id = p_user_id AND u.deleted_at IS NULL)
+    WHEN p_reason = 'WORKER_RETIRED' THEN EXISTS (SELECT 1 FROM workers k WHERE k.id = p_worker_id)
+    WHEN p_reason = 'WORKER_DELETED' THEN NOT EXISTS (SELECT 1 FROM workers k WHERE k.id = p_worker_id)
+    WHEN p_reason = 'AGENT_DELETED'
+      THEN NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = p_agent_id AND a.deleted_at IS NULL)
+    WHEN p_reason IN ('AGENT_UNINSTALLED', 'AGENT_IMPORTER_UNINSTALLED', 'AGENT_IMPORTER_DELETED', 'AGENT_IMPORT_REMOVED', 'AGENT_LICENSE_REVOKED',
+                      'AGENT_LICENSE_EXPIRED', 'ORG_DELETED')
+      THEN EXISTS (SELECT 1 FROM agents a WHERE a.id = p_agent_id AND a.deleted_at IS NULL)
+    ELSE TRUE END
+$$;
+-- #4180 (Antonio BLIND P2): the cause a door records yields to what already happened to the holder. A door ending the grants of an
+-- agent that is already deleted (unstamped rows) records AGENT_DELETED, not the install loss it judged; a person already erased
+-- records USER_ERASED; a retired worker whose row is gone records WORKER_DELETED. Without the yield the guard would refuse the
+-- stamp and roll the whole door back.
+CREATE OR REPLACE FUNCTION hadron_fit_departure_cause(p_reason text, p_user_id text, p_worker_id text, p_agent_id text) RETURNS text
+LANGUAGE sql STABLE AS $$
+  SELECT CASE
+    WHEN p_reason IS NULL OR hadron_departure_cause_fits(p_reason, p_user_id, p_worker_id, p_agent_id) THEN p_reason
+    WHEN p_user_id IS NOT NULL THEN 'USER_ERASED'
+    WHEN p_worker_id IS NOT NULL THEN 'WORKER_DELETED'
+    WHEN p_agent_id IS NOT NULL THEN 'AGENT_DELETED'
+    ELSE p_reason END
+$$;
 CREATE OR REPLACE FUNCTION hadron_guard_grant() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   -- Columns that may differ between OLD and NEW; each is judged by its own rule below.
   movable text[] := ARRAY['updated_at', 'use_count', 'user_id', 'issuer_user_id', 'requested_by_user_id', 'verified_by', 'revoked_at', 'revoked_by',
-                          'holder_departed_at', 'activated_at', 'verification_kind', 'signature_id', 'withdrawn_at'];
+                          'holder_departed_at', 'holder_departure_reason', 'activated_at', 'verification_kind', 'signature_id', 'withdrawn_at'];
   db_now timestamp(3) := (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3);
 BEGIN
   IF TG_OP = 'DELETE' THEN
@@ -94,8 +151,10 @@ BEGIN
   END IF;
   IF TG_OP = 'INSERT' THEN
     IF NEW.activated_at IS NOT NULL OR NEW.verification_kind IS NOT NULL OR NEW.verified_by IS NOT NULL
-       OR NEW.signature_id IS NOT NULL OR NEW.revoked_by IS NOT NULL -- (revoked_at alone is refused by the pair CHECK)
+       OR NEW.signature_id IS NOT NULL OR NEW.revoked_by IS NOT NULL
+       -- (a personless revoked_at is refused by chk_grants_shape's end pairing)
        OR NEW.use_count <> 0 OR NEW.version <> 1 OR NEW.holder_departed_at IS NOT NULL OR NEW.withdrawn_at IS NOT NULL THEN
+      -- (#4180: a departure cause cannot arrive either: chk_grants_shape admits one only beside the departure stamp refused here)
       RAISE EXCEPTION 'grants must arrive pending' USING ERRCODE = '23514';
     END IF;
     -- The holder must exist and not have gone. FOR SHARE: a departure that updates the holder row waits for this row (and a
@@ -162,10 +221,10 @@ BEGIN
   IF ROW(NEW.activated_at, NEW.verification_kind, NEW.signature_id) IS DISTINCT FROM ROW(OLD.activated_at, OLD.verification_kind, OLD.signature_id) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
-  -- The one revoke: stamped once, together with its revoker (the shape CHECK pairs the two).
+  -- The one revoke: stamped once, together with its revoker (the shape CHECK pairs the two). #4767: a run-withdrawn row has
+  -- revoked_by NULL, so the already-ended test is on revoked_at itself, not on the revoker the row may not carry.
   IF NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
-    -- (an already-revoked row has revoked_by set: the pair CHECK makes OLD.revoked_at redundant here)
-    IF NEW.revoked_at IS NULL OR OLD.revoked_by IS NOT NULL THEN
+    IF NEW.revoked_at IS NULL OR OLD.revoked_at IS NOT NULL THEN
       RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
     END IF;
   ELSIF NEW.revoked_by IS DISTINCT FROM OLD.revoked_by THEN
@@ -204,6 +263,13 @@ BEGIN
     OR EXISTS (SELECT 1 FROM apps p WHERE p.id = OLD.grantee_app_id AND p.deleted_at IS NULL)) THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
+  -- #4180: the cause is written only in the statement that stamps the departure (the first end's cause stands: never changed, cleared
+  -- or added later), and it must agree with what happened to the holder (hadron_departure_cause_fits, the one statement of it).
+  IF NEW.holder_departure_reason IS DISTINCT FROM OLD.holder_departure_reason AND (
+       OLD.holder_departure_reason IS NOT NULL OR OLD.holder_departed_at IS NOT NULL OR NEW.holder_departed_at IS NULL
+    OR NOT hadron_departure_cause_fits(NEW.holder_departure_reason, OLD.user_id, OLD.worker_id, OLD.agent_id)) THEN
+    RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
+  END IF;
   IF OLD.holder_departed_at IS NOT NULL AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
     RAISE EXCEPTION 'grants are append-only' USING ERRCODE = '23514';
   END IF;
@@ -237,7 +303,9 @@ FOR EACH ROW EXECUTE FUNCTION hadron_guard_grant();
 -- reclaim, the owner rename's raw SQL): the grants it held end, in the deleting transaction. The soft deletes (an erased
 -- person, a retired worker, a deleted agent, a deleted App) fire no delete, so those doors stamp the departure in code
 -- (src/lib/grants/departure.ts). Only a grant not already ended (revoked, departed, expired or spent: the first end stands), and only one whose own App still
--- exists (a scope App's hard delete takes its grants with it, so there is nothing to stamp).
+-- exists (a scope App's hard delete takes its grants with it, so there is nothing to stamp). #4180: the second argument is the cause the
+-- departure records (a hard-deleted person was erased; a hard-deleted worker, agent or App was deleted). Where a soft-deleting door
+-- ran first, its own stamp and cause stand: this trigger stamps only rows not already ended.
 CREATE OR REPLACE FUNCTION hadron_grant_holder_gone() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -247,7 +315,8 @@ BEGIN
     'SELECT 1 FROM grants WHERE %I = $1 AND holder_departed_at IS NULL AND revoked_at IS NULL
         AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id) ORDER BY id FOR UPDATE', TG_ARGV[0]) USING OLD.id;
   EXECUTE format(
-    'UPDATE grants SET holder_departed_at = (clock_timestamp() AT TIME ZONE ''UTC''), updated_at = (clock_timestamp() AT TIME ZONE ''UTC'')
+    'UPDATE grants SET holder_departed_at = (clock_timestamp() AT TIME ZONE ''UTC''), updated_at = (clock_timestamp() AT TIME ZONE ''UTC''),
+        holder_departure_reason = hadron_fit_departure_cause($2, grants.user_id, grants.worker_id, grants.agent_id)
       WHERE %I = $1 AND holder_departed_at IS NULL AND revoked_at IS NULL
         AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
         AND NOT (activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= (clock_timestamp() AT TIME ZONE ''UTC''))
@@ -255,21 +324,74 @@ BEGIN
           OR EXISTS (SELECT 1 FROM actions x WHERE x.name = grants.action
                AND ((x.max_uses IS NOT NULL AND grants.use_count >= x.max_uses)
                  OR (x.lifetime_seconds IS NOT NULL
-                     AND grants.activated_at + make_interval(secs => x.lifetime_seconds) <= (clock_timestamp() AT TIME ZONE ''UTC''))))))', TG_ARGV[0]) USING OLD.id;
+                     AND grants.activated_at + make_interval(secs => x.lifetime_seconds) <= (clock_timestamp() AT TIME ZONE ''UTC''))))))', TG_ARGV[0])
+    USING OLD.id, TG_ARGV[1];
   RETURN NULL;
 END $$;
 DROP TRIGGER IF EXISTS users_grant_holder_gone ON users;
 CREATE TRIGGER users_grant_holder_gone AFTER DELETE ON users
-FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('user_id');
+FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('user_id', 'USER_ERASED');
 DROP TRIGGER IF EXISTS agents_grant_holder_gone ON agents;
 CREATE TRIGGER agents_grant_holder_gone AFTER DELETE ON agents
-FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('agent_id');
+FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('agent_id', 'AGENT_DELETED');
 DROP TRIGGER IF EXISTS workers_grant_holder_gone ON workers;
 CREATE TRIGGER workers_grant_holder_gone AFTER DELETE ON workers
-FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('worker_id');
+FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('worker_id', 'WORKER_DELETED');
 DROP TRIGGER IF EXISTS apps_grant_holder_gone ON apps;
 CREATE TRIGGER apps_grant_holder_gone AFTER DELETE ON apps
-FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('grantee_app_id');
+FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('grantee_app_id', 'APP_DELETED');
+
+-- #4179 (cor:acl:140:03, Holger R2): a HARD delete of an IMPORTING PARENT agent cascades its agent_imports edges away
+-- (parent_agent_id is ON DELETE CASCADE), and an imported agent left with no effective installation in an App has gone for its
+-- grants there. Stamped here, in the deleting transaction, because it is a write door: the soft deletes and the code doors
+-- stamp through src/lib/grants/agentInstallDeparture.ts, a hard delete fires only this trigger.
+--   * Only when the PARENT row is gone. An ordinary edge removal (removeAgentImport, the parent still exists) is judged by its
+--     own door under the installation locks (#4172 D2); a raw edge delete with a live parent ends nothing.
+--   * hadron_agent_installed_in_app is #4172's effective-installation check: ANY route left (the child's own row, another
+--     importing parent under a usable licence) keeps the grant. Only AGENT-held rows, only ones not already ended (revoked,
+--     departed, expired, spent or past the action's limits: the first end stands), only ones whose own App still exists.
+--   * Lock first, judge second (two statements, as hadron_grant_holder_gone): a grant that expired, or an install that
+--     committed, while this delete waited for the row lock is judged on the state AFTER the lock. The grant row lock is the LAST
+--     lock THIS TRIGGER takes (src/lib/grants/departure.ts, LOCK ORDER). Inside a multi-table cascade, later cascades of the same
+--     delete can still lock other rows after it, so a code door that holds an installation lock and then wants a grant row can
+--     deadlock with this delete. Postgres detects that and aborts one transaction whole (no partial stamp, no wrong data): the
+--     delete or the door retries. No installation lock is taken here: a concurrent reinstall linearizes after the departure, and
+--     a reinstall revives nothing (the stamp never clears), as for every door.
+--   * Why only parent_agent_id: it is the ONE cascading foreign key on agent_imports (imported_agent_id and the agent_org_grants
+--     key are ON DELETE RESTRICT, so those deletes refuse instead of removing an edge). A new cascading key would need a case here.
+CREATE OR REPLACE FUNCTION hadron_grant_import_parent_gone() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM agents WHERE id = OLD.parent_agent_id) THEN
+    RETURN NULL;
+  END IF;
+  -- Fence a CONCURRENT agent-grant create (SEC10, #4697): create and the insert guard hold this agent row FOR SHARE, so taking it
+  -- FOR NO KEY UPDATE first waits for an uncommitted create to commit, and the next statement (a fresh READ COMMITTED snapshot)
+  -- then sees that grant. Same order as create: the agent row, then the grants. FOR NO KEY UPDATE leaves foreign-key checks
+  -- (FOR KEY SHARE) alone. The #4172 code doors share this gap (agents FOR SHARE only): a follow-up, not widened here.
+  PERFORM 1 FROM agents WHERE id = OLD.imported_agent_id FOR NO KEY UPDATE;
+  PERFORM 1 FROM grants
+   WHERE agent_id = OLD.imported_agent_id AND holder_departed_at IS NULL AND revoked_at IS NULL
+     AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
+     AND NOT hadron_agent_installed_in_app(grants.app_id, grants.agent_id)
+   ORDER BY id FOR UPDATE;
+  -- #4180: the cause is the importer's hard delete; an imported agent that is itself already deleted records that instead.
+  UPDATE grants SET holder_departed_at = (clock_timestamp() AT TIME ZONE 'UTC'), updated_at = (clock_timestamp() AT TIME ZONE 'UTC'),
+       holder_departure_reason = hadron_fit_departure_cause('AGENT_IMPORTER_DELETED', NULL, NULL, grants.agent_id)
+   WHERE agent_id = OLD.imported_agent_id AND holder_departed_at IS NULL AND revoked_at IS NULL
+     AND EXISTS (SELECT 1 FROM apps a WHERE a.id = grants.app_id)
+     AND NOT hadron_agent_installed_in_app(grants.app_id, grants.agent_id)
+     AND NOT (activated_at IS NOT NULL AND ((expires_at IS NOT NULL AND expires_at <= (clock_timestamp() AT TIME ZONE 'UTC'))
+       OR (max_uses IS NOT NULL AND use_count >= max_uses)
+       OR EXISTS (SELECT 1 FROM actions x WHERE x.name = grants.action
+            AND ((x.max_uses IS NOT NULL AND grants.use_count >= x.max_uses)
+              OR (x.lifetime_seconds IS NOT NULL
+                  AND grants.activated_at + make_interval(secs => x.lifetime_seconds) <= (clock_timestamp() AT TIME ZONE 'UTC'))))));
+  RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS agent_imports_grant_parent_gone ON agent_imports;
+CREATE TRIGGER agent_imports_grant_parent_gone AFTER DELETE ON agent_imports
+FOR EACH ROW EXECUTE FUNCTION hadron_grant_import_parent_gone();
 
 -- GRANT EVENTS. Each event is bound to its grant's App at insert: the grant must exist and be in the event's App (#3690;
 -- the event's own app_id carries the cascade, so an event naming another App's grant would outlive, or be deleted with, the wrong one).
@@ -279,6 +401,9 @@ FOR EACH ROW EXECUTE FUNCTION hadron_grant_holder_gone('grantee_app_id');
 ALTER TABLE grant_events DROP CONSTRAINT IF EXISTS chk_grant_events_shape;
 ALTER TABLE grant_events ADD CONSTRAINT chk_grant_events_shape CHECK (
   action IN ('CREATE', 'ACTIVATE', 'REVOKE', 'WITHDRAW', 'USE') AND grant_id <> '' AND (actor_user_id IS NULL OR actor_user_id <> '')
+  -- #4767 (R6): a WITHDRAW event attributes its act — a person, or the run that made it the agent's (Beatrix P3-1 on #4803,
+  -- the event half of the row's run-made-only marker above). endGrant is the one writer and always names one of the two.
+  AND (action <> 'WITHDRAW' OR actor_user_id IS NOT NULL OR run_id IS NOT NULL)
 );
 CREATE OR REPLACE FUNCTION hadron_append_only_grant_event() RETURNS trigger
 LANGUAGE plpgsql AS $$

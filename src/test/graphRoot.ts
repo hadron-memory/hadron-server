@@ -1,8 +1,8 @@
 /**
  * The graph-fixture root for a test run (#1951).
  *
- * `createNode` writes every node it creates to disk under `GRAPHS_PATH`
- * (`saveNodeToFs`), so a suite leaves a directory per memory it touches. Tests
+ * Memory-root creation is database-only. Filesystem integration fixtures still
+ * use `GRAPHS_PATH`; historically root projection also wrote there. Tests
  * used to pin `GRAPHS_PATH` to ONE shared `/tmp/hadron-test-graphs` and nothing
  * ever removed what landed there: ~100K directories in nine days exhausted
  * /tmp's inodes on the shared host, and every worker's suite failed with ENOSPC.

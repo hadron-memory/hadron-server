@@ -77,6 +77,16 @@ describe('cloneAgent: success', () => {
     expect(audit[0]).toMatchObject({ sourceAgentId: src.id, targetOrgId: orgA.id, actorUserId: adminA, nodeCount: 2, edgeCount: 1 });
   });
 
+  it('the system-memory copy leaves hrn:asset URNs in node text alone and still rewrites the memory URN (#3767)', async () => {
+    const src = await sourceAgent(orgA, 'ORGANIZATION');
+    const asset = 'hrn:asset:cl-a:src-system:assets:01abc';
+    const srcA = await db.node.findFirstOrThrow({ where: { memoryId: src.memId, loc: 'a' } });
+    await db.node.update({ where: { id: srcA.id }, data: { content: `img ${asset} and cl-a:src-system:b` } });
+    const out = await clone(adminA, { source: src.urn, target: orgA.urn, name: 'Copy' });
+    const a = await db.node.findFirstOrThrow({ where: { memoryId: out.systemMemoryId, loc: 'a' } });
+    expect(a.content).toBe(`img ${asset} and cl-a:copy-system:b`);
+  });
+
   it('a second clone gets a new URN only when named differently; the same name is refused', async () => {
     const src = await sourceAgent(orgA, 'PUBLIC');
     await clone(adminB, { source: src.urn, target: orgB.urn });

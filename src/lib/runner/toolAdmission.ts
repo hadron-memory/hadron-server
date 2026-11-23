@@ -61,7 +61,10 @@ export async function admitAndExecuteTool(
   const started = Date.now();
   let passthrough = false;
   try {
-    if (opts.onToolCall && !(await opts.onToolCall(def.policyAction ?? `tool.${def.name}`, def.cost))) {
+    // A secret-bearing web request is charged atomically with its ticket and grant inside the use transaction.
+    // Its normal policy gate still runs first; presence, not truthiness, also covers malformed client references.
+    const secretUse = def.name === 'web_request' && args != null && Object.prototype.hasOwnProperty.call(args, 'secretClientId');
+    if (opts.onToolCall && !(await opts.onToolCall(def.policyAction ?? `tool.${def.name}`, secretUse ? 0 : def.cost))) {
       throw new ToolDeniedError(def.name);
     }
     if (opts.beforeExecute) {

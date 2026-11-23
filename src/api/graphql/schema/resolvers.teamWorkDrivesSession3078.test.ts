@@ -45,7 +45,7 @@ let rex: { id: string };
 
 const REFS: Record<string, string> = { pr: 'o/r#371', issue: 'o/r#5', commit: 'o/r@abc1234', branch: 'o/r:feat/x', repo: 'o/r' };
 
-const session = (worker: { id: string } | null, userId: string, hoursSilent: number, endedHoursAgo?: number) =>
+const session = (worker: { id: string } | null, userId: string | null, hoursSilent: number, endedHoursAgo?: number) =>
   db.session.create({
     data: {
       id: generateId(), appId: app.id, workerId: worker?.id ?? null, agentId: teamAgent.id, userId,
@@ -135,6 +135,43 @@ describe('#3078 acceptance 2: no revival, never another worker\'s session', () =
     const s = await session(liam, other.id, 20);
     const before = await heartbeat(s.id);
     await expect(recordGql(gqlCtx(member.id), s.id)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    expect(await heartbeat(s.id)).toBe(before);
+  });
+});
+
+/**
+ * #3190 (cor:agt:020:11 rule 3, Decided, Holger 2026-11-01, V24; the gate's scoped spec verdict): what drives a session
+ * is a worker's own work through its own live, BOUND session. The two arms of the `recordTeamWork` guard the #3078
+ * fixtures above never reach.
+ *
+ * DOCUMENTED DIVERGENCE (gate pin 3): MCP `hadron_record_work` drove an unbound session the caller owned (through
+ * `heartbeatSession`); GraphQL does not, and the spec says it must not. The tool is off over MCP and not planned to
+ * build (#3082, #3208), so the differential names this as a divergence on a disabled tool: GraphQL is never converged
+ * towards MCP, and any convergence (#3211) can only move MCP towards GraphQL.
+ */
+describe('#3190: only a worker-bound session is driven', () => {
+  it('an unbound session the caller owns: the record is accepted and the heartbeat stays unchanged', async () => {
+    const s = await session(null, member.id, 20);
+    const before = await heartbeat(s.id);
+    // The record is admitted (explicit, so an unrelated refusal cannot satisfy the heartbeat assertion below).
+    await expect(recordGql(gqlCtx(member.id), s.id)).resolves.toMatchObject({ sessionId: s.id, workerId: null });
+    expect(await heartbeat(s.id)).toBe(before);
+  });
+
+  it('the same session driven as a worker-bound one does move (control: the fixture is otherwise live and owned)', async () => {
+    const s = await session(anne, member.id, 20);
+    const before = await heartbeat(s.id);
+    await recordGql(gqlCtx(member.id), s.id);
+    expect(await heartbeat(s.id)).toBeGreaterThan(before + HOUR);
+  });
+
+  it('a worker session with a null userId: a platform admin\'s record is accepted and the heartbeat stays unchanged', async () => {
+    // Reachable only this way: a pure App key cannot record (requireTeamWorkAccess refuses it), and the session write
+    // gate admits a user-less session to a platform admin. The `sessionUserId != null` clause is redundant with the
+    // equality beside it, because `ctx.userId` is never null on an accepted record; the equality is what this kills.
+    const s = await session(anne, null, 20);
+    const before = await heartbeat(s.id);
+    await expect(recordGql(gqlCtx(platformAdmin.id, { roles: ['ADMIN'] }), s.id)).resolves.toMatchObject({ sessionId: s.id, workerId: anne.id });
     expect(await heartbeat(s.id)).toBe(before);
   });
 });

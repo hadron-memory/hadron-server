@@ -1,3 +1,5 @@
+import { requireProtectedSecretHolder } from '../secrets/protection.js';
+import { lockSecretRow } from '../secrets/appSecrets.js';
 /**
  * #3649 slice C (hrn:node:hadronmemory.com:specs:cor:acl:140:07, :04, :03; ruling 0257) — the grant signing ceremony's
  * logic, below the HTTP routes (`src/api/grantSigningCeremonyRoutes.ts`). It mirrors node signing's
@@ -34,6 +36,7 @@ import * as issuers from '../grants/issuers.js';
 import { GrantSummaryError, renderGrantSummary } from '../grants/summary.js';
 import { GrantTermsError, grantTermsFromRow, grantTermsHash } from '../grants/terms.js';
 import { emitEntityUrnV2, safeNodeUrnV2 } from '../urnEmit.js';
+import { composeWorkerUrnV2 } from '../urn.js';
 import type { AssertionParts } from './verify.js';
 import { verifySigningAssertion } from './verify.js';
 import { grantSignaturePayloadBytes } from './grantPayload.js';
@@ -42,6 +45,7 @@ import { generateId } from '../id.js';
 import { passkeyRpId, signingCeremonyOrigins, SigningNotConfiguredError } from './config.js';
 import { effectiveRequestState } from './requests.js';
 import { GrantSigningRefusal } from './grantRequests.js';
+import { autoDeleteLimitRefusal } from '../secrets/autoDelete.js';
 import * as grantLocks from './grantActivationLocks.js';
 import { CeremonyRefused } from './signingCeremony.js';
 import { recordGrantRefusalObservation, type GrantRefusalObservation } from './grantRefusalObservation.js';
@@ -120,13 +124,13 @@ interface GrantRow {
   id: string; app_id: string; user_id: string | null; agent_id: string | null; worker_id: string | null; grantee_app_id: string | null;
   action: string; action_values: unknown; starts_at: Date | null; expires_at: Date | null; max_uses: number | null; reason: string;
   version: number; activated_at: Date | null; revoked_at: Date | null; holder_departed_at: Date | null;
-  requested_by_user_id: string | null; requested_by_worker_id: string | null;
+  requested_by_user_id: string | null; requested_by_worker_id: string | null; requested_by_run_id: string | null;
 }
 
 async function readGrant(tx: Prisma.TransactionClient, grantId: string, appId: string): Promise<GrantRow | null> {
   const [row] = await tx.$queryRaw<GrantRow[]>`
     SELECT id, app_id, user_id, agent_id, worker_id, grantee_app_id, action, action_values, starts_at, expires_at, max_uses, reason,
-           version, activated_at, revoked_at, holder_departed_at, requested_by_user_id, requested_by_worker_id
+           version, activated_at, revoked_at, holder_departed_at, requested_by_user_id, requested_by_worker_id, requested_by_run_id
       FROM grants WHERE id = ${grantId} AND app_id = ${appId}`;
   return row ?? null;
 }
@@ -171,7 +175,7 @@ export interface GrantCeremonyView {
    * Who wrote that reason: the one who asked for the GRANT (`grants.requested_by_*`), and the worker it came through. Null name: the
    * person was erased, and the link went with them (cor:acl:140:08). Never the account that asked for this signature.
    */
-  reasonAuthor: { name: string | null; via: string | null };
+  reasonAuthor: { name: string | null; via: string | null; run: boolean };
   /** Who asked for this SIGNATURE (the signing request's requester). Often a different account from the reason's author. */
   requester: { name: string; via: string | null };
   holder: { kind: 'user' | 'agent' | 'worker' | 'app'; name: string | null };
@@ -195,13 +199,16 @@ async function requesterOf(tx: Prisma.TransactionClient, r: { requesterUserId: s
   return { name: user?.handle ?? app?.name ?? 'someone', via: worker?.name ?? null };
 }
 
-/** Who asked for the grant, and so wrote its reason: the person by handle (null once erased) and the worker the request came through. */
-async function reasonAuthorOf(tx: Prisma.TransactionClient, g: Pick<GrantRow, 'requested_by_user_id' | 'requested_by_worker_id'>) {
+/**
+ * Who asked for the grant, and so wrote its reason: the person by handle (null once erased) and the worker the request came through; or, when
+ * a headless run asked (#3753, `requested_by_run_id`), `run: true` with no name, so the page never calls a run's request an erased person's.
+ */
+async function reasonAuthorOf(tx: Prisma.TransactionClient, g: Pick<GrantRow, 'requested_by_user_id' | 'requested_by_worker_id' | 'requested_by_run_id'>) {
   const [user, worker] = await Promise.all([
     g.requested_by_user_id ? tx.user.findFirst({ where: { id: g.requested_by_user_id, deletedAt: null }, select: { handle: true } }) : null,
     g.requested_by_worker_id ? tx.worker.findUnique({ where: { id: g.requested_by_worker_id }, select: { name: true } }) : null,
   ]);
-  return { name: user?.handle ?? null, via: worker?.name ?? null };
+  return { name: user?.handle ?? null, via: worker?.name ?? null, run: g.requested_by_run_id !== null };
 }
 
 async function holderName(tx: Prisma.TransactionClient, h: { kind: string; id: string }): Promise<string | null> {
@@ -234,6 +241,20 @@ async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: GrantRo
         const app = parseUrnV2(appUrn);
         refs[id] = { urn: composeAppSecretUrnV2(app.root, app.segments[0], secret.name) };
       } catch { return null; }
+      continue;
+    }
+    if (p.type === 'worker-ref') {
+      // #4855: each worker the grant names shows as its canonical worker URN (the App's root and slug, the worker's stored slug). A worker
+      // that is gone or of another App makes the sentence unsignable, never a guess. Retired workers still resolve (a name is never freed).
+      const value = values[p.name];
+      let app: ReturnType<typeof parseUrnV2>;
+      try { app = parseUrnV2(appUrn); } catch { return null; }
+      for (const id of Array.isArray(value) ? value : [value]) {
+        if (typeof id !== 'string' || Object.prototype.hasOwnProperty.call(refs, id)) continue;
+        const named = await tx.worker.findFirst({ where: { id, appId: g.app_id }, select: { slug: true } });
+        if (!named) return null;
+        try { refs[id] = { urn: composeWorkerUrnV2(app.root, app.segments[0]!, named.slug) }; } catch { return null; }
+      }
       continue;
     }
     if (p.type !== 'node-ref') continue;
@@ -398,6 +419,14 @@ async function locate(db: PrismaClient, a: { requestId: string; ceremonyId: stri
 async function lockAndJudge(tx: Prisma.TransactionClient, txCtx: Context, loc: Located, a: {
   requestId: string; ceremonyId: string; browserNonceHash: string; credentialId: Buffer;
 }) {
+  // S4: secret before ceremony/grant/request/credential, matching protection and reveal.
+  const pre=await readGrant(tx,loc.request.grantId,loc.appId);
+  if(pre?.action==='secret.reveal') {
+   const secretId=(pre.action_values as Record<string,unknown>).secret;
+   if(typeof secretId!=='string' || !(await lockSecretRow(tx,secretId))) throw new CeremonyRefused();
+
+  }
+  if(pre?.action==='secret.reveal' && pre.worker_id) await tx.$queryRaw`SELECT id FROM workers WHERE id=${pre.worker_id} FOR SHARE`;
   // The App's owner and org must still be the ones whose anchors we hold.
   const [app] = await tx.$queryRaw<Array<{ organization_id: string | null; owner_user_id: string | null }>>`
     SELECT organization_id, owner_user_id FROM apps WHERE id = ${loc.appId}`;
@@ -414,6 +443,14 @@ async function lockAndJudge(tx: Prisma.TransactionClient, txCtx: Context, loc: L
   if (!(await grantLocks.lockGrantForSigning(tx, loc.request.grantId, loc.appId))) throw new CeremonyRefused();
   const g = await readGrant(tx, loc.request.grantId, loc.appId);
   if (!g) throw new CeremonyRefused();
+  if(g.action==='secret.reveal') {
+   const secretId=(g.action_values as Record<string,unknown>).secret;
+   if(pre?.action!=='secret.reveal' || g.worker_id!==pre.worker_id || typeof secretId!=='string' || secretId!==(pre.action_values as Record<string,unknown>).secret) throw new CeremonyRefused();
+   await requireProtectedSecretHolder(tx,secretId,loc.signerId,g.worker_id === null ? g.user_id : null);
+  }
+  // #4001/#4594: historical pending rows must also obey the finite deletion rule at activation.
+  const limit = autoDeleteLimitRefusal(['secret.reveal', 'secret.use'].includes(g.action) && (g.action_values as Record<string, unknown>)?.['auto-delete'] === 'delete', g.expires_at, g.max_uses);
+  if (limit) throw new GrantSigningRefusal('SECRET_AUTO_DELETE_NEEDS_LIMIT', limit.message);
   const [request] = await tx.$queryRaw<Array<{ id: string; grant_id: string; version: number; terms_hash: string; payload_version: string; state: string; expires_at: Date }>>`
     SELECT id, grant_id, version, terms_hash, payload_version, state, expires_at FROM grant_signing_requests WHERE id = ${a.requestId} FOR UPDATE`;
   if (!request || request.grant_id !== g.id) throw new CeremonyRefused();
@@ -506,20 +543,26 @@ export async function completeGrantSigning(db: PrismaClient, a: {
 }
 
 /**
- * #3998: a `secret.reveal` grant requested through the grant path (not `issueSecretReadClient`) has no client row yet. Signing
+ * #3998/#4000: a secret grant requested through the grant path (not `issueSecretReadClient`) has no client row yet. Signing
  * creates it: the signer is the issuer, fixed here and never changed; the client is self-issued when the holder is that person.
  * Idempotent for a grant `issueSecretReadClient` already gave a row.
  */
 async function ensureSecretReadClient(tx: Prisma.TransactionClient, g: GrantRow, signerId: string): Promise<void> {
-  if (g.action !== 'secret.reveal') return;
+  if (g.action !== 'secret.reveal' && g.action !== 'secret.use') return;
   const values = (g.action_values ?? {}) as Record<string, unknown>;
   const secretId = typeof values.secret === 'string' ? values.secret : null;
   if (!secretId) return;
-  if (await tx.secretReadClient.findUnique({ where: { grantId: g.id }, select: { id: true } })) return;
+  const existing=await tx.secretReadClient.findUnique({where:{grantId:g.id},select:{id:true,issuedToOwnWorker:true}});
   const secret = await tx.secret.findFirst({ where: { id: secretId, ownerType: 'app', ownerId: g.app_id }, select: { name: true } });
   if (!secret) return;
+  const held=g.worker_id ? await tx.$queryRaw<Array<{held_by_user_id:string|null}>>`SELECT held_by_user_id FROM workers WHERE id=${g.worker_id}` : [];
+  const issuedToOwnWorker=g.worker_id!==null && held[0]?.held_by_user_id===signerId;
+  if(existing){
+   if(existing.issuedToOwnWorker===null) await tx.secretReadClient.update({where:{id:existing.id},data:{issuedToOwnWorker}});
+   return;
+  }
   await tx.secretReadClient.create({
-    data: { id: generateId(), grantId: g.id, appId: g.app_id, secretId, secretName: secret.name, issuerUserId: signerId, selfIssued: g.user_id === signerId },
+    data: { id: generateId(), grantId: g.id, appId: g.app_id, secretId, secretName: secret.name, issuerUserId: signerId, selfIssued: g.user_id === signerId, issuedToOwnWorker },
   });
 }
 

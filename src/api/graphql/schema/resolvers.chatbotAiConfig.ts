@@ -23,6 +23,7 @@ import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { chatNotFoundError } from '../../../lib/chatNotFound.js';
@@ -39,7 +40,9 @@ function isDirectPerson(ctx: Context): boolean {
 }
 
 async function loadApp(ctx: Context, appRef: string): Promise<AppRow> {
-  const { id } = await resolveAppRef(ctx.db, appRef);
+  let id: string;
+  try { ({ id } = await resolveAppRef(ctx.db, appRef)); }
+  catch (e) { if (isAppRefResolutionFailure(e)) throw new AppNotFoundError(appRef); throw e; }
   const app = await ctx.db.app.findUnique({ where: { id }, select: { id: true, organizationId: true, ownerUserId: true } });
   if (!app) throw new AppNotFoundError(appRef);
   return app;

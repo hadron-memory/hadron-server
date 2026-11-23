@@ -23,7 +23,7 @@ export interface ActionParameter { name: string; type: string; refusesWildcard: 
  *  - `NO_WORKER`: a person-held grant, which reaches no agent or worker, even one the person drives (cor:acl:140:06 R5, Decided).
  */
 /** #4162: the parameter types whose value is a reference to something with an id; only these can name a subject, take a list or be covered. */
-export const REFERENCE_PARAMETER_TYPES: ReadonlySet<string> = new Set(['node-ref', 'secret-ref']);
+export const REFERENCE_PARAMETER_TYPES: ReadonlySet<string> = new Set(['node-ref', 'secret-ref', 'worker-ref']);
 
 export type GrantReach = 'WORKER' | 'WORKER_OR_ROLE_AGENT' | 'NO_WORKER';
 
@@ -110,10 +110,33 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
       { name: 'auto-delete', type: 'secret-mark', refusesWildcard: true },
     ],
     summaryTemplate: 'Read the value of the secret {secret} of {app}, and {auto-delete}',
-    // #4162: the read is the holder's own session presenting its own client (readClientReveal.ts judges grant.workerId === the bound worker);
-    // an agent holder is refused when the client is requested (S3 does not build it; hadron-server#4434 will, as WORKER_OR_ROLE_AGENT), so the
-    // narrowest reach is the true one. A person holder reads on the passkey page, not as a worker.
-    reach: 'WORKER',
+    // #4434 (cor:sec:060:02 R5, cor:acl:140:06): a worker holder reads through its bound worker session, and an agent holder through its
+    // role agent's live workers in the client's App (readClientReveal.ts judges the reach with the shared helpers). A person holder
+    // reads on the passkey page and reaches no worker; an App holder has no reveal path (S5, #4000).
+    reach: 'WORKER_OR_ROLE_AGENT',
+  },
+  // #4855 (cor:acl:140:02, cor:agt:070:08 S4a; Holger 2026-11-22: a person-signed grant action, no wildcard): the worker dedicated to
+  // manage agents ends a DARK open session of a named worker and starts that worker again, with no person in the loop. The grant names
+  // the workers it covers (one `worker` parameter that takes a list, never the wildcard); a person who manages the App signs it; it
+  // repeats (no count). No role is named anywhere: the holder is whichever worker the person gave the grant to, and only that worker
+  // (never its role agent) may use it.
+  {
+    name: 'worker.session.restart', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'APP_MANAGER',
+    parameters: [{ name: 'worker', type: 'worker-ref', refusesWildcard: true }],
+    summaryTemplate: 'End a dark open session of any worker among {worker} in {app} and start that worker again',
+    reach: 'WORKER', listParameters: ['worker'],
+  },
+  // #4000: complete signed terms, including the HTTPS path and header the signer approves.
+  {
+    name: 'secret.use', source: 'PLATFORM', tool: 'web_request', enforcement: 'SERVER', issuerRule: 'SECRET_READ_CLIENT',
+    parameters: [
+      { name: 'secret', type: 'secret-ref', refusesWildcard: true },
+      { name: 'auto-delete', type: 'secret-mark', refusesWildcard: true },
+      { name: 'binding-prefix', type: 'https-prefix', refusesWildcard: true },
+      { name: 'binding-header', type: 'header-name', refusesWildcard: true },
+    ],
+    summaryTemplate: 'Use the secret {secret} of {app} at {binding-prefix} with header {binding-header}, and {auto-delete}',
+    reach: 'NO_WORKER',
   },
 ];
 

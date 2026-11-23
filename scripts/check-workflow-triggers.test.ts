@@ -56,6 +56,9 @@ describe('check-workflow-triggers: benign controls pass', () => {
   it('a reusable-workflow job (uses:, no runs-on) passes', () => {
     expect(runOn({ 'a.yml': 'on: push\njobs:\n  a:\n    uses: ./.github/workflows/other.yml\n' }).code).toBe(0);
   });
+  it('a merge_group trigger passes, as a string, in a list and as a map key (#4819: the merge queue runs the required checks on it)', () => {
+    expect(runOn({ 'a.yml': wf('on: merge_group'), 'b.yml': wf('on: [push, merge_group]'), 'c.yml': wf('on:\n  pull_request:\n  merge_group:\n  push:\n    branches: [main]') }).code).toBe(0);
+  });
   it('a workflow_dispatch / schedule / workflow_call trigger passes (not the prohibited ones)', () => {
     expect(runOn({ 'a.yml': wf('on:\n  workflow_dispatch:\n  schedule:\n    - cron: "0 0 * * *"\n  workflow_call:') }).code).toBe(0);
   });
@@ -246,10 +249,13 @@ describe('check-workflow-triggers: the real tree', () => {
     expect(Object.keys(files).length).toBeGreaterThanOrEqual(8);
     expect(runOn(files).code).toBe(0);
   });
-  it('workflow-guard.yml is pull_request only, read-only, hosted, secret-free, unfiltered', () => {
+  it('workflow-guard.yml is pull_request, merge_group and push only, read-only, hosted, secret-free, unfiltered', () => {
     const doc = parse(readFileSync(join(process.cwd(), '.github', 'workflows', 'workflow-guard.yml'), 'utf8'));
-    expect(Object.keys(doc.on).sort()).toEqual(['pull_request', 'push']);
+    // merge_group (#4819): the merge queue runs this whole-tree guard on the merged tree, so two PRs that each add a
+    // workflow are judged together. It is not a prohibited trigger (see the benign controls above).
+    expect(Object.keys(doc.on).sort()).toEqual(['merge_group', 'pull_request', 'push']);
     expect(doc.on.pull_request ?? {}).not.toHaveProperty('paths');
+    expect(doc.on.merge_group ?? {}).not.toHaveProperty('paths');
     expect(doc.on.push).not.toHaveProperty('paths');
     expect(doc.permissions).toEqual({ contents: 'read' });
     const jobs = Object.values(doc.jobs) as Array<{ 'runs-on': string; permissions?: unknown }>;

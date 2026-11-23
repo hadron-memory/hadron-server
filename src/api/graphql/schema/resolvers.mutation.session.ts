@@ -1,3 +1,4 @@
+import { lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import { edgeRunOrder } from '../../../lib/edgeOrder.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
@@ -20,7 +21,7 @@ import {
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { nextRevisionNumber, RevisionSlotsExhaustedError } from '../../../lib/revisionSlot.js';
 import { isLiveSlotLoc } from '../../../lib/agentRevisions.js';
-import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockNodeForDelete, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
+import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockAncestorsForCreateMany, lockNodeForDelete, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
@@ -29,10 +30,12 @@ import { hasRequestOperationKey, getRequestOperationKey } from '../../../lib/req
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { makeKeyVerifier, verifyDataKey } from '../../../lib/memoryUnlock.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
+import { missingRequiredTaskArgs } from '../../../lib/taskArgs.js';
 import {
   parseUrnInput,
   assertFullyQualifiedUrn,
   UrnNotQualifiedError,
+  UrnParseError,
   hasSchemePrefix,
   splitNodeUrn,
   normalizeUrnForLookup,
@@ -42,7 +45,7 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { isAppGateRefusal } from '../../../lib/auth/workerRead.js';
+import { isAppGateRefusal, appNotFound } from '../../../lib/auth/workerRead.js';
 import { serveBindInTransaction, resolveReadableWorkerRef, resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
@@ -57,7 +60,8 @@ import {
   handoffSessionId,
 } from '../../../lib/workerHandoff.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
-import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import { foreignIncludeReader } from '../../../lib/includes/foreignIncludeReader.js';
+import { deriveEdgeLoc, edgeLocDecodesAsDerived } from '../../../lib/edgeLoc.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
@@ -65,7 +69,12 @@ import { compileTemplate } from '../../../lib/template.js';
 import { chargeRequestServed } from '../../../lib/includes/resolveNodeContent.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
-import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import {
+  NodeNotFoundError,
+  AgentNotFoundError,
+  AppNotFoundError,
+  AmbiguousLegacyUrnError,
+} from '../../../lib/entityRef/errors.js';
 import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -100,6 +109,7 @@ import {
   type SessionInput,
   type UsageEventInput,
 } from './resolvers.helpers.js';
+import { assertRestoreKeepsRetirement } from '../../../lib/restoreUnretireGuard.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
 import { recordSessionOutcome as recordOutcome } from '../../../lib/sessionOutcome.js';
@@ -113,7 +123,7 @@ import {
   toCandidates,
   writeResumeClaim,
 } from '../../../lib/resumeClaims.js';
-import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from '../../../lib/teamAttention.js';
+import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from '../../../lib/ownWorkerSessions.js';
 import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
@@ -232,6 +242,43 @@ const launchGrantInvalid = () =>
 /** startSession's answer for a worker ref that names nothing the caller may see: one envelope for absent and unreadable alike. */
 const workerRefNotFound = (workerRef: string) =>
   new GraphQLError(`Worker not found: ${workerRef}`, { extensions: { code: 'WORKER_NOT_FOUND' } });
+
+/**
+ * #4836 — startSession's appRef refusal judge, PURE so the race arms can be pinned without a database.
+ *
+ * Standing (reach) is decided by the caller, then state here, in that order — cor:api:140:02's partition,
+ * the same one `updateApp` runs: only a caller who can reach the App is told its state.
+ *
+ * - No standing → the one unknown-App answer, `appNotFound()` (#3977's shared V58 envelope, so this door
+ *   can never drift from the team surfaces' bytes). That covers a missing, deleted, uninstalled or
+ *   existing-but-inaccessible App and a malformed/ambiguous ref alike — existence is not confirmed to a
+ *   caller who cannot reach it (cor:dmo:070:05, the Proposed clause; V58).
+ * - Standing + `deletedAt` → the same unknown-App answer: a row that died between `resolveAppRef` and the
+ *   row read is a missing App for EVERYONE (resolveAppRef already excludes soft-deleted rows on both
+ *   paths, so this arm is the TOCTOU gap only).
+ * - Standing + `uninstalledAt` → the specific `APP_UNINSTALLED`, with the appId the caller's own ref
+ *   resolved to (#944: by PK the row is unambiguous, so a member earns the more specific refusal; by URN
+ *   an uninstalled App never resolves at all — URNs are unique only among ACTIVE rows, spec 021 FR-027 —
+ *   so that case is folded into unknown-App at resolution, above).
+ * - Otherwise null: the ref stands, the caller may attribute a session to the App.
+ *
+ * A participant may always attribute (any role counts, cor:acl:030:01), so there is no
+ * member-lacks-authority arm on THIS door; the V58 exception stays alive on this mutation one level down,
+ * at the bind (a launch-grant holder who lost the App keeps the FORBIDDEN that fails the start, #10775).
+ */
+export function startSessionAppRefRefusal(
+  standing: boolean,
+  app: { id: string; deletedAt: Date | null; uninstalledAt: Date | null },
+): GraphQLError | null {
+  if (!standing) return appNotFound();
+  if (app.deletedAt) return appNotFound();
+  if (app.uninstalledAt) {
+    return new GraphQLError('Cannot start a session in an uninstalled App.', {
+      extensions: { code: 'APP_UNINSTALLED', appId: app.id },
+    });
+  }
+  return null;
+}
 
 /**
  * #1937 — the worker read gate for an id/URN ref, collapsed: a caller who may not read the worker's App's staff
@@ -520,6 +567,105 @@ export async function writeSessionHandoff(
   }
 }
 
+// #3587: the revision snapshot read and the revision row write, split so `restoreRevision` can run both inside its
+// own transaction (the auto-save then rolls back with a refused or failed restore).
+const STANDALONE_REVISION_TX_TIMEOUT_MS = 35_000;
+
+type RevisionSnapshotRead = {
+  nodes: Array<Record<string, unknown>>;
+  edges: Array<Record<string, unknown>>;
+};
+
+/** Snapshot all non-revision nodes + edges of a system memory, through `client` (the pool or a transaction). */
+async function readRevisionSnapshot(client: Prisma.TransactionClient | Context['db'], sysMemId: string): Promise<RevisionSnapshotRead> {
+  const nodeRows = await client.node.findMany({
+    where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
+    // #4244: `role` is recorded so a boot-prompt source recreated by a restore keeps the role a compile needs.
+    select: { id: true, loc: true, name: true, nodeType: true, role: true, description: true, content: true, data: true, tags: true, seq: true },
+  });
+  const nodeIds = nodeRows.map((n) => n.id);
+  const nodes = nodeRows.map(({ id: _id, ...n }) => ({ ...n, tags: n.tags ?? [] }));
+  const edges = await client.edge.findMany({
+    // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
+    where: { sourceId: { in: nodeIds }, deletedAt: null, governedKind: null },
+    include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
+    // #4034: the reader breaks equal-priority ties by snapshot order, so write it in the live read's order.
+    orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+  });
+  const edgeSnapshots = edges.map((e) => ({
+    sourceLoc: e.source.loc,
+    targetLoc: e.target.loc,
+    loc: e.loc,
+    name: e.name,
+    description: e.description,
+    isRunnable: e.isRunnable,
+    data: e.data,
+    // #4034 (plan D3, edgeFormat 2): a snapshot that drops these makes a pinned chat fire every conditional rule.
+    condition: e.condition ?? null,
+    priority: e.priority,
+  }));
+  return { nodes, edges: edgeSnapshots };
+}
+
+/**
+ * Ensure the `revisions` parent, allocate the next slot and insert the revision row. Inside `tx`, which must already
+ * hold the `revisions` path key (the order every `revisions:<label>` create takes it in).
+ */
+async function writeRevisionRow(
+  tx: Prisma.TransactionClient,
+  sysMemId: string,
+  snapshot: RevisionSnapshotRead,
+  description: string | undefined,
+  createdBy: string | null,
+): Promise<{ label: string; revLoc: string }> {
+  // #664/#752: revLoc is `revisions:<label>`, so a concurrent non-recursive delete of the `revisions` parent could
+  // count zero descendants and then orphan this row. Hold the ancestor-path lock across the insert (advisory before
+  // row; READ COMMITTED so the delete's count sees this post-commit).
+  // #2498: the slot is allocated INSIDE the serialized section. The `revisions` path lock is taken first and the
+  // count is read after it is granted, on READ COMMITTED's fresh statement snapshot, so concurrent saves each see
+  // the previous save's row and take distinct slots.
+  await lockPathForCreateUnder(tx, sysMemId, 'revisions');
+  // The parent ensure must not abort the transaction (#3587 D5): inside one, a unique violation aborts it whatever
+  // is caught, so this is ON CONFLICT DO NOTHING, which waits for a competing insert and then does nothing.
+  await tx.node.createMany({
+    data: [{ id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' }],
+    skipDuplicates: true,
+  });
+  // #2507: the highest number ever used, soft-deleted and archived rows included (no deletedAt filter).
+  const slotRows = await tx.node.findMany({
+    where: { memoryId: sysMemId, loc: { startsWith: 'revisions:rev-' } },
+    select: { loc: true },
+  });
+  let revNum: number;
+  try {
+    revNum = nextRevisionNumber(slotRows.map((r) => r.loc));
+  } catch (e) {
+    if (e instanceof RevisionSlotsExhaustedError) {
+      throw new GraphQLError(e.message, { extensions: { code: 'REVISION_SLOTS_EXHAUSTED' } });
+    }
+    throw e;
+  }
+  const label = `rev-${revNum}`;
+  const revLoc = `revisions:${label}`;
+  await lockAncestorsForCreate(tx, sysMemId, revLoc);
+  await tx.node.create({
+    data: {
+      id: generateId(), memoryId: sysMemId, loc: revLoc, name: label,
+      nodeType: 'system',
+      description: description ?? `Revision ${revNum}`,
+      data: {
+        revision: revNum,
+        label,
+        published: false,
+        createdBy,
+        snapshot: { edgeFormat: CHAT_SCRIPT_EDGE_FORMAT, nodes: snapshot.nodes, edges: snapshot.edges },
+      } as InputJsonValue,
+    },
+  });
+  return { label, revLoc };
+}
+
+
 // ── #2086 / #1931 / #1948: refresh a bound session's model and family ─────────────────────────────────────────
 /** A supplied family must be a valid token; checked before any write (and, on a resume, before the claim is spent). */
 /** #4244: an Agent revision that is not there (unknown or retired loc), refused before any write. */
@@ -715,8 +861,31 @@ export const sessionMutations = {
         try {
           ({ id: resolvedAppId } = await resolveAppRef(ctx.db, appRef));
         } catch (e) {
-          if (e instanceof AppNotFoundError) {
-            throw new GraphQLError(`App not found: ${appRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+          // #4836: the ref-RESOLUTION failures fold into the one unknown-App
+          // answer (appNotFound()). Two reasons their own typed errors must
+          // not reach the wire on this door: their messages ECHO the caller's
+          // value (a token pasted into appRef by mistake would print into a
+          // terminal, CI log or error tracker), and a "malformed" vs "missing"
+          // distinction would confirm which App URNs resolve. NARROW catch
+          // (review:narrow-catch-blocks): a database failure inside the lookup
+          // propagates — an outage reported as a missing App is the one thing
+          // this fold must never hide. The shared parser is untouched;
+          // memory/node not-found keeps its echo (cor:api:140:03). This fold
+          // is App refs on this door only (#4837 tracks the other doors).
+          if (
+            e instanceof AppNotFoundError ||
+            e instanceof AmbiguousLegacyUrnError ||
+            e instanceof UrnNotQualifiedError ||
+            // Defensive (SEC10 P3-1): no input reaches UrnParseError through
+            // resolveAppRef today — the qualification boundary throws
+            // UrnNotQualifiedError, parseUrnInput never throws (it falls
+            // through to type 'unknown'), and normalizeUrnForLookup is a pure
+            // string transform. Listed so the fold names the whole
+            // ref-resolution family: a future parser change that starts
+            // throwing it lands on the right side of this catch.
+            e instanceof UrnParseError
+          ) {
+            throw appNotFound();
           }
           throw e;
         }
@@ -724,63 +893,40 @@ export const sessionMutations = {
           where: { id: resolvedAppId },
           select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
         });
-        // resolveAppRef already excludes soft-deleted rows, and excludes
-        // uninstalled ones on the URN path only — re-check both here so the ID
-        // path can't attach a session to a dead App.
+        // #4836 (cor:dmo:070:05, the Proposed clause; V58): REACH first, state
+        // after — cor:api:140:02's partition, the same one updateApp runs, so
+        // only a caller who can reach the App is told its state. A caller
+        // without standing gets the one unknown-App answer whatever the App's
+        // state and whatever the ref's form, byte-identical across a missing,
+        // deleted, uninstalled and existing-but-inaccessible App: no ref
+        // echoed, no appId in extensions. (resolveAppRef already excludes
+        // soft-deleted rows on both paths, so the judge's deletedAt arm closes
+        // only the resolve-then-read race; an uninstalled App is unreachable
+        // by URN at resolution — the #944 asymmetry the judge keeps, so a
+        // MEMBER naming one by PK still earns the specific APP_UNINSTALLED.)
         //
-        // The URN/PK asymmetry on APP_UNINSTALLED is deliberate, not an
-        // oversight (#944 review): App URNs are unique only among ACTIVE rows
-        // (spec 021 FR-027), so an uninstalled App's URN may name several dead
-        // rows and/or belong to a different live App — "not found" is the only
-        // honest answer there. By PK the row is unambiguous, so it earns the
-        // more specific refusal. Both forms are tested.
-        if (app.deletedAt) {
-          throw new GraphQLError(`App not found: ${appRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
-        }
-        if (app.uninstalledAt) {
-          throw new GraphQLError('Cannot start a session in an uninstalled App.', {
-            extensions: { code: 'APP_UNINSTALLED', appId: resolvedAppId },
-          });
-        }
-        // Precedence (documented decision, #943): an App-key CREDENTIAL wins
-        // over a caller-supplied ref. A pure App-key principal IS an App, so a
-        // ref naming a different App is a client bug, not a widening — refuse
-        // it typed rather than silently honouring one or the other.
-        //
-        // #1037: keyed on the ABSENCE of a userId, not on `ctx.appId` alone.
-        // The comment always said "credential"; the check caught the MCP
-        // active-App SELECTION too, so a user whose connection was pinned to B
-        // could not deliberately start a session in A — the exact precedence
-        // this PR promises, contradicted one level above where it is granted.
-        // The distinction is spelled out in the very next comment block, which
-        // is a good measure of how easily this field name misleads
-        // (findings:auth-appid-credential-vs-selection). A user's selection
-        // yields to the argument; the participant gate below still runs on the
-        // resolved App, so yielding never widens reach.
-        if (ctx.appId && !ctx.userId && ctx.appId !== resolvedAppId) {
-          throw new GraphQLError(
-            `appRef "${appRef}" does not name the App this request is authenticated for.`,
-            { extensions: { code: 'SESSION_APP_MISMATCH', appId: ctx.appId } },
-          );
-        }
-        // Authority. A pure App-key principal (no userId) needs no membership:
-        // its credential IS the App. Everyone else — including a HYBRID
-        // principal carrying MCP's active-App SELECTION, which is not a
-        // credential (findings:auth-appid-credential-vs-selection) — must be a
-        // member of the resolved App, the same predicate the team-chat gate
-        // uses. Without this, any caller could stamp any App's id onto a
-        // session and author into that team's chat as its persona.
-        if (ctx.userId || !ctx.appId) {
-          if (!(await isAppParticipant(ctx, app))) {
-            throw new GraphQLError(
-              'You are not a member of this App, so a session cannot be attributed to it.',
-              { extensions: { code: 'FORBIDDEN' } },
-            );
-          }
-        }
+        // Standing is #943's predicate unchanged — the same one the team-chat
+        // gate uses: a participant (AppMember at any role, org CONTRIBUTOR+,
+        // a user-owned App's owner — isAppParticipant) — or a pure App-key
+        // CREDENTIAL, which IS its App and reaches exactly it
+        // (findings:auth-appid-credential-vs-selection). A HYBRID principal
+        // (userId + the MCP active-App SELECTION) is judged on the USER: the
+        // selection is a convenience, not a credential (#1037). #4836
+        // amendment 1: a pure App key naming any OTHER App — existing or not —
+        // gets the unknown-App answer too (the old typed SESSION_APP_MISMATCH
+        // told an existing App from a missing one to a caller holding a key;
+        // a key reaches only its own App). A member keeps every specific
+        // refusal, and the precedence below is unchanged.
+        const standing =
+          ctx.appId && !ctx.userId
+            ? ctx.appId === resolvedAppId
+            : await isAppParticipant(ctx, app);
+        const refusal = startSessionAppRefRefusal(standing, app);
+        if (refusal) throw refusal;
         appId = resolvedAppId;
-        // An explicit argument outranks a selection but not a credential — the
-        // credential branch above already refused a disagreeing ref.
+        // An explicit argument outranks a selection but not a credential — a
+        // credential's ref was just judged on exactly that: a disagreeing one
+        // has no standing and never reaches here.
         if (appSource !== 'credential') appSource = 'argument';
       }
 
@@ -2351,91 +2497,15 @@ export const sessionMutations = {
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
-      // Snapshot all non-revision nodes + edges in the system memory
-      const nodes = await ctx.db.node.findMany({
-        where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
-        // #4244: `role` is recorded so a boot-prompt source recreated by a restore keeps the role a compile needs.
-        select: { loc: true, name: true, nodeType: true, role: true, description: true, content: true, data: true, tags: true, seq: true },
-      });
-      const nodeIds = (await ctx.db.node.findMany({
-        where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
-        select: { id: true },
-      })).map((n) => n.id);
-      const edges = await ctx.db.edge.findMany({
-        // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
-        where: { sourceId: { in: nodeIds }, deletedAt: null, governedKind: null },
-        include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
-        // #4034: the reader breaks equal-priority ties by snapshot order, so write it in the live read's order.
-        orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-      });
-      const edgeSnapshots = edges.map((e) => ({
-        sourceLoc: e.source.loc,
-        targetLoc: e.target.loc,
-        loc: e.loc,
-        name: e.name,
-        description: e.description,
-        isRunnable: e.isRunnable,
-        data: e.data,
-        // #4034 (plan D3, edgeFormat 2): a snapshot that drops these makes a pinned chat fire every conditional rule.
-        condition: e.condition ?? null,
-        priority: e.priority,
-      }));
-
-      // Ensure revisions parent exists
-      try {
-        await ctx.db.node.upsert({
-          where: { loc_memoryId: { loc: 'revisions', memoryId: sysMemId } },
-          create: { id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' },
-          update: {},
-        });
-      } catch (err) {
-        // #2476: only the cold-path race loss means the parent exists.
-        if (!isNodeLocUniqueViolation(err)) throw err;
-      }
-
-      // #664/#752: revLoc is `revisions:<label>`, so a concurrent non-recursive
-      // delete of the `revisions` parent could count zero descendants and then
-      // orphan this row. Hold the ancestor-path lock across the insert (advisory
-      // before row; READ COMMITTED so the delete's count sees this post-commit).
-      // #2498: the slot is allocated INSIDE the serialized section. The `revisions` path lock is
-      // taken first (the key every `revisions:<label>` create takes) and the count is read after it
-      // is granted, on READ COMMITTED's fresh statement snapshot, so concurrent saves (a restore's
-      // auto-save included) each see the previous save's row and take distinct slots.
-      const { label, revLoc } = await ctx.db.$transaction(async (tx) => {
-        await lockPathForCreateUnder(tx, sysMemId, 'revisions');
-        // #2507: the highest number ever used, soft-deleted and archived rows included (no deletedAt filter).
-        const slotRows = await tx.node.findMany({
-          where: { memoryId: sysMemId, loc: { startsWith: 'revisions:rev-' } },
-          select: { loc: true },
-        });
-        let revNum: number;
-        try {
-          revNum = nextRevisionNumber(slotRows.map((r) => r.loc));
-        } catch (e) {
-          if (e instanceof RevisionSlotsExhaustedError) {
-            throw new GraphQLError(e.message, { extensions: { code: 'REVISION_SLOTS_EXHAUSTED' } });
-          }
-          throw e;
-        }
-        const label = `rev-${revNum}`;
-        const revLoc = `revisions:${label}`;
-        await lockAncestorsForCreate(tx, sysMemId, revLoc);
-        await tx.node.create({
-          data: {
-            id: generateId(), memoryId: sysMemId, loc: revLoc, name: label,
-            nodeType: 'system',
-            description: description ?? `Revision ${revNum}`,
-            data: {
-              revision: revNum,
-              label,
-              published: false,
-              createdBy: ctx.userId ?? null,
-              snapshot: { edgeFormat: CHAT_SCRIPT_EDGE_FORMAT, nodes: nodes.map((n) => ({ ...n, tags: n.tags ?? [] })), edges: edgeSnapshots },
-            } as InputJsonValue,
-          },
-        });
-        return { label, revLoc };
-      });
+      // #3587 (D2): the snapshot is read OUTSIDE the transaction, as before, so a large system memory is not read
+      // inside the transaction's timeout. The restore's auto-save reads the same snapshot with its own `tx`.
+      const snapshotRead = await readRevisionSnapshot(ctx.db, sysMemId);
+      // #3587 (D6): a restore now holds the `revisions` key for up to its 30 s, so this save, which waits behind it,
+      // gets an explicit bound above that rather than Prisma's 5 s default.
+      const { label, revLoc } = await ctx.db.$transaction(
+        (tx) => writeRevisionRow(tx, sysMemId, snapshotRead, description, ctx.userId ?? null),
+        { timeout: STANDALONE_REVISION_TX_TIMEOUT_MS },
+      );
 
       return { revisionLoc: revLoc, label, published: false, createdAt: new Date().toISOString() };
     },
@@ -2566,8 +2636,8 @@ export const sessionMutations = {
       // #4034 (D3): only a v2 snapshot holds edge condition/priority and node seq to restore.
       const restoresScriptFields = snapshot.edgeFormat === CHAT_SCRIPT_EDGE_FORMAT;
 
-      // Auto-save current state before restoring
-      await sessionMutations.createRevision({}, { agentRef: resolvedAgentId, description: `Auto-save before restoring ${revisionLoc}` }, ctx);
+      // #3587: the auto-save before restoring is written INSIDE the restore's transaction (below), so a refused or
+      // failed restore rolls it back too and "nothing was written" holds.
 
       // Restore is ATOMIC (#752 review, Codex P1): the destructive soft-deletes
       // AND the snapshot restore run in ONE transaction, so any failure — the
@@ -2581,11 +2651,28 @@ export const sessionMutations = {
       const locToId = new Map<string, string>();
       await ctx.db.$transaction(
         async (tx) => {
-          await lockAncestorsForCreateMany(
-            tx,
-            sysMemId,
-            snapshot.nodes.map((n) => n.loc as string).filter((l) => typeof l === 'string' && l !== ''),
+          // #1213: this owning restore can recreate snapshot roles and tombstone live signals.
+          // Join the bounded system-memory handshake before any loc or node-row lock/read.
+          await lockMemoryForChannelChange(tx, sysMemId);
+          const snapshotLocs = snapshot.nodes.map((n) => n.loc as string).filter((l) => typeof l === 'string' && l !== '');
+          // #3587 (D1/Riana Q2): ONE complete advisory set first, in the one global order (#1214): the snapshot
+          // locs' ancestors plus the `revisions` path key the auto-save takes. No advisory key may be first taken
+          // after a row lock, so nothing below adds one; the helpers' own acquisitions only re-take these.
+          await acquireLockSet(tx, [
+            ...new Set(snapshotLocs.flatMap((l) => ancestorLocs(l))),
+            'revisions',
+          ].map((loc) => ({ memoryId: sysMemId, loc })));
+          await lockAncestorsForCreateMany(tx, sysMemId, snapshotLocs);
+          // Unlocked and before any row lock: encryption is one-way, so a stale false only over-refuses.
+          const sysMem = await tx.memory.findUnique({ where: { id: sysMemId }, select: { isEncrypted: true } });
+          // Auto-save current state before restoring, in this transaction.
+          await writeRevisionRow(
+            tx, sysMemId, await readRevisionSnapshot(tx, sysMemId), `Auto-save before restoring ${revisionLoc}`, ctx.userId ?? null,
           );
+          // #3587 (ruling 0220): the authoritative check, under the row locks and before the soft-delete.
+          await assertRestoreKeepsRetirement(tx, {
+            memoryId: sysMemId, revisionLoc, snapshotNodes: snapshot.nodes, isEncrypted: sysMem?.isEncrypted ?? false,
+          });
 
           // Delete all current non-revision nodes in the system memory.
           //
@@ -2599,9 +2686,9 @@ export const sessionMutations = {
           // cor:agt:040:10), not written below, and a snapshot's copy of one is ignored.
           //
           // #4313: every statement of this step leaves compiled rows out BY TYPE, in its own WHERE. It used to leave
-          // them out by the ids of an earlier read, so a compile that committed between that read and this one (the
-          // transaction is READ COMMITTED and shares no lock with a compile) was tombstoned, or had its edges
-          // retired. No statement here depends on what an earlier one saw of compiled rows.
+          // them out by ids from an earlier read. Before S2 coordinated restore and compile, a compile between
+          // those reads could be tombstoned or lose its edges. Direct writes outside the memory-key protocol can
+          // still interleave, so no statement here depends on an earlier snapshot of compiled rows.
           const notCompiled = { nodeType: { not: COMPILED_BOOT_PROMPT_NODE_TYPE } };
           const live = await tx.node.findMany({
             where: { memoryId: sysMemId, deletedAt: null, ...notCompiled, NOT: { loc: { startsWith: 'revisions' } } },
@@ -2737,6 +2824,9 @@ export const sessionMutations = {
               const edgeFields = {
                 sourceId,
                 targetId,
+                // #2947: a snapshot carries no provenance flag, so a restored edge is classified exactly as the migration
+                // backfill classifies one: derived iff its loc decodes as the derivation of its own name; no loc is derived.
+                locAuthored: e.loc != null && !edgeLocDecodesAsDerived(edgeLoc, edgeName),
                 name: edgeName,
                 description: (e.description as string | null) ?? null,
                 isRunnable: (e.isRunnable as boolean | null) ?? null,
@@ -3411,6 +3501,8 @@ export const sessionMutations = {
         // empty-content targets are skipped), so the read events below describe
         // what crossed the boundary rather than what the node links to.
         const inlined: unknown[] = [];
+        // #4689: foreign URN includes resolve under this principal's own read access (ruling A).
+        const foreignReader = foreignIncludeReader(ctx.db, auth);
         const assembled = await assembleRunNodePrompt(
           { ...node, loc },
           stringArgs ?? undefined,
@@ -3419,7 +3511,7 @@ export const sessionMutations = {
               (await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn,
             // #40: each compiled piece is served, so it counts toward the request's aggregate.
             compileTemplate: (content, data, memoryId) =>
-              compileTemplate(content, data, memoryId, ctx.db, {}).then(text => chargeRequestServed(ctx, content, text)),
+              compileTemplate(content, data, memoryId, ctx.db, {}, undefined, { foreignReader }).then(text => chargeRequestServed(ctx, content, text)),
             includeTarget: target => !!target && readableTargets.has(target.memoryId),
             onTargetInlined: (target) => inlined.push(target),
           },
@@ -3468,7 +3560,56 @@ export const sessionMutations = {
       // App-run kernel re-renders the same task via this resolver's assemble
       // path, so the two modes stay in lockstep. Without `appRef`, behavior is
       // unchanged — the rendered prompt is returned for an LLM agent to run.
+      // #317 — required task-argument validation (spec cor:dmo:060:11, v1). The one
+      // enforcement point for GraphQL, the CLI and MCP `hadron_run_task` in EXECUTE mode
+      // (appRef, which delegates here). MCP render mode and `hadron_run_action` build their
+      // own bundle and are out of scope by the #317 gate. Judged AFTER
+      // the caller's read access: a task the caller cannot read (or that does not
+      // exist) is skipped here and answers exactly what it answered before, so the
+      // refusal discloses nothing of an unreadable task's schema. Judged BEFORE any
+      // render, usage event or AppRun, so a refusal has no side effects.
+      const assertRequiredTaskArgs = async (targetNodeUrn: string): Promise<void> => {
+        // The run kernel assembles EVERY hop of a minted AppRun through this resolver, with the
+        // hop's merged view (event data + upstream extractions) as `args` and a run principal as
+        // the caller. That is not a caller's argument list, and a refusal there would land AFTER
+        // the AppRun was minted and budget spent, contradicting "the run was not started"
+        // (LOCAL F1). The door is the caller's own call; a kernel hop is exempt.
+        if (isRunPrincipal(auth)) return;
+        let memUrn: string;
+        let loc: string;
+        try {
+          assertFullyQualifiedUrn(targetNodeUrn, 'node');
+          ({ memoryUrn: memUrn, loc } = splitWholeNodeUrn(targetNodeUrn));
+        } catch {
+          return; // malformed: the existing path produces its own answer
+        }
+        const normalized = normalizeUrnForLookup(parseUrnInput(memUrn.trim()).value);
+        const memory = await ctx.db.memory.findFirst({
+          where: { OR: [{ urn: normalized }, { urn: legacyMemoryUrnToCanonical(normalized) }], deletedAt: null },
+          select: { id: true },
+        });
+        if (!memory || !(await canReadMemory(ctx.db, auth, memory.id))) return;
+        const node = await ctx.db.node.findUnique({
+          where: { loc_memoryId: { loc, memoryId: memory.id } },
+          select: { memoryId: true, abstract: true, content: true, data: true },
+        });
+        if (!node) return;
+        // Without a cached session key an encrypted memory's `data` stays ciphertext, which is
+        // not an object, so nothing is refused: the unchanged pre-#317 behaviour, never a new
+        // refusal. Every divergence between this lookup and loadAndRender's lands the same way
+        // (validation skipped, the existing answer stands); none can produce a false refusal.
+        await decryptNodesBatch(ctx.db, [node]);
+        const missing = missingRequiredTaskArgs(node.data, args);
+        if (missing.length > 0) {
+          throw new GraphQLError(
+            `Missing required task argument${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}. The task declares ${missing.length > 1 ? 'them' : 'it'} in its data.args as required with no default; the run was not started.`,
+            { extensions: { code: 'BAD_USER_INPUT', missingArgs: missing } },
+          );
+        }
+      };
+
       const dispatch = async (nodeUrn: string): Promise<string> => {
+        await assertRequiredTaskArgs(nodeUrn);
         if (!appRef) return loadAndRender(nodeUrn);
         assertFullyQualifiedUrn(nodeUrn, 'node');
         const run = await triggerManualRun(ctx, {

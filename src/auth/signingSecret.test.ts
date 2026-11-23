@@ -50,13 +50,14 @@ describe('assertProductionSigningSecret (#421)', () => {
     expect(refusal(prod({ JWT_SECRET: '🔑'.repeat(7) + 'abc' }))).toBeInstanceOf(Error);
   });
 
-  it('refuses a weak JWT_SECRET even when the dedicated team-attention and CSRF secrets are set', () => {
+  it('refuses a weak JWT_SECRET even when the dedicated worker-proof and CSRF secrets are set', () => {
     // Both fall back to JWT_SECRET when unset, and JWT_SECRET signs sign-in
     // tokens regardless, so a strong dedicated secret never excuses it.
     const err = refusal(
       prod({
         JWT_SECRET: 'short',
-        TEAM_ATTENTION_TOKEN_SECRET: 'x'.repeat(64),
+        WORKER_PROOF_TOKEN_SECRET: 'x'.repeat(64),
+        TEAM_ATTENTION_TOKEN_SECRET: 'z'.repeat(64), // the pre-#4509 name, still read for one cycle
         CSRF_SECRET: 'y'.repeat(64),
       }),
     );

@@ -86,6 +86,7 @@ import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
+import { isReadOnlyImpersonation } from '../impersonationReadOnlyPlugin.js';
 import { GraphQLError } from 'graphql';
 import { isLifecycleActive, type LifecycleLike } from '@hadron-memory/access-control';
 import {
@@ -237,6 +238,8 @@ export interface Context {
   readableAgentCache?: Map<string, Promise<unknown | null>>;
   // #2109 — App.viewerManages: per-request, per-caller facts and the same-tick batch (see resolvers.appViewerManages.ts).
   viewerManagesCache?: import('./resolvers.appViewerManages.js').ViewerManagesCache;
+  // #4758 — App.selfJoin: the fresh App row and the caller's membership, batched per request (see resolvers.appSelfJoinFacts.ts).
+  selfJoinFactsCache?: import('./resolvers.appSelfJoinFacts.js').SelfJoinFactsCache;
   entryNodeCache?: Map<string, Promise<{ memoryId: string } | null>>;
   // Request-scoped memo for NodeRevision.editedByUser / approvedByUser
   // candidate lookups (#620) — a node's history repeats the same few editor
@@ -292,7 +295,7 @@ export async function resolveRefArg(
   const chosen = chosenRefArg(args);
   if (!chosen) {
     throw new GraphQLError(
-      `A ${args.label} is required: pass ${args.label}Ref (or the deprecated ${args.label}Id).`,
+      `${args.label}Ref is required (or the deprecated ${args.label}Id).`,
       { extensions: { code: 'BAD_USER_INPUT' } },
     );
   }
@@ -313,7 +316,7 @@ export async function resolveRequiredRefArg(
 ): Promise<string> {
   const chosen = args.ref?.trim();
   if (!chosen) {
-    throw new GraphQLError(`A ${args.label} is required: pass ${args.label}Ref.`, {
+    throw new GraphQLError(`${args.label}Ref is required.`, {
       extensions: { code: 'BAD_USER_INPUT' },
     });
   }
@@ -1199,6 +1202,29 @@ export async function filterReadableMemoryRecords<T extends Parameters<typeof ca
 }
 
 /**
+ * The fields `canReadMemoryRecord` reads (#1104). `MEMORY_RECORD_GATE_SELECT`
+ * is keyed on this type in BOTH directions (`Record<keyof ..., true>`), so
+ * adding a field here without selecting it, or selecting one the gate does not
+ * read, fails type-checking; a caller that spreads the constant into its
+ * Prisma `select` can never leave a gate field out and fail the gate OPEN.
+ */
+export type MemoryRecordGateRow = {
+  id: string;
+  class: string;
+  userId: string | null;
+  ownerUserId: string | null;
+  organizationId: string | null;
+  appId: string | null;
+  userMemoryOfAgentId: string | null;
+};
+
+/** The Prisma `select` that yields a {@link MemoryRecordGateRow}; spread it, then add your own fields. */
+export const MEMORY_RECORD_GATE_SELECT = {
+  id: true, class: true, userId: true, ownerUserId: true,
+  organizationId: true, appId: true, userMemoryOfAgentId: true,
+} as const satisfies Record<keyof MemoryRecordGateRow, true>;
+
+/**
  * The RECORD-level memory read gate — "may this caller open this memory's
  * record (its scalars: name, description, data)?", as distinct from
  * `isMemoryReadableCached` above, which answers "may they read its NODES?".
@@ -1257,15 +1283,7 @@ export async function canReadMemoryRecord(
   // Requiring them is what makes a wrong call a COMPILE error instead of a
   // quiet re-answer, which is why `granteeShareAccess` below is now called
   // without the `as never` that was hiding exactly this.
-  memory: {
-    id: string;
-    class: string;
-    userId: string | null;
-    ownerUserId: string | null;
-    organizationId: string | null;
-    appId: string | null;
-    userMemoryOfAgentId: string | null;
-  },
+  memory: MemoryRecordGateRow,
   batch?: MemoryRecordReadBatch,
 ): Promise<boolean> {
   // A full set and an indexed point read use the same shared predicate. Only
@@ -2484,7 +2502,7 @@ export async function getAccessibleMemoryIds(
   // read) at worst. Same shape as `requireSessionWriteAccess`'s App branch
   // (#932) and the #967 narrow-never-grant rule.
   if (ctx.appId && ctx.sessionId && !ctx.userId) {
-    const ids = await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId);
+    const ids = await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId, ctx);
     const scoped = onlyMemoryId ? ids.filter((id) => id === onlyMemoryId) : ids;
     // 0114 B: admit only explicitly named PUBLIC targets, never enumerate PUBLIC memories.
     if (!readsPublicKnowledgeWithoutUser(ctx)) return scoped;
@@ -3049,14 +3067,71 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
 }
 
 /**
+ * #606 — the non-throwing twin of `requireMemoryWriteAccess`: "would a write to this memory be refused for this caller?"
+ * It RUNS the gate and maps only its own refusal to false, so it cannot drift from it (no branch is copied here). Any
+ * other failure (a DB error, a missing row) propagates from here instead of reading as "cannot write"; the
+ * `Memory.canWrite` field turns it into null (unknown) so one memory cannot null a list. A caller with no
+ * identity at all (no user, no App) cannot write, which is the gate's own unauthenticated answer.
+ *
+ * NOT the raw gate answer: it answers the `Memory.canWrite` FIELD, so it is false for any read-only impersonation
+ * session even where `requireMemoryWriteAccess` alone would allow the target. A caller that needs the gate's own
+ * answer calls the gate. Its only caller is the field resolver.
+ *
+ * Memoised per request context: a list of N memories asks the gate once per distinct memory, and a memory that
+ * appears twice in one response (list item and a nested copy) is answered once. The memo lives only on the request's
+ * context object, so it is never shared across principals or requests.
+ */
+const memoryCanWriteMemo = new WeakMap<object, Map<string, Promise<boolean>>>();
+export function canWriteMemoryRecord(ctx: Context, memoryId: string): Promise<boolean> {
+  // A read-only impersonation session refuses every mutation but stopImpersonation (impersonationReadOnlyPlugin), so
+  // no write to any memory would be allowed: the gate alone would say true, which is not what the field promises.
+  if (isReadOnlyImpersonation(ctx)) return Promise.resolve(false);
+  let perRequest = memoryCanWriteMemo.get(ctx);
+  if (!perRequest) {
+    perRequest = new Map();
+    memoryCanWriteMemo.set(ctx, perRequest);
+  }
+  let answer = perRequest.get(memoryId);
+  if (!answer) {
+    answer = requireMemoryWriteAccess(ctx, memoryId).then(
+      () => true,
+      (err: unknown) => {
+        if (isMemoryWriteRefusal(err)) return false;
+        throw err;
+      },
+    );
+    const memo = perRequest;
+    memo.set(memoryId, answer);
+    // A thrown (non-refusal) answer must not be remembered as the memory's answer.
+    answer.catch(() => memo.delete(memoryId));
+  }
+  return answer;
+}
+
+/**
+ * #606 — the errors `memoryWriteForbidden()` made. Classification is by IDENTITY (this set), never by the denial's
+ * prose, so rewording the message cannot turn a refusal into a failure; every refusal the gate throws comes from
+ * `memoryWriteForbidden()`.
+ */
+const memoryWriteRefusals = new WeakSet<object>();
+
+/** True for the gate's own write refusal (made by `memoryWriteForbidden`) and for its no-identity answer. */
+export function isMemoryWriteRefusal(err: unknown): boolean {
+  if (!(err instanceof GraphQLError)) return false;
+  return memoryWriteRefusals.has(err) || err.extensions?.code === 'UNAUTHENTICATED';
+}
+
+/**
  * The shared memory-write denial. Keep the established prose and GraphQL
  * partial-response transport, but make the authorization classification
  * explicit so Apollo does not report an ordinary denial as a server fault.
  */
 export function memoryWriteForbidden(): GraphQLError {
-  return new GraphQLError('Forbidden: no write access to this memory', {
+  const err = new GraphQLError('Forbidden: no write access to this memory', {
     extensions: { code: 'FORBIDDEN' },
   });
+  memoryWriteRefusals.add(err);
+  return err;
 }
 
 export const MEMORY_INCLUDE = {
@@ -3615,8 +3690,11 @@ export async function uninstallAgentFromAppCore(
       // here end (first end stands; other Apps untouched). Judged on every call, so a retry also ends a stranded row. The agent
       // this one imports may have lost its only (derived) witness too: one level, derivation never recurses (D1).
       const importedHere = removedRow.count > 0 ? await importedPairsOfParent(tx, resolvedAgentId, [resolvedAppId]) : [];
+      // #4180: the uninstalled agent records AGENT_UNINSTALLED; an agent it imported, which lost its derived install here, records
+      // AGENT_IMPORTER_UNINSTALLED (it was not uninstalled itself).
       await endGrantsOfAgentsNoLongerInstalled(
-        tx, [{ appId: resolvedAppId, agentId: resolvedAgentId }, ...importedHere], ctx.userId ?? null);
+        tx, [{ appId: resolvedAppId, agentId: resolvedAgentId }, ...importedHere], ctx.userId ?? null,
+        (p) => (p.agentId === resolvedAgentId ? 'AGENT_UNINSTALLED' : 'AGENT_IMPORTER_UNINSTALLED'));
     },
     { lockMode: 'exclusive', afterLock: async (tx) => {
       // NO KEY UPDATE, not SHARE (#4210 F1): two uninstalls of different agents in one App delete their own app_agents rows and then

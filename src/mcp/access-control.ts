@@ -115,12 +115,19 @@ type AppMemoryAccessOptions = {
   callerUserId?: string | null;
   allAgents?: boolean;
   memberAdmitted?: boolean;
-  /** Userless principals, including App keys and AppRuns, receive no item-derived authority. */
+  /**
+   * Userless principals, including App keys and AppRuns, receive no item-derived authority.
+   * Default (#3292): when omitted, `getAppMemoryAccess` uses `!callerUserId`. An explicit value is an
+   * INTERNAL-ONLY, trusted low-level seam (#3354): an explicit `false` without `callerUserId` keeps the
+   * pre-#3292 uncapped item fold. No production caller passes it (the principal path passes `!principal.userId`),
+   * and new callers must not: an item is a limit, never a grant (cor:dmo:050:09).
+   */
   credentialOnly?: boolean;
   /** #2190: filled, per memory, with the Agents whose fold granted it (install order). */
   provenance?: Map<string, AgentProvenance[]>;
 };
-type ItemUserAccessLoader = () => Promise<ReadonlyMap<string, string>>;
+/** #3326: given the item memory ids about to be judged, the user's own level for those ids (absent = none). */
+type ItemUserAccessLoader = (candidateIds: readonly string[]) => Promise<ReadonlyMap<string, string>>;
 
 /** Direct authority callers default to credential-only without a user; known users receive the independent item ceiling. */
 export async function getAppMemoryAccess(
@@ -129,7 +136,7 @@ export async function getAppMemoryAccess(
   opts: AppMemoryAccessOptions & { loadItemUserAccess?: ItemUserAccessLoader } = {},
 ): Promise<Map<string, string>> {
   const loadItemUserAccess = opts.loadItemUserAccess ?? (opts.callerUserId
-    ? () => independentUserItemAccess(db, opts.callerUserId!)
+    ? (candidateIds: readonly string[]) => independentUserItemAccess(db, opts.callerUserId!, candidateIds)
     : undefined);
   return buildAppMemoryMap(db, appId, { ...opts, credentialOnly: opts.credentialOnly ?? !opts.callerUserId }, loadItemUserAccess);
 }
@@ -174,9 +181,12 @@ async function buildAppMemoryMap(
   const liveSystemIds = new Set(liveSystemRows.map((row) => row.id));
   // No item can contribute without a licensed live Agent carrying one. Keep
   // system/team-only reads on their existing query budget (#3048/#2608).
+  // #3326: and only the memories those items name are judged, never everything the user can reach.
+  const candidateItemIds = [...new Set(agents
+    .filter(agent => licensedAgentIds.has(agent.id))
+    .flatMap(agent => agent.memoryItems.map(item => item.memoryId)))];
   const itemUserAccess = loadItemUserAccess
-    ? (agents.some(agent => licensedAgentIds.has(agent.id) && agent.memoryItems.length > 0)
-      ? await loadItemUserAccess() : new Map<string, string>())
+    ? (candidateItemIds.length > 0 ? await loadItemUserAccess(candidateItemIds) : new Map<string, string>())
     : undefined;
   const access = new Map<string, string>();
   for (const install of appInstalls) {
@@ -491,9 +501,19 @@ export async function getPrincipalAppMemoryAccess(
   // #3280/#3305 / cor:dmo:050:09: neither a run nor a session gains item
   // authority through App membership. Compute the same independent-user
   // ceiling once, including when an unselected user folds several Apps.
-  let independentItems: Promise<Map<string, string>> | undefined;
-  const loadItemUserAccess = principal.userId
-    ? () => independentItems ??= independentUserItemAccess(db, principal.userId!)
+  // #3326: per call and per memory, so overlapping candidates across several Apps are judged once and nothing
+  // outlives this request: the next one reads the user's authority afresh (cor:acl:020:01).
+  const independentLevels = new Map<string, Promise<string | null>>();
+  const loadItemUserAccess: ItemUserAccessLoader | undefined = principal.userId
+    ? async (candidateIds) => {
+      const missing = candidateIds.filter(id => !independentLevels.has(id));
+      if (missing.length > 0) {
+        const batch = independentUserItemAccess(db, principal.userId!, missing);
+        for (const id of missing) independentLevels.set(id, batch.then(levels => levels.get(id) ?? null));
+      }
+      const levels = await Promise.all(candidateIds.map(id => independentLevels.get(id)!));
+      return new Map(candidateIds.flatMap((id, i) => levels[i] ? [[id, levels[i]!] as const] : []));
+    }
     : undefined;
 
   if (principal.appId) {
@@ -785,7 +805,7 @@ export async function getMemoryAccess(
   // admit named PUBLIC knowledge (0114 B), without putting it in discovery. The ordinary App
   // fold may include sibling AgentMemoryItems, so it cannot answer this shape.
   if (auth.appId && auth.sessionId && !auth.userId) {
-    const ids = await sessionScopedMemoryIds(db, auth.appId, auth.sessionId);
+    const ids = await sessionScopedMemoryIds(db, auth.appId, auth.sessionId, auth);
     const session = await db.session.findUnique({
       where: { id: auth.sessionId }, select: { appId: true, memoryId: true },
     });
@@ -1158,7 +1178,7 @@ export async function canWriteToMemory(
         select: { appId: true, memoryId: true },
       });
       return session?.appId === auth.appId && session.memoryId === memoryId &&
-        (await sessionScopedMemoryIds(db, auth.appId, auth.sessionId)).includes(memoryId);
+        (await sessionScopedMemoryIds(db, auth.appId, auth.sessionId, auth)).includes(memoryId);
     }
     // Worker and session rows are not App-wide generic-write targets. In
     // particular, an org CONTRIBUTOR or AppMember may not turn participation
@@ -1255,10 +1275,21 @@ async function canReadMemoryRow(
   // #2044: an install memory's content is its live App's participants alone.
   if (isInstallMemoryRow(memory)) return (await installMemoryAudience(db, auth, memory)).read;
   if (memory.class === 'personal' || memory.class === 'private') {
-    if (auth.userId !== memory.userId || auth.impersonation) return false;
     // #1719 R5a: private is categorically unavailable to every AppRun,
     // including detached/free-standing holdings. No input or grant overrides it.
+    // #3401 D3: it runs first, before the session arm below, because a run
+    // principal can carry an App and a session with no user.
     if (memory.class === 'private' && isRunPrincipal(auth)) return false;
+    // #3401 (ruling 0203, cor:acl:010:02 "acting on the owner's behalf"): a
+    // pure App key bound to a session reads that session's personal or private
+    // memory exactly when the forced session map holds it. The map is the one
+    // shared predicate (`sessionScopedMemoryIds`), which re-validates the
+    // binding and checks the owner, the subscription and the App + Agent
+    // match; nothing here re-derives it. Impersonation never takes this arm.
+    if (auth.appId && auth.sessionId && !auth.userId && !auth.impersonation) {
+      return (opts.access ?? await getMemoryAccess(db, auth)).has(memory.id);
+    }
+    if (auth.userId !== memory.userId || auth.impersonation) return false;
 
     // 034-memory-class-access: a FREE-STANDING personal/private memory
     // (app_id AND agent both NULL — user-owned, created outside any App) is
@@ -1532,6 +1563,9 @@ export async function explainWriteRefusal(
   if (auth.impersonation) return ' An impersonation session is a read-only support view.';
   if (isRunPrincipal(auth)) return ' An App run writes only within its own App\'s scope.';
   if (auth.appId && auth.sessionId && !auth.userId) {
+    // #3401: the key now reads its session's personal/private memory, but the write question stays open
+    // (cor:acl:010:04), so that refusal keeps its bare text, byte-identical to before the read arm.
+    if (memory.class === 'personal' || memory.class === 'private') return '';
     return ' A session-bound App key writes only its own session memory.';
   }
   // Strict-owner and user-owned memories name no cause: their audience is the

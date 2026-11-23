@@ -15,6 +15,12 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { postgresRetrievalProvider as provider } from '../../lib/retrieval/postgres.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { setVectorSmallScopeRowsForTests as __smallScope } from '../../services/embedding/vectors.js';
+import { beforeEach as __be, afterEach as __ae } from 'vitest';
+// #2772: these pins are about the ITERATIVE index scan; their small fixtures would otherwise be ranked exactly
+// (a scope under the small-scope bound never walks the global HNSW index, BLIND/SEC findings at b07e0311).
+__be(() => __smallScope(0));
+__ae(() => __smallScope(null));
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
@@ -71,16 +77,23 @@ function probe(shortfall: boolean) {
       const v = Reflect.get(t, prop);
       if (prop !== '$queryRaw') return typeof v === 'function' ? v.bind(t) : v;
       return async (strings: TemplateStringsArray, ...vals: unknown[]) => {
-        const sql = Array.isArray(strings) ? strings.join('?') : '';
-        // #3675: only the two ANN statements run in this transaction (vectors.ts withEfSearch): the node ANN carries
-        // `ann_rows`, the chunk ANN `ne.chunk_index`. Anything else is a new in-transaction query this harness would
-        // otherwise answer `[]` and mislabel, so it fails loudly before it runs.
-        const annKind = sql.includes('ann_rows') ? 'node' : sql.includes('ne.chunk_index') ? 'chunk' : null;
-        if (!annKind) throw new Error(`unexpected in-transaction SQL: ${sql.trim().replace(/\s+/g, ' ').slice(0, 80)}`);
+        // A tagged template arrives as its strings array; a prebuilt Prisma.Sql (the version probe's) as an object with `.sql`.
+        const sql = Array.isArray(strings) ? strings.join('?') : String((strings as unknown as { sql?: string })?.sql ?? '');
+        // #4938 N2: a cold pgvector-version probe runs inside the budgeted transaction too (first, before any SET LOCAL).
+        if (sql.includes('FROM pg_extension')) return (v as any).call(t, strings, ...vals);
+        // #2772: every vector statement runs in the budgeted transaction (vectors.ts withVectorBudget): the iterative
+        // ANN scan (ORDER BY the distance), the independent eligible count and the MATERIALIZED exact scan. Only the
+        // ANN statement is intercepted; anything else unrecognised fails loudly before it runs.
+        const isExact = sql.includes('MATERIALIZED');
+        const isCount = sql.includes('count(*)::int AS n');
+        const isAnn = !isExact && !isCount && sql.includes('ORDER BY ne.embedding');
+        if (!isExact && !isCount && !isAnn) throw new Error(`unexpected in-transaction SQL: ${sql.trim().replace(/\s+/g, ' ').slice(0, 80)}`);
         const real = await (v as any).call(t, strings, ...vals);
-        if (!shortfall) return real;
+        if (isExact) seen.exactCalls++;
+        if (isCount) seen.counts.push(Number((real as any[])[0]?.n));
+        if (!isAnn || !shortfall) return real;
         seen.annIntercepted++;
-        seen.annKind = annKind;
+        seen.annKind = sql.includes('ne.chunk_index') ? 'chunk' : 'node';
         seen.annRealRows = (real as unknown[]).length;
         return [];
       };
@@ -93,15 +106,6 @@ function probe(shortfall: boolean) {
         return (arg: unknown, opts?: unknown) => typeof arg !== 'function'
           ? (target.$transaction as any)(arg, opts)
           : (target.$transaction as any)((tx: any) => (arg as any)(txProxy(tx)), opts);
-      }
-      if (prop === '$queryRaw') {
-        return async (strings: TemplateStringsArray, ...vals: unknown[]) => {
-          const sql = Array.isArray(strings) ? strings.join('?') : '';
-          const out = await (v as any).call(target, strings, ...vals);
-          if (sql.includes('MATERIALIZED')) seen.exactCalls++;
-          else if (sql.includes('count(*)::int AS n')) seen.counts.push(Number((out as any[])[0]?.n));
-          return out;
-        };
       }
       return typeof v === 'function' ? v.bind(target) : v;
     },
@@ -121,7 +125,6 @@ for (const [value, expectedNames, limit] of [[true, ['e1', 'e2'], 2], [false, ['
       const eligible = expectedNames.length;
 
       it('control: with no interception the normal full ANN page takes NO fallback (so the branch-entry oracle is real)', async () => {
-        vi.stubEnv('VECTOR_EXACT_FALLBACK_MAX_ROWS', String(eligible));
         const { handle, seen } = probe(false);
         const hits = await call(handle);
         expect(names(hits.map((h) => h.nodeId))).toEqual(expectedNames);
@@ -130,15 +133,16 @@ for (const [value, expectedNames, limit] of [[true, ['e1', 'e2'], 2], [false, ['
       });
 
       it('interception: real ANN returned a full page, the real count and MATERIALIZED statements ran once, and the final result is exact', async () => {
-        vi.stubEnv('VECTOR_EXACT_FALLBACK_MAX_ROWS', String(eligible)); // the per-call bound equals the known eligible count
         const { handle, seen } = probe(true);
         const hits = await call(handle);
         // Exactly the intended ANN arm, once; the real statement had returned a full requested page.
         expect(seen.annIntercepted).toBe(1);
         expect(seen.annKind).toBe(kind);
         expect(seen.annRealRows).toBeGreaterThanOrEqual(limit);
-        // The real eligible-count statement ran once and matched the fixture's independently known count.
-        expect(seen.counts).toEqual([eligible]);
+        // The real small-scope probe ran once: a count capped at (seam 0) + 1 = 1, which already exceeds the seam, so the
+        // ANN walk ran; the fixture holds `eligible` >= 1 rows.
+        expect(eligible).toBeGreaterThanOrEqual(1);
+        expect(seen.counts).toEqual([1]);
         // The MATERIALIZED exact statement ran exactly once.
         expect(seen.exactCalls).toBe(1);
         // Exact final identities, in rank order; foreign and wrong-state rows are absent.

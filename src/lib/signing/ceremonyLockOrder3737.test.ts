@@ -23,6 +23,7 @@ import { createSigningRequestInTransaction, SigningRefusal } from './requests.js
 import { CeremonyRefused, completeSigning, openProofCeremony, proofChallenge, proveForSigning } from './signingCeremony.js';
 import { signatureChallenge, signaturePayloadBytes } from './payload.js';
 import { clearSignatureVerifyCache } from './verify.js';
+import { backendPid, deadline, waitBlocked as observeBlocked, within, type Deadline } from '../../test/lockObserver.js';
 
 const ORIGIN = 'https://sign.example.test';
 const RP = 'example.test';
@@ -74,6 +75,8 @@ async function proofWith(requestId: string, key: SoftPasskey, browserHash: strin
 
 let observer: Client;
 let gate: Client;
+/** The gate connection's backend pid: the holder the first mover is expected to wait on (#3748 item 3). */
+let gatePid: number;
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -88,6 +91,7 @@ beforeEach(async () => {
   await observer.query(`SET statement_timeout = '10s'`);
   await gate.query(`SET statement_timeout = '30s'`);
   await gate.query(`SET lock_timeout = '30s'`);
+  gatePid = await backendPid(gate);
 });
 
 afterEach(async () => {
@@ -97,22 +101,15 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-interface Waiting { pid: number; query: string; blockers: number[] }
+/**
+ * #3748 item 3: the expected waiter only, never any backend waiting on any lock (it once returned the completion's
+ * pre-read instead of its anchor wait, #4536 / #4177). Item 2: every wait shares the pin's one deadline.
+ */
+const waitBlocked = (dl: Deadline, query: RegExp, blockedBy: number[]) => observeBlocked(observer, dl, { query, blockedBy });
 
-/** Bounded poll: a backend (not in `exclude`) waiting on a lock. */
-async function waitBlocked(exclude: number[] = []): Promise<Waiting> {
-  const deadline = Date.now() + 8000;
-  for (;;) {
-    await observer.query('SELECT pg_stat_clear_snapshot()');
-    const r = await observer.query<{ pid: number; query: string; blockers: number[] }>(
-      `SELECT pid, query, pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
-        WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'`);
-    const hit = r.rows.find((x) => !exclude.includes(x.pid));
-    if (hit) return hit;
-    if (Date.now() > deadline) throw new Error('no backend ever blocked on a lock');
-    await new Promise((res) => setTimeout(res, 25));
-  }
-}
+/** #3748 item 1: the live (unconsumed) SIGN ceremonies, oldest first. */
+const liveSignCeremonies = () => db.$queryRaw<Array<{ id: string; user_id: string | null; browser_nonce_hash: string }>>`
+  SELECT id, user_id, browser_nonce_hash FROM passkey_ceremonies WHERE purpose = 'SIGN' AND consumed_at IS NULL ORDER BY created_at`;
 
 const deadlocks = async () => {
   await observer.query('SELECT pg_stat_clear_snapshot()');
@@ -144,18 +141,19 @@ describe('#3737 proof vs completion lock order (real functions, two connections)
     const w = await seed();
     const proof = await prepareProof(w.requestId, w.key, w.browserHash, 2);
     const before = await deadlocks();
+    const dl = deadline(20_000);
 
     // The gate holds the node row, so completion parks right after it has spent its SIGN ceremony.
     await gate.query('BEGIN');
     await gate.query('SELECT id FROM nodes WHERE id = $1 FOR UPDATE', [w.nodeId]);
     const c = settle(completion(w, 3)());
-    const cWait = await waitBlocked();
+    const cWait = await waitBlocked(dl, /FROM nodes WHERE id/, [gatePid]);
     expect(cWait.query).toMatch(/FROM nodes WHERE id/);
 
     const p = settle(proof.run());
-    const pWait = await waitBlocked([cWait.pid]);
+    const pWait = await waitBlocked(dl, /pg_advisory_xact_lock/, [cWait.pid]);
     await gate.query('COMMIT');
-    const [cr, pr] = await Promise.all([c, p]);
+    const [cr, pr] = await within(dl, 'proof/completion', Promise.all([c, p]));
     await new Promise((res) => setTimeout(res, 1700));
 
     // No transaction was aborted as a deadlock victim, and the database-wide count did not move.
@@ -174,18 +172,19 @@ describe('#3737 proof vs completion lock order (real functions, two connections)
     const w = await seed();
     const proof = await prepareProof(w.requestId, w.key, w.browserHash, 2);
     const before = await deadlocks();
+    const dl = deadline(20_000);
 
     // The gate holds the proof ceremony row, so the proof parks holding the credential (and, once fixed, the anchor).
     await gate.query('BEGIN');
     await gate.query('SELECT id FROM passkey_ceremonies WHERE id = $1 FOR UPDATE', [proof.ceremonyId]);
     const p = settle(proof.run());
-    const pWait = await waitBlocked();
+    const pWait = await waitBlocked(dl, /passkey_ceremonies WHERE id/, [gatePid]);
     expect(pWait.query).toMatch(/passkey_ceremonies WHERE id/);
 
     const c = settle(completion(w, 3)());
-    const cWait = await waitBlocked([pWait.pid]);
+    const cWait = await waitBlocked(dl, /pg_advisory_xact_lock/, [pWait.pid]);
     await gate.query('COMMIT');
-    const [cr, pr] = await Promise.all([c, p]);
+    const [cr, pr] = await within(dl, 'proof/completion', Promise.all([c, p]));
     await new Promise((res) => setTimeout(res, 1700));
 
     for (const r of [cr, pr]) if (!r.ok) expect(isDeadlock(r.error), `a deadlock victim: ${String((r.error as Error)?.message)}`).toBe(false);
@@ -196,6 +195,14 @@ describe('#3737 proof vs completion lock order (real functions, two connections)
     expect(pr.ok && pr.value.outcome === 'open').toBe(true);
     expect(!cr.ok && cr.error instanceof CeremonyRefused).toBe(true);
     expect(await state(w)).toEqual({ request: 'open', signatures: 0, counter: 2, oldSignConsumed: true });
+    // #3748 item 1: 'open' alone would pass if the proof returned without minting the replacement. Exactly ONE fresh,
+    // unconsumed SIGN ceremony exists afterwards: not the retired one, bound to the signer, under the rotated nonce.
+    const sessionNonce = (pr.ok && pr.value.outcome === 'open' ? (pr.value as { sessionNonce?: string }).sessionNonce : undefined)!;
+    expect(sessionNonce).toEqual(expect.any(String));
+    const live = await liveSignCeremonies();
+    expect(live).toHaveLength(1);
+    expect(live[0]).toMatchObject({ user_id: w.userId, browser_nonce_hash: sha256Hex(sessionNonce) });
+    expect(live[0]!.id).not.toBe(w.signCeremonyId);
   }, 40_000);
   it('a signer id read before the anchor authorizes nothing: a ceremony spent while the completion waits is refused', async () => {
     const w = await seed();
@@ -203,14 +210,15 @@ describe('#3737 proof vs completion lock order (real functions, two connections)
     // The gate holds the SIGNER's user anchor (the same advisory key the proof and the completion take).
     await gate.query('BEGIN');
     await gate.query(`SELECT pg_advisory_xact_lock(hashtext('authorization:user'), hashtext($1))`, [w.userId]);
+    const dl = deadline(20_000);
     const c = settle(completion(w, 3)());
-    const cWait = await waitBlocked();
+    const cWait = await waitBlocked(dl, /pg_advisory_xact_lock/, [gatePid]);
     expect(cWait.query).toMatch(/pg_advisory_xact_lock/);
     // While it waits, the ceremony it pre-read is spent (a binding to another user is blocked by the DB's bound-once
     // trigger, so the user-equality re-check after the lock is defense in depth that cannot be staged).
     await gate.query(`UPDATE passkey_ceremonies SET consumed_at = (clock_timestamp() AT TIME ZONE 'UTC') WHERE id = $1`, [w.signCeremonyId]);
     await gate.query('COMMIT');
-    const cr = await c;
+    const cr = await within(dl, 'completion', c);
     expect(!cr.ok && cr.error instanceof CeremonyRefused, 'completion must re-judge the ceremony under the anchor').toBe(true);
     const after = await state(w);
     expect(after).toEqual({ ...before, oldSignConsumed: true });

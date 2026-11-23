@@ -30,7 +30,7 @@ import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
 import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
 import type { CheckpointWrite } from '../../../lib/contextReset/contextReset.js';
 import { Prisma } from '../../../generated/prisma/index.js';
-import type { Context } from './resolvers.helpers.js';
+import { pageArgs, pageEnvelope, type Context } from './resolvers.helpers.js';
 import {
   actorManagesApp,
   recordInstructedManagerAct,
@@ -49,6 +49,7 @@ import { managesApp } from '../../../lib/auth/appManagement.js';
 import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { generateId } from '../../../lib/id.js';
 import { keyEverHeldHostOperate, keyHostId, recordHostKeyUse, recordHostKeyUseApart, type HostKey, type HostKeyAction } from '../../../lib/hostOperations/hostKey.js';
@@ -133,7 +134,10 @@ export async function hostKeyEntry(ctx: Context, appRef: string): Promise<{ app:
   try {
     const { id } = await resolveAppRef(ctx.db, appRef);
     app = id === key.appId ? await loadApp(ctx, id) : null;
-  } catch {
+  } catch (e) {
+    // #4893/#2975: only a name-resolution outcome takes the not-found path below; a
+    // database fault propagates (it is not "app not found").
+    if (!isAppRefResolutionFailure(e)) throw e;
     app = null;
   }
   if (!app || app.deletedAt || app.uninstalledAt) throw appNotFound(appRef);
@@ -562,7 +566,7 @@ export const hostOperationMutations = {
    * The server builds what it stores (`buildWorkerTerminal`): `host` is the key's host and its registration's label,
    * `reportedAt` is the server's clock. #4225 S4a: a report may carry the worker's context size (`contextTokens` with
    * `contextMeasuredAt`, or neither); a malformed size refuses the batch like any other malformed field, and a worker
-   * this host does not run is refused for its row as before, so its size is never stored. The report decides nothing. The alarm verdict is computed from the stored
+   * this host does not run is refused for its row as before, so its size is never stored. The report decides one thing (#4933): no desired-running start for a worker whose agent this host already runs; nothing else. The alarm verdict is computed from the stored
    * rows after the write and returned, never stored, and names only coordinators THIS host registers.
    */
   setHostWorkerTerminals: async (
@@ -918,11 +922,13 @@ async function loadRegistrationView(ctx: Context, appId: string, hostId: string)
   return views[0]!;
 }
 
-async function loadRegistrationViews(ctx: Context, appId: string, hostId?: string) {
+/** #2213 S3: `page` takes one window of the same `hostId asc` order (unique per App), so a page is a slice of the full list. */
+async function loadRegistrationViews(ctx: Context, appId: string, hostId?: string, page?: { take: number; skip: number }) {
   const regs = await ctx.db.hostRegistration.findMany({
     where: { appId, ...(hostId ? { hostId } : {}) },
     include: { workers: { orderBy: { workerId: 'asc' } } },
     orderBy: { hostId: 'asc' },
+    ...(page ?? {}),
   });
   const schedule = await ctx.db.agentTaskStallSchedule.findUnique({ where: { appId }, select: { hostLapseCheckIns: true } });
   const checkIns = schedule?.hostLapseCheckIns ?? HOST_LAPSE_CHECK_INS_DEFAULT;
@@ -967,6 +973,25 @@ export const hostOperationQueries = {
       const key = appKeyCaller(ctx);
       if (key) await recordHostKeyUseApart(ctx.db, key, 'read', { count: views.length });
       return views;
+    }),
+
+  /**
+   * #2213 S3 (cor:api:120:04): `hostRegistrations` as a page. The same gate (`recordingRefusal` around
+   * `withReadableApp`), the same rows, order and nested workers, with the real total. Count and page are read on one
+   * repeatable-read snapshot (`coherent`), so they agree. A host key's read is recorded apart, as the old field's is,
+   * with `count` = the items on this page.
+   */
+  hostRegistrationsPage: (_: unknown, a: { appRef: string; limit?: number | null; offset?: number | null }, ctx: Context) =>
+    recordingRefusal(ctx, 'read', null, async () => {
+      const { take, skip } = pageArgs(a);
+      const page = await withReadableApp(ctx, a.appRef, async (c, app) => {
+        const total = await c.db.hostRegistration.count({ where: { appId: app.id } });
+        const items = take === 0 ? [] : await loadRegistrationViews(c, app.id, undefined, { take, skip });
+        return pageEnvelope(items, total, skip);
+      }, false, undefined, { coherent: true });
+      const key = appKeyCaller(ctx);
+      if (key) await recordHostKeyUseApart(ctx.db, key, 'read', { count: page.items.length });
+      return page;
     }),
 
   /** The App's host operations, newest first: whoever reads its tasks and events (cor:agt:050:21). */

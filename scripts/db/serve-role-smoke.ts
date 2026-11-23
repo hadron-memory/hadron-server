@@ -16,7 +16,7 @@
  * worker-reference fence write, a read of EVERY public table (so a table the
  * serve role cannot SELECT fails here, by name), and a table the owner creates
  * AFTER the grants (the default-privileges proof). Negative checks: SQLSTATE
- * 42501 on TRUNCATE, ALTER TABLE, DROP TRIGGER, CREATE TABLE and a SELECT on
+ * 42501 on TRUNCATE, UPDATE and DELETE of `secret_root_check`, ALTER TABLE, DROP TRIGGER, CREATE TABLE and a SELECT on
  * `_prisma_migrations`.
  *
  * Exit codes: 0 all hold, 1 an assertion failed (each printed `FAIL <name>`),
@@ -225,6 +225,9 @@ export function buildChecks(f: Fixture, owner: Client): Check[] {
       },
     },
     { name: 'TRUNCATE is refused (42501)', run: (s) => expectRefused(s, 'TRUNCATE worker_reference_fences') },
+    // #4573: the serve role never moves the recorded root check; WHERE false is enough, the privilege is judged before any row.
+    { name: 'UPDATE on secret_root_check is refused (42501)', run: (s) => expectRefused(s, 'UPDATE secret_root_check SET check_value = check_value WHERE false') },
+    { name: 'DELETE on secret_root_check is refused (42501)', run: (s) => expectRefused(s, 'DELETE FROM secret_root_check WHERE false') },
     { name: 'ALTER TABLE is refused (42501)', run: (s) => expectRefused(s, 'ALTER TABLE nodes ADD COLUMN smoke_x integer') },
     { name: 'DROP TRIGGER is refused (42501)', run: (s) => expectRefused(s, 'DROP TRIGGER nodes_comment_insert ON nodes') },
     { name: 'CREATE TABLE is refused (42501)', run: (s) => expectRefused(s, `CREATE TABLE smoke_serve_made_${f.tag} (id int)`) },

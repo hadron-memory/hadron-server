@@ -21,8 +21,24 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { serveAgentBootPrompt } from '../servedBootPrompt.js';
+import { BOOT_PROMPT_REFUSAL_CODES } from '../../lib/bootPrompt/refusal.js';
 
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
+
+// #3920 item 2: the mint's serve step answers a forced refusal for the codes a fixture cannot reach from real state (a licence
+// lapse, a signing policy), and the real resolver otherwise.
+const forced = vi.hoisted(() => ({ refusal: null as null | { code: string; surface: string } }));
+vi.mock('../../lib/bootPrompt/serve.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/bootPrompt/serve.js')>();
+  const { bootPromptRefusal } = await import('../../lib/bootPrompt/refusal.js');
+  return {
+    ...actual,
+    resolveServedBootPrompt: (...args: Parameters<typeof actual.resolveServedBootPrompt>) => {
+      if (forced.refusal) throw bootPromptRefusal(forced.refusal.code as never, { surface: forced.refusal.surface as never, agentName: '' });
+      return actual.resolveServedBootPrompt(...args);
+    },
+  };
+});
 
 import { mintAppRun } from '../../jobs/appRuns.js';
 import { schedulerTick } from '../../jobs/scheduler.js';
@@ -117,6 +133,8 @@ describe('#3689 the data transition (migration + pre-push)', () => {
     expect(block).toBeTruthy();
     expect(blockOf(read(MIGRATION_FILE))).toBe(block);
     expect(read('pre-push.sql')).toMatch(new RegExp(`^\\\\ir ${BLOCK_FILE.replace('.', '\\.')}$`, 'm'));
+    // #3920 item 10: the line that restores the guarantee on a push-synced database.
+    expect(read('post-push.sql')).toMatch(/^ALTER TABLE app_runs ALTER COLUMN agent_id SET NOT NULL;$/m);
   });
 
   it('fills a single-install run, deletes every other agentless or dangling run with its children, is idempotent, then the migration constrains', async () => {
@@ -150,14 +168,16 @@ describe('#3689 the data transition (migration + pre-push)', () => {
     });
 
     const block = blockOf(read(BLOCK_FILE))!;
-    const snapshot = async () => (await db.appRun.findMany({ select: { id: true, agentId: true }, orderBy: { id: 'asc' } }));
+    // #3920 item 5: both sides sorted in JS (`<`), never the database's collation against JS order.
+    const byId = (a: { id: string }, b: { id: string }) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const snapshot = async () => (await db.appRun.findMany({ select: { id: true, agentId: true } })).sort(byId);
     await withPg(c => c.query(block));
     const after = await snapshot();
     expect(after).toEqual([
       { id: ids.filled, agentId: single.agentIds[0] },
       { id: ids.filledPastDeadSibling, agentId: singleWithDeadSibling.agentIds[0] },
       { id: valid.id, agentId: single.agentIds[0] },
-    ].sort((a, b) => (a.id < b.id ? -1 : 1)));
+    ].sort(byId));
     expect(await db.manualAutomationPin.count()).toBe(0);
     expect(await db.webFetchPollBinding.count()).toBe(0);
     expect(await db.webFetchEventReceipt.count()).toBe(0);
@@ -219,12 +239,12 @@ describe('#3689 the data transition (migration + pre-push)', () => {
     // Boot (#3770) marks a refused migration rolled back and serves the schema that exists, under THIS build's generated
     // client. So the client must read a NULL-agent run: the Prisma field stays optional until the migration has applied
     // everywhere (the database column is what guarantees the Agent once it has).
-    const two = await app('refused-read', [{ live: true }, { live: true }]);
-    const one = await app('refused-read-one', [{ live: true }]);
+    const appTwo = await app('refused-read', [{ live: true }, { live: true }]);
+    const appOne = await app('refused-read-one', [{ live: true }]);
     const ids = await withPg(async (c) => {
       await c.query(RELAX);
-      const retained = await insertRun(c, two.id, null);
-      const control = await insertRun(c, one.id, one.agentIds[0]);
+      const retained = await insertRun(c, appTwo.id, null);
+      const control = await insertRun(c, appOne.id, appOne.agentIds[0]);
       await c.query(`INSERT INTO manual_automation_pins (run_id, pin) VALUES ($1, '{}'::jsonb)`, [retained]);
       // The migration's own transaction: a child refuses, HDPRF, and boot rolls the whole migration back.
       await c.query('BEGIN');
@@ -237,14 +257,79 @@ describe('#3689 the data transition (migration + pre-push)', () => {
       }
       return { retained, control };
     });
-    expect(await db.appRun.findUnique({ where: { id: ids.control } })).toMatchObject({ agentId: one.agentIds[0] });
+    expect(await db.appRun.findUnique({ where: { id: ids.control } })).toMatchObject({ agentId: appOne.agentIds[0] });
     expect(await db.appRun.findUnique({ where: { id: ids.retained } })).toMatchObject({ id: ids.retained, agentId: null });
-    expect((await db.appRun.findMany({ where: { appId: { in: [two.id, one.id] } } })).map(r => r.id).sort()).toEqual([ids.retained, ids.control].sort());
+    expect((await db.appRun.findMany({ where: { appId: { in: [appTwo.id, appOne.id] } } })).map(r => r.id).sort()).toEqual([ids.retained, ids.control].sort());
+  });
+
+  // #3920 item 8: only raise_exception / restrict_violation / foreign_key_violation become a data refusal (boot then serves
+  // the old schema). Anything else is a fault that must stop boot, so it passes through as itself. 57014 (a statement
+  // timeout) is the issue's example, but PL/pgSQL's WHEN OTHERS never matches query_canceled, so that pin alone cannot
+  // kill a catch widened to OTHERS; 22012 and 23505 are ordinary errors OTHERS DOES catch, and kill it.
+  for (const sqlstate of ['57014', '22012', '23505']) {
+    it(`an error that is not a refusal (${sqlstate}) raised inside the delete is NOT mapped to HDPRF (the catch stays narrow)`, async () => {
+      const two = await app(`narrow-${sqlstate}`, [{ live: true }, { live: true }]);
+      await withPg(async (c) => {
+        await c.query('BEGIN');
+        try {
+          await c.query(RELAX);
+          const doomed = await insertRun(c, two.id, null);
+          await c.query(`INSERT INTO manual_automation_pins (run_id, pin) VALUES ($1, '{}'::jsonb)`, [doomed]);
+          await c.query(`CREATE FUNCTION pg_temp.ra_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected fault' USING ERRCODE = '${sqlstate}'; END $$`);
+          await c.query(`CREATE TRIGGER ra_fault BEFORE DELETE ON manual_automation_pins FOR EACH ROW EXECUTE FUNCTION pg_temp.ra_fault()`);
+          const err = await sqlError(c, blockOf(read(BLOCK_FILE))!);
+          expect(err?.code).toBe(sqlstate);
+          expect(err?.message).not.toMatch(/app_runs agent backfill/);
+        } finally {
+          await c.query('ROLLBACK');
+        }
+      });
+    });
+  }
+
+  it('a failure after the cleanup rolls the cleanup back: the file is one transaction as the migration runner sends it', async () => {
+    // BLIND F1 (Coco, 924be003): the file has no BEGIN of its own. `prisma migrate deploy` sends a migration file as ONE
+    // multi-statement query, which PostgreSQL runs as a single implicit transaction, so a statement that fails AFTER the
+    // DO block (here CREATE INDEX, behind SET NOT NULL) must bring back the runs the block deleted, their children and the
+    // NULLs it filled. This runs the real file the same way (one query, no BEGIN). A COMMIT, or anything else that ends
+    // the implicit transaction, added to the file would make this fail.
+    const single = await app('atomic-single', [{ live: true }]);
+    const two = await app('atomic-two', [{ live: true }, { live: true }]);
+    await withPg(async (c) => {
+      await c.query(RELAX);
+      const fillable = await insertRun(c, single.id, null);
+      const doomed = await insertRun(c, two.id, null);
+      await c.query(`INSERT INTO manual_automation_pins (run_id, pin) VALUES ($1, '{}'::jsonb)`, [doomed]);
+      // The migration's index name is taken, so its CREATE INDEX fails after the block has filled and deleted.
+      await c.query('CREATE INDEX app_runs_agent_id_idx ON app_runs (created_at)');
+      try {
+        const err = await sqlError(c, read(MIGRATION_FILE));
+        expect(err?.code).toBe('42P07');
+        const rows = await c.query('SELECT id, agent_id FROM app_runs WHERE id = ANY($1) ORDER BY id', [[fillable, doomed]]);
+        expect(rows.rows).toEqual([{ id: fillable, agent_id: null }, { id: doomed, agent_id: null }].sort((a, b) => (a.id < b.id ? -1 : 1)));
+        expect((await c.query('SELECT count(*)::int AS n FROM manual_automation_pins WHERE run_id = $1', [doomed])).rows).toEqual([{ n: 1 }]);
+        const nullable = await c.query(`SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'app_runs' AND column_name = 'agent_id'`);
+        expect(nullable.rows).toEqual([{ is_nullable: 'YES' }]);
+      } finally {
+        await c.query('DROP INDEX IF EXISTS app_runs_agent_id_idx');
+      }
+    });
   });
 
   afterEach(async () => {
     // A failed assertion above can leave the schema relaxed; put the PR's shape back for the next file in this worker.
-    await withPg(c => c.query(`DELETE FROM app_runs WHERE agent_id IS NULL OR NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = app_runs.agent_id)`).then(() => c.query(RESTORE))).catch(() => undefined);
+    // BLIND F3 (Coco, 924be003): a restore that fails is not swallowed, and the restored shape is checked, so no later
+    // test runs against a relaxed table without this file saying so.
+    await withPg(async (c) => {
+      await c.query(`DELETE FROM app_runs WHERE agent_id IS NULL OR NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = app_runs.agent_id)`);
+      await c.query(RESTORE);
+      const shape = await c.query(`
+        SELECT (SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'app_runs' AND column_name = 'agent_id') AS nullable,
+               (SELECT confdeltype::text FROM pg_constraint WHERE conname = 'app_runs_agent_id_fkey' AND conrelid = 'app_runs'::regclass) AS fk,
+               (SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'app_runs_agent_id_idx') AS idx`);
+      expect(shape.rows[0]).toMatchObject({ nullable: 'NO', fk: 'c' });
+      expect(shape.rows[0].idx).toMatch(/\(agent_id\)$/);
+    });
   });
 });
 
@@ -283,4 +368,104 @@ describe('#3689 R2: a trigger that names no Agent gets the typed refusal', () =>
     expect(warn.mock.calls.some(args => String(args[0]).includes('launch denied') && String(args[0]).includes('BOOT_PROMPT_NOT_SET'))).toBe(true);
     expect(await db.appRun.count()).toBe(0);
   });
+});
+
+
+describe('#3689 / #3920 R2: every refusal the serve step can raise is a launch refusal, never a run', () => {
+  let server: Server | undefined;
+  afterEach(async () => {
+    forced.refusal = null;
+    vi.restoreAllMocks();
+    if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+    server = undefined;
+  });
+
+  async function fire(a: { id: string; agentIds: string[] }, agentId: string | null) {
+    const secret = generateWebhookSecret();
+    const hook = await db.agentWebhook.create({ data: { id: generateId(), organizationId: orgId, appId: a.id, agentId, name: 'notify', secret, entryNodeUrn: 'ra-org:mem:entry' } });
+    const hpt = await mintWebhookPlatformToken(hook.id);
+    const ex = express();
+    ex.use(express.json());
+    mountWebhookRoutes(ex, db);
+    server = await new Promise<Server>((resolve) => { const s = ex.listen(0, () => resolve(s)); });
+    const addr = server.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    return fetch(`http://127.0.0.1:${port}/hooks/${secret}/notify?hpt=${hpt}`);
+  }
+
+  async function tick(a: { id: string }, agentId: string | null) {
+    await db.agentSchedule.create({ data: { id: generateId(), organizationId: orgId, appId: a.id, agentId, name: 'tick', cron: '* * * * *', nextRunAt: new Date(0), entryNodeUrn: 'ra-org:mem:entry' } });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const minted = await schedulerTick(db);
+    return { minted, warn, error };
+  }
+
+  const nothingWritten = async () => {
+    expect(await db.appRun.count()).toBe(0);
+    expect(await db.servedPrompt.count()).toBe(0);
+  };
+
+  // An EXISTING installed Agent whose boot prompt cannot be served, from real state.
+  const REAL: Array<[string, (agentId: string) => Promise<void>]> = [
+    ['BOOT_PROMPT_NOT_SET', async () => undefined],
+    ['BOOT_PROMPT_TARGET_DELETED', async (agentId) => {
+      const nodeId = await serveAgentBootPrompt(db, agentId, 'Doomed prompt.');
+      await db.node.update({ where: { id: nodeId }, data: { deletedAt: new Date() } });
+    }],
+    ['BOOT_PROMPT_NOT_APPROVED', async (agentId) => {
+      const nodeId = await serveAgentBootPrompt(db, agentId, 'Unapproved prompt.');
+      await db.node.update({ where: { id: nodeId }, data: { approvedRevNo: null, approvedAt: null, approvedByInfo: null, approvalHash: null } });
+    }],
+  ];
+
+  for (const [code, setup] of REAL) {
+    it(`webhook: an existing Agent that cannot be served (${code}) is 409 {error}, no run, no served record`, async () => {
+      const a = await app(`hook-${code.slice(12).toLowerCase()}`, [{ live: true }]);
+      await setup(a.agentIds[0]);
+      const res = await fire(a, a.agentIds[0]);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: code });
+      await nothingWritten();
+    });
+
+    it(`schedule: an existing Agent that cannot be served (${code}) is a logged denial, no run, no served record`, async () => {
+      const a = await app(`sched-${code.slice(12).toLowerCase()}`, [{ live: true }]);
+      await setup(a.agentIds[0]);
+      const { minted, warn, error } = await tick(a, a.agentIds[0]);
+      expect(minted).toBe(0);
+      expect(error).not.toHaveBeenCalled();
+      expect(warn.mock.calls.some(args => String(args[0]).includes('launch denied') && String(args[0]).includes(code))).toBe(true);
+      await nothingWritten();
+    });
+  }
+
+  // The codes a fixture cannot reach from real state (a licence lapse, a signing policy), forced at the serve step with
+  // the `run` surface the real resolver gives a launch.
+  for (const code of ['BOOT_PROMPT_INSTALL_LICENSE_INACTIVE', 'BOOT_PROMPT_NOT_SIGNED'] as const) {
+    it(`webhook and schedule: ${code} from the run surface is 409 / a logged denial, no run`, async () => {
+      const a = await app(`forced-${code.slice(12).toLowerCase()}`, [{ live: true }]);
+      forced.refusal = { code, surface: 'run' };
+      const res = await fire(a, a.agentIds[0]);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: code });
+      const { minted, warn } = await tick(a, a.agentIds[0]);
+      expect(minted).toBe(0);
+      expect(warn.mock.calls.some(args => String(args[0]).includes('launch denied') && String(args[0]).includes(code))).toBe(true);
+      await nothingWritten();
+    });
+  }
+
+  // #3920 item 1 (red before the surface check): the webhook answers only the `run` surface's refusal as its own.
+  for (const code of BOOT_PROMPT_REFUSAL_CODES) {
+    for (const surface of ['bind', 'chat'] as const) {
+      it(`webhook: ${code} raised for the ${surface} surface inside the handler is NOT a 409`, async () => {
+        const a = await app(`surface-${surface}-${code.slice(12).toLowerCase()}`, [{ live: true }]);
+        forced.refusal = { code, surface };
+        const res = await fire(a, a.agentIds[0]);
+        expect(res.status).not.toBe(409);
+        await nothingWritten();
+      });
+    }
+  }
 });

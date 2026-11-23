@@ -18,7 +18,7 @@ import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolvers } from '../api/graphql/schema/resolvers.js';
 import { isSessionDormant, isSessionLive, loadLastEventBySession, usageEventCountsAsActivity } from './sessionActivity.js';
 import { attributedRequestActivity, recordNodeUsage } from './usageRecorder.js';
-import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx, resumableOwnWorkerIds } from './teamAttention.js';
+import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx, resumableOwnWorkerIds } from './ownWorkerSessions.js';
 import { sessionKeyReleasedHint } from './sessionKeyCache.js';
 import { decryptNodeFields } from './nodeCrypto.js';
 

@@ -3,7 +3,7 @@
  * the edge addresses that were DERIVED from that address.
  */
 import type { Prisma } from '../generated/prisma/index.js';
-import { deriveEdgeLoc } from './edgeLoc.js';
+import { rekeyDerivedEdgeLoc } from './edgeLoc.js';
 import { acquireLockSet } from './nodeSubtreeLock.js';
 
 /** The loc a tombstone is archived at: id-unique, outside any real loc namespace. */
@@ -159,13 +159,12 @@ function rekeyedEdgeLoc(
   const target = moved.get(edge.targetId);
   const oldSourceLoc = source?.oldLoc ?? edge.source.loc;
   const oldTargetLoc = target?.oldLoc ?? edge.target.loc;
-  if (edge.loc === deriveEdgeLoc(oldSourceLoc, edge.name, oldTargetLoc)) {
-    return deriveEdgeLoc(
-      source?.newLoc ?? oldSourceLoc,
-      edge.name,
-      target?.newLoc ?? oldTargetLoc,
-    );
-  }
+  // #4583: re-derived in the spelling the loc carries, so a pair of twins does not land on one loc.
+  const rekeyed = rekeyDerivedEdgeLoc(
+    edge.loc, oldSourceLoc, edge.name, oldTargetLoc,
+    source?.newLoc ?? oldSourceLoc, target?.newLoc ?? oldTargetLoc,
+  );
+  if (rekeyed !== null) return rekeyed;
   if (source && edge.loc.startsWith(`${source.oldLoc}:`)) {
     return `${source.newLoc}${edge.loc.slice(source.oldLoc.length)}`;
   }

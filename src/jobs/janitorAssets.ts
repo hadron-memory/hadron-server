@@ -17,7 +17,7 @@
 
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { db as defaultDb } from '../integrations/db/client.js';
-import { deleteObject } from '../integrations/r2/client.js';
+import { deleteObject } from '../integrations/objectstore/index.js';
 import { logAssetEvent } from '../lib/asset/audit.js';
 import { decryptStorageKey } from '../lib/asset/encryption.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';

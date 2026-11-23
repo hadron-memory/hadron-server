@@ -13,7 +13,7 @@ import {
 const headObjectMock = vi.hoisted(() => vi.fn());
 const captureMock = vi.hoisted(() => vi.fn());
 
-vi.mock('../integrations/r2/client.js', () => ({
+vi.mock('../integrations/objectstore/index.js', () => ({
   headObject: headObjectMock,
   isObjectStoreConfigured: () => true,
 }));

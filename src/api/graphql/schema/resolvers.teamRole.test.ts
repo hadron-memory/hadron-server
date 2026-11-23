@@ -317,10 +317,12 @@ describe('#960 — createTeamRole', () => {
     );
   });
 
-  it('write gate is the definition-edit gate: org READER and CONTRIBUTOR refused, ADMIN admitted', async () => {
-    await expect(
-      M.createTeamRole({}, { appRef: app.id, role: 'ops', names: ['Uma'] }, ctx(reader.id)),
-    ).rejects.toThrow(/Forbidden/);
+  it('write gate is the definition-edit gate: org READER concealed, CONTRIBUTOR refused, ADMIN admitted', async () => {
+    // #4838: an org READER cannot REACH the App (participation is
+    // CONTRIBUTOR+), so the reach gate answers the one unknown-App answer —
+    // the FORBIDDEN this test used to pin was an existence oracle. A
+    // CONTRIBUTOR reaches and keeps FORBIDDEN from the definition-edit gate.
+    await expectCode(M.createTeamRole({}, { appRef: app.id, role: 'ops' }, ctx(reader.id)), 'APP_NOT_FOUND');
     await expectCode(M.createTeamRole({}, { appRef: app.id, role: 'ops' }, ctx(contrib.id)), 'FORBIDDEN');
     const role = await M.createTeamRole(
       {},
@@ -702,11 +704,11 @@ describe('#960 — updateTeamRole (#1050: description only)', () => {
     expect(after.data).toEqual(before.data);
   });
 
-  it('write gate: org READER and CONTRIBUTOR refused, ADMIN admitted', async () => {
-    // Definition edits use the same management boundary as Agent edits.
-    await expect(
-      M.updateTeamRole({}, { appRef: app.id, role: 'backend-engineer', description: 'x' }, ctx(reader.id)),
-    ).rejects.toThrow(/Forbidden/);
+  it('write gate: org READER concealed, CONTRIBUTOR refused, ADMIN admitted', async () => {
+    // Definition edits use the same management boundary as Agent edits, and
+    // #4838's reach gate conceals the App from a non-participant (org READER)
+    // where this test used to pin FORBIDDEN.
+    await expectCode(M.updateTeamRole({}, { appRef: app.id, role: 'backend-engineer', description: 'x' }, ctx(reader.id)), 'APP_NOT_FOUND');
     await expectCode(M.updateTeamRole({}, { appRef: app.id, role: 'backend-engineer', description: 'x' }, ctx(contrib.id)), 'FORBIDDEN');
     const ok = await M.updateTeamRole(
       {},
@@ -723,7 +725,9 @@ describe('deleteTeamRole (#1002, simplified by #1050)', () => {
 
   it('definition removal requires an authorized manager', async () => {
     await expectCode(del(ctx(contrib.id), { role: 'backend-engineer' }), 'FORBIDDEN');
-    await expectCode(del(ctx(reader.id), { role: 'backend-engineer' }), 'FORBIDDEN');
+    // #4838: an org READER cannot reach the App, so the refusal is concealed —
+    // the FORBIDDEN this pinned was an existence oracle.
+    await expectCode(del(ctx(reader.id), { role: 'backend-engineer' }), 'APP_NOT_FOUND');
   });
 
   /** Mint a worker holding `name`, as a real cast would. */
@@ -795,9 +799,11 @@ describe('deleteTeamRole (#1002, simplified by #1050)', () => {
 
   it('runs the definition-edit gate — a reader App member may not retire a role', async () => {
     // requireMemoryWriteAccess signals denial with a plain Error('Forbidden…'),
-    // matching how the create/update auth tests above assert it.
+    // matching how the create/update auth tests above assert it. #4838: the
+    // OUTSIDER is concealed behind the unknown-App answer (reach first) where
+    // this used to pin FORBIDDEN.
     await expect(del(ctx(appMember.id), { role: 'frontend-engineer' })).rejects.toThrow(/Forbidden/);
-    await expect(del(ctx(outsider.id), { role: 'frontend-engineer' })).rejects.toThrow(/Forbidden/);
+    await expectCode(del(ctx(outsider.id), { role: 'frontend-engineer' }), 'APP_NOT_FOUND');
     expect(await roleLocs()).toContain('roles:frontend-engineer');
   });
 });
