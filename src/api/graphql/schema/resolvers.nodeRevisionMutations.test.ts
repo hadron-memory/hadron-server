@@ -85,6 +85,21 @@ describe('deleteNodeRevision (#617)', () => {
     ).rejects.toThrow('Node revision not found');
   });
 
+  it('a legacy revision with no captured memory falls back to the node\'s memory for the read gate (#4138)', async () => {
+    // Rows from before #602 carry no memoryId; every door reads `revision.memoryId ?? node.memoryId`.
+    const legacy = await db.nodeRevision.create({
+      data: { id: generateId(), nodeId: node.id, memoryId: null, loc: 'guide', revNo: 40, name: 'v4', content: 'body-4', createdAt: T3 },
+    });
+    // A caller who cannot read the node's memory gets the missing-ref answer and nothing is deleted.
+    await expect(resolvers.Mutation.deleteNodeRevision(null, { nodeRevRef: legacy.id }, outsiderCtx())).rejects.toMatchObject({
+      message: 'Node revision not found', extensions: { code: 'NOT_FOUND' },
+    });
+    expect(await db.nodeRevision.count({ where: { id: legacy.id } })).toBe(1);
+    // One who can read and write the node's memory deletes it.
+    expect(await resolvers.Mutation.deleteNodeRevision(null, { nodeRevRef: legacy.id }, adminCtx())).toBe(true);
+    expect(await db.nodeRevision.count({ where: { id: legacy.id } })).toBe(0);
+  });
+
   it('conceals an existing revision from a non-reader as a missing one (#4138: guessable URN, no existence oracle)', async () => {
     const existingUrn = composeNodeRevUrn(memory.urn, node.loc, 20);
     const missingUrn = composeNodeRevUrn(memory.urn, node.loc, 99);
