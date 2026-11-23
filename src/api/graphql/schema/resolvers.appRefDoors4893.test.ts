@@ -109,8 +109,8 @@ async function workerArmCtx(): Promise<{ ctx: Context; workerId: string }> {
   });
   return { ctx: ctx(member.id, { sessionId: session.id }), workerId: worker.id };
 }
-const createGrantAsWorker = (ref: string, c: Context, holderRef: string) =>
-  M.createGrant({}, { input: { appRef: ref, action: 'schedule.create', values: {}, holderKind: 'WORKER', holderRef, reason: 'pin' } }, c);
+const createGrantAsWorker = (ref: string, c: Context, holderRef: string, action = 'schedule.create') =>
+  M.createGrant({}, { input: { appRef: ref, action, values: {}, holderKind: 'WORKER', holderRef, reason: 'pin' } }, c);
 
 /** FOLD doors: every malformed shape answers exactly like a well-formed ref naming no App. Each row
  *  names its caller ctx; the harness injects a faulty db into the same ctx for the control. */
@@ -293,11 +293,16 @@ describe('#4893 createGrant worker arm: the scoped lookup folds what it can reac
   });
   it('the own-App legacy alias resolves under the scope, past the worker refusal', async () => {
     const { ctx: c, workerId } = await workerArmCtx();
-    const got = await answer(runAsActor({ workerId, agentId: teamAgent.id }, () => createGrantAsWorker(AMBIG, c, workerId)));
+    // The action is incidental to this row and deliberately names nothing registered: the actions
+    // registry is world state this suite does not own — cleanDb keeps it, and a shard-mate that
+    // registers platform actions turns a 'schedule.create' input into GRANT_VALUES_INVALID for
+    // empty values (the CI-only red the first push caught on this exact row). A name nothing
+    // registers makes the post-resolution outcome deterministic in every environment.
+    const got = await answer(runAsActor({ workerId, agentId: teamAgent.id }, () => createGrantAsWorker(AMBIG, c, workerId, 'pin.4893-no-such-action')));
     // AMBIG is this worker's OWN App's legacyUrn in this world: the scoped lookup resolves it and
-    // the door proceeds into grant creation, where it meets the first creation refusal (no
-    // registered action in this suite's world) — an outcome the folded answer never reaches,
-    // because GRANT_REQUESTER_NOT_WORKER answers before any grant machinery runs.
+    // the door proceeds into grant creation, where it meets the first creation refusal — an
+    // outcome the folded answer never reaches, because GRANT_REQUESTER_NOT_WORKER answers
+    // before any grant machinery runs.
     expect(got).toMatchObject({ ok: false, code: 'GRANT_ACTION_UNKNOWN' });
   });
 });
