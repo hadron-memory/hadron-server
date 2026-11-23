@@ -76,12 +76,12 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
       const candidates: DueMemory[] = await db.$queryRaw<DueMemory[]>`
         WITH due AS (
         SELECT m.id AS "memoryId", m.source, m.urn AS "memoryUrn", org.urn AS "orgUrn", m.write_branch AS "writeBranch",
-          MIN(${mirrorDueAtSql(Prisma.sql`o.state`, Prisma.sql`o.last_attempt_at`, Prisma.sql`o.attempts`)}) AS "dueAt"
+          MIN(${mirrorDueAtSql({ state: Prisma.sql`o.state`, lastAttemptAt: Prisma.sql`o.last_attempt_at`, attempts: Prisma.sql`o.attempts` })}) AS "dueAt"
         FROM git_mirror_obligations o JOIN memories m ON m.id = o.memory_id JOIN organizations org ON org.id = m.organization_id
         WHERE o.state IN ('PENDING', 'FAILED', 'NOT_CLONED') AND o.attempts < ${MAX_ATTEMPTS}
           AND ${mirrorRetryBranchEligibleSql(Prisma.sql`o.branch`, Prisma.sql`m.write_branch`)}
           AND NOT m.is_encrypted AND m.source IS NOT NULL AND m.organization_id IS NOT NULL AND m.deleted_at IS NULL
-          AND ${mirrorDueAtSql(Prisma.sql`o.state`, Prisma.sql`o.last_attempt_at`, Prisma.sql`o.attempts`)} <= ${toNaiveUtc(now)}::timestamp
+          AND ${mirrorDueAtSql({ state: Prisma.sql`o.state`, lastAttemptAt: Prisma.sql`o.last_attempt_at`, attempts: Prisma.sql`o.attempts` })} <= ${toNaiveUtc(now)}::timestamp
         GROUP BY m.id, m.source, m.urn, org.urn, m.write_branch
         ) SELECT * FROM due
         WHERE (${afterDueUtc}::timestamp IS NULL OR ("dueAt", "memoryId") > (${afterDueUtc}::timestamp, ${afterId}::text))
@@ -101,7 +101,7 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
         handled++;
         // Bound the DB result, not just its consumer. Only due rows reserve budget slots; the existing lock-time
         // re-read still decides whether a selected row needs an attempt after a competing writer has run.
-        const rowDue = mirrorDueAtSql(Prisma.sql`state`, Prisma.sql`last_attempt_at`, Prisma.sql`attempts`);
+        const rowDue = mirrorDueAtSql({ state: Prisma.sql`state`, lastAttemptAt: Prisma.sql`last_attempt_at`, attempts: Prisma.sql`attempts` });
         const rows = await db.$queryRaw<DueRow[]>`
           SELECT node_id AS "nodeId", kind, remove_loc AS "removeLoc", branch
           FROM git_mirror_obligations

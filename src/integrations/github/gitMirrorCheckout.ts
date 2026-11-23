@@ -26,7 +26,7 @@ import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { prepareWriteBranch, unpublishedCommitCount, quarantineUnpublishedCommits } from './gitBranch.js';
 import { hasIncompleteMirrorMutation } from './mirrorFileMutation.js';
 import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
-import { mirrorDueAtMs } from './mirrorDueTime.js';
+import { mirrorRetryDue } from './mirrorDueTime.js';
 import { execGit } from './execGit.js';
 import { sourceNamesRepo, validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
@@ -262,7 +262,7 @@ export async function withMirrorCheckout(
           OR: obligations.map(r => ({ nodeId: r.nodeId, kind: r.kind, removeLoc: r.removeLoc ?? '', branch: r.branch ?? capturedBranch })),
         } });
         const now = opts.retry.now.getTime();
-        obligations = rows.filter(r => mirrorDueAtMs(r) <= now)
+        obligations = rows.filter(r => mirrorRetryDue(r, now))
           .map(r => ({ nodeId: r.nodeId, kind: r.kind, removeLoc: r.removeLoc, branch: r.branch }));
         if (!obligations.length) return 'skipped';
         attemptSeq = retryAttemptSeq = await tryTakeAttemptSeq(db);
