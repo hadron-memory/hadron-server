@@ -51,7 +51,9 @@ export interface SpliceOptions {
    * #4689 — a per-target reader for a render whose `access` is not a real read filter (`{}`): a URN tag naming
    * another memory is followed only when this answers true for that memory. It is the reader's own read
    * decision (`foreignIncludeReader`), asked after the lookup was charged, so a missing, unreadable and
-   * readable target cost the same. Never set with `foreign`.
+   * readable target are charged the same budget and answer the same bytes. Not the same latency: an existing
+   * target in another memory costs the reader's own read queries, which a missing one does not. Never set
+   * with `foreign`.
    */
   foreignReader?: (memoryId: string) => Promise<boolean>;
   memo?: IncludeReadMemo;

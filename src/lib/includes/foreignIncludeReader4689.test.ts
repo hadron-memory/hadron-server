@@ -75,6 +75,29 @@ describe('#4689: the reader of a foreign URN include', () => {
     for (const ctx of [userCtx(), runCtx()]) expect(await render(ctx, 'tasks:t')).toContain(`A [${READABLE}] B`);
   });
 
+  it('an encrypted foreign memory whose key is not cached is the notice, for a caller and for the run principal (F2)', async () => {
+    const m = await memory('fi-org:encnk', { class: 'group', visibility: 'GROUP', organizationId: orgId, isEncrypted: true });
+    await node(m.id, 'snip', 'KEYLESS-ENCRYPTED-TEXT');
+    await task(m.urn, 'snip');
+    for (const ctx of [userCtx(), runCtx()]) {
+      const text = await render(ctx, 'tasks:t');
+      expect(text).not.toContain('KEYLESS-ENCRYPTED-TEXT');
+      expect(text).toContain(`A [${NOTICE}] B`);
+    }
+  });
+
+  it('a soft-deleted foreign memory is the same notice as a missing one, for a caller and for the run principal (F7)', async () => {
+    const m = await memory('fi-org:deleted', { class: 'group', visibility: 'GROUP', organizationId: orgId });
+    await node(m.id, 'snip', 'DELETED-MEMORY-TEXT');
+    await db.memory.update({ where: { id: m.id }, data: { deletedAt: new Date() } });
+    await task(m.urn, 'snip');
+    for (const ctx of [userCtx(), runCtx()]) {
+      const text = await render(ctx, 'tasks:t');
+      expect(text).not.toContain('DELETED-MEMORY-TEXT');
+      expect(text).toContain(`A [${NOTICE}] B`);
+    }
+  });
+
   it('the run principal never reads wider than itself: another organization, an encrypted memory and a stranger\'s private memory are the notice', async () => {
     const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'fi-other', urn: 'fi-other' } });
     await db.orgMember.create({ data: { organizationId: otherOrg.id, userId: ownerId, role: 'ADMIN' } });
