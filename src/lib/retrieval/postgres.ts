@@ -232,7 +232,15 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       ORDER BY ${orderBy}
       LIMIT ${limitPh} OFFSET ${offsetPh}
     `;
-    const rows = await opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(sql, ...params);
+    // #4938 N3: a caller-given budget bounds the ranking statement the way regexSearch's does (a transaction-local
+    // statement_timeout on the statement's own connection). The querytree() probe above reads no table.
+    const budget = opts.statementTimeoutMs;
+    const rows = budget == null
+      ? await opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(sql, ...params)
+      : (await opts.db.$transaction([
+        opts.db.$executeRawUnsafe(`SET LOCAL statement_timeout = ${Math.max(1, Math.trunc(budget))}`),
+        opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(sql, ...params),
+      ]))[1];
     return rows.map((r) => ({ nodeId: r.id, score: Number(r.score) }));
   },
 

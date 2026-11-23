@@ -30,7 +30,7 @@ import {
   isEmbeddingConfigured,
 } from '../../../lib/embedding/index.js';
 import { certifiedHybridRanking, hybridKeywordCandidates } from '../../../lib/retrieval/hybrid.js';
-import { vectorSearchTimeoutMs } from '../../../services/embedding/vectors.js';
+import { isStatementTimeout, vectorSearchTimeoutMs } from '../../../services/embedding/vectors.js';
 import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from '../../../lib/retrieval/defaultNodeTypes.js';
@@ -2096,10 +2096,11 @@ export const nodeQueries = {
       // same bare query. TRUE hybrid (vector present) does NOT relax: the vector
       // half already supplies recall, and relaxing would pollute the RRF inputs
       // and mislabel a vector-found result as `and_relaxed_to_or`.
-      const runKeywordRanked = async (opts: { relax?: boolean; limit?: number } = {}) => {
+      const runKeywordRanked = async (opts: { relax?: boolean; limit?: number; statementTimeoutMs?: number } = {}) => {
         const args = {
           db: ctx.db, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter,
           includeDeleted: !!f.includeDeleted, sort: 'relevance' as const, offset: 0, limit: opts.limit ?? fetchN,
+          statementTimeoutMs: opts.statementTimeoutMs,
         };
         const result = await hybridKeywordCandidates(q, query => provider.lexicalSearch({ ...args, query }), !!opts.relax);
         lexicalDegraded = result.degraded;
@@ -2273,7 +2274,16 @@ export const nodeQueries = {
           } else if (r.kwUncertain && dk < kwCeiling && Date.now() < vectorDeadlineAt) {
             // BLIND F3 (Elena): the widening spends the request's one budget too; past its deadline the page stops early.
             dk = Math.min(dk * 2, kwCeiling);
-            kwHits = await runKeywordRanked({ limit: dk });
+            // #4938 N3 (Elena): and its statement runs under what is LEFT of that budget, so a widening started just before
+            // the deadline cannot run unbounded. A cut is the early stop: the page keeps the ranking it had, flagged below,
+            // never a short page (cor:api:090:04).
+            try {
+              kwHits = await runKeywordRanked({ limit: dk, statementTimeoutMs: Math.max(1, Math.trunc(vectorDeadlineAt - Date.now())) });
+            } catch (e) {
+              if (!isStatementTimeout(e)) throw e;
+              rankingIncomplete = true;
+              return { fused: r.ranked, vecHits, exhausted: false };
+            }
             continue;
           }
           rankingIncomplete = true; // the order up to the page could not be certified inside the budget / ceiling

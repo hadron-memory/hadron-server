@@ -133,6 +133,12 @@ export interface LexicalSearchOpts {
   propertySort?: NodePropertySort;
   offset?: number;
   limit: number;
+  /**
+   * #4938 N3 — a statement budget (ms) for the ranking statement, applied as a transaction-local `statement_timeout` on
+   * its own connection (it never reaches a pooled session). A cancelled statement throws the statement-timeout shape;
+   * the caller decides what a cut means. Omit = no budget of its own (the default, unchanged).
+   */
+  statementTimeoutMs?: number;
 }
 
 export interface RegexSearchOpts {
