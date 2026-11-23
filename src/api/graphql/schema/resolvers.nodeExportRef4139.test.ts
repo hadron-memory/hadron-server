@@ -3,6 +3,13 @@
  * node(ref:). Adopting that gate WIDENS the export: an App key or userless run exports PUBLIC knowledge read-only
  * (cor:acl:010:01, cor:dmo:150:03), a re-authorization event (cor:api:140:01). Refusals are NODE_NOT_FOUND
  * (cor:api:140:03), one identical answer for every miss.
+ *
+ * Ruling on the breaking contract change (blind P2-2, restated here because a diff-only read cannot see the PR
+ * body): the `id` → `ref` hard rename and the `NOT_FOUND` → `NODE_NOT_FOUND` refusal rename are by design
+ * (Holger's #775 rulings; Bruce, coordinator, team chat #134801, restated #135959 — the same ordered hard break
+ * as entity-refs S1-S3, precedent 0274): no deprecated old-name alias, and the callers are the named lockstep
+ * companions hadron-cli#2899 and hadron-portal#2472. A grep of this repo found no other `nodeExport` call site,
+ * so the absence of caller changes in this diff is the ruled design, not an omission.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { buildSchema, GraphQLObjectType } from 'graphql';
@@ -10,6 +17,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { memoryAccessFilter } from './resolvers.helpers.js';
 import { typeDefs } from './typeDefs.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 import { testRunAgentId } from '../../../test/runAgent.js';
@@ -64,12 +72,17 @@ async function fixture() {
   const keyPrincipal = { db, appId: app.id, appKeyId: appKey.id, roles: [] } as unknown as Context;
   const stranger = await db.user.create({ data: { id: generateId(), githubId: 41390, githubUsername: 'stranger4139' } });
   const strangerCtx = { db, roles: ['READER'], userId: stranger.id } as Context;
-  const adminCtx = { db, roles: ['ADMIN'], userId: generateId() } as Context;
+  // A platform ADMIN in its own right: a REAL user row that CARRIES the ADMIN role (node(ref:)'s reconciled read
+  // re-validates platform roles from the user row, authorizedTx readLiveContext — a context that merely asserts
+  // the role for a row that lacks it is demoted there) and holds no OrgMember row anywhere (asserted in the ADMIN
+  // pin below), so its reach comes from the ADMIN branch of getAccessibleMemoryIds, not from an org in-list.
+  const admin = await db.user.create({ data: { id: generateId(), githubId: 41392, githubUsername: 'admin4139', roles: ['ADMIN'] } });
+  const adminCtx = { db, roles: ['ADMIN'], userId: admin.id } as Context;
   // A real member of the owning org: reads BOTH the PUBLIC memory and the org-visible one (the positive control).
   const owner = await db.user.create({ data: { id: generateId(), githubId: 41391, githubUsername: 'owner4139' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgB.id, userId: owner.id, role: 'OWNER' } });
   const ownerCtx = { db, roles: ['READER'], userId: owner.id } as Context;
-  return { ownerCtx, orgB, pub, orgVisible, appScoped, hub, inc, sibling, gone, runPrincipal, keyPrincipal, strangerCtx, adminCtx };
+  return { ownerCtx, orgB, pub, orgVisible, appScoped, hub, inc, sibling, gone, runPrincipal, keyPrincipal, strangerCtx, adminCtx, admin, app, appKey };
 }
 async function rejection(p: Promise<unknown>) {
   try { await p; return null; } catch (err) {
@@ -152,8 +165,11 @@ describe('#4139 nodeExport(ref:)', () => {
         expect(out.data).not.toContain('secret orgvis');
       }
     });
-    it('a list-gated user (not only a userless principal) loses an edge into a memory they cannot read; a reader of both keeps it (blind P3-A)', async () => {
-      for (const [format, full] of [['JSON', true], ['MD', true], ['MD', false]] as const) {
+    // The edge-rendering formats crossed with `full` mechanically (every branch of renderNodeExport that reads
+    // edges): MD and JSON. PDF is not crossed — it renders the same markdown body and reads no edges, and `full`
+    // does not apply to it.
+    it('a list-gated user (not only a userless principal) loses an edge into a memory they cannot read; a reader of both keeps it', async () => {
+      for (const [format, full] of (['JSON', 'MD'] as const).flatMap((format) => ([true, false] as const).map((full) => [format, full] as const))) {
         const out = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:hub'), format, full }, f.strangerCtx);
         expect(out.data).toContain('docs:sibling');
         expect(out.data).not.toContain(f.orgVisible.nodeId);
@@ -170,13 +186,37 @@ describe('#4139 nodeExport(ref:)', () => {
     // The invariant the fail-closed helper (nodeReadMemoryAllowed, resolvers.query.node.ts) rests on, stated here so a diff-only
     // reader sees it (blind P2-C / N-1): memoryAccessFilter returns { memoryId: { in: ids } } for EVERY caller, ADMIN included,
     // and never an unrestricted shape. So a shape that is not an in-list is not a case that exists, and failing closed on it denies nobody.
-    it('ADMIN is not denied by the fail-closed gate: an ADMIN caller exports both the PUBLIC and the org-visible memory (P2-C / N-1)', async () => {
+    it('ADMIN is not denied by the fail-closed gate: an ADMIN caller reads and exports both the PUBLIC and the org-visible memory', async () => {
+      // The ADMIN context is a platform ADMIN in its own right, not an org member: pinned here so the export above
+      // proves the ADMIN branch of the gate, not an ordinary membership in-list.
+      expect(await db.orgMember.count({ where: { userId: f.admin.id } })).toBe(0);
       for (const [m, text] of [[f.pub, 'secret pub'], [f.orgVisible, 'secret orgvis']] as const) {
+        expect(await Q.node({}, { ref: urn(m) }, f.adminCtx)).not.toBeNull();
         expect((await Q.nodeExport({}, { ref: urn(m) }, f.adminCtx)).data).toContain(text);
         expect((await Q.nodeExport({}, { ref: m.nodeId }, f.adminCtx)).data).toContain(text);
       }
       const withEdge = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:hub'), format: 'JSON' }, f.adminCtx);
       expect(withEdge.data).toContain(f.orgVisible.nodeId);
+    });
+    // The same invariant pinned at its source: every principal kind getAccessibleMemoryIds has a branch for answers
+    // the in-list shape, so the fail-closed branch denies nobody. (There is no separate system/internal principal
+    // branch; an impersonated key folds into the sessionless-key branch.)
+    it('memoryAccessFilter answers an in-list for every principal kind', async () => {
+      const sessionKeyCtx = { db, appId: f.app.id, appKeyId: f.appKey.id, sessionId: generateId(), roles: [] } as unknown as Context;
+      const kinds: Array<[string, Context]> = [
+        ['a pure App key with an active session', sessionKeyCtx],
+        ['a platform ADMIN', f.adminCtx],
+        ['a pure App key without a session', f.keyPrincipal],
+        ['an ordinary user', f.strangerCtx],
+        ['a userless run', f.runPrincipal],
+        ['an unauthenticated caller', { db } as Context],
+      ];
+      for (const [kind, ctx] of kinds) {
+        const filter = await memoryAccessFilter(ctx);
+        expect(Object.keys(filter), kind).toEqual(['memoryId']);
+        expect(Object.keys(filter.memoryId as object), kind).toEqual(['in']);
+        expect((filter.memoryId as { in: unknown[] }).in, kind).toBeInstanceOf(Array);
+      }
     });
     it('a reader who CAN read the target memory still sees the edge', async () => {
       const out = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:hub'), format: 'JSON' }, f.ownerCtx);
@@ -215,7 +255,7 @@ describe('#4139 nodeExport(ref:)', () => {
     });
   });
 
-  describe('a globally ambiguous legacy URN: nodeExport answers exactly as node(ref:) does (cor:urn:030:01/:02, Riana P3)', () => {
+  describe('a globally ambiguous legacy URN: nodeExport answers exactly as node(ref:) does (cor:urn:030:01/:02)', () => {
     const claim = async (urn: string, nodeIds: string[]) => {
       await db.urnAlias.createMany({ data: nodeIds.map((entityId) => ({
         urn, entityType: 'NODE' as const, entityId, reason: 'RENAME' as const, replacedByUrn: `${urn}-new`,
