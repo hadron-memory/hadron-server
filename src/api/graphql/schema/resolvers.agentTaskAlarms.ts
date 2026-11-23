@@ -565,7 +565,7 @@ export const agentTaskAlarmMutations = {
       const [row] = await tx.$queryRaw<{ exist: boolean | null }[]>`
         SELECT external_tasks_exist AS exist FROM apps WHERE id = ${freshApp.id} FOR UPDATE`;
       if (row?.exist === exist) return; // #3323: a no-op writes nothing
-      // The time is the database's clock (statement time), never the caller's.
+      // The time is the database's clock (now() is the transaction's start time, still the DB clock), never the caller's.
       await tx.$executeRaw`
         UPDATE apps SET external_tasks_exist = ${exist}, external_tasks_reported_at = now() AT TIME ZONE 'UTC',
                         external_tasks_reported_by = ${ctx.userId ?? null}

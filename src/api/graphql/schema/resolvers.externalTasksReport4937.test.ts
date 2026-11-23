@@ -11,7 +11,7 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { DISABLED_TEAM_TOOLS } from '../../../mcp/disabledTools.js';
-import { mcpExternalTasksReportArgs, registerAgentTaskTools } from '../../../mcp/agentTaskTools.js';
+import { mcpExternalTasksReportArgs, mcpExternalTasksReportLead, registerAgentTaskTools } from '../../../mcp/agentTaskTools.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -144,7 +144,7 @@ describe('#4937 the report: never reported by default, made by whoever manages t
     const precedent = await failure(M.setAgentTaskStallSchedule({}, { appRef: appId, input: { notStartedMinutes: 33 } }, keyCtx()));
     const mine = await failure(report(true, keyCtx()));
     expect(precedent, 'the precedent refuses the App key').not.toBeNull();
-    expect(mine?.extensions?.code).toBe(precedent?.extensions?.code);
+    expect(mine).toEqual(precedent);
     expect((await row()).externalTasksExist).toBeNull();
   });
 
@@ -162,6 +162,42 @@ describe('#4937 the report: never reported by default, made by whoever manages t
     expect(typeof (await row()).externalTasksExist).toBe('boolean');
   }, 30000);
 
+  it('#4960 the time is the transaction clock, not the caller\'s: a shifted caller clock cannot move it', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2001-01-01T00:00:00Z'));
+      await report(true, ctx(ownerId));
+    } finally {
+      vi.useRealTimers();
+    }
+    const at = (await row()).externalTasksReportedAt as Date;
+    expect(at.getUTCFullYear()).toBeGreaterThan(2020);
+    const [{ now }] = await db.$queryRaw<{ now: Date }[]>`SELECT now() AT TIME ZONE 'UTC' AS now`;
+    expect(Math.abs(now.getTime() - at.getTime())).toBeLessThan(60_000);
+  });
+
+  it('#4960 an uninstalled App refuses the report APP_UNINSTALLED and writes nothing', async () => {
+    await db.app.update({ where: { id: appId }, data: { uninstalledAt: new Date() } });
+    expect(await code(report(true, ctx(ownerId)))).toBe('APP_UNINSTALLED');
+    expect((await row()).externalTasksExist).toBeNull();
+  });
+
+  it('#4960 a named session that failed to bind is SESSION_NOT_BOUND and writes nothing', async () => {
+    expect(await code(report(true, ctx(ownerId, { sessionBindingRefused: true } as Partial<Context>)))).toBe('SESSION_NOT_BOUND');
+    expect((await row()).externalTasksExist).toBeNull();
+  });
+
+  it('#4960 an instructed worker of a managing holder is admitted, and the record names the holder', async () => {
+    const id = generateId();
+    await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id, appId, agentId, name: `W-${id}`, slug: `w-${id}`, role: 'triager', heldByUserId: ownerId } });
+    const s = await db.session.create({ data: { id: generateId(), appId, agentId, workerId: id, userId: ownerId, tool: 'vitest' } });
+    const instruction = { kind: 'LIVE_CHAT', ref: 'client-chat:turn-4960' };
+    const got = await runAsActor({ workerId: id, agentId }, () => M.reportExternalTasks({}, { appRef: appId, exist: true, instruction }, ctx(ownerId, { sessionId: s.id })));
+    expect(got).toMatchObject({ appId, exist: true });
+    expect(await row()).toMatchObject({ externalTasksExist: true, externalTasksReportedBy: ownerId });
+    expect(await db.agentTeamEvent.count({ where: { appId, type: 'app.manager-act' } })).toBe(1);
+  });
+
   it('does not write the stall schedule row (the record is on the App)', async () => {
     await report(true, ctx(ownerId));
     expect(await db.agentTaskStallSchedule.count({ where: { appId } })).toBe(0);
@@ -177,5 +213,12 @@ describe('#4937 the MCP door: registered disabled, as the team cut requires (#30
   it('the report tool forwards appRef and exist unchanged and drops its own session argument', () => {
     expect(mcpExternalTasksReportArgs({ session: 's-1', appRef: 'team-app', exist: false })).toEqual({ appRef: 'team-app', exist: false });
     expect(Object.keys(mcpExternalTasksReportArgs({ session: 's-1', appRef: 'a', exist: true })).sort()).toEqual(['appRef', 'exist']);
+  });
+
+  it('#4960 the report tool says "Already reported." when the stored answer equals the request, else "Reported."', () => {
+    expect(mcpExternalTasksReportLead(true, true)).toBe('Already reported.');
+    expect(mcpExternalTasksReportLead(false, false)).toBe('Already reported.');
+    expect(mcpExternalTasksReportLead(null, false)).toBe('Reported.');
+    expect(mcpExternalTasksReportLead(false, true)).toBe('Reported.');
   });
 });
