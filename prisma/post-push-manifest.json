@@ -328,6 +328,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_chat_tool_teardown_state",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_comment_meta_state_top_level",
       "kind": "check-constraint",
       "file": "comment-invariants.sql",
