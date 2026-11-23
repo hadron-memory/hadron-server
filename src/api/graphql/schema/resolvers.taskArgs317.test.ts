@@ -17,6 +17,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { composeNodeUrn } from '../../../lib/urn.js';
 import { resolvers, type Context } from './resolvers.js';
+import { RUN_CLIENT_PREFIX } from '../../../lib/auth/runPrincipal.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -102,6 +103,21 @@ describe('#317 acceptance 1 — a missing required argument is refused before an
     });
   });
 
+  it.each([
+    ['null', null],
+    ['an array', ['file_path']],
+    ['a string', 'file_path'],
+    ['a number', 7],
+  ])('args given as %s is not an argument object: refused BAD_USER_INPUT naming the missing arguments, never a TypeError (blind P2-1)', async (_label, bad) => {
+    const urn = await mkTask(`tasks:bad-args-${_label.replace(/\W/g, '')}`, { args: ARGS });
+    const err = (await resolvers.Mutation.runTask({}, { nodeRef: urn, args: bad }, adminCtx()).catch((e: unknown) => e)) as {
+      extensions?: { code?: string };
+      message?: string;
+    };
+    expect(err.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(err.message).toContain('file_path');
+  });
+
   it('a required argument passed as null counts as missing', async () => {
     const urn = await mkTask('tasks:null-arg', { args: ARGS });
     await expect(
@@ -173,6 +189,18 @@ describe('#317 acceptance 2-5 — what is NOT refused', () => {
   it('an empty string and false satisfy "present"', async () => {
     const urn = await mkTask('tasks:present', { args: { s: { required: true }, f: { required: true } } }, 'ok');
     await expect(resolvers.Mutation.runTask({}, { nodeRef: urn, args: { s: '', f: false } }, adminCtx())).resolves.toContain('ok');
+  });
+});
+
+describe('#317 — a run-kernel hop is not the door (LOCAL F1)', () => {
+  it('runTask called as a run principal (the kernel\'s assemble, merged view as args) is not refused for a missing required argument', async () => {
+    const urn = await mkTask('tasks:kernel-hop', { args: ARGS }, 'hop {{file_path}}');
+    const kernelCtx: Context = { db, roles: [], userId: adminId, clientId: `${RUN_CLIENT_PREFIX}run-317`, appId: app.id };
+    await expect(resolvers.Mutation.runTask({}, { nodeRef: urn, args: undefined }, kernelCtx)).resolves.toContain('hop ');
+    // The same task through the caller's own door is still refused.
+    await expect(resolvers.Mutation.runTask({}, { nodeRef: urn, args: {} }, adminCtx())).rejects.toMatchObject({
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
   });
 });
 

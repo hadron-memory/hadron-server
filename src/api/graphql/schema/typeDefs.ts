@@ -13670,7 +13670,8 @@ export const typeDefs = `#graphql
     default, args must carry it (present and not null) or the call is refused
     BAD_USER_INPUT, naming every missing argument, before anything renders or runs
     (no AppRun, no usage event). Judged after the read-access check, so a task the
-    caller cannot read answers as it always did. Undeclared arguments pass through;
+    caller cannot read answers as it always did. A hop of an already-minted run (the
+    run kernel assembling through this call) is exempt. Undeclared arguments pass through;
     data_type is not checked and defaults are not filled in.
     Spec cor:api:060.
     """

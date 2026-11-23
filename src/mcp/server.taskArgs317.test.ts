@@ -67,5 +67,8 @@ describe('#317 — hadron_run_task (execute mode, appRef) delegates the refusal 
       appRef: appId,
     });
     expect(text).not.toContain('Missing required task argument');
+    // It reached the run path: the refusal that comes next is the existing one (no served agent here), not the argument refusal.
+    expect(text).toContain('Could not start run');
+    expect(text).toMatch(/No boot prompt/i);
   });
 });
