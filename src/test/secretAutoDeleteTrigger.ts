@@ -17,6 +17,7 @@ import { generateId } from '../lib/id.js';
 
 /** The two `grants` triggers the S6 pins switch off. A closed list: the name is interpolated into DDL. */
 export type GrantsTrigger = 'secret_auto_delete_limit' | 'grants_guard';
+const GRANTS_TRIGGERS: ReadonlySet<string> = new Set<GrantsTrigger>(['secret_auto_delete_limit', 'grants_guard']);
 
 /**
  * Run `fn` in one transaction with `trigger` disabled on `grants`. Anything `fn` throws rolls the transaction back,
@@ -26,6 +27,8 @@ export async function withGrantsTriggerOff<T>(
   trigger: GrantsTrigger,
   fn: (tx: Prisma.TransactionClient) => Promise<T>,
 ): Promise<T> {
+  // The union is compile-time only and the name goes into DDL, so refuse anything else at run time too.
+  if (!GRANTS_TRIGGERS.has(trigger)) throw new Error('withGrantsTriggerOff: not an allowed trigger name');
   return db.$transaction(async (tx) => {
     await tx.$executeRawUnsafe(`ALTER TABLE grants DISABLE TRIGGER ${trigger}`);
     const out = await fn(tx);

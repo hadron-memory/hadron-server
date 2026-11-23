@@ -319,7 +319,7 @@ describe('#4635 a signed delete mark with both a window and a read budget ends a
     await expired(a.grantId);
     // Real time, no sweep yet: the read door refuses a read the budget would still allow, and a refused read
     // neither spends nor deletes (the secret waits for the sweep, which owns window-end deletion).
-    expect(await failure(reveal(a.clientId))).not.toBe('OK');
+    expect(await failure(reveal(a.clientId))).toBe('SECRET_READ_CLIENT_EXPIRED');
     expect(await exists()).toBe(1);
     expect((await db.grant.findUniqueOrThrow({ where: { id: a.grantId } })).useCount).toBe(1);
     expect(await secretSweepTick(db)).toMatchObject({ deleted: 1 });
@@ -390,16 +390,28 @@ describe('#4635 poison batch: one secret whose deletion fails must not stop the 
     await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS ${POISON_FN}()`);
   });
 
-  it('a due secret that cannot be deleted stays, is logged by code alone, and a later due secret in the same batch is deleted', async () => {
-    // Ids sort by creation, so the poisoned secret (created first, in beforeEach) is first in the sweep's `ORDER BY s.id` batch.
+  /** Two due secrets, the first-created (so first by id) poisoned: its DELETE raises. Returns both ids. */
+  async function poisonedFirstAndGood() {
     const poisoned = secretId;
     const dueA = await client('delete', null, await dbDeadline(3));
     secretId = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'tok-good', kind: 'generic', value: 's6-canary' }, ctx())).id;
     const good = secretId;
     const dueB = await client('delete', null, await dbDeadline(3));
+    // The pins below rely on the poisoned id sorting first in the sweep's `ORDER BY s.id`.
+    expect([poisoned, good].sort()[0]).toBe(poisoned);
     await db.$executeRawUnsafe(`CREATE FUNCTION ${POISON_FN}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'poisoned delete CANARY'; END $$`);
     await db.$executeRawUnsafe(`CREATE TRIGGER zz_poison_secret_delete_4635 BEFORE DELETE ON secrets FOR EACH ROW WHEN (OLD.id = '${poisoned}') EXECUTE FUNCTION ${POISON_FN}()`);
     await expired(dueA.grantId); await expired(dueB.grantId);
+    return { poisoned, good };
+  }
+  const expectPoisonedKept = async (poisoned: string) => {
+    expect(await db.secret.count({ where: { id: poisoned } })).toBe(1);
+    expect(await db.secretVersion.count({ where: { secretId: poisoned } })).toBe(2);
+    expect(await db.secretEvent.count({ where: { secretId: poisoned, kind: 'DELETE' } })).toBe(0);
+  };
+
+  it('a due secret that cannot be deleted stays, is logged by code alone, and a later due secret in the same batch is deleted', async () => {
+    const { poisoned, good } = await poisonedFirstAndGood();
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       expect(await secretSweepTick(db)).toMatchObject({ deleted: 1 });
@@ -408,10 +420,19 @@ describe('#4635 poison batch: one secret whose deletion fails must not stop the 
       expect(logged).not.toContain('CANARY');
       expect(logged).not.toContain(poisoned);
     } finally { error.mockRestore(); }
-    expect(await db.secret.count({ where: { id: poisoned } })).toBe(1);
-    expect(await db.secretVersion.count({ where: { secretId: poisoned } })).toBe(2);
-    expect(await db.secretEvent.count({ where: { secretId: poisoned, kind: 'DELETE' } })).toBe(0);
+    await expectPoisonedKept(poisoned);
     expect(await db.secret.count({ where: { id: good } })).toBe(0);
     expect(await db.secretEvent.count({ where: { secretId: good, kind: 'DELETE' } })).toBe(1);
+  }, 30_000);
+
+  it('with a batch size of one, a poisoned first secret does not stop the pass: the next batch starts after it', async () => {
+    const { poisoned, good } = await poisonedFirstAndGood();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      // Before the keyset cursor this re-selected the poisoned id every batch and broke on deleted < batchSize: 0 deleted.
+      expect(await deletion.sweepSecretAutoDelete(db, 1)).toBe(1);
+    } finally { error.mockRestore(); }
+    await expectPoisonedKept(poisoned);
+    expect(await db.secret.count({ where: { id: good } })).toBe(0);
   }, 30_000);
 });

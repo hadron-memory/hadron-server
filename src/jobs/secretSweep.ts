@@ -13,7 +13,7 @@
  * Run one tick by hand:
  *   pnpm tsx src/jobs/secretSweep.ts
  */
-import { safeErrorCode as errorCode, sweepSecretAutoDelete } from '../lib/secrets/autoDelete.js';
+import { safeErrorCode, sweepSecretAutoDelete } from '../lib/secrets/autoDelete.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { purgeExpiredSecretEvents, purgeSupersededVersions } from '../lib/secrets/purge.js';
 
@@ -35,19 +35,19 @@ export async function secretSweepTick(
 ): Promise<{ versions: number; events: number; tombstones: number; deleted: number }> {
   const out = { versions: 0, events: 0, tombstones: 0, deleted: 0 };
   try { out.deleted = await legs.autoDelete?.(db) ?? 0; }
-  catch (err) { console.error(`${TAG}.auto_delete_failed`, { code: errorCode(err) }); }
+  catch (err) { console.error(`${TAG}.auto_delete_failed`, { code: safeErrorCode(err) }); }
   if (!runRetention) return out;
   try {
     out.versions = (await legs.purgeVersions(db)).purged;
   } catch (err) {
-    console.error(`${TAG}.version_purge_failed`, { code: errorCode(err) });
+    console.error(`${TAG}.version_purge_failed`, { code: safeErrorCode(err) });
   }
   try {
     const e = await legs.purgeEvents(db);
     out.events = e.events;
     out.tombstones = e.tombstones;
   } catch (err) {
-    console.error(`${TAG}.event_purge_failed`, { code: errorCode(err) });
+    console.error(`${TAG}.event_purge_failed`, { code: safeErrorCode(err) });
   }
   return out;
 }

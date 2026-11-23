@@ -13,16 +13,18 @@
  * is then updated to name that migration on purpose.
  */
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 
-const PRISMA = join(process.cwd(), 'prisma');
+// Resolved from this file, not the working directory, so the test runs from any cwd.
+const PRISMA = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'prisma');
 const FUNCTION = 'hadron_guard_secret_auto_delete_limit';
 const MIGRATION = '20261120210000_secret_auto_delete';
 
-/** Executable SQL only: `--` comment lines dropped, runs of whitespace collapsed. The guard has no `--` inside a string. */
-const executable = (sql: string) => sql.split('\n').filter((l) => !/^\s*--/.test(l)).join('\n').replace(/\s+/g, ' ').trim();
+/** Executable SQL only: `--` comments dropped (whole-line and trailing), runs of whitespace collapsed. The guard has no `--` inside a string. */
+const executable = (sql: string) => sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n').replace(/\s+/g, ' ').trim();
 
 describe('#4635 secret auto-delete guard SQL: migration and post-push include agree', () => {
   it('the migration and prisma/secret-auto-delete-invariants.sql carry the same executable SQL', () => {
@@ -49,8 +51,10 @@ describe('#4635 secret auto-delete guard SQL: migration and post-push include ag
     const [fn] = await db.$queryRaw<Array<{ src: string }>>`
       SELECT p.prosrc AS src FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
       WHERE n.nspname = current_schema() AND p.proname = ${FUNCTION}`;
-    const body = /\$\$(.*)\$\$/s.exec(readFileSync(join(PRISMA, 'secret-auto-delete-invariants.sql'), 'utf8'))?.[1] ?? '';
+    // Non-greedy: the first dollar-quoted body only (the file defines exactly one function).
+    const body = /\$\$(.*?)\$\$/s.exec(readFileSync(join(PRISMA, 'secret-auto-delete-invariants.sql'), 'utf8'))?.[1] ?? '';
     expect(body).not.toBe('');
-    expect(executable(fn.src)).toBe(executable(body));
+    expect(fn, 'the guard function is not installed in the test database').toBeDefined();
+    expect(executable(fn!.src)).toBe(executable(body));
   });
 });
