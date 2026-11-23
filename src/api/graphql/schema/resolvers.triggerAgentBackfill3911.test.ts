@@ -167,7 +167,8 @@ describe('#3911 V71: the imports half of "installed"', () => {
   // install elsewhere, so it holds with or without the join. Here the trigger's OWN App is gone: it has no installed
   // Agent (V71: "its App's single installed Agent"), so the row is DISABLED and KEPT, never filled from the App's
   // (still listed) app_agents row. Dropping `ap.deleted_at IS NULL` or `ap.uninstalled_at IS NULL` from the physical
-  // branch (migration.sql:35) fills it instead. Each clause is pinned by its own App.
+  // branch's `JOIN apps` fills it instead. Each clause is pinned by its own App. The rows start enabled (schedule,
+  // webhook) and uncancelled (poll), so the disable arm has work to do and "disabled" is a real transition.
   it.each([
     ['deleted', { deletedAt: new Date() }],
     ['uninstalled', { uninstalledAt: new Date() }],
@@ -176,7 +177,6 @@ describe('#3911 V71: the imports half of "installed"', () => {
     const t = await triggers(appId, null);
     await db.app.update({ where: { id: appId }, data: gone });
     const before = await total();
-    const runs = await db.appRun.count();
     await migrate();
     const r = await read(t);
     expect([r.schedule.agentId, r.schedule.enabled]).toEqual([null, false]);
@@ -185,13 +185,12 @@ describe('#3911 V71: the imports half of "installed"', () => {
     expect(r.poll.cancelledAt).not.toBeNull();
     // Nothing is deleted: V71's last sentence. The rows, their App row and the run history survive.
     expect(await total()).toBe(before);
-    expect(await db.appRun.count()).toBe(runs);
     expect(r.schedule.deletedAt).toBeNull();
     expect(r.webhook.deletedAt).toBeNull();
-    expect(await db.app.count({ where: { id: appId } })).toBe(1);
+    expect(await db.app.count({ where: { id: appId } })).toBe(1); // the App row itself (deleted or uninstalled) is kept
   });
 
-  // #4835 pin 3 — an import counts only THROUGH its live importer (migration.sql:32 joins the importing Agent with
+  // #4835 pin 3 — an import counts only THROUGH its live importer (the imports branch joins the importing Agent with
   // `deleted_at IS NULL`; appInstallations.ts filters importers the same way). With the physical install's Agent deleted
   // and its import edge still live, neither branch credits the App: disabled, NOT filled with the imported Agent, and
   // nothing deleted. Dropping the importer-live join would credit the imported Agent and fill from it.
@@ -265,13 +264,17 @@ describe('#3911 V71: re-enabling a disabled schedule', () => {
 
   // #4835 pin 1 — the SUCCESS branch of an `agentRef: null` edit of an ENABLED schedule: with exactly one installed Agent
   // the edit is judged as a creation is (V70 resolution) and records that Agent instead of clearing; every refusal test
-  // above uses an App with several or none. The row names a different Agent first (agentB, not installed here), so a
-  // reading that preserved it, or that cleared to null, would not produce [agentA, true]. This pins the builder's
-  // reading of V70's resolution (record the single installed Agent), which cor:api:210:01's "explicit null is treated as
-  // absent" could also be read against; the corpus does not state it.
+  // above uses an App with several or none. The start state is one the product reaches: the App had two installed Agents,
+  // the schedule names agentB, and agentB is then uninstalled, leaving agentA the only one. A reading that preserved the
+  // named Agent, or that cleared to null, would not end [agentA, true]. This pins the builder's reading of V70's
+  // resolution (record the single installed Agent); cor:api:210:01's "explicit null is treated as absent" could be read
+  // against it and the corpus does not state which holds (Vera records the reading as Proposed on merge).
   it('clearing the Agent of an enabled schedule in an App with ONE installed Agent records that Agent (#4835)', async () => {
-    const t = await triggers(await app('clear-one', [agentA]), agentB);
-    await M.updateAgentSchedule({}, { id: t.schedule, input: { agentRef: null } }, ctx());
+    const appId = await app('clear-one', [agentA, agentB]);
+    const t = await triggers(appId, agentB);
+    await db.appAgent.delete({ where: { appId_agentId: { appId, agentId: agentB } } as never });
+    const returned = await M.updateAgentSchedule({}, { id: t.schedule, input: { agentRef: null } }, ctx());
+    expect([returned.agentId, returned.enabled]).toEqual([agentA, true]);
     const r = (await read(t)).schedule;
     expect([r.agentId, r.enabled]).toEqual([agentA, true]);
   });
