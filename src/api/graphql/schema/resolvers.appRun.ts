@@ -34,6 +34,8 @@ import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveAppRunRef, composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { AppRunNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { assertAppRunRefShape } from '../../../lib/entityRef/appRunRefShape.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
@@ -789,7 +791,18 @@ export const appRunMutations = {
   ) => triggerManualRun(ctx, input),
 
   /** The kill switch's manual handle (cor:agt:010:02). */
-  cancelAppRun: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+  cancelAppRun: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+    // #4141: PK or URN. The shape check is local to this door (a ref that cannot name a run is a caller error); a
+    // well-shaped miss, an ambiguous legacy ref and a run that does not exist all answer today's NOT_FOUND. Only a
+    // resolver miss is folded: a database fault propagates. The RESOLVED id feeds every statement below.
+    assertAppRunRefShape(ref);
+    let id: string;
+    try {
+      ({ id } = await resolveAppRunRef(ctx.db, ref));
+    } catch (error) {
+      if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+      throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
+    }
     const run = await ctx.db.appRun.findUnique({ where: { id } });
     if (!run) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
     await requireOrgRole(ctx, run.organizationId, 'ADMIN');

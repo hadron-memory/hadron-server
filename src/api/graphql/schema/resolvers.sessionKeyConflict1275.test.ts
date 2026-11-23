@@ -36,7 +36,7 @@ let plainAppId: string;
 const ctx = (appId: string): Context => ({ db, appId, roles: [], organizationId: orgId });
 const start = (key: string, externalUserId = 'u1') =>
   withTestOperationKey(key, secretAppId, () =>
-    resolvers.Mutation.startAgentSession({}, { agentId, externalUserId }, ctx(secretAppId)));
+    resolvers.Mutation.startAgentSession({}, { agentRef: agentId, externalUserId }, ctx(secretAppId)));
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -91,7 +91,7 @@ describe('startAgentSession post-commit key registration (#1275)', () => {
   });
 
   it('the non-encrypted path never calls set: no key is cached', async () => {
-    const s = await resolvers.Mutation.startAgentSession({}, { agentId, externalUserId: 'plain' }, ctx(plainAppId));
+    const s = await resolvers.Mutation.startAgentSession({}, { agentRef: agentId, externalUserId: 'plain' }, ctx(plainAppId));
     expect(s.memoryId).toBeTruthy();
     expect(sessionKeyCache.getByMemoryId(s.memoryId!)).toBeNull();
     expect(sessionKeyCache.refCount(s.memoryId!)).toBe(0);
