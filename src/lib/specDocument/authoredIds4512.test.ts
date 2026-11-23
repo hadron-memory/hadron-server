@@ -54,11 +54,12 @@ describe('#4512 authored ids equal to an assigned anchor', () => {
     expect(out).toContain('<a id="my-own-anchor"></a>');
     expect(out).toContain('<span id="fx-110-zzz">z</span>');
   });
-  it('a fenced code block (backtick or tilde) that shows an id is untouched; inline code is not exempt (scope call)', () => {
+  it('code is no exemption: an assigned id in fenced, tilde-fenced and inline code is removed too (the stated trade)', () => {
     const body = 'Write `<a id="fx-110-a"></a>` like so:\n\n```html\n<a id="fx-110-a"></a>\n```\n\n~~~\n<a id="fx-110-a"></a>\n~~~';
     const out = renderSpecDocument(doc([part('fx:110:a', body)]));
-    expect(count(out, 'id="fx-110-a"')).toBe(3); // the server block and the two fences
+    expect(count(out, 'id="fx-110-a"')).toBe(1); // the server block only
     expect(out).toContain('Write `<a></a>` like so:');
+    expect(out).toContain('```html\n<a></a>\n```');
   });
   it('an assigned id inside another attribute value goes too (over-neutralised on purpose); the rest of the tag stays', () => {
     const out = renderSpecDocument(doc([part('fx:110:a', '<a title="see id=fx-110-a here" id="fx-110-a" href="#x">l</a>')]));

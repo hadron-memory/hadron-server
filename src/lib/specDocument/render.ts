@@ -201,22 +201,7 @@ function dropAssignedIdAttrs(text: string, assigned: ReadonlySet<string>): strin
  * never a second element carrying a server anchor. One linear pass; named character references in an id are not decoded.
  */
 export function neutraliseAssignedIds(text: string, assigned: ReadonlySet<string>): string {
-  if (assigned.size === 0 || !/id/i.test(text)) return text;
-  const out: string[] = [];
-  let pending: string[] = [];
-  let fence: OpenFence | null = null;
-  const flush = (): void => {
-    if (pending.length) for (const l of dropAssignedIdAttrs(pending.join('\n'), assigned).split('\n')) out.push(l);
-    pending = [];
-  };
-  for (const line of text.split('\n')) {
-    const wasOpen = fence !== null;
-    const step = stepFence(line, fence);
-    fence = step.open;
-    if (step.fenceLine || wasOpen) { flush(); out.push(line); } else pending.push(line);
-  }
-  flush();
-  return out.join('\n');
+  return assigned.size === 0 || !/id/i.test(text) ? text : dropAssignedIdAttrs(text, assigned);
 }
 
 const SPEC_CORE_DIV = /^<div class="spec-core"[^>]*><\/div>\s*$/;
