@@ -196,6 +196,27 @@ describe('#4779 P2-2: one interactive transaction per search', () => {
     expect(windows.at(-1)).toMatchObject({ stoppedEarly: true });
     // BLIND N2: the same timeout with the ORDINARY maxWait (no request deadline cut it) is pool pressure: an error.
     await expect(vectorSearchNodes(fake, { memoryIds: [winMem], queryEmbedding: q, limit: 3 })).rejects.toMatchObject({ code: 'P2028' });
+    // SEC10 P3-1 (Rook) / BLIND F6 (Elena): each further term is pinned to throw on its own.
+    // A small env budget with NO request deadline: maxWait is below the ordinary cap, but the request did not bind it.
+    process.env.VECTOR_SEARCH_TIMEOUT_MS = '300';
+    try {
+      await expect(vectorSearchNodes(fake, { memoryIds: [winMem], queryEmbedding: q, limit: 3 })).rejects.toMatchObject({ code: 'P2028' });
+    } finally { delete process.env.VECTOR_SEARCH_TIMEOUT_MS; }
+    // Another Transaction API error message while waiting, deadline-capped: not the connection-wait timeout.
+    const other = new Proxy(db, { get(t, p) {
+      if (p === '$transaction') return (_fn: unknown, o: { maxWait: number }) => new Promise((_res, rej) => setTimeout(
+        () => rej(Object.assign(new Error('Transaction API error: Transaction already closed'), { code: 'P2028' })), o.maxWait));
+      const v = Reflect.get(t, p);
+      return typeof v === 'function' ? v.bind(t) : v;
+    } }) as typeof db;
+    await expect(vectorSearchNodes(other, { memoryIds: [winMem], queryEmbedding: q, limit: 3, deadlineAt: Date.now() + 300 })).rejects.toMatchObject({ code: 'P2028' });
+    // The connection-wait timeout BEFORE the deadline passed (the wait failed early): still an error.
+    const early = new Proxy(db, { get(t, p) {
+      if (p === '$transaction') return () => Promise.reject(Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' }));
+      const v = Reflect.get(t, p);
+      return typeof v === 'function' ? v.bind(t) : v;
+    } }) as typeof db;
+    await expect(vectorSearchNodes(early, { memoryIds: [winMem], queryEmbedding: q, limit: 3, deadlineAt: Date.now() + 300 })).rejects.toMatchObject({ code: 'P2028' });
   }, 30_000);
 
   it('load: concurrent shallow and deep searches on a 2-connection pool all complete (no P2028)', async () => {

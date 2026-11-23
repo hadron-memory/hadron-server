@@ -310,10 +310,12 @@ describe('#4779 P3-1: a page left short by hydration', () => {
   it('LOCAL F1 (Abigail): a re-ranking that stops early keeps the usable first page (flagged), never an emptier one', async () => {
     const original = provider.vectorSearch.bind(provider);
     let calls = 0;
+    let deleted: string | undefined;
     vi.spyOn(provider, 'vectorSearch').mockImplementation(async (a) => {
       if (calls++ === 0) {
         const hits = await original(a);
-        await db.node.update({ where: { id: hits[0]!.nodeId }, data: { deletedAt: new Date() } });
+        deleted = hits[0]!.nodeId;
+        await db.node.update({ where: { id: deleted }, data: { deletedAt: new Date() } });
         return hits;
       }
       a.onWindow?.({ exhausted: false, stoppedEarly: true }); // the re-ranking ran out of the request's budget
@@ -323,7 +325,31 @@ describe('#4779 P3-1: a page left short by hydration', () => {
       const res = await findNodes({ query: 'q', mode: 'vector', limit: 3 });
       expect(names(res.hits)).toEqual(['B', 'X']);
       expect(res.degraded ?? '').toContain('stopped_early');
-    } finally { await db.node.update({ where: { id: id.A! }, data: { deletedAt: null } }); }
+    } finally { if (deleted) await db.node.update({ where: { id: deleted }, data: { deletedAt: null } }); } // BLIND F4
+  }, 60_000);
+
+  it('BLIND F1 (Elena): a hybrid first page that filled PAST its certified depth is never kept in place of the re-ranking', async () => {
+    // First attempt: X is deleted after ranking, so the offset-2 page fills from past the certified depth (incomplete by
+    // depth, not by size). The re-ranking then stops early with an emptier page (no vector rows, no keyword rows).
+    let vecCalls = 0;
+    const original = provider.vectorSearch.bind(provider);
+    vi.spyOn(provider, 'vectorSearch').mockImplementation(async (a) => {
+      if (vecCalls++ === 0) {
+        const hits = await original(a);
+        await db.node.update({ where: { id: id.X! }, data: { deletedAt: new Date() } });
+        return hits;
+      }
+      a.onWindow?.({ exhausted: false, stoppedEarly: true });
+      return [];
+    });
+    vi.spyOn(provider, 'lexicalSearch').mockImplementation(async (a: any) =>
+      vecCalls > 1 ? [] : KW.slice(0, a.limit).map((n, i) => ({ nodeId: id[n]!, score: 1 / (i + 1) })));
+    try {
+      const res = await findNodes({ query: 'q', mode: 'hybrid', limit: 2, offset: 2 });
+      expect(vecCalls).toBeGreaterThanOrEqual(2);
+      expect(res.hits).toEqual([]); // the re-ranking's page, never the first attempt's uncertified rows
+      expect(res.degraded ?? '').toContain('stopped_early');
+    } finally { await db.node.update({ where: { id: id.X! }, data: { deletedAt: null } }); }
   }, 60_000);
 
   it('vector: still short after the one re-ranking => stopped_early, never a silently short page', async () => {

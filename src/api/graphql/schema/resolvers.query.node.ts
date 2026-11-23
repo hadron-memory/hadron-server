@@ -2324,7 +2324,10 @@ export const nodeQueries = {
         if (incomplete(attempt, depth)) rankingIncomplete = true;
         // LOCAL F1 (Abigail): a re-ranking that stopped early (e.g. it started past the request deadline) and came back with
         // a smaller page must not replace the usable first page; keep the first, flagged incomplete as it already was.
-        if (rankingIncomplete && attempt.stats.pageCount < first.stats.pageCount) attempt = first;
+        // BLIND F1 (Elena, ff757c61): only when the first page stayed inside the depth its ranking stood behind (it was only
+        // SHORT). A first page that reached past that depth holds rows in uncertified order, which stopped_early does not
+        // describe; it is never served in place of the re-ranking.
+        if (rankingIncomplete && attempt.stats.pageCount < first.stats.pageCount && first.stats.consumed <= page) attempt = first;
       }
       const env = stoppedEnvelope(attempt.built.hits.length, attempt.built.degraded, attempt.built.reason);
       return { ...attempt.built, reason: env.reason, degraded: env.degraded };

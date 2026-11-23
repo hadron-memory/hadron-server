@@ -439,14 +439,23 @@ export function isStatementTimeout(e: unknown, phase?: 'waiting' | 'running'): b
  * the work budget ending the search (cor:api:090:04), not the pool failing. A wait that had its full `maxWait` and still
  * timed out stays an error that reaches alerting.
  */
-function isVectorEarlyStop(e: unknown, phase: 'waiting' | 'running', txMs: number, deadline: number): boolean {
+/**
+ * Clock slack for "the request deadline has passed" when Prisma reports the connection-wait timeout (BLIND F5): Prisma
+ * fires that timeout on its own timer, which can run a few milliseconds ahead of ours, so a wait that ended AT the deadline
+ * must not read as one that ended before it.
+ */
+const DEADLINE_CLOCK_SLACK_MS = 25;
+
+function isVectorEarlyStop(e: unknown, phase: 'waiting' | 'running', txMs: number, deadline: number, cappedByRequest: boolean): boolean {
   if (isStatementTimeout(e, phase)) return true;
   const err = e as { code?: string; message?: string; meta?: { message?: string } } | null;
   // BLIND N2 (Elena): only Prisma's connection-wait timeout (not any Transaction API error), only when the wait was
   // capped by the request's deadline (not the ordinary maxWait), and only when that deadline has in fact passed.
   return err?.code === 'P2028' && phase === 'waiting'
     && /unable to start a transaction/i.test(`${err.message ?? ''} ${err.meta?.message ?? ''}`)
-    && txMs < VECTOR_TX_MAX_WAIT_MS && Date.now() >= deadline - 25;
+    // BLIND F6 (Elena): the REQUEST deadline (`deadlineAt`) must be what bound the wait, not merely a budget below the
+    // ordinary maxWait (a small VECTOR_SEARCH_TIMEOUT_MS with no request deadline is still pool pressure).
+    && cappedByRequest && txMs < VECTOR_TX_MAX_WAIT_MS && Date.now() >= deadline - DEADLINE_CLOCK_SLACK_MS;
 }
 
 /** Prisma options for one budgeted vector transaction: its clock runs past the budget so Postgres ends the statement first. */
@@ -481,14 +490,16 @@ async function setIterativeScan(tx: Prisma.TransactionClient): Promise<void> {
  * calls (a hybrid page's vector leg, its rank lookups and a re-ranking all share it, set once by the resolver); a call
  * never gets more than what is left of it, so one budget bounds the whole request, not each call.
  */
-function budgetClock(budgetMs: number, deadlineAt?: number): { left: () => number; txMs: number; deadline: number } {
-  const deadline = deadlineAt == null ? Date.now() + budgetMs : Math.min(Date.now() + budgetMs, deadlineAt);
+function budgetClock(budgetMs: number, deadlineAt?: number): { left: () => number; txMs: number; deadline: number; cappedByRequest: boolean } {
+  const own = Date.now() + budgetMs;
+  const deadline = deadlineAt == null ? own : Math.min(own, deadlineAt);
+  const cappedByRequest = deadlineAt != null && deadlineAt < own;
   const left = () => {
     const ms = deadline - Date.now();
     if (ms < 1) throw Object.assign(new Error('canceling statement due to statement timeout'), { meta: { code: '57014' } });
     return Math.trunc(ms);
   };
-  return { left, txMs: Math.max(1, Math.trunc(deadline - Date.now())), deadline };
+  return { left, txMs: Math.max(1, Math.trunc(deadline - Date.now())), deadline, cappedByRequest };
 }
 
 /**
@@ -501,11 +512,13 @@ async function oneStatementUnderBudget<R>(
   let phase: 'waiting' | 'running' = 'waiting';
   let txMs = Number.POSITIVE_INFINITY;
   let deadline = Number.POSITIVE_INFINITY;
+  let cappedByRequest = false;
   try {
     const clock = budgetClock(vectorSearchTimeoutMs(), deadlineAt);
     const left = clock.left;
     txMs = clock.txMs;
     deadline = clock.deadline;
+    cappedByRequest = clock.cappedByRequest;
     left(); // a request whose deadline already passed stops here, before taking a connection
     const rows = await db.$transaction(async (tx) => {
       phase = 'running';
@@ -514,7 +527,7 @@ async function oneStatementUnderBudget<R>(
     }, vectorTxOptions(txMs));
     return { rows, stopped: false };
   } catch (e) {
-    if (!isVectorEarlyStop(e, phase, txMs, deadline)) throw e;
+    if (!isVectorEarlyStop(e, phase, txMs, deadline, cappedByRequest)) throw e;
     return { rows: [], stopped: true };
   }
 }
@@ -580,11 +593,13 @@ async function rankUnderBudget<R>(
   let phase: 'waiting' | 'running' = 'waiting';
   let txMs = Number.POSITIVE_INFINITY;
   let deadline = Number.POSITIVE_INFINITY;
+  let cappedByRequest = false;
   try {
     const clock = budgetClock(vectorSearchTimeoutMs(), o.deadlineAt);
     const left = clock.left;
     txMs = clock.txMs;
     deadline = clock.deadline;
+    cappedByRequest = clock.cappedByRequest;
     left(); // a request whose deadline already passed stops here, before taking a connection
     return await db.$transaction(async (tx) => {
       phase = 'running';
@@ -627,7 +642,7 @@ async function rankUnderBudget<R>(
       return { rows: best, exhausted: o.distinctCount(best) < o.need, stopped: false };
     }, vectorTxOptions(txMs));
   } catch (e) {
-    if (!isVectorEarlyStop(e, phase, txMs, deadline)) throw e;
+    if (!isVectorEarlyStop(e, phase, txMs, deadline, cappedByRequest)) throw e;
     return { rows: best, exhausted: false, stopped: true };
   }
 }
