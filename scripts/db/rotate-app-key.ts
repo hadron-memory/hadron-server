@@ -7,7 +7,7 @@
  *
  * `--reencrypt` (the compromise runbook) also re-encrypts every version of the App under the new key, in the SAME
  * transaction as the rotation, so either both happen or neither does. Without it, old versions stay under their own
- * (retired) key until a later run with the flag. The output carries counts and ids only, never a value.
+ * (retired) key until a later run with the flag; `under_older_keys` in the output says how many there are (#4573). The output carries counts and ids only, never a value.
  *
  * New versions are written under n+1 at once; versions under older keys stay readable (a retired key still
  * unwraps). The root comes from the environment the server itself reads, never argv, and must be the recorded
@@ -42,11 +42,12 @@ export async function main(argv: readonly string[], io: RotateToolIo): Promise<n
   const db = new PrismaClient({ datasourceUrl: io.env.DATABASE_URL });
   try {
     // A large App's re-encrypt can outlast Prisma's 5 s default; the run is an attended ops step.
-    const { handle, moved } = await db.$transaction(async (tx) => {
+    const { handle, moved, older } = await db.$transaction(async (tx) => {
       const h = await rotateAppKey(tx, appId);
-      return { handle: h, moved: reencrypt ? await reencryptAppSecretVersions(tx, appId) : null };
+      const n = reencrypt ? await reencryptAppSecretVersions(tx, appId) : null;
+      return { handle: h, moved: n, older: await tx.secretVersion.count({ where: { appId, keyVersion: { not: h.keyVersion } } }) };
     }, { timeout: 10 * 60 * 1000, maxWait: 60 * 1000 });
-    io.log(`${TAG} ok app=${appId} key_version=${handle.keyVersion}${moved === null ? '' : ` reencrypted=${moved}`}`);
+    io.log(`${TAG} ok app=${appId} key_version=${handle.keyVersion}${moved === null ? '' : ` reencrypted=${moved}`} under_older_keys=${older}`);
     handle.encryptionKey.fill(0);
     handle.fingerprintKey.fill(0);
     return 0;

@@ -15,7 +15,7 @@ import { appKeyAad, appKeyCache, ensureAppKey, lockAppKeyMint, rootCheckValue, u
 import { main, type SecretRewrapToolIo } from './rewrap-secret-keys.js';
 
 /** #4553 §10 F3 (G4): a library re-wrap that reports success but wrote nothing, so the tool's own AFTER check is tested. */
-const fake = vi.hoisted(() => ({ silentRewrap: false }));
+const fake = vi.hoisted(() => ({ silentRewrap: false, skipBefore: false }));
 vi.mock('../../src/lib/secrets/rotation.js', async (orig) => {
   const real = await orig<typeof import('../../src/lib/secrets/rotation.js')>();
   return {
@@ -24,7 +24,7 @@ vi.mock('../../src/lib/secrets/rotation.js', async (orig) => {
       fake.silentRewrap
         // It still takes the BEFORE pass under the lock, as the real one does: only the writes are missing.
         ? args[0].$transaction(async (tx) => { await args[3]?.(tx); return { rows: 1, rewrapped: 1 }; })
-        : real.rewrapSecretRootKeys(...args),
+        : real.rewrapSecretRootKeys(args[0], args[1], args[2], fake.skipBefore ? undefined : args[3]),
   };
 });
 
@@ -74,6 +74,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   fake.silentRewrap = false;
+  fake.skipBefore = false;
   await Promise.allSettled(paths.map((p) => rm(join(p, '..'), { recursive: true, force: true })));
   paths = [];
   delete process.env.SECRET_ROOT_KEY;
@@ -204,6 +205,14 @@ describe('secrets-root re-wrap tool: the run', () => {
     expect(lines.some((l) => /rows=2 rewrapped=2 verified=2/.test(l))).toBe(true);
   });
 
+  it('a re-wrap that never took the BEFORE pass is not verified: exit 1 (#4573)', async () => {
+    await mint();
+    const [from, to] = await rootPair();
+    fake.skipBefore = true;
+    expect(await main(['--from-root-file', from, '--to-root-file', to], io())).toBe(1);
+    expect(lines.some((l) => l.includes('before=not taken'))).toBe(true);
+  });
+
   it('--from equal to --to is usage, and nothing runs (#4553 F3)', async () => {
     await mint();
     const before = await wrapped();
@@ -231,6 +240,9 @@ describe('secrets-root re-wrap tool: the run', () => {
     });
     const [from, to] = await rootPair();
     expect(await main(['--from-root-file', from, '--to-root-file', to], io())).toBe(1);
+    // The BEFORE pass stopped the run: one line, naming the row, and the re-wrap's own refusal never ran (#4573).
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('unwraps under neither root');
     expect(await wrapped()).toBe(before);
   });
 

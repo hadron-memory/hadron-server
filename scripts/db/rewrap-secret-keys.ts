@@ -13,10 +13,10 @@
  * characters and never logged.
  *
  * The re-wrap is one transaction ({@link rewrapSecretRootKeys}): atomic, idempotent, holding the secrets-root lock
- * that every mint holds shared. Verification is real: BEFORE, every row is unwrapped (under either root, since a
+ * that every mint holds shared. Verification is real: BEFORE, inside that transaction with the lock held, every row is unwrapped (under either root, since a
  * re-run starts with rows already under the new one) and SHA-256-committed in memory; AFTER, every row is unwrapped
- * under the NEW root ONLY and the commitments compared, so a re-wrap that wrote nothing exits 1. The digests are
- * never printed. An instance still running the old root after the switch mints nothing (the key-check value moved),
+ * under the NEW root ONLY and the commitments compared, and the recorded root check is read back and must name the new
+ * root, so a re-wrap that wrote nothing exits 1 even with no App keys. The digests are never printed. An instance still running the old root after the switch mints nothing (the key-check value moved),
  * but the runbook still stops writers first and re-runs this tool after the switch as the proof. The inverse
  * argument order is the rollback. Runbook: hrn:node:hadronmemory.com:dev:ops:alpha:app-secrets-key-rotation.
  *
@@ -25,8 +25,8 @@
 import { createHash } from 'crypto';
 import { open, readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { PrismaClient } from '../../src/generated/prisma/index.js';
-import { appKeyAad, SecretKeyUnavailableError } from '../../src/lib/secrets/appKeys.js';
+import { PrismaClient, type Prisma } from '../../src/generated/prisma/index.js';
+import { appKeyAad, rootCheckValue, SecretKeyUnavailableError } from '../../src/lib/secrets/appKeys.js';
 import { rewrapSecretRootKeys } from '../../src/lib/secrets/rotation.js';
 import { decryptBytesAad } from '../../src/lib/tokenCrypto.js';
 
@@ -48,9 +48,12 @@ const usage = (io: Pick<SecretRewrapToolIo, 'log'>, line: string): number => {
   return 2;
 };
 
+/** Thrown inside the re-wrap's transaction to roll it back when the BEFORE pass failed (already logged). */
+class BeforePassFailed extends Error {}
+
 /** Every App key row's bytes, SHA-256-committed in memory, or null (logged) if a row unwraps under none of `roots`. */
 async function unwrapDigests(
-  db: PrismaClient,
+  db: Prisma.TransactionClient,
   roots: readonly Buffer[],
   phase: 'before' | 'after',
   log: (line: string) => void,
@@ -131,7 +134,7 @@ export async function main(argv: readonly string[], io: SecretRewrapToolIo): Pro
   } else {
     if (io.stdinIsTty()) return usage(io, 'stdin is a terminal and the roots would echo; pipe them or use --from-root-file/--to-root-file');
     const lines = (await io.readStdin()).split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
-    if (lines.length < 2) return usage(io, 'stdin needs two root lines (from, then to)');
+    if (lines.length !== 2) return usage(io, 'stdin needs exactly two root lines (from, then to)');
     [fromHex, toHex] = lines;
     if (!HEX64.test(fromHex) || !HEX64.test(toHex)) return usage(io, 'roots must be 64 hex characters');
   }
@@ -147,18 +150,27 @@ export async function main(argv: readonly string[], io: SecretRewrapToolIo): Pro
   const toRoot = Buffer.from(toHex, 'hex');
   const db = new PrismaClient({ datasourceUrl: io.env.DATABASE_URL });
   try {
-    const before = await unwrapDigests(db, [fromRoot, toRoot], 'before', io.log);
-    if (before === null) return 1;
+    const taken: { before: Map<string, string> | null } = { before: null };
     let out: { rows: number; rewrapped: number };
     try {
-      out = await rewrapSecretRootKeys(db, fromHex, toHex);
+      out = await rewrapSecretRootKeys(db, fromHex, toHex, async (tx) => {
+        taken.before = await unwrapDigests(tx, [fromRoot, toRoot], 'before', io.log);
+        if (taken.before === null) throw new BeforePassFailed();
+      });
     } catch (e) {
+      if (e instanceof BeforePassFailed) return 1;
       io.log(e instanceof SecretKeyUnavailableError ? `${TAG}.refused: an App key, or the recorded root check, names neither root; nothing was changed` : `${TAG}.rewrap_failed`);
       return 1;
     }
     const after = await unwrapDigests(db, [toRoot], 'after', io.log);
-    if (after === null || before.size !== after.size || [...before].some(([k, digest]) => after.get(k) !== digest)) {
-      io.log(`${TAG}.verify_failed: rows or key bytes changed across the re-wrap (before=${before.size} after=${after?.size ?? 'unreadable'})`);
+    const { before } = taken;
+    if (after === null || before === null || before.size !== after.size || [...before].some(([k, digest]) => after.get(k) !== digest)) {
+      io.log(`${TAG}.verify_failed: rows or key bytes changed across the re-wrap (before=${before?.size ?? 'not taken'} after=${after?.size ?? 'unreadable'})`);
+      return 1;
+    }
+    const recorded = await db.secretRootCheck.findUnique({ where: { id: 1 }, select: { checkValue: true } });
+    if (recorded?.checkValue !== rootCheckValue(toRoot)) {
+      io.log(`${TAG}.verify_failed: the recorded root check does not name the NEW root; stop writers and re-run`);
       return 1;
     }
     io.log(`${TAG} ok rows=${out.rows} rewrapped=${out.rewrapped} verified=${after.size}`);
