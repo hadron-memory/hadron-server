@@ -20,6 +20,7 @@ import { normalizeUrnForLookup, parseUrnInput } from '../../../lib/urn.js';
 import { findLiveUrnAliasTargets } from '../../../lib/urnAlias.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 
 type AppRow = { id: string; organizationId: string | null; ownerUserId: string | null };
 
@@ -36,7 +37,7 @@ async function locate(ctx: Context, ref: string): Promise<AppRow | null> {
     const { id } = await resolveAppRef(ctx.db, ref);
     return await ctx.db.app.findUnique({ where: { id }, select });
   } catch (e) {
-    if (!(e instanceof AppNotFoundError)) throw e;
+    if (!isAppRefResolutionFailure(e)) throw e;
   }
   const urn = normalizeUrnForLookup(parseUrnInput(ref).value);
   const rows = await ctx.db.app.findMany({ where: { urn, uninstalledAt: { not: null }, deletedAt: null }, select, take: 2 });

@@ -49,7 +49,7 @@ import { forbiddenError } from '../../../lib/refusals.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { admitOperationRate } from '../../../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import {
@@ -129,7 +129,8 @@ async function resolveSecretOwnerRef(
         return (await resolveAppRef(ctx.db, ownerRef)).id;
       } catch (err) {
         // A missing App and one the caller may not use answer the same, so the ref is no existence oracle.
-        if (err instanceof AppNotFoundError || err instanceof AmbiguousLegacyUrnError) throw authorizationDenied();
+        // #4893: the whole shared resolution list folds — a malformed ref is the same refusal.
+        if (isAppRefResolutionFailure(err)) throw authorizationDenied();
         throw err;
       }
     }

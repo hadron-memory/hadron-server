@@ -18,6 +18,7 @@ import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActiv
 import { loadApp, taskError, type TaskApp } from './resolvers.agentTask.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { appKeyCaller, refuseSessionBound, requireKeyScope } from '../../../lib/appKeyScopes/scopes.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
@@ -64,7 +65,8 @@ export async function batchKeyEntry(ctx: Context, appRef: string): Promise<{ app
   try {
     const { id } = await resolveAppRef(ctx.db, appRef);
     app = id === key.appId ? await loadApp(ctx, id) : null;
-  } catch {
+  } catch (e) {
+    if (!isAppRefResolutionFailure(e)) throw e;
     app = null;
   }
   if (!app || app.deletedAt || app.uninstalledAt) throw taskError('APP_NOT_FOUND', 'App not found.');
@@ -121,7 +123,7 @@ export async function ownBatchSession(ctx: Context, expectedAppId?: string, lock
 async function selfBatches(ctx: Context, a: { appRef: string; workerRefs?: string[] | null }) {
   const initial = await ownBatchSession(ctx);
   let appId: string;
-  try { appId = (await resolveAppRef(ctx.db, a.appRef)).id; } catch { throw taskError('APP_NOT_FOUND', 'App not found.'); }
+  try { appId = (await resolveAppRef(ctx.db, a.appRef)).id; } catch (e) { if (!isAppRefResolutionFailure(e)) throw e; throw taskError('APP_NOT_FOUND', 'App not found.'); }
   if (appId !== initial.session.appId) throw taskError('APP_NOT_FOUND', 'App not found.');
   const app = await loadApp(ctx, appId);
   if (!app || app.deletedAt || app.uninstalledAt) throw taskError('APP_NOT_FOUND', 'App not found.');

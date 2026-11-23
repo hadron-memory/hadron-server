@@ -49,7 +49,8 @@ import { loadCommentActor, type CommentActorRef } from './resolvers.comments.js'
 import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { AppNotFoundError, EntityNotFoundError } from '../../../lib/entityRef/errors.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
+import { EntityNotFoundError } from '../../../lib/entityRef/errors.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
 import { appendTaskEvent, eventActor } from '../../../lib/agentTasks/events.js';
@@ -1257,7 +1258,8 @@ async function readableAppMemoryIds(ctx: Context, appRef: string): Promise<strin
     app = await resolveAppRef(ctx.db, appRef);
   } catch (error) {
     // An unknown App answers like one with nothing to show: no existence oracle.
-    if (error instanceof AppNotFoundError) return [];
+    // #4893: every ref-resolution failure joins it — a malformed ref shows nothing either.
+    if (isAppRefResolutionFailure(error)) return [];
     throw error;
   }
   const accessible = await getAccessibleMemoryIds(ctx);

@@ -5,7 +5,7 @@
  */
 import { GraphQLError } from 'graphql';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { createTelegramToolConnection, deleteTelegramToolConnection } from '../../../lib/telegramClient.js';
 import { dispatchChatToolTeardown, recordChatToolTeardown } from '../../../lib/chatToolTeardown.js';
@@ -32,7 +32,8 @@ export const telegramMutations = {
       appId = (await resolveAppRef(ctx.db, appRef)).id;
     } catch (err) {
       // An ambiguous legacy URN names two Apps: another org's admin must not tell it apart from an unknown App.
-      if (err instanceof AppNotFoundError || err instanceof AmbiguousLegacyUrnError) throw authorizationDenied();
+      // #4893: the whole shared resolution list folds — a malformed ref is the same non-existence.
+      if (isAppRefResolutionFailure(err)) throw authorizationDenied();
       throw err;
     }
     const app = await ctx.db.app.findUnique({ where: { id: appId }, select: { organizationId: true } });

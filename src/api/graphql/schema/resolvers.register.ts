@@ -25,6 +25,7 @@ import {
   resolveOrgScope,
 } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
@@ -109,7 +110,9 @@ export const registerQueries = {
           attendee = { workerId: id };
           appId = w.appId;
         }
-      } catch {
+      } catch (e) {
+        // #4893/#2975: only a name-resolution failure is the empty answer; a database fault propagates.
+        if (!refNamesNothing(e, { ambiguousNamesNothing: true })) throw e;
         return [];
       }
     } else if (agentRef?.trim() && appRef?.trim()) {
@@ -117,7 +120,9 @@ export const registerQueries = {
         const [{ id: agentId }, { id: resolvedAppId }] = await Promise.all([resolveAgentRef(ctx.db, agentRef), resolveAppRef(ctx.db, appRef)]);
         attendee = { agentId, appId: resolvedAppId };
         appId = resolvedAppId;
-      } catch {
+      } catch (e) {
+        // #4893/#2975: only a name-resolution failure is the empty answer; a database fault propagates.
+        if (!refNamesNothing(e, { ambiguousNamesNothing: true })) throw e;
         return [];
       }
     } else {
@@ -159,10 +164,13 @@ export const registerQueries = {
       let ownerWhere: Prisma.RegisterEntryWhereInput | null = null;
       try {
         ownerWhere = { appId: (await resolveAppRef(ctx.db, ref)).id };
-      } catch {
+      } catch (appErr) {
+        // #4893/#2975: only a name-resolution failure falls through to the org arm; a fault propagates.
+        if (!refNamesNothing(appErr, { ambiguousNamesNothing: true })) throw appErr;
         try {
           ownerWhere = { organizationId: (await resolveOrgRef(ctx.db, ref)).id };
-        } catch {
+        } catch (orgErr) {
+          if (!refNamesNothing(orgErr, { ambiguousNamesNothing: true })) throw orgErr;
           return empty;
         }
       }
@@ -225,7 +233,9 @@ async function readableAttendee(
       if (!install) return null;
       attendee = { agentId, appId: resolvedAppId };
       appId = resolvedAppId;
-    } catch {
+    } catch (e) {
+      // #4893/#2975: a name-resolution failure is the door's null; a database fault propagates.
+      if (!refNamesNothing(e, { ambiguousNamesNothing: true })) throw e;
       return null;
     }
   }

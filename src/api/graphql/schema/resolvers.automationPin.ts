@@ -10,6 +10,7 @@ import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { workerBoundActor } from '../../../lib/grants/triggerGrant.js';
 import { AppNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
@@ -173,7 +174,7 @@ export const automationPinQueries = {
     const empty = { rows: [] as never[], nextCursor: null, omitted: MANUAL_OMISSION };
     let appId: string;
     try { appId = (await resolveAppRef(ctx.db, input.appRef)).id; }
-    catch (e) { if (e instanceof AppNotFoundError) return empty; throw e; }
+    catch (e) { if (isAppRefResolutionFailure(e)) return empty; throw e; }
     const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null, uninstalledAt: null } });
     const actor = await ctx.db.user.findFirst({ where: { id: actorId, deletedAt: null }, select: { id: true } });
     if (!app || !actor) return empty;

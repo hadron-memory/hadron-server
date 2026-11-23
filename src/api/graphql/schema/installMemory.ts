@@ -22,6 +22,7 @@ import type { Prisma, PrismaClient } from '../../../generated/prisma/index.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { agentSlugFromUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -80,7 +81,19 @@ export async function withInstallMemory<T>(
   options: { create?: boolean } = {},
 ): Promise<T> {
   if (!ctx.userId || isRunPrincipal(ctx)) throw memoryWriteForbidden();
-  const { appId, agentId } = await resolveInstallTarget(ctx.db, target);
+  // #4893: the APP arm folds every ref-resolution failure into the door's own unknown-App
+  // answer (the participant gates below already collapse a missing App and one this caller
+  // may not reach); the Agent arm keeps its typed miss — its ref is the caller's own Agent.
+  // resolveInstallTarget itself stays raw for its other callers.
+  let appId: string;
+  let agentId: string;
+  try {
+    appId = (await resolveAppRef(ctx.db, target.appRef)).id;
+    agentId = (await resolveAgentRef(ctx.db, target.agentRef)).id;
+  } catch (e) {
+    if (isAppRefResolutionFailure(e)) throw new AppNotFoundError(target.appRef);
+    throw e;
+  }
   const app = await ctx.db.app.findUnique({
     where: { id: appId },
     select: { id: true, organizationId: true, ownerUserId: true },
