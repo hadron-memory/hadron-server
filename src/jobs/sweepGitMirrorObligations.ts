@@ -40,10 +40,11 @@ type DueRow = { nodeId: string; kind: 'WRITE' | 'REMOVE'; removeLoc: string; bra
  *
  * Not lock-ordered (a skip never takes the checkout lock), so the fence is what keeps it safe, as for a lock-failed settle:
  * a restore cancelling a row between the read and the settle gets at worst one spurious row back (the safe direction; the
- * next attempt's live-owner check clears it). For the no-clone arm that clearing waits for the clone to return — no
- * attempt runs without one — and until then the rows this settles are the due-row query's PENDING rows (a FAILED row in backoff stays FAILED), and a settled row already
- * reports "did not land" with the repository possibly stale, so the spurious row reports nothing the state does not
- * already say. The number is taken only once a row is found: a skip with nothing
+ * next attempt's live-owner check clears it). For the no-clone arm that clearing waits for the clone to return, because no
+ * attempt runs without one, so the spurious row can persist until then. That is acceptable: this settle's own query below
+ * reads PENDING rows only, so every FAILED and NOT_CLONED row stays untouched, and a settled row says "did not land; the
+ * repository may be stale", which is already true of a repository the sweep cannot clone. The number is taken only once
+ * a row is found: a skip with nothing
  * captured consumes no attempt and no sequence.
  */
 async function settleCapturedOnSkip(db: PrismaClient, memory: DueMemory, settlement: MirrorSettlement): Promise<void> {
