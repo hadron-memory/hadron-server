@@ -8,6 +8,7 @@ import { cleanDb, createDbOrgAndGraph } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { derivedEdgeLocForUpsert } from './edgeLocLookup.js';
 import pg from 'pg';
+import { waitForLockWaitersBlockedBy } from '../test/lockWait.js';
 
 const NAME = 'a😀b';
 const MIGRATED = 'root:a-b:leaf';
@@ -42,19 +43,6 @@ async function waitForRowLockWaiter() {
     await new Promise((res) => setTimeout(res, 5));
   }
   throw new Error('the competing writer never blocked on the selected row');
-}
-
-/** True once at least `n` OTHER backends are blocked on a row lock. */
-async function waitForLockWaiters(n: number) {
-  const until = Date.now() + 10_000;
-  while (Date.now() < until) {
-    const [r] = await db.$queryRaw<Array<{ n: number }>>`
-      SELECT count(DISTINCT pid)::int AS n FROM pg_locks WHERE NOT granted AND locktype IN ('transactionid', 'tuple')
-        AND pid <> pg_backend_pid()`;
-    if (r.n >= n) return;
-    await new Promise((res) => setTimeout(res, 5));
-  }
-  throw new Error('the expected lock wait was never observed');
 }
 
 /**
@@ -273,9 +261,11 @@ describe('KNOWN, ACCEPTED: a writer key-sharing two edges against a mover re-key
       await lockMemoriesForChannelChange(tx, [graph.id]);
       await derivedEdgeLocForUpsert(tx, args(t2)); // the caller's order: E2 first,
       writerFirst();
-      // Hold E1 back until the mover is OBSERVED blocked on a lock this writer holds (E2's key share, or the channel
-      // key), so the writer's next step is the one that closes the cycle, whatever the machine's speed.
-      await waitForLockWaiters(1);
+      // Hold E1 back until the mover is OBSERVED blocked behind THIS writer (a backend in this database whose blocker is
+      // the writer's pid), so the writer's next step is the one that closes the cycle, whatever the machine's speed and
+      // whoever else is waiting on a lock somewhere (#4940).
+      const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+      await waitForLockWaitersBlockedBy(db, pid);
       await derivedEdgeLocForUpsert(tx, args(t1)); // then E1; the mover re-keys E1 first
     }, { timeout: 20_000 });
     writer.catch(() => undefined);
@@ -336,7 +326,7 @@ describe('the post-lock re-check and the capped re-select loop (#4888)', () => {
     expect(r.$queryRaw).toHaveBeenCalledTimes(6);
     expect(warn).toHaveBeenCalledTimes(1);
     const text = String(warn.mock.calls[0][0]);
-    expect(text).toContain('edge_loc_lock_cap_reached');
+    expect(JSON.parse(text)).toEqual({ event: 'edge_loc_lock_cap_reached', attempts: 6 }); // the first selection plus 5 re-selects
     // Fixed text: no loc, name or id of the edge is echoed.
     expect(text).not.toContain(MIGRATED);
     expect(text).not.toContain(NAME);
