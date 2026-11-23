@@ -13,7 +13,7 @@
  * Run one tick by hand:
  *   pnpm tsx src/jobs/secretSweep.ts
  */
-import { sweepSecretAutoDelete } from '../lib/secrets/autoDelete.js';
+import { safeErrorCode as errorCode, sweepSecretAutoDelete } from '../lib/secrets/autoDelete.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { purgeExpiredSecretEvents, purgeSupersededVersions } from '../lib/secrets/purge.js';
 
@@ -26,11 +26,6 @@ export interface SecretSweepLegs {
 }
 
 const defaultLegs: SecretSweepLegs = { autoDelete: sweepSecretAutoDelete, purgeVersions: purgeSupersededVersions, purgeEvents: purgeExpiredSecretEvents };
-
-function errorCode(err: unknown): string {
-  const raw = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
-  return typeof raw === 'string' && /^(P\d{4}|[0-9A-Z]{5})$/.test(raw) ? raw : 'UNKNOWN';
-}
 
 /** One tick. Each leg is isolated: a failed version purge does not stop the event purge. Returns the counts. */
 export async function secretSweepTick(

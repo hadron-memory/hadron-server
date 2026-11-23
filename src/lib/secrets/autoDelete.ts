@@ -2,6 +2,12 @@
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { recordSecretEvent, type SecretActor } from './appSecrets.js';
 
+/** A database error code safe to log: a Prisma `P####` or a five-character SQLSTATE, else UNKNOWN. Never a message, id or value. */
+export function safeErrorCode(err: unknown): string {
+  const raw = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
+  return typeof raw === 'string' && /^(P\d{4}|[0-9A-Z]{5})$/.test(raw) ? raw : 'UNKNOWN';
+}
+
 export function autoDeleteLimitRefusal(autoDelete: boolean, expiresAt: Date | null, maxUses: number | null): {
   code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT'; message: string;
 } | null {
@@ -47,8 +53,18 @@ export async function sweepSecretAutoDelete(db: PrismaClient, batchSize = 500): 
           AND g.action_values->>'auto-delete' = 'delete' AND g.activated_at IS NOT NULL AND g.signature_id IS NOT NULL
           AND g.expires_at <= (clock_timestamp() AT TIME ZONE 'UTC') LIMIT 1`;
       if (!due) continue;
-      await deleteLockedAppSecret(tx, { id: s.id, ownerId: s.owner_id, name: s.name });
-      deleted++;
+      // #4635: one secret whose deletion fails must not roll back, or block, the others in its batch. Its own writes
+      // (the DELETE event, the secret, the version and client cascade) are undone by the savepoint; the row stays due
+      // and is tried again next tick. Only a fixed tag and an error code are logged, never an id, name or value.
+      await tx.$executeRaw`SAVEPOINT secret_auto_delete_one`;
+      try {
+        await deleteLockedAppSecret(tx, { id: s.id, ownerId: s.owner_id, name: s.name });
+        await tx.$executeRaw`RELEASE SAVEPOINT secret_auto_delete_one`;
+        deleted++;
+      } catch (err) {
+        await tx.$executeRaw`ROLLBACK TO SAVEPOINT secret_auto_delete_one`;
+        console.error('secret_sweep.auto_delete_row_failed', { code: safeErrorCode(err) });
+      }
     }
     return deleted;
     }, { timeout: 30_000 });
