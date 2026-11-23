@@ -6,7 +6,8 @@
  * object from the validated fields; nothing is stored as received, and no screen text of any kind is accepted or
  * stored (cor:agt:050:11; D-2026-10-16-005 amended, Holger R65). `reason` is therefore a closed code, never a line.
  *
- * The field decides nothing: it feeds no `checkStatus` (cor:agt:100:03 stays derived), no availability
+ * The field decides ONE thing (#4933): the desired-start loop issues no start for a worker whose agent this host already
+ * runs (`hostRunsAgent` in src/lib/desiredState/desiredStart.ts). It feeds no `checkStatus` (cor:agt:100:03 stays derived), no availability
  * (cor:agt:060:08), no matcher, no stall rule and no server alarm.
  *
  * #4225 S4a (epic #4229) — the report also carries the worker's context size: `contextTokens` (a count the host
