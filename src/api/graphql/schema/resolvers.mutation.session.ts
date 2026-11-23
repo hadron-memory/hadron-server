@@ -60,6 +60,7 @@ import {
   handoffSessionId,
 } from '../../../lib/workerHandoff.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
+import { foreignIncludeReader } from '../../../lib/includes/foreignIncludeReader.js';
 import { deriveEdgeLoc, edgeLocDecodesAsDerived } from '../../../lib/edgeLoc.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
@@ -3500,6 +3501,8 @@ export const sessionMutations = {
         // empty-content targets are skipped), so the read events below describe
         // what crossed the boundary rather than what the node links to.
         const inlined: unknown[] = [];
+        // #4689: foreign URN includes resolve under this principal's own read access (ruling A).
+        const foreignReader = foreignIncludeReader(ctx.db, auth);
         const assembled = await assembleRunNodePrompt(
           { ...node, loc },
           stringArgs ?? undefined,
@@ -3508,7 +3511,7 @@ export const sessionMutations = {
               (await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn,
             // #40: each compiled piece is served, so it counts toward the request's aggregate.
             compileTemplate: (content, data, memoryId) =>
-              compileTemplate(content, data, memoryId, ctx.db, {}).then(text => chargeRequestServed(ctx, content, text)),
+              compileTemplate(content, data, memoryId, ctx.db, {}, undefined, { foreignReader }).then(text => chargeRequestServed(ctx, content, text)),
             includeTarget: target => !!target && readableTargets.has(target.memoryId),
             onTargetInlined: (target) => inlined.push(target),
           },

@@ -62,6 +62,7 @@ import {
 import { compileTemplate } from '../../../lib/template.js';
 import { chargeRequestServed, resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
+import { foreignIncludeReader } from '../../../lib/includes/foreignIncludeReader.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { appMemoryScopePage, resolveAppNodeScope } from './resolvers.appMemoryScope.js';
@@ -699,6 +700,8 @@ export const nodeQueries = {
       // executes — Mustache via compileTemplate, routing edges skipped — not
       // the legacy MCP bundle, which does a literal replaceAll and inlines
       // every edge. A preview that disagrees with the run is worse than none.
+      // #4689: foreign URN includes resolve under the caller's own read access (cor:dmo:150:04).
+      const foreignReader = foreignIncludeReader(ctx.db, ctx);
       const bundle = await assembleRunNodePrompt(
         { ...node, outgoingEdges: visibleEdges } as never,
         stringArgs,
@@ -707,7 +710,7 @@ export const nodeQueries = {
             loadMemoryUrn(ctx, memoryId).then((u: string | null) => u ?? memoryId),
           // #40: each compiled piece is served, so it counts toward the request's aggregate.
           compileTemplate: (content: string, data: Record<string, string> | null, memoryId: string) =>
-            compileTemplate(content, data, memoryId, ctx.db, {}).then(text => chargeRequestServed(ctx, content, text)),
+            compileTemplate(content, data, memoryId, ctx.db, {}, undefined, { foreignReader }).then(text => chargeRequestServed(ctx, content, text)),
           // visibleEdges was already filtered through this caller's read gate.
           includeTarget: target => !!target,
           onTargetInlined: (target) => inlined.push(target),
