@@ -157,11 +157,12 @@ fi
 # #4608 BLIND F2: one host Node invocation imports the validator and judges. Exit 42, and only 42, is a rejected record
 # (#4608 BLIND delta: 1 is what a crashing node exits with, so it cannot mean "rejected"); any other failure (no usable
 # host node, an import error, a validator exception) is named as a failed check. argv[1] is the record, never a path.
-# #4650: an import error's message goes to stderr first (load.mjs's UNSUPPORTED_NODE names the Node it needs, fixed text, no value).
+# #4650: an import error's MESSAGE (never its stack) goes to stderr first, written synchronously so process.exit cannot drop it
+# (load.mjs's UNSUPPORTED_NODE names the Node it needs: fixed text, no value).
 if [ "$load_rc" -eq 0 ]; then
   check_rc=0
-  node --input-type=module -e 'import { pathToFileURL } from "node:url";
-    let m; try { m = await import(pathToFileURL(process.argv[3]).href); } catch (e) { process.stderr.write(String(e && e.message || e) + "\n"); process.exit(3); }
+  node --input-type=module -e 'import { pathToFileURL } from "node:url"; import { writeSync } from "node:fs";
+    let m; try { m = await import(pathToFileURL(process.argv[3]).href); } catch (e) { writeSync(2, (e?.message || String(e)) + "\n"); process.exit(3); }
     process.exit(m.loadRecordOk(process.argv[1], process.argv[2]) ? 0 : 42)' "$load_line" "$workload" "$here/load.mjs" || check_rc=$?
   if [ "$check_rc" -eq 42 ]; then
     echo "load generator exited 0 but printed no valid load record for $workload; diagnosis is invalid" >&2; exit 7
