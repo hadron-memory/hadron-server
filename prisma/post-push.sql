@@ -958,8 +958,8 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- #2755: the dark-worker alarm's window, episodes and their worker fence (the fence function is #1162's, above).
 \ir dark-alarm-invariants.sql
 
--- #2763: the coordinator-cadence alarm's episodes and first-observed clocks (after the #1162 fence function).
-\ir coordinator-cadence-invariants.sql
+-- #2763, #4375: the lead-cadence alarm's episodes and first-observed clocks (after the #1162 fence function).
+\ir lead-cadence-invariants.sql
 
 -- #3934: the recorded end of an alarm's escalation is written once.
 \ir alarm-escalation-end-invariants.sql

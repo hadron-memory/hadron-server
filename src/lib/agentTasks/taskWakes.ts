@@ -38,7 +38,7 @@ import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { isWorkerDormant, toNaiveUtc } from '../sessionActivity.js';
-import { ASSIGNED_EVENT_TYPES, PASSIVE_EVENT_TYPES } from './events.js';
+import { ASSIGNED_EVENT_TYPES, LEAD_CADENCE_EVENT_TYPES, PASSIVE_EVENT_TYPES } from './events.js';
 import { alarmEpisodeKey, currentAlarmEpisodes } from './stall.js';
 import { SATURATION_EVENT_TYPE } from './saturation.js';
 
@@ -77,9 +77,10 @@ const ASSIGNED_KIND: Record<(typeof ASSIGNED_EVENT_TYPES)[number], TaskWakeEvent
 const TASKLESS_ALARMS = [
   { type: 'alarm.dark-worker', handle: 'DARK', openEpisodeRequired: 'd',
     title: Prisma.sql`sw.name || ' has gone dark (' || COALESCE(e.payload ->> 'reason', 'dark') || ')'` },
-  // #2763: stops with its episode, which ends at the coordinator's next counted assignment.
-  { type: 'alarm.coordinator-cadence', handle: 'CADENCE', openEpisodeRequired: 'c',
-    title: Prisma.sql`sw.name || ' has stopped assigning work'` },
+  // #2763: stops with its episode, which ends at the lead's next counted assignment. #4375: both spellings of the type
+  // (the legacy one for alarms raised before the rename) wake the same way.
+  ...LEAD_CADENCE_EVENT_TYPES.map((type) => ({ type, handle: 'CADENCE', openEpisodeRequired: 'c' as const,
+    title: Prisma.sql`sw.name || ' has stopped assigning work'` })),
   { type: 'alarm.post-limit', handle: 'LIMIT', openEpisodeRequired: false,
     title: Prisma.sql`sw.name || '''s team-chat post was refused by the post limit' || CASE WHEN e.payload ->> 'limit' IS NULL THEN '' ELSE ' (' || (e.payload ->> 'limit') || ')' END` },
   // #4231: delivered and escalated until acknowledged; its episode only de-duplicates.
@@ -198,7 +199,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
              e.created_at AS at, s.idx AS "chainIndex"
       FROM agent_team_events e
       LEFT JOIN dark_worker_episodes d ON d.event_id = e.id
-      LEFT JOIN coordinator_cadence_episodes c ON c.event_id = e.id
+      LEFT JOIN lead_cadence_episodes c ON c.event_id = e.id
       JOIN workers sw ON sw.id = e.subject_worker_id
       JOIN LATERAL (SELECT max(chain_index) AS idx FROM agent_team_alarm_schedule
                     WHERE event_id = e.id AND woken_at IS NOT NULL) s ON s.idx IS NOT NULL
