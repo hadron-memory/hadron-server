@@ -74,12 +74,12 @@ describe('requeue-chat-tool-teardown', () => {
 
   it('#4945: a failure logs what failed (error name and Prisma code), never the connection URL or a secret, and exits 1 writing nothing', async () => {
     await intent('t-x', 'CAPPED');
-    const secretUrl = 'postgresql://nobody:hunter2-4945@127.0.0.1:1/none';
+    const secretUrl = 'postgresql://nobody:hunter2-4945@invalid.invalid:1/none'; // never resolves: no connection is attempted against a real host
     const { code, lines } = await run(['--all', '--apply'], { DATABASE_URL: secretUrl });
     expect(code).toBe(1);
     const out = lines.join('\n');
-    expect(out).toMatch(/db\.chat_tool_teardown_requeue\.failed name=\w+/);
-    expect(out).not.toMatch(/hunter2|127\.0\.0\.1|postgresql:/);
+    expect(out).toMatch(/db\.chat_tool_teardown_requeue\.failed name=\w+ code=[\w-]+$/m);
+    expect(out).not.toMatch(/hunter2|invalid\.invalid|postgresql:/);
     expect(await db.chatToolTeardownIntent.count({ where: { state: 'CAPPED' } })).toBe(1);
   });
 });

@@ -60,7 +60,8 @@ export async function main(argv: readonly string[], io: RequeueToolIo): Promise<
   } catch (error) {
     // The kind of failure, so an operator is not left guessing: the error's name and a Prisma code, never its message (which can
     // carry the connection string or a value) and never the URL.
-    const code = typeof (error as { code?: unknown })?.code === 'string' && /^[A-Za-z0-9_]{1,16}$/.test((error as { code: string }).code) ? (error as { code: string }).code : '-';
+    const rawCode = (error as { code?: unknown } | null)?.code;
+    const code = typeof rawCode === 'string' && /^[A-Za-z0-9_]{1,16}$/.test(rawCode) ? rawCode : '-';
     const name = error instanceof Error && /^[A-Za-z0-9_]{1,64}$/.test(error.name) ? error.name : 'Error';
     io.log(`${TAG}.failed name=${name} code=${code}`);
     return 1;
