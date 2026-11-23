@@ -221,6 +221,32 @@ test('a failed load record check (no usable host node) is reported as a check fa
   } finally { f.clean(); }
 });
 
+// #4650: on a host Node without import.meta.main, load.mjs's guard throws UNSUPPORTED_NODE when the record check imports it.
+// run.sh used to discard that error (exit 3, no runtime named); the operator must be told which Node is needed. Real run.sh,
+// real load.mjs: the host node is a wrapper that runs the check against a scratch copy of load.mjs (and its sampler import)
+// in which import.meta.main reads undefined, exactly what an unsupported runtime does.
+test('a host Node without import.meta.main: the refusal names the Node requirement, exits 7 and captures nothing (#4650)', async () => {
+  const { UNSUPPORTED_NODE } = await import('./load.mjs');
+  const f = fixture('cap');
+  try {
+    const copy = join(f.dir, 'unsupported'); mkdirSync(copy);
+    writeFileSync(join(copy, 'sampler.mjs'), readFileSync(join(here, 'sampler.mjs'), 'utf8'));
+    const src = readFileSync(join(here, 'load.mjs'), 'utf8');
+    expect(src.split('(import.meta.main)').length - 1).toBe(2);   // the guard call and the entry check, as in entry2627
+    writeFileSync(join(copy, 'load.mjs'), src.split('(import.meta.main)').join('(undefined)'));
+    writeFileSync(join(f.dir, 'bin', 'node'),
+      `#!/bin/bash\nif [ "\${1:-}" = --input-type=module ]; then n=$#; args=("$@"); args[$((n-1))]='${join(copy, 'load.mjs')}'; exec '${process.execPath}' "\${args[@]}"; fi\nexec '${process.execPath}' "$@"\n`,
+      { mode: 0o755 });
+    const r = f.run();
+    expect(r.status).toBe(7);
+    expect(r.stderr).toContain(UNSUPPORTED_NODE);                       // the fixed text, naming Node 22.18+ / 24.2+
+    expect(r.stderr).toContain('could not run the load record check on this host (node exit 3)');
+    expect(r.stderr).not.toContain('printed no valid load record');
+    // Nothing captured: only the settle sleep ran, no idle tail, no snapshot after the refusal.
+    expect(existsSync(join(f.dir, 'sleeps')) ? readFileSync(join(f.dir, 'sleeps'), 'utf8').split('\n').filter(Boolean).length : 0).toBe(1);
+  } finally { f.clean(); }
+});
+
 // #2624: the freshness slack is two periods of the interval the preload RECORDED, not a fixed 2000 ms. A last sample
 // 3 s old passes at a recorded 2500 ms (slack 5 s) and is stale at the 1000 ms default (slack 2 s); 6 s old is stale
 // even at 2500 ms (the control); a run whose samples record no supported interval is refused.
