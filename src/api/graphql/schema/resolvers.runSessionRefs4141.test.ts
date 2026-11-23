@@ -155,7 +155,7 @@ describe('#4141 cancelAppRun(ref:)', () => {
     expect((await db.appRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe('RUNNING');
   });
 
-  it('an ADMIN of ANOTHER org is FORBIDDEN on this org\'s run by PK and by URN (requireOrgRole runs on the resolved run), and the run is untouched', async () => {
+  it('an ADMIN of ANOTHER org is FORBIDDEN on this org\'s run by PK and by URN, and the run is untouched', async () => {
     const orgB = await db.organization.create({ data: { name: 'refs4141b', urn: 'refs4141b' } });
     const adminB = await db.user.create({ data: { email: 'adminb4141@example.com', name: 'AdminB' } });
     await db.orgMember.create({ data: { organizationId: orgB.id, userId: adminB.id, role: 'ADMIN' } });
