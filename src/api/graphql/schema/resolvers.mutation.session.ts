@@ -30,6 +30,7 @@ import { hasRequestOperationKey, getRequestOperationKey } from '../../../lib/req
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { makeKeyVerifier, verifyDataKey } from '../../../lib/memoryUnlock.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
+import { missingRequiredTaskArgs } from '../../../lib/taskArgs.js';
 import {
   parseUrnInput,
   assertFullyQualifiedUrn,
@@ -3556,7 +3557,44 @@ export const sessionMutations = {
       // App-run kernel re-renders the same task via this resolver's assemble
       // path, so the two modes stay in lockstep. Without `appRef`, behavior is
       // unchanged — the rendered prompt is returned for an LLM agent to run.
+      // #317 — required task-argument validation (spec cor:dmo:060:11, v1). The one
+      // enforcement point for GraphQL, the CLI and MCP `hadron_run_task`. Judged AFTER
+      // the caller's read access: a task the caller cannot read (or that does not
+      // exist) is skipped here and answers exactly what it answered before, so the
+      // refusal discloses nothing of an unreadable task's schema. Judged BEFORE any
+      // render, usage event or AppRun, so a refusal has no side effects.
+      const assertRequiredTaskArgs = async (targetNodeUrn: string): Promise<void> => {
+        let memUrn: string;
+        let loc: string;
+        try {
+          assertFullyQualifiedUrn(targetNodeUrn, 'node');
+          ({ memoryUrn: memUrn, loc } = splitWholeNodeUrn(targetNodeUrn));
+        } catch {
+          return; // malformed: the existing path produces its own answer
+        }
+        const normalized = normalizeUrnForLookup(parseUrnInput(memUrn.trim()).value);
+        const memory = await ctx.db.memory.findFirst({
+          where: { OR: [{ urn: normalized }, { urn: legacyMemoryUrnToCanonical(normalized) }], deletedAt: null },
+          select: { id: true },
+        });
+        if (!memory || !(await canReadMemory(ctx.db, auth, memory.id))) return;
+        const node = await ctx.db.node.findUnique({
+          where: { loc_memoryId: { loc, memoryId: memory.id } },
+          select: { memoryId: true, abstract: true, content: true, data: true },
+        });
+        if (!node) return;
+        await decryptNodesBatch(ctx.db, [node]);
+        const missing = missingRequiredTaskArgs(node.data, args);
+        if (missing.length > 0) {
+          throw new GraphQLError(
+            `Missing required task argument${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}. The task declares ${missing.length > 1 ? 'them' : 'it'} in its data.args as required with no default; the run was not started.`,
+            { extensions: { code: 'BAD_USER_INPUT', missingArgs: missing } },
+          );
+        }
+      };
+
       const dispatch = async (nodeUrn: string): Promise<string> => {
+        await assertRequiredTaskArgs(nodeUrn);
         if (!appRef) return loadAndRender(nodeUrn);
         assertFullyQualifiedUrn(nodeUrn, 'node');
         const run = await triggerManualRun(ctx, {

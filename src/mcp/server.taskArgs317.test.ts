@@ -1,7 +1,9 @@
 /**
  * #317 acceptance 6 — the required-argument refusal reaches MCP `hadron_run_task`
- * through its delegation to `Mutation.runTask` (no second implementation), and a
- * supplied argument still renders.
+ * through its delegation to `Mutation.runTask` (no second implementation). The
+ * delegation exists in EXECUTE mode (`appRef`); the default render mode builds its
+ * own bundle (`runBundleResult`, shared with `hadron_run_action`) and is the open
+ * question on the issue thread.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -20,12 +22,14 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({
 
 let auth: AuthContext;
 let nodeUrn: string;
+let appId: string;
 
 beforeEach(async () => {
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: 'mta-org', urn: 'mta-org' } });
   const admin = await db.user.create({ data: { githubId: 3173, githubUsername: 'mta-admin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
+  appId = (await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'mta-app', urn: 'mta-org::mta-app' } })).id;
   const mem = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, name: 'mta-tasks', urn: 'mta-org:mta-tasks', class: 'knowledge' },
   });
@@ -47,19 +51,21 @@ beforeEach(async () => {
   nodeUrn = 'mta-org::mta-tasks::tasks:needs-file';
 });
 
-describe('#317 — hadron_run_task delegates the refusal', () => {
-  it('a missing required argument is refused, naming it; nothing renders', async () => {
-    const text = await createTestableMcpServer(auth).callToolText('hadron_run_task', { urn: nodeUrn, args: {} });
+describe('#317 — hadron_run_task (execute mode, appRef) delegates the refusal to Mutation.runTask', () => {
+  it('a missing required argument is refused, naming it; no AppRun is minted', async () => {
+    const text = await createTestableMcpServer(auth).callToolText('hadron_run_task', { urn: nodeUrn, args: {}, appRef: appId });
+    expect(text).toContain('Missing required task argument');
     expect(text).toContain('file_path');
-    expect(text.toLowerCase()).toMatch(/required/);
-    expect(text).not.toContain('# Node: needs-file');
+    expect(text).not.toContain('Run started');
+    expect(await db.appRun.count()).toBe(0);
   });
 
-  it('the supplied argument renders as before', async () => {
+  it('with the argument supplied the call is not refused for it (it proceeds to the run path)', async () => {
     const text = await createTestableMcpServer(auth).callToolText('hadron_run_task', {
       urn: nodeUrn,
       args: { file_path: 'a.txt' },
+      appRef: appId,
     });
-    expect(text).toContain('Process a.txt');
+    expect(text).not.toContain('Missing required task argument');
   });
 });

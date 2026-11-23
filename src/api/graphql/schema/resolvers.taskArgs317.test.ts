@@ -80,7 +80,7 @@ beforeEach(async () => {
 describe('#317 acceptance 1 — a missing required argument is refused before anything runs', () => {
   it('refuses BAD_USER_INPUT naming EVERY missing required argument, with no render, usage event or AppRun', async () => {
     const urn = await mkTask('tasks:needs-args', { args: ARGS });
-    const err = (await resolvers.Mutation.runTask({}, { nodeRef: urn, args: {} }, adminCtx()).catch((e) => e)) as {
+    const err = (await resolvers.Mutation.runTask({}, { nodeRef: urn, args: {} }, adminCtx()).catch((e: unknown) => e)) as {
       extensions?: { code?: string };
       message?: string;
     };
@@ -187,12 +187,12 @@ describe('#317 acceptance 7 — the refusal is judged after read access and disc
       {},
       { nodeRef: urn, args: { file_path: 'a', mode: 'm' } },
       outsiderCtx,
-    ).catch((e) => e)) as { extensions?: { code?: string }; message?: string };
+    ).catch((e: unknown) => e)) as { extensions?: { code?: string }; message?: string };
     expect(baseline.extensions?.code).toBeDefined();
     expect(baseline.extensions?.code).not.toBe('BAD_USER_INPUT');
 
     // Missing the required arguments: byte-identical answer, nothing about the schema.
-    const refused = (await resolvers.Mutation.runTask({}, { nodeRef: urn, args: {} }, outsiderCtx).catch((e) => e)) as {
+    const refused = (await resolvers.Mutation.runTask({}, { nodeRef: urn, args: {} }, outsiderCtx).catch((e: unknown) => e)) as {
       extensions?: { code?: string };
       message?: string;
     };
@@ -205,12 +205,12 @@ describe('#317 acceptance 7 — the refusal is judged after read access and disc
       {},
       { nodeRef: urn, args: { file_path: 'a', mode: 'm' }, appRef: app.id },
       outsiderCtx,
-    ).catch((e) => e)) as { extensions?: { code?: string }; message?: string };
+    ).catch((e: unknown) => e)) as { extensions?: { code?: string }; message?: string };
     const refusedExec = (await resolvers.Mutation.runTask(
       {},
       { nodeRef: urn, args: {}, appRef: app.id },
       outsiderCtx,
-    ).catch((e) => e)) as { extensions?: { code?: string }; message?: string };
+    ).catch((e: unknown) => e)) as { extensions?: { code?: string }; message?: string };
     expect(refusedExec.extensions?.code).not.toBe('BAD_USER_INPUT');
     expect(refusedExec.extensions?.code).toBe(baselineExec.extensions?.code);
     expect(refusedExec.message).toBe(baselineExec.message);
