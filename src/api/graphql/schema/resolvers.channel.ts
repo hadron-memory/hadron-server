@@ -21,12 +21,13 @@ import {
   resolveOrgScope,
 } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
-import { InvalidLocError, validateLoc } from '../../../lib/validateLoc.js';
+import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
 import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
@@ -85,7 +86,8 @@ export const channelQueries = {
     if (filter?.appRef) {
       try {
         memoryWhere.push({ appId: (await resolveAppRef(ctx.db, filter.appRef.trim())).id });
-      } catch {
+      } catch (e) {
+        if (!isAppRefResolutionFailure(e)) throw e;
         return empty;
       }
     }
@@ -128,19 +130,8 @@ export const channelMutations = {
     // #1316: a memory the caller cannot open answers as resolveMemoryRef's miss.
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
     const loc = input.loc.trim();
-    // #3136: the one GraphQL validateLoc site that still threw raw — every
-    // sibling (upsertNode and friends) wraps typed, so a bad loc here surfaced
-    // INTERNAL_SERVER_ERROR instead of the code the other nine sites deliver.
-    try {
-      validateLoc(loc);
-    } catch (e) {
-      if (e instanceof InvalidLocError) {
-        throw new GraphQLError(e.message, {
-          extensions: { code: e.name, loc: e.loc, segment: e.segment },
-        });
-      }
-      throw e;
-    }
+    // #3136, #4461: a bad loc is typed, and the one shared answer.
+    validateLocOrThrow(loc, 'loc');
     const name = input.name.trim();
     if (!name) throw new GraphQLError('name is required.', { extensions: { code: 'BAD_USER_INPUT' } });
     // The overlap check (LOC_OVERLAPS_CHANNEL) and the live-occupant check

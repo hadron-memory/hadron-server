@@ -172,6 +172,15 @@ ALTER TABLE memories
 CREATE UNIQUE INDEX IF NOT EXISTS slack_connections_org_team_active_uniq
   ON slack_connections (organization_id, team_id) WHERE deleted_at IS NULL;
 
+-- ─── #597 telegram-connection ────────────────────────────────────────────
+-- One ACTIVE Telegram connection per App: PARTIAL unique so a soft-deleted row never blocks a new one (Prisma can't
+-- model the WHERE clause). Synced with the 20261122000000_telegram_connection migration.
+CREATE UNIQUE INDEX IF NOT EXISTS telegram_connections_app_active_uniq
+  ON telegram_connections (app_id) WHERE deleted_at IS NULL;
+-- One ACTIVE connection per bot (Telegram allows one update consumer per bot).
+CREATE UNIQUE INDEX IF NOT EXISTS telegram_connections_bot_active_uniq
+  ON telegram_connections (bot_id) WHERE deleted_at IS NULL;
+
 -- ─── 036-ai-service-config ──────────────────────────────────────────────
 -- A config belongs to exactly one owner (HadronServer / Organization /
 -- App / Agent). Synced with the 036 migration and src/test/globalSetup.ts.
@@ -443,7 +452,7 @@ BEGIN
                   THEN ', shares its root with another row' ELSE '' END), ', ' ORDER BY p.name)
       INTO offending_rows_summary
       FROM (SELECT id, name, kind, status FROM principals WHERE name <> lower(name) ORDER BY name LIMIT 20) p;
-    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row that shares its root with no other row, lower-case it and the owning users.handle / organizations.urn; for rows that share a root, decide which owner keeps it and rename or delete the others. Then re-run pnpm db:dev-setup. Rows (first 20): %', offending_count, offending_rows_summary
+    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row that shares its root with no other row, lower-case it and the owning users.handle / organizations.urn; for rows that share a root, decide which owner keeps it and rename or delete the others, then lower-case the kept row (if it is still mixed case) together with its owning users.handle / organizations.urn, or the next run refuses again. Then re-run pnpm db:dev-setup. Rows (first 20): %', offending_count, offending_rows_summary
       USING ERRCODE = 'HDPRF';
   END IF;
 END $$;
@@ -845,6 +854,9 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1632: signing requests, append-only signature records, the content-change
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
 \ir signing-invariants.sql
+-- #4337 (#434 Slice C): stamp_signing_keys.id as the migration's identity (db push builds a sequence default; pinned by
+-- src/test/migrations/stampKeyIdentity4337.test.ts and scripts/db/migration-replay.ts).
+\ir stamp-key-identity-invariants.sql
 
 -- #3996 (S1 of #3991): per-App data keys. One source, shared verbatim with migration 20261112150000_secret_app_keys.
 \ir secret-app-keys-invariants.sql
@@ -852,6 +864,18 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #4003 (S8 of #3991): the secrets root's key-check value. One source, shared verbatim with migration
 -- 20261120090000_secret_root_check.
 \ir secret-rotation-invariants.sql
+
+-- #4332 (#434 Slice C): the rate-limit CHECKs migration 20261031220000_shared_rate_limiter declares inline (pinned by
+-- src/lib/rateLimit/rateLimitChecks4332.test.ts and scripts/db/migration-replay.ts).
+\ir rate-limit-invariants.sql
+
+-- #4333 (#434 Slice C): the six UNIQUE constraints the migrations create, promoted from the same-name unique indexes
+-- db push leaves (pinned by src/test/migrations/uniqueConstraints4333.test.ts and scripts/db/migration-replay.ts).
+\ir unique-constraint-invariants.sql
+
+-- #4335 (#434 Slice C): the two indexes migration 20260519180903_baseline_init builds partial, which db push builds full
+-- (pinned by src/test/migrations/partialIndexes4335.test.ts and scripts/db/migration-replay.ts).
+\ir partial-index-invariants.sql
 
 -- #1885: an Agent extends at most one base Agent; no cycles, at most 4 in a
 -- chain. One source, shared verbatim with migration 20261014120000_agent_base
@@ -934,8 +958,8 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- #2755: the dark-worker alarm's window, episodes and their worker fence (the fence function is #1162's, above).
 \ir dark-alarm-invariants.sql
 
--- #2763: the coordinator-cadence alarm's episodes and first-observed clocks (after the #1162 fence function).
-\ir coordinator-cadence-invariants.sql
+-- #2763, #4375: the lead-cadence alarm's episodes and first-observed clocks (after the #1162 fence function).
+\ir lead-cadence-invariants.sql
 
 -- #3934: the recorded end of an alarm's escalation is written once.
 \ir alarm-escalation-end-invariants.sql
@@ -947,6 +971,9 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 
 -- #4233: the sweep run record and the stale-sweep episodes.
 \ir host-sweep-invariants.sql
+
+-- #3819 slice 1: the saturation episodes.
+\ir saturation-invariants.sql
 
 -- #3997 (S2 of #3991): App-owned secrets, versions, events, tombstones. One source, shared verbatim with migration
 -- 20261114120000_app_secret_versions. After worker-reference-invariants.sql: it puts the #1162 fence on its three tables.
@@ -983,6 +1010,15 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
 -- verbatim with migration 20261109200000_grant_signing (after grant-invariants.sql: the tables it guards reference grants).
 \ir grant-signing-invariants.sql
 
+-- #3999: secret change requests. Verbatim with migration 20261120180000_secret_change_requests.
+\ir secret-change-requests-invariants.sql
+
+-- Any committed secret mutation invalidates earlier proposals, including same-millisecond changes.
+ALTER TABLE secrets ADD COLUMN IF NOT EXISTS change_revision integer NOT NULL DEFAULT 0;
+CREATE OR REPLACE FUNCTION hadron_secret_change_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.change_revision := OLD.change_revision + 1; RETURN NEW; END $$;
+DROP TRIGGER IF EXISTS secret_change_revision ON secrets;
+CREATE TRIGGER secret_change_revision BEFORE UPDATE ON secrets FOR EACH ROW EXECUTE FUNCTION hadron_secret_change_revision();
 -- #3689 (#3910 F1): app_runs.agent_id is NOT NULL in the database but optional in schema.prisma, so a build serving the
 -- old nullable column after an HDPRF-refused migration (#3770) can still read the retained agentless runs. `db push`
 -- therefore leaves it nullable; this restores the guarantee the 20261117500000_app_run_agent_required migration states.
@@ -1035,3 +1071,14 @@ ALTER TABLE mcp_servers ALTER COLUMN tool_allowlist SET NOT NULL;
 ALTER TABLE rate_limit_manifests ALTER COLUMN key_ids SET NOT NULL;
 ALTER TABLE tickers ALTER COLUMN reasons SET NOT NULL;
 ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
+
+-- S4 R22, after S3 client guards.
+\ir secret-read-client-own-worker.sql
+-- #4001: finite auto-delete terms, after the grants and read-client invariants.
+\ir secret-auto-delete-invariants.sql
+
+-- #4945 (cor:int:030:03 clause 4): a chat tool teardown intent's state is one of the three the code writes
+-- (Prisma cannot model the CHECK; the migration carries the same statements, behind an HDPRF preflight).
+ALTER TABLE chat_tool_teardown_intents DROP CONSTRAINT IF EXISTS chk_chat_tool_teardown_state;
+ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_state
+  CHECK (state IN ('PENDING', 'CONFIRMED', 'CAPPED'));

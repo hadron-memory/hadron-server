@@ -58,7 +58,7 @@ down() {
     rm -- "$state/diagnose-owner"
     (cd "$stage/src" && scripts/e2e/stack.sh down "$worker") || cleanup_rc=5
   else
-    echo "stack ownership unverified; refusing capture/teardown; inspect private state: $state (manual ownership check required)" >&2
+    explain_stack_ownership_failure "${state:-}" "${project:-}"   # #2628: which case, and the path only when there is one to inspect
     if [ "$rc" = 0 ]; then cleanup_rc=5; fi
   fi
   if [ -n "$stage" ]; then git -C "$root" worktree remove --force "$stage/src" || cleanup_rc=5; rm -rf -- "$stage"; fi
@@ -151,6 +151,24 @@ elif [ "$load_rc" -eq 0 ]; then
   # #4453 N4: exit 0 with no line leaves report.mjs nothing to read; that is an invalid run, not a pass.
   echo 'load generator exited 0 but printed no load line; diagnosis is invalid' >&2
   exit 7   # not 5: that is the generator's acceptance code and cleanup_rc's
+fi
+# #2627: an exit 0 is accepted only on positive evidence, one valid load record for this workload. Output that is
+# not one (a no-op, another kind, another workload, an extra line) is an invalid run, refused before any capture.
+# #4608 BLIND F2: one host Node invocation imports the validator and judges. Exit 42, and only 42, is a rejected record
+# (#4608 BLIND delta: 1 is what a crashing node exits with, so it cannot mean "rejected"); any other failure (no usable
+# host node, an import error, a validator exception) is named as a failed check. argv[1] is the record, never a path.
+# #4650: an import error's MESSAGE (never its stack) goes to stderr first, written synchronously so process.exit cannot drop it
+# (load.mjs's UNSUPPORTED_NODE names the Node it needs: fixed text, no value).
+if [ "$load_rc" -eq 0 ]; then
+  check_rc=0
+  node --input-type=module -e 'import { pathToFileURL } from "node:url"; import { writeSync } from "node:fs";
+    let m; try { m = await import(pathToFileURL(process.argv[3]).href); } catch (e) { writeSync(2, (e?.message || String(e)) + "\n"); process.exit(3); }
+    process.exit(m.loadRecordOk(process.argv[1], process.argv[2]) ? 0 : 42)' "$load_line" "$workload" "$here/load.mjs" || check_rc=$?
+  if [ "$check_rc" -eq 42 ]; then
+    echo "load generator exited 0 but printed no valid load record for $workload; diagnosis is invalid" >&2; exit 7
+  elif [ "$check_rc" -ne 0 ]; then
+    echo "could not run the load record check on this host (node exit $check_rc); diagnosis is invalid" >&2; exit 7
+  fi
 fi
 # A failed generator still explains itself: the line is echoed and stashed above, the EXIT trap
 # re-appends it to DIAG_OUT after preserve_samples, and the rc propagates (samples and private

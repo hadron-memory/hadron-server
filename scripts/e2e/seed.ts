@@ -5,6 +5,7 @@ import { PrismaClient } from '../../src/generated/prisma/index.js';
 import { computeApprovalHash } from '../../src/lib/approvalHash.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../src/lib/nodeRevisionSnapshot.js';
 import { resolveServedBootPrompt } from '../../src/lib/bootPrompt/serve.js';
+import { seedE2eScriptFlowIfEnabled, e2eFlowFixturesEnabled, e2eFlowNodeUrn, E2E_SCRIPT_GRANT_PREFIX, E2E_SCRIPT_WRITE_ENTRY, E2E_SCRIPT_REFUSED_ENTRY } from '../../src/test/e2eScriptFlow.js';
 import { seedE2eStockAgents, seedE2eInstallRegister, e2eRegisterGaps, E2E_BOOT_PROMPT, E2E_STOCK_ROLES } from '../../src/test/e2eBootPrompt.js';
 
 // Separate from the narrative dev seed: every principal has global READER
@@ -88,6 +89,9 @@ async function seed() {
     // The stock Agents, their workers and their served boot prompts (#2712: no literal prompt and no serving switch any
     // more, so a stock Agent binds only with an approved compiled prompt). Shared with src/test/e2eBootPrompt.test.ts.
     await seedE2eStockAgents(db, { org, organizationId, appId, systemMemoryId: memoryIds.system, appMemoryId: memoryIds.app, id, approvedAt: date });
+    // #4624: the script-node fixture flows, run only when the stack was started with E2E_RUN_WORKER=true (README).
+    // #4753: seeded only then, so the default stack's memory inventory matches the catalog.
+    await seedE2eScriptFlowIfEnabled(db, { org, organizationId, appId, agentId: id(`${org}:coordinator`), grantedBy: owner, id });
     const root = await node(memoryIds.app, 'chats:team', { nodeType: 'chat', data: { lastSeq: 0 } });
     const channel = await db.channel.create({ data: { id: id(`${org}:channel`), memoryId: memoryIds.app,
       loc: 'chats:team', name: 'Team', chatRootNodeId: root.id } });
@@ -177,6 +181,20 @@ async function check() {
       assert.equal(n.approvalHash, n.mintedHash);
     }
     assert.equal(await db.nodeRoleRule.count({ where: { configId: id(`${org}:config`), writers: 'ADMIN', locked: true } }), 1);
+    // #4624: on a worker stack both script entry flows exist and the App holds exactly one live write grant, on the one
+    // prefix the write flow targets. #4753: on the default stack there is no flows memory and no write grant at all.
+    const grants = await db.appMemoryWriteGrant.findMany({ where: { appId: id(`${org}:team`), revokedAt: null } });
+    if (e2eFlowFixturesEnabled()) {
+      for (const entry of [E2E_SCRIPT_WRITE_ENTRY, E2E_SCRIPT_REFUSED_ENTRY]) {
+        const flow = await db.node.findFirstOrThrow({ where: { memoryId: id(`${org}:flows`), loc: entry } });
+        assert.equal((flow.data as { script: { call: { tool: string } } }).script.call.tool, 'hadron_create_node');
+        assert(e2eFlowNodeUrn(org, entry).endsWith(`:${entry}`));
+      }
+      assert.deepEqual(grants.map(g => g.prefix).sort(), [E2E_SCRIPT_GRANT_PREFIX]);
+    } else {
+      assert.equal(await db.memory.count({ where: { id: id(`${org}:flows`) } }), 0, `${org}: the flows memory exists on a stack without the run worker`);
+      assert.deepEqual(grants, []);
+    }
   }
   for (const cls of ['personal', 'private']) {
     const memory = await db.memory.findUniqueOrThrow({ where: { id: id(`personal-owner:${cls}`) } });

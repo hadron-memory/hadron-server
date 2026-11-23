@@ -21,7 +21,7 @@ import {
   deleteObject,
   readObjectPrefix,
   copyObject,
-} from '../../integrations/r2/client.js';
+} from '../../integrations/objectstore/index.js';
 import {
   verifyDeclaredContentType,
   MAGIC_BYTES_WINDOW,

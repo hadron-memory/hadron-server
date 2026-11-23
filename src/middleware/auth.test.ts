@@ -157,6 +157,28 @@ describe('resolveAuthContext', () => {
       return { appId: app.id, rawKey };
     }
 
+    // #4561: the App-key twin of the user-key pin ('updates lastUsedAt fire-and-forget on
+    // successful resolution'). Until now nothing pinned this stamp: the #4471 busy-store
+    // assertions only count ZERO writes on fault paths, which a mutant that deletes the
+    // success-path stamp cannot redden.
+    it('#4561: updates the App Key lastUsedAt fire-and-forget on successful resolution', async () => {
+      const { rawKey } = await createAppWithKey();
+      const before = await db.appKey.findUniqueOrThrow({ where: { id: 'key-1' } });
+      expect(before.lastUsedAt).toBeNull();
+
+      await resolveAuthContext(makeReq(`Bearer ${rawKey}`), db);
+
+      // Fire-and-forget; poll for the deferred update rather than a fixed sleep (same
+      // budget as the user-key pin: 1s, every 10ms).
+      let after = before;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        after = await db.appKey.findUniqueOrThrow({ where: { id: 'key-1' } });
+        if (after.lastUsedAt) break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(after.lastUsedAt).not.toBeNull();
+    });
+
     it('resolves a valid App Key to appId context', async () => {
       const { appId, rawKey } = await createAppWithKey();
       const ctx = await resolveAuthContext(makeReq(`Bearer ${rawKey}`), db);
@@ -672,21 +694,19 @@ describe('resolveAuthContext', () => {
         }
       });
 
-      it('#4555: warm-unreachable classification uses the code, independent of the message', async () => {
-        for (const [code, message] of [
-          ['P1001', 'an unrelated database failure'],
-          ['P2002', "Can't reach database server at `db:5432`"],
-        ]) {
-          const original = new Prisma.PrismaClientKnownRequestError(message, { code, clientVersion: '6.19.2' });
-          const err = await refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${USER_KEY}`), busyDb(() => original).db));
-          if (code === 'P1001') {
-            expect(err).toBeInstanceOf(AuthStoreBusyError);
-            expect((err as AuthStoreBusyError).cause).toBe(original);
-            expect((err as AuthStoreBusyError).extensions.reason).toBe('STORE_UNREACHABLE');
-          } else {
-            expect(err).toBe(original);
-            expect(err).not.toBeInstanceOf(AuthStoreBusyError);
-          }
+      it.each([
+        { label: 'P1001 with an unrelated message is converted', code: 'P1001', message: 'an unrelated database failure', converted: true },
+        { label: 'P2002 with the unreachable message is passed through', code: 'P2002', message: "Can't reach database server at `db:5432`", converted: false },
+      ])('#4555: warm-unreachable classification uses the code, independent of the message: $label', async ({ code, message, converted }) => {
+        const original = new Prisma.PrismaClientKnownRequestError(message, { code, clientVersion: '6.19.2' });
+        const err = await refuse(() => resolveAuthContextWithStatus(makeReq(`Bearer ${USER_KEY}`), busyDb(() => original).db));
+        if (converted) {
+          expect(err).toBeInstanceOf(AuthStoreBusyError);
+          expect((err as AuthStoreBusyError).cause).toBe(original);
+          expect((err as AuthStoreBusyError).extensions.reason).toBe('STORE_UNREACHABLE');
+        } else {
+          expect(err).toBe(original);
+          expect(err).not.toBeInstanceOf(AuthStoreBusyError);
         }
       });
 
@@ -822,6 +842,46 @@ describe('resolveAuthContext', () => {
         expect(ctx.auth.userId).toBe('user-4504');
         expect(ctx.credentialStatus).toBe('authenticated');
         expect(stampCalls).toBe(1);
+      });
+
+      it('#4561: the App Key lastUsedAt stamp FIRES and its rejection is swallowed — the App-key twin of the user-key swallow pin', async () => {
+        // Same shape as the user-key leg above: a successful lookup, then a REJECTED stamp.
+        // The call is COUNTED and asserted after a tick, so removing the stamp reddens here;
+        // the rejection must neither surface as AUTH_STORE_BUSY nor fail the request.
+        let stampCalls = 0;
+        const stampingDb = {
+          appKey: {
+            findUnique: () => Promise.resolve({
+              id: 'key-4561',
+              revokedAt: null,
+              app: { id: 'app-4561', deletedAt: null, organizationId: 'org-4561' },
+            }),
+            update: () => {
+              stampCalls += 1;
+              return Promise.reject(p('P2024', 'Timed out fetching a new connection from the pool.'));
+            },
+          },
+        } as unknown as typeof db;
+        // The swallow is asserted by THIS test, not by the runner: an unhandled rejection is
+        // captured here, so dropping the resolver's `.catch` fails this test by name instead of
+        // surfacing only as a run-level error attributed to whichever test is running (#4571, BLIND P2).
+        const unhandled: unknown[] = [];
+        const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+        process.on('unhandledRejection', onUnhandled);
+        try {
+          const ctx = await resolveAuthContextWithStatus(makeReq(`Bearer ${APP_KEY}`), stampingDb);
+          // Let the rejected stamp's promise chain settle (a rejection is reported after the
+          // microtask queue drains, so two macrotask ticks) before asserting.
+          await new Promise((resolve) => setImmediate(resolve));
+          await new Promise((resolve) => setImmediate(resolve));
+          expect(ctx.auth.appId).toBe('app-4561');
+          expect(ctx.auth.appKeyId).toBe('key-4561');
+          expect(ctx.credentialStatus).toBe('authenticated');
+          expect(stampCalls).toBe(1);
+          expect(unhandled).toEqual([]);
+        } finally {
+          process.off('unhandledRejection', onUnhandled);
+        }
       });
 
       it('a non-Prisma error wearing code P2024 is NOT classified — the class is closed to Prisma (LOCAL mutant)', async () => {

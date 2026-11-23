@@ -71,9 +71,12 @@ it.each([['false', 'true'], ['malformed', 'true'], ['true', undefined], ['true',
         const control = await client.callTool({ name: 'hadron_absent_control', arguments: {} }).catch(e => e);
         // SDK 2.x (#2605): a call to a tool that is not registered is a JSON-RPC error (-32602), no longer an isError
         // result. The property under test is unchanged: a switched-off tool answers exactly as a name that never existed.
-        const shape = (e: { code?: unknown; message?: unknown }) => JSON.stringify({ code: e.code, message: e.message });
-        expect(missing).toBeInstanceOf(ProtocolError);
-        expect(missing.code).toBe(-32602);
+        const shape = (e: { code?: unknown; message?: unknown; data?: unknown }) =>
+          JSON.stringify({ code: e.code, message: e.message, data: e.data ?? null });
+        for (const answer of [missing, control]) {
+          expect(answer).toBeInstanceOf(ProtocolError);
+          expect(answer.code).toBe(-32602);
+        }
         expect(shape(missing).replaceAll(name, '<tool>')).toBe(shape(control).replaceAll('hadron_absent_control', '<tool>'));
       }
     }

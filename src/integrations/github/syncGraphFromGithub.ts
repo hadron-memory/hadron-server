@@ -1,6 +1,8 @@
 import type { SyncNotAttemptedReason } from './syncNotAttempted.js';
+import { acquireSyncRunLock } from './syncRunLock.js';
 import { committedSyncReport, failedSyncReport, type SyncReportEntry } from './syncReport.js';
 import { GitCommandError } from './execGit.js';
+import { syncFailureText } from './syncErrorText.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, withSyncCaller } from '../../lib/bootPrompt.js';
 import { currentActor } from '../../lib/requestActor.js';
@@ -30,7 +32,8 @@ import { join, dirname } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
 import { pathUnderGraphsRoot } from '../localFs/pathUnderGraphsRoot.js';
 import { InvalidNodeNameError, loadGraphFromFs, type UnreadableFile } from '../localFs/loadGraphFromFs.js';
-import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
+import { deriveEdgeLoc, isAuthoredLoc, rekeyDerivedEdgeLoc } from '../../lib/edgeLoc.js';
+import { derivedEdgeLocForUpsert } from '../../lib/edgeLocLookup.js';
 import { validateEdgeCondition } from '../../lib/edge-conditions/validator.js';
 import { entryConditionOf, validateEntryCondition } from '../../lib/edge-conditions/entryCondition.js';
 import { countCrossMemoryEdgesForNodeDelete } from '../../lib/crossMemoryEdgeDelete.js';
@@ -375,6 +378,8 @@ const syncGraphFromGithubAsSystem = async (
    */
   heldMoves?: string[];
 }> => {
+  // #3571: held from before the SYNCING stamp until after the final OK/ERROR write (released in the finally below).
+  let releaseRunLock: (() => Promise<void>) | undefined;
   try {
     const graphName = graph.urn;
 
@@ -430,6 +435,10 @@ const syncGraphFromGithubAsSystem = async (
       where: { id: graph.id }, select: { isEncrypted: true },
     });
     if (encryptionState?.isEncrypted) throw new GitSyncEncryptedMemoryError();
+
+    // #3571 (ruling 0223): take the memory's sync-run lock (shared) BEFORE stamping SYNCING, so a row reads SYNCING
+    // only while an attempt holds the lock; the reconciliation of abandoned rows skips any row whose lock is held.
+    releaseRunLock = await acquireSyncRunLock(graph.id);
 
     // Update sync status to SYNCING
     await db.memory.update({
@@ -1575,10 +1584,11 @@ const syncGraphFromGithubAsSystem = async (
           for (const edge of incident) {
             const beforeSource = edge.sourceId === movedRoot.id ? oldLoc : edge.source.loc;
             const beforeTarget = edge.targetId === movedRoot.id ? oldLoc : edge.target.loc;
-            if (edge.loc === deriveEdgeLoc(beforeSource, edge.name, beforeTarget)) {
-              await tx.edge.update({ where: { id: edge.id }, data: {
-                loc: deriveEdgeLoc(edge.source.loc, edge.name, edge.target.loc),
-              } });
+            // #4583: each edge keeps the spelling its loc carries, so twins do not land on one loc.
+            // #2947: an AUTHORED loc is never rewritten, even one that equals the derivation.
+            const rekeyed = edge.locAuthored ? null : rekeyDerivedEdgeLoc(edge.loc, beforeSource, edge.name, beforeTarget, edge.source.loc, edge.target.loc);
+            if (rekeyed !== null) {
+              await tx.edge.update({ where: { id: edge.id }, data: { loc: rekeyed } });
             }
           }
         }
@@ -1644,7 +1654,15 @@ const syncGraphFromGithubAsSystem = async (
           // Spec 037: the edge's identity is its loc within the source's
           // memory (= graph.id here; the source came from this repo). Derive
           // it deterministically so re-syncs are idempotent.
-          const edgeLoc = deriveEdgeLoc(edge.sourceLoc, edge.name, targetExists.loc);
+          // #4583: an edge the historical migration wrote under the other non-BMP spelling is the same edge.
+          const edgeLoc = await derivedEdgeLocForUpsert(tx, {
+            memoryId: graph.id,
+            sourceId: edgeSourceId,
+            targetId: edgeTargetId,
+            sourceLoc: edge.sourceLoc,
+            targetLoc: targetExists.loc,
+            name: edge.name,
+          });
           const edgeCondition = edge.condition ?? null;
           const edgePriority = edge.priority ?? 0;
           const conditionValidation = validateEdgeCondition(edgeCondition);
@@ -1659,6 +1677,7 @@ const syncGraphFromGithubAsSystem = async (
               sourceId: edgeSourceId,
               targetId: edgeTargetId,
               loc: edgeLoc,
+              locAuthored: false, // #2947: derived from the endpoints and name
               name: edge.name,
               description: edge.description ?? null,
               ...(edge.data != null ? { data: edge.data as Prisma.InputJsonValue } : {}),
@@ -1731,7 +1750,14 @@ const syncGraphFromGithubAsSystem = async (
               );
             }
             if (pSrc) {
-              const pLoc = p.loc ?? deriveEdgeLoc(pSrc.loc, p.name, target.loc);
+              const pLoc = p.loc ?? await derivedEdgeLocForUpsert(tx, {
+                memoryId: pSrc.memoryId,
+                sourceId: p.sourceId,
+                targetId: p.targetId,
+                sourceLoc: pSrc.loc,
+                targetLoc: target.loc,
+                name: p.name,
+              });
               const promotedEdge = await tx.edge.upsert({
                 where: { loc_memoryId: { loc: pLoc, memoryId: pSrc.memoryId } },
                 create: {
@@ -1740,6 +1766,7 @@ const syncGraphFromGithubAsSystem = async (
                   sourceId: p.sourceId,
                   targetId: p.targetId,
                   loc: pLoc,
+                  locAuthored: isAuthoredLoc(p.loc), // #2947: a loc the pending edge carried was supplied
                   name: p.name,
                   description: p.description,
                   ...(p.data != null ? { data: p.data as Prisma.InputJsonValue } : {}),
@@ -1849,18 +1876,21 @@ const syncGraphFromGithubAsSystem = async (
     // Update sync status to ERROR
     await db.memory.update({
       where: { id: graph.id },
-      data: { syncStatus: 'ERROR', syncError: (error as Error).message,
+      data: { syncStatus: 'ERROR', syncError: syncFailureText(error),
         lastSyncReport: failedSyncReport(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError ? 'BAD_USER_INPUT' : 'SYNC_FAILED') },
     }).catch(() => {});
     console.error(`Failed to sync memory "${graph.name}":`, error);
     return {
-      error: (error as Error).message,
+      error: syncFailureText(error), // #4731: no host or port from a driver or Prisma fault, in the row or the return
       ...(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError
         ? { errorCode: 'BAD_USER_INPUT' as const }
         : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE }
           // A git failure's message is fixed and credential-free by design (execGit), so it stays a typed refusal.
           : error instanceof GitCommandError ? {} : { fault: true as const }),
     };
+  } finally {
+    // #3571: after the final status write on every path; a no-op when the attempt returned before taking it.
+    await releaseRunLock?.();
   }
 };
 

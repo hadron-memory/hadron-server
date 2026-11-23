@@ -8,6 +8,7 @@ import { openThreadsSql } from '../comments/openThreads.js';
  * tsquery expression (tsquery.ts). Vector search delegates to the existing
  * pgvector helpers.
  */
+import { Prisma } from '../../generated/prisma/index.js';
 import { contentScopeSql, effectiveContentScope } from '../comments/scope.js';
 import { approvalStateSql, mintedSql } from '../nodeApproval.js';
 import type {
@@ -25,8 +26,8 @@ import type {
   NodePropertySort,
 } from './provider.js';
 import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
-import { vectorSearchNodes, vectorSearchChunks } from '../../services/embedding/vectors.js';
-import { compileBooleanQuery } from './tsquery.js';
+import { vectorSearchNodes, vectorSearchChunks, vectorRanksOf, type NodeVectorScope } from '../../services/embedding/vectors.js';
+import { UnindexableQueryError, compileBooleanQuery } from './tsquery.js';
 import { compileNodeWhere, compileNodePropertySort } from './nodeWhere.js';
 import { regexSearchTimeoutMs } from './regexTimeout.js';
 import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from './defaultNodeTypes.js';
@@ -152,6 +153,50 @@ const REGEX_FIELD_SQL: Record<string, string> = {
 };
 const REGEX_DEFAULT_FIELDS = ['name', 'alias', 'loc', 'tags', 'description', 'abstract', 'content'];
 
+/**
+ * #2772 — the structured filters (cor:api:090:02, incl. `where`), the deleted rule and the caller's exclusions as
+ * one `AND ne.node_id IN (SELECT id FROM nodes …)` fragment for the vector statement, compiled by the SAME
+ * `filterClause` the lexical legs use so the legs cannot disagree on scope. Absent filter ⇒ no fragment (the
+ * callers that pass none keep their own predicates).
+ */
+function vectorFilterSql(opts: Omit<VectorSearchOpts, 'limit' | 'onWindow'>): Prisma.Sql | undefined {
+  // BLIND P2 (#4665): `includeDeleted` alone must still reach the statement, or the default deleted rule (applied only when
+  // no fragment exists) would hide tombstones from a caller who asked for them, while ANY other filter would show them.
+  if (!opts.filter && !opts.excludeNodeIds?.length && !opts.includeDeleted) return undefined;
+  const { params, bind } = paramBuilder();
+  const mem = opts.memoryIds.map((m) => bind(m)).join(', ');
+  const deleted = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';
+  const exclude = opts.excludeNodeIds?.length ? `AND id <> ALL(${bind(opts.excludeNodeIds)}::text[])` : '';
+  const text = `AND ne.node_id IN (SELECT id FROM nodes WHERE memory_id IN (${mem}) ${deleted}${filterClause(opts.filter, bind)} ${exclude})`;
+  // Re-express the positional $n placeholders as a Prisma.Sql so the fragment composes with the tagged queries.
+  const parts = text.split(/\$(\d+)/);
+  const strings: string[] = [];
+  const values: unknown[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) strings.push(parts[i]!);
+    else values.push(params[Number(parts[i]) - 1]);
+  }
+  return Prisma.sql(Object.assign(strings, { raw: strings }) as unknown as TemplateStringsArray, ...values);
+}
+
+/**
+ * #4779 (BLIND P2-3) — the ONE mapping from provider options to a node-level vector scope, shared by `vectorSearch` and
+ * `vectorRanks`, so the page ranking and the rank lookup can never disagree on eligibility (filter fragment, memory scope,
+ * candidate set, abstract-only, open threads, content scope and its default, the request deadline).
+ */
+function nodeVectorScopeOf(opts: Omit<VectorSearchOpts, 'limit' | 'onWindow'>): NodeVectorScope {
+  return {
+    filterSql: vectorFilterSql(opts),
+    memoryIds: opts.memoryIds,
+    queryEmbedding: opts.queryEmbedding,
+    candidateNodeIds: opts.candidateNodeIds,
+    abstractOnly: opts.abstractOnly,
+    hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
+    scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
+    deadlineAt: opts.deadlineAt,
+  };
+}
+
 export const postgresRetrievalProvider: NodeRetrievalProvider = {
   async lexicalSearch(opts: LexicalSearchOpts): Promise<LexicalHit[]> {
     if (opts.memoryIds.length === 0) return [];
@@ -161,6 +206,12 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
     // params via the builder. Weights are server-controlled floats → inlined as
     // a literal ($queryRawUnsafe can't bind a float4[] param).
     const tsq = compileBooleanQuery(opts.query, 1);
+    // #435: the database judges whether the index can serve this query. querytree() reads no table, evaluates the same
+    // expression with the same binds, and answers 'T' when some satisfying branch needs no positive indexed lexeme
+    // (`-foo`, `a OR -b`, `the -foo`): refuse it before the scan. '' means only stop words, which match nothing.
+    const [{ qt }] = await opts.db.$queryRawUnsafe<{ qt: string }[]>(`SELECT querytree(${tsq.sql})::text AS qt`, ...tsq.params);
+    if (qt === 'T') throw new UnindexableQueryError();
+    if (qt === '') return [];
     const { params, bind } = paramBuilder([...tsq.params]);
     const weightsLit = `ARRAY[${weights.join(', ')}]::float4[]`;
     const memPh = opts.memoryIds.map((m) => bind(m)).join(', ');
@@ -181,7 +232,20 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       ORDER BY ${orderBy}
       LIMIT ${limitPh} OFFSET ${offsetPh}
     `;
-    const rows = await opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(sql, ...params);
+    // #4938 N3: a caller-given budget bounds the ranking statement the way regexSearch's does (a transaction-local
+    // statement_timeout on the statement's own connection). The querytree() probe above reads no table.
+    const budget = opts.statementTimeoutMs;
+    // A budget Postgres cannot take (NaN, Infinity, past INT_MAX ms) would fail the SET LOCAL as a syntax or range error,
+    // which no caller reads as a cut: refuse it loudly here instead (the one caller passes a bounded, positive remainder).
+    if (budget != null && !(Number.isFinite(budget) && budget <= 2_147_483_647)) {
+      throw new RangeError(`lexicalSearch: statementTimeoutMs must be a finite number of milliseconds up to 2147483647`);
+    }
+    const rows = budget == null
+      ? await opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(sql, ...params)
+      : (await opts.db.$transaction([
+        opts.db.$executeRawUnsafe(`SET LOCAL statement_timeout = ${Math.max(1, Math.trunc(budget))}`),
+        opts.db.$queryRawUnsafe<{ id: string; score: number }[]>(sql, ...params),
+      ]))[1];
     return rows.map((r) => ({ nodeId: r.id, score: Number(r.score) }));
   },
 
@@ -288,26 +352,25 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
   },
 
   vectorSearch(opts: VectorSearchOpts): Promise<VectorHit[]> {
-    return vectorSearchNodes(opts.db, {
-      memoryIds: opts.memoryIds,
-      queryEmbedding: opts.queryEmbedding,
-      limit: opts.limit,
-      onWindow: opts.onWindow,
-      candidateNodeIds: opts.candidateNodeIds,
-      abstractOnly: opts.abstractOnly,
-      hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
-      scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
-    });
+    return vectorSearchNodes(opts.db, { ...nodeVectorScopeOf(opts), limit: opts.limit, onWindow: opts.onWindow });
+  },
+
+  async vectorRanks(opts) {
+    // #4779 (BLIND P2-3): the SAME scope mapping as vectorSearch, so ranks and pages share one eligibility.
+    const { ranks, stopped } = await vectorRanksOf(opts.db, { ...nodeVectorScopeOf(opts), nodeIds: opts.nodeIds });
+    return { ranks, stoppedEarly: stopped };
   },
 
   vectorSearchChunks(opts: VectorSearchOpts): Promise<ChunkHit[]> {
     return vectorSearchChunks(opts.db, {
+      filterSql: vectorFilterSql(opts),
       memoryIds: opts.memoryIds,
       queryEmbedding: opts.queryEmbedding,
       limit: opts.limit,
       onWindow: opts.onWindow,
       hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
       scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
+      deadlineAt: opts.deadlineAt,
     });
   },
 };

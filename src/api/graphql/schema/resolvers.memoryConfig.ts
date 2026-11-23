@@ -635,11 +635,29 @@ export const ruleRefFieldResolvers = {
 
 type SkipRow = { templateRuleId: string | null; field: string };
 /** The skipped rule's reference as the calling manager sees it now. A rule since removed has nothing to show. */
-async function skipView(ctx: Context, row: SkipRow): Promise<RefView> {
+async function skipViewUncached(ctx: Context, row: SkipRow): Promise<RefView> {
   if (row.templateRuleId == null || !(row.field in REF_COLUMNS)) return { urn: null, id: null, state: 'BROKEN' };
   const rule = await ctx.db.memoryConfigTemplateRule.findUnique({ where: { id: row.templateRuleId } });
   if (!rule) return { urn: null, id: null, state: 'BROKEN' };
   return refViewOnce(ctx, rule, row.field as RefKind);
+}
+
+/**
+ * `skipViewUncached`, memoized per skip row object (#3615), so a selection of both `ref` and `refState` costs one
+ * template-rule lookup per row, not two. The row object is created per request by `defaultSkips`, so nothing is
+ * shared across requests or callers. A rejection is not kept (as in `refViewOnce`, #1327).
+ */
+const skipViewCache = new WeakMap<object, Promise<RefView>>();
+function skipView(ctx: Context, row: SkipRow): Promise<RefView> {
+  let pending = skipViewCache.get(row);
+  if (!pending) {
+    pending = skipViewUncached(ctx, row);
+    skipViewCache.set(row, pending);
+    pending.catch(() => {
+      if (skipViewCache.get(row) === pending) skipViewCache.delete(row);
+    });
+  }
+  return pending;
 }
 
 export const memoryConfigFieldResolvers = {

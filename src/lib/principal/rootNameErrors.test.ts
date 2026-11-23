@@ -7,7 +7,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
-import { mintPrincipal, RootNameInvalidError, RootNameTakenError } from './mintPrincipal.js';
+import { MAX_ATOM_LEN } from '../urn.js';
+import { mintPrincipal, ROOT_NAME_RULE_TEXT, RootNameInvalidError, RootNameTakenError } from './mintPrincipal.js';
 import { rethrowRootNameErrors } from './rootNameErrors.js';
 
 beforeEach(async () => {
@@ -24,6 +25,27 @@ function mapped(err: unknown): GraphQLError {
   }
   throw new Error('mapper returned without throwing');
 }
+
+describe('#4516 F7: the refusal message echoes a bounded, escaped name and derives its bound from MAX_ATOM_LEN', () => {
+  it('elides the tail of an oversized name (mutant: no truncation) with the code unchanged', () => {
+    const big = `x${'y'.repeat(9_998)}TAIL`;
+    const gql = mapped(new RootNameInvalidError(big));
+    expect(gql.extensions.code).toBe('ROOT_NAME_INVALID');
+    expect(gql.message.length).toBeLessThan(400);
+    expect(gql.message).not.toContain('TAIL');
+  });
+
+  it('escapes a quote-bearing name (mutant: no JSON.stringify)', () => {
+    const gql = mapped(new RootNameInvalidError('a"b\nc'));
+    expect(gql.extensions.code).toBe('ROOT_NAME_INVALID');
+    expect(gql.message).toContain(JSON.stringify('a"b\nc'));
+  });
+
+  it('states the bound from MAX_ATOM_LEN (mutant: a hard-coded 64)', () => {
+    expect(ROOT_NAME_RULE_TEXT).toContain(`1–${MAX_ATOM_LEN}`);
+    expect(mapped(new RootNameInvalidError('ünï')).message).toContain(ROOT_NAME_RULE_TEXT);
+  });
+});
 
 describe('rethrowRootNameErrors', () => {
   it('maps RootNameInvalidError to the ROOT_NAME_INVALID typed refusal', () => {

@@ -73,6 +73,38 @@
    "4377cfabdd6bad8e7e0403e65b1d0d1728cc779b7fb1cddf6c03e6255ff8b6f0"
   ],
   [
+   "hadron_list_question_logs",
+   "c29185bb7767e40f64574ddeba5a3a6e4dfb6c891c749774c53a448ec82e7939"
+  ],
+  [
+   "hadron_ask_question",
+   "27aef79831dd0cc2d2256aadb25d34591496bb84d5f32ea6d29b3aee32a8091f"
+  ],
+  [
+   "hadron_get_question",
+   "18ba673ab916dd8a2f313b1b8911615b131424ee123a1f505ef0d6ac94a2bad4"
+  ],
+  [
+   "hadron_list_questions",
+   "0a7381f48b05324f988b7098a76bc460678c250457ad1e206b5041ef5bc02a41"
+  ],
+  [
+   "hadron_amend_question",
+   "a917e84e7c67b6576bf25310371ffee778ce7971ce6a2168f33a92c0926c8cad"
+  ],
+  [
+   "hadron_withdraw_question",
+   "1676f6b72e13a92790a7c65474feeb33d34950da357f217f1e2a5f9c23d048d3"
+  ],
+  [
+   "hadron_answer_question",
+   "f18515d38863235f11da320f76ae8d6727397124a4433844c168f8b006b1f1c7"
+  ],
+  [
+   "hadron_retract_question_answer",
+   "8143b12f8b74599fda23939fb9d445f74d5b3612fcf66cee0dcfce5238b3d648"
+  ],
+  [
    "hadron_set_asset_public_link",
    "9ea3f3b840cbc88d16235c9c800062cc71a422ddf26db0e4f0922245d72dfbcc"
   ],
@@ -194,7 +226,7 @@
   ],
   [
    "hadron_find_nodes",
-   "77499516714df668acd7cb1ebf489455b4fb5253b87f2198cde2b27ef5e9584b"
+   "1f759ae458e4921a3495b36ad6242d9ba7000435e4c6544d49a848d67f2d4c01"
   ],
   [
    "hadron_get_node",
@@ -222,15 +254,15 @@
   ],
   [
    "hadron_create_node",
-   "bef0d430408f57978aa6e7dff9d597a285b2908035af7901116ceacf14da434e"
+   "1dc134ed795aa3a74ae2178bde14995bdb5c63ad1d985139c106be77d4c7106b"
   ],
   [
    "hadron_update_node",
-   "e7c91cb617d8a8ed5898feac12f4fe6709532a3793f30b6a9e6eb2b63d32f310"
+   "c8c1058fd0edb769064303a4b1bb88fc86bae38b245ed29e64cb8347da4833d4"
   ],
   [
    "hadron_create_task",
-   "5bfd76216ac408f39ffc820f3e7308fc4b2ccf46d3ae752b1d115c8d22234a8a"
+   "341d2bfbe8e62e47b42cd4b82e43ec3af4474ed1e4a9af928e5a428d9998de9a"
   ],
   [
    "hadron_update_task",
@@ -243,6 +275,10 @@
   [
    "hadron_update_review",
    "b6f08df15baf3e9d3bace314d966d352a366d28c1bedb366b86639da6134cfdf"
+  ],
+  [
+   "hadron_retire_spec",
+   "b10f43422245a0bdfece7143c296fee1d7c4c8f61113cbfb146d3cf81b7b5ad2"
   ],
   [
    "hadron_update_node_data",
@@ -290,7 +326,7 @@
   ],
   [
    "hadron_move_node",
-   "f35cde7d04cfd7f745ab4df6e8a49975606965813c49e283b3d62e52f19ece89"
+   "3c381f354f42f2a0295c1d20992dd53eadeb495c8ebc388aeecb5c466859332a"
   ],
   [
    "hadron_run_action",
@@ -399,6 +435,38 @@
    "4377cfabdd6bad8e7e0403e65b1d0d1728cc779b7fb1cddf6c03e6255ff8b6f0"
   ],
   [
+   "hadron_list_question_logs",
+   "c29185bb7767e40f64574ddeba5a3a6e4dfb6c891c749774c53a448ec82e7939"
+  ],
+  [
+   "hadron_ask_question",
+   "27aef79831dd0cc2d2256aadb25d34591496bb84d5f32ea6d29b3aee32a8091f"
+  ],
+  [
+   "hadron_get_question",
+   "18ba673ab916dd8a2f313b1b8911615b131424ee123a1f505ef0d6ac94a2bad4"
+  ],
+  [
+   "hadron_list_questions",
+   "0a7381f48b05324f988b7098a76bc460678c250457ad1e206b5041ef5bc02a41"
+  ],
+  [
+   "hadron_amend_question",
+   "a917e84e7c67b6576bf25310371ffee778ce7971ce6a2168f33a92c0926c8cad"
+  ],
+  [
+   "hadron_withdraw_question",
+   "1676f6b72e13a92790a7c65474feeb33d34950da357f217f1e2a5f9c23d048d3"
+  ],
+  [
+   "hadron_answer_question",
+   "f18515d38863235f11da320f76ae8d6727397124a4433844c168f8b006b1f1c7"
+  ],
+  [
+   "hadron_retract_question_answer",
+   "8143b12f8b74599fda23939fb9d445f74d5b3612fcf66cee0dcfce5238b3d648"
+  ],
+  [
    "hadron_set_asset_public_link",
    "9ea3f3b840cbc88d16235c9c800062cc71a422ddf26db0e4f0922245d72dfbcc"
   ],
@@ -520,7 +588,7 @@
   ],
   [
    "hadron_find_nodes",
-   "77499516714df668acd7cb1ebf489455b4fb5253b87f2198cde2b27ef5e9584b"
+   "1f759ae458e4921a3495b36ad6242d9ba7000435e4c6544d49a848d67f2d4c01"
   ],
   [
    "hadron_get_node",
@@ -548,15 +616,15 @@
   ],
   [
    "hadron_create_node",
-   "bef0d430408f57978aa6e7dff9d597a285b2908035af7901116ceacf14da434e"
+   "1dc134ed795aa3a74ae2178bde14995bdb5c63ad1d985139c106be77d4c7106b"
   ],
   [
    "hadron_update_node",
-   "e7c91cb617d8a8ed5898feac12f4fe6709532a3793f30b6a9e6eb2b63d32f310"
+   "c8c1058fd0edb769064303a4b1bb88fc86bae38b245ed29e64cb8347da4833d4"
   ],
   [
    "hadron_create_task",
-   "5bfd76216ac408f39ffc820f3e7308fc4b2ccf46d3ae752b1d115c8d22234a8a"
+   "341d2bfbe8e62e47b42cd4b82e43ec3af4474ed1e4a9af928e5a428d9998de9a"
   ],
   [
    "hadron_update_task",
@@ -569,6 +637,10 @@
   [
    "hadron_update_review",
    "b6f08df15baf3e9d3bace314d966d352a366d28c1bedb366b86639da6134cfdf"
+  ],
+  [
+   "hadron_retire_spec",
+   "b10f43422245a0bdfece7143c296fee1d7c4c8f61113cbfb146d3cf81b7b5ad2"
   ],
   [
    "hadron_update_node_data",
@@ -616,7 +688,7 @@
   ],
   [
    "hadron_move_node",
-   "f35cde7d04cfd7f745ab4df6e8a49975606965813c49e283b3d62e52f19ece89"
+   "3c381f354f42f2a0295c1d20992dd53eadeb495c8ebc388aeecb5c466859332a"
   ],
   [
    "hadron_run_action",
@@ -725,6 +797,38 @@
    "4377cfabdd6bad8e7e0403e65b1d0d1728cc779b7fb1cddf6c03e6255ff8b6f0"
   ],
   [
+   "hadron_list_question_logs",
+   "c29185bb7767e40f64574ddeba5a3a6e4dfb6c891c749774c53a448ec82e7939"
+  ],
+  [
+   "hadron_ask_question",
+   "27aef79831dd0cc2d2256aadb25d34591496bb84d5f32ea6d29b3aee32a8091f"
+  ],
+  [
+   "hadron_get_question",
+   "18ba673ab916dd8a2f313b1b8911615b131424ee123a1f505ef0d6ac94a2bad4"
+  ],
+  [
+   "hadron_list_questions",
+   "0a7381f48b05324f988b7098a76bc460678c250457ad1e206b5041ef5bc02a41"
+  ],
+  [
+   "hadron_amend_question",
+   "a917e84e7c67b6576bf25310371ffee778ce7971ce6a2168f33a92c0926c8cad"
+  ],
+  [
+   "hadron_withdraw_question",
+   "1676f6b72e13a92790a7c65474feeb33d34950da357f217f1e2a5f9c23d048d3"
+  ],
+  [
+   "hadron_answer_question",
+   "f18515d38863235f11da320f76ae8d6727397124a4433844c168f8b006b1f1c7"
+  ],
+  [
+   "hadron_retract_question_answer",
+   "8143b12f8b74599fda23939fb9d445f74d5b3612fcf66cee0dcfce5238b3d648"
+  ],
+  [
    "hadron_set_asset_public_link",
    "9ea3f3b840cbc88d16235c9c800062cc71a422ddf26db0e4f0922245d72dfbcc"
   ],
@@ -846,7 +950,7 @@
   ],
   [
    "hadron_find_nodes",
-   "77499516714df668acd7cb1ebf489455b4fb5253b87f2198cde2b27ef5e9584b"
+   "1f759ae458e4921a3495b36ad6242d9ba7000435e4c6544d49a848d67f2d4c01"
   ],
   [
    "hadron_get_node",
@@ -874,15 +978,15 @@
   ],
   [
    "hadron_create_node",
-   "bef0d430408f57978aa6e7dff9d597a285b2908035af7901116ceacf14da434e"
+   "1dc134ed795aa3a74ae2178bde14995bdb5c63ad1d985139c106be77d4c7106b"
   ],
   [
    "hadron_update_node",
-   "e7c91cb617d8a8ed5898feac12f4fe6709532a3793f30b6a9e6eb2b63d32f310"
+   "c8c1058fd0edb769064303a4b1bb88fc86bae38b245ed29e64cb8347da4833d4"
   ],
   [
    "hadron_create_task",
-   "5bfd76216ac408f39ffc820f3e7308fc4b2ccf46d3ae752b1d115c8d22234a8a"
+   "341d2bfbe8e62e47b42cd4b82e43ec3af4474ed1e4a9af928e5a428d9998de9a"
   ],
   [
    "hadron_update_task",
@@ -895,6 +999,10 @@
   [
    "hadron_update_review",
    "b6f08df15baf3e9d3bace314d966d352a366d28c1bedb366b86639da6134cfdf"
+  ],
+  [
+   "hadron_retire_spec",
+   "b10f43422245a0bdfece7143c296fee1d7c4c8f61113cbfb146d3cf81b7b5ad2"
   ],
   [
    "hadron_update_node_data",
@@ -942,7 +1050,7 @@
   ],
   [
    "hadron_move_node",
-   "f35cde7d04cfd7f745ab4df6e8a49975606965813c49e283b3d62e52f19ece89"
+   "3c381f354f42f2a0295c1d20992dd53eadeb495c8ebc388aeecb5c466859332a"
   ],
   [
    "hadron_run_action",
@@ -1051,6 +1159,38 @@
    "4377cfabdd6bad8e7e0403e65b1d0d1728cc779b7fb1cddf6c03e6255ff8b6f0"
   ],
   [
+   "hadron_list_question_logs",
+   "c29185bb7767e40f64574ddeba5a3a6e4dfb6c891c749774c53a448ec82e7939"
+  ],
+  [
+   "hadron_ask_question",
+   "27aef79831dd0cc2d2256aadb25d34591496bb84d5f32ea6d29b3aee32a8091f"
+  ],
+  [
+   "hadron_get_question",
+   "18ba673ab916dd8a2f313b1b8911615b131424ee123a1f505ef0d6ac94a2bad4"
+  ],
+  [
+   "hadron_list_questions",
+   "0a7381f48b05324f988b7098a76bc460678c250457ad1e206b5041ef5bc02a41"
+  ],
+  [
+   "hadron_amend_question",
+   "a917e84e7c67b6576bf25310371ffee778ce7971ce6a2168f33a92c0926c8cad"
+  ],
+  [
+   "hadron_withdraw_question",
+   "1676f6b72e13a92790a7c65474feeb33d34950da357f217f1e2a5f9c23d048d3"
+  ],
+  [
+   "hadron_answer_question",
+   "f18515d38863235f11da320f76ae8d6727397124a4433844c168f8b006b1f1c7"
+  ],
+  [
+   "hadron_retract_question_answer",
+   "8143b12f8b74599fda23939fb9d445f74d5b3612fcf66cee0dcfce5238b3d648"
+  ],
+  [
    "hadron_set_asset_public_link",
    "9ea3f3b840cbc88d16235c9c800062cc71a422ddf26db0e4f0922245d72dfbcc"
   ],
@@ -1172,7 +1312,7 @@
   ],
   [
    "hadron_find_nodes",
-   "77499516714df668acd7cb1ebf489455b4fb5253b87f2198cde2b27ef5e9584b"
+   "1f759ae458e4921a3495b36ad6242d9ba7000435e4c6544d49a848d67f2d4c01"
   ],
   [
    "hadron_get_node",
@@ -1200,15 +1340,15 @@
   ],
   [
    "hadron_create_node",
-   "bef0d430408f57978aa6e7dff9d597a285b2908035af7901116ceacf14da434e"
+   "1dc134ed795aa3a74ae2178bde14995bdb5c63ad1d985139c106be77d4c7106b"
   ],
   [
    "hadron_update_node",
-   "e7c91cb617d8a8ed5898feac12f4fe6709532a3793f30b6a9e6eb2b63d32f310"
+   "c8c1058fd0edb769064303a4b1bb88fc86bae38b245ed29e64cb8347da4833d4"
   ],
   [
    "hadron_create_task",
-   "5bfd76216ac408f39ffc820f3e7308fc4b2ccf46d3ae752b1d115c8d22234a8a"
+   "341d2bfbe8e62e47b42cd4b82e43ec3af4474ed1e4a9af928e5a428d9998de9a"
   ],
   [
    "hadron_update_task",
@@ -1221,6 +1361,10 @@
   [
    "hadron_update_review",
    "b6f08df15baf3e9d3bace314d966d352a366d28c1bedb366b86639da6134cfdf"
+  ],
+  [
+   "hadron_retire_spec",
+   "b10f43422245a0bdfece7143c296fee1d7c4c8f61113cbfb146d3cf81b7b5ad2"
   ],
   [
    "hadron_update_node_data",
@@ -1268,7 +1412,7 @@
   ],
   [
    "hadron_move_node",
-   "f35cde7d04cfd7f745ab4df6e8a49975606965813c49e283b3d62e52f19ece89"
+   "3c381f354f42f2a0295c1d20992dd53eadeb495c8ebc388aeecb5c466859332a"
   ],
   [
    "hadron_run_action",

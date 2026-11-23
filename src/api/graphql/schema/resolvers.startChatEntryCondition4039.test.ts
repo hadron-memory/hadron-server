@@ -5,13 +5,15 @@
  * evaluated, and only then is anything provisioned. A condition that cannot be evaluated refuses with
  * `ENTRY_CONDITION_FAILED` and leaves nothing behind.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLoc } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { encryptNodeFields } from '../../../lib/nodeCrypto.js';
+import { generateDataKey } from '../../../lib/crypto.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -85,6 +87,8 @@ beforeEach(async () => {
   await serveEveryAgent(db);
 });
 
+afterEach(() => sessionKeyCache.clear()); // the cache is process-wide: a failing pin must not leak a key into the next test
+
 const startShared = (userId: string, args: Record<string, unknown> = {}) =>
   M.startChat({}, { agentRef: agentId, scope: 'shared', ...args }, ctxFor(userId));
 const opened = async (userId: string, args: Record<string, unknown> = {}) => (await startShared(userId, args)).conversationName as string;
@@ -102,6 +106,17 @@ async function saveFacts(users: Record<string, Record<string, unknown>>) {
     update: { data: { users } as never },
     create: { id: generateId(), memoryId: memory!.id, loc: 'data', name: 'data', nodeType: 'system', data: { users } as never },
   });
+}
+/**
+ * The EXACT outcome of a start that passes the entry-condition step on an encrypted home memory with no cached key (#4087): no entry
+ * condition was evaluated, so the refusal is not `ENTRY_CONDITION_FAILED`; the start goes on and is refused DOWNSTREAM, when the chat
+ * itself is provisioned, by `SessionExpiredError` (src/lib/nodeCrypto.ts; message `SESSION_EXPIRED: memory <id> is encrypted but no active session
+ * key is available...`, no extensions code). A bare `.not.toBe('ENTRY_CONDITION_FAILED')` passed for ANY other failure, a crash included.
+ */
+function expectEncryptedNoKeyDownstream(err: any) {
+  expect(err).not.toBeNull();
+  expect(err.message).toMatch(/^SESSION_EXPIRED: memory \S+ is encrypted but no active session key is available/);
+  expect(err.extensions?.code).toBeUndefined();
 }
 const footprint = async () => ({
   memories: await db.memory.count(), nodes: await db.node.count(), subscriptions: await db.agentSubscription.count(),
@@ -132,6 +147,34 @@ for (const path of ['live', 'snapshot'] as const) describe(`#4039 unnamed start 
     expect(await opened(alice.id)).toBe('su');
   });
 
+  it('S4 (Q12), fallback only: every ordered condition fails and there is no setup: the fallback conversation opens', async () => {
+    const never = { '==': [1, 2] };
+    // `fb` carries the same failing condition and seq as in the counterfactual twin below: the ONLY difference between the two is the
+    // isFallback flag (a flagged conversation is never in the condition scan, so its failing condition is not evaluated).
+    await seed([...conv('one', { seq: 1, condition: never }), ...conv('fb', { seq: 2, condition: never, flags: { isFallback: true } })], path);
+    expect(await opened(alice.id)).toBe('fb');
+  });
+
+  // The counterfactual twin of the pin above, identical in every field but one: `fb` has the same seq and failing condition and LACKS the
+  // isFallback flag. It is then an ordinary conversation whose condition fails, nothing is eligible, and the start is refused: the flag
+  // alone is what makes the conversation above open.
+  it('S4 (Q12), fallback only, counterfactual: without the fallback flag the same conversation is not opened', async () => {
+    const never = { '==': [1, 2] };
+    await seed([...conv('one', { seq: 1, condition: never }), ...conv('fb', { seq: 2, condition: never })], path);
+    expect((await refusal(alice.id)).code).toBe('AGENT_HAS_NO_CONVERSATIONS');
+  });
+
+  // Built behaviour (ruling 0127, hadron-server#3408), not a spec citation: cor:cht:020:02 says only that the start is refused, and
+  // says nothing about what a refusal leaves behind. "No footprint" is pinned here as a regression guard on the code as built.
+  it('S4 (Q12), no match: every ordered condition fails, no setup, no fallback: AGENT_HAS_NO_CONVERSATIONS and no database footprint', async () => {
+    const never = { '==': [1, 2] };
+    await seed([...conv('one', { seq: 1, condition: never }), ...conv('two', { seq: 2, condition: never })], path);
+    const before = await footprint();
+    const ext = await refusal(alice.id);
+    expect(ext.code).toBe('AGENT_HAS_NO_CONVERSATIONS');
+    expect(await footprint()).toEqual(before);
+  });
+
   it('S5 (Q17): a named start opens the named conversation although its condition fails, and reads no facts', async () => {
     await seed([...conv('welcome', { seq: 1, condition: NAME_UNKNOWN }), ...conv('other', { seq: 2 })], path);
     await opened(alice.id);
@@ -140,7 +183,7 @@ for (const path of ['live', 'snapshot'] as const) describe(`#4039 unnamed start 
     // Encrypted home memory, no key: a named start never evaluates, so it is not refused for the condition.
     await db.memory.update({ where: { id: (await sharedMemory())!.id }, data: { isEncrypted: true } });
     const err = await startShared(alice.id, { conversationName: 'welcome' }).then(() => null, (e: any) => e);
-    expect(err?.extensions?.code).not.toBe('ENTRY_CONDITION_FAILED');
+    expectEncryptedNoKeyDownstream(err);
   });
 
   it('8 (shared chat): the starter\'s bucket decides, never another member\'s', async () => {
@@ -185,7 +228,41 @@ describe('#4039 refusals judged before any write', () => {
     await opened(alice.id);
     await db.memory.update({ where: { id: (await sharedMemory())!.id }, data: { isEncrypted: true } });
     const err = await startShared(alice.id).then(() => null, (e: any) => e);
-    expect(err?.extensions?.code).not.toBe('ENTRY_CONDITION_FAILED');
+    expectEncryptedNoKeyDownstream(err);
+  });
+
+  // cor:cht:020:02 step 3 and its encrypted-memory edge case: the refusal is for an encrypted home memory UNTIL a session key is cached.
+  it('4f (step 3): an encrypted home memory WITH a cached key: its facts are decrypted and decide the start; the same start without the key is refused', async () => {
+    await seed([...conv('welcome', { seq: 1, condition: NAME_UNKNOWN }), ...conv('recent', { seq: 2 })]);
+    await opened(alice.id); // provisions the shared memory, plaintext
+    const memory = (await sharedMemory())!;
+    const info = { id: memory.id, isEncrypted: true };
+    const key = generateDataKey();
+    // The cache is keyed by MEMORY id: the first argument only names which session holds the key (its lifetime), so a start by any
+    // user reads it by memory (sessionKeyCache.getByMemoryId). That is the contract this pin relies on, not a cross-session leak.
+    sessionKeyCache.set(generateId(), memory.id, key);
+    await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
+    const facts = { users: { [alice.id]: { name: 'Ann-4087-secret' } } };
+    const ciphertext = encryptNodeFields({ data: facts }, info).data as never;
+    await db.node.upsert({
+      where: { loc_memoryId: { loc: 'data', memoryId: memory.id } },
+      update: { data: ciphertext },
+      create: { id: generateId(), memoryId: memory.id, loc: 'data', name: 'data', nodeType: 'system', data: ciphertext },
+    });
+    // The stored facts really are ciphertext: neither the name nor the user id is readable in the row, so only a decrypting read can
+    // answer the start below (a plaintext row would make this pin pass without exercising decryption).
+    const stored = JSON.stringify((await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'data', memoryId: memory.id } } })).data);
+    expect(stored).not.toContain('Ann-4087-secret');
+    expect(stored).not.toContain(alice.id);
+    // The name is saved, so `recent` opens: only a decrypted read of the facts can say so (bob, with no facts, gets `welcome`).
+    expect(await opened(alice.id)).toBe('recent');
+    expect(await opened(bob.id)).toBe('welcome');
+    // The flipped fixture: release the key and the very same start is refused for the missing key, before any write.
+    sessionKeyCache.clear();
+    const before = await footprint();
+    const ext = await refusal(alice.id);
+    expect(ext).toMatchObject({ code: 'ENTRY_CONDITION_FAILED', reason: 'MEMORY_ENCRYPTED_NO_KEY' });
+    expect(await footprint()).toEqual(before);
   });
 
   it('4d (B2): a soft-deleted shared memory counts as absent (no facts read), and is then revived as today', async () => {

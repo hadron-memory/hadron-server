@@ -8,7 +8,7 @@ import { runAssetJanitor, runAssetJanitorTick, startAssetJanitorLoop } from './j
 
 const deleteObjectMock = vi.hoisted(() => vi.fn());
 
-vi.mock('../integrations/r2/client.js', () => ({
+vi.mock('../integrations/objectstore/index.js', () => ({
   deleteObject: deleteObjectMock,
 }));
 

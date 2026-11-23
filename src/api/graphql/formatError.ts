@@ -152,7 +152,8 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   ),
   // #3136: encrypt/decrypt on an encrypted memory with no active session key
   // used to be a bare Error('SESSION_EXPIRED: …') that only the surfaces which
-  // hand-wrapped it (comments/teamChat/teamRole/teamAttention/channels) typed;
+  // hand-wrapped it (comments/teamChat/teamRole/channels, and teamAttention
+  // before #2027 S11 retired its scan) typed;
   // every other read/write path surfaced INTERNAL_SERVER_ERROR. Throwing the
   // typed class at the source (nodeCrypto) and mapping it once gives every path
   // the code those wrapped sites already deliver — message prefix unchanged, so
@@ -172,17 +173,18 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // than enumerating its codes is the point: a new refusal reaches the wire
   // typed without anyone remembering to come back here.
   //
-  // Sentry: NOT silenced. Mapping these for the wire and silencing them in the
-  // issue stream were proposed together; @Holger split them (2026-09-06) and
-  // took only the wire half. The reason is `ASSET_BYTES_GONE` — a row whose
-  // object is missing is genuine server-state inconsistency, and dropping it
-  // here would remove the only alarm without adding one anywhere else. The
-  // right home for that alarm is the purge/janitor path where the
-  // inconsistency is DISCOVERED, and it does not exist yet (#1140).
+  // Sentry: silenced (#1140). Mapping these for the wire and silencing them in
+  // the issue stream were proposed together; @Holger split them (2026-09-06)
+  // and took the wire half first, because of `ASSET_BYTES_GONE`: a row whose
+  // object is missing is genuine server-state inconsistency, and this was its
+  // only alarm. That alarm now lives where the inconsistency is DISCOVERED:
+  // the bytes-missing sweep (src/jobs/sweepAssetBytes.ts, #1140 slice B) and
+  // the restore path raise `asset.bytes_missing` (src/lib/asset/bytesMissingAlarm.ts).
+  // A caller meeting the refusal is not a fault to report here.
   mapping(
     (err): err is AssetUploadError => err instanceof AssetUploadError,
     (err) => ({ code: err.code }),
-    { silenceInSentry: false },
+    { silenceInSentry: true },
   ),
   // #2979: setAgentAssetUploadEnabled's refusals (PERMISSION_DENIED, NOT_FOUND) are caller errors with a code on the
   // instance, exactly as AssetUploadError above. The message is the operation's fixed text (no ref, no id), so it is

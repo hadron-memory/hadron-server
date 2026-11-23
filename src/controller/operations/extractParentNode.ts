@@ -1,3 +1,4 @@
+import { lockMemoriesForChannelChange } from '../../lib/channels.js';
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -109,6 +110,8 @@ export async function extractParentNodeGraph(
 ): Promise<ExtractParentNodeResult> {
   return db.$transaction(
     async (tx) => {
+      // #1213: owning copies/moves join before reading the signals they will carry.
+      await lockMemoriesForChannelChange(tx, [args.sourceMemoryId]);
       const source = await tx.memory.findUniqueOrThrow({ where: { id: args.sourceMemoryId } });
 
       // ── Subtree ──────────────────────────────────────────────────────────
@@ -167,16 +170,9 @@ export async function extractParentNodeGraph(
       // Unlike the merge this whole operation is ONE transaction, so holding
       // the lock here covers every write it performs.
       //
-      // CORRECTED by #1210 (@copilot, PR #1230). This used to continue: "…
-      // `nodes` was read inside it a few lines above, so the governed check is
-      // on this transaction's own snapshot rather than a stale one." That
-      // safety property does NOT hold, and the fix directly below is what
-      // proves it: `nodes` is read BEFORE the gate takes the memory lock, and
-      // the governed-kind doors serialize per loc rather than on that key, so
-      // a promotion or demotion can commit in between. READ COMMITTED does not
-      // refresh the earlier read. That is precisely why `assertBatchMutable`
-      // re-reads the signals and hands them back for the carry to copy — a
-      // reader must not lean on this snapshot being current.
+      // #1210 requires an authoritative signal carry, not a refusal. #1213 now acquires the source's
+      // coordination key at transaction entry, before even selecting this subtree, so promotion/demotion
+      // cannot land between this snapshot and its copy. The gate still returns its own fresh signals.
       // #1331 — a MOVE removes the subtree from its source memory: each node's role
       // needs its writer level there. A copy writes into a brand-new memory that has
       // no rulebook yet, so nothing narrows it (and it never changes the source).
@@ -415,6 +411,7 @@ export async function extractParentNodeGraph(
           sourceId: idMap.get(e.sourceId)!,
           targetId: idMap.get(e.targetId)!,
           loc,
+          locAuthored: false, // #2947: the copy's loc is derived from its own rebased endpoints
           name: e.name,
           description: e.description,
           isRunnable: e.isRunnable,

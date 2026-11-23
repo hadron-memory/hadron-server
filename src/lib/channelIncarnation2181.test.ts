@@ -124,6 +124,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.useRealTimers();
+  delete process.env.WORKER_PROOF_TOKEN_SECRET;
   delete process.env.TEAM_ATTENTION_TOKEN_SECRET;
   sessionKeyCache.clear();
 });

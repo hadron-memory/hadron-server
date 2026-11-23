@@ -23,7 +23,7 @@ import {
   decodeProtectedHeader,
   type JWTVerifyGetKey,
 } from 'jose';
-import { mintProviderNonce } from './providerNonce.js';
+import { hashProviderNonce, mintProviderNonce } from './providerNonce.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import {
@@ -36,8 +36,9 @@ import {
   type AppleIdentity,
 } from './apple.js';
 
-// Pre-#2204 rows carry no nonce hash; the nonce paths have their own tests in providerNonce.test.ts.
-const LEGACY = { legacyUnbound: true } as const;
+// #2282: every token is checked against a bound nonce; the nonce paths have their own tests in providerNonce.test.ts.
+const NONCE = 'test-nonce-2282';
+const BOUND = { bound: hashProviderNonce(NONCE) } as const;
 
 const CLIENT_ID = 'com.hadronmemory.signin';
 const TEAM_ID = 'TEAMID9999';
@@ -149,14 +150,17 @@ describe('verifyAppleIdToken', () => {
       .sign(opts.key ?? signKey);
   }
 
+  const mintBound = (claims: Record<string, unknown>, opts: Parameters<typeof mintIdToken>[1] = {}) =>
+    mintIdToken({ nonce: NONCE, ...claims }, opts);
+
   it('returns the identity claims from a valid token', async () => {
-    const token = await mintIdToken({
+    const token = await mintBound({
       sub: '001234.abcd1234ef567890.0102',
       email: 'ada@example.com',
       email_verified: true,
       is_private_email: false,
     });
-    expect(await verifyAppleIdToken(token, LEGACY, getKey)).toEqual({
+    expect(await verifyAppleIdToken(token, BOUND, getKey)).toEqual({
       sub: '001234.abcd1234ef567890.0102',
       email: 'ada@example.com',
       emailVerified: true,
@@ -165,45 +169,45 @@ describe('verifyAppleIdToken', () => {
   });
 
   it('accepts the string "true" for email_verified / is_private_email (Apple quirk)', async () => {
-    const token = await mintIdToken({
+    const token = await mintBound({
       sub: '42',
       email: 'relay@privaterelay.appleid.com',
       email_verified: 'true',
       is_private_email: 'true',
     });
-    const identity = await verifyAppleIdToken(token, LEGACY, getKey);
+    const identity = await verifyAppleIdToken(token, BOUND, getKey);
     expect(identity.emailVerified).toBe(true);
     expect(identity.isPrivateEmail).toBe(true);
   });
 
   it('fails closed on any other email_verified shape', async () => {
     for (const v of ['false', false, 'yes', 1, undefined]) {
-      const token = await mintIdToken({ sub: '42', email: 'a@b.com', email_verified: v });
-      expect((await verifyAppleIdToken(token, LEGACY, getKey)).emailVerified).toBe(false);
+      const token = await mintBound({ sub: '42', email: 'a@b.com', email_verified: v });
+      expect((await verifyAppleIdToken(token, BOUND, getKey)).emailVerified).toBe(false);
     }
   });
 
   it('lowercases the email claim (magic-link/Google parity)', async () => {
-    const token = await mintIdToken({ sub: '42', email: 'Ada@Example.COM' });
-    expect((await verifyAppleIdToken(token, LEGACY, getKey)).email).toBe('ada@example.com');
+    const token = await mintBound({ sub: '42', email: 'Ada@Example.COM' });
+    expect((await verifyAppleIdToken(token, BOUND, getKey)).email).toBe('ada@example.com');
   });
 
   it('rejects wrong audience, wrong issuer, wrong key, and missing sub', async () => {
     await expect(
-      verifyAppleIdToken(await mintIdToken({ sub: '42' }, { audience: 'other' }), LEGACY, getKey),
+      verifyAppleIdToken(await mintBound({ sub: '42' }, { audience: 'other' }), BOUND, getKey),
     ).rejects.toThrow();
     await expect(
       verifyAppleIdToken(
-        await mintIdToken({ sub: '42' }, { issuer: 'https://evil.example' }),
-        LEGACY,
+        await mintBound({ sub: '42' }, { issuer: 'https://evil.example' }),
+        BOUND,
         getKey,
       ),
     ).rejects.toThrow();
     await expect(
-      verifyAppleIdToken(await mintIdToken({ sub: '42' }, { key: wrongKey }), LEGACY, getKey),
+      verifyAppleIdToken(await mintBound({ sub: '42' }, { key: wrongKey }), BOUND, getKey),
     ).rejects.toThrow();
     await expect(
-      verifyAppleIdToken(await mintIdToken({ email: 'a@b.com' }), LEGACY, getKey),
+      verifyAppleIdToken(await mintBound({ email: 'a@b.com' }), BOUND, getKey),
     ).rejects.toThrow(/sub/);
   });
 

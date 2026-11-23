@@ -49,6 +49,7 @@
 import { GraphQLError } from 'graphql';
 import { getRetrievalProvider } from './retrieval/postgres.js';
 import { composeHybridRanking, hybridKeywordCandidates, type MatchedBy } from './retrieval/hybrid.js';
+import { assertQueryLength } from './retrieval/tsquery.js';
 import { getEmbeddingClient, isEmbeddingConfigured } from './embedding/index.js';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
@@ -270,6 +271,7 @@ export async function listAgentTasks(db: Db, auth: AuthContext, agentId: string,
   if (!symptom || (search.limit != null && (!Number.isInteger(search.limit) || search.limit < 1))) {
     throw new GraphQLError('symptom must be non-empty and limit must be a positive integer.', { extensions: { code: 'BAD_USER_INPUT' } });
   }
+  assertQueryLength(symptom); // #435: this free text reaches the keyword half without passing findNodes
   const limit = Math.min(search.limit ?? 3, 3);
   // #2421 experimental search is only the effective SYSTEM set, not the wider
   // readable outside-chain index entries accepted by the unfiltered list.

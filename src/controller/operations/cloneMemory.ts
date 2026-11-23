@@ -1,3 +1,4 @@
+import { lockMemoriesForChannelChange } from '../../lib/channels.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -80,7 +81,9 @@ const SLUG_ATOM = 'A-Za-z0-9._-';
  * Rewrite every reference to `oldUrn` (stored legacy form) into `newUrn`
  * inside a text blob. Handles both the canonical (`org::slug`) and legacy
  * (`org:slug`) spellings, including `urn:<type>:`-prefixed and
- * node-loc-suffixed (`...::loc:part`) occurrences. Returns the input
+ * node-loc-suffixed (`...::loc:part`) occurrences. An `hrn:asset:<root>:<mem>:assets:<id>`
+ * URN is NOT rewritten (#3767, cor:api:150:01): assets are not copied, so the
+ * clone's text keeps pointing at the source's assets. Returns the input
  * unchanged (same reference) when nothing matches.
  */
 export function rewriteMemoryUrnRefs(
@@ -99,7 +102,7 @@ export function rewriteMemoryUrnRefs(
     [oldForms.legacy, newForms.legacy],
   ] as const) {
     const re = new RegExp(
-      `(?<![${LEFT_BOUNDARY}])${escapeRegExp(from)}(?![${RIGHT_BOUNDARY}])(?!\\.[${SLUG_ATOM}])`,
+      `(?<!(?:hrn|urn):asset:)(?<![${LEFT_BOUNDARY}])${escapeRegExp(from)}(?![${RIGHT_BOUNDARY}])(?!\\.[${SLUG_ATOM}])`,
       'g',
     );
     out = out.replace(re, to);
@@ -228,6 +231,8 @@ export async function cloneMemoryGraphInTx(
   tx: Prisma.TransactionClient,
   args: CloneMemoryArgs,
 ): Promise<CloneMemoryInTxResult> {
+  // #1213: cloneAgent predeclares this key before its rows; standalone clones take it here at entry.
+  await lockMemoriesForChannelChange(tx, [args.sourceMemoryId]);
   const source = await tx.memory.findUniqueOrThrow({
     where: { id: args.sourceMemoryId },
   });
@@ -520,6 +525,7 @@ export async function cloneMemoryGraphInTx(
       sourceId: idMap.get(e.sourceId)!,
       targetId: newTarget ?? e.targetId,
       loc: e.loc,
+      locAuthored: e.locAuthored, // #2947: the copy keeps the source edge's provenance
       name: e.name,
       description: e.description,
       isRunnable: e.isRunnable,

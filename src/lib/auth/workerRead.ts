@@ -6,6 +6,7 @@ import { listAppInstallations, resolveAppInstallation } from '../appInstallation
 import { resolveAgentRef } from '../entityRef/agentRef.js';
 import { resolveAppRef } from '../entityRef/appRef.js';
 import { AgentNotFoundError, AmbiguousLegacyUrnError, AppNotFoundError } from '../entityRef/errors.js';
+import { UrnNotQualifiedError, UrnParseError } from '../urn.js';
 import { isRunPrincipal } from './runPrincipal.js';
 import { runMayReadTeam } from './runTeamRead.js';
 
@@ -35,18 +36,44 @@ export const appNotFound = (): GraphQLError =>
 
 /**
  * `resolveAppRef` for the App-scoped team surfaces: an absent ref answers `appNotFound()`, the same bytes a
- * non-participant gets from the gates. Narrow: only the not-found and ambiguous-legacy-URN errors convert (an
- * ambiguous reference would otherwise tell an outsider that SOME App matches it, before any participation check);
- * a database failure propagates. A caller with an ambiguous legacy URN names the App by id instead.
+ * non-participant gets from the gates. Narrow: only the four ref-resolution failures of
+ * {@link isAppRefResolutionFailure} convert (an ambiguous reference would otherwise tell an outsider that SOME App
+ * matches it, before any participation check; #4876: a malformed ref's parser error quotes the caller's value, so a
+ * pasted token would print back); a database failure propagates. A caller with an ambiguous legacy URN names the
+ * App by id instead.
  */
 export async function resolveAppRefConcealed(db: Context['db'], appRef: string): Promise<{ id: string }> {
   try {
     return await resolveAppRef(db, appRef);
   } catch (e) {
-    if (e instanceof AppNotFoundError || e instanceof AmbiguousLegacyUrnError) throw appNotFound();
+    if (isAppRefResolutionFailure(e)) throw appNotFound();
     throw e;
   }
 }
+
+/**
+ * Is `e` one of the four ref-RESOLUTION failures the concealed doors fold into their one unknown-App
+ * answer (#4838)? The URN parser's own errors (`UrnNotQualifiedError` / `UrnParseError`) ECHO the
+ * caller's value in their messages, so they fold exactly like `AppNotFoundError` /
+ * `AmbiguousLegacyUrnError`; every OTHER failure — a database fault inside the lookup — stays out
+ * (the narrow-catch rule, review:narrow-catch-blocks). Shared by the teamRole doors' `resolveApp` and
+ * connectionGrant's grantee catch so the class list cannot drift between them. {@link resolveAppRefConcealed}
+ * uses the same predicate since #4876, so the read doors and the write doors fold one list. The `UrnParseError` arm is
+ * unreachable through `resolveAppRef` TODAY — `assertFullyQualifiedUrn` is the API boundary gate and
+ * throws `UrnNotQualifiedError` only, and the tolerant `parseUrnInput` never throws — it is kept for
+ * a parser swap and pinned as contract, not as a reachable door path (workerRead.test.ts).
+ *
+ * NOT an alias of `refNamesNothing({ ambiguousNamesNothing: true })`, deliberately (Elena F11 on
+ * #4948): that list matches the `EntityNotFoundError` BASE — every entity's typed miss — while this
+ * one matches `AppNotFoundError` alone. A door that resolves TWO refs in one try and folded the base
+ * would turn an unknown AGENT (or memory, or org) into its unknown-APP answer; keeping this list
+ * App-narrow is what makes a two-arm door's catch safe to write. Do not merge them.
+ */
+export const isAppRefResolutionFailure = (e: unknown): boolean =>
+  e instanceof AppNotFoundError ||
+  e instanceof AmbiguousLegacyUrnError ||
+  e instanceof UrnNotQualifiedError ||
+  e instanceof UrnParseError;
 
 /**
  * Is `e` one of the refusals the App read gates (`requireWorkerReadAccess`, `requireTeamChatAccess`, the profile

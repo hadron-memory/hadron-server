@@ -248,10 +248,13 @@ export async function applyAgentTickerTemplates(
  */
 export async function endGeneratedTickersForWorker(
   tx: Prisma.TransactionClient,
-  args: { workerId: string; deletedBy: string | null },
+  args: { workerId: string; deletedBy: string | null; at: Date },
 ): Promise<number> {
   const actor = currentActor();
-  const now = new Date();
+  // #4312: `at` is REQUIRED so no caller can mint its own stamp by omission. Retirement passes its `retiredAt`, so the
+  // soft-delete stamp and `workers.retired_at` are ONE value (the delete-census attributes the delete to retirement by it,
+  // `workerMiscastRepair.removableGeneratedTickerIds`); a caller that is not retirement passes its own `new Date()`.
+  const now = args.at;
   const doomed = await tx.ticker.findMany({
     where: { generatedForWorkerId: args.workerId, deletedAt: null },
     select: { id: true },

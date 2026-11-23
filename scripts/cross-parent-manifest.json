@@ -27,16 +27,6 @@
     "SpecDocumentEntry": "value",
     "RegisterViewRow": "value",
     "ChannelReadState": "value",
-    "TeamAttentionChannel": "value",
-    "TeamAttentionWorker": "value",
-    "TeamAttentionResult": "envelope",
-    "TeamAttentionSwitchoverChannel": "value",
-    "TeamAttentionSwitchoverWorker": "value",
-    "TeamAttentionSwitchoverPreview": "envelope",
-    "TeamAttentionPageItem": "value",
-    "TeamAttentionPage": "envelope",
-    "TeamAttentionPreviewPage": "envelope",
-    "TeamAttentionSwitchoverResult": "envelope",
     "OwnTeamChatReadState": "value",
     "RegisterDefaults": "value",
     "GlobalSearchHit": "value",
@@ -52,6 +42,7 @@
     "SkillPlanUnrecognized": "value",
     "NodeBatchResult": "envelope",
     "Passage": "value",
+    "NodeMoveEdgeUrnChange": "value",
     "NodeMoveLinkWarning": "value",
     "NodeMovePlan": "envelope",
     "NodeMovePlanEntry": "value",
@@ -160,6 +151,7 @@
     "ConnectionStart": "value",
     "ConnectionFlow": "value",
     "SlackConnectionsPage": "envelope",
+    "TelegramConnectionsPage": "envelope",
     "McpServersPage": "envelope",
     "McpServerTool": "value",
     "SecretsPage": "envelope",
@@ -240,9 +232,6 @@
     "RevisionResult": "envelope",
     "AgentRevision": "value",
     "EditorLockResult": "envelope",
-    "UntrackedTaskItem": "value",
-    "UntrackedTaskItemPage": "envelope",
-    "ClaimUntrackedTaskItemsResult": "envelope",
     "AgentTaskRequirements": "value",
     "AgentTaskResult": "envelope",
     "AgentTaskFinding": "value",
@@ -324,7 +313,20 @@
     "ReviewSlotReadiness": "value",
     "GrantSignatureStatus": "value",
     "TeamUtilization": "value",
+    "TeamMetrics": "value",
+    "TeamMetricsCount": "value",
+    "TeamMetricsWindow": "value",
+    "TeamMetricsProject": "value",
+    "TeamMetricsProjectGroup": "value",
+    "TeamMetricsOwnerGroup": "value",
+    "TeamMetricsStartedOwned": "value",
+    "TeamMetricsChildStatus": "value",
+    "TeamMetricsProjectRow": "value",
+    "TeamMetricsProjects": "value",
+    "TeamMetricsWorkers": "value",
+    "TeamMetricsFlow": "value",
     "WorkerUtilization": "value",
+    "MatchFailure": "value",
     "WebPollsPage": "envelope",
     "SigningRequestsPage": "envelope",
     "WorkerDesiredState": "value",
@@ -604,6 +606,12 @@
       "resolver": "src/api/graphql/schema/resolvers.types.ts::sharedMemory",
       "gate": "canReadMemoryRecord"
     },
+    "App.selfJoin": {
+      "target": "AppSelfJoin",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::selfJoin",
+      "gate": "canReadApp"
+    },
     "AppAgent.agent": {
       "target": "Agent",
       "class": "self-gated",
@@ -783,17 +791,17 @@
       "resolver": "src/api/graphql/schema/resolvers.channel.ts::readableMemoryWhere",
       "target": "Channel"
     },
+    "AgentTaskPage.items": {
+      "class": "parent-implies-child",
+      "audience": "callers who passed the App's task gate (participant or the App's live key via withReadableApp); Query.agentTasksPage reads through the same agentTaskListWhere as Query.agentTasks, and task reads are App-wide for that audience",
+      "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
+      "target": "AgentTask"
+    },
     "ChatPage.items": {
       "class": "self-gated",
       "resolver": "src/api/graphql/schema/resolvers.query.chat.ts::myChatsScope",
       "gate": "myChatsScope",
       "target": "Chat"
-    },
-    "ClaimUntrackedTaskItemsResult.tasks": {
-      "class": "parent-implies-child",
-      "audience": "the claimer passed the App's task gate (participant or the App's live key via withReadableApp); task reads are App-wide for that audience",
-      "resolver": "src/api/graphql/schema/resolvers.untrackedTaskItems.ts::withReadableApp",
-      "target": "AgentTask"
     },
     "Comment.author": {
       "class": "open",
@@ -1981,6 +1989,12 @@
       "resolver": "src/api/graphql/schema/resolvers.query.slack.ts::isOrgMemberOrAdmin",
       "target": "SlackConnection"
     },
+    "TelegramConnectionsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "live org members (resolveOrgScope memberOrgIds); telegramConnection(ref) admits isOrgMemberOrAdmin of the owning org",
+      "resolver": "src/api/graphql/schema/resolvers.query.telegram.ts::isOrgMemberOrAdmin",
+      "target": "TelegramConnection"
+    },
     "SpecCorpusMintReport.unresolvedFeedback": {
       "class": "parent-implies-child",
       "audience": "the report exists only in the mintMemoryNodes and mintSpecCorpus answers, after concealUnreadableDenial and mayMintNodes (memory write access); open-comment counts on nodes of that memory",
@@ -2029,6 +2043,12 @@
       "class": "closed-projection",
       "projection": "AgentTaskParty",
       "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "TeamMetricsOwnerGroup.owner": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience: the roster audience, and the group exists only for a reader who may read the App's tasks, cor:agt:050:21)",
       "target": "AgentTaskParty"
     },
     "TeamCompositionWorker.worker": {
@@ -2233,6 +2253,12 @@
       "evidence": "private follow-up (hadron-internal#30); details withheld",
       "target": "Node"
     },
+    "WorkerContinuity.handoffAuthor": {
+      "class": "closed-projection",
+      "projection": "WorkerContinuityAuthor",
+      "why": "userHandle (identity tier, cor:acl:070:01) and the writing session id only, never the Session or User; the session is looked up among this worker's own sessions; the parent continuity is masked unless maySeeWorkerInternals passes",
+      "target": "WorkerContinuityAuthor"
+    },
     "WorkerContinuity.previousSession": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",
@@ -2301,6 +2327,8 @@
       "resolver": "src/api/graphql/schema/resolvers.agentTask.ts::withReadableApp",
       "target": "AgentTaskExternalIdChange"
     },
+    "RetireSpecResult.node": {"class": "parent-implies-child", "audience": "the caller who may write the spec's memory: retireSpecDoor conceals an unreadable spec as NODE_NOT_FOUND and requires write access before any read, and writeNodeCore holds the response to the memory's read audience (concealWriteBeyondRead)", "resolver": "src/api/graphql/schema/resolvers.mutation.retireSpec.ts::retireSpecDoor", "target": "Node"},
+    "RetireSpecResult.successorEdge": {"class": "parent-implies-child", "audience": "the same writer: the edge is the one the door inserted from the spec to a successor the caller can read (item 3, isMemoryReadableCached), in the spec's own memory; Edge.source and Edge.target keep their own field gates", "resolver": "src/api/graphql/schema/resolvers.mutation.retireSpec.ts::retireSpecDoor", "target": "Edge"},
     "WebPollsPage.items": {
       "class": "parent-implies-child",
       "audience": "Same org ADMIN and tool.web_poll policy authorization as the existing webPolls list, with org-bound redacted rows.",

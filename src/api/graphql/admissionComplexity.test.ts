@@ -28,7 +28,6 @@ const REVIEWED_PAGED_FIELDS = [
   "AppKey.hostUses",
   "Chat.servedPrompts",
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
-  "Mutation.claimUntrackedTaskItems", // #3125 S3: limit default 1, cap 10; common omitted bound 100 is conservative.
   "Mutation.collectHostOperations",
   "Mutation.planNodeMove", // #3424: limit default100/cap1000; common omitted bound100 matches.
   "Node.lintWarnings",
@@ -45,6 +44,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agentTaskExternalIdChanges", // #4084: clampListTake with a floor of 1, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.agentTaskList", // #2421: limit applies only when symptom is present; default 3, cap 3.
   "Query.agentTasks",
+  "Query.agentTasksPage", // #2212 A3: pageArgs, default 20, cap 200 (PAGE_ARGS_FIELDS).
   "Query.agentTeamEvents",
   "Query.agentTeamEventsPage", // #3933: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.agentWebhooks",
@@ -128,15 +128,13 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.slackConnections",
   "Query.specBacklinksPage", // #3222 (#2213 S3): pageArgs, default 20, cap 200; in PAGE_ARGS_FIELDS.
   "Query.specUnresolvedReferencesPage", // #3222: as specBacklinksPage.
-  "Query.teamAttentionPage",
-  "Query.teamAttentionPreviewPage",
   "Query.teamChatMessages",
   "Query.teamChatSearch", // #2299: as channelMessageSearch.
   "Query.teamRoles",
   "Query.teamStopSignals",
   "Query.teamWorkItems",
+  "Query.telegramConnections", // #597: clampListTake default 20, cap 200 (as slackConnections).
   "Query.tickersPage",
-  "Query.untrackedTaskItems", // #3125 S3: limit default 20, cap 100.
   "Query.usageEvents",
   "Query.usageEventsPage",
   "Query.users",

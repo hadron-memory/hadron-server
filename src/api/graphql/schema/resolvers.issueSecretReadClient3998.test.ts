@@ -4,6 +4,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
+import { createPendingGrant } from '../../../lib/grants/create.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 import { autoDeleteLimitRefusal } from './resolvers.secret.js';
@@ -29,6 +30,46 @@ beforeEach(async () => {
 });
 
 describe('#3998 issueSecretReadClient', () => {
+  it('issues an App-held use client with signed binding, and rejects a mismatched header', async () => {
+    const s = await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'fetch', kind: 'webfetch-auth', metadata: { urlPrefix: 'https://api.example.test/v1/' }, value: { type: 'bearer', token: 'private' } }, ctxOf(ownerId));
+    const binding = { secretRef: s.id, mode: 'USE', holderKind: 'APP', holderRef: appId, bindingPrefix: 'https://api.example.test/v1/', bindingHeader: 'Authorization' };
+    const result: any = await issue(ownerId, binding);
+    const grant = await db.grant.findUniqueOrThrow({ where: { id: result.grantId } });
+    expect(grant).toMatchObject({ action: 'secret.use', granteeAppId: appId, activatedAt: null });
+    expect(grant.values).toEqual({ secret: s.id, 'auto-delete': 'keep', 'binding-prefix': binding.bindingPrefix, 'binding-header': binding.bindingHeader });
+    expect(await db.secretReadClient.count({ where: { grantId: result.grantId, secretId: s.id } })).toBe(1);
+    expect(await code(issue(ownerId, { ...binding, bindingHeader: 'X-Other' }))).toBe('GRANT_VALUES_INVALID');
+    expect(await db.secretReadClient.count({ where: { secretId: s.id } })).toBe(1);
+  });
+
+  it('the generic grant door also rejects a use header that does not match the payload', async () => {
+    const s = await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'fetch', kind: 'webfetch-auth', metadata: { urlPrefix: 'https://api.example.test/v1/' }, value: { type: 'bearer', token: 'private' } }, ctxOf(ownerId));
+    await expect(db.$transaction((tx) => createPendingGrant(tx, { appId, requester: { userId: ownerId, workerId: null, sessionId: null }, holder: { kind: 'app', id: appId }, action: 'secret.use', values: { secret: s.id, 'auto-delete': 'keep', 'binding-prefix': 'https://api.example.test/v1/', 'binding-header': 'X-Other' }, reason: 'r', canReadMemory: async () => false }))).rejects.toMatchObject({ code: 'GRANT_VALUES_INVALID' });
+    expect(await db.grant.count()).toBe(0);
+  });
+
+  it('does not allow a use client for a person, worker, or another App', async () => {
+    const binding = { mode: 'USE', bindingPrefix: 'https://api.example.test/v1/', bindingHeader: 'Authorization' };
+    for (const holderKind of ['USER', 'WORKER']) {
+      expect(await code(issue(ownerId, { ...binding, holderKind }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    }
+    const s = await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'fetch', kind: 'webfetch-auth', metadata: { urlPrefix: 'https://api.example.test/v1/' }, value: { type: 'bearer', token: 'private' } }, ctxOf(ownerId));
+    expect(await code(issue(ownerId, { ...binding, secretRef: s.id, holderKind: 'APP', holderRef: generateId() }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await db.grant.count()).toBe(0);
+  });
+
+  it('issues a use client for an installed agent, but not an unknown agent', async () => {
+    const org = await db.organization.create({ data: { name: 's5', urn: `${generateId().toLowerCase()}.test` } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: ownerId, role: 'ADMIN' } });
+    await db.app.update({ where: { id: appId }, data: { organizationId: org.id, ownerUserId: null } });
+    const agent = await db.agent.create({ data: { organizationId: org.id, name: 's5', urn: `${org.urn}:a`, visibility: 'ORGANIZATION' } });
+    await db.appAgent.create({ data: { appId, agentId: agent.id } });
+    const s = await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'fetch', kind: 'webfetch-auth', metadata: { urlPrefix: 'https://api.example.test/v1/' }, value: { type: 'bearer', token: 'private' } }, ctxOf(ownerId));
+    const binding = { secretRef: s.id, mode: 'USE', holderKind: 'AGENT', bindingPrefix: 'https://api.example.test/v1/', bindingHeader: 'Authorization' };
+    const result: any = await issue(ownerId, { ...binding, holderRef: agent.id });
+    expect(await db.grant.findUniqueOrThrow({ where: { id: result.grantId } })).toMatchObject({ agentId: agent.id, action: 'secret.use' });
+    expect(await code(issue(ownerId, { ...binding, holderRef: generateId() }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+  });
   it('a manager issues to themself: one pending grant and one client, marked self-issued', async () => {
     const r: any = await issue(ownerId);
     expect(r).toMatchObject({ secretName: 'tok', selfIssued: true });
@@ -53,16 +94,14 @@ describe('#3998 issueSecretReadClient', () => {
     expect(await db.grant.count()).toBe(0);
   });
 
-  it('an auto-delete mark is refused until S6 consumes it (#4001), with or without a limit, and nothing is written', async () => {
-    // NOT_AVAILABLE is judged first (#4443 item 6): a caller is not told to add a limit only to be refused after adding one. Signed but
-    // not consumed: refused with a typed code, nothing written. S6 removes this guard; the NEEDS_LIMIT rule is pinned by the pure-function test below.
-    expect(await code(issue(ownerId, { autoDelete: true }))).toBe('SECRET_AUTO_DELETE_NOT_AVAILABLE');
-    expect(await code(issue(ownerId, { autoDelete: true, maxReads: 1 }))).toBe('SECRET_AUTO_DELETE_NOT_AVAILABLE');
+  it('S6 admits a bounded mark and refuses an unbounded mark without writing', async () => {
+    expect(await code(issue(ownerId, { autoDelete: true }))).toBe('SECRET_AUTO_DELETE_NEEDS_LIMIT');
     expect(await db.grant.count()).toBe(0);
     expect(await db.secretReadClient.count()).toBe(0);
+    expect(await code(issue(ownerId, { autoDelete: true, maxReads: 1 }))).toBe('OK');
   });
 
-  it('the limit rule is pinned now, while NOT_AVAILABLE shadows it: S6 turns it on with a test already in place', () => {
+  it('the S6 finite-limit rule distinguishes marked and unmarked terms', () => {
     const NEEDS = { code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT' };
     expect(autoDeleteLimitRefusal(true, null, null)).toMatchObject(NEEDS);
     expect(autoDeleteLimitRefusal(true, new Date(), null)).toBeNull();
@@ -71,8 +110,16 @@ describe('#3998 issueSecretReadClient', () => {
     expect(autoDeleteLimitRefusal(false, null, null)).toBeNull();
   });
 
-  it('a person holder is only the issuer themself', async () => {
-    expect(await code(issue(ownerId, { holderRef: memberId }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+  it('S4 admits a different live person holder and refuses a nonmember', async () => {
+    expect(await issue(ownerId, { holderRef: memberId })).toMatchObject({selfIssued:false});
+    expect(await code(issue(ownerId, { holderRef: outsiderId }))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+  });
+
+  it.each(['former', 'deleted'])('refuses a %s person holder with the exact holder code and no writes', async state => {
+    if(state === 'former') await db.appMember.deleteMany({where:{appId,userId:memberId}});
+    else await db.user.update({where:{id:memberId},data:{deletedAt:new Date()}});
+    expect(await code(issue(ownerId,{holderRef:memberId}))).toBe('GRANT_HOLDER_NOT_ALLOWED');
+    expect(await db.grant.count()).toBe(0);expect(await db.secretReadClient.count()).toBe(0);
   });
 
   it.each(['AGENT', 'APP'])('refuses a %s holder before any write (#4434: agent-held reads are not built)', async (holderKind) => {
@@ -101,10 +148,11 @@ describe('#3998 issueSecretReadClient', () => {
     // directly, so GraphQL DateTime coercion is not in play (item 9). The cases make 12 calls under one identity, well inside the
     // WRITES class limit of 600 a minute (item 8).
     const cases: Array<[string, Record<string, unknown>, string]> = [
-      ['agent holder', { holderKind: 'AGENT', holderRef: generateId() }, 'GRANT_HOLDER_NOT_ALLOWED'],
+      // #4434: an agent holder is no longer an input refusal, so an outsider gets the plain uniform FORBIDDEN for it, existing secret or not.
+      ['agent holder', { holderKind: 'AGENT', holderRef: generateId() }, 'FORBIDDEN'],
       ['app holder', { holderKind: 'APP' }, 'GRANT_HOLDER_NOT_ALLOWED'],
-      ['auto-delete without a limit', { autoDelete: true }, 'SECRET_AUTO_DELETE_NOT_AVAILABLE'],
-      ['auto-delete with a limit', { autoDelete: true, maxReads: 1 }, 'SECRET_AUTO_DELETE_NOT_AVAILABLE'],
+      ['auto-delete without a limit', { autoDelete: true }, 'SECRET_AUTO_DELETE_NEEDS_LIMIT'],
+      ['auto-delete with a limit', { autoDelete: true, maxReads: 1 }, 'SECRET_AUTO_DELETE_NOT_ALLOWED'],
       ['bad time', { expiresAt: 'not-a-date' }, 'BAD_USER_INPUT'],
       ['plain', {}, 'FORBIDDEN'],
     ];

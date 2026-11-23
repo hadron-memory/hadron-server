@@ -1,3 +1,4 @@
+import { softDeleteChatToolConnections, dispatchChatToolTeardown, type ChatToolTeardown } from '../../../lib/chatToolTeardown.js';
 import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { markNewInstallPayload } from './installationPayload.js';
 import { requireInstructedAct, sameActPrincipal, type StaffActAdmission, type ActInstruction, type ActAdmission } from '../../../lib/auth/instructedAct.js';
@@ -287,9 +288,8 @@ async function removeAppMemberWithAdmission(
   // #764 + #816 review: appRef/userRef accept id / URN / (user) handle /
   // email. #4142 (S6 chunk F) dropped the deprecated appId/userId aliases:
   // the refs are required. Evaluate the ROLE gate BEFORE resolving the
-  // target user, so an
-  // unauthorized caller can't turn user resolution into an existence
-  // oracle. A role-authorized caller may remove anyone; everyone else may
+  // target user, so an unauthorized caller can't turn user resolution into
+  // an existence oracle. A role-authorized caller may remove anyone; everyone else may
   // remove ONLY themselves — and a self-only caller's target resolution
   // maps any miss to the same Forbidden, with the resolved id required to
   // be the caller, so an unknown handle/email is indistinguishable from a
@@ -623,13 +623,18 @@ export const appMutations = {
           await assertNoWorkers(ctx.db, existing.id, appUrn, 'reclaim');
           // #1468 — the delete cascades the App's memories: refused while one
           // is a stamped corpus still holding a spec.
-          await ctx.db.$transaction(async (tx) => {
+          const reclaimTeardowns = await ctx.db.$transaction(async (tx) => {
             await assertNoInstallMemories(tx, existing.id, appUrn);
             await detachAppOwnerMemories(tx, [existing.id]);
             const doomed = await tx.memory.findMany({ where: { appId: existing.id }, select: { id: true } });
             await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
+            // #4828: an App soft-deleted BEFORE its deletion tore its tool registrations down still holds live connection rows, which this
+            // hard delete would cascade away silently; collect them first, ask their tools after the commit. Rows already torn down return nothing.
+            const torn = await softDeleteChatToolConnections(tx, { appId: existing.id }, ctx.userId ?? ctx.clientId ?? null);
             await tx.app.delete({ where: { id: existing.id } });
+            return torn;
           });
+          dispatchChatToolTeardown(reclaimTeardowns);
         } else {
           // #2785: typed, like the memory collision (#2819); a plain Error is
           // masked as INTERNAL_SERVER_ERROR (cor:api:260:01). Names only the
@@ -824,13 +829,16 @@ export const appMutations = {
               // castings and recycle their permanently-reserved names.
               await assertNoWorkers(ctx.db, depCollision.id, depUrn, 'reclaim');
               // #1468 — same cascade rule as the parent App branch.
-              await ctx.db.$transaction(async (tx) => {
+              const depTeardowns = await ctx.db.$transaction(async (tx) => {
                 await assertNoInstallMemories(tx, depCollision.id, depUrn);
                 await detachAppOwnerMemories(tx, [depCollision.id]);
                 const doomed = await tx.memory.findMany({ where: { appId: depCollision.id }, select: { id: true } });
                 await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
+                const torn = await softDeleteChatToolConnections(tx, { appId: depCollision.id }, ctx.userId ?? ctx.clientId ?? null); // #4828, as above
                 await tx.app.delete({ where: { id: depCollision.id } });
+                return torn;
               });
+              dispatchChatToolTeardown(depTeardowns);
             } else {
               depUrn = `${depUrn}:${imp.importedAgentId.slice(-8)}`;
             }
@@ -1153,7 +1161,7 @@ export const appMutations = {
       // #3997 (cor:sec:010:01 "a secret never outlives its owner"): its App-owned secrets go in the SAME transaction, each
       // with a DELETE event, and the owner's tombstone (the durable start of the one-year event retention, R25) is written
       // when the App has events. The BEFORE DELETE trigger on `apps` covers the hard-delete paths (account erasure, URN reclaim).
-      await withAuthorizedTx(
+      const teardowns = await withAuthorizedTx(
         ctx,
         [
           { kind: 'app', id: resolvedId },
@@ -1174,7 +1182,7 @@ export const appMutations = {
           });
           // #3690: an App that HOLDS a grant (another App's grantee) is a holder that went: those grants end here, after the apps FOR
           // UPDATE lock. Its OWN grants allow nothing already (the live check reads `apps.deleted_at`) and cascade at the reclaim.
-          if (deleted.count > 0) await endHeldGrants(tx, 'app', resolvedId);
+          if (deleted.count > 0) await endHeldGrants(tx, 'app', resolvedId, 'APP_DELETED');
           if (deleted.count > 0) {
             const actor = secretActorOf(ctx);
             const secrets = await tx.secret.findMany({ where: { ownerType: 'app', ownerId: resolvedId }, select: { id: true, name: true } });
@@ -1185,13 +1193,18 @@ export const appMutations = {
             await tx.$executeRaw`INSERT INTO secret_owner_tombstones (owner_type, owner_id)
               SELECT 'app', ${resolvedId} WHERE EXISTS (SELECT 1 FROM secret_events WHERE owner_type = 'app' AND owner_id = ${resolvedId})
               ON CONFLICT DO NOTHING`;
+            // #4828 (cor:dmo:080:04): the App's Telegram bot and the Slack workspaces it is the default App of go in the same transaction;
+            // the tools are asked to drop their side after the commit. An App already deleted returns nothing here, so a repeat asks nothing.
+            return softDeleteChatToolConnections(tx, { appId: resolvedId }, ctx.userId ?? ctx.clientId ?? null);
           }
+          return [] as ChatToolTeardown[];
         },
         // #3974: Uninstalled → Deleted while uninstalled (cor:dmo:050:21), by id only. resolveAppRef never reaches an uninstalled row by URN, but one uninstalled between the resolve and the lock must not be admitted for a URN either (§10 F1).
         { lockMode: 'exclusive', allowUninstalledApp: isEntityId(ref), afterLock: async (tx) => {
           await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedId} FOR UPDATE`;
         } },
       );
+      dispatchChatToolTeardown(teardowns);
       return true;
     },
 

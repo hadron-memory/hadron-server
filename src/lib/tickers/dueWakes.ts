@@ -601,7 +601,7 @@ export async function computeDueWakes(args: {
       checkPending: (pendingOf.get(w.id) ?? null) !== null,
       tasks: tasksFor(w.id)
         .slice(0, WAKE_TASK_REASONS_MAX)
-        .map(({ taskId, eventId, chainIndex, event, title, handle, at }) => ({ taskId, eventId, chainIndex, event, title, handle, atMs: at.getTime() })),
+        .map(({ taskId, eventId, chainIndex, event, title, handle, at, questionCode }) => ({ taskId, eventId, chainIndex, event, title, handle, atMs: at.getTime(), ...(questionCode != null ? { questionCode } : {}) })),
       now,
     });
     // #2022: the stop notice rides ahead of everything else in the wake (cor:agt:090:04), or is the wake.

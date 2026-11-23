@@ -405,6 +405,8 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // the owner moved before they were held, the whole transaction is retried
   // with a fresh snapshot (PromotionOwnerDriftError never surfaces).
   let createdAgent!: Awaited<ReturnType<typeof createAgentTx>>;
+  // #4218: the one name a promotion's not-found carries: the caller's own ref, else the id they passed.
+  const promotionTargetName: string | undefined = systemMemoryRef ?? systemMemoryId;
   for (let attempt = 1; ; attempt++) {
     const promotionOwner = systemMemoryId ? await observePromotionOwner(ctx.db, systemMemoryId) : null;
     try {
@@ -412,7 +414,12 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       break;
     } catch (e) {
       if (!(e instanceof PromotionOwnerDriftError)) throw e;
-      if (attempt >= MAX_PROMOTION_OWNER_ATTEMPTS) throw promotionTargetNotFound(systemMemoryRef ?? systemMemoryId!);
+      if (attempt >= MAX_PROMOTION_OWNER_ATTEMPTS) {
+        // #4218: a drift is only observed for a promotion, so `systemMemoryId` is set. Name the caller's OWN
+        // reference when they gave one (#4140, cor:api:140:03), else the id; never a non-null assertion.
+        if (promotionTargetName === undefined) throw e;
+        throw promotionTargetNotFound(promotionTargetName);
+      }
     }
   }
   function createAgentTx(promotionOwner: PromotionOwner | null) {
@@ -425,7 +432,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       }
       const found = await tx.memory.findUnique({ where: { id: systemMemoryId }, select: PROMOTION_TARGET_SELECT });
       const decideCtx = promotionOwner ? await fencedPromotionCtx(ctx, tx, promotionOwner, found) : ctx;
-      await assertPromotableSystemMemory(decideCtx, found, systemMemoryRef ?? systemMemoryId);
+      await assertPromotableSystemMemory(decideCtx, found, promotionTargetName ?? systemMemoryId);
       const target = found!;
       // spec 047 / #949: the promoted memory must share the agent's owner —
       // same org (org-owned) OR same user (user-owned). One shared assertion
@@ -1267,7 +1274,7 @@ export const agentMutations = {
         await tx.agent.update({ where: { id }, data: { deletedAt } });
         // #3690 / ruling 0259: any agent delete, soft delete included, is a departure. No FK action fires on a soft delete, so the grants
         // the agent HOLDS end here, after the `agents FOR UPDATE` lock (afterLock below): the grant row lock is the last one.
-        await endHeldGrants(tx, 'agent', id);
+        await endHeldGrants(tx, 'agent', id, 'AGENT_DELETED');
         if (agent.systemMemoryId) {
           await tx.memory.updateMany({ where: { id: agent.systemMemoryId }, data: { deletedAt } });
         }
@@ -1545,7 +1552,7 @@ export const agentMutations = {
             for (const appId of await liveAppsWhereInstalled(tx, parentAgentId, resolvedOrgId)) candidateApps.add(appId);
           }
           await endGrantsOfAgentsNoLongerInstalled(
-            tx, [...candidateApps].map((appId) => ({ appId, agentId: resolvedAgentId })), ctx.userId ?? null);
+            tx, [...candidateApps].map((appId) => ({ appId, agentId: resolvedAgentId })), ctx.userId ?? null, 'AGENT_LICENSE_REVOKED');
           return tx.agentOrgGrant.findUnique({
             where: { orgId_agentId: { orgId: resolvedOrgId, agentId: resolvedAgentId } },
           });
@@ -1713,18 +1720,41 @@ export const agentMutations = {
       // auto-provisioned memory is class='personal' (plaintext USER_ID mode) or
       // 'private' (encrypted SECRET mode, 041/#516); scope by userMemoryOfAgentId
       // so free-standing user memories (agent NULL) never match.
-      const userMemory = await ctx.db.memory.findFirst({
-        where: {
-          userId: resolvedUserId,
-          userMemoryOfAgentId: resolvedAgentId,
-          class: { in: ['personal', 'private'] },
-          deletedAt: null,
-        },
-        include: { _count: { select: { nodes: true } } },
+      //
+      // #4716: the empty-check and the hard delete are ONE guarded operation
+      // (cor:dmo:050:08). The memory row is locked FOR UPDATE before counting —
+      // every node writer necessarily takes an FK key-share on that row, so the
+      // lock fences them all — and the count is its own statement AFTER the lock
+      // wait, so under READ COMMITTED's fresh statement snapshot a node that
+      // committed while we waited is seen. A memory that gained a node is not
+      // empty and is retained. The predicate stays "no node rows at all" (a
+      // soft-deleted node is still data to preserve) and the scope stays as it
+      // was. The transaction's isolation is PINNED to READ COMMITTED, not left
+      // to the server default: under REPEATABLE READ the count would reuse the
+      // pre-wait snapshot and miss the node committed during the lock wait; the
+      // cascade's foreign-key check would then see that row and raise 40001, so
+      // the node is not lost, but the delete rolls back and the revocation,
+      // already committed, surfaces as an error. REPEATABLE READ and SERIALIZABLE
+      // both abort this shape where READ COMMITTED re-snapshots (#4806; see the
+      // #664 count-then-act refinement).
+      await ctx.db.$transaction(async (tx) => {
+        const scoped = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM memories
+          WHERE user_id = ${resolvedUserId}
+            AND user_memory_of_agent_id = ${resolvedAgentId}
+            AND class IN ('personal', 'private')
+            AND deleted_at IS NULL
+          LIMIT 1
+          FOR UPDATE`;
+        if (scoped.length === 0) return;
+        const nodes = await tx.node.count({ where: { memoryId: scoped[0].id } });
+        if (nodes === 0) {
+          await tx.memory.delete({ where: { id: scoped[0].id } });
+        }
+      }, {
+        timeout: 20_000,
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
       });
-      if (userMemory && userMemory._count.nodes === 0) {
-        await ctx.db.memory.delete({ where: { id: userMemory.id } });
-      }
 
       return updated;
     },

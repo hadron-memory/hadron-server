@@ -18,6 +18,8 @@ import { cleanDb, createDbNode, createDbOrgAndGraph } from '../test/helpers.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../test/softPasskey.js';
 import { createSigningRequestInTransaction } from '../lib/signing/requests.js';
 import { clearSignatureVerifyCache } from '../lib/signing/verify.js';
+import { createHash } from 'node:crypto';
+import { backendPid, deadline, waitBlocked as observeBlocked, within, type Deadline } from '../test/lockObserver.js';
 
 const ORIGIN = 'https://sign.example.test';
 const RP = 'example.test';
@@ -26,6 +28,8 @@ let server: Server | undefined;
 let base: string;
 let observer: Client;
 let gate: Client;
+/** The gate connection's backend pid: the holder the first request is expected to wait on (#3748 item 3). */
+let gatePid: number;
 let requestId: string;
 let nodeId: string;
 let key: SoftPasskey;
@@ -66,19 +70,12 @@ async function seed() {
   return { cookie, signing, second, complete: () => post('complete', bodyOf(signing.ceremonyId, a), cookie) };
 }
 
-async function waitBlocked(exclude: number[] = []) {
-  const deadline = Date.now() + 8000;
-  for (;;) {
-    await observer.query('SELECT pg_stat_clear_snapshot()');
-    const r = await observer.query<{ pid: number; query: string; blockers: number[] }>(
-      `SELECT pid, query, pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
-        WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'`);
-    const hit = r.rows.find((x) => !exclude.includes(x.pid));
-    if (hit) return hit;
-    if (Date.now() > deadline) throw new Error('no backend ever blocked on a lock');
-    await new Promise((res) => setTimeout(res, 25));
-  }
-}
+/** #3748 items 2 and 3: the expected waiter only (statement and blocker), on the pin's one deadline. */
+const waitBlocked = (dl: Deadline, query: RegExp, blockedBy: number[]) => observeBlocked(observer, dl, { query, blockedBy });
+const sha256Hex = (v: string) => createHash('sha256').update(v).digest('hex');
+/** #3748 item 1: the live (unconsumed) SIGN ceremonies. */
+const liveSignCeremonies = () => db.$queryRaw<Array<{ id: string; browser_nonce_hash: string }>>`
+  SELECT id, browser_nonce_hash FROM passkey_ceremonies WHERE purpose = 'SIGN' AND consumed_at IS NULL`;
 const deadlocks = async () => {
   await observer.query('SELECT pg_stat_clear_snapshot()');
   return Number((await observer.query(`SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()`)).rows[0].deadlocks);
@@ -115,6 +112,7 @@ beforeEach(async () => {
   await observer.query(`SET statement_timeout = '10s'`);
   await gate.query(`SET statement_timeout = '30s'`);
   await gate.query(`SET lock_timeout = '30s'`);
+  gatePid = await backendPid(gate);
 });
 
 afterEach(async () => {
@@ -130,14 +128,15 @@ describe('#3737 proof vs completion over the real routes (software passkey; no h
   it('completion first: /complete answers 200, the racing /proof is the handled 403 refusal, one signature, no deadlock', async () => {
     const w = await seed();
     const before = await deadlocks();
+    const dl = deadline(20_000);
     await gate.query('BEGIN');
     await gate.query('SELECT id FROM nodes WHERE id = $1 FOR UPDATE', [nodeId]);
     const c = w.complete();
-    const cWait = await waitBlocked();
+    const cWait = await waitBlocked(dl, /FROM "?nodes"? WHERE/, [gatePid]);
     const p = w.second.send();
-    const pWait = await waitBlocked([cWait.pid]);
+    const pWait = await waitBlocked(dl, /pg_advisory_xact_lock/, [cWait.pid]);
     await gate.query('COMMIT');
-    const [cr, pr] = await Promise.all([c, p]);
+    const [cr, pr] = await within(dl, 'proof/completion', Promise.all([c, p]));
     await new Promise((res) => setTimeout(res, 1700));
     expect(await deadlocks()).toBe(before);
     expect(pWait.blockers).toEqual([cWait.pid]);
@@ -149,14 +148,15 @@ describe('#3737 proof vs completion over the real routes (software passkey; no h
   it('proof first: /proof answers 200 with a new ceremony, the racing /complete is the handled 403 refusal, request stays open, no deadlock', async () => {
     const w = await seed();
     const before = await deadlocks();
+    const dl = deadline(20_000);
     await gate.query('BEGIN');
     await gate.query('SELECT id FROM passkey_ceremonies WHERE id = $1 FOR UPDATE', [w.second.ceremonyId]);
     const p = w.second.send();
-    const pWait = await waitBlocked();
+    const pWait = await waitBlocked(dl, /passkey_ceremonies/, [gatePid]);
     const c = w.complete();
-    const cWait = await waitBlocked([pWait.pid]);
+    const cWait = await waitBlocked(dl, /pg_advisory_xact_lock/, [pWait.pid]);
     await gate.query('COMMIT');
-    const [cr, pr] = await Promise.all([c, p]);
+    const [cr, pr] = await within(dl, 'proof/completion', Promise.all([c, p]));
     await new Promise((res) => setTimeout(res, 1700));
     expect(await deadlocks()).toBe(before);
     expect(cWait.blockers).toEqual([pWait.pid]);
@@ -164,5 +164,13 @@ describe('#3737 proof vs completion over the real routes (software passkey; no h
     expect(await cr.text()).toBe('{"error":"forbidden"}');
     expect(((await pr.json()) as { outcome: string }).outcome).toBe('open');
     expect(await state()).toEqual({ request: 'open', signatures: 0 });
+    // #3748 item 1: exactly ONE fresh, unconsumed SIGN ceremony afterwards, not the retired one, under the cookie the
+    // winning proof just set (its value is the new browser nonce; the ceremony stores its hash).
+    const rotated = cookieOf(pr).split('=').slice(1).join('=');
+    expect(rotated).not.toBe('');
+    const live = await liveSignCeremonies();
+    expect(live).toHaveLength(1);
+    expect(live[0]!.id).not.toBe(w.signing.ceremonyId);
+    expect(live[0]!.browser_nonce_hash).toBe(sha256Hex(decodeURIComponent(rotated)));
   }, 40_000);
 });

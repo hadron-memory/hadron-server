@@ -19,9 +19,13 @@ const query = <T>(sql: string, ...params: unknown[]) => db.$queryRawUnsafe<T[]>(
 describe('prisma/grant-invariants.sql parity', () => {
   it('the newest migration to carry it ends with a byte-identical copy, and post-push includes the file', () => {
     const sql = readFileSync(new URL('../../../prisma/grant-invariants.sql', import.meta.url), 'utf8');
-    // #3998: the use-count-bound migration carries the full canonical guard (everything #4173's withdrawn-state migration carried, plus
-    // the max_uses bound on use_count), after it.
-    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d === '20261118100000_grant_use_count_bound');
+    // #4179 / #4180: the newest migration carries the full canonical file (everything #3998's use-count-bound migration carried, plus
+    // the agent_imports AFTER DELETE trigger), after it.
+    // The newest migration whose file contains the canonical file's first line is the carrier; a later one that carries it moves this.
+    const migrations = new URL('../../../prisma/migrations/', import.meta.url);
+    const first = sql.split('\n')[0]!;
+    const dir = readdirSync(migrations).sort().reverse()
+      .find((d) => { try { return readFileSync(new URL(`${d}/migration.sql`, migrations), 'utf8').includes(first); } catch { return false; } });
     expect(dir).toBeTruthy();
     expect(readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8').endsWith(sql)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir grant-invariants.sql');
@@ -72,6 +76,37 @@ describe('one App, one registered action, a reason', () => {
   it('revoked_at and revoked_by go together', async () => {
     await refused(insertGrantUnguarded(w, { revoked_at: raw(DB_NOW) }), /chk_grants_shape/);
     await refused(insertGrantUnguarded(w, { revoked_by: w.userId }), /chk_grants_shape/);
+  });
+  // A marker with no end (withdrawn_at set, revoked_at NULL) is admitted exactly as before #4767: the equal-timestamp line
+  // reads it as NULL, a CHECK passes on NULL, and the #4001 lifecycle negative control (secretAutoDelete4001) rides that
+  // tolerance — #4767's law binds ENDS (a person or the marker), not a stray marker on a never-ended row.
+  it('a marker with no end stays admitted: withdrawn_at set with revoked_at NULL', async () => {
+    await insertGrantUnguarded(w, { withdrawn_at: raw(DB_NOW) });
+  });
+  // #4767 (Grants R6): an agent's withdrawal through a run records no person — withdrawn_at pairs with revoked_at instead.
+  it('a WITHDRAWAL may stamp revoked_at with revoked_by NULL (#4767); a revoke with no person still may not', async () => {
+    const id = await insertGrant(w, { user_id: null, agent_id: w.agentId, requested_by_run_id: 'run_x' });
+    await refused(exec(`UPDATE grants SET revoked_at = ${DB_NOW}, updated_at = ${DB_NOW} WHERE id = $1`, id), /chk_grants_shape/); // a revoke names a person
+    await exec(`UPDATE grants SET revoked_at = ${DB_NOW}, withdrawn_at = ${DB_NOW}, updated_at = ${DB_NOW} WHERE id = $1`, id);
+    const [row] = await query<any>('SELECT revoked_at, withdrawn_at, revoked_by FROM grants WHERE id = $1', id);
+    expect(row.revoked_by).toBeNull();
+    expect(row.revoked_at).not.toBeNull();
+    expect(row.withdrawn_at).toEqual(row.revoked_at);
+  });
+  // Rook SEC10 on #4803 (defense in depth): the marker admits a personless end only on a RUN-MADE row — the database, not
+  // only the code, refuses a personless withdrawal of a person's or a worker's request.
+  it('a personless end rides only a run-made request: withdrawn_at with no revoker on a worker-made row is refused', async () => {
+    const workerMade = await insertGrant(w, { user_id: null, agent_id: w.agentId, requested_by_worker_id: w.workerId });
+    const personMade = await insertGrant(w, { user_id: null, agent_id: w.agentId, requested_by_user_id: w.userId });
+    for (const id of [workerMade, personMade]) {
+      await refused(exec(`UPDATE grants SET revoked_at = ${DB_NOW}, withdrawn_at = ${DB_NOW}, updated_at = ${DB_NOW} WHERE id = $1`, id), /chk_grants_shape/);
+    }
+  });
+  it('an agent-withdrawn row ends once: re-stamping it or retrofitting a revoker onto it is refused (#4767)', async () => {
+    const id = await insertGrant(w, { user_id: null, agent_id: w.agentId, requested_by_run_id: 'run_x' });
+    await exec(`UPDATE grants SET revoked_at = ${DB_NOW}, withdrawn_at = ${DB_NOW}, updated_at = ${DB_NOW} WHERE id = $1`, id);
+    await refused(exec(`UPDATE grants SET revoked_at = ${DB_NOW} + interval '1 minute', withdrawn_at = ${DB_NOW} + interval '1 minute' WHERE id = $1`, id), /grants are append-only/);
+    await refused(exec(`UPDATE grants SET revoked_by = $2 WHERE id = $1`, id, w.userId), /grants are append-only/);
   });
 });
 const dbNowPlus2h = () => raw(`${DB_NOW} + interval '2 hours'`);

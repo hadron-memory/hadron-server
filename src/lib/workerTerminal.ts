@@ -6,7 +6,8 @@
  * object from the validated fields; nothing is stored as received, and no screen text of any kind is accepted or
  * stored (cor:agt:050:11; D-2026-10-16-005 amended, Holger R65). `reason` is therefore a closed code, never a line.
  *
- * The field decides nothing: it feeds no `checkStatus` (cor:agt:100:03 stays derived), no availability
+ * The field decides ONE thing (#4933): the desired-start loop issues no start for a worker whose agent this host already
+ * runs (`agentRunsOnAnyHost` in src/lib/desiredState/desiredStart.ts). It feeds no `checkStatus` (cor:agt:100:03 stays derived), no availability
  * (cor:agt:060:08), no matcher, no stall rule and no server alarm.
  *
  * #4225 S4a (epic #4229) — the report also carries the worker's context size: `contextTokens` (a count the host
@@ -19,6 +20,13 @@
 /** The terminal states a host reports. */
 export const TERMINAL_STATUSES = ['busy', 'idle', 'locked', 'dark'] as const;
 export type TerminalStatus = (typeof TERMINAL_STATUSES)[number];
+
+/**
+ * #4941 (cor:agt:070:01: a report's state is "busy, idle, locked or dark"): the statuses that show an agent on the
+ * terminal. `dark` is the absent one. One list, so a status the CLI adds is a change to 070:01 and to this list first;
+ * the exhaustive table test over TERMINAL_STATUSES (desiredStartAlreadyRunning4933.test.ts) fails until it is decided.
+ */
+export const AGENT_PRESENT_STATUSES: ReadonlySet<string> = new Set<TerminalStatus>(['busy', 'idle', 'locked']);
 
 /** What the input prompt looked like. */
 export const TERMINAL_PROMPTS = ['empty', 'not_empty', 'menu', 'unknown'] as const;
@@ -48,6 +56,9 @@ export const TERMINAL_REASONS = [
   'multiple_terminals',
 ] as const;
 export type TerminalReason = (typeof TERMINAL_REASONS)[number];
+
+/** Terminal reasons that say no agent is on the terminal, whatever the status (hadron-cli#1187 codes; #4941 moved here). */
+export const AGENT_ABSENT_REASONS: ReadonlySet<string> = new Set<TerminalReason>(['no_terminal', 'bare_shell', 'no_agent']);
 
 /**
  * The keys of the stored object, exactly. The DB CHECK on `workers.terminal` lists the same keys; it lets the two

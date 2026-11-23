@@ -139,16 +139,60 @@ export async function writeChatEngineState(tx: Prisma.TransactionClient, rootId:
   await tx.chatRootEngineState.update({ where: { chatRootNodeId: rootId }, data: { state: stored as Prisma.InputJsonValue } });
 }
 
-/** Re-key at the existing node/memory locks; envelope shape, not the already-flipped flag, decides. */
-export async function encryptChatEngineStateWithKey(tx: Prisma.TransactionClient, rootId: string, key: import('./crypto.js').EncryptionKey): Promise<boolean> {
+export type ChatEngineConversion = 'unchanged' | 'converted' | 'blocked';
+
+/**
+ * Re-key at the existing node/memory locks; envelope shape, not the already-flipped flag, decides.
+ * #3575 (rulings 0225/0227/0228): the result is a CLASSIFICATION, never a throw for an unauthenticated envelope.
+ *  - 'unchanged': no row, or an envelope that already authenticates under this key (no double wrapping).
+ *  - 'converted': plain stored JSON was encrypted verbatim.
+ *  - 'blocked': an `__enc`-marked value that FAILS authentication. It is not plaintext: the row is preserved byte for byte
+ *    (never rewrapped, cleared, repaired or reseeded) and the caller reports it, content-free, as incomplete.
+ * Database and key failures still throw: they are real failures, not per-row skips.
+ */
+export async function encryptChatEngineStateWithKey(tx: Prisma.TransactionClient, rootId: string, key: import('./crypto.js').EncryptionKey): Promise<ChatEngineConversion> {
   const row = await tx.chatRootEngineState.findUnique({ where: { chatRootNodeId: rootId } });
-  if (!row || isAuthenticatedDataEnvelope(row.state, key)) return false;
-  // A failed authentication is not plaintext. Preserve it and refuse, never nest or reseed it.
-  if (row.state && typeof row.state === 'object' && Object.hasOwn(row.state, '__enc')) throw invalid();
+  if (!row || isAuthenticatedDataEnvelope(row.state, key)) return 'unchanged';
+  if (row.state && typeof row.state === 'object' && Object.hasOwn(row.state, '__enc')) return 'blocked';
   // Conversion is a confidentiality operation, not an engine execution/read.
   // Preserve all stored JSON (including malformed shapes and JSON null) verbatim;
   // strict semantic validation remains at the turn boundary after decryption.
   const stored = { __enc: encryptString(JSON.stringify(row.state), key) };
   await tx.chatRootEngineState.update({ where: { chatRootNodeId: rootId }, data: { state: stored as Prisma.InputJsonValue } });
-  return true;
+  return 'converted';
+}
+
+/** The most blocked chat-root node ids an ENCRYPTION_INCOMPLETE reports (ruling 0228, the gate's choice). */
+export const BLOCKED_ROOT_ID_CAP = 100;
+
+/**
+ * #3575: the content-free ENCRYPTION_INCOMPLETE for a blocked chat-engine row (the gate's extensions table plus
+ * `blockedEngineStateRootIds`, ruling 0228). Names no name, ciphertext, decoded value, path, key material or cipher,
+ * parser or database message. The ids are chat-root NODE ids of roots currently in the admitted memory, distinct and in
+ * ascending order (JavaScript UTF-16 code-unit order from `.sort()`; node ids are ASCII-generated, so it matches the database's order), at most BLOCKED_ROOT_ID_CAP; the count beside them is exact, or null when the scan did not finish.
+ * Callers raise it only AFTER the operation's authority and concealment checks.
+ * Two shapes carry this code: this one (`phase: 'CHAT_ENGINE_STATE'`, with the count and ids), and the legacy bare
+ * history-convergence error in encryptMemory (`{ code, memoryId }` only, no `phase`). The bare one takes precedence when both apply.
+ */
+export function buildEngineStateIncompleteError(args: {
+  memoryId: string;
+  operation: 'ENCRYPT_MEMORY' | 'PROMOTE_ANONYMOUS_MEMORY';
+  blockedRootIds: Iterable<string>;
+  scanFinished: boolean;
+  progressCommitted: boolean;
+}): GraphQLError {
+  const ids = [...new Set(args.blockedRootIds)].sort();
+  return new GraphQLError('Encryption conversion is incomplete.', {
+    extensions: {
+      code: 'ENCRYPTION_INCOMPLETE',
+      memoryId: args.memoryId,
+      operation: args.operation,
+      phase: 'CHAT_ENGINE_STATE',
+      reason: 'UNAUTHENTICATED_ENVELOPE',
+      blockedEngineStateCount: args.scanFinished ? ids.length : null,
+      blockedEngineStateRootIds: ids.slice(0, BLOCKED_ROOT_ID_CAP),
+      progressCommitted: args.progressCommitted,
+      retryable: false,
+    },
+  });
 }

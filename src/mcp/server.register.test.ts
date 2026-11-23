@@ -86,4 +86,4 @@ describe('the register on the identity surfaces (Phase 6)', () => {
 });
 
 // #3082: the team-chat monitor (#1265) rode hadron_team_chat_read, now disabled; the attention engine (mention-only routing,
-// deliberate acknowledgement, switchover, stale-session handling) is pinned in src/lib/teamAttention.test.ts.
+// deliberate acknowledgement, switchover, stale-session handling) is pinned in src/lib/ownWorkerSessions.test.ts.

@@ -1,3 +1,5 @@
+import { buildAuthRateAdmission } from './auth/authRate.js';
+import { AUTH_COOKIE_NAME } from './auth/cookieName.js';
 import { isSessionSupersededError, respondSessionSuperseded } from './lib/sessionSuperseded.js';
 import { assertRateReadiness, checkRateConfiguration, cleanupRateBuckets } from './lib/rateLimit/index.js';
 import { assertEventKeysLocal } from './lib/agentTasks/eventKeyRebase.js';
@@ -9,7 +11,7 @@ import { readTeamRecordKeys } from './lib/teamSpec/record.js';
 import * as Sentry from '@sentry/node';
 import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo/server';
 import { memoryPressurePlugin } from './api/graphql/memoryPressurePlugin.js';
-import { expressMiddleware } from '@apollo/server/express4';
+import { expressMiddleware } from '@as-integrations/express4';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -51,11 +53,12 @@ import {
   type LoginProvider,
   type NewPendingLogin,
 } from './auth/pendingLoginState.js';
-import { mintProviderNonce, nonceExpectation, recordNonceRefusal } from './auth/providerNonce.js';
+import { mintProviderNonce, nonceExpectation, refuseUnboundNonce } from './auth/providerNonce.js';
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
 import { mountSigningCeremonyRoutes } from './api/signingCeremonyRoutes.js';
+import { mountSecretChangeCeremonyRoutes } from './api/secretChangeCeremonyRoutes.js';
 import { mountGrantSigningCeremonyRoutes } from './api/grantSigningCeremonyRoutes.js';
 import { mountSecretRevealRoutes } from './api/secretRevealRoutes.js';
 import { mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
@@ -95,13 +98,17 @@ import { assignRequestId, bindRequestId, REQUEST_ID_HEADER } from './lib/request
 import { internalFaultErrorHandler, respondInternalFault } from './lib/internalFault.js';
 import { handleMcpRequest, handleMcpDelete, handleMcpSessionlessRequest, mcpServingMode, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
+import { startSecretChangeSweepLoop } from './jobs/sweepSecretChanges.js';
 import { startPasskeyCeremonySweepLoop } from './jobs/sweepPasskeyCeremonies.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
+import { startChatToolTeardownSweepLoop } from './jobs/sweepChatToolTeardown.js';
 import { secretSweepDisabledReason, startSecretSweepLoop } from './jobs/secretSweep.js';
 import { startGitMirrorObligationSweepLoop } from './jobs/sweepGitMirrorObligations.js';
 import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
+import { startGrantLapseSweepLoop } from './jobs/sweepGrantLapse.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
+import { checkPgvectorAtBoot } from './services/embedding/vectors.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
 import { startAssetBytesSweepLoop } from './jobs/sweepAssetBytes.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
@@ -135,6 +142,7 @@ import { mountCapabilitiesRoute } from './api/capabilities.js';
 import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
 import { mountSlackEventRoutes } from './api/slackEvents.js';
+import { mountTelegramEventRoutes } from './api/telegramEvents.js';
 import { mountWebFetchEventRoutes } from './api/webfetchEvents.js';
 import { buildMicrosoftAuthUrl, getMicrosoftRedirectUri } from './integrations/exchange/auth.js';
 import { buildGmailAuthUrl, getGmailRedirectUri, isGmailConnectConfigured } from './integrations/gmail/auth.js';
@@ -174,10 +182,12 @@ const GITHUB_WEBHOOK_PATH = '/github/webhook';
 // BEING MAPPED IS NOT BEING SKIPPED (@copilot, PR #924). `isExpectedClientError`
 // consults one shared list with `formatError` — so no second hand-kept
 // `instanceof` chain lives here — but each entry declares `silenceInSentry`
-// separately. The asset refusals are mapped for the wire and deliberately still
-// REPORTED, because ASSET_BYTES_GONE is real server-state inconsistency and
-// this is currently its only alarm (#1140). Do not read the list as "everything
-// formatError touches is silent here"; read the flag.
+// separately. For example, the asset refusals were for a while mapped for the
+// wire but still REPORTED, because ASSET_BYTES_GONE (a missing object) had no
+// other alarm; since #1140 the bytes-missing sweep and the restore path raise
+// `asset.bytes_missing` where it is discovered, so they are silenced here now.
+// Do not read the list as "everything formatError touches is silent here";
+// read the flag.
 const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
   async requestDidStart() {
     return {
@@ -214,6 +224,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // configured keyring refuses boot without echoing secret values.
   readTeamRecordKeys();
   const app = express();
+  const authRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'none' });
+  const userAuthRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'bearer' });
 
   // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
   // which upstream proxies it can trust so `req.protocol` resolves to
@@ -394,7 +406,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     return claim.pending;
   };
 
-  app.get('/auth/github', async (req, res) => {
+  app.get('/auth/github', authRate, async (req, res) => {
     const redirect = (req.query.redirect as string) || '/';
 
     // Option-C: optional `return_to` query param routes the post-
@@ -447,7 +459,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     res.redirect(buildAuthUrl(state));
   });
 
-  app.get('/auth/github/callback', async (req, res) => {
+  app.get('/auth/github/callback', authRate, async (req, res) => {
     const { code, state } = req.query as { code?: string; state?: string };
 
     if (!code || !state) {
@@ -553,7 +565,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       if (pending.returnTo) {
         const { exp } = decodeJwt(jwt);
         const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-        res.cookie('hadron_token', jwt, {
+        res.cookie(AUTH_COOKIE_NAME, jwt, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
@@ -594,7 +606,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // for one provider can never be replayed against the other's callback.
   // ---------------------------------------------------------------------------
 
-  app.get('/auth/google', async (req, res) => {
+  app.get('/auth/google', authRate, async (req, res) => {
     // Fail loud and early when the deployment doesn't carry the Google OAuth
     // client — a 302 built with an undefined client_id would send the user to
     // a Google error page instead.
@@ -640,7 +652,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     res.redirect(buildGoogleAuthUrl(state, nonce));
   });
 
-  app.get('/auth/google/callback', async (req, res) => {
+  app.get('/auth/google/callback', authRate, async (req, res) => {
     const { code, state } = req.query as { code?: string; state?: string };
 
     if (!code || !state) {
@@ -651,11 +663,11 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     const pending = await claimStateOrFail(res, state, 'google');
     if (!pending) return;
 
-    // #2204: what the ID token's nonce must match. Null = a ceremony row with no nonce hash, refused before any
-    // exchange (the legacy skip never reaches passkey step-up).
+    // #2204: what the ID token's nonce must match. Null = a row with no nonce hash (ceremony or ordinary), refused before any
+    // exchange (#2282: no row is exempt).
     const nonceExpected = nonceExpectation(pending);
     if (!nonceExpected) {
-      recordNonceRefusal('google', 'ceremony_unbound');
+      refuseUnboundNonce('google', pending);
       failLoginCallback(res, 'google', 'verify_failed');
       return;
     }
@@ -707,7 +719,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       if (pending.returnTo) {
         const { exp } = decodeJwt(jwt);
         const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-        res.cookie('hadron_token', jwt, {
+        res.cookie(AUTH_COOKIE_NAME, jwt, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
@@ -747,7 +759,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // minted for one provider can never be replayed against another's callback.
   // ---------------------------------------------------------------------------
 
-  app.get('/auth/apple', async (req, res) => {
+  app.get('/auth/apple', authRate, async (req, res) => {
     // All four vars are required together (client id for the authorize URL,
     // team id + key id + private key for the token-call client secret) — a
     // half-configured deployment must fail loud here, not 500 mid-callback.
@@ -800,7 +812,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // would always fail. Don't "fix" this into cookies. The route-scoped
   // urlencoded parser is needed because the app only mounts JSON parsers
   // globally.
-  app.post('/auth/apple/callback', express.urlencoded({ extended: false }), async (req, res) => {
+  app.post('/auth/apple/callback', authRate, express.urlencoded({ extended: false }), async (req, res) => {
     // typeof guards, not a cast: repeated form fields (`code=a&code=b`) parse
     // to arrays, which would slip past a bare truthiness check and 500 inside
     // the exchange. Non-string shapes collapse to the same 400 as absent
@@ -818,11 +830,11 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     const pending = await claimStateOrFail(res, state, 'apple');
     if (!pending) return;
 
-    // #2204: what the ID token's nonce must match. Null = a ceremony row with no nonce hash, refused before any
-    // exchange (the legacy skip never reaches passkey step-up).
+    // #2204: what the ID token's nonce must match. Null = a row with no nonce hash (ceremony or ordinary), refused before any
+    // exchange (#2282: no row is exempt).
     const nonceExpected = nonceExpectation(pending);
     if (!nonceExpected) {
-      recordNonceRefusal('apple', 'ceremony_unbound');
+      refuseUnboundNonce('apple', pending);
       failLoginCallback(res, 'apple', 'verify_failed');
       return;
     }
@@ -874,7 +886,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       if (pending.returnTo) {
         const { exp } = decodeJwt(jwt);
         const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-        res.cookie('hadron_token', jwt, {
+        res.cookie(AUTH_COOKIE_NAME, jwt, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
@@ -971,7 +983,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     },
   );
 
-  app.get('/auth/email/verify', async (req, res) => {
+  app.get('/auth/email/verify', authRate, async (req, res) => {
     const { token, redirect: redirectParam, return_to: returnToRaw } = req.query as {
       token?: string;
       redirect?: string;
@@ -1060,7 +1072,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
         });
         const { exp } = decodeJwt(jwt);
         const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-        res.cookie('hadron_token', jwt, {
+        res.cookie(AUTH_COOKIE_NAME, jwt, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
@@ -1112,6 +1124,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   mountSigningCeremonyRoutes(app);
   // #3649 slice C: the grant signing ceremony, on the same switch.
   mountGrantSigningCeremonyRoutes(app);
+  mountSecretChangeCeremonyRoutes(app);
   mountSecretRevealRoutes(app);
   mountPasskeySignInRoutes(app);
   mountFreshSignInRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
@@ -1122,7 +1135,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // cookie on the portal origin. The JWT never rides in a browser-visible URL.
   // `clientState` (GitHub flow) is the raw browser nonce the portal read from
   // its HttpOnly cookie; the code's stored hash must match (session fixation).
-  app.post('/auth/session', async (req, res) => {
+  app.post('/auth/session', authRate, async (req, res) => {
     const body = (req.body ?? {}) as { code?: unknown; clientState?: unknown };
     const code = typeof body.code === 'string' ? body.code : '';
     const clientState = typeof body.clientState === 'string' ? body.clientState : undefined;
@@ -1160,7 +1173,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     res.json({ token: jwt, redirect: redeemed.redirect, isNew: redeemed.isNew });
   });
 
-  app.get('/auth/me', async (req, res) => {
+  app.get('/auth/me', userAuthRate, async (req, res) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) {
       res.status(401).json({ error: 'No token provided' });
@@ -1221,6 +1234,9 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     stopOnTerminationSignals: false,
     // #2087: concealed errors must not depend on the deployment's NODE_ENV.
     includeStacktraceInErrorResponses: false,
+    // #4593: Apollo 5 answers a variable-coercion error with HTTP 400 by default; 4 answered 200 with `errors`.
+    // Keep the 4 answer: flipping it is a client-visible contract change (S2 of #4521), not part of the bump.
+    status400ForVariableCoercionErrors: false,
     typeDefs,
     resolvers: deploymentResolvers,
     plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission), memoryPressurePlugin()],
@@ -1799,6 +1815,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // Fails safe until the mailbox GCP project's client is provisioned —
     // same posture as Google login (#583).
     isConfigured: isGmailConnectConfigured,
+    // #2948: a Google account shared across services — the start accepts an
+    // account hint (Google's login_hint) scoped to the caller's own Google
+    // connections in the org.
+    acceptsLoginHint: true,
   });
   // Google Calendar = hadrontool-google-cal — a CALENDAR connection on the
   // same rails (ExchangeConnection row, provider 'google-cal'). Separate
@@ -1814,6 +1834,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // The calendar tool has no folder-subscription surface (no event plane
     // in v1) — don't POST a doomed inbox subscription on every connect.
     subscribeInbox: false,
+    // #2948: same Google-account hint scope as the gmail start.
+    acceptsLoginHint: true,
   });
   // Google Drive = hadrontool-google-drive — a DRIVE connection on the same
   // rails (ExchangeConnection row, provider 'google-drive'). Its own OAuth
@@ -1829,6 +1851,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     isConfigured: isGoogleDriveConnectConfigured,
     // No folder-subscription surface (no event plane in v1).
     subscribeInbox: false,
+    // #2948: same Google-account hint scope as the gmail start.
+    acceptsLoginHint: true,
   });
 
   // ---------------------------------------------------------------------------
@@ -1846,6 +1870,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // (spec 043 Phase 2) — same CORE_EVENTS_TOKEN contract; dispatch dedupes
   // on (connectionId, envelopeId) because the tool's inbox is at-least-once.
   mountSlackEventRoutes(app);
+
+  // Normalized Telegram events (telegram.*) arrive here from hadrontool-telegram (#597, Telegram phase 2) — same
+  // CORE_EVENTS_TOKEN contract; dispatch claims (connectionId, eventId) because the tool's inbox is at-least-once.
+  mountTelegramEventRoutes(app);
 
   // Durable webfetch poll events (poll.triggered / expired / failed) arrive
   // from hadrontool-webfetch. The core validates the origin-run binding,
@@ -1929,21 +1957,32 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     startMergeConsentSweepLoop(db);
   }
 
+  // Background job (#4847, cor:int:030:03): reconcile, cap and retry the chat tool teardown intents (Telegram, Slack) every 5 minutes.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_CHAT_TOOL_TEARDOWN_SWEEP !== 'true') {
+    startChatToolTeardownSweepLoop(db);
+  }
+
   // #4003 (S8 of #3991) — App secret retention: superseded versions past SECRET_VERSION_RETENTION_DAYS or the
   // kept-versions cap, and events a year after their App is gone. Hourly. A disabled sweep is logged (plan #3991).
   {
     const off = secretSweepDisabledReason();
     if (off === null) startSecretSweepLoop(db);
-    else if (off !== 'NODE_ENV=test') console.warn(`secret_sweep.disabled reason=${off}`);
+    else if (off !== 'NODE_ENV=test') console.warn(`secret_sweep.disabled reason=${off} window_end_auto_delete=off`);
   }
 
   // #3122: transient passkey/signing ceremonies; independent of feature flags so old rows still retire.
   startPasskeyCeremonySweepLoop(db);
+  startSecretChangeSweepLoop(db);
 
   // #155 — collect unused DCR OAuth clients 7 days past their expiry (soft delete). Dry run, logging
   // the count it would collect, until OAUTH_CLIENT_GC_ENABLED=true (R220).
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_OAUTH_CLIENT_GC !== 'true') {
     startOauthClientGcLoop(db);
+  }
+
+  // #4178 — end the grants of agents whose installation lapsed with no write door (licence expiry/revoke, deleted organization).
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_GRANT_LAPSE_SWEEP !== 'true') {
+    startGrantLapseSweepLoop(db);
   }
 
   // #1647 — resume pending notices of admin-initiated account erasures (restart-safe outbox).
@@ -1986,6 +2025,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   ) {
     startOrphanObjectReaperLoop(db);
   }
+
+  // #2772: read the pgvector version once so the `vector.iterative_scan_unsupported` line (older than 0.8.0)
+  // appears at startup. It never throws and never refuses to start: an older version just uses the exact scan.
+  if (process.env.NODE_ENV !== 'test') void checkPgvectorAtBoot(db);
 
   // Background job (#1140): hourly bounded sweep for Asset rows whose bytes are
   // missing from object storage — the mirror of the orphan sweep. Read-only

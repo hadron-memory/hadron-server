@@ -13,11 +13,11 @@ import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.
 import { renderAttentionSection } from '../lib/channelReadState.js';
 import { makeProdRunDeps, runContext } from '../jobs/appRunDeps.js';
 import { hadronStoreFile } from '../lib/runner/tools/storeTools.js';
-import { putObject } from '../integrations/r2/client.js';
+import { putObject } from '../integrations/objectstore/index.js';
 import { hadronReadNode, hadronUpdateNode, hadronCreateNode } from '../lib/runner/tools/nodeTools.js';
 import { testRunAgentId } from '../test/runAgent.js';
 
-vi.mock('../integrations/r2/client.js', () => ({ putObject: vi.fn(), deleteObject: vi.fn() }));
+vi.mock('../integrations/objectstore/index.js', () => ({ putObject: vi.fn(), deleteObject: vi.fn() }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 beforeEach(async () => { await cleanDb(db); });
 
