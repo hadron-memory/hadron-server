@@ -4238,6 +4238,15 @@ model App {
   @@index([urn])
   @@index([ownerUserId])
   @@index([legacyUrn])
+  /// #4937 (hrn:node:hadronmemory.com:specs:cor:agt:050:31): the App's latest report of whether work exists OUTSIDE Hadron
+  /// (GitHub issues and the like), made by an App manager through `reportExternalTasks`. NULL = never reported, and the
+  /// lead cadence alarm does not exist for such an App. The platform never learns what the external tasks are, and there
+  /// is no staleness rule: the latest report counts however old it is.
+  externalTasksExist                Boolean?             @map("external_tasks_exist")
+  /// When the latest report that CHANGED the answer was made (database clock). NULL until the first report.
+  externalTasksReportedAt           DateTime?            @map("external_tasks_reported_at")
+  /// The user who made that report (a bare id, no relation: the report is a fact, not a membership).
+  externalTasksReportedBy           String?              @map("external_tasks_reported_by")
   @@index([chatbotAiConfigId])
   @@map("apps")
 }

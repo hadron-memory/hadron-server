@@ -5102,7 +5102,13 @@ export const typeDefs = `#graphql
     caller-org scope as apps — never exposes a foreign org's App.
     """
     appAgents: [AppAgent!]!
-    "Adoption count. #551: the owning tenant's view (0 otherwise): the owning org's members, or for a user-owned agent its owner (#1693)."
+    """
+    Adoption count: the owning tenant's total (#551). It counts every live
+    install of this Agent, including Apps the viewer may not be able to read,
+    so it can exceed the length of apps. It is 0 for any viewer outside the
+    owning tenant: the owning org's members, or for a user-owned agent its
+    owner (#1693). It is not the number of Apps the viewer can read.
+    """
     appCount: Int!
     """
     Org grants for this Agent (which orgs were granted it). #551: the agent's
@@ -9961,6 +9967,11 @@ export const typeDefs = `#graphql
     """
     saturationAlarmWakeRoles(appRef: ID!): SaturationAlarmWakeRoles!
     """
+    #4937 — the App's latest report of whether work exists outside Hadron (hrn:node:hadronmemory.com:specs:cor:agt:050:31), for whoever may
+    read its roster, with the roster's refusal byte for byte. exist is null until the App's first report.
+    """
+    externalTasksReport(appRef: ID!): ExternalTasksReport!
+    """
     #4921 — the App's role lists, one per purpose (link a defect, the register pick's role route, withdraw a negative review verdict). For whoever may read the App's roster, refused as the roster is (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
     """
     appRoleLists(appRef: ID!): AppRoleLists!
@@ -12906,6 +12917,16 @@ export const typeDefs = `#graphql
     #3323: the App-manager arm also admits the manager's held worker on an instruction, recorded as one app.manager-act event, ids only.
     """
     setSaturationAlarmWakeRoles(appRef: ID!, roles: [String!]!, instruction: ActInstructionInput): SaturationAlarmWakeRoles!
+    """
+    #4937 — report whether work exists OUTSIDE Hadron for the App (GitHub issues and the like; hrn:node:hadronmemory.com:specs:cor:agt:050:31).
+    Until an App's first report the lead cadence alarm does not exist for it; once the latest report says true it does. Whoever manages
+    the App only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12): a participant who does not manage it gets APP_MANAGER_REQUIRED, a caller
+    who cannot see the App gets the missing App's answer. There is no staleness rule: the latest report counts however old it is. A report
+    of false only stops NEW alarms; an open episode stays open until its lead assigns. Reporting the stored answer again changes nothing.
+    Refusals: BAD_USER_INPUT (before any other check), APP_NOT_FOUND, APP_MANAGER_REQUIRED, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    #3323: the App-manager arm also admits the manager's held worker on an instruction, recorded as one app.manager-act event, ids only.
+    """
+    reportExternalTasks(appRef: ID!, exist: Boolean!, instruction: ActInstructionInput): ExternalTasksReport!
     """
     #4921 — set ONE of the App's role lists, the whole list at once. Whoever manages the App only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12): a participant who does not manage it gets APP_MANAGER_REQUIRED, a caller who cannot see the App gets the missing App's answer. Names are trimmed and lower-cased and duplicates collapse; at most 32 names of 1 to 64 characters with no ':' or whitespace; an empty list clears it. Stores the list only: no door reads it yet.
     """
@@ -19267,6 +19288,17 @@ export const typeDefs = `#graphql
     defectLink: [String!]!
     registerPick: [String!]!
     reviewWithdraw: [String!]!
+  }
+
+  """
+  #4937 — whether work exists outside Hadron for an App, as its manager last reported it (hrn:node:hadronmemory.com:specs:cor:agt:050:31).
+  """
+  type ExternalTasksReport {
+    appId: ID!
+    "True: external tasks exist. False: none. Null: the App has never reported, so its lead cadence alarm does not exist."
+    exist: Boolean
+    "When the latest report that changed the answer was made (database clock); null until the first report."
+    reportedAt: DateTime
   }
 
   """

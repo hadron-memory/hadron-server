@@ -788,6 +788,8 @@ export type ManagerAct =
   // #4777: the saturation-alarm wake-roles list (cor:agt:060:16).
   | 'app.saturation-wake-roles'
   | 'app.role-list'
+  // #4937: the App's report of whether external tasks exist (cor:agt:050:31).
+  | 'app.external-tasks-report'
   | 'app.model-group.set' | 'app.model-group.delete' | 'app.properties'
   // #3321 (S4b): the host-operation, stop-signal, ticker, settings, isolation and wake doors.
   | `host-operation.${'worker.start' | 'worker.end' | 'worktree.create' | 'worktree.remove'}`
