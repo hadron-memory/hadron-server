@@ -156,6 +156,12 @@ describe('#4937 the report: never reported by default, made by whoever manages t
     expect(await row()).toEqual(before);
   });
 
+  it('concurrent reports by several managers all resolve: the writer takes the App row exclusive, so none deadlocks (40P01)', async () => {
+    const results = await Promise.allSettled(Array.from({ length: 18 }, (_, i) => report(i % 2 === 0, ctx(i % 3 === 0 ? ownerId : orgAdminId))));
+    expect(results.filter((r) => r.status === 'rejected').map((r) => (r as PromiseRejectedResult).reason?.message)).toEqual([]);
+    expect(typeof (await row()).externalTasksExist).toBe('boolean');
+  }, 30000);
+
   it('does not write the stall schedule row (the record is on the App)', async () => {
     await report(true, ctx(ownerId));
     expect(await db.agentTaskStallSchedule.count({ where: { appId } })).toBe(0);

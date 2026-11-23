@@ -571,7 +571,7 @@ export const agentTaskAlarmMutations = {
                         external_tasks_reported_by = ${ctx.userId ?? null}
         WHERE id = ${freshApp.id}`;
       await recordInstructedManagerAct(tx, freshApp.id, actor, 'app.external-tasks-report');
-    });
+    }, { lockMode: 'exclusive' }); // the writer UPDATEs the anchored App row itself: a shared hold cannot upgrade without deadlocking its peers
     return externalTasksReportView(ctx.db, app.id);
   },
 
