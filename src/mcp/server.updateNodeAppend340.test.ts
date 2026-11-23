@@ -321,6 +321,21 @@ describe('#340 acceptance 5 — refusals write nothing', () => {
     expect(await raw()).toEqual(before);
   });
 
+  it('memory encrypted while the append waits: refused under the lock, ciphertext byte-identical, no revision (Rodolfo §10 P2-1)', async () => {
+    const node = await seed('refuse:encrypted-while-waiting');
+    const key = parseDataKey(Buffer.alloc(32, 43).toString('base64'));
+    const cipher = (encryptNodeFieldsWithKey({ content: 'PLAIN BODY' }, key) as { content: string }).content;
+    writeJustBeforeNextTransaction(async () => {
+      await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
+      await db.node.update({ where: { id: node.id }, data: { content: cipher } });
+    });
+    const text = await mcp().callToolText('hadron_update_node', { urn: urnFor(node.loc), appendContent: 'TAIL' });
+    expect(text).not.toContain('Node updated:');
+    expect(text).toMatch(/\[node_write_conflict\] Memory encryption changed while this write waited/);
+    expect(await bodyOf(node.id)).toBe(cipher);
+    expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(0);
+  });
+
   it('governed node: [role_governed], and no door is named (no door carries the new arguments)', async () => {
     const task = await seed('refuse:task', { isRunnable: true });
     const review = await seed('refuse:review', { role: 'review' });
