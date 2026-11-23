@@ -1090,6 +1090,8 @@ export const nodeQueries = {
           try {
             const parsed = parseUrnV2(baseUrn); // fixed 'agenttask' arity: [app-slug, leaf]
             const leaf = parseTaskHandle(parsed.segments[1]);
+            // Deliberate guard: a single URN segment cannot carry the colon an App-qualified handle needs, so
+            // appUrn is null here today; refuse anything else rather than trust that.
             if (!leaf || leaf.appUrn !== null) return null;
             qualified = `hrn:agenttask:${parsed.root}:${parsed.segments[0]!}:${leaf.handle}`;
           } catch (error) {
@@ -1101,7 +1103,7 @@ export const nodeQueries = {
               ctx,
               qualified,
               async (_c, { task, app }) => ({ kind: 'agenttask', id: task.id, organizationId: app.organizationId }),
-              true,
+              true, // allowRun: a run in the task's own App may read it
             );
           } catch (error) {
             // A name-resolution outcome on the App reference is the uniform refusal; a fault propagates (#2975).
