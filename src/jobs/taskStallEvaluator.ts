@@ -19,8 +19,8 @@
  *      reset in the same pass.
  *   7. (#2755) raise the dark-worker alarm for each worker that is OVERDUE or has a wake unacknowledged past the
  *      App's window, once per episode, and end the episodes that cleared (cor:agt:100:06, Proposed).
- *   8. (#2763) raise the coordinator-cadence alarm for each coordinator that made no assignment for 60 minutes while a
- *      worker in its lane was free for work, once per episode (cor:agt:050:31, Proposed).
+ *   8. (#2763, #4375) raise the lead-cadence alarm for each lead that made no assignment for 60 minutes while a
+ *      worker under it was free for work, once per episode (cor:agt:050:31).
  *   9. (#3819 slice 1) open and end the saturation episodes, raising one task-less, chain-less alarm per episode for a
  *      family/tier/role combination the platform could not give work to (cor:agt:060:14, :15, Proposed).
  *
@@ -44,7 +44,7 @@ import { anchorNow } from '../lib/stopSignals/state.js';
 import { sweepContextResets } from '../lib/contextReset/contextReset.js';
 import { recordStallPass } from '../lib/agentTasks/stallGap.js';
 import { evaluateDarkWorkers } from '../lib/agentTasks/darkWorker.js';
-import { evaluateCoordinatorCadence } from '../lib/agentTasks/coordinatorCadence.js';
+import { evaluateLeadCadence } from '../lib/agentTasks/leadCadence.js';
 import { evaluateStaleSweeps, postPendingSweepSummaries } from '../lib/agentTasks/sweepRuns.js';
 import { evaluateSaturation } from '../lib/agentTasks/saturation.js';
 
@@ -69,9 +69,9 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
   }
   // #2763: with the dark-worker pass, before the escalation, for the same reason.
   try {
-    result.cadenceRaised = (await evaluateCoordinatorCadence(db, now)).length;
+    result.cadenceRaised = (await evaluateLeadCadence(db, now)).length;
   } catch (err) {
-    console.error('[task-stall] coordinator-cadence evaluation failed:', err);
+    console.error('[task-stall] lead-cadence evaluation failed:', err);
   }
   // #4233: a host whose sweep stopped reporting; before the escalation, for the same reason.
   try {

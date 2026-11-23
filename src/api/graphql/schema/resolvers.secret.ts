@@ -49,7 +49,8 @@ import { forbiddenError } from '../../../lib/refusals.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { admitOperationRate } from '../../../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import {
@@ -129,7 +130,8 @@ async function resolveSecretOwnerRef(
         return (await resolveAppRef(ctx.db, ownerRef)).id;
       } catch (err) {
         // A missing App and one the caller may not use answer the same, so the ref is no existence oracle.
-        if (err instanceof AppNotFoundError || err instanceof AmbiguousLegacyUrnError) throw authorizationDenied();
+        // #4893: the whole shared resolution list folds — a malformed ref is the same refusal.
+        if (isAppRefResolutionFailure(err)) throw authorizationDenied();
         throw err;
       }
     }
@@ -306,9 +308,11 @@ export const secretMutations = {
     }
     if (secret.ownerType === 'app') return updateAppSecret(ctx, secret, args);
     await requireSecretOwnerWrite(ctx, secret.ownerType as SecretOwnerType, secret.ownerId);
-    if (args.protected !== undefined) throw badInput('Protection is available only for App secrets.');
+    // An explicit null on a field that is not nullable in storage is "not supplied" (cor:api:210:01), as on the App door.
+    const requestedProtected = args.protected ?? undefined;
+    if (requestedProtected !== undefined) throw badInput('Protection is available only for App secrets.');
 
-    if (args.metadata === undefined && args.value === undefined && args.protected === undefined) {
+    if (args.metadata === undefined && args.value === undefined) {
       throw badInput('Pass metadata and/or value.');
     }
     const effectiveValue = args.value !== undefined ? args.value : decryptSecretValue(secret);
@@ -507,6 +511,7 @@ const MAX_LIVE_READ_CLIENTS = 100;
 
 interface IssueReadClientInput {
   secretRef: string; holderKind: 'USER' | 'WORKER' | 'AGENT' | 'APP'; holderRef?: string | null; autoDelete: boolean;
+  mode?: 'REVEAL' | 'USE' | null; bindingPrefix?: string | null; bindingHeader?: string | null;
   startsAt?: Date | string | null; expiresAt?: Date | string | null; maxReads?: number | null; reason: string;
 }
 
@@ -531,10 +536,12 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
   await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
   // The refusals that depend only on the INPUT come first, before the secret is looked up: judged after it, a stranger could tell an
   // existing secret from a missing one by which refusal came back (existence oracle, Rook's partial §10 at f610b2e5).
-  // #4434: an AGENT holder is read through the role agent's live workers (cor:sec:060:02). An APP holder has no reveal path (use by its
-  // own runs is S5, #4000), and a read client nothing can read must never exist: refuse it before any write.
-  if (input.holderKind === 'APP') {
-    throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A read client is held by a person, a worker or an agent.');
+  // #4434: an AGENT holder is read through the role agent's live workers (cor:sec:060:02). A REVEAL client has no App holder (an App
+  // reaches a secret only by use, from its own runs: S5, #4000), and a USE client is held by an agent or an App, never a person or a worker.
+  // A read client nothing can read must never exist: refuse it before any write.
+  const use = input.mode === 'USE';
+  if (use ? (input.holderKind !== 'AGENT' && input.holderKind !== 'APP') : input.holderKind === 'APP') {
+    throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', use ? 'A use client is held by an agent or an App.' : 'A read client is held by a person, a worker or an agent.');
   }
   const startsAt = asTime(input.startsAt);
   const expiresAt = asTime(input.expiresAt);
@@ -563,6 +570,7 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
         const issuance = await requireSecretReadClientIssuer({ ...txCtx, db: tx } as Context, found.id, input.autoDelete);
         const holder = input.holderKind === 'USER'
           ? { kind: 'user' as const, id: input.holderRef || userId }
+          : input.holderKind === 'APP' ? { kind: 'app' as const, id: input.holderRef || app.id }
           : { kind: input.holderKind === 'AGENT' ? 'agent' as const : 'worker' as const, id: input.holderRef ?? '' };
         if (holder.kind === 'user' && !(await appMember({db:tx, userId:holder.id, roles:[]} as unknown as Context, app.id))) {
           throw readClientRefusal('GRANT_HOLDER_NOT_ALLOWED', 'A person holder must participate in this App.');
@@ -576,7 +584,8 @@ async function issueSecretReadClient(ctx: Context, input: IssueReadClientInput) 
         }
         const grantId = await createPendingGrant(tx, {
           appId: app.id, requester: { userId, workerId: null, sessionId: null }, holder,
-          action: 'secret.reveal', values: { secret: found.id, 'auto-delete': input.autoDelete ? 'delete' : 'keep' },
+          action: use ? 'secret.use' : 'secret.reveal',
+          values: { secret: found.id, 'auto-delete': input.autoDelete ? 'delete' : 'keep', ...(use ? { 'binding-prefix': input.bindingPrefix, 'binding-header': input.bindingHeader } : {}) },
           startsAt, expiresAt, maxUses, reason: input.reason, canReadMemory: async () => false, heldAgentAnchor: agentAnchor,
         });
         const clientId = generateId();
@@ -632,8 +641,18 @@ export const secretQueries = {
     let ownerId: string;
     try {
       ownerId = await resolveSecretOwnerRef(ctx, ownerType, args.ownerRef);
-    } catch {
-      return { items: [], total: 0 };
+    } catch (e) {
+      // #4893/#2975: a name-resolution failure on any owner arm — typed miss, malformed or
+      // ambiguous ref — is the empty page, as is a typed refusal an arm already folded: the App
+      // arm's one denial for missing-and-not-yours is authorizationDenied(), whose code (FORBIDDEN,
+      // src/lib/auth/authorizationDenied.ts) is what this matches — while an App that resolves but
+      // is not the caller's answers the same page below, at canSeeSecretOwner. Anything else —
+      // argument validation, a database fault — is none of those and propagates: the bare catch
+      // that used to swallow it made a dead database indistinguishable from an empty owner.
+      if ((e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN') || refNamesNothing(e, { ambiguousNamesNothing: true })) {
+        return { items: [], total: 0 };
+      }
+      throw e;
     }
     if (!(await canSeeSecretOwner(ctx, ownerType, ownerId))) return { items: [], total: 0 };
     if (ownerType === 'app') await admitOperationRate(ctx, ctx.db, 'OTHER_READS', appRateIdentity(ctx));
@@ -674,7 +693,7 @@ export const secretQueries = {
     const [items, total] = await Promise.all([
       take === 0
         ? Promise.resolve([])
-        : ctx.db.secretEvent.findMany({ where, orderBy: [{ at: 'desc' }, { id: 'desc' }], take, skip: Math.max(0, args.offset ?? 0) }),
+        : ctx.db.secretEvent.findMany({ where, orderBy: [{ at: 'desc' }, { seq: 'desc' }], take, skip: Math.max(0, args.offset ?? 0) }),
       ctx.db.secretEvent.count({ where }),
     ]);
     return { items, total };

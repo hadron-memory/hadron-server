@@ -1,4 +1,5 @@
 import { GraphQLError } from 'graphql';
+import { toolRegistrationKey } from './toolRegistrationKey.js';
 
 /**
  * Client for the Telegram capability tool (#597; hadrontool-telegram). On the emailClient / slackClient pattern:
@@ -140,9 +141,13 @@ export interface TelegramToolConnectionIdentity {
  */
 export async function createTelegramToolConnection(
   provider: string,
-  input: { botToken: string },
+  input: { botToken: string; appId: string },
 ): Promise<TelegramToolConnectionIdentity> {
-  const identity = await postToTool<TelegramToolConnectionIdentity>(provider, '/connections', input, [input.botToken]);
+  // #4829: a core-derived registrationKey lets a tool that supports it recognise a retry after a lost response as the
+  // SAME registration. A tool that does not know the field ignores it and behaves exactly as before (the 400 on a
+  // duplicate bot). The key is scrubbed from any error like the token.
+  const body = { botToken: input.botToken, registrationKey: toolRegistrationKey(provider, input.appId, [input.botToken]) };
+  const identity = await postToTool<TelegramToolConnectionIdentity>(provider, '/connections', body, [input.botToken, body.registrationKey]);
   const required: (keyof TelegramToolConnectionIdentity)[] = ['id', 'botId', 'botUsername', 'displayName'];
   const invalid = required.some((k) => typeof identity[k] !== 'string' || (identity[k] as string).trim() === '');
   if (invalid || identity.provider !== provider) {
@@ -156,10 +161,12 @@ export async function createTelegramToolConnection(
 }
 
 /**
- * Best-effort disconnect on the provider tool (poll teardown + soft delete). NEVER throws: the caller's DB effect has
- * already committed, so a misconfigured provider or an unreachable tool must log, not fail the surrounding operation.
+ * Disconnect on the provider tool (poll teardown + soft delete). NEVER throws: the caller's DB effect has already committed, so a
+ * misconfigured provider or an unreachable tool must log, not fail the surrounding operation. Returns whether the tool CONFIRMED:
+ * true only on a success answer (#4847, cor:int:030:03 clause 3). A not-found is NOT a confirmation here (the tool must answer a
+ * repeat DELETE with success, hadrontool-telegram#8), nor is any other status, a transport failure or an unset URL.
  */
-export async function deleteTelegramToolConnection(provider: string, toolConnectionId: string): Promise<void> {
+export async function deleteTelegramToolConnection(provider: string, toolConnectionId: string): Promise<boolean> {
   try {
     const { baseUrl, token } = toolFor(provider);
     const res = await fetch(`${baseUrl}/connections/${encodeURIComponent(toolConnectionId)}`, {
@@ -167,9 +174,14 @@ export async function deleteTelegramToolConnection(provider: string, toolConnect
       headers: token ? { authorization: `Bearer ${token}` } : {},
       signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
-    // fetch resolves on 4xx/5xx: a refusal (wrong bearer, tool error) leaves the tool holding the token, so say so.
-    if (!res.ok) console.error(`[telegramClient] tool disconnect refused for ${provider}/${toolConnectionId}: HTTP ${res.status}`);
+    // fetch resolves on 4xx/5xx: a refusal (wrong bearer, tool error, not found) leaves the tool holding the token, so say so.
+    if (!res.ok) {
+      console.error(`[telegramClient] tool disconnect refused for ${provider}/${toolConnectionId}: HTTP ${res.status}`);
+      return false;
+    }
+    return true;
   } catch (err) {
     console.error(`[telegramClient] tool disconnect failed for ${provider}/${toolConnectionId}:`, err);
+    return false;
   }
 }

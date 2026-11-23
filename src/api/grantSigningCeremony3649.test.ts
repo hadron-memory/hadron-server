@@ -199,6 +199,14 @@ describe('C10: behind the signing switch; the grant-signing capability token', (
     expect(js).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
   });
 
+  it('#4787 the signer is told a run wrote the reason: the served script carries the run sentence, not only the "Written by <name>" one (cor:acl:140:05, :07)', async () => {
+    const js = await (await fetch(`${base}/grant-signing/ceremony.js`)).text();
+    // the branch the JSON view's run flag selects: dropping `reasonAuthor.run ? <run sentence> : ...` removes this sentence from the script
+    expect(js).toContain('Written by an automated run of this App, which asked for this grant.');
+    // and the person-written sentence stays the other arm, so the two cannot be merged into one
+    expect(js).toContain(', who asked for this grant.');
+  });
+
   it('#4164 (Victor\'s build note): the page\'s reason for a withheld sentence is true for an unwritable summary too, not only an unreadable node', async () => {
     const js = await (await fetch(`${base}/grant-signing/ceremony.js`)).text();
     expect(js).toContain('its text cannot be written from its values');
@@ -453,6 +461,66 @@ describe('#3998: signing a secret.reveal grant creates its read client', () => {
       expect(p.json.canSign).toBe(true);
       expect(p.json.view.summary).toMatch(new RegExp(`^Read the value of the secret hrn:secret:\\S+ of ${appUrn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, and ${words}$`));
     }
+  });
+});
+
+describe('#4000: signing a secret.use grant', () => {
+  it('shows the complete binding and creates one App-held read client at activation', async () => {
+    const secret = await db.secret.create({ data: { ownerType: 'app', ownerId: appId, name: 'use-token', kind: 'webfetch-auth' } as never });
+    const id = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, grantee_app_id, action, action_values, reason, max_uses, created_at, updated_at)
+      VALUES ($1, $2, $2, 'secret.use', $3::jsonb, 'use it', 3, (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+    id, appId, JSON.stringify({ secret: secret.id, 'auto-delete': 'keep', 'binding-prefix': 'https://api.example.test/v1', 'binding-header': 'Authorization' }));
+    const req = await openRequest(id);
+    const proof = await prove(req.id, admin);
+    expect(proof.json.canSign).toBe(true);
+    expect(proof.json.view.summary).toContain('https://api.example.test/v1 with header Authorization');
+    const result = await post(req.id, 'complete', signingBody(proof, admin), proof.cookie);
+    expect(result.status).toBe(200);
+    const rows = await db.secretReadClient.findMany({ where: { grantId: id } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ issuerUserId: admin.id, selfIssued: false, secretId: secret.id, appId });
+  });
+});
+
+describe('#4855: signing a worker.session.restart grant', () => {
+  const restartGrant = async (names: string | string[], holder = workerId): Promise<string> => {
+    const id = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, created_at, updated_at)
+      VALUES ($1, $2, $3, 'worker.session.restart', $4::jsonb, 'keep the team running', (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
+    id, appId, holder, JSON.stringify({ worker: names }));
+    return id;
+  };
+  const otherWorker = async (appOf = appId, slug = 'gs-kit') => (await db.worker.create({
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: appOf, agentId: (await db.agent.findFirstOrThrow({ where: { organizationId: orgId } })).id, name: slug, slug },
+  })).id;
+
+  it('the signer reads each named worker as its canonical worker URN, and an App manager signs it into an active grant', async () => {
+    const kit = await otherWorker();
+    const id = await restartGrant([kit, workerId]);
+    const req = await openRequest(id);
+    const p = await prove(req.id, admin);
+    expect(p.json.canSign).toBe(true);
+    const urn = (slug: string) => `hrn:worker:${appUrn.replace(/^hrn:app:/, '')}:${slug}`;
+    expect(p.json.view.summary).toBe(`End a dark open session of any worker among ${urn('gs-kit')}, ${urn('gs-worker')} in ${appUrn} and start that worker again`);
+    const r = await post(req.id, 'complete', signingBody(p, admin), p.cookie);
+    expect(r.status).toBe(200);
+    expect((await grantRow(id))!.activated_at).not.toBeNull();
+  });
+
+  it('a person who does not manage the App gets the one refusal: no terms, no ceremony', async () => {
+    const id = await restartGrant(await otherWorker());
+    const p = await prove((await openRequest(id)).id, member);
+    expect(p.text).toBe(FORBIDDEN);
+    expect(await unconsumedGrantSign(member.id)).toBe(0);
+  });
+
+  it('a named worker of another App is unsignable: summary null, canSign false', async () => {
+    const otherApp = await db.app.create({ data: { organizationId: orgId, name: 'gs-app2', urn: `${appUrn.replace(/^hrn:app:/, '').split(':')[0]}:gs-app2` } });
+    const id = await restartGrant(await otherWorker(otherApp.id, 'gs-foreign'));
+    const p = await prove((await openRequest(id)).id, admin);
+    expect(p.json.view.summary).toBeNull();
+    expect(p.json.canSign).toBe(false);
   });
 });
 

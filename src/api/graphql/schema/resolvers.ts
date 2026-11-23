@@ -1,4 +1,5 @@
 import { utilizationQueries } from './resolvers.utilization.js';
+import { teamMetricsQueries } from './resolvers.teamMetrics.js';
 import { runTeamSnapshotMutations, runTeamSnapshotQueries } from './resolvers.runTeamSnapshot.js';
 import { rateLimitQueries, rateLimitMutations } from './resolvers.rateLimit.js';
 import { registerRolePickQueries } from './resolvers.registerRolePick.js';
@@ -82,7 +83,7 @@ import { compileBootPromptMutations } from './resolvers.mutation.compileBootProm
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamSpecQueries } from './resolvers.teamSpec.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
-import { teamAttentionMutations } from './resolvers.teamAttention.js';
+import { ownWorkerSessionsMutations } from './resolvers.ownWorkerSessions.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
 import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolvers.ticker.js';
@@ -96,6 +97,7 @@ import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.j
 import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.deliveryBatch.js';
 import { appKeyScopeMutations, appKeyScopeFieldResolvers, appKeyScopeQueries } from './resolvers.appKeyScope.js';
 import { hostOperationMutations, hostOperationQueries, hostOperationFieldResolvers } from './resolvers.hostOperation.js';
+import { sessionRestartMutations } from './resolvers.sessionRestart4855.js';
 import { hostSweepRunMutations, hostSweepRunQueries } from './resolvers.hostSweepRuns.js';
 import { desiredStateMutations, desiredStateQueries, desiredStateWorkerFields } from './resolvers.desiredState.js';
 import { hostAssignmentMutations, hostAssignmentQueries, hostAssignmentFieldResolvers } from './resolvers.hostAssignment.js';
@@ -246,6 +248,7 @@ export const resolvers = {
     ...accountUsageQueries,
     ...reviewQualityQueries,
     ...utilizationQueries,
+    ...teamMetricsQueries,
     ...registerRoleCandidateQueries,
     ...registerRolePickQueries,
     ...actionRegisterIndexQueries,
@@ -310,7 +313,7 @@ export const resolvers = {
     ...compileBootPromptMutations,
     ...teamRoleMutations,
     ...teamChatMutations,
-    ...teamAttentionMutations,
+    ...ownWorkerSessionsMutations,
     ...teamWorkMutations,
     ...agentTaskMutations,
     ...prProtocolMutations,
@@ -326,6 +329,7 @@ export const resolvers = {
     ...deliveryBatchMutations,
     ...appKeyScopeMutations,
     ...hostOperationMutations,
+    ...sessionRestartMutations,
     ...desiredStateMutations,
     ...hostSweepRunMutations,
     ...hostAssignmentMutations,

@@ -9,6 +9,7 @@
  *   - deleteTelegramConnection: soft-delete + best-effort tool teardown; an outsider or revoked member gets NOT_FOUND.
  *   - telegramConnection(ref) / telegramConnections: member-scoped reads, null/empty for outsiders.
  */
+import { chatToolTeardownIdle } from '../../../lib/chatToolTeardown.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -83,7 +84,7 @@ describe('createTelegramConnection', () => {
       status: 'ACTIVE',
       createdBy: admin.id,
     });
-    expect(createTelegramToolConnection).toHaveBeenCalledWith('telegram', { botToken: BOT_TOKEN });
+    expect(createTelegramToolConnection).toHaveBeenCalledWith('telegram', { botToken: BOT_TOKEN, appId: app.id });
     const raw = await db.telegramConnection.findUniqueOrThrow({ where: { id: connection.id } });
     expect(JSON.stringify(raw)).not.toContain('SECRET-bot-token');
     // No read surface can return it: the SDL type has no token-shaped field.
@@ -159,6 +160,7 @@ describe('createTelegramConnection', () => {
     const app2 = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'tg-app2', urn: 'tg-org::tg-app2' } });
     vi.mocked(createTelegramToolConnection).mockResolvedValue(identity({ id: 'tool-conn-2' }));
     await expect(create(undefined, app2.id)).rejects.toThrow('This bot is already connected.');
+    await chatToolTeardownIdle(); // #4847: the first attempt is claimed in the database before the tool is asked
     expect(deleteTelegramToolConnection).toHaveBeenCalledWith('telegram', 'tool-conn-2');
     expect(await db.telegramConnection.count({ where: { deletedAt: null } })).toBe(1);
     await db.telegramConnection.update({ where: { id: first.id }, data: { deletedAt: new Date() } });
@@ -172,6 +174,7 @@ describe('createTelegramConnection', () => {
     vi.mocked(deleteTelegramToolConnection).mockClear();
     vi.mocked(createTelegramToolConnection).mockResolvedValue(identity({ id: 'tool-conn-1', botId: '55' })); // the tool re-issues the winner's id
     await expect(create(undefined, app2.id)).rejects.toThrow();
+    await chatToolTeardownIdle(); // #4847: the first attempt is claimed in the database before the tool is asked
     expect(deleteTelegramToolConnection).not.toHaveBeenCalled();
     expect(await db.telegramConnection.count({ where: { deletedAt: null } })).toBe(1);
   });
@@ -207,7 +210,9 @@ describe('createTelegramConnection', () => {
     expect(await db.telegramConnection.count({ where: { deletedAt: null } })).toBe(1);
     const kept = (await db.telegramConnection.findFirstOrThrow({ where: { deletedAt: null } })).toolConnectionId;
     const lost = kept === 'tool-a' ? 'tool-b' : 'tool-a';
+    await chatToolTeardownIdle(); // #4847: the first attempt is claimed in the database before the tool is asked
     expect(deleteTelegramToolConnection).toHaveBeenCalledWith('telegram', lost);
+    await chatToolTeardownIdle(); // #4847: the first attempt is claimed in the database before the tool is asked
     expect(deleteTelegramToolConnection).not.toHaveBeenCalledWith('telegram', kept);
   });
 
@@ -222,6 +227,7 @@ describe('createTelegramConnection', () => {
     vi.mocked(createTelegramToolConnection).mockRejectedValue(new Error('tool down'));
     await expect(create()).rejects.toThrow('tool down');
     expect(await db.telegramConnection.count()).toBe(0);
+    await chatToolTeardownIdle(); // #4847: the first attempt is claimed in the database before the tool is asked
     expect(deleteTelegramToolConnection).not.toHaveBeenCalled();
   });
 });
@@ -234,6 +240,7 @@ describe('deleteTelegramConnection', () => {
     const row = await db.telegramConnection.findUniqueOrThrow({ where: { id: connection.id } });
     expect(row.deletedAt).not.toBeNull();
     expect(row.deletedBy).toBe(admin.id);
+    await chatToolTeardownIdle(); // #4847: the first attempt is claimed in the database before the tool is asked
     expect(deleteTelegramToolConnection).toHaveBeenCalledWith('telegram', 'tool-conn-1');
   });
 
@@ -244,6 +251,7 @@ describe('deleteTelegramConnection', () => {
       resolvers.Mutation.deleteTelegramConnection({}, { ref: connection.id }, ctxFor(owner.id)),
     ].map((p) => p.then((v: boolean) => v, (e: Error) => e.message)));
     expect(results.filter((r) => r === true).length).toBeGreaterThanOrEqual(1);
+    await chatToolTeardownIdle(); // #4847
     expect(deleteTelegramToolConnection).toHaveBeenCalledTimes(1);
   });
 
@@ -262,6 +270,7 @@ describe('deleteTelegramConnection', () => {
       seen.add(`${err?.message}|${String(err?.extensions?.code)}`);
     }
     expect([...seen]).toEqual(['Telegram connection not found.|NOT_FOUND']);
+    await chatToolTeardownIdle(); // #4847: the first attempt is claimed in the database before the tool is asked
     expect(deleteTelegramToolConnection).not.toHaveBeenCalled();
   });
 });

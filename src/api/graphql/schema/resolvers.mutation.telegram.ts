@@ -5,9 +5,10 @@
  */
 import { GraphQLError } from 'graphql';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { createTelegramToolConnection, deleteTelegramToolConnection } from '../../../lib/telegramClient.js';
+import { dispatchChatToolTeardown, recordChatToolTeardown } from '../../../lib/chatToolTeardown.js';
 import type { Context } from './resolvers.helpers.js';
 import { isOrgMemberOrAdmin, requireOrgRole } from './resolvers.helpers.js';
 
@@ -31,7 +32,8 @@ export const telegramMutations = {
       appId = (await resolveAppRef(ctx.db, appRef)).id;
     } catch (err) {
       // An ambiguous legacy URN names two Apps: another org's admin must not tell it apart from an unknown App.
-      if (err instanceof AppNotFoundError || err instanceof AmbiguousLegacyUrnError) throw authorizationDenied();
+      // #4893: the whole shared resolution list folds — a malformed ref is the same non-existence.
+      if (isAppRefResolutionFailure(err)) throw authorizationDenied();
       throw err;
     }
     const app = await ctx.db.app.findUnique({ where: { id: appId }, select: { organizationId: true } });
@@ -43,10 +45,11 @@ export const telegramMutations = {
     if (existing) throw new GraphQLError(ALREADY_CONNECTED, { extensions: { code: 'BAD_USER_INPUT' } });
 
     // The tool validates the token live and derives the bot identity; the token goes no further than this call.
-    const identity = await createTelegramToolConnection('telegram', { botToken });
+    const identity = await createTelegramToolConnection('telegram', { botToken, appId });
 
-    // KNOWN GAPS (deferred, not this slice): a lost registration response leaves a tool row core cannot see (#4829); App or
-    // org deletion does not tear the tool row down (#4828, same as Slack).
+    // App and org deletion DO tear the tool row down (#4828, src/lib/chatToolTeardown.ts, shared with Slack). A lost
+    // registration response (#4829) is covered by the registrationKey sent above: the retry re-derives it and a tool
+    // that supports it returns the same connection.
     // EVERY failure past this point tears the tool row down, or the tool would hold an encrypted token and a poll
     // loop with no core row and no GraphQL handle to delete them.
     try {
@@ -87,13 +90,18 @@ export const telegramMutations = {
       throw new GraphQLError('Telegram connection not found.', { extensions: { code: 'NOT_FOUND' } });
     }
     await requireOrgRole(ctx, connection.organizationId, 'ADMIN');
-    // App or org deletion does not reach this teardown (#4828, same gap as Slack); only this door does.
-    // Guarded on the live row so a concurrent double delete tears the tool down once.
-    const { count } = await ctx.db.telegramConnection.updateMany({
-      where: { id: connection.id, deletedAt: null },
-      data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+    // App and org deletion tear their connections down through the shared path in src/lib/chatToolTeardown.ts (#4828); this is the single-connection door.
+    // The guarded soft delete and the teardown INTENT are one transaction (#4847): a concurrent double delete records and asks the tool once,
+    // and a call that fails or is lost is retried by the sweep. A deleted row stays NOT_FOUND to an admin: no door reaches it (cor:dmo:080:04).
+    const torn = await ctx.db.$transaction(async (tx) => {
+      const { count } = await tx.telegramConnection.updateMany({
+        where: { id: connection.id, deletedAt: null },
+        data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+      });
+      if (count !== 1) return null;
+      return recordChatToolTeardown(tx, { kind: 'telegram', id: connection.id, provider: connection.provider, toolConnectionId: connection.toolConnectionId });
     });
-    if (count === 1) void deleteTelegramToolConnection(connection.provider, connection.toolConnectionId);
+    if (torn) dispatchChatToolTeardown([torn]);
     return true;
   },
 };

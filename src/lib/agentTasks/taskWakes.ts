@@ -38,8 +38,9 @@ import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { isWorkerDormant, toNaiveUtc } from '../sessionActivity.js';
-import { ASSIGNED_EVENT_TYPES, PASSIVE_EVENT_TYPES } from './events.js';
+import { ASSIGNED_EVENT_TYPES, LEAD_CADENCE_EVENT_TYPES, PASSIVE_EVENT_TYPES } from './events.js';
 import { alarmEpisodeKey, currentAlarmEpisodes } from './stall.js';
+import { SATURATION_EVENT_TYPE } from './saturation.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -74,17 +75,22 @@ const ASSIGNED_KIND: Record<(typeof ASSIGNED_EVENT_TYPES)[number], TaskWakeEvent
  * is no longer dark); the post-limit alarm is delivered and escalated until acknowledged, like any alarm.
  */
 const TASKLESS_ALARMS = [
-  { type: 'alarm.dark-worker', handle: 'DARK', openEpisodeRequired: 'd',
+  { types: ['alarm.dark-worker'], handle: 'DARK', openEpisodeRequired: 'd',
     title: Prisma.sql`sw.name || ' has gone dark (' || COALESCE(e.payload ->> 'reason', 'dark') || ')'` },
-  // #2763: stops with its episode, which ends at the coordinator's next counted assignment.
-  { type: 'alarm.coordinator-cadence', handle: 'CADENCE', openEpisodeRequired: 'c',
+  // #2763: stops with its episode, which ends at the lead's next counted assignment. #4375: both spellings of the type
+  // (the legacy one for alarms raised before the rename) wake the same way.
+  // One entry, so the handle is declared once (#4950).
+  { types: LEAD_CADENCE_EVENT_TYPES, handle: 'CADENCE', openEpisodeRequired: 'c',
     title: Prisma.sql`sw.name || ' has stopped assigning work'` },
-  { type: 'alarm.post-limit', handle: 'LIMIT', openEpisodeRequired: false,
+  { types: ['alarm.post-limit'], handle: 'LIMIT', openEpisodeRequired: false,
     title: Prisma.sql`sw.name || '''s team-chat post was refused by the post limit' || CASE WHEN e.payload ->> 'limit' IS NULL THEN '' ELSE ' (' || (e.payload ->> 'limit') || ')' END` },
   // #4231: delivered and escalated until acknowledged; its episode only de-duplicates.
-  { type: 'alarm.start-failing', handle: 'START', openEpisodeRequired: false,
+  { types: ['alarm.start-failing'], handle: 'START', openEpisodeRequired: false,
     title: Prisma.sql`sw.name || '''s platform starts keep failing'` },
 ] as const;
+
+/** The SQL list of one task-less alarm's type spellings. */
+const alarmTypes = (t: { types: readonly string[] }) => Prisma.join(t.types.map((type) => Prisma.sql`${type}::text`));
 
 const OPEN = Prisma.sql`('pending', 'started')`;
 
@@ -118,7 +124,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   const assignedTypes = Prisma.join([...ASSIGNED_EVENT_TYPES]);
 
   type Row = { workerId: string; taskId: string; eventId: string; type: string; title: string; handle: string; at: Date };
-  const [assigned, finished, alarms, endSession, darkAlarms, answered] = await Promise.all([
+  const [assigned, finished, alarms, endSession, darkAlarms, answered, saturationAlarms] = await Promise.all([
     // The task's LATEST assignment event, to its current worker assignee, who has not acted on the task since
     // (an assignment the worker made itself counts as acting: `>=` includes the event).
     db.$queryRaw<Row[]>(Prisma.sql`
@@ -192,18 +198,18 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
     // alarm stays open until acknowledged, its episode only de-duplicates it).
     db.$queryRaw<(Row & { chainIndex: number })[]>(Prisma.sql`
       SELECT (e.chain -> s.idx ->> 'workerId') AS "workerId", e.id AS "taskId", e.id AS "eventId", e.type,
-             CASE e.type ${Prisma.join(TASKLESS_ALARMS.map((t) => Prisma.sql`WHEN ${t.type}::text THEN ${t.title}`), ' ')} END AS title,
-             CASE e.type ${Prisma.join(TASKLESS_ALARMS.map((t) => Prisma.sql`WHEN ${t.type}::text THEN ${t.handle}::text`), ' ')} END AS handle,
+             CASE ${Prisma.join(TASKLESS_ALARMS.map((t) => Prisma.sql`WHEN e.type IN (${alarmTypes(t)}) THEN ${t.title}`), ' ')} END AS title,
+             CASE ${Prisma.join(TASKLESS_ALARMS.map((t) => Prisma.sql`WHEN e.type IN (${alarmTypes(t)}) THEN ${t.handle}::text`), ' ')} END AS handle,
              e.created_at AS at, s.idx AS "chainIndex"
       FROM agent_team_events e
       LEFT JOIN dark_worker_episodes d ON d.event_id = e.id
-      LEFT JOIN coordinator_cadence_episodes c ON c.event_id = e.id
+      LEFT JOIN lead_cadence_episodes c ON c.event_id = e.id
       JOIN workers sw ON sw.id = e.subject_worker_id
       JOIN LATERAL (SELECT max(chain_index) AS idx FROM agent_team_alarm_schedule
                     WHERE event_id = e.id AND woken_at IS NOT NULL) s ON s.idx IS NOT NULL
       JOIN workers w ON w.id = (e.chain -> s.idx ->> 'workerId') AND w.app_id = e.app_id
-      WHERE e.type IN (${Prisma.join(TASKLESS_ALARMS.map((t) => Prisma.sql`${t.type}::text`))}) AND e.severity = 'alarm' AND e.acknowledged_at IS NULL
-        AND (${Prisma.join(TASKLESS_ALARMS.map((t) => t.openEpisodeRequired === 'd' ? Prisma.sql`(e.type = ${t.type}::text AND d.ended_at IS NULL AND d.id IS NOT NULL)` : t.openEpisodeRequired === 'c' ? Prisma.sql`(e.type = ${t.type}::text AND c.ended_at IS NULL AND c.id IS NOT NULL)` : Prisma.sql`e.type = ${t.type}::text`), ' OR ')})
+      WHERE e.type IN (${Prisma.join(TASKLESS_ALARMS.flatMap((t) => t.types).map((type) => Prisma.sql`${type}::text`))}) AND e.severity = 'alarm' AND e.acknowledged_at IS NULL
+        AND (${Prisma.join(TASKLESS_ALARMS.map((t) => t.openEpisodeRequired === 'd' ? Prisma.sql`(e.type IN (${alarmTypes(t)}) AND d.ended_at IS NULL AND d.id IS NOT NULL)` : t.openEpisodeRequired === 'c' ? Prisma.sql`(e.type IN (${alarmTypes(t)}) AND c.ended_at IS NULL AND c.id IS NOT NULL)` : Prisma.sql`e.type IN (${alarmTypes(t)})`), ' OR ')})
         AND (e.chain -> s.idx ->> 'workerId') IN (${ids})
         AND ${liveApp('e')}
         AND ${undelivered("(e.chain -> s.idx ->> 'workerId')", 'e.id', 's.idx')}`),
@@ -222,6 +228,26 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         AND NOT EXISTS (SELECT 1 FROM agent_team_events x
                         WHERE x.task_id = t.id AND x.app_id = t.app_id AND x.actor_worker_id = t.assignee_worker_id AND x.created_at >= e.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
         AND ${undelivered('t.assignee_worker_id', 'e.id', '0')}`),
+    // #4777 (cor:agt:060:16): a saturation alarm wakes EVERY worker its chain names, each through its own row, all woken
+    // when the alarm was raised: never the highest position only, and never a climb. The wake is due while the alarm's
+    // saturation episode is open (like the dark-worker alarm's): once the combination can be given work again there is
+    // nothing to wake for, and the scan starts from the open episodes only (at most one per combination). Acknowledging
+    // changes nothing else (:16), so an acknowledged alarm's wake stays due while its episode is open. The App must be
+    // live. Words only: the nudge names the combination from the payload, never evidence. Who is never due
+    // (cor:agt:080:11) is the caller's.
+    db.$queryRaw<(Row & { chainIndex: number })[]>(Prisma.sql`
+      SELECT (e.chain -> s.chain_index ->> 'workerId') AS "workerId", e.id AS "taskId", e.id AS "eventId", e.type,
+             'Saturation: no work could be given to ' || COALESCE(e.payload ->> 'family', 'any family') || ' / '
+               || COALESCE(e.payload ->> 'tier', 'any tier') || ' / ' || COALESCE(e.payload ->> 'role', 'any role') AS title,
+             'SATURATION' AS handle, e.created_at AS at, s.chain_index AS "chainIndex"
+      FROM saturation_episodes ep
+      JOIN agent_team_events e ON e.id = ep.event_id AND e.app_id = ep.app_id
+      JOIN agent_team_alarm_schedule s ON s.event_id = e.id AND s.woken_at IS NOT NULL
+      JOIN workers w ON w.id = (e.chain -> s.chain_index ->> 'workerId') AND w.app_id = e.app_id
+      WHERE ep.ended_at IS NULL AND e.type = ${SATURATION_EVENT_TYPE} AND e.severity = 'alarm'
+        AND (e.chain -> s.chain_index ->> 'workerId') IN (${ids})
+        AND ${liveApp('e')}
+        AND ${undelivered("(e.chain -> s.chain_index ->> 'workerId')", 'e.id', 's.chain_index')}`),
   ]);
 
   const current = await currentAlarmEpisodes(db, alarms, now);
@@ -235,6 +261,9 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   for (const r of answered) push({ ...r, chainIndex: 0, event: 'ANSWERED' });
   for (const r of alarms) {
     if (!r.episodeStart || !current.has(alarmEpisodeKey(r.taskId, r.type, r.episodeStart))) continue;
+    push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, handle: r.handle, at: r.at, chainIndex: r.chainIndex, event: 'ALARM' });
+  }
+  for (const r of saturationAlarms) {
     push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, handle: r.handle, at: r.at, chainIndex: r.chainIndex, event: 'ALARM' });
   }
   for (const r of darkAlarms) {

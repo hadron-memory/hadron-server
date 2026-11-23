@@ -30,6 +30,7 @@ import {
   legacyMemoryUrnToCanonical,
 } from '../../../lib/urn.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveAppRunRef, composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { AppRunNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -133,6 +134,20 @@ export interface CreateAgentScheduleInput extends TriggerRunBudgets {
   /** Spec 049 Phase 3b — the trigger's scope (id, or a name in the App's context); update: '' clears. */
   scopeRef?: string | null;
   enabled?: boolean | null;
+}
+
+/**
+ * #4893: resolve an App ref on an org-scoped door, or answer the door's bare unknown-App
+ * NOT_FOUND — missing, malformed and ambiguous all answer the same bytes (the door's stated
+ * non-disclosure posture, cor:api:120:01). A database fault propagates.
+ */
+async function resolveAppRefOrNotFound(ctx: Context, ref: string): Promise<string> {
+  try {
+    return (await resolveAppRef(ctx.db, ref)).id;
+  } catch (e) {
+    if (isAppRefResolutionFailure(e)) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+    throw e;
+  }
 }
 
 /** Resolve the App ref (PK or URN), require it live, and require org-ADMIN on its org. */
@@ -946,7 +961,7 @@ export const appRunMutations = {
   },
 
   /**
-   * Mint comm.outbound tickets into the org ledger (cor:acl:050:04 tier 2).
+   * Mint tickets into the org ledger (hrn:node:hadronmemory.com:specs:cor:acl:050:04).
    * Org-ADMIN only; `note` keeps the ledger legible ("where did they go?").
    */
   mintActionTickets: async (
@@ -966,7 +981,7 @@ export const appRunMutations = {
     // Gemini high + Copilot). ''≡absent per the platform convention.
     let appId: string | null = null;
     if (input.appRef && input.appRef.trim() !== '') {
-      const { id } = await resolveAppRef(ctx.db, input.appRef);
+      const id = await resolveAppRefOrNotFound(ctx, input.appRef);
       const app = await ctx.db.app.findFirst({
         where: { id, organizationId, deletedAt: null },
         select: { id: true },
@@ -977,8 +992,8 @@ export const appRunMutations = {
       }
       appId = app.id;
     }
-    if (input.action !== 'comm.outbound') {
-      throw new GraphQLError('v1 tickets exist for the comm.outbound action class only (cor:acl:050:04).', {
+    if (input.action !== 'comm.outbound' && input.action !== 'secret.use') {
+      throw new GraphQLError('Unknown ticket action class.', {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
@@ -1043,7 +1058,7 @@ export const appRunMutations = {
     let scopeKind: 'app' | 'org' = 'org';
     let scopeId = organizationId;
     if (input.appRef && input.appRef.trim() !== '') {
-      const { id } = await resolveAppRef(ctx.db, input.appRef);
+      const id = await resolveAppRefOrNotFound(ctx, input.appRef);
       const app = await ctx.db.app.findFirst({
         where: { id, organizationId, deletedAt: null },
         select: { id: true },
@@ -1172,7 +1187,7 @@ export const appRunQueries = {
     if (orgRef) ({ id: organizationId } = await resolveOrgRef(ctx.db, orgRef));
     if (appRef) {
       // ref dispatch (was raw-PK-only — the refactor also makes URNs work here)
-      ({ id: appId } = await resolveAppRef(ctx.db, appRef));
+      appId = await resolveAppRefOrNotFound(ctx, appRef);
       const app = await ctx.db.app.findFirst({
         // When orgRef was ALSO given, scope the app to that org — a mismatch
         // is NOT_FOUND rather than orgRef being silently overridden by the
@@ -1286,7 +1301,7 @@ export const appRunQueries = {
     { appRef, previous }: { appRef: string; previous?: boolean | null },
     ctx: Context,
   ) => {
-    const { id: appId } = await resolveAppRef(ctx.db, appRef);
+    const appId = await resolveAppRefOrNotFound(ctx, appRef);
     const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null } });
     if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
     if (!isPlatformAdmin(ctx)) {
@@ -1324,7 +1339,7 @@ export const appRunQueries = {
       { scopeKind: 'org', scopeId: organizationId },
     ];
     if (appRef && appRef.trim() !== '') {
-      const { id } = await resolveAppRef(ctx.db, appRef);
+      const id = await resolveAppRefOrNotFound(ctx, appRef);
       const app = await ctx.db.app.findFirst({
         where: { id, organizationId, deletedAt: null },
         select: { id: true },

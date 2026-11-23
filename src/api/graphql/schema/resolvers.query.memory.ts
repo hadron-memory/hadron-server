@@ -31,7 +31,7 @@ import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { activeAgentInstallLicenseIds, isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 import { findInstallMemory, resolveInstallTarget } from './installMemory.js';
 import { listableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
-import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
@@ -264,7 +264,9 @@ export const memoryQueries = {
       try {
         target = await resolveInstallTarget(ctx.db, { appRef: args.appRef, agentRef: args.agentRef });
       } catch (e) {
-        if (e instanceof AppNotFoundError || e instanceof AgentNotFoundError) return null;
+        // #2044/#4893: a name-resolution failure on either arm — typed miss, malformed or
+        // ambiguous ref — is the same null; a database fault propagates.
+        if (refNamesNothing(e, { ambiguousNamesNothing: true })) return null;
         throw e;
       }
       const row = await findInstallMemory(ctx.db, target.appId, target.agentId);

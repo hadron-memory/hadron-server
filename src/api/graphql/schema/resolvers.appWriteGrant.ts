@@ -22,6 +22,7 @@ import { managesApp } from '../../../lib/auth/appManagement.js';
 import { requirePersonAsThemselves, requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { GRANT_MEMORY_SELECT, grantTargetRefusal, isStrictOwnerClass } from '../../../lib/appWriteGrant.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { parseUrnInput } from '../../../lib/urn.js';
@@ -61,7 +62,10 @@ function parseRegisterUrn(raw: string | null | undefined): string | null {
 async function resolveOrDeny<T>(lookup: () => Promise<T>): Promise<T> {
   try { return await lookup(); } catch (e) {
     if (e instanceof GraphQLError) throw e;
-    if (e instanceof Error && /not found|not fully qualified|URN/i.test(e.message)) throw denied();
+    // #3275: classify expected reference refusals by type, never by words in an infrastructure fault
+    // (#4893: one shared list — refNamesNothing with ambiguity opted in is isAppRefResolutionFailure
+    // generalized to the memory arm this helper also wraps).
+    if (refNamesNothing(e, { ambiguousNamesNothing: true })) throw denied();
     throw e;
   }
 }

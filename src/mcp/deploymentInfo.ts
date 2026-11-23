@@ -151,15 +151,46 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `markOwnTeamChatRead` mark and every wake/mark/resume rule it shared a module
 // with are unchanged.
 //
-// 0.27.0 — BREAKING, entity refs S6 chunk A (#4142): the GraphQL memory READS take `<entity>Ref`, no alias.
+// 0.25.0 — #4836 (cor:dmo:070:05 Proposed; V58): startSession's `appRef` refusals are
+//      concealed and re-typed. A caller without standing for the named App — a non-member,
+//      an anonymous caller, a malformed/ambiguous ref, or a pure App key naming any other
+//      App — gets ONE answer: APP_NOT_FOUND · "App not found.", byte-identical for a
+//      missing, deleted, uninstalled and existing-but-inaccessible App, echoing no ref and
+//      carrying no appId. Was: BAD_USER_INPUT · "App not found: <ref>" (missing/deleted,
+//      echoing the value), FORBIDDEN (existing, non-member — an existence oracle), the
+//      URN parser's echoing typed errors (malformed), and SESSION_APP_MISMATCH (an App key
+//      naming another App — that code is GONE from this door). A caller with standing
+//      keeps APP_UNINSTALLED by PK, with the appId. `hadron_start_session` (MCP) never
+//      took an appRef, so the MCP tool surface is unchanged.
+//
+// 0.29.0 — #4838 (the other App-ref doors; same rule as 0.25.0): the teamRole write doors
+//      (`createTeamRole` / `updateTeamRole` / `deleteTeamRole`) and the `teamRoles` read
+//      conceal their `appRef` refusals the same way — reach first, state after. A caller
+//      without standing gets the one APP_NOT_FOUND · "App not found." answer for a missing,
+//      deleted, uninstalled (by PK) or existing-but-inaccessible App and for a malformed or
+//      ambiguous ref, echoing no ref and carrying no appId; a participant keeps
+//      APP_UNINSTALLED with the appId, and a member who reaches but may not edit keeps
+//      FORBIDDEN. Was: BAD_USER_INPUT · "App not found: <ref>" for a deleted App (echoing;
+//      reachable only in the resolve-then-read race), APP_UNINSTALLED with the appId
+//      BEFORE any reach decision for an uninstalled App named by PK (an existence and
+//      state oracle), FORBIDDEN for an existing App, and the URN parser's echoing typed
+//      errors for a malformed ref. `createConnectionGrant`'s grantee refusal keeps its
+//      code (BAD_USER_INPUT) and its deliberate existence oracle (a connection owner need
+//      not reach the grantee App) but no longer echoes the ref: "Grantee App not found."
+//      (was "Grantee App not found: '<ref>'."). The three local appNotFound copies
+//      (`agentTask` / `hostOperation` / `hostAssignment`) are untouched.
+//
+//      Why 0.29.0 and not 0.26.0: 0.26.0–0.28.0 are reserved numbers, taken by the
+//      concurrent surface renumbering recorded in team chat #138407 — this entry takes
+//      the next FREE number past them (blind review on #4871 asked).
+//
+// 0.30.0 — BREAKING, entity refs S6 chunk A (#4142): the GraphQL memory READS take `<entity>Ref`, no alias.
 // `usageEvents` / `usageEventsPage` (`memoryId` → `memoryRef`, `nodeId` → `nodeRef`; both stay optional `ID`),
 // `memoryAssets` (`memoryId` → `memoryRef: ID!`) and `memoryLocSegments` (`memoryIds` → `memoryRefs: [ID!]!`).
 // A lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation. Nothing else
 // changes: every field already resolved an ID or URN and keeps its gate and its refusals byte-identical; the
-// usage "provide either nodeId or loc" refusal now names `nodeRef`. (0.25.0 and 0.26.0 are claimed by
-// #4789 and #4810. Merge order, ruled by the coordinator: #4789 (0.25.0), #4810 (0.26.0), then this change (0.27.0); all three are held
-// paired renames, and whichever merges later than its number renumbers this constant by hand.)
-export const HADRON_SERVER_VERSION = '0.27.0';
+// usage "provide either nodeId or loc" refusal now names `nodeRef`. (Merged after main reached 0.29.0; the held paired renames #4789 and #4810 still carry their own numbers and renumber by hand when they land.)
+export const HADRON_SERVER_VERSION = '0.30.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

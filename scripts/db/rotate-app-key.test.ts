@@ -49,6 +49,21 @@ describe('rotate-app-key tool', () => {
     expect(lines.join('\n')).not.toContain('f6f6');
   });
 
+  it('reports how many versions are still under older keys, of this App only (#4573)', async () => {
+    const org = await db.organization.findFirstOrThrow({ where: { urn: 'rotate-tool-org.test' } });
+    const other = (await createDbAppWithKey(db, 'rotate-other', org.id)).app.id;
+    for (const [owner, n] of [[appId, 2], [other, 1]] as const) {
+      const s = await db.secret.create({ data: { ownerType: 'app', ownerId: owner, name: `s-${n}`, kind: 'generic' } });
+      for (let i = 0; i < n; i++) {
+        await db.$transaction((tx) => addAppSecretVersion(tx, { id: s.id, ownerId: owner }, JSON.stringify('x'), 3, { userId: null, workerId: null, sessionId: null }));
+      }
+    }
+    expect(await main(['--app', appId], io())).toBe(0);
+    expect(lines.at(-1)).toMatch(/key_version=2 under_older_keys=2$/);
+    expect(await main(['--app', appId, '--reencrypt'], io())).toBe(0);
+    expect(lines.at(-1)).toMatch(/key_version=3 reencrypted=2 under_older_keys=0$/);
+  });
+
   it('--reencrypt rotates and moves every version to the new key in one transaction, and prints only counts', async () => {
     const secret = await db.secret.create({ data: { ownerType: 'app', ownerId: appId, name: 'tool-reenc', kind: 'generic' } });
     await db.$transaction((tx) => addAppSecretVersion(tx, { id: secret.id, ownerId: appId }, JSON.stringify('TOOL-CANARY'), 13,

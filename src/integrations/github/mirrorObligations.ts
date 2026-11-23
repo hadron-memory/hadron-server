@@ -26,7 +26,11 @@
 import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 
-/** The closed set of failure words a row may carry (CHECK in git-mirror-obligation-invariants.sql). */
+/**
+ * The closed set of failure words a settle may write (CHECK in git-mirror-obligation-invariants.sql). The CHECK also
+ * admits `'PENDING'`, which only the #425 nodes trigger writes (a captured, never-attempted debt) — deliberately NOT in
+ * this type, so no settle can record a failure under the trigger word.
+ */
 export type MirrorErrorClass =
   | 'TOKEN_UNAVAILABLE' | 'BRANCH_SETUP' | 'TREE_WRITE' | 'PUSH_FAILED' | 'PUSH_REJECTED' | 'LOCK_FAILED' | 'NOT_CLONED';
 

@@ -1,4 +1,5 @@
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { assertNoGenericMessageSeqWrite } from '../../../lib/legacyMessageSeq.js';
 import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
@@ -35,6 +36,7 @@ import {
   type GovernedContext,
   type GovernedMerge,
 } from '../../../lib/governedRole.js';
+import { resolveTaskIndexEdge, withClaudeSkillExport, type TaskIndexInput, type TaskSkillExportInput } from '../../../lib/taskIndexEdge.js';
 import { assertEdgeSourceWritersById, assertRoleWritersForNodes, assertRoleWritersForWrite, lockEdgeUnderSourceWriters, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../../lib/specCorpus.js';
 import { carryGovernedSignals } from '../../../lib/governedSignals.js';
@@ -74,7 +76,7 @@ import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
-import { deriveEdgeLoc, isAuthoredLoc } from '../../../lib/edgeLoc.js';
+import { deriveEdgeLoc, isAuthoredLoc, normalizeAuthoredEdgeLoc } from '../../../lib/edgeLoc.js';
 import {
   liveEdgeEndpointSet,
   lockEdgeEndpointMemories,
@@ -235,6 +237,42 @@ async function assertEdgeWriteMemory(tx: Prisma.TransactionClient, edgeId: strin
   }
 }
 
+/**
+ * #860: the per-edge checks `deleteEdge` runs under its transaction, shared with
+ * `hadron_update_node(removeEdges:)` so the two doors cannot drift. Runs on the transaction client, AFTER
+ * the caller's own preflight (resolve the ref, read the edge's memory, readable and write gates) and, for
+ * `deleteEdge`, after its install-authority and memory-share locks. A caller already inside a node-write
+ * transaction has taken its own locks and passes its door context. An unreadable, missing or
+ * already-deleted edge is the one `EDGE_NOT_FOUND` answer.
+ */
+export async function deleteEdgeInDoorTx(
+  tx: Prisma.TransactionClient,
+  txCtx: Context,
+  args: { edgeId: string; edgeRef: string; memoryId: string; expectedSourceId?: string },
+): Promise<void> {
+  const { edgeId, edgeRef, memoryId, expectedSourceId } = args;
+  if (!(await isMemoryReadableCached(txCtx, memoryId))) {
+    throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
+      extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+    });
+  }
+  await requireMemoryWriteAccess(txCtx, memoryId);
+  // Writer level of the edge's current source, locked before the edge.
+  const lockedEdge = await lockEdgeUnderSourceWriters(tx, txCtx, edgeId);
+  if (!lockedEdge || lockedEdge.deleted_at) {
+    throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
+  }
+  // #860: a caller scoped to one source's own edges (hadron_update_node removeEdges) re-checks it on the LOCKED edge: the
+  // preflight read it without a lock, and an edge re-sourced since then is another node's, so not found here.
+  if (expectedSourceId !== undefined && lockedEdge.source_id !== expectedSourceId) {
+    throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
+  }
+  await assertEdgeWriteMemory(tx, edgeId, memoryId);
+  await assertNoBootPromptRows(tx, [lockedEdge.source_id], 'update');
+  await refuseGovernedEdge(tx, edgeId);
+  await tx.edge.delete({ where: { id: edgeId } });
+}
+
 // ── Shared node-write core (spec 039 Phase 0 D1) ────────────────────────────
 //
 // The single canonical single-node write path — formerly the upsertNode
@@ -247,6 +285,14 @@ async function assertEdgeWriteMemory(tx: Prisma.TransactionClient, edgeId: strin
 type NodeWriteMode = 'create' | 'update' | 'upsert';
 /** NodeInput with `name` optional — update mode preserves it on omit (D4). */
 type NodeWriteInput = Omit<NodeInput, 'name'> & { name?: string };
+
+/**
+ * #4864: the existing-loc refusal, worded for the task door's index create (the caller meant to ADD a task, so name the route for
+ * changing the one that is there). Every other write keeps the message it had; the code and fields are unchanged.
+ */
+function locConflictText(message: string, opts?: { taskIndex?: TaskIndexInput }): string {
+  return opts?.taskIndex ? `${message} Extend that task (updateTaskNode, or hadron_update_task) instead of creating it again.` : message;
+}
 
 /**
  * Why did an update-by-PK match no row? Extracted so the decision is testable
@@ -391,6 +437,12 @@ async function writeNodeCoreRaw(
      * over a tombstone revives existing history and takes the normal gate (Beckett LOCAL delta of #2989). No other caller passes it.
      */
     copiesSeq?: boolean;
+    /**
+     * #4864 — set only by the task door's CREATE (`createTaskNode(input, index)`): the Agent whose tasks index lists the new
+     * task, and the trigger. The edge to that index is resolved after the memory's gates, merged into the write's inline
+     * edges and written in this write's one transaction.
+     */
+    taskIndex?: TaskIndexInput;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -431,7 +483,7 @@ async function writeNodeCoreRaw(
       // never answers.
       const carriesIncludeTag = typeof input.content === 'string' && input.content.includes('{{>');
       const grantDestination: WriteDestination | undefined =
-        input.edges === undefined && !carriesIncludeTag ? { loc: input.loc, verb: mode } : undefined;
+        input.edges === undefined && !carriesIncludeTag && !opts?.taskIndex ? { loc: input.loc, verb: mode } : undefined;
       const authorizeWrite = async (authCtx: Context) => {
         const gate = () => requireMemoryWriteAccess(authCtx, resolvedMemoryId, grantDestination);
         if (!conceal) {
@@ -640,7 +692,7 @@ async function writeNodeCoreRaw(
       // in create mode is refused by the mode gate below regardless.
       if (mode === 'create' && existing && !existing.deletedAt) {
         const collision = new NodeLocConflictError(input.loc, input.memoryId);
-        throw new GraphQLError(collision.message, {
+        throw new GraphQLError(locConflictText(collision.message, opts), {
           extensions: { code: collision.name, loc: collision.loc, memoryId: collision.memoryId },
         });
       }
@@ -706,7 +758,7 @@ async function writeNodeCoreRaw(
       const isResurrect = mode === 'create' && !!existing?.deletedAt;
       if (mode === 'create' && existing && !existing.deletedAt) {
         const err = new NodeLocConflictError(input.loc, input.memoryId);
-        throw new GraphQLError(err.message, {
+        throw new GraphQLError(locConflictText(err.message, opts), {
           extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
         });
       }
@@ -726,6 +778,10 @@ async function writeNodeCoreRaw(
       // Spec 037: edges are first-class. Carry the target's loc so the
       // edge loc can be derived (<sourceLoc>:<name>:<targetLoc>) when the
       // caller doesn't author one; validate any author-supplied loc here.
+      // #4864: the task door's index edge joins the inline edges here, after every memory gate and the existing-loc refusal.
+      if (opts?.taskIndex) {
+        input.edges = [...(input.edges ?? []), await resolveTaskIndexEdge(ctx, input.memoryId, opts.taskIndex)];
+      }
       let resolvedEdges: Array<{
         targetNodeId: string;
         targetLoc: string;
@@ -738,8 +794,12 @@ async function writeNodeCoreRaw(
       if (input.edges !== undefined) {
         resolvedEdges = [];
         for (const e of input.edges) {
-          if (e.loc != null && e.loc !== '') {
-            validateLocOrThrow(e.loc, 'loc');
+          // #4813: one helper decides what "nothing authored" means ('' included, #4738);
+          // a non-null loc is validated before any write — the same refusal the
+          // MCP inline-edge door (resolveEdgeRefs) gives, byte-identically.
+          const edgeLoc = normalizeAuthoredEdgeLoc(e.loc);
+          if (edgeLoc !== null) {
+            validateLocOrThrow(edgeLoc, 'loc');
           }
           try {
             const { id: targetNodeId } = await resolveNodeRefForCaller(ctx, e.targetId, input.memoryId);
@@ -779,7 +839,7 @@ async function writeNodeCoreRaw(
               targetLoc: tgt.loc,
               targetMemoryId: tgt.memoryId,
               name: e.name ?? null,
-              loc: e.loc || null, // #4738: '' is no authored loc, it derives
+              loc: edgeLoc, // #4738/#4813: '' is no authored loc, it derives
               description: e.description ?? null,
               isRunnable: e.isRunnable ?? null,
             });
@@ -1622,7 +1682,7 @@ async function writeNodeCoreRaw(
 
             if (mode === 'create' && authoritative && !authoritative.deletedAt) {
               const err = new NodeLocConflictError(input.loc, input.memoryId);
-              throw new GraphQLError(err.message, {
+              throw new GraphQLError(locConflictText(err.message, opts), {
                 extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
               });
             }
@@ -1638,7 +1698,7 @@ async function writeNodeCoreRaw(
               }
               if (mode === 'create' && !authoritative.deletedAt) {
                 const err = new NodeLocConflictError(input.loc, input.memoryId);
-                throw new GraphQLError(err.message, {
+                throw new GraphQLError(locConflictText(err.message, opts), {
                   extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
                 });
               }
@@ -2402,7 +2462,7 @@ function shallowMergeProperties(existing: unknown, patch: Record<string, unknown
  * and roles after its authority wait. Keep the existing ordinary-memory
  * context contract; this cut does not change those doors' principal model.
  */
-async function nodeDoorTxContext(ctx: Context, tx: Prisma.TransactionClient, memoryIds: readonly string[], preview = false): Promise<Context> {
+export async function nodeDoorTxContext(ctx: Context, tx: Prisma.TransactionClient, memoryIds: readonly string[], preview = false): Promise<Context> {
   // Writes refresh under authority/credential locks. A plan validates the same
   // live credential facts in its read-only repeatable-read snapshot (#3424).
   const install = await tx.memory.findFirst({ where: { isInstallMemory: true, class: 'system',
@@ -2697,8 +2757,18 @@ async function createNodeInInstallMemory(input: CreateNodeArgs, ctx: Context) {
 
 /** The caller's view of an App's install memory, creating nothing: a miss and a refusal read the same. */
 export async function findCallerInstallMemory(ctx: Context, install: InstallTarget): Promise<{ id: string }> {
-  const { appId, agentId } = await resolveInstallTarget(ctx.db, install);
-  const row = await findInstallMemory(ctx.db, appId, agentId);
+  let ids: { appId: string; agentId: string };
+  try {
+    ids = await resolveInstallTarget(ctx.db, install);
+  } catch (e) {
+    // #4893/#2975: a name-resolution failure on either arm — typed miss, malformed or
+    // ambiguous ref — is the same "not customised yet"; a database fault propagates.
+    if (refNamesNothing(e, { ambiguousNamesNothing: true })) {
+      throw new GraphQLError('This App has not customised that Agent yet.', { extensions: { code: 'INSTALL_MEMORY_NOT_FOUND' } });
+    }
+    throw e;
+  }
+  const row = await findInstallMemory(ctx.db, ids.appId, ids.agentId);
   if (!row || !(await canReadMemoryRecord(ctx, row))) {
     throw new GraphQLError('This App has not customised that Agent yet.', { extensions: { code: 'INSTALL_MEMORY_NOT_FOUND' } });
   }
@@ -2756,13 +2826,25 @@ export const nodeMutations = {
       GOVERNED_KINDS.filter((entry) => !entry.operationsOnly).flatMap((entry) => [
         [
           entry.doors.create,
-          async (_: unknown, { input }: { input: CreateNodeInput }, ctx: Context) =>
-            writeNodeCore(input, ctx, 'create', {
+          async (
+            _: unknown,
+            { input, index, skill }: { input: CreateNodeInput; index?: TaskIndexInput | null; skill?: TaskSkillExportInput | null },
+            ctx: Context,
+          ) => {
+            // #4864: only the task door declares `index` and `skill` in the SDL; this keeps a direct call from
+            // smuggling them onto another kind's door.
+            const task = entry.kind === 'task';
+            const written = task && skill
+              ? { ...input, properties: withClaudeSkillExport(input.properties, skill, { loc: input.loc, content: input.content ?? '' }) }
+              : input;
+            return writeNodeCore(written, ctx, 'create', {
               authoring: authoringFromRequest(ctx, input.authoredWith),
               ownsKind: entry.kind,
               governedContext: 'node-write',
               concealUnreadable: { entity: 'memory', ref: input.memoryId },
-            }),
+              ...(task && index ? { taskIndex: index } : {}),
+            });
+          },
         ],
         [
           entry.doors.update,
@@ -4206,21 +4288,7 @@ export const nodeMutations = {
         await lockInstallAuthoritiesFirst(tx, ctx, [edgeMem.memoryId]);
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;
         const txCtx = await nodeDoorTxContext(ctx, tx, [edgeMem.memoryId]);
-        if (!(await isMemoryReadableCached(txCtx, edgeMem.memoryId))) {
-          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
-          });
-        }
-        await requireMemoryWriteAccess(txCtx, edgeMem.memoryId);
-        // Writer level of the edge's current source, locked before the edge.
-        const lockedEdge = await lockEdgeUnderSourceWriters(tx, txCtx, resolvedEdgeId);
-        if (!lockedEdge || lockedEdge.deleted_at) {
-          throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
-        }
-        await assertEdgeWriteMemory(tx, resolvedEdgeId, edgeMem.memoryId);
-        await assertNoBootPromptRows(tx, [lockedEdge.source_id], 'update');
-        await refuseGovernedEdge(tx, resolvedEdgeId);
-        await tx.edge.delete({ where: { id: resolvedEdgeId } });
+        await deleteEdgeInDoorTx(tx, txCtx, { edgeId: resolvedEdgeId, edgeRef, memoryId: edgeMem.memoryId });
       });
       // #1061 — attributed to the source node, as createEdge is.
       recordNodeWrite(ctx.db, toUsageNodeRef(edgeMem.source), ctx);

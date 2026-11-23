@@ -10,17 +10,17 @@
  * stays as built.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { db } from '../../integrations/db/client.js';
-import { cleanDb } from '../../test/helpers.js';
-import { generateId } from '../id.js';
-import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
-import { upsertPlatformActions } from '../grants/actions.js';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { resolvers, type Context } from './resolvers.js';
+import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 
 let userId: string, appId: string, secretId: string;
 const ctx = (as: string = userId): Context => ({ db, userId: as, roles: [] } as unknown as Context);
 const error = async (p: Promise<unknown>) => p.then(() => { throw new Error('expected refusal'); }, (e) => e);
 const eventKinds = async () =>
-  (await db.secretEvent.findMany({ where: { ownerId: appId, secretName: 'canary' }, orderBy: { at: 'asc' }, select: { kind: true } })).map((e) => e.kind);
+  (await db.secretEvent.findMany({ where: { ownerId: appId, secretName: 'canary' }, orderBy: [{ at: 'asc' }, { seq: 'asc' }], select: { kind: true } })).map((e) => e.kind);
 const member = async () => {
   const id = (await db.user.create({ data: { email: `${generateId()}@s4.test` } })).id;
   await db.appMember.create({ data: { appId, userId: id, role: 'reader' } });
@@ -95,6 +95,47 @@ describe('#4749 an explicit GraphQL null asks for no protection change, like an 
     await db.secret.update({ where: { id: secretId }, data: { protected: true } });
     const e = await error(resolvers.Mutation.updateSecret({}, { ref: secretId, protected: null as never, value: 'v2' }, ctx()));
     expect(e.extensions).toMatchObject({ code: 'SECRET_PROTECTED_NEEDS_PASSKEY', requestId: expect.any(String) });
+    // a null input must not leak through as a protection change
+    expect((await db.secretChangeRequest.findFirstOrThrow()).protectedResult).toBeNull();
+  });
+});
+
+describe('#4814 protected: null on a non-App (user) secret is "not supplied" too (cor:api:210:01); the org door is the same branch', () => {
+  const userSecret = async () =>
+    (await resolvers.Mutation.createSecret({}, { ownerType: 'user', ownerRef: userId, name: 'mine', kind: 'generic', value: 'v1' }, ctx())).id as string;
+
+  it('with a value: an ordinary update, not refused as an App-only protection request', async () => {
+    const id = await userSecret();
+    const before = await db.secret.findUniqueOrThrow({ where: { id } });
+    await resolvers.Mutation.updateSecret({}, { ref: id, protected: null as never, value: 'v2' }, ctx());
+    const after = await db.secret.findUniqueOrThrow({ where: { id } });
+    expect(after.valueEncrypted).not.toEqual(before.valueEncrypted); // the value changed: it was an ordinary update
+  });
+
+  it('with metadata: an ordinary update', async () => {
+    const id = await userSecret();
+    await resolvers.Mutation.updateSecret({}, { ref: id, protected: null as never, metadata: { note: 'n' } }, ctx());
+    expect((await db.secret.findUniqueOrThrow({ where: { id } })).metadata).toEqual({ note: 'n' });
+  });
+
+  it('alone: the same empty-update refusal as {} (not the App-only protection refusal)', async () => {
+    const id = await userSecret();
+    const e = await error(resolvers.Mutation.updateSecret({}, { ref: id, protected: null as never }, ctx()));
+    expect(e.extensions.code).toBe('BAD_USER_INPUT');
+    expect(e.message).toBe('Pass metadata and/or value.');
+  });
+
+  it('a real boolean is still refused as App-only, and a non-manager still gets the one refusal first', async () => {
+    const id = await userSecret();
+    for (const flag of [true, false]) {
+      const e = await error(resolvers.Mutation.updateSecret({}, { ref: id, protected: flag, value: 'x' }, ctx()));
+      expect(e.message, `protected=${flag}`).toBe('Protection is available only for App secrets.');
+    }
+    const stranger = (await db.user.create({ data: { email: `${generateId()}@s4.test` } })).id;
+    const outsiderNull = await error(resolvers.Mutation.updateSecret({}, { ref: id, protected: null as never, value: 'x' }, ctx(stranger)));
+    const outsiderOmitted = await error(resolvers.Mutation.updateSecret({}, { ref: id, value: 'x' }, ctx(stranger)));
+    expect(outsiderNull.message).toBe(outsiderOmitted.message);
+    expect(outsiderNull.extensions).toEqual(outsiderOmitted.extensions);
   });
 });
 
