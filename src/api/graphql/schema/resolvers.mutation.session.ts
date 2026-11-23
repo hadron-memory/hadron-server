@@ -571,6 +571,16 @@ export async function writeSessionHandoff(
 // own transaction (the auto-save then rolls back with a refused or failed restore).
 const STANDALONE_REVISION_TX_TIMEOUT_MS = 35_000;
 
+/**
+ * Test seam (#3587 P2s): awaited inside `restoreRevision`'s transaction between the auto-save write and the
+ * retirement check, so a test can commit a retirement in that window and pin that the check reads under its own row
+ * lock. Ordering proof only; null (the default) skips it.
+ */
+let restorePauseBeforeRetirementCheck: (() => Promise<void>) | null = null;
+export function setRestorePauseBeforeRetirementCheckForTests(fn: (() => Promise<void>) | null): void {
+  restorePauseBeforeRetirementCheck = fn;
+}
+
 type RevisionSnapshotRead = {
   nodes: Array<Record<string, unknown>>;
   edges: Array<Record<string, unknown>>;
@@ -2669,6 +2679,7 @@ export const sessionMutations = {
           await writeRevisionRow(
             tx, sysMemId, await readRevisionSnapshot(tx, sysMemId), `Auto-save before restoring ${revisionLoc}`, ctx.userId ?? null,
           );
+          if (restorePauseBeforeRetirementCheck) await restorePauseBeforeRetirementCheck();
           // #3587 (ruling 0220): the authoritative check, under the row locks and before the soft-delete.
           await assertRestoreKeepsRetirement(tx, {
             memoryId: sysMemId, revisionLoc, snapshotNodes: snapshot.nodes, isEncrypted: sysMem?.isEncrypted ?? false,

@@ -9,7 +9,7 @@
  * - scope: the #1591 guards stay disabled, and `restoreNode` / `restoreNodeRevision` stay outside the rule (ruling
  *   0220 names only the snapshot restore; cor:spc:010:02's stated limit).
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Observe-only: the real acquireLockSet runs; the spy records each call's keys.
 const lockSetCalls = vi.hoisted(() => [] as Array<Array<{ memoryId: string; loc: string }>>);
@@ -29,6 +29,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { isMintedSpecPermanenceEnforced } from '../../../lib/mintedSpecPermanence.js';
+import { setRestorePauseBeforeRetirementCheckForTests } from './resolvers.mutation.session.js';
 
 const M = resolvers.Mutation as any;
 let ctx: Context;
@@ -92,6 +93,36 @@ describe('#3587 P8 — concealment for a readable, non-ADMIN caller', () => {
     expect(JSON.stringify({ m: unretiring.message, x: unretiring.extensions })).toBe(JSON.stringify({ m: harmless.message, x: harmless.extensions }));
     expect((await rowOf('specs:z')).tags).toEqual(['superseded']);
   });
+});
+
+describe('#3587 P2s — a retirement that commits after the auto-save and before the check (leaf, seam-driven)', () => {
+  // ORDERING proof inside the restore, not endpoint proof: the pause is a test-only seam in restoreRevision between the
+  // auto-save write and the row-locked check. The endpoint races are P2b and P3b in resolvers.restoreUnretire3587.test.ts.
+  afterEach(() => { setRestorePauseBeforeRetirementCheckForTests(null); });
+
+  it('the restore paused there sees the committed retirement under its row lock and refuses, leaving no auto-save', async () => {
+    const spec = await mk('specs:l', mintedFields); // a leaf: no snapshot loc lies under it, so A never holds key(specs:l)
+    await mk('notes:other');
+    const rev = await save();
+    const revs = await revCount();
+    let reached!: () => void;
+    const atPause = new Promise<void>((r) => { reached = r; });
+    let release!: () => void;
+    const resume = new Promise<void>((r) => { release = r; });
+    setRestorePauseBeforeRetirementCheckForTests(async () => { reached(); await resume; });
+    const a = restore(rev).then(() => null, (e: any) => e);
+    await atPause;
+    // B: a real retirement through updateNode, which commits while A is paused (A holds no key or row it needs).
+    await M.updateNode({}, { input: { id: spec.id, tags: ['superseded'] } }, ctx);
+    // Observed before A resumes: a fresh read sees the committed tag.
+    expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).tags).toEqual(['superseded']);
+    release();
+    const e = await a;
+    expect(e?.extensions?.code).toBe('RESTORE_WOULD_UNRETIRE_SPEC');
+    expect(e?.extensions?.locs).toEqual(['specs:l']);
+    expect(await revCount()).toBe(revs);
+    expect((await rowOf('specs:l')).tags).toEqual(['superseded']);
+  }, 30_000);
 });
 
 describe('#3587 D2 — standalone createRevision reads outside its transaction', () => {
