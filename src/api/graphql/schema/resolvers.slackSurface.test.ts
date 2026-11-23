@@ -11,6 +11,7 @@
  *   - slackConnections: uniform page scoped to member orgs; orgId
  *     narrows per cor:api:100:01 (non-member -> empty page).
  */
+import { chatToolTeardownIdle } from '../../../lib/chatToolTeardown.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -130,6 +131,7 @@ describe('createSlackConnection', () => {
     vi.mocked(createSlackToolConnection).mockResolvedValue(identity({ id: 'tool-conn-2' }));
     await expect(createConnection()).rejects.toThrow(/already connected/);
     // The just-created tool row was torn down, not orphaned.
+    await chatToolTeardownIdle(); // #4847: the first attempt is claimed in the database before the tool is asked
     expect(deleteSlackToolConnection).toHaveBeenCalledWith('slack', 'tool-conn-2');
     expect(await db.slackConnection.count({ where: { deletedAt: null } })).toBe(1);
   });
@@ -162,6 +164,7 @@ describe('deleteSlackConnection', () => {
     const row = await db.slackConnection.findUniqueOrThrow({ where: { id: connection.id } });
     expect(row.deletedAt).not.toBeNull();
     expect(row.deletedBy).toBe(admin.id);
+    await chatToolTeardownIdle(); // #4847: the first attempt is claimed in the database before the tool is asked
     expect(deleteSlackToolConnection).toHaveBeenCalledWith('slack', 'tool-conn-1');
   });
 });

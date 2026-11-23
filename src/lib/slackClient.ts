@@ -176,20 +176,25 @@ export async function createSlackToolConnection(
 }
 
 /**
- * Best-effort disconnect on the provider tool (socket teardown + soft
- * delete). NEVER throws — the caller's DB effect has already committed, so
- * a misconfigured provider or an unreachable tool must log, not fail the
- * surrounding operation. Callers fire-and-forget (`void deleteSlackToolConnection(...)`).
+ * Disconnect on the provider tool. NEVER throws (the caller's DB effect has already committed). Returns whether the tool CONFIRMED:
+ * true only on a success answer (#4847, cor:int:030:03 clause 3). A not-found is NOT a confirmation here (the tool must answer a
+ * repeat DELETE with success, hadrontool-slack#6), nor is any other status, a transport failure or an unset URL.
  */
-export async function deleteSlackToolConnection(provider: string, toolConnectionId: string): Promise<void> {
+export async function deleteSlackToolConnection(provider: string, toolConnectionId: string): Promise<boolean> {
   try {
     const { baseUrl, token } = toolFor(provider);
-    await fetch(`${baseUrl}/connections/${encodeURIComponent(toolConnectionId)}`, {
+    const res = await fetch(`${baseUrl}/connections/${encodeURIComponent(toolConnectionId)}`, {
       method: 'DELETE',
       headers: token ? { authorization: `Bearer ${token}` } : {},
       signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
+    if (!res.ok) {
+      console.error(`[slackClient] tool disconnect refused for ${provider}/${toolConnectionId}: HTTP ${res.status}`);
+      return false;
+    }
+    return true;
   } catch (err) {
     console.error(`[slackClient] tool disconnect failed for ${provider}/${toolConnectionId}:`, err);
+    return false;
   }
 }

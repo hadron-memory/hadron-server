@@ -107,18 +107,18 @@ describe('telegramClient', () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/connections/tool-1'), expect.objectContaining({ method: 'DELETE' })));
   });
 
-  it('disconnect is best effort: it never throws, unconfigured or unreachable', async () => {
+  it('disconnect is best effort: it never throws and reports not-confirmed, unconfigured or unreachable (#4847)', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('down')));
-    await expect(deleteTelegramToolConnection('telegram', 'tool-1')).resolves.toBeUndefined();
+    await expect(deleteTelegramToolConnection('telegram', 'tool-1')).resolves.toBe(false);
     delete process.env.TELEGRAM_TOOL_URL;
-    await expect(deleteTelegramToolConnection('telegram', 'tool-1')).resolves.toBeUndefined();
+    await expect(deleteTelegramToolConnection('telegram', 'tool-1')).resolves.toBe(false);
   });
 
-  it('disconnect logs a tool refusal (HTTP 500) and still never throws', async () => {
+  it('disconnect logs a tool refusal (HTTP 500) , reports not-confirmed and still never throws (#4847)', async () => {
     process.env.TELEGRAM_TOOL_URL = 'http://tool.local';
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('no', { status: 500 })));
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
-    await expect(deleteTelegramToolConnection('telegram', 'tool-1')).resolves.toBeUndefined();
+    await expect(deleteTelegramToolConnection('telegram', 'tool-1')).resolves.toBe(false);
     expect(err).toHaveBeenCalledWith(expect.stringContaining('HTTP 500'));
     err.mockRestore();
   });
