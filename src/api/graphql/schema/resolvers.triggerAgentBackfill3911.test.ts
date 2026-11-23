@@ -217,8 +217,9 @@ describe('#3911 V71: the imports half of "installed"', () => {
   // import too (two installed Agents) and disables it instead. The asymmetry (a physical install is credited under a deleted
   // organization, an import is not) is written in the migration's own header ("...as imports ... in a live, org-owned App")
   // and mirrors `resolveAppInstallation` (src/lib/appInstallations.ts: physical rows are listed first, then the import loop is
-  // skipped when the organization is deleted). It is NOT stated in the specs corpus, so this pins the shipped behaviour, not
-  // a confirmed rule; if the corpus later rules otherwise, this pin changes with it.
+  // skipped when the organization is deleted). CURRENT BEHAVIOUR, UNCONFIRMED AGAINST SPEC: V71 says "installed" without
+  // saying whether an import counts under a deleted organization, so this pins what ships, not a confirmed rule (Vera has
+  // been asked to check it against the corpus; a follow-up issue only if she calls it a defect).
   it('the owning organization is deleted: an import is not credited, so the physical install alone fills (#4835)', async () => {
     const appId = await app('org-gone', [agentA]);
     await imp(agentA, agentB);
