@@ -139,6 +139,15 @@ describe('#340 acceptance 3 — exact bytes of the join', () => {
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(1);
   });
 
+  it('an include in the appended text derives its include edge, as a replace would', async () => {
+    const target = await seed('bytes:include-target', { content: 'shared' });
+    const node = await seed('bytes:include');
+    const text = await mcp().callToolText('hadron_update_node', { urn: urnFor(node.loc), appendContent: `{{> ${target.loc}}}` });
+    expect(text).toContain('Node updated:');
+    const edges = await db.edge.findMany({ where: { sourceId: node.id, governedKind: 'INCLUDE', deletedAt: null } });
+    expect(edges.map((e) => e.targetId)).toEqual([target.id]);
+  });
+
   it('re-embeds with the joined body', async () => {
     const spy = vi.spyOn(embeddingEnqueue, 'enqueueNodeEmbedding');
     const node = await seed('bytes:embed', { abstract: 'summary' });
@@ -258,6 +267,16 @@ describe('#340 acceptance 5 — refusals write nothing', () => {
     expect(text).toMatch(/`separator` applies only with `appendContent` or `prependContent`/);
     expect(await snapshot(node.id)).toEqual(before);
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).name).toBe(node.name);
+  });
+
+  it('a NUL in appendContent, prependContent or separator: [bad_user_input], like one in content (#4096)', async () => {
+    const node = await seed('refuse:nul');
+    const before = await snapshot(node.id);
+    for (const args of [{ appendContent: 'a\u0000b' }, { prependContent: 'a\u0000b' }, { appendContent: 'x', separator: '\u0000' }]) {
+      const text = await mcp().callToolText('hadron_update_node', { urn: urnFor(node.loc), ...args });
+      expect(text).toMatch(/^\[bad_user_input\]/);
+    }
+    expect(await snapshot(node.id)).toEqual(before);
   });
 
   it('install: refused before forwarding, like edges/isRunnable', async () => {
