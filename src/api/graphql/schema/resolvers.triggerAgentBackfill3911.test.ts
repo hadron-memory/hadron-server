@@ -202,15 +202,23 @@ describe('#3911 V71: the imports half of "installed"', () => {
     await imp(agentA, agentB);
     const t = await triggers(appId, null);
     await db.app.update({ where: { id: appId }, data: gone });
+    const before = await total();
     await migrate();
     const r = await read(t);
     expect([r.schedule.agentId, r.schedule.enabled]).toEqual([null, false]);
     expect([r.webhook.agentId, r.webhook.enabled]).toEqual([null, false]);
+    expect(r.poll.agentId).toBeNull();
+    expect(r.poll.cancelledAt).not.toBeNull();
+    expect(await total()).toBe(before); // nothing deleted
   });
 
   // The organization clause of the imports branch: with the owning organization deleted the import is not credited, so the
   // physical install alone is the only installed Agent and fills the trigger. Dropping `o.deleted_at IS NULL` credits the
-  // import too (two installed Agents) and disables it instead.
+  // import too (two installed Agents) and disables it instead. The asymmetry (a physical install is credited under a deleted
+  // organization, an import is not) is written in the migration's own header ("...as imports ... in a live, org-owned App")
+  // and mirrors `resolveAppInstallation` (src/lib/appInstallations.ts: physical rows are listed first, then the import loop is
+  // skipped when the organization is deleted). It is NOT stated in the specs corpus, so this pins the shipped behaviour, not
+  // a confirmed rule; if the corpus later rules otherwise, this pin changes with it.
   it('the owning organization is deleted: an import is not credited, so the physical install alone fills (#4835)', async () => {
     const appId = await app('org-gone', [agentA]);
     await imp(agentA, agentB);
@@ -295,15 +303,16 @@ describe('#3911 V71: re-enabling a disabled schedule', () => {
 
   // #4835 pin 1 — the SUCCESS branch of an `agentRef: null` edit of an ENABLED schedule: with exactly one installed Agent
   // the edit is judged as a creation is (V70 resolution) and records that Agent instead of clearing; every refusal test
-  // above uses an App with several or none. The start state is one the product reaches: the App had two installed Agents,
-  // the schedule names agentB, and agentB is then uninstalled, leaving agentA the only one. A reading that preserved the
+  // above uses an App with several or none. The start state is reachable by uninstalling an Agent: the App had two installed Agents,
+  // the schedule names agentB, and agentB's install row is then removed (done directly here, not through the uninstall door),
+  // leaving agentA the only one. A reading that preserved the
   // named Agent, or that cleared to null, would not end [agentA, true]. This pins the builder's reading of V70's
   // resolution (record the single installed Agent); cor:api:210:01's "explicit null is treated as absent" could be read
   // against it and the corpus does not state which holds (Vera records the reading as Proposed on merge).
   it('clearing the Agent of an enabled schedule in an App with ONE installed Agent records that Agent (#4835)', async () => {
     const appId = await app('clear-one', [agentA, agentB]);
     const t = await triggers(appId, agentB);
-    await db.appAgent.delete({ where: { appId_agentId: { appId, agentId: agentB } } as never });
+    await db.appAgent.delete({ where: { appId_agentId: { appId, agentId: agentB } } });
     const returned = await M.updateAgentSchedule({}, { id: t.schedule, input: { agentRef: null } }, ctx());
     expect([returned.agentId, returned.enabled]).toEqual([agentA, true]);
     const r = (await read(t)).schedule;
