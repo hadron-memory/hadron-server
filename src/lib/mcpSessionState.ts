@@ -28,7 +28,9 @@
  * caller whose client has NO record of its own starts from a copy of the user's
  * last explicit selection (`USER_DEFAULT_CLIENT_KEY`). A client that has a
  * record is still never changed by another client, and a caller on an API key
- * neither reads nor feeds the per-user record.
+ * neither reads nor feeds the per-user record. That includes a key MINTED BY an
+ * OAuth-issued key: it carries no OAuth client (`AuthContext.oauthClientId`).
+ * The per-user record always holds one client's whole selection.
  *
  * A client that sends no header is keyed on the OAuth client its credential was
  * issued to (#2605, `selectionClientKey`): no client application sends the
@@ -156,8 +158,7 @@ export async function loadMcpSessionState(
     // #2605 (ruling 7): an OAuth caller whose client has no record of its own STARTS FROM the user's last explicit
     // selection. The copy gives the client its own record, so nothing another client selects later moves it. What
     // is copied is the stored pointers; they are re-authorized below like any other stored selection.
-    if (!row && auth.oauthClientId) {
-      await adoptUserDefault(db, auth.userId, clientKey);
+    if (!row && auth.oauthClientId && (await adoptUserDefault(db, auth.userId, clientKey))) {
       row = await db.mcpSessionState.findUnique({ where, select });
     }
     if (!row) return {};
@@ -274,25 +275,34 @@ export async function saveActiveScope(
   await upsertSelection(db, auth, clientKey, { scopeId });
 }
 
-/** Shared upsert for the selections — one row per (user, client instance). */
+/** The four stored pointers, as one client holds them. */
+const SELECTION_POINTERS = { appId: true, memoryId: true, organizationId: true, scopeId: true } as const;
+
 /**
- * #2605 (ruling 7) — give a client that has no record a copy of the user's own record, if there is one. Losing a
- * race to a concurrent open of the same client is fine: the unique (userId, clientKey) keeps the first copy, and the
- * caller re-reads. Any failure leaves the client with no record, which is what it had.
+ * #2605 (ruling 7) — give a client that has no record a copy of the user's own record, if there is one. Returns
+ * whether the client may now have a record worth reading: true after a copy, and after losing the race to a
+ * concurrent open of the same client (the unique (userId, clientKey) kept the other copy). False when the user has
+ * no record, or a copied pointer was deleted between the read and the copy; the client then has no record, which is
+ * what it had. Any other failure propagates, and the caller's restore answers "nothing usable stored".
  */
-async function adoptUserDefault(db: PrismaClient, userId: string, clientKey: string): Promise<void> {
+async function adoptUserDefault(db: PrismaClient, userId: string, clientKey: string): Promise<boolean> {
+  const own = await db.mcpSessionState.findUnique({
+    where: { userId_clientKey: { userId, clientKey: USER_DEFAULT_CLIENT_KEY } },
+    select: SELECTION_POINTERS,
+  });
+  if (!own) return false;
   try {
-    const own = await db.mcpSessionState.findUnique({
-      where: { userId_clientKey: { userId, clientKey: USER_DEFAULT_CLIENT_KEY } },
-      select: { appId: true, memoryId: true, organizationId: true, scopeId: true },
-    });
-    if (!own) return;
     await db.mcpSessionState.create({ data: { userId, clientKey, ...own } });
-  } catch {
-    // Lost the race, or a pointer was deleted between the read and the copy: nothing to adopt.
+    return true;
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    if (code === 'P2002') return true; // lost the race: the other open's copy is there to read
+    if (code === 'P2003') return false; // a pointer was deleted under us: nothing to adopt
+    throw err;
   }
 }
 
+/** Shared upsert for the selections — one row per (user, client instance). */
 async function upsertSelection(
   db: PrismaClient,
   auth: AuthContext,
@@ -300,17 +310,36 @@ async function upsertSelection(
   patch: { appId?: string; memoryId?: string; organizationId?: string | null; scopeId?: string | null },
 ): Promise<void> {
   if (!clientKey || !auth.userId) return;
+  await upsertOne(db, auth.userId, clientKey, patch);
   // #2605 (ruling 7): an OAuth caller's explicit selection is also the user's last one, which a client of theirs
   // with no record of its own starts from. An API-key caller's selection stays in its own record only.
-  const keys = auth.oauthClientId ? [clientKey, USER_DEFAULT_CLIENT_KEY] : [clientKey];
-  for (const key of keys) await upsertOne(db, auth.userId, key, patch);
+  if (auth.oauthClientId) await copyToUserDefault(db, auth.userId, clientKey);
+}
+
+/**
+ * #2605 (ruling 7) — make the user's record a copy of this client's WHOLE selection, not just the field that changed.
+ * Each save writes one field, so patching the per-user record field by field would leave it holding the App one
+ * client chose and the memory another chose: a starting point no client ever had. Copying the whole row keeps it
+ * one client's selection. Best-effort like every save here.
+ */
+async function copyToUserDefault(db: PrismaClient, userId: string, clientKey: string): Promise<void> {
+  try {
+    const current = await db.mcpSessionState.findUnique({
+      where: { userId_clientKey: { userId, clientKey } },
+      select: SELECTION_POINTERS,
+    });
+    if (!current) return;
+    await upsertOne(db, userId, USER_DEFAULT_CLIENT_KEY, current);
+  } catch {
+    // See the doc comment: never fail the caller's actual operation.
+  }
 }
 
 async function upsertOne(
   db: PrismaClient,
   userId: string,
   clientKey: string,
-  patch: { appId?: string; memoryId?: string; organizationId?: string | null; scopeId?: string | null },
+  patch: { appId?: string | null; memoryId?: string | null; organizationId?: string | null; scopeId?: string | null },
 ): Promise<void> {
   try {
     await db.mcpSessionState.upsert({
