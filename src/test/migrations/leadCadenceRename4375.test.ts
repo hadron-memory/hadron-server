@@ -72,7 +72,8 @@ describe('#4375 migration 20261123020000_lead_cadence_rename', () => {
 
       const migrated = await objectNames((sql, p) => pg.query(sql, p));
       expect(migrated.filter((n) => n.includes('coordinator'))).toEqual([]);
-      const fresh = await objectNames(async (sql, p) => ({ rows: await db.$queryRawUnsafe<Array<{ n: string }>>(sql.replace(/\$1/g, `ARRAY['${TABLES.join("','")}']::text[]`), ) }));
+      // The same catalog query, with its one parameter bound, on the worker database (db push + post-push.sql).
+      const fresh = await objectNames(async (sql, p = []) => ({ rows: await db.$queryRawUnsafe<Array<{ n: string }>>(sql, ...p) }));
       expect(migrated).toEqual(fresh);
     });
   });
@@ -130,12 +131,25 @@ describe('#4375 migration 20261123020000_lead_cadence_rename', () => {
       await pg.query(NEW); // no old tables at all
       expect((await pg.query(`SELECT to_regclass('lead_cadence_episodes') AS a`)).rows[0].a).toBeNull();
       await pg.query(OLD);
+      await pg.query(`INSERT INTO apps VALUES ('a1'); INSERT INTO workers VALUES ('w1'), ('w3'); INSERT INTO agent_team_events VALUES ('e1');
+        UPDATE workers SET reports_to_worker_id = 'w1' WHERE id = 'w3';
+        INSERT INTO coordinator_cadence_episodes (id, app_id, worker_id, event_id, opened_at) VALUES ('ep1', 'a1', 'w1', 'e1', '2026-11-20 10:00:00');
+        INSERT INTO coordinator_cadence_clocks (worker_id, app_id, observed_at) VALUES ('w1', 'a1', '2026-11-01 09:00:00');`);
       await pg.query(NEW);
+      const rowsOf = async () => ({
+        episodes: (await pg.query(`SELECT id, app_id, worker_id, event_id, opened_at, ended_at FROM lead_cadence_episodes ORDER BY id`)).rows,
+        clocks: (await pg.query(`SELECT worker_id, app_id, observed_at FROM lead_cadence_clocks ORDER BY worker_id`)).rows,
+      });
+      const afterFirst = await rowsOf();
+      expect(afterFirst.episodes).toHaveLength(1);
+      expect(afterFirst.clocks).toHaveLength(1);
       await pg.query(NEW); // already renamed
       const once = await objectNames((sql, p) => pg.query(sql, p));
       expect(once.length).toBeGreaterThan(8);
       await pg.query(NEW);
-      expect(await objectNames((sql, p) => pg.query(sql, p))).toEqual(once); // the third run changes nothing either
+      // The further runs change neither the objects nor the rows (the data path, not only the names).
+      expect(await objectNames((sql, p) => pg.query(sql, p))).toEqual(once);
+      expect(await rowsOf()).toEqual(afterFirst);
     });
   });
 });

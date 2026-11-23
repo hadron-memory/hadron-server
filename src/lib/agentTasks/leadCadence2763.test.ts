@@ -10,6 +10,7 @@ import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { ensureChannelWithRoot } from '../channels.js';
 import { evaluateLeadCadence } from './leadCadence.js';
+import { leadWorkerIds } from './leads.js';
 import { matchingTeamPool } from './matcher.js';
 import * as stopState from '../stopSignals/state.js';
 import { Prisma } from '../../generated/prisma/index.js';
@@ -17,6 +18,11 @@ import { eventPayloadFor } from './darkWorker.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
+// A pass-through spy, so a test can count how many times the lead set is read (#4950).
+vi.mock('./leads.js', async (orig) => {
+  const m = await orig<typeof import('./leads.js')>();
+  return { ...m, leadWorkerIds: vi.fn(m.leadWorkerIds) };
+});
 
 const MIN = 60_000;
 const NOW = new Date('2026-11-03T12:00:00.000Z');
@@ -338,6 +344,20 @@ describe('#4375 the alarm watches every lead (rulings 0270, 0271)', () => {
     expect(await alarms('Ada')).toHaveLength(2);
     expect(await db.leadCadenceEpisode.count({ where: { workerId: w.Ada.id } })).toBe(2);
     expect(await alarms('Cass')).toHaveLength(1); // Cass's one episode is still open: no second alarm for her either
+    // The re-raised alarm wakes Cass (the nearest owner) like the first one did, so the second stint is not silent.
+    const [, again] = await alarms('Ada');
+    expect(((await pendingTaskWakes(db, [w.Cass.id], later(63))).get(w.Cass.id) ?? []).some((p) => p.eventId === again.id)).toBe(true);
+  });
+
+  it('a pass reads the App\'s lead set once for its candidates; only each raise transaction reads it again (#4950)', async () => {
+    w.Cass = await mk('Cass', null, 'owner');
+    await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Cass.id } });
+    await lateAda();
+    vi.mocked(leadWorkerIds).mockClear();
+    const raised = await evaluateLeadCadence(db, NOW);
+    expect(raised).toHaveLength(2); // Ada and Cass are both late
+    // One read for the pass, shared by both candidates, plus one per raise transaction (the decision it re-derives).
+    expect(vi.mocked(leadWorkerIds)).toHaveBeenCalledTimes(1 + raised.length);
   });
 
   it('an App with no lead raises nothing', async () => {

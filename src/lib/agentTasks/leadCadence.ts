@@ -38,7 +38,7 @@
  * the same SERIALIZABLE transaction as the event. The loser of a race rolls back and raises nothing. An episode ends in
  * exactly two ways. (1) At the lead's next counted assignment: neither a shortage of free workers nor a pause ends it, so
  * busy/free toggles never raise a second alarm; the next lateness after that opens a new one. (2) When its worker STOPS
- * BEING A LEAD (nobody reports to it any more): the alarm says a lead stopped assigning, which is no longer true of a
+ * BEING A LEAD (no live worker reports to it any more, or it is retired itself while reports still point at it): the alarm says a lead stopped assigning, which is no longer true of a
  * worker that leads nobody, and an ended episode is what stops the alarm's escalation up the reporting line. Its
  * `ended_at` is the pass's time; if the worker leads again, the next lateness opens a new episode from a fresh clock.
  *
@@ -110,10 +110,12 @@ type Late = { workerId: string; lastAssignedAt: Date | null; freeWorkerCount: nu
  * it). Every input is read through `db`, so the raise transaction can call it again on its own connection. A lead that
  * already has an open episode is the caller's concern (the unique index decides a race).
  */
-async function decide(db: PrismaClient, appId: string, workerId: string, now: Date): Promise<Late | null> {
-  // The lead set is read once per judgement (cor:agt:020:12, `./leads.ts`): it decides whether this worker is watched at
-  // all and which pool workers do not count as free. In the raise transaction it is read again on that connection.
-  const leads = await leadWorkerIds(db, appId);
+async function decide(db: PrismaClient, appId: string, workerId: string, now: Date, passLeads?: ReadonlySet<string>): Promise<Late | null> {
+  // The lead set (cor:agt:020:12, `./leads.ts`) decides whether this worker is watched at all and which pool workers do
+  // not count as free. A pass hands in the snapshot it already read for the App, so its candidates share one read
+  // (#4950). The raise transaction hands in none, so it reads the set again on its own connection: that read is part of
+  // the decision Postgres checks for a read-write cycle.
+  const leads = passLeads ?? (await leadWorkerIds(db, appId));
   if (!leads.has(workerId)) return null;
   const observed = await observe(db, appId, [workerId], now);
   // #4937 (cor:agt:050:31): the alarm exists only while the App's LATEST report says external tasks exist. Read here, after the
@@ -224,7 +226,7 @@ export async function evaluateLeadCadence(db: PrismaClient, now = new Date()): P
       const openWorkers = new Set(open.filter((e) => !(lastAssigned.get(e.workerId) && (lastAssigned.get(e.workerId) as Date) > e.openedAt) && leads.has(e.workerId)).map((e) => e.workerId));
       for (const c of candidates) {
         try {
-          const late = await decide(db, app.id, c.id, now);
+          const late = await decide(db, app.id, c.id, now, leads);
           if (!late) continue;
           if (openWorkers.has(c.id)) continue;
           const id = await raise(db, app, late, now);

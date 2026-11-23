@@ -302,9 +302,9 @@ export const ALARM_EVENT_TYPES = [
   // #2755: a worker gone dark (cor:agt:100:06, Proposed). Task-less; its episode lives in `dark_worker_episodes`.
   'alarm.dark-worker',
   // #2763, renamed by #4375: a lead that stopped assigning while a worker under it was free (cor:agt:050:31). Task-less;
-  // its episode lives in `lead_cadence_episodes`. The legacy spelling stays valid for the rows raised under it.
+  // its episode lives in `lead_cadence_episodes`. Only the new spelling is an emit type: the legacy one is history that
+  // is read ({@link LEAD_CADENCE_EVENT_TYPES}), never written (#4950).
   LEAD_CADENCE_EVENT_TYPE,
-  LEGACY_LEAD_CADENCE_EVENT_TYPE,
   // #2014: a worker's team-chat post refused by the rate limit. Task-less; its episode lives in `post_limit_episodes`.
   'alarm.post-limit',
   // #4231: a worker whose platform starts keep failing (three in an hour). Task-less; its episode lives in `start_failing_episodes`.
