@@ -251,6 +251,87 @@ describe('#4375 the alarm watches every lead (rulings 0270, 0271)', () => {
     expect(await alarms('Ned')).toHaveLength(1);
   });
 
+  it('a stale clock row from the old role-based watch does not make a worker late the day it becomes a lead (Riana P2-3)', async () => {
+    await adaLeadsNobody();
+    w.Zed = await mk('Zed', null, 'coordinator');
+    await bind('Zed', 600);
+    await bind('Tove');
+    await event('task.assigned', 'Zed', 500);
+    // The row a pre-rename deploy left for a coordinator-role worker that nobody reported to: observed 500 minutes ago.
+    await db.leadCadenceClock.create({ data: { workerId: w.Zed.id, appId: app.id, observedAt: at(500) } });
+    await evaluateLeadCadence(db, at(120)); // Zed is not a lead: the pass drops the stale row
+    expect(await clockOf('Zed')).toBeNull();
+    await mk('Pat', w.Zed.id); // somebody starts reporting to Zed: it leads from here
+    expect(await evaluateLeadCadence(db, at(70))).toEqual([]);
+    expect((await clockOf('Zed'))?.observedAt.getTime()).toBe(at(70).getTime()); // a FRESH first sighting
+    expect(await evaluateLeadCadence(db, at(11))).toEqual([]); // 59 minutes on
+    expect(await evaluateLeadCadence(db, later(1))).toHaveLength(1);
+  });
+
+  it('a lead that stops leading and leads again starts a fresh 60 minutes, and a lead that keeps leading keeps its row', async () => {
+    await adaLeadsNobody();
+    w.Ned = await mk('Ned', null, 'engineer');
+    w.Pat = await mk('Pat', w.Ned.id);
+    await bind('Ned', 600);
+    await bind('Tove');
+    await evaluateLeadCadence(db, at(300)); // Ned leads: row at 300 minutes ago
+    expect((await clockOf('Ned'))?.observedAt.getTime()).toBe(at(300).getTime());
+    await evaluateLeadCadence(db, at(250)); // still a lead: the same row
+    expect((await clockOf('Ned'))?.observedAt.getTime()).toBe(at(300).getTime());
+    await db.worker.update({ where: { id: w.Pat.id }, data: { reportsToWorkerId: null } }); // Ned leads nobody
+    await evaluateLeadCadence(db, at(200));
+    expect(await clockOf('Ned')).toBeNull();
+    await db.worker.update({ where: { id: w.Pat.id }, data: { reportsToWorkerId: w.Ned.id } }); // and again
+    expect(await evaluateLeadCadence(db, at(70))).toEqual([]); // not late at the first pass back, whatever the old row said
+    expect((await clockOf('Ned'))?.observedAt.getTime()).toBe(at(70).getTime());
+  });
+
+  it('only the App\'s own non-leads lose their row: its leads keep theirs, and a lead of ANOTHER App keeps its row untouched', async () => {
+    await adaLeadsNobody();
+    w.Beth = await mk('Beth', null, 'engineer');
+    w.Sam = await mk('Sam', w.Beth.id);
+    await bind('Tove');
+    await evaluateLeadCadence(db, at(70)); // Beth leads: her row
+    const otherApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
+    await db.appAgent.create({ data: { appId: otherApp.id, agentId: agent.id } });
+    const farOf = (name: string, reportsTo: string | null) => db.worker.create({
+      data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: otherApp.id, agentId: agent.id, name, slug: name.toLowerCase(), role: 'engineer', heldByUserId: user.id, reportsToWorkerId: reportsTo },
+    });
+    const farLead = await farOf('FarLead', null);
+    await farOf('FarRep', farLead.id);
+    await db.leadCadenceClock.create({ data: { workerId: farLead.id, appId: otherApp.id, observedAt: at(400) } });
+    await db.leadCadenceClock.create({ data: { workerId: w.Tove.id, appId: app.id, observedAt: at(400) } }); // a non-lead of THIS App
+    await evaluateLeadCadence(db, at(10));
+    expect((await clockOf('Beth'))?.observedAt.getTime()).toBe(at(70).getTime());
+    expect(await clockOf('Tove')).toBeNull();
+    // The other App's lead keeps its ORIGINAL row (a prune that ignored the App would delete it, and a later pass would only write a new one).
+    expect((await db.leadCadenceClock.findUnique({ where: { workerId: farLead.id } }))?.observedAt.getTime()).toBe(at(400).getTime());
+  });
+
+  it('an open episode ends when its worker stops being a lead (the escalation stops), and a later stint can raise a new alarm (Elena P3)', async () => {
+    w.Cass = await mk('Cass', null, 'owner');
+    await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Cass.id } });
+    await lateAda();
+    await evaluateLeadCadence(db, NOW); // Cass leads Ada, so she is late too and raises her own alarm: this case is about Ada's
+    expect(await alarms()).toHaveLength(1);
+    const [a] = await alarms();
+    const { pendingTaskWakes } = await import('./taskWakes.js');
+    expect(((await pendingTaskWakes(db, [w.Cass.id], NOW)).get(w.Cass.id) ?? []).some((p) => p.eventId === a.id)).toBe(true);
+    await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: null } }); // nobody reports to Ada any more
+    await evaluateLeadCadence(db, later(1)); // (Cass already has her open episode: nothing new is raised)
+    const ep = await db.leadCadenceEpisode.findUniqueOrThrow({ where: { eventId: a.id } });
+    expect(ep.endedAt?.getTime()).toBe(later(1).getTime()); // ended by the pass, at its time
+    expect(((await pendingTaskWakes(db, [w.Cass.id], later(1))).get(w.Cass.id) ?? []).some((p) => p.eventId === a.id)).toBe(false);
+    expect(await alarms()).toHaveLength(1); // no second alarm for the same stint
+    await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: w.Ada.id } }); // Ada leads again
+    await evaluateLeadCadence(db, later(2)); // a fresh stint: not late at the first pass back
+    await evaluateLeadCadence(db, later(61)); // 59 minutes on
+    expect(await alarms()).toHaveLength(1);
+    await evaluateLeadCadence(db, later(63)); // 61 minutes: a new episode, a new alarm
+    expect(await alarms()).toHaveLength(2);
+    expect(await db.leadCadenceEpisode.count({ where: { workerId: w.Ada.id } })).toBe(2);
+  });
+
   it('an App with no lead raises nothing', async () => {
     await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: null } }); // nobody reports to anybody
     await bind('Ada');

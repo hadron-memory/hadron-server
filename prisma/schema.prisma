@@ -7882,7 +7882,8 @@ model DarkWorkerEpisode {
 /// Which workers: every LEAD, a worker that at least one worker reports to (the reporting line, hrn:node:hadronmemory.com:specs:cor:agt:020:12),
 /// that is not retired. No `role` takes part: a worker in any role is watched when it leads, and a worker that
 /// nobody reports to is not watched. The one definition of a lead is src/lib/agentTasks/leads.ts. A worker that
-/// stops being a lead while its episode is open keeps the episode until it next assigns.
+/// stops being a lead while its episode is open has the episode ended by the next pass (`endedAt` is that pass's
+/// time): the alarm says a lead stopped assigning, and ending it stops the escalation up the reporting line.
 ///
 /// Episode pattern: an alarm is an AgentTeamEvent, which is append-only, and an alarm about no task cannot be
 /// de-duplicated by that table's unique index. So each period during which the condition holds is one row
@@ -7951,8 +7952,10 @@ model LeadCadenceEpisode {
 /// Behaviour: inserted by `observe` in src/lib/agentTasks/leadCadence.ts, which the stall evaluator's pass
 /// (src/jobs/taskStallEvaluator.ts, every minute) runs for each lead when it decides whether the lead is late,
 /// and again inside the transaction that raises the alarm. The insert is `ON CONFLICT DO NOTHING`, so the first
-/// pass to see a lead sets `observedAt` and concurrent passes agree on it. No code updates or deletes a row: a
-/// worker that stops being a lead and is one again later keeps its first `observedAt`.
+/// pass to see a lead sets `observedAt` and concurrent passes agree on it. No code updates a row. The row belongs to
+/// the lead's current stint: each pass deletes the rows of the App's workers that are not leads, so a worker that
+/// stops leading and leads again, or one that kept a row from before the rename, gets a fresh `observedAt` at the
+/// first pass that sees it as a lead.
 ///
 /// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31. Background: #2763, renamed and re-pointed by #4375.
 model LeadCadenceClock {

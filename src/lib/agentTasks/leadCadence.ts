@@ -17,7 +17,8 @@
  * `actor_worker_id` = this lead; `assignment.matched` is the matcher's and never counts, so a busy matcher cannot hide a
  * lead that stopped dispatching), its first session, and `observed_at`, the first pass that saw it as a lead
  * (`lead_cadence_clocks`), so a worker that was already a lead before the deploy, or that becomes one later, is not late
- * at the first pass that sees it.
+ * at the first pass that sees it. The row belongs to the lead's current stint: a pass deletes the rows of workers that are
+ * not leads, so one that stops leading and leads again, or that kept a row from the old role-based watch, starts afresh.
  *
  * THE WORKERS UNDER THE LEAD. The matcher's team pool for the lead (`matchingTeamPool`) minus every lead (the pool
  * includes the lead itself, and a worker with no reporting line joins every pool; a lead, a sub-lead included, is not
@@ -29,8 +30,10 @@
  * episode is a row in `lead_cadence_episodes` whose partial unique index admits one OPEN row per lead, inserted in
  * the same SERIALIZABLE transaction as the event. The loser of a race rolls back and raises nothing. An episode ends
  * ONLY at the lead's next counted assignment: neither a shortage of free workers nor a pause ends it, so busy/free
- * toggles never raise a second alarm. The next lateness after that opens a new one. A worker that stops being a lead
- * while an episode is open keeps it until it next assigns.
+ * toggles never raise a second alarm. The next lateness after that opens a new one. An episode also ends when its worker
+ * STOPS BEING A LEAD (nobody reports to it any more): the alarm says a lead stopped assigning, which is no longer true of
+ * a worker that leads nobody, and an ended episode is what stops the alarm's escalation up the reporting line. Its
+ * `ended_at` is the pass's time.
  *
  * WIRE. Emitted under `alarm.lead-cadence` only. Events raised before #4375 carry `alarm.coordinator-cadence`; they are
  * history and are not rewritten, and every reader matches both (`LEAD_CADENCE_EVENT_TYPES`).
@@ -99,17 +102,16 @@ async function decide(db: PrismaClient, appId: string, workerId: string, now: Da
   // all and which pool workers do not count as free. In the raise transaction it is read again on that connection.
   const leads = await leadWorkerIds(db, appId);
   if (!leads.has(workerId)) return null;
-  const c = { id: workerId };
-  const observed = await observe(db, appId, [c.id], now);
-  const last = (await lastCountedAssignments(db, appId, [c.id])).get(c.id) ?? null;
-  const first = (await firstSessionStarts(db, [c.id])).get(c.id);
+  const observed = await observe(db, appId, [workerId], now);
+  const last = (await lastCountedAssignments(db, appId, [workerId])).get(workerId) ?? null;
+  const first = (await firstSessionStarts(db, [workerId])).get(workerId);
   // The pending reason is read directly, not through the check status: NO_SESSION would hide it, and a lead with no live
   // session is NOT exempt (cor:agt:050:31 r3), but a paused one without a session still is.
-  const reason = (await loadPendingReasons(db, appId, [c.id], now)).get(c.id);
+  const reason = (await loadPendingReasons(db, appId, [workerId], now)).get(workerId);
   if (reason && EXEMPT_PENDING.has(reason)) return null;
-  const clock = Math.max(last?.getTime() ?? -Infinity, first?.getTime() ?? -Infinity, observed.get(c.id)?.getTime() ?? -Infinity);
+  const clock = Math.max(last?.getTime() ?? -Infinity, first?.getTime() ?? -Infinity, observed.get(workerId)?.getTime() ?? -Infinity);
   if (now.getTime() - clock < LEAD_CADENCE_WINDOW_MINUTES * 60_000) return null;
-  const pool = await matchingTeamPool(db, appId, c.id);
+  const pool = await matchingTeamPool(db, appId, workerId);
   const states = new Map((await loadWorkerWorkStates(db, appId, now)).map((st) => [st.id, st]));
   // Ruling 0123: every stop level blocks assignment, including pause-dispatch.
   // Read live coverage through this connection so raise() rechecks it in its transaction too.
@@ -119,7 +121,7 @@ async function decide(db: PrismaClient, appId: string, workerId: string, now: Da
     // No lead counts as a free worker (a sub-lead under this lead included): leads are judged, not dispatched to.
     return !!st && !leads.has(id) && st.free && !stopped.has(id);
   }).length;
-  return freeWorkerCount === 0 ? null : { workerId: c.id, lastAssignedAt: last, freeWorkerCount };
+  return freeWorkerCount === 0 ? null : { workerId, lastAssignedAt: last, freeWorkerCount };
 }
 
 /** Open one episode and raise its alarm, in one transaction. Null when the lead already has an open episode. */
@@ -176,24 +178,33 @@ export async function evaluateLeadCadence(db: PrismaClient, now = new Date()): P
   for (const app of apps) {
     try {
       // Every lead of the App (cor:agt:020:12), whatever its role; one definition, `./leads.ts`.
-      const candidates = [...(await leadWorkerIds(db, app.id))].map((id) => ({ id }));
+      const leads = await leadWorkerIds(db, app.id);
+      const candidates = [...leads].map((id) => ({ id }));
+      // A clock row belongs to a lead's CURRENT stint: a worker that is not a lead has none. So a worker that becomes a lead
+      // (or comes back to leading after a gap, or kept a row from the old role-based watch) starts a fresh 60 minutes at the
+      // first pass that sees it as a lead, instead of being late at once on a stale first sighting.
+      await db.leadCadenceClock.deleteMany({ where: { appId: app.id, workerId: { notIn: [...leads] } } });
       // The open episodes are read BEFORE the clocks, so a pass ends only an episode that existed when it began.
       const open = await db.leadCadenceEpisode.findMany({ where: { appId: app.id, endedAt: null }, select: { id: true, workerId: true, openedAt: true } });
       const ids = [...new Set([...candidates.map((c) => c.id), ...open.map((e) => e.workerId)])];
       if (ids.length === 0) continue;
       const lastAssigned = await lastCountedAssignments(db, app.id, ids);
-      // An episode ends at the lead's next counted assignment, whoever it is and whatever its state now.
+      // An episode ends at the lead's next counted assignment, whoever it is and whatever its state now, or when its worker
+      // is no longer a lead (nobody reports to it: the alarm's subject is gone, and ending it stops the escalation).
       for (const e of open) {
         const last = lastAssigned.get(e.workerId);
-        if (!last || last <= e.openedAt) continue;
+        const assigned = !!last && last > e.openedAt;
+        if (!assigned && leads.has(e.workerId)) continue;
         try {
-          await db.leadCadenceEpisode.updateMany({ where: { id: e.id, endedAt: null }, data: { endedAt: last } });
+          // Assigned: the assignment's time. No longer a lead: this pass's time (never before the episode opened).
+          const endedAt = assigned ? (last as Date) : new Date(Math.max(now.getTime(), e.openedAt.getTime()));
+          await db.leadCadenceEpisode.updateMany({ where: { id: e.id, endedAt: null }, data: { endedAt } });
         } catch (err) {
           console.error(`[lead-cadence] ending episode ${e.id} failed:`, err);
         }
       }
       if (candidates.length === 0) continue;
-      const openWorkers = new Set(open.filter((e) => !(lastAssigned.get(e.workerId) && (lastAssigned.get(e.workerId) as Date) > e.openedAt)).map((e) => e.workerId));
+      const openWorkers = new Set(open.filter((e) => !(lastAssigned.get(e.workerId) && (lastAssigned.get(e.workerId) as Date) > e.openedAt) && leads.has(e.workerId)).map((e) => e.workerId));
       for (const c of candidates) {
         try {
           const late = await decide(db, app.id, c.id, now);
