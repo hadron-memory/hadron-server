@@ -1,6 +1,12 @@
 import type { WebFetchAuth } from '../webfetchClient.js';
 
-/** Remove an injected credential from every string and key in a JSON-shaped tool result (#4000). */
+/**
+ * Remove an injected credential from every string and key in a JSON-shaped tool result (#4000).
+ *
+ * Threat model: best effort (#4775). For every credential type it catches a remote that echoes the value as sent, or in the encodings the
+ * `variants` loop below builds from each raw value (JSON-escaped, base64, form- or URI-encoded; pinned in secretUseRedaction4000.test.ts). It does not catch a remote that transforms the value some other way (splits, reverses, hashes or
+ * encrypts it) before echoing it. The binding to one origin and path limits which remote can try.
+ */
 export function redactSecretUse(value: unknown, auth: WebFetchAuth): unknown {
   const raw = auth.type === 'bearer' ? [auth.token] : auth.type === 'header' ? [auth.value] :
     [auth.username, auth.password, `${auth.username}:${auth.password}`, Buffer.from(`${auth.username}:${auth.password}`).toString('base64')];

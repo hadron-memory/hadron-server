@@ -179,6 +179,9 @@ function auditErrorCode(e: unknown): string {
  * consumes one ticket and one grant use, and commits its audit rows before returning the credential to core.
  * The caller must not put the returned auth into a model-visible value or make an outbound call until it can
  * enforce the no-redirect contract. This is an internal primitive, not a GraphQL/MCP reveal door.
+ *
+ * The ticket, the run's action and the grant use are spent by that commit, before the outbound call. Nothing refunds them: a network
+ * failure, a tool error or a withheld response leaves all three spent, because the credential may already have been sent (#4775).
  */
 export async function prepareSecretUse(
   tool: import('../runner/tools/types.js').RunToolContext,
