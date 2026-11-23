@@ -190,6 +190,37 @@ describe('#3911 V71: the imports half of "installed"', () => {
     expect(await db.app.count({ where: { id: appId } })).toBe(1); // the App row itself (deleted or uninstalled) is kept
   });
 
+  // #4835 (LOCAL P3) — the IMPORTS branch has its own `apps` and `organizations` joins, so the physical-branch pin above does
+  // not reach them. The trigger's own App deleted or uninstalled, with an Agent installed that imports another: the physical
+  // branch excludes the App, so only the imports branch could credit the imported Agent, and it must not (disabled, not
+  // filled). Dropping `ap.deleted_at` / `ap.uninstalled_at` from the imports branch fills it with the imported Agent.
+  it.each([
+    ['deleted', { deletedAt: new Date() }],
+    ['uninstalled', { uninstalledAt: new Date() }],
+  ])('the trigger\'s own App is %s and an installed Agent imports another: disabled, not filled from the import (#4835)', async (label, gone) => {
+    const appId = await app(`own-imp-${label}`, [agentA]);
+    await imp(agentA, agentB);
+    const t = await triggers(appId, null);
+    await db.app.update({ where: { id: appId }, data: gone });
+    await migrate();
+    const r = await read(t);
+    expect([r.schedule.agentId, r.schedule.enabled]).toEqual([null, false]);
+    expect([r.webhook.agentId, r.webhook.enabled]).toEqual([null, false]);
+  });
+
+  // The organization clause of the imports branch: with the owning organization deleted the import is not credited, so the
+  // physical install alone is the only installed Agent and fills the trigger. Dropping `o.deleted_at IS NULL` credits the
+  // import too (two installed Agents) and disables it instead.
+  it('the owning organization is deleted: an import is not credited, so the physical install alone fills (#4835)', async () => {
+    const appId = await app('org-gone', [agentA]);
+    await imp(agentA, agentB);
+    const t = await triggers(appId, null);
+    await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    await migrate();
+    const r = await read(t);
+    expect([r.schedule.agentId, r.schedule.enabled]).toEqual([agentA, true]);
+  });
+
   // #4835 pin 3 — an import counts only THROUGH its live importer (the imports branch joins the importing Agent with
   // `deleted_at IS NULL`; appInstallations.ts filters importers the same way). With the physical install's Agent deleted
   // and its import edge still live, neither branch credits the App: disabled, NOT filled with the imported Agent, and
