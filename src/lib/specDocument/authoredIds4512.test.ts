@@ -221,4 +221,31 @@ describe('#4512 the scanner on its own (review findings)', () => {
   it('E5: a blockquote marker between = and the value does not hide the id', () => {
     expect(run('> <a id=\n> "fx-110-a">x</a>')).toBe('> <a>x</a>');
   });
+
+  it('F1: cutting an inner match cannot leave a live id (the scan repeats to a fixed point)', () => {
+    expect(run('<a id="id=\'fx-110-a\'fx-110-a">')).toBe('<a>');
+    expect(run('<a id="id=\'id=\\"fx-110-a\\"fx-110-a\'fx-110-a">')).not.toMatch(/id\s*=\s*["']?fx-110-a/);
+  });
+  it('F2 (QA F1): a slash that separates attributes is a boundary inside a tag', () => {
+    expect(run('<a b="c"/id="fx-110-a">')).toBe('<a b="c"/>');
+    expect(run('<a b/id=fx-110-a>')).toBe('<a b/>');
+    expect(run('<a//id="fx-110-a">')).toBe('<a//>');
+    expect(run('<a href="https://x.test/id=fx-110-a">l</a>')).toBe('<a href="https://x.test/id=fx-110-a">l</a>');
+  });
+  it('F3: a blockquote > at the line start directly before id', () => {
+    expect(run('> <a\n>id="fx-110-a">x</a>')).toBe('> <a\n>>x</a>');
+  });
+  it('F4: removing an attribute that fills a line leaves no blank line inside the tag', () => {
+    const out = run('<a\n  id="fx-110-a"\n  class="c">x</a>');
+    expect(out).toBe('<a\n  class="c">x</a>');
+    expect(out).not.toMatch(/\n[ \t]*\n/);
+  });
+  it('F5 and QA F2: id= outside any tag is prose and is not touched', () => {
+    expect(run('see id=fx-110-a here')).toBe('see id=fx-110-a here');
+    expect(run('text\nid=\n> "fx-110-a" more')).toBe('text\nid=\n> "fx-110-a" more');
+    expect(run('line one\n\nid="fx-110-a"\nline two')).toBe('line one\n\nid="fx-110-a"\nline two');
+  });
+  it('a tag that never closes ends at the blank line, so a later tag is still seen', () => {
+    expect(run('<a x="\n\n<b id="fx-110-a">')).toBe('<a x="\n\n<b>');
+  });
 });
