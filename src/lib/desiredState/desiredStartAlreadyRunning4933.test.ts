@@ -18,9 +18,15 @@ import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { AGENT_PRESENT_STATUSES, TERMINAL_REASONS, TERMINAL_STATUSES } from '../workerTerminal.js';
+import { loadHostDesiredState } from './desiredState.js';
 import { agentRunsOnAnyHost, LONG_HOLD_LOG_MS, pruneRunningLog, runningLogSize, TERMINAL_FUTURE_TOLERANCE_MS, resetDesiredStartStateLog, startDesiredWorker, startDesiredWorkers, START_FAILING_EVENT_TYPE, TERMINAL_FRESH_MS } from './desiredStart.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+// A pass-through wrapper, so a test can make one read fail (blind P2-3).
+vi.mock('./desiredState.js', async (orig) => {
+  const m = await orig<typeof import('./desiredState.js')>();
+  return { ...m, loadHostDesiredState: vi.fn(m.loadHostDesiredState) };
+});
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 
 const M = resolvers.Mutation as any;
@@ -294,8 +300,16 @@ describe('#4933: a worker registered on two hosts, one of which runs its agent',
 });
 
 describe('#4933: every terminal reason has a decided meaning, so a new one cannot slip in silently', () => {
-  // When hadron-cli adds a reason, TERMINAL_REASONS gains it and this table must say whether it means no agent.
-  const absent = new Set(['no_terminal', 'bare_shell', 'no_agent']);
+  // When hadron-cli adds a reason, TERMINAL_REASONS gains it and the key check below fails until this table decides it.
+  const table: Record<(typeof TERMINAL_REASONS)[number], boolean> = {
+    model_at_capacity: false, token_budget_exhausted: false, rate_limited: false, guardrail_triggered: false, menu_or_question: false,
+    shed_staged_not_relaunched: false, unrecognized: false, no_turn_for_due_ticker: false, no_terminal: true, bare_shell: true, no_agent: true,
+    no_screen: false, multiple_terminals: false,
+  };
+  const absent = new Set(Object.entries(table).filter(([, v]) => v).map(([k]) => k));
+  it('the table has exactly the reasons that exist', () => {
+    expect(Object.keys(table).sort()).toEqual([...TERMINAL_REASONS].sort());
+  });
   const now = new Date('2026-11-23T00:00:00Z');
   const t = (reason: string) => ({ host: { id: 'h' }, status: 'locked', reason, reportedAt: now.toISOString() });
   it.each([...TERMINAL_REASONS])('locked with %s', (reason) => {
@@ -307,8 +321,13 @@ describe('#4933: every terminal reason has a decided meaning, so a new one canno
 });
 
 describe('#4941: every terminal STATUS has a decided meaning (cor:agt:070:01), so a new one cannot slip in silently', () => {
-  // When hadron-cli adds a status, TERMINAL_STATUSES gains it and this table must say whether it shows an agent.
-  const present = new Set(['busy', 'idle', 'locked']);
+  // When hadron-cli adds a status, TERMINAL_STATUSES gains it, the typed table below stops compiling and the key check
+  // fails, until the new status is decided here (an unlisted status would otherwise read as "no agent" silently).
+  const table: Record<(typeof TERMINAL_STATUSES)[number], boolean> = { busy: true, idle: true, locked: true, dark: false };
+  const present = new Set(Object.entries(table).filter(([, v]) => v).map(([k]) => k));
+  it('the table has exactly the statuses that exist', () => {
+    expect(Object.keys(table).sort()).toEqual([...TERMINAL_STATUSES].sort());
+  });
   const now = new Date('2026-11-23T00:00:00Z');
   it.each([...TERMINAL_STATUSES])('status %s', (status) => {
     expect(agentRunsOnAnyHost({ host: { id: 'h' }, status, reason: null, reportedAt: now.toISOString() }, now)).toBe(present.has(status));
@@ -330,6 +349,52 @@ describe('#4941: freshness is judged on reportedAt (the server\'s clock), not th
   });
   it('a report the server stored long ago is stale even when its checkedAt looks fresh', () => {
     expect(agentRunsOnAnyHost(t(new Date(now.getTime() - 1000), new Date(now.getTime() - TERMINAL_FRESH_MS - 1)), now)).toBe(false);
+  });
+});
+
+describe('#4941: the guard judges at the moment of the decision, not at the pass\'s start (blind P2-2)', () => {
+  it('a report stored while the pass waited (reportedAt later than the pass `now` by more than the tolerance) still counts as running', async () => {
+    await report({ status: 'idle', ageMs: 30_000 });
+    // A pass whose `now` was taken ten minutes before its decision (the anchor says ten minutes of waits).
+    const passNow = new Date(Date.now() - 10 * 60_000);
+    const out = await startDesiredWorker(db, { appId: app.id, workerId: kit.id, hostId: 'orca1' }, passNow, performance.now() - 10 * 60_000);
+    expect(out).toBe('running');
+    expect(await starts()).toHaveLength(0);
+  });
+});
+
+describe('#4941: a pass that could not read every host keeps the log (blind P2-3, local F1)', () => {
+  const held = async () => {
+    await report({ status: 'idle' });
+    await tick();
+    expect(runningLogSize()).toBe(1);
+  };
+  it('listing an App\'s hosts fails: the held worker stays in the log', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      await held();
+      const q = vi.spyOn(db, '$queryRaw').mockRejectedValueOnce(new Error('hosts list failed'));
+      await tick();
+      q.mockRestore();
+      expect(runningLogSize()).toBe(1);
+    } finally {
+      err.mockRestore();
+      info.mockRestore();
+    }
+  });
+  it('reading one host\'s desired state fails: the held worker stays in the log', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      await held();
+      vi.mocked(loadHostDesiredState).mockRejectedValueOnce(new Error('read failed'));
+      await tick();
+      expect(runningLogSize()).toBe(1);
+    } finally {
+      err.mockRestore();
+      info.mockRestore();
+    }
   });
 });
 

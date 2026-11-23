@@ -102,7 +102,8 @@ export function agentRunsOnAnyHost(terminal: StoredTerminal | null, now: Date): 
 
 /**
  * Workers whose last logged state is `already running`, with when it was first seen (a pass's `now`) and whether the
- * long-hold line was written. An entry goes when the worker is started, when a pass no longer lists it as startable
+ * long-hold line was written. The log is per process: a restart forgets it, so `since` restarts and a long hold logs
+ * `already running` again (log only). An entry goes when the worker is started, when a pass no longer lists it as startable
  * (`pruneRunningLog`, so a deleted or retired worker's id is not held for the life of the process), or the process ends.
  */
 const loggedRunning = new Map<string, { since: number; longHoldLogged: boolean }>();
@@ -261,11 +262,14 @@ export async function startDesiredWorker(
       }
       // Re-decided under the locks, at the moment after their waits: a stop signal, a team pause, leave-alone or a
       // session since the pass's read wins.
-      const row = (await loadHostDesiredState(tx, a.appId, a.hostId, afterWaits(now, anchor)))?.workers.find((w) => w.workerId === a.workerId);
+      // `decideAt` is `now` plus what the lock waits took: a report stored while this pass waited is judged against the
+      // moment of the decision, never against the pass's earlier `now` (it would read as "future" past the tolerance).
+      const decideAt = afterWaits(now, anchor);
+      const row = (await loadHostDesiredState(tx, a.appId, a.hostId, decideAt))?.workers.find((w) => w.workerId === a.workerId);
       if (!row || !startable(row)) return 'skipped';
       // #4933: before the failure count, so a worker the host already runs is neither started nor tripped nor alarmed.
       const reported = asTerminal((await tx.worker.findUnique({ where: { id: a.workerId }, select: { terminal: true } }))?.terminal);
-      if (agentRunsOnAnyHost(reported, now)) return 'running';
+      if (agentRunsOnAnyHost(reported, decideAt)) return 'running';
       if ((await recentFailures(tx, a.workerId, now)) >= START_FAILURE_LIMIT) return 'tripped';
       await fenceHostDecision(tx, a.appId);
       const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, now, a.hostId)).find((r) => r.worktrees.length > 0);
