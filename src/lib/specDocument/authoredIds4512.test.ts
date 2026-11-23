@@ -204,4 +204,19 @@ describe('#4512 the scanner on its own (review findings)', () => {
     run('id="a" '.repeat(40000));
     expect(Date.now() - t0).toBeLessThan(5000);
   });
+
+  it('D5: a bare value joined to the tag-closing slash is the assigned id', () => {
+    expect(run('<a id=fx-110-a/>')).toBe('<a/>');
+    expect(run('<a href=x id=fx-110-a />')).toBe('<a href=x />');
+    expect(run('<a id=fx-110-a/b>')).toBe('<a id=fx-110-a/b>');
+  });
+  it('Peter test: id counts only as an attribute name after whitespace, a quote, or the slash right after a tag name', () => {
+    expect(run('see https://x.test/id=fx-110-a now')).toBe('see https://x.test/id=fx-110-a now');
+    expect(run('a/b/id=fx-110-a')).toBe('a/b/id=fx-110-a');
+    expect(run('<div/id="fx-110-a">')).toBe('<div/>');
+    expect(run('<a href="x"id="fx-110-a">')).toBe('<a href="x">');
+  });
+  it('E5: a blockquote marker between = and the value does not hide the id', () => {
+    expect(run('> <a id=\n> "fx-110-a">x</a>')).toBe('> <a>x</a>');
+  });
 });
