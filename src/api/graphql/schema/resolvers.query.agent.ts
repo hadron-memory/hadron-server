@@ -14,7 +14,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { listAgentProcesses, listAgentTasks, reverifyServed, type ListedNode } from '../../../lib/agentDefinitionLists.js';
-import { listAgentRevisions } from '../../../lib/agentRevisions.js';
+import { readAgentRevisionList } from '../../../lib/agentRevisionSnapshot.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import {
@@ -130,9 +130,10 @@ export const agentQueries = {
     agentRevisions: async (_: unknown, { agentRef }: { agentRef: string }, ctx: Context) => {
       const agent = await resolveReadableAgentRef(ctx, agentRef);
       await requireAgentAccess(ctx, agent, 'ADMIN');
-      const sysMemId = (agent as any).systemMemoryId as string | null;
-      if (!sysMemId) throw new Error('Agent has no system memory');
-      return listAgentRevisions(ctx.db, sysMemId, (agent as any).publishedRevisionLoc ?? null);
+      // #4634 F2: the pin and the rows are ONE snapshot, read after the gate; the gate's own read is not served.
+      const list = await readAgentRevisionList(ctx.db, agent.id);
+      if (!list) throw new Error('Agent has no system memory');
+      return list;
     },
 
     /**
