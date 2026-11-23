@@ -54,15 +54,16 @@ describe('#4512 authored ids equal to an assigned anchor', () => {
     expect(out).toContain('<a id="my-own-anchor"></a>');
     expect(out).toContain('<span id="fx-110-zzz">z</span>');
   });
-  it('fenced code and inline code that show an id are untouched', () => {
+  it('a fenced code block (backtick or tilde) that shows an id is untouched; inline code is not exempt (scope call)', () => {
     const body = 'Write `<a id="fx-110-a"></a>` like so:\n\n```html\n<a id="fx-110-a"></a>\n```\n\n~~~\n<a id="fx-110-a"></a>\n~~~';
     const out = renderSpecDocument(doc([part('fx:110:a', body)]));
-    expect(count(out, 'id="fx-110-a"')).toBe(4);
+    expect(count(out, 'id="fx-110-a"')).toBe(3); // the server block and the two fences
+    expect(out).toContain('Write `<a></a>` like so:');
   });
-  it('an attribute VALUE that mentions an id is not an id, and the real id beside it still goes', () => {
+  it('an assigned id inside another attribute value goes too (over-neutralised on purpose); the rest of the tag stays', () => {
     const out = renderSpecDocument(doc([part('fx:110:a', '<a title="see id=fx-110-a here" id="fx-110-a" href="#x">l</a>')]));
-    expect(out).toContain('<a title="see id=fx-110-a here" href="#x">l</a>');
     expect(count(out, 'id="fx-110-a"')).toBe(1);
+    expect(out).toContain('href="#x">l</a>');
   });
   it('a body with no colliding id renders byte-for-byte as before', () => {
     const out = renderSpecDocument(doc([part('fx:110:a', 'Rule body.')]));
@@ -79,12 +80,12 @@ describe('#4512 the scanner on its own (review findings)', () => {
   it('a stray backtick in an earlier paragraph does not hide an id in a later one', () => {
     expect(run('it`s odd\n\n<a id="fx-110-a"></a> and `code` x')).toBe('it`s odd\n\n<a></a> and `code` x');
   });
-  it('a stray backtick does not eat the opener of a real code span', () => {
-    expect(run('a ` b\n\n`<a id="fx-110-a"></a>`')).toBe('a ` b\n\n`<a id="fx-110-a"></a>`');
+  it('code spans are not recognised: an id in one is removed too', () => {
+    expect(run('a ` b\n\n`<a id="fx-110-a"></a>`')).toBe('a ` b\n\n`<a></a>`');
   });
   it('backtick runs of different lengths are not a code span', () => {
     expect(run('``<a id="fx-110-a"></a>`')).toBe('``<a></a>`');
-    expect(run('``<a id="fx-110-a"></a>``')).toBe('``<a id="fx-110-a"></a>``');
+    expect(run('``<a id="fx-110-a"></a>``')).toBe('``<a></a>``');
   });
   it('an escaped backtick does not open a span', () => {
     expect(run('\\`<a id="fx-110-a"></a>`')).toBe('\\`<a></a>`');
@@ -96,14 +97,12 @@ describe('#4512 the scanner on its own (review findings)', () => {
     expect(run('<div class="x"id="fx-110-a">')).toBe('<div class="x">');
     expect(run('<div/id="fx-110-a">')).toBe('<div/>');
   });
-  it('text inside another attribute value is never cut', () => {
-    expect(run('<div class="x"title="see id=fx-110-a">')).toBe('<div class="x"title="see id=fx-110-a">');
-  });
+
   it('prose with < and apostrophes does not hide a real tag', () => {
     expect(run('a <b, don\'t <a id="fx-110-a"></a> it\'s fine <br>')).toBe('a <b, don\'t <a></a> it\'s fine <br>');
   });
-  it('an escaped tag is shown text and stays', () => {
-    expect(run('\\<a id="fx-110-a">')).toBe('\\<a id="fx-110-a">');
+  it('an escaped tag is not recognised: its assigned id is removed', () => {
+    expect(run('\\<a id="fx-110-a">')).toBe('\\<a>');
   });
   it('a numeric character reference in the id is decoded before comparing', () => {
     expect(run('<a id="fx&#45;110-a"></a>')).toBe('<a></a>');
@@ -113,6 +112,9 @@ describe('#4512 the scanner on its own (review findings)', () => {
     const t0 = Date.now();
     run('<a'.repeat(20000) + '\n\n' + '`'.repeat(20000) + '<a id="x" '.repeat(5000) + '"'.repeat(20000));
     run('`a '.repeat(20000));
+    run('<a x='.repeat(40000) + '>');
+    run('id="'.repeat(40000));
+    run(' '.repeat(200000) + 'id');
     run('<!-- <b id="x"> '.repeat(20000) + '<![CDATA['.repeat(20000));
     run('<a x="<a x=\'<a x="'.repeat(8000));
     expect(Date.now() - t0).toBeLessThan(5000);
@@ -123,9 +125,9 @@ describe('#4512 the scanner on its own (review findings)', () => {
     expect(run('<div hidden id="fx-110-a"title="t">')).toBe('<div hidden title="t">');
     expect(run('<s id="fx-110-a"cript>')).toBe('<s cript>');
   });
-  it('N2: autolinks and link destinations are not tags', () => {
-    expect(run('<https://example.com/id=fx-110-a>')).toBe('<https://example.com/id=fx-110-a>');
-    expect(run('[x](<docs/id=fx-110-a>)')).toBe('[x](<docs/id=fx-110-a>)');
+  it('N2: an autolink or link destination carrying exactly an assigned id loses it (over-neutralised); other URLs are untouched', () => {
+    expect(run('<https://example.com/id=fx-110-a>')).toBe('<https://example.com/>');
+    expect(run('<https://example.com/id=other>')).toBe('<https://example.com/id=other>');
   });
   it('N3: CRLF blank lines split blocks', () => {
     expect(run('it`s odd\r\n\r\n<a id="fx-110-a"></a> and `code` x')).toBe('it`s odd\r\n\r\n<a></a> and `code` x');
@@ -134,10 +136,10 @@ describe('#4512 the scanner on its own (review findings)', () => {
     expect(run('- it`s odd\n- <a id="fx-110-a"></a> and `code` x')).toBe('- it`s odd\n- <a></a> and `code` x');
     expect(run('# it`s\n<a id="fx-110-a"></a> `c`')).toBe('# it`s\n<a></a> `c`');
   });
-  it('N5: in an HTML block backticks and backslashes mean nothing, and comments are raw text', () => {
+  it('N5: backticks, backslashes and comments shield nothing: every assigned id attribute goes', () => {
     expect(run('<div>`<a id="fx-110-a"></a>`</div>')).toBe('<div>`<a></a>`</div>');
     expect(run('<div>\\<a id="fx-110-a"></a></div>')).toBe('<div>\\<a></a></div>');
-    expect(run('<!-- <a id="fx-110-a"></a> -->')).toBe('<!-- <a id="fx-110-a"></a> -->');
+    expect(run('<!-- <a id="fx-110-a"></a> -->')).toBe('<!-- <a></a> -->');
     expect(run('<!-- ` --> <a id="fx-110-a"></a> `')).toBe('<!-- ` --> <a></a> `');
   });
   it('N6: a bare value with = or a backtick is read to whitespace in an HTML block', () => {
@@ -162,14 +164,22 @@ describe('#4512 the scanner on its own (review findings)', () => {
   ])('QA P2: a comment-like opener that does not close hides no live id: %s', (body) => {
     expect(run(body)).not.toContain('id="fx-110-a"');
   });
-  it('a comment that does close still shields the id inside it', () => {
-    expect(run('x <!-- <b id="fx-110-a"> --> y')).toBe('x <!-- <b id="fx-110-a"> --> y');
-    expect(run('x <? <b id="fx-110-a"> ?> y')).toBe('x <? <b id="fx-110-a"> ?> y');
+  it('a closed comment, CDATA and a processing instruction shield nothing either', () => {
+    expect(run('x <!-- <b id="fx-110-a"> --> y')).toBe('x <!-- <b> --> y');
+    expect(run('x <? <b id="fx-110-a"> ?> y')).toBe('x <? <b> ?> y');
   });
   it('local F8: a very long body (300 KB, 150k lines) renders; no argument-spread overflow', () => {
     const body = 'a\n'.repeat(150000) + '<a id="fx-110-a"></a>';
     expect(run(body).endsWith('<a></a>')).toBe(true);
     const out = renderSpecDocument(doc([part('fx:110:a', body)]));
     expect(count(out, 'id="fx-110-a"')).toBe(1);
+  });
+
+  it('D6: a namespaced tag (<o:p>) loses an assigned id; a longer attribute name that ends in id is not an id', () => {
+    expect(run('<o:p class="x" id="fx-110-a">')).toBe('<o:p class="x">');
+    expect(run('<a data-id="fx-110-a" xid="fx-110-a" my:id="fx-110-a">')).toBe('<a data-id="fx-110-a" xid="fx-110-a" my:id="fx-110-a">');
+  });
+  it('D1: a paragraph that starts with a tag is handled like any other text', () => {
+    expect(run('<b>bold</b> `<i id="fx-110-a">`')).toBe('<b>bold</b> `<i>`');
   });
 });

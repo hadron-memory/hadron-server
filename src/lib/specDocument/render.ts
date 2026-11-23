@@ -164,16 +164,7 @@ export function splitAtClosingRule(text: string): { body: string; tail: string }
   return { body: text, tail: '' };
 }
 
-const BACKTICK_RUN = /`+/g;
-/** A heading or thematic-break line is a block of its own. */
-const SINGLE_LINE_BLOCK = /^ {0,3}(?:#{1,6}(?:\s|$)|(?:[-*_][ \t]*){3,}$)/;
-/** A line that opens a new Markdown block (list item, heading, rule, quote), so an inline span cannot run across it. */
-const BLOCK_START = /^ {0,3}(?:[-*+](?:\s|$)|\d{1,9}[.)](?:\s|$)|#{1,6}(?:\s|$)|>|(?:[-*_][ \t]*){3,}$)/;
-const isWs = (c: string): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
-const ATTR_NAME_STOP = /[\s"'<>/=]/;
-const BARE_VALUE_STOP = /[\s"'=<>`]/;
-
-/** The text of a numeric character reference decoded (`&#45;`, `&#x2d;`), so an encoded id compares as the browser reads it. */
+/** The text of a numeric character reference decoded (`&#45;`, `&#x2d;`, and without the `;`), so an encoded id compares as a browser reads it. */
 function decodeNumericRefs(v: string): string {
   return v.replace(/&#(?:[xX]([0-9a-fA-F]{1,6})|([0-9]{1,7}));?/g, (all, hex?: string, dec?: string) => {
     const cp = hex !== undefined ? parseInt(hex, 16) : parseInt(dec as string, 10);
@@ -181,146 +172,43 @@ function decodeNumericRefs(v: string): string {
   });
 }
 
-/**
- * One start tag at `i` (`text[i] === '<'`), parsed in one forward pass: a name, then attributes separated by
- * whitespace, `/` or nothing (a browser accepts `class="x"id="y"`), each a name with an optional quoted or
- * bare value. Returns the tag's end and the spans of the `id` attributes to drop, or null when it is not a
- * well-formed tag (the `<` is then plain text). It never leaves the block, so a quote cannot pair across paragraphs.
- */
-function scanTag(text: string, i: number, assigned: ReadonlySet<string>, html: boolean): { end: number; cuts: Array<[number, number]> } | null {
-  let j = i + 1;
-  if (!/[A-Za-z]/.test(text[j] ?? '')) return null;
-  while (j < text.length && /[A-Za-z0-9-]/.test(text[j])) j += 1;
-  // A tag name ends at whitespace, `/` or `>`: `<https://x>` is an autolink and `<a:b>` is no tag.
-  if (j >= text.length || !(isWs(text[j]) || text[j] === '/' || text[j] === '>')) return null;
-  const cuts: Array<[number, number]> = [];
-  for (;;) {
-    const gapStart = j;
-    while (j < text.length && (isWs(text[j]) || (text[j] === '/' && (html || text[j + 1] === '>')))) j += 1;
-    if (j >= text.length) return null;
-    // Inline HTML (CommonMark 6.6) needs whitespace before each attribute; an HTML block is read as a browser reads it.
-    if (!html && text[j] !== '>' && j === gapStart) return null;
-    if (text[j] === '>') return { end: j + 1, cuts };
-    const nameStart = j;
-    while (j < text.length && !ATTR_NAME_STOP.test(text[j])) j += 1;
-    if (j === nameStart) return null;
-    const name = text.slice(nameStart, j);
-    let k = j;
-    while (k < text.length && isWs(text[k])) k += 1;
-    let value: string | null = null;
-    if (text[k] === '=') {
-      k += 1;
-      while (k < text.length && isWs(text[k])) k += 1;
-      const q = text[k];
-      if (q === '"' || q === "'") {
-        const close = text.indexOf(q, k + 1);
-        if (close < 0) return null;
-        value = text.slice(k + 1, close);
-        j = close + 1;
-      } else {
-        const vs = k;
-        while (k < text.length && (html ? !(isWs(text[k]) || text[k] === '>') : !BARE_VALUE_STOP.test(text[k]))) k += 1;
-        if (k === vs) return null;
-        value = text.slice(vs, k);
-        j = k;
-      }
-    }
-    if (name.toLowerCase() === 'id' && value !== null && assigned.has(decodeNumericRefs(value))) {
-      // Drop the attribute and the whitespace before it (a `/` or no separator stays, so the tag still parses).
-      // The whitespace before it goes too, unless the next attribute follows with none: then one separator stays.
-      let from = nameStart;
-      if (isWs(text[j] ?? '') || text[j] === '/' || text[j] === '>') while (from > gapStart && isWs(text[from - 1])) from -= 1;
-      cuts.push([from, j]);
-    }
-  }
-}
+/** One `id` attribute: the name (not the tail of another name), `=`, then a quoted or bare value. Linear: no nested quantifier, each alternative stops at a delimiter. */
+const ID_ATTR = /(?<![\w:.-])id[ \t\r\n\f]*=[ \t\r\n\f]*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/gi;
+const isWs = (c: string | undefined): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
 
-/** One paragraph (no blank line inside), left to right in one pass; code spans and escapes are skipped as the CommonMark rules read them. */
-function neutraliseBlock(text: string, assigned: ReadonlySet<string>): string {
-  if (!/id/i.test(text)) return text;
-  const runs = new Map<number, number[]>();
-  for (const m of text.matchAll(BACKTICK_RUN)) (runs.get(m[0].length) ?? runs.set(m[0].length, []).get(m[0].length)!).push(m.index);
-  const next = new Map<number, number>();
-  const noMark = new Set<string>();
-  // A block that opens with a tag is an HTML block: backticks and backslashes mean nothing in it.
-  const html = /^ {0,3}<(?:[A-Za-z]|\/[A-Za-z]|!)/.test(text);
+/** `text` without every `id` attribute whose value is in `assigned`; the whitespace before it goes too unless an attribute follows with none. */
+function dropAssignedIdAttrs(text: string, assigned: ReadonlySet<string>): string {
   let out = '';
-  let i = 0;
   let copied = 0;
-  while (i < text.length) {
-    const c = text[i];
-    if (c === '<') {
-      const raw = /^<(?:!--|\?|!\[CDATA\[)/.exec(text.slice(i, i + 9));
-      if (raw) {
-        // Search for the end from just past `<!-`, so `<!-->` and `<!--->` close at once; `--!>` closes too (HTML parsing).
-        const from = raw[0] === '<!--' ? i + 2 : i + raw[0].length;
-        const marks = raw[0] === '<!--' ? ['-->', '--!>'] : raw[0] === '<?' ? ['?>'] : [']]>'];
-        let hit = -1;
-        let len = 0;
-        for (const mark of marks) {
-          if (noMark.has(mark)) continue;
-          const e = text.indexOf(mark, from);
-          if (e < 0) noMark.add(mark); // none after here means none after any later opener: keeps the scan linear
-          if (e >= 0 && (hit < 0 || e < hit)) { hit = e; len = mark.length; }
-        }
-        // A never-closed opener is plain text: skipping to the end of the block would leave a live id.
-        if (hit >= 0) { i = hit + len; continue; }
-      }
-    }
-    if (c === '\\' && !html) { i += 2; continue; }
-    if (c === '`' && !html) {
-      let k = i;
-      while (text[k] === '`') k += 1;
-      const len = k - i;
-      const at = runs.get(len) ?? [];
-      let p = next.get(len) ?? 0;
-      while (p < at.length && at[p] < k) p += 1;
-      next.set(len, p);
-      // A closer is a run of exactly the same length after the opener; none means the backticks are plain text.
-      i = p < at.length ? at[p] + len : k;
-      continue;
-    }
-    if (c === '<') {
-      const tag = scanTag(text, i, assigned, html);
-      if (tag) {
-        for (const [from, to] of tag.cuts) { out += text.slice(copied, from); copied = to; }
-        i = tag.end;
-        continue;
-      }
-    }
-    i += 1;
+  for (const m of text.matchAll(ID_ATTR)) {
+    if (!assigned.has(decodeNumericRefs(m[1] ?? m[2] ?? m[3] ?? ''))) continue;
+    let from = m.index;
+    const to = m.index + m[0].length;
+    const after = text[to];
+    if (after === undefined || isWs(after) || after === '/' || after === '>') while (from > copied && isWs(text[from - 1])) from -= 1;
+    out += text.slice(copied, from);
+    copied = to;
   }
   return copied === 0 ? text : out + text.slice(copied);
 }
 
 /**
- * #4512 (cor:spc:030:02 "Authored ids"): an `id` in authored text that equals an anchor assigned in this
- * document is removed, so the server's own `<a id>` element is the only carrier. Only the attribute goes;
- * every other byte is as written. An id that is not an assigned anchor is left alone, and so is text in fenced
- * code, an inline code span or an escaped tag (shown, not parsed as an element). Limits: an indented code
- * block is not recognised as code, and a character reference other than a numeric one in an id is not decoded.
- * Linear in the text: one forward pass per paragraph.
+ * #4512 (cor:spc:030:02 "Authored ids", scope call by Peter 2026-11-23 after three review rounds on a hand-written
+ * HTML/Markdown scanner): every `id` attribute whose value is an anchor assigned in this document is removed, anywhere
+ * in authored text except inside a fenced code block (CommonMark fence rules). Only the attribute goes; every other
+ * byte stays. NOT recognised, on purpose: inline code, comments, CDATA, processing instructions, indented code and
+ * HTML-block structure. An assigned id written there is removed too: the worst case is a slightly altered code sample,
+ * never a second element carrying a server anchor. One linear pass; named character references in an id are not decoded.
  */
 export function neutraliseAssignedIds(text: string, assigned: ReadonlySet<string>): string {
   if (assigned.size === 0 || !/id/i.test(text)) return text;
-  const chunk = (c: string): string => {
-    const lines = c.split('\n');
-    const res: string[] = [];
-    let block: string[] = [];
-    const end = (): void => { if (block.length) res.push(neutraliseBlock(block.join('\n'), assigned)); block = []; };
-    for (const line of lines) {
-      if (line.trim() === '') { end(); res.push(line); continue; }
-      if (BLOCK_START.test(line)) end();
-      block.push(line);
-      if (SINGLE_LINE_BLOCK.test(line)) end();
-    }
-    end();
-    return res.join('\n');
-  };
   const out: string[] = [];
   let pending: string[] = [];
   let fence: OpenFence | null = null;
-  const flush = (): void => { if (pending.length) for (const l of chunk(pending.join('\n')).split('\n')) out.push(l); pending = []; };
+  const flush = (): void => {
+    if (pending.length) for (const l of dropAssignedIdAttrs(pending.join('\n'), assigned).split('\n')) out.push(l);
+    pending = [];
+  };
   for (const line of text.split('\n')) {
     const wasOpen = fence !== null;
     const step = stepFence(line, fence);
