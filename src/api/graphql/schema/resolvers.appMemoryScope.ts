@@ -22,6 +22,7 @@ import { getAppMemoryCandidates, filterReadableMemoryIds, type AgentProvenance }
 import { type AuthContext } from '../../../middleware/auth.js';
 import {
   clampListTake,
+  MEMORY_RECORD_GATE_SELECT,
   filterReadableMemoryRecords,
   isAppParticipant,
   isOwnerOrOrgMember,
@@ -275,13 +276,10 @@ export type AppScopedMemoryRow = {
  * per cor:api:120:04 with the shared list clamp. `viewerCanWrite` runs the
  * exact `createNode` gate with this request's own context, for the page's rows
  * only: a FORBIDDEN denial reads false, and any other failure fails the field.
- * `description` (#4890) rides the RECORD gate, not the row's admission: the
- * page's rows are batched through `filterReadableMemoryRecords` (the list form
- * of the exact `canReadMemoryRecord` `Query.memory` applies), so a row's
- * description is what `Memory.description` would return this caller, and null
- * otherwise — including under impersonation, which the shared gate decides.
- * The memory record is never enciphered (cor:sec:040:03 enciphers node
- * content only), so there is no key logic here: no session key, no nulling.
+ * `description` rides the record gate (see {@link AppScopedMemoryRow}): the
+ * page's rows are batched through `filterReadableMemoryRecords`, the list form
+ * of the exact `canReadMemoryRecord` `Query.memory` applies. The memory record
+ * is never enciphered (cor:sec:040:03), so there is no key logic here.
  */
 export async function appMemoryScopePage(
   ctx: Context,
@@ -291,40 +289,50 @@ export async function appMemoryScopePage(
 ): Promise<{ items: AppScopedMemoryRow[]; total: number }> {
   const scope = await resolveAppNodeScope(ctx, appRef);
   if (!scope) return { items: [], total: 0 };
-  const rows = await ctx.db.memory.findMany({
+  // The order key only: the scope's ids with their URNs. Everything else is
+  // fetched for the PAGE's ids below, so a wide scope does not read every
+  // description and gate field to return one page (#4905 F2).
+  const keys = await ctx.db.memory.findMany({
     where: { id: { in: [...scope.sources.keys()] } },
-    // Every field `canReadMemoryRecord` reads is selected (an omitted one can
-    // fail that gate OPEN, #1104), plus `deletedAt`: `Query.memory` answers
-    // null for a soft-deleted record, so its description is withheld too.
-    select: {
-      id: true, urn: true, name: true, class: true, description: true,
-      userId: true, ownerUserId: true, organizationId: true, appId: true,
-      userMemoryOfAgentId: true, deletedAt: true,
-    },
+    select: { id: true, urn: true },
   });
-  const ordered = rows
-    .map((m) => ({ ...m, memoryUrn: safeCanonicalUrn('memory', m.urn) }))
+  const ordered = keys
+    .map((m) => ({ id: m.id, memoryUrn: safeCanonicalUrn('memory', m.urn) }))
     .sort((a, b) => (a.memoryUrn < b.memoryUrn ? -1 : a.memoryUrn > b.memoryUrn ? 1 : 0));
   const skip = Math.max(0, offset ?? 0);
-  const page = ordered.slice(skip, skip + clampListTake(limit));
-  // The record gate for the page's rows only (the same bounding
-  // `viewerCanWrite` uses), batched so membership and access-set queries are
-  // shared per request rather than repeated per row.
-  const openableIds = new Set(
+  const pageKeys = ordered.slice(skip, skip + clampListTake(limit));
+  const pageRows = await ctx.db.memory.findMany({
+    where: { id: { in: pageKeys.map((k) => k.id) } },
+    // The record gate's whole field list comes from ONE shared constant (an
+    // omitted gate field can fail the gate OPEN, #1104, and now fails
+    // type-checking instead), plus what the row carries and `deletedAt`:
+    // `Query.memory` answers null for a soft-deleted record, so its
+    // description is withheld too.
+    select: { ...MEMORY_RECORD_GATE_SELECT, name: true, description: true, deletedAt: true },
+  });
+  const byId = new Map(pageRows.map((m) => [m.id, m]));
+  // A row hard-deleted between the two reads has nothing to show: dropped.
+  const page = pageKeys.flatMap((k) => {
+    const m = byId.get(k.id);
+    return m ? [{ ...m, memoryUrn: k.memoryUrn }] : [];
+  });
+  // The record gate for the page's rows only, batched so membership and
+  // access-set queries are shared per request rather than repeated per row.
+  const readableIds = new Set(
     (await filterReadableMemoryRecords(ctx, page.filter((m) => !m.deletedAt))).map((m) => m.id),
   );
-  const items: AppScopedMemoryRow[] = [];
-  for (const m of page) {
-    items.push({
-      memoryId: m.id,
-      memoryUrn: m.memoryUrn,
-      name: m.name,
-      class: m.class,
-      description: openableIds.has(m.id) ? m.description : null,
-      sources: scope.sources.get(m.id)!,
-      viewerCanWrite: await viewerCanWrite(ctx, m.id),
-    });
-  }
+  // `viewerCanWrite` is the exact createNode gate per row (no batched form
+  // exists); the rows run together, like the record gate above.
+  const writable = await Promise.all(page.map((m) => viewerCanWrite(ctx, m.id)));
+  const items: AppScopedMemoryRow[] = page.map((m, i) => ({
+    memoryId: m.id,
+    memoryUrn: m.memoryUrn,
+    name: m.name,
+    class: m.class,
+    description: readableIds.has(m.id) ? m.description : null,
+    sources: scope.sources.get(m.id)!,
+    viewerCanWrite: writable[i]!,
+  }));
   return { items, total: ordered.length };
 }
 

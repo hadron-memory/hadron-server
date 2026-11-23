@@ -1202,6 +1202,30 @@ export async function filterReadableMemoryRecords<T extends Parameters<typeof ca
 }
 
 /**
+ * The fields `canReadMemoryRecord` reads (#1104). `MEMORY_RECORD_GATE_SELECT`
+ * is keyed on this type in BOTH directions (`Record<keyof ..., true>`), so
+ * adding a field here without selecting it, or selecting one the gate does not
+ * read, fails type-checking; a caller that spreads the constant into its
+ * Prisma `select` can never leave a gate field out and fail the gate OPEN.
+ * The gate does not read `sharedMemoryOfAgentId` (#4905 F1).
+ */
+export type MemoryRecordGateRow = {
+  id: string;
+  class: string;
+  userId: string | null;
+  ownerUserId: string | null;
+  organizationId: string | null;
+  appId: string | null;
+  userMemoryOfAgentId: string | null;
+};
+
+/** The Prisma `select` that yields a {@link MemoryRecordGateRow}; spread it, then add your own fields. */
+export const MEMORY_RECORD_GATE_SELECT = {
+  id: true, class: true, userId: true, ownerUserId: true,
+  organizationId: true, appId: true, userMemoryOfAgentId: true,
+} as const satisfies Record<keyof MemoryRecordGateRow, true>;
+
+/**
  * The RECORD-level memory read gate — "may this caller open this memory's
  * record (its scalars: name, description, data)?", as distinct from
  * `isMemoryReadableCached` above, which answers "may they read its NODES?".
@@ -1260,15 +1284,7 @@ export async function canReadMemoryRecord(
   // Requiring them is what makes a wrong call a COMPILE error instead of a
   // quiet re-answer, which is why `granteeShareAccess` below is now called
   // without the `as never` that was hiding exactly this.
-  memory: {
-    id: string;
-    class: string;
-    userId: string | null;
-    ownerUserId: string | null;
-    organizationId: string | null;
-    appId: string | null;
-    userMemoryOfAgentId: string | null;
-  },
+  memory: MemoryRecordGateRow,
   batch?: MemoryRecordReadBatch,
 ): Promise<boolean> {
   // A full set and an indexed point read use the same shared predicate. Only
