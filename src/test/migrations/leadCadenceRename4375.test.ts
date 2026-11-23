@@ -141,8 +141,9 @@ describe('#4375 migration 20261123020000_lead_cadence_rename', () => {
         clocks: (await pg.query(`SELECT worker_id, app_id, observed_at FROM lead_cadence_clocks ORDER BY worker_id`)).rows,
       });
       const afterFirst = await rowsOf();
-      expect(afterFirst.episodes).toHaveLength(1);
-      expect(afterFirst.clocks).toHaveLength(1);
+      // w1 is a lead (w3 reports to it), so its episode and clock came through the rename with the values inserted.
+      expect(afterFirst.episodes).toMatchObject([{ id: 'ep1', worker_id: 'w1', event_id: 'e1', ended_at: null }]);
+      expect(afterFirst.clocks).toMatchObject([{ worker_id: 'w1', app_id: 'a1' }]);
       await pg.query(NEW); // already renamed
       const once = await objectNames((sql, p) => pg.query(sql, p));
       expect(once.length).toBeGreaterThan(8);

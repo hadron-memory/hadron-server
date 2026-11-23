@@ -356,8 +356,22 @@ describe('#4375 the alarm watches every lead (rulings 0270, 0271)', () => {
     vi.mocked(leadWorkerIds).mockClear();
     const raised = await evaluateLeadCadence(db, NOW);
     expect(raised).toHaveLength(2); // Ada and Cass are both late
-    // One read for the pass, shared by both candidates, plus one per raise transaction (the decision it re-derives).
+    // One read for the pass, shared by both candidates, plus one per raise transaction (the decision it re-derives). The
+    // count is an implementation detail on purpose: a SERIALIZABLE retry inside a raise would add a read, and this pin
+    // should then be revisited, not loosened silently.
     expect(vi.mocked(leadWorkerIds)).toHaveBeenCalledTimes(1 + raised.length);
+  });
+
+  it('an open episode ends when its lead is retired while reports still point at it (the module doc\'s way 2, #4950)', async () => {
+    await lateAda();
+    await evaluateLeadCadence(db, NOW);
+    const [a] = await alarms('Ada');
+    expect((await db.leadCadenceEpisode.findUniqueOrThrow({ where: { eventId: a.id } })).endedAt).toBeNull();
+    // Ada retires; Liam's reportsTo still names her, so she is no longer a lead (a retired worker leads nobody).
+    await db.worker.update({ where: { id: w.Ada.id }, data: { retiredAt: later(1) } });
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.Liam.id } })).reportsToWorkerId).toBe(w.Ada.id);
+    await evaluateLeadCadence(db, later(2));
+    expect((await db.leadCadenceEpisode.findUniqueOrThrow({ where: { eventId: a.id } })).endedAt?.getTime()).toBe(later(2).getTime());
   });
 
   it('an App with no lead raises nothing', async () => {
@@ -554,6 +568,7 @@ describe('#4375 an alarm raised before the rename (type alarm.coordinator-cadenc
     const { pendingTaskWakes } = await import('./taskWakes.js');
     const pending = (await pendingTaskWakes(db, [w.Cass.id], NOW)).get(w.Cass.id) ?? [];
     expect(pending.find((p) => p.eventId === legacy.id)?.title).toBe('Ada has stopped assigning work');
+    expect(pending.find((p) => p.eventId === legacy.id)?.handle).toBe('CADENCE'); // the one entry serves both spellings (#4950)
     await db.leadCadenceEpisode.updateMany({ where: { eventId: legacy.id }, data: { endedAt: later(1) } });
     expect(((await pendingTaskWakes(db, [w.Cass.id], later(1))).get(w.Cass.id) ?? []).some((p) => p.eventId === legacy.id)).toBe(false);
   });
