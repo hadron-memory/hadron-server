@@ -4124,8 +4124,8 @@ model App {
   wakeReservations        AppWakeReservation[]
   agentTeamEvents         AgentTeamEvent[]
   darkWorkerEpisodes      DarkWorkerEpisode[]
-  cadenceEpisodes         CoordinatorCadenceEpisode[]
-  cadenceClocks           CoordinatorCadenceClock[]
+  cadenceEpisodes         LeadCadenceEpisode[]
+  cadenceClocks           LeadCadenceClock[]
   postLimitEpisodes       PostLimitEpisode[]
   startFailingEpisodes    StartFailingEpisode[]
   hostSweepRuns           HostSweepRun[]
@@ -4600,8 +4600,8 @@ model AppAgent {
 model Worker {
   id                String    @id @default(cuid())
   darkWorkerEpisodes DarkWorkerEpisode[]
-  cadenceEpisodes    CoordinatorCadenceEpisode[]
-  cadenceClock       CoordinatorCadenceClock?
+  cadenceEpisodes    LeadCadenceEpisode[]
+  cadenceClock       LeadCadenceClock?
   postLimitEpisodes PostLimitEpisode[]
   startFailingEpisodes StartFailingEpisode[]
   appId             String    @map("app_id")
@@ -7657,7 +7657,7 @@ model AgentTaskCounter {
 ///   sealed record of who acted and what it concerned, and a foreign-key action would have to update the row.
 /// - An alarm has AgentTeamAlarmSchedule rows (who it wakes, and when) and at most one AlarmEscalationEnd.
 /// - An alarm that is about no task has one episode row that points at it: DarkWorkerEpisode,
-///   CoordinatorCadenceEpisode, PostLimitEpisode, StartFailingEpisode, HostSweepEpisode or SaturationEpisode.
+///   LeadCadenceEpisode, PostLimitEpisode, StartFailingEpisode, HostSweepEpisode or SaturationEpisode.
 /// - WorkerDeliveryTaskEvent rows record the delivery of an event to a worker.
 ///
 /// Behaviour:
@@ -7671,7 +7671,7 @@ model AgentTaskCounter {
 ///   alarm with no task, which is why those have episode tables.
 /// - `txId` is the id of the writing transaction, set by the database, so a reader can page in commit order.
 /// - Most events are written by src/lib/agentTasks/events.ts. The modules that raise an alarm about no task
-///   insert their own alarm rows (darkWorker.ts, coordinatorCadence.ts, postLimit.ts and sweepRuns.ts in
+///   insert their own alarm rows (darkWorker.ts, leadCadence.ts, postLimit.ts and sweepRuns.ts in
 ///   src/lib/agentTasks, and src/lib/desiredState/desiredStart.ts), and src/lib/stopSignals/notices.ts,
 ///   src/lib/hostOperations/sessionEnd.ts and src/lib/contextReset/contextReset.ts write events of their own.
 ///
@@ -7728,7 +7728,7 @@ model AgentTeamEvent {
   wakes      AgentTeamAlarmSchedule[]
   deliveries WorkerDeliveryTaskEvent[]
   darkEpisode DarkWorkerEpisode?
-  cadenceEpisode CoordinatorCadenceEpisode?
+  cadenceEpisode LeadCadenceEpisode?
   postLimitEpisode PostLimitEpisode?
   startFailingEpisode StartFailingEpisode?
   hostSweepEpisode HostSweepEpisode?
@@ -7875,44 +7875,46 @@ model DarkWorkerEpisode {
   @@map("dark_worker_episodes")
 }
 
-/// One period during which a worker that is expected to hand out tasks was late doing so: it assigned no task
-/// for 60 minutes while a worker it could have given work to was free. The row opens with the alarm raised
-/// about the worker and is closed when the worker next assigns a task.
+/// One period during which a lead was late handing out work: it assigned no task for 60 minutes while a worker
+/// under it was free for work. The row opens with the alarm raised about the lead and is closed when the lead
+/// next assigns a task.
 ///
-/// Which workers: a Worker whose `role` is the text `coordinator` (compared without regard to case) and that
-/// is not retired. `role` is free text on Worker; this one value is what the platform reads to find the
-/// workers whose assigning it times. The name of the model is historical and under review in #4375.
+/// Which workers: every LEAD, a worker that at least one worker reports to (the reporting line, hrn:node:hadronmemory.com:specs:cor:agt:020:12),
+/// that is not retired. No `role` takes part: a worker in any role is watched when it leads, and a worker that
+/// nobody reports to is not watched. The one definition of a lead is src/lib/agentTasks/leads.ts. A worker that
+/// stops being a lead while its episode is open keeps the episode until it next assigns.
 ///
 /// Episode pattern: an alarm is an AgentTeamEvent, which is append-only, and an alarm about no task cannot be
 /// de-duplicated by that table's unique index. So each period during which the condition holds is one row
-/// here, with at most one open row per worker, inserted in the same transaction as the alarm. That makes it
+/// here, with at most one open row per lead, inserted in the same transaction as the alarm. That makes it
 /// one alarm per episode, and gives the alarm an end.
 ///
 /// Relationships: belongs to an App and to the Worker it is about, and is deleted with either. `event` is the
-/// alarm raised with the episode (an AgentTeamEvent of type `alarm.coordinator-cadence`, with no task), one to
-/// one.
+/// alarm raised with the episode (an AgentTeamEvent of type `alarm.lead-cadence`, with no task; episodes raised
+/// before #4375 carry `alarm.coordinator-cadence`, which is history and is read the same way), one to one.
 ///
 /// Behaviour:
-/// - The stall evaluator's pass (`evaluateCoordinatorCadence`, src/lib/agentTasks/coordinatorCadence.ts, every
-///   minute) opens an episode when such a worker has made no assignment of its own for 60 minutes and at least
-///   one worker in its lane is free for work. Its lane is the workers whose reporting line leads to it, and
-///   the workers that report to no one. Another such worker, and a worker under a stop signal, never count as
-///   free.
-/// - Only a task the worker itself assigns or reassigns counts (an AgentTeamEvent of type `task.assigned` or
-///   `task.reassigned` with the worker as actor). Assignments made by the matcher do not.
-/// - The 60 minutes run from the latest of the worker's last own assignment, the start of its first session,
-///   and the moment in CoordinatorCadenceClock.
-/// - A worker is not judged late while its team is paused, it is paused itself, or it is under a stop signal.
+/// - The stall evaluator's pass (`evaluateLeadCadence`, src/lib/agentTasks/leadCadence.ts, every minute)
+///   opens an episode when a lead has made no assignment of its own for 60 minutes and at least one worker
+///   under it is free for work. The workers under a lead are those whose reporting line leads to it, and the
+///   workers that report to no one. A lead, a sub-lead included, and a worker under a stop signal never count
+///   as free.
+/// - Only a task the lead itself assigns or reassigns counts (an AgentTeamEvent of type `task.assigned` or
+///   `task.reassigned` with the lead as actor). Assignments made by the matcher do not.
+/// - The 60 minutes run from the latest of the lead's last own assignment, the start of its first session,
+///   and the moment in LeadCadenceClock.
+/// - A lead is not judged late while its team is paused, it is paused itself, or it is under a stop signal.
 ///   Having no live session is not an exemption.
-/// - At most one open row per worker (partial unique index in prisma/coordinator-cadence-invariants.sql). The
-///   episode ends only at the worker's next own assignment, and `endedAt` is that assignment's time. A lane
-///   worker turning busy, or the worker being paused, does not end it, so neither raises a second alarm.
-/// - While the worker is exempt the 60 minutes keep running; only the judgment is skipped. A worker that comes
+/// - At most one open row per lead (partial unique index in prisma/lead-cadence-invariants.sql). The episode
+///   ends only at the lead's next own assignment, and `endedAt` is that assignment's time. A worker under the
+///   lead turning busy, or the lead being paused, does not end it, so neither raises a second alarm.
+/// - While the lead is exempt the 60 minutes keep running; only the judgment is skipped. A lead that comes
 ///   back after a long pause without having assigned anything can be judged late at once.
 /// - AlarmEscalationEnd and the wake schedule read `endedAt` to stop the alarm's escalation.
 ///
-/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31. Background: #2763.
-model CoordinatorCadenceEpisode {
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31 (Decided in part, including the 60-minute trigger).
+/// Background: #2763, renamed and re-pointed by #4375.
+model LeadCadenceEpisode {
   id       String    @id @default(cuid())
   appId    String    @map("app_id")
   workerId String    @map("worker_id")
@@ -7925,44 +7927,35 @@ model CoordinatorCadenceEpisode {
   event  AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
   @@index([appId, endedAt])
-  @@map("coordinator_cadence_episodes")
+  @@map("lead_cadence_episodes")
 }
 
-/// The moment the platform first saw a worker as one whose task assigning it times. One row per such worker.
-/// It gives the worker a starting point for its 60-minute window, so that a worker the platform has only just
-/// begun to watch is not reported late at once.
+/// The moment the cadence evaluator first saw this worker as a lead. A lead that has never assigned a task is not
+/// late until 60 minutes after this time (or after its first live session, if later); see
+/// hrn:node:hadronmemory.com:specs:cor:agt:050:31. One row per lead, written once and never updated. Its sibling
+/// LeadCadenceEpisode records the open alarm.
 ///
-/// Which workers: a Worker whose `role` is the text `coordinator` (compared without regard to case) and that
-/// is not retired. `role` is free text on Worker; this one value is what the platform reads to find the
-/// workers that are expected to hand out tasks to others. The name of the model is historical and under review
-/// in #4375.
+/// Why the evaluator needs the row: the other moments that start a lead's 60 minutes (its last own assignment
+/// and the start of its first session) can be missing or old. A worker that never assigned a task and never had
+/// a session has neither, and a lead that existed before the evaluator first ran can have both far in the past.
+/// Without a recorded first sighting, such a lead would be late on the very first pass. With it, the lead is
+/// not late until 60 minutes after the platform first saw it as a lead. A worker that becomes a lead later gets
+/// its row at the first pass that sees it as one.
 ///
-/// What is timed: how long such a worker has gone without assigning or reassigning a task itself. When that
-/// reaches 60 minutes while a worker it could give work to is free, the platform raises one alarm about it
-/// and opens a CoordinatorCadenceEpisode. The 60 minutes run from the latest of three moments: the worker's
-/// last own assignment, the start of its first session, and `observedAt` in this row.
-///
-/// A worker is not judged late while its team is paused, it is paused itself, or it is under a stop signal.
-/// Having no live session is not an exemption. While the worker is exempt the 60 minutes keep running; only the
-/// judgment is skipped.
-///
-/// Why the evaluator needs the row: the first two moments can be missing or old. A worker that never assigned
-/// a task and never had a session has neither, and a worker that existed before the evaluator first ran can
-/// have both far in the past. Without a recorded first sighting, such a worker would be late on the very first
-/// pass. With it, the worker is not late until 60 minutes after the platform first saw it.
+/// Which workers: the leads (a worker that at least one worker reports to, hrn:node:hadronmemory.com:specs:cor:agt:020:12; no `role` takes part;
+/// the one definition is src/lib/agentTasks/leads.ts). A lead that is judged late has an open LeadCadenceEpisode.
 ///
 /// Relationships: belongs to the Worker it is about (`workerId` is the primary key) and to that worker's App,
 /// and is deleted with either.
 ///
-/// Behaviour: inserted by `observe` in src/lib/agentTasks/coordinatorCadence.ts, which the stall evaluator's
-/// pass (src/jobs/taskStallEvaluator.ts, every minute) runs for each such worker when it decides whether the
-/// worker is late, and again inside the transaction that raises the alarm. The insert is
-/// `ON CONFLICT DO NOTHING`, so the first pass to see a worker sets `observedAt` and concurrent passes agree
-/// on it. No code updates or deletes a row: a worker that stops being watched and is watched again later
-/// keeps its first `observedAt`.
+/// Behaviour: inserted by `observe` in src/lib/agentTasks/leadCadence.ts, which the stall evaluator's pass
+/// (src/jobs/taskStallEvaluator.ts, every minute) runs for each lead when it decides whether the lead is late,
+/// and again inside the transaction that raises the alarm. The insert is `ON CONFLICT DO NOTHING`, so the first
+/// pass to see a lead sets `observedAt` and concurrent passes agree on it. No code updates or deletes a row: a
+/// worker that stops being a lead and is one again later keeps its first `observedAt`.
 ///
-/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31. Background: #2763.
-model CoordinatorCadenceClock {
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31. Background: #2763, renamed and re-pointed by #4375.
+model LeadCadenceClock {
   workerId   String   @id @map("worker_id")
   appId      String   @map("app_id")
   observedAt DateTime @map("observed_at")
@@ -7970,7 +7963,7 @@ model CoordinatorCadenceClock {
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
-  @@map("coordinator_cadence_clocks")
+  @@map("lead_cadence_clocks")
 }
 
 /// One period, at most an hour long, during which the platform's attempts to start a worker kept failing. The

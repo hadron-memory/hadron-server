@@ -50,13 +50,13 @@ describe('AgentTeamEvent.taskHandle (#4135)', () => {
   });
 
   it('never invents a handle for taskless events or a retained event whose task was deleted', async () => {
-    for (const type of ['alarm.dark-worker', 'alarm.coordinator-cadence', 'availability.changed', 'host.registered']) await event(null, type);
+    for (const type of ['alarm.dark-worker', 'alarm.lead-cadence', 'alarm.coordinator-cadence', 'availability.changed', 'host.registered']) await event(null, type);
     const deleted = await task(); await event(deleted.id); await db.agentTask.delete({ where: { id: deleted.id } });
     const response = await run(query());
     expect(response.errors).toBeUndefined();
     const rows = (response.data?.agentTeamEventsPage as any).events;
-    expect(rows).toHaveLength(5);
-    expect(rows.map((row: any) => row.taskHandle)).toEqual(Array(5).fill(null));
+    expect(rows).toHaveLength(6);
+    expect(rows.map((row: any) => row.taskHandle)).toEqual(Array(6).fill(null));
     expect(rows.find((row: any) => row.taskId === deleted.id)).toBeDefined();
   });
 

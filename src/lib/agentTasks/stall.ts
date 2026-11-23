@@ -59,7 +59,7 @@ import { type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { loadLastGapEnd } from './stallGap.js';
-import { ASSIGNED_EVENT_TYPES, ASSIGNEE_CLEARED_EVENT_TYPES, PASSIVE_EVENT_TYPES, appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
+import { ASSIGNED_EVENT_TYPES, ASSIGNEE_CLEARED_EVENT_TYPES, LEAD_CADENCE_EVENT_TYPES, PASSIVE_EVENT_TYPES, appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
 import { markStalled } from './availability.js';
 import { appManagerUserIds } from '../auth/appManagement.js';
 import { isSerializationFailure } from './serializationFailure.js';
@@ -1059,7 +1059,7 @@ export async function endedAlarmEpisodeInstants(
  * #3934 (cor:agt:050:20, V77) — the instant each of these alarms' OWN episode ended, by event id: the one answer the
  * wake schedule and the event reads share, for every kind of alarm.
  *   - a task alarm: {@link endedAlarmEpisodeInstants};
- *   - a dark-worker or coordinator-cadence alarm (task-less): the `ended_at` of its own episode row (#2755, #2763);
+ *   - a dark-worker or lead-cadence alarm (task-less): the `ended_at` of its own episode row (#2755, #2763);
  *   - any other alarm (a post-limit alarm, #2014): no episode condition, so never.
  * An alarm absent from the map has not had its episode end. Acknowledgement is not here: it is the reader's to
  * combine, and the wake pass has already excluded acknowledged alarms. Writers: {@link recordEndedEscalations} and {@link freezeEndedEscalation}.
@@ -1083,10 +1083,11 @@ export async function alarmEpisodeEnds(
     const over = await db.darkWorkerEpisode.findMany({ where: { eventId: { in: darkIds }, endedAt: { not: null } }, select: { eventId: true, endedAt: true } });
     for (const e of over) out.set(e.eventId, e.endedAt as Date);
   }
-  // #2763: the same for a coordinator-cadence alarm, whose episode ends at the coordinator's next counted assignment.
-  const cadenceIds = alarms.filter((a) => a.type === 'alarm.coordinator-cadence').map((a) => a.id);
+  // #2763: the same for a lead-cadence alarm, whose episode ends at the lead's next counted assignment. Alarms raised
+  // before #4375 carry the legacy type and have the same episode table (#4375: read both).
+  const cadenceIds = alarms.filter((a) => (LEAD_CADENCE_EVENT_TYPES as readonly string[]).includes(a.type)).map((a) => a.id);
   if (cadenceIds.length) {
-    const over = await db.coordinatorCadenceEpisode.findMany({ where: { eventId: { in: cadenceIds }, endedAt: { not: null } }, select: { eventId: true, endedAt: true } });
+    const over = await db.leadCadenceEpisode.findMany({ where: { eventId: { in: cadenceIds }, endedAt: { not: null } }, select: { eventId: true, endedAt: true } });
     for (const e of over) out.set(e.eventId, e.endedAt as Date);
   }
   // #4233: a stale-sweep alarm's episode ends when the host records its next run (or the App's sweep mode goes OFF).
@@ -1117,7 +1118,7 @@ export async function recordEndedEscalations(db: Db, now: Date): Promise<number>
       // re-asked every pass for ever.
       where: {
         severity: 'alarm', acknowledgedAt: null, escalationEnd: { is: null }, id: { gt: after },
-        type: { in: [...STALL_ALARM_TYPES, 'alarm.dark-worker', 'alarm.coordinator-cadence', 'alarm.stale-sweep'] },
+        type: { in: [...STALL_ALARM_TYPES, 'alarm.dark-worker', ...LEAD_CADENCE_EVENT_TYPES, 'alarm.stale-sweep'] },
         app: { deletedAt: null, uninstalledAt: null },
       },
       select: { id: true, appId: true, taskId: true, type: true, episodeStart: true, createdAt: true },
@@ -1195,7 +1196,7 @@ export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise
     const taskIds = [...new Set(due.map((d) => d.taskId).filter((t): t is string => !!t))].sort();
     if (taskIds.length) await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id IN (${Prisma.join(taskIds)}) ORDER BY id FOR SHARE`;
     // #3934: the one answer the event reads share (`alarmEpisodeEnds`), for every kind of alarm: a task alarm by its
-    // task's record (#2200), a dark-worker (#2755) or coordinator-cadence (#2763) alarm by its own episode row.
+    // task's record (#2200), a dark-worker (#2755) or lead-cadence (#2763) alarm by its own episode row.
     const endedEvents = new Set((await alarmEpisodeEnds(tx, due.map((d) => ({ id: d.eventId, appId: d.appId, taskId: d.taskId, type: d.type, episodeStart: d.episodeStart, raisedAt: d.raisedAt })), now)).keys());
     if (endedEvents.size) {
       // The alarm's own episode is over: close EVERY row of it still unwoken (not only the due ones), so no later

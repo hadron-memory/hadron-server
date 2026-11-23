@@ -279,6 +279,19 @@ export async function appendTaskEvent(
  * rule. `assignment.unassignable` is cor:agt:050:17's alarm; T3 writes the
  * ordinary `assignment.queued` / `.matched` events.
  */
+/**
+ * #4375 (rulings 0270, 0271): the cadence alarm's type, the only one emitted. The alarm watches every lead
+ * (src/lib/agentTasks/leads.ts), so the type names the lead.
+ */
+export const LEAD_CADENCE_EVENT_TYPE = 'alarm.lead-cadence';
+/**
+ * The type the same alarm was raised under before #4375. Those `agent_team_events` rows are history and are never
+ * rewritten, so every place that matches the type reads BOTH ({@link LEAD_CADENCE_EVENT_TYPES}); nothing emits this one.
+ */
+export const LEGACY_LEAD_CADENCE_EVENT_TYPE = 'alarm.coordinator-cadence';
+/** Both spellings of the cadence alarm's type: read both, emit only {@link LEAD_CADENCE_EVENT_TYPE}. */
+export const LEAD_CADENCE_EVENT_TYPES = [LEAD_CADENCE_EVENT_TYPE, LEGACY_LEAD_CADENCE_EVENT_TYPE] as const;
+
 export const ALARM_EVENT_TYPES = [
   'stall.not-started',
   'stall.no-progress',
@@ -288,8 +301,10 @@ export const ALARM_EVENT_TYPES = [
   'stall.finish-by',
   // #2755: a worker gone dark (cor:agt:100:06, Proposed). Task-less; its episode lives in `dark_worker_episodes`.
   'alarm.dark-worker',
-  // #2763: a coordinator that stopped assigning while a lane worker was free (cor:agt:050:31, Proposed). Task-less; its episode lives in `coordinator_cadence_episodes`.
-  'alarm.coordinator-cadence',
+  // #2763, renamed by #4375: a lead that stopped assigning while a worker under it was free (cor:agt:050:31). Task-less;
+  // its episode lives in `lead_cadence_episodes`. The legacy spelling stays valid for the rows raised under it.
+  LEAD_CADENCE_EVENT_TYPE,
+  LEGACY_LEAD_CADENCE_EVENT_TYPE,
   // #2014: a worker's team-chat post refused by the rate limit. Task-less; its episode lives in `post_limit_episodes`.
   'alarm.post-limit',
   // #4231: a worker whose platform starts keep failing (three in an hour). Task-less; its episode lives in `start_failing_episodes`.
