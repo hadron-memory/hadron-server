@@ -148,4 +148,25 @@ describe('#4512 the scanner on its own (review findings)', () => {
     expect(run('<a id="fx-110&#45b"></a>')).toBe('<a id="fx-110&#45b"></a>');
     expect(run('<a id="fx&#45;110-a"></a>')).toBe('<a></a>');
   });
+
+  it.each([
+    ['<!--> <b id="fx-110-a">'],
+    ['<!---> <b id="fx-110-a">'],
+    ['<!-- a --!> <b id="fx-110-a">'],
+    ['<!-- never closed <b id="fx-110-a">'],
+    ['x <![CDATA[ never closed <b id="fx-110-a">'],
+    ['x <? never closed <b id="fx-110-a">'],
+  ])('QA P2: a comment-like opener that does not close hides no live id: %s', (body) => {
+    expect(run(body)).not.toContain('id="fx-110-a"');
+  });
+  it('a comment that does close still shields the id inside it', () => {
+    expect(run('x <!-- <b id="fx-110-a"> --> y')).toBe('x <!-- <b id="fx-110-a"> --> y');
+    expect(run('x <? <b id="fx-110-a"> ?> y')).toBe('x <? <b id="fx-110-a"> ?> y');
+  });
+  it('local F8: a very long body (300 KB, 150k lines) renders; no argument-spread overflow', () => {
+    const body = 'a\n'.repeat(150000) + '<a id="fx-110-a"></a>';
+    expect(run(body).endsWith('<a></a>')).toBe(true);
+    const out = renderSpecDocument(doc([part('fx:110:a', body)]));
+    expect(count(out, 'id="fx-110-a"')).toBe(1);
+  });
 });
