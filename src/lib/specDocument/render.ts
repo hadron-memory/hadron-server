@@ -173,10 +173,11 @@ function decodeNumericRefs(v: string): string {
 }
 
 /**
- * One `id` attribute: the name (not the tail of another name, and not a URL query key such as `?id=`), `=`, then a
- * quoted or bare value. Linear: no nested quantifier, each alternative stops at a delimiter.
+ * One `id` attribute: the name, `=`, then a quoted or bare value. The name counts only at an attribute position (start of
+ * text, after whitespace or a quote, or the slash right after a tag name), so a URL path or query key is never cut; a
+ * blockquote marker at a line start between `=` and the value is skipped, as the renderer drops it. Linear: no nested quantifier, each alternative stops at a delimiter.
  */
-const ID_ATTR = /(?<![\w:.?&=#-])id[ \t\r\n\f]*=[ \t\r\n\f]*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/gi;
+const ID_ATTR = /(?<=^|[ \t\r\n\f"']|<[A-Za-z][^\s<>/]*\/)id[ \t\r\n\f]*=(?:[ \t\r\n\f]|(?<=\n[ \t]{0,3})>)*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/gi;
 const isWs = (c: string | undefined): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
 
 /**
@@ -189,9 +190,12 @@ function dropAssignedIdAttrs(text: string, assigned: ReadonlySet<string>): strin
   let copied = 0;
   const re = new RegExp(ID_ATTR.source, ID_ATTR.flags);
   for (let m = re.exec(text); m !== null; m = re.exec(text)) {
-    if (!assigned.has(decodeNumericRefs(m[1] ?? m[2] ?? m[3] ?? ''))) { re.lastIndex = m.index + 2; continue; }
+    let value = m[1] ?? m[2] ?? m[3] ?? '';
+    let to = m.index + m[0].length;
+    // A bare value read up to the tag-closing slash (`<a id=X/>`) is the value without that slash.
+    if (m[3] !== undefined && value.endsWith('/') && text[to] === '>') { value = value.slice(0, -1); to -= 1; }
+    if (!assigned.has(decodeNumericRefs(value))) { re.lastIndex = m.index + 2; continue; }
     let from = m.index;
-    const to = m.index + m[0].length;
     const after = text[to];
     if (after === undefined || isWs(after) || after === '/' || after === '>') while (from > copied && (text[from - 1] === ' ' || text[from - 1] === '\t')) from -= 1;
     out += text.slice(copied, from);

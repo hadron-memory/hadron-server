@@ -126,9 +126,11 @@ describe('#4512 the scanner on its own (review findings)', () => {
     expect(run('<div hidden id="fx-110-a"title="t">')).toBe('<div hidden title="t">');
     expect(run('<s id="fx-110-a"cript>')).toBe('<s cript>');
   });
-  it('N2: an autolink or link destination carrying exactly an assigned id loses it (over-neutralised); other URLs are untouched', () => {
-    expect(run('<https://example.com/id=fx-110-a>')).toBe('<https://example.com/>');
+  it('N2: an autolink or link destination is not cut unless it is indistinguishable from a tag (`<name/id=ASSIGNED`)', () => {
     expect(run('<https://example.com/id=other>')).toBe('<https://example.com/id=other>');
+    expect(run('<https://example.com/a/id=fx-110-a>')).toBe('<https://example.com/a/id=fx-110-a>');
+    expect(run('see https://example.com/id=fx-110-a now')).toBe('see https://example.com/id=fx-110-a now');
+    expect(run('<docs/id=fx-110-a>')).toBe('<docs/>'); // a browser reads this as a tag with an id
   });
   it('N3: CRLF blank lines split blocks', () => {
     expect(run('it`s odd\r\n\r\n<a id="fx-110-a"></a> and `code` x')).toBe('it`s odd\r\n\r\n<a></a> and `code` x');
