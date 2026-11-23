@@ -49,6 +49,7 @@ import {
   fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, startSettingsFor, type StartHold,
 } from '../hostOperations/launch.js';
 import { loadHostDesiredState } from './desiredState.js';
+import { AGENT_ABSENT_REASONS, AGENT_PRESENT_STATUSES } from '../workerTerminal.js';
 
 export const START_FAILING_EVENT_TYPE = 'alarm.start-failing';
 /** The reason a desired-state start records (`HostOperation.issuedReason`). */
@@ -57,16 +58,22 @@ export const DESIRED_RUNNING = 'DESIRED_RUNNING';
 export const START_FAILURE_LIMIT = 3;
 export const START_FAILURE_WINDOW_MS = 60 * 60_000;
 /**
- * #4933: how long a host's terminal report keeps saying the agent runs. The host's sweep reports every minute, so five
- * minutes tolerates a few missed reports and still lets a host that stopped reporting be started again.
+ * #4933: how long a stored terminal report keeps saying the agent runs, measured from `reportedAt`, the SERVER's clock at
+ * the moment it stored the report (#4941; `checkedAt` is the host's own clock, so a host clock more than this slow made
+ * every report read stale and switched the guard off). A constant, not derived from the host's check-in interval
+ * (cor:agt:070:01 judges a registration by that interval, which the App tunes 2 to 10 times): the cadence of the host's
+ * terminal sweep is hadron-cli's and is not visible to the server, so five minutes is a tolerance for a few missed
+ * reports, not a statement of that cadence. Open on #4941 whether to derive it from the registration's lapse rule.
  */
 export const TERMINAL_FRESH_MS = 5 * 60_000;
-/** Terminal reasons that say no agent is on the terminal, whatever the status (hadron-cli#1187 codes). */
-const AGENT_ABSENT_REASONS: ReadonlySet<string> = new Set(['no_terminal', 'bare_shell', 'no_agent']);
-/** How far ahead of the server's clock a report's `checkedAt` may be and still count (a host's clock may run a little fast). */
+/**
+ * How far ahead of the pass's `now` a report's `reportedAt` may be and still count. `reportedAt` is the server's own
+ * clock, so this is only the gap between a pass taking `now` and a report committed while the pass waited on its locks.
+ */
 export const TERMINAL_FUTURE_TOLERANCE_MS = 2 * 60_000;
 
-type StoredTerminal = { host?: { id?: string }; status?: string; reason?: string | null; checkedAt?: string };
+/** The stored `Worker.terminal` JSON, read defensively (a row may predate a key): every key optional, every value an unvalidated string. */
+type StoredTerminal = { host?: { id?: string }; status?: string; reason?: string | null; reportedAt?: string };
 
 /** The stored `Worker.terminal` JSON as a typed value, or null when it is not an object (the DB CHECK makes it one). */
 function asTerminal(value: unknown): StoredTerminal | null {
@@ -74,37 +81,73 @@ function asTerminal(value: unknown): StoredTerminal | null {
 }
 
 /**
- * Does a host's last report say its agent runs right now? (#4933) ANY host's report counts, not only the one the pass is
- * about to start on: the stored report names the one host the agent is on, and a start on another registered host would
- * make a second agent (the loop tries the worker's hosts in id order, so the reporting host may not be first). Only `busy`, `idle` and `locked` show
- * an agent (so `dark` and any status this code does not know say no), unless the reason says the agent is absent.
+ * Does the worker's last report say its agent is up on SOME host right now? (#4933, renamed from `hostRunsAgent` in
+ * #4941, which read as the host the pass is starting on.) The reading, which cor:agt:070:08 does not state ("the
+ * registered host"; it is silent on a worker registered on several hosts): the guard never looks at which host reported (any report counts), because
+ * the stored report names the one host the agent is on, and a start on another of the worker's hosts would make a second
+ * agent (the loop tries the hosts in id order, so the reporting one may not be first). Agent present is
+ * `AGENT_PRESENT_STATUSES` (cor:agt:070:01: busy, idle, locked; `dark` and any status this code does not know say no),
+ * unless the reason says the agent is absent.
  */
-export function hostRunsAgent(terminal: StoredTerminal | null, now: Date): boolean {
+export function agentRunsOnAnyHost(terminal: StoredTerminal | null, now: Date): boolean {
   if (!terminal) return false;
-  if (terminal.status !== 'busy' && terminal.status !== 'idle' && terminal.status !== 'locked') return false;
+  if (!terminal.status || !AGENT_PRESENT_STATUSES.has(terminal.status)) return false;
   if (terminal.reason != null && AGENT_ABSENT_REASONS.has(terminal.reason)) return false;
-  const at = terminal.checkedAt ? Date.parse(terminal.checkedAt) : NaN;
+  const at = terminal.reportedAt ? Date.parse(terminal.reportedAt) : NaN;
   return Number.isFinite(at) && now.getTime() - at <= TERMINAL_FRESH_MS && at <= now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS;
 }
 
-/** Workers whose last logged state is `already running`; an entry goes when the worker is started or the process ends. */
-const loggedRunning = new Set<string>();
+/**
+ * Workers whose last logged state is `already running`, with when it was first seen (a pass's `now`) and whether the
+ * long-hold line was written. The log is per process: a restart forgets it, so `since` restarts and a long hold logs
+ * `already running` again (log only). A `skipped` pass (lock contention, a brief absence from the startable list)
+ * also forgets the entry and restarts the clock. An entry goes when the worker is started, when a pass no longer lists it as startable
+ * (`pruneRunningLog`, so a deleted or retired worker's id is not held for the life of the process), or the process ends.
+ */
+const loggedRunning = new Map<string, { since: number; longHoldLogged: boolean }>();
 /** For tests: forget what was logged. */
 export function resetDesiredStartStateLog(): void {
   loggedRunning.clear();
 }
 /**
- * Log a state change once, AFTER the transaction that decided it committed (a rolled-back decision must not be
- * remembered): `already running` when first seen, and `starting` when a start is issued for a worker last seen running.
+ * #4941: a worker the guard has held for this long, with no change, gets ONE `held a long time` line. A log line only:
+ * no alarm event (that needs its own cor:agt:050 rule and a decision) and never a start (a hold judged too long and then
+ * started over would break the cor:agt:070:08 guard). A host that reports `idle` forever is the case it is for.
  */
-function noteOutcome(a: { appId: string; workerId: string; hostId: string }, outcome: Awaited<ReturnType<typeof startDesiredWorker>>): void {
+export const LONG_HOLD_LOG_MS = 6 * 60 * 60_000;
+/** For tests: how many workers the log remembers. */
+export function runningLogSize(): number {
+  return loggedRunning.size;
+}
+/** Forget every logged worker that is not in `keep`: a worker no longer startable (deleted, retired, held by a session). */
+export function pruneRunningLog(keep: ReadonlySet<string>): void {
+  for (const id of [...loggedRunning.keys()]) if (!keep.has(id)) loggedRunning.delete(id);
+}
+/**
+ * Log a state change once, AFTER the transaction that decided it committed (a rolled-back decision must not be
+ * remembered): `already running` when first seen, `held a long time` once past LONG_HOLD_LOG_MS, and `starting` when a
+ * start is issued for a worker last seen running.
+ */
+function noteOutcome(
+  a: { appId: string; workerId: string; hostId: string },
+  outcome: Awaited<ReturnType<typeof startDesiredWorker>>,
+  now: Date,
+): void {
   if (outcome === 'running') {
-    if (loggedRunning.has(a.workerId)) return;
-    loggedRunning.add(a.workerId);
-    console.info('[desired-start] no start issued: a host already runs this worker\'s agent (already running)', a);
+    const seen = loggedRunning.get(a.workerId);
+    if (!seen) {
+      loggedRunning.set(a.workerId, { since: now.getTime(), longHoldLogged: false });
+      console.info('[desired-start] no start issued: a host already runs this worker\'s agent (already running)', a);
+    } else if (!seen.longHoldLogged && now.getTime() - seen.since >= LONG_HOLD_LOG_MS) {
+      seen.longHoldLogged = true;
+      console.info('[desired-start] a host has run this worker\'s agent for a long time and no start was issued (held a long time)', { ...a, sinceMs: now.getTime() - seen.since });
+    }
     return;
   }
-  // Any other outcome ends the remembered state, so a later return to running is logged again and no id stays forever.
+  // `no-host` is this host having no usable registration: the pass goes on to the worker's next host, so the state is
+  // kept and a start issued there is still logged as `starting` (#4941; it used to be forgotten here, unlogged).
+  if (outcome === 'no-host') return;
+  // Any other outcome ends the remembered state, so a later return to running is logged again.
   if (loggedRunning.delete(a.workerId) && outcome === 'issued') {
     console.info('[desired-start] starting a worker whose agent no host runs any more (starting)', a);
   }
@@ -133,6 +176,8 @@ async function hostIdsOf(db: Db, appId: string): Promise<string[]> {
 export async function startDesiredWorkers(db: PrismaClient, now = new Date(), anchor: number = anchorNow()): Promise<number> {
   const apps = await db.app.findMany({ where: { sweepMode: 'APPLY', deletedAt: null, uninstalledAt: null }, select: { id: true }, orderBy: { id: 'asc' } });
   let issued = 0;
+  const startableNow = new Set<string>();
+  let complete = true;
   for (const app of apps) {
     // Every host that lists the worker as startable, by host id. The first is tried; a host that turns out unusable
     // under the locks (its registration lapsed, or it no longer lists a worktree) falls through to the next.
@@ -145,14 +190,17 @@ export async function startDesiredWorkers(db: PrismaClient, now = new Date(), an
         } catch (err) {
           // One host's read failing skips that host only.
           console.error('[desired-start] reading a host\'s desired state failed:', { appId: app.id, hostId }, err);
+          complete = false;
         }
       }
     } catch (err) {
       // One App's host list failing skips that App only.
       console.error('[desired-start] listing an App\'s hosts failed:', { appId: app.id }, err);
+      complete = false;
       continue;
     }
     for (const [workerId, hostIds] of candidates) {
+      startableNow.add(workerId);
       for (const hostId of hostIds) {
         const outcome = await startDesiredWorker(db, { appId: app.id, workerId, hostId }, now, anchor);
         if (outcome === 'issued') issued++;
@@ -167,6 +215,8 @@ export async function startDesiredWorkers(db: PrismaClient, now = new Date(), an
       }
     }
   }
+  // #4941: only after a pass that read every App and host, so a failed read never forgets a worker still held.
+  if (complete) pruneRunningLog(startableNow);
   return issued;
 }
 
@@ -210,11 +260,14 @@ export async function startDesiredWorker(
       }
       // Re-decided under the locks, at the moment after their waits: a stop signal, a team pause, leave-alone or a
       // session since the pass's read wins.
-      const row = (await loadHostDesiredState(tx, a.appId, a.hostId, afterWaits(now, anchor)))?.workers.find((w) => w.workerId === a.workerId);
+      // `decideAt` is `now` plus what the lock waits took: a report stored while this pass waited is judged against the
+      // moment of the decision, never against the pass's earlier `now` (it would read as "future" past the tolerance).
+      const decideAt = afterWaits(now, anchor);
+      const row = (await loadHostDesiredState(tx, a.appId, a.hostId, decideAt))?.workers.find((w) => w.workerId === a.workerId);
       if (!row || !startable(row)) return 'skipped';
       // #4933: before the failure count, so a worker the host already runs is neither started nor tripped nor alarmed.
       const reported = asTerminal((await tx.worker.findUnique({ where: { id: a.workerId }, select: { terminal: true } }))?.terminal);
-      if (hostRunsAgent(reported, now)) return 'running';
+      if (agentRunsOnAnyHost(reported, decideAt)) return 'running';
       if ((await recentFailures(tx, a.workerId, now)) >= START_FAILURE_LIMIT) return 'tripped';
       await fenceHostDecision(tx, a.appId);
       const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, now, a.hostId)).find((r) => r.worktrees.length > 0);
@@ -230,7 +283,7 @@ export async function startDesiredWorker(
       });
       return 'issued';
     });
-    noteOutcome(a, outcome);
+    noteOutcome(a, outcome, now);
     return outcome;
   } catch (err) {
     console.error('[desired-start] starting a worker that should run failed:', a, err);
