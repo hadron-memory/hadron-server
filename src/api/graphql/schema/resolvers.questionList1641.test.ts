@@ -305,19 +305,22 @@ describe('#4428 acceptance 9: sorts and paging', () => {
     const high2 = await ask(logA.row.id, simple({ priority: 'HIGH' }));
     const normal = await ask(logA.row.id, simple({ priority: 'NORMAL', tier: 'ANSWERED' }));
     const unanswered = [low, urgent, high1, high2];
+    const earlier = await ask(logA.row.id, simple({ priority: 'NORMAL', tier: 'ANSWERED' }));
     await answerAt(normal.row.id, holger.id, '2026-10-20T00:00:00.000Z');
+    await answerAt(earlier.row.id, holger.id, '2026-10-15T00:00:00.000Z');
     const withAsked = async (sort: string, extra: Record<string, unknown> = {}) =>
       ids(await Q.questions(null, { appRef: app.id, sort, ...extra }, as(reader.id)));
     // Newest ask first inside a priority: high2 was asked after high1.
-    expect(await withAsked('PRIORITY_DESC')).toEqual([urgent, high2, high1, normal, low].map((v) => v.row.id));
+    expect(await withAsked('PRIORITY_DESC')).toEqual([urgent, high2, high1, earlier, normal, low].map((v) => v.row.id));
     // Asked-at order follows the stored askedAt; equal instants fall to n.
     const desc = await withAsked('ASKED_AT_DESC');
     const asc = await withAsked('ASKED_AT_ASC');
     expect(desc.slice().reverse()).toEqual(asc);
-    expect(new Set(desc)).toEqual(new Set([...unanswered, normal].map((v) => v.row.id)));
+    expect(new Set(desc)).toEqual(new Set([...unanswered, normal, earlier].map((v) => v.row.id)));
     const answeredOrder = await withAsked('ANSWERED_AT_DESC');
-    expect(answeredOrder[0]).toBe(normal.row.id);
-    expect(answeredOrder.slice(1).sort()).toEqual(unanswered.map((v) => v.row.id).sort());
+    // Most recently answered first (a reversed comparator would put `earlier` first): normal (Oct 20), earlier (Oct 15), then the unanswered.
+    expect(answeredOrder.slice(0, 2)).toEqual([normal.row.id, earlier.row.id]);
+    expect(answeredOrder.slice(2).sort()).toEqual(unanswered.map((v) => v.row.id).sort());
     // Two pages of two plus one cover every question exactly once.
     const p1 = await withAsked('PRIORITY_DESC', { limit: 2, offset: 0 });
     const p2 = await withAsked('PRIORITY_DESC', { limit: 2, offset: 2 });
