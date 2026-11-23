@@ -71,6 +71,9 @@ async function withOldIndexDropped<T>(body: () => Promise<T>): Promise<T> {
   try {
     return await body();
   } finally {
+    // Both alarms (the foreign one and App B's) share the three columns, so the index cannot come back over them: the
+    // rows go first (the events table is append-only, so cleanDb is the way), then the index as it was.
+    await cleanDb(db);
     await db.$executeRawUnsafe(def);
   }
 }

@@ -370,7 +370,7 @@ export async function appendAlarmEvent(
       ${JSON.stringify(chain)}::jsonb, ${JSON.stringify(payload)}::jsonb,
       ${toNaiveUtc(args.createdAt)}::timestamp, ${toNaiveUtc(args.episodeStart)}::timestamp
     )
-    ON CONFLICT (task_id, type, episode_start) DO NOTHING
+    ON CONFLICT (app_id, task_id, type, episode_start) DO NOTHING
     RETURNING id`;
   return rows[0]?.id ?? null;
 }
