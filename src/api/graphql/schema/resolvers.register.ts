@@ -118,10 +118,9 @@ export const registerQueries = {
     } else if (agentRef?.trim() && appRef?.trim()) {
       // #4893/#2975: only a name-resolution failure is the empty answer; a database fault
       // propagates — even when the OTHER arm failed to resolve, so the two are settled
-      // separately and a fault always wins the fold (Elena F6 on #4948: Promise.all settles
+      // separately and a fault always wins the fold (#4948: Promise.all settles
       // with the first rejection, letting a malformed arm mask a faulting one).
-      // NEW-6 (Elena's blind delta on #4948): the settled pair is named `agentArm`/`appArm` so it
-      // cannot shadow the `app` row read below.
+      // The settled pair is named `agentArm`/`appArm` so it cannot shadow the `app` row read below.
       const [agentArm, appArm] = await Promise.allSettled([resolveAgentRef(ctx.db, agentRef), resolveAppRef(ctx.db, appRef)]);
       const fault = [agentArm, appArm].find((r): r is PromiseRejectedResult =>
         r.status === 'rejected' && !refNamesNothing(r.reason, { ambiguousNamesNothing: true }));
@@ -230,9 +229,9 @@ async function readableAttendee(
   if (!attendee) {
     if (!appRef?.trim()) return null;
     // #4893/#2975: a name-resolution failure on either arm is the door's null; a database
-    // fault propagates even when the other arm also failed to resolve (Elena F6 on #4948).
-    // NEW-6 (Elena's blind delta on #4948): `agentArm`/`appArm`, not `agent`/`app` — the
-    // settled pair used to shadow the `app` row read below it.
+    // fault propagates even when the other arm also failed to resolve (#4948).
+    // `agentArm`/`appArm`, not `agent`/`app` — the settled pair used to shadow
+    // the `app` row read below it.
     const [agentArm, appArm] = await Promise.allSettled([resolveAgentRef(ctx.db, attendeeRef), resolveAppRef(ctx.db, appRef)]);
     const fault = [agentArm, appArm].find((r): r is PromiseRejectedResult =>
       r.status === 'rejected' && !refNamesNothing(r.reason, { ambiguousNamesNothing: true }));

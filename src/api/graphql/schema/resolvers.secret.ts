@@ -643,9 +643,12 @@ export const secretQueries = {
       ownerId = await resolveSecretOwnerRef(ctx, ownerType, args.ownerRef);
     } catch (e) {
       // #4893/#2975: a name-resolution failure on any owner arm — typed miss, malformed or
-      // ambiguous ref — is the empty page, as is a typed refusal an arm already folded (the App
-      // arm's one denial for missing-and-not-yours). A database fault is none of those: the bare
-      // catch that used to swallow it made a dead database indistinguishable from an empty owner.
+      // ambiguous ref — is the empty page, as is a typed refusal an arm already folded: the App
+      // arm's one denial for missing-and-not-yours is authorizationDenied(), whose code (FORBIDDEN,
+      // src/lib/auth/authorizationDenied.ts) is what this matches — while an App that resolves but
+      // is not the caller's answers the same page below, at canSeeSecretOwner. Anything else —
+      // argument validation, a database fault — is none of those and propagates: the bare catch
+      // that used to swallow it made a dead database indistinguishable from an empty owner.
       if ((e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN') || refNamesNothing(e, { ambiguousNamesNothing: true })) {
         return { items: [], total: 0 };
       }

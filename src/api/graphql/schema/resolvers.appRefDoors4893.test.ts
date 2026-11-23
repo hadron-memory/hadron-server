@@ -12,14 +12,14 @@
  * contract; `requireScheduleAdmin`'s schedule/webhook doors are that class and
  * are pinned below by direct call. A database fault always propagates.
  *
- * Every FOLD row also carries a reaches-resolution control (Elena F4 on #4948):
+ * Every FOLD row also carries a reaches-resolution control (#4948):
  * a db whose `app.findFirst`/`memory.findFirst` faults only on the miss ref's
  * URN lookup must make the door REJECT — a row that refuses before resolution
  * (argument validation, a missing credential) never fires the fault and fails
  * the control, so no row can pass vacuously. The ambiguous legacy URN (two live
  * Apps in two orgs, plus an uninstalled third holding it as its current urn) is
- * Elena F3's fixture; the uninstall/reinstall doors are its FOLD pin (F2), and
- * the write-grant memory arm is F5's.
+ * the ambiguity fixture; the uninstall/reinstall doors pin its FOLD, and
+ * the write-grant memory arm is pinned the same way.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { GraphQLError } from 'graphql';
@@ -40,14 +40,14 @@ const Q = resolvers.Query as any;
 const ctx = (userId?: string, extra: Partial<Context> = {}): Context => ({ db, userId, roles: ['READER'], ...extra });
 
 const CANARY = 'hdr_user_CANARY0123456789abcdef';
-// Baylor P2 on #4948: a NUL and a lone UTF-16 surrogate pass the urn grammar but no stored URN can
+// #4948: a NUL and a lone UTF-16 surrogate pass the urn grammar but no stored URN can
 // contain them — the resolvers pre-reject them as names-nothing (#2975 §10), so they fold like any
 // other malformed shape instead of surfacing a Postgres driver fault on the narrowed catches.
 const MALFORMED = [CANARY, `  ${CANARY}  `, `hrn:app:${CANARY}`, `a:${CANARY}`, 'hrn:app:', ':', 'mf-org.com:no\u0000pe', 'mf-org.com:pe\uD800', 'mf-org.com:pe\uDC00'];
 const MISSING = 'mf-org.com:nope';
 /** The typed miss used only by the reaches-resolution control: guaranteed to route to the App arm. */
 const CONTROL_MISS = `hrn:app:${MISSING}`;
-/** A legacy URN two live Apps in two orgs both hold (F3), with an uninstalled third holding it as its CURRENT urn. */
+/** A legacy URN two live Apps in two orgs both hold, with an uninstalled third holding it as its CURRENT urn. */
 const AMBIG = 'amb.example:dup';
 
 type Answer = { ok: true; value: unknown; rawJson: string } | { ok: false; message: string; code: unknown; extra: string[]; rawJson: string };
@@ -58,7 +58,7 @@ async function answer(p: Promise<unknown>): Promise<Answer> {
     return {
       ok: false, message: f.message, code: f.extensions?.code,
       extra: Object.keys(f.extensions ?? {}).filter((k) => k !== 'code' && k !== 'stacktrace').sort(),
-      // Rook P3 on #4948: the FULL formatted error, values included — the `extra` list above
+      // #4948: the FULL formatted error, values included — the `extra` list above
       // carries only extension KEYS, so an extension VALUE echoing the caller's token would
       // otherwise pass unseen.
       rawJson: JSON.stringify({ message: f.message, extensions: f.extensions }),
@@ -82,14 +82,16 @@ beforeEach(async () => {
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
-  // F3: two LIVE Apps in two orgs share a legacy URN, and an uninstalled third holds it as its
-  // current urn — resolveAppRef refuses it as ambiguous; locate()'s uninstalled fallback (F2) finds
-  // exactly the third, whose gate then refuses the caller like any unknown App. NEW-4 (Elena's
-  // blind delta): each claimant org has an ADMIN, so the fallthrough rows can pin every caller class.
+  // Two LIVE Apps in two orgs share a legacy URN, and an uninstalled third holds it as its
+  // current urn — resolveAppRef refuses it as ambiguous; locate()'s uninstalled fallback finds
+  // exactly the third, whose gate then refuses the caller like any unknown App. Each claimant org
+  // has an ADMIN, so the fallthrough rows can pin every caller class (#4948).
   const orgB = await db.organization.create({ data: { id: generateId(), name: 'mf-org2', urn: 'mf-org2.com' } });
   orgBAdmin = await mk(4);
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgB.id, userId: orgBAdmin.id, role: 'ADMIN' } });
   await db.app.create({ data: { id: generateId(), organizationId: orgB.id, name: 'Other', urn: `${orgB.urn}:team`, legacyUrn: AMBIG } });
+  // Load-bearing fixture: every ambiguous FOLD row and the locate fallthrough suite below key on
+  // THIS App's legacyUrn being AMBIG — changing it here re-baselines all of them.
   await db.app.update({ where: { id: app.id }, data: { legacyUrn: AMBIG } });
   const orgC = await db.organization.create({ data: { id: generateId(), name: 'mf-org3', urn: 'mf-org3.com' } });
   orgCAdmin = await mk(5);
@@ -144,12 +146,12 @@ const FOLD: Array<[string, (ref: string, c: Context) => Promise<unknown>, () => 
   ['createAppMemory', (r, c) => M.createAppMemory({}, { appRef: r, name: 'pin mem' }, c), memberCtx],
   ['createTelegramConnection', (r, c) => M.createTelegramConnection({}, { appRef: r, botToken: '123:pin' }, c), memberCtx],
   // nodeRef: null — the door refuses a MISSING nodeRef before any App resolution (presence, not
-  // truthiness), so without the key the row pinned only that early refusal (Elena F4's control).
+  // truthiness), so without the key the row pinned only that early refusal (the control catches it).
   ['setAppAgentBootPrompt', (r, c) => M.setAppAgentBootPrompt({}, { appRef: r, agentRef: teamAgent.id, nodeRef: null }, c), memberCtx],
   ['installMemory', (r, c) => Q.installMemory({}, { appRef: r, agentRef: teamAgent.id }, c), memberCtx],
   ['memoryConfigTemplates(APP owner)', (r, c) => Q.memoryConfigTemplates({}, { filter: { ownerType: 'APP', ownerRef: r } }, c), memberCtx],
   // adminCtx: memberCtx never passes resolveOrgScope (member is only an appMember), so the row
-  // would not reach the owner arm at all — Elena F4's control catches exactly that vacuous row.
+  // would not reach the owner arm at all — the control catches exactly that vacuous row.
   ['registerEntries(ownerRef)', (r, c) => Q.registerEntries({}, { filter: { ownerRef: r }, orgId: org.id }, c), adminCtx],
   ['attendeeRegister', (r, c) => Q.attendeeRegister({}, { agentRef: teamAgent.id, appRef: r }, c), memberCtx],
   ['questions', (r, c) => Q.questions({}, { appRef: r }, c), memberCtx],
@@ -161,7 +163,7 @@ const FOLD: Array<[string, (ref: string, c: Context) => Promise<unknown>, () => 
   ['worker(ref:, appRef:)', (r, c) => Q.worker({}, { ref: 'zed', appRef: r }, c), memberCtx],
   ['uninstallApp', (r, c) => M.uninstallApp({}, { ref: r }, c), memberCtx],
   ['reinstallApp', (r, c) => M.reinstallApp({}, { ref: r }, c), memberCtx],
-  // adminCtx (Elena F5): memberCtx is refused at the door's App gate before the MEMORY arm ever
+  // adminCtx (#4948): memberCtx is refused at the door's App gate before the MEMORY arm ever
   // resolves, so the row pinned nothing about the memory ref. The admin passes the gate and the
   // memory arm's fold is what this row exists to pin. The control ref is MEMORY-shaped: an
   // app-shaped URN is refused by resolveMemoryRef's kind boundary before any lookup, so the
@@ -206,7 +208,7 @@ describe('#4893 fold doors: a malformed App ref answers exactly like an unknown 
           ? { ...(miss as Record<string, unknown>), message: ((miss as any).message as string).split(MISSING).join(r) }
           : miss;
         expect(got).toEqual(expected);
-        // Full-form equality (Rook P3 on #4948): the WHOLE formatted error — message, code, every
+        // Full-form equality (#4948): the WHOLE formatted error — message, code, every
         // extension KEY and VALUE — equals the miss answer with the ref substituted. A door may
         // echo the ref VERBATIM (in the message or an extension value — several task doors carry
         // `appRef: <ref>`; findings:app-ref-door-classes-4893) because a miss echoes it the same
@@ -218,11 +220,15 @@ describe('#4893 fold doors: a malformed App ref answers exactly like an unknown 
       }
     });
     it(`${door}: the row reaches ref resolution on both lookup paths (the conditional fault fires)`, async () => {
-      // NEW-3 (Elena's blind delta on #4948): the control used to prove only the fully-qualified
+      // #4948: the control used to prove only the fully-qualified
       // URN path (CONTROL_MISS → app.findFirst); the FOLD rows' MISSING baseline takes the LEGACY
       // alias path (app.findMany + urnAlias.findMany), which a control on the urn path alone says
       // nothing about — a door that refused the legacy form before resolution would have passed
-      // vacuously. Both paths now fault through the same wrapped db.
+      // vacuously. Both paths now fault through the same wrapped db. A row with an explicit
+      // controlRef runs only that ref: its arm's URN boundary refuses the bare MISSING shape
+      // BEFORE any lookup (resolveMemoryRef requires a fully-qualified URN, so a bare root:slug
+      // never reaches a query), and the controlRef IS that arm's fully-qualified miss — the one
+      // ref that does reach the memory lookup.
       const c = { ...mkCtx(), db: resolutionFaultDb() } as Context;
       for (const ref of controlRef ? [controlRef] : [CONTROL_MISS, MISSING]) {
         await expect(call(ref, c)).rejects.toThrow('resolution-reached fault');
@@ -274,7 +280,7 @@ describe('#4893 the fold stays narrow (a database fault is never the unknown-App
   });
 });
 
-describe('#4893 createGrant worker arm: the scoped lookup folds what it can reach (Celine P2 on #4948)', () => {
+describe('#4893 createGrant worker arm: the scoped lookup folds what it can reach (#4948)', () => {
   // The FOLD table's createGrant row drives the MANAGER path (resolveGrantReader is null for a
   // plain member), so the WORKER arm's appRef branch — the one the branch moved onto the shared
   // fold list — had no row at all. Its lookup is SCOPED to the caller's own App (#3914: foreign
@@ -320,14 +326,20 @@ describe('#4893 createGrant worker arm: the scoped lookup folds what it can reac
 });
 
 /**
- * F4's control: a db whose resolution lookups throw ONLY when the caller's miss ref is in the
+ * The reaches-resolution control: a db whose resolution lookups throw ONLY when the caller's miss ref is in the
  * where — `app.findFirst`/`memory.findFirst` (the primary URN path), `app.findMany`/`urnAlias.findMany`
- * (the legacy alias path, NEW-3) and `worker.findFirst` (the workerRef arm). A door that reaches ref
+ * (the legacy alias path) and `worker.findFirst` (the workerRef arm). A door that reaches ref
  * resolution with the caller's ref sees the fault and (per the narrow-fold contract) propagates it; a
  * door that refuses earlier never fires it, so a vacuous row fails here instead of passing on nothing.
+ * Extra markers extend the fault key past the miss ref, so a row can fault a LATER lookup (the
+ * worker-row read) without firing the App resolution on the way in.
  */
-function resolutionFaultDb() {
-  const hits = (args: unknown) => JSON.stringify((args as { where?: unknown } | undefined)?.where ?? {}).includes(MISSING);
+function resolutionFaultDb(...extraMarkers: string[]) {
+  const markers = [MISSING, ...extraMarkers];
+  const hits = (args: unknown) => {
+    const where = JSON.stringify((args as { where?: unknown } | undefined)?.where ?? {});
+    return markers.some((m) => where.includes(m));
+  };
   const wrap = (model: object, methods: string[]) => new Proxy(model, {
     get: (t, k) => (methods.includes(k as string)
       ? (args: unknown) => { if (hits(args)) throw new Error('resolution-reached fault'); return (t as any)[k](args); }
@@ -349,16 +361,15 @@ describe('#4893 withInstallMemory folds the App arm alone (the Agent arm keeps i
     await expect(withInstallMemory(memberCtx(), { appRef: CANARY, agentRef: teamAgent.id }, async () => 1))
       .rejects.toMatchObject({ name: 'AppNotFoundError' });
   });
-  it('a malformed AGENT ref keeps the boundary typed answer, not an App miss (Elena F1 on #4948)', async () => {
+  it('a malformed AGENT ref keeps the boundary typed answer, not an App miss (#4948)', async () => {
     await expect(withInstallMemory(memberCtx(), { appRef: app.urn, agentRef: CANARY }, async () => 1))
       .rejects.toMatchObject({ name: 'UrnNotQualifiedError' });
   });
-  // NEW-1 (Elena blind delta + Rook §10 concur, ruling #141946): the participant gates judge BEFORE the
-  // Agent resolves, so a caller the gates refuse gets the one unknown-App answer whatever their agentRef
-  // says — the typed Agent errors are reachable only for a caller the gates already admitted. Before the
-  // reorder this was an App-existence oracle: a non-participant could tell an existing App (typed Agent
-  // error) from a missing one (AppNotFoundError).
-  it('a non-participant cannot tell an existing App from a missing one through the Agent arm (NEW-1)', async () => {
+  // The participant gates judge BEFORE the Agent resolves, so a caller the gates refuse gets the one
+  // unknown-App answer whatever their agentRef says — the typed Agent errors are reachable only for a
+  // caller the gates already admitted. Before the reorder this was an App-existence oracle: a
+  // non-participant could tell an existing App (typed Agent error) from a missing one (AppNotFoundError).
+  it('a non-participant cannot tell an existing App from a missing one through the Agent arm', async () => {
     const jsonEscaped = (s: string) => JSON.stringify(s).slice(1, -1);
     for (const agentRef of [...MALFORMED, 'hrn:agent:mf-org.com:ghost']) {
       const existing = await answer(withInstallMemory(ctx(outsider.id), { appRef: app.urn, agentRef }, async () => 1));
@@ -374,7 +385,7 @@ describe('#4893 withInstallMemory folds the App arm alone (the Agent arm keeps i
       expect(existing.rawJson).toBe(missing.rawJson.split(MISSING).join(jsonEscaped(app.urn)));
     }
   });
-  it('the gates-admitted caller keeps the typed Agent contract (the F1 row after the NEW-1 reorder)', async () => {
+  it('the gates-admitted caller keeps the typed Agent contract (the typed row after the reorder)', async () => {
     await expect(withInstallMemory(memberCtx(), { appRef: app.urn, agentRef: 'hrn:agent:mf-org.com:ghost' }, async () => 1))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
   });
@@ -396,7 +407,7 @@ describe('#4893 findCallerInstallMemory folds both arms into its one not-customi
     await expect(findCallerInstallMemory(memberCtx(), { appRef: CANARY, agentRef: teamAgent.id })).rejects.toMatchObject(refused);
     await expect(findCallerInstallMemory(memberCtx(), { appRef: AMBIG, agentRef: teamAgent.id })).rejects.toMatchObject(refused);
   });
-  // Elena's blind delta (test gap): the two-arm fold must not swallow an operational fault.
+  // #4948 (test gap): the two-arm fold must not swallow an operational fault.
   it('a resolution fault propagates instead of answering not-customised', async () => {
     const c = { ...memberCtx(), db: resolutionFaultDb() } as Context;
     await expect(findCallerInstallMemory(c, { appRef: CONTROL_MISS, agentRef: teamAgent.id }))
@@ -404,7 +415,7 @@ describe('#4893 findCallerInstallMemory folds both arms into its one not-customi
   });
 });
 
-describe('#4893 deliveryBatches task arm: the own-session caller folds like the host arm (Rook P3-1 on #4948)', () => {
+describe('#4893 deliveryBatches task arm: the own-session caller folds like the host arm (#4948)', () => {
   // The FOLD table's deliveryBatches row drives the HOST arm (keyCtx carries no session), so the
   // task arm's narrowed catch — selfBatches' appRef lookup — had no row. Its caller is a live
   // worker session of the App driven by its member.
@@ -429,7 +440,7 @@ describe('#4893 deliveryBatches task arm: the own-session caller folds like the 
   });
 });
 
-describe('#4893 a fault wins the two-arm folds (Rook P3-1 / Elena test gaps on #4948)', () => {
+describe('#4893 a fault wins the two-arm folds (#4948)', () => {
   // readableAttendee's settled pair (register's read-state doors): an app-arm fault must win even
   // while the agent arm fails to resolve — the `if (fault) throw` line had no pin.
   it('channelReadState propagates an app-arm fault beside a names-nothing agent arm', async () => {
@@ -437,18 +448,26 @@ describe('#4893 a fault wins the two-arm folds (Rook P3-1 / Elena test gaps on #
     await expect(Q.channelReadState({}, { attendeeRef: CANARY, appRef: CONTROL_MISS, channelRef: 'ch:pin' }, c))
       .rejects.toThrow('resolution-reached fault');
   });
-  // The register worker arm's try holds resolution AND the worker-row read: a worker lookup fault
-  // must propagate instead of the empty list (the masked combination Elena's run listed). The v2
-  // worker URN resolves its APP first (composeUrnV2 → hrn:app:mf-org.com:nope), so the fault fires
-  // inside the worker arm's own resolution.
+  // The register worker arm's try holds resolution AND the worker-row read. This row faults the
+  // APP resolution inside the worker arm: the v2 worker URN resolves its App first
+  // (composeUrnV2 → hrn:app:mf-org.com:nope), so the miss marker fires there.
   it('attendeeRegister propagates a workerRef-arm resolution fault instead of the empty list', async () => {
     const c = { ...memberCtx(), db: resolutionFaultDb() } as Context;
     await expect(Q.attendeeRegister({}, { workerRef: 'hrn:worker:mf-org.com:nope:zed' }, c))
       .rejects.toThrow('resolution-reached fault');
   });
+  // …and this one faults the WORKER-ROW read itself: the ref's App segment names the REAL App
+  // (hrn:app:mf-org.com:team, no marker), so the App resolution completes and only the worker
+  // lookup — keyed on the marker slug — faults. That lookup runs inside the same narrowed catch,
+  // and a fault there must propagate instead of the empty list.
+  it('attendeeRegister propagates a worker-row fault (after the App resolves) instead of the empty list', async () => {
+    const c = { ...memberCtx(), db: resolutionFaultDb('d93-faultpin') } as Context;
+    await expect(Q.attendeeRegister({}, { workerRef: 'hrn:worker:mf-org.com:team:d93-faultpin' }, c))
+      .rejects.toThrow('resolution-reached fault');
+  });
 });
 
-describe("#4893 locate's ambiguous fallthrough is caller-neutral (Elena NEW-4 on #4948)", () => {
+describe("#4893 locate's ambiguous fallthrough is caller-neutral (#4948)", () => {
   // locate(AMBIG) reaches the uninstalled current-urn holder for EVERY caller; the gate decides.
   // A claimant org's admin must be refused exactly like the member row — their OWN App being one
   // of the live legacy claimants tells them nothing.
@@ -467,13 +486,24 @@ describe("#4893 locate's ambiguous fallthrough is caller-neutral (Elena NEW-4 on
   });
 });
 
-describe("#4893 the secrets fold carries only the arm's own denial (Elena NEW-5 on #4948)", () => {
+describe("#4893 the secrets fold carries only the arm's own denial (#4948)", () => {
   it('an argument-validation refusal propagates instead of reading as an empty owner', async () => {
     await expect(Q.secrets({}, { ownerType: 'org' }, memberCtx()))
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
   it("the App arm's folded denial still answers the empty page (missing ≡ not-yours)", async () => {
     await expect(Q.secrets({}, { ownerType: 'app', ownerRef: MISSING }, memberCtx()))
+      .resolves.toEqual({ items: [], total: 0 });
+  });
+  it('an existing App the caller cannot reach is the same empty page as a missing one', async () => {
+    // Two paths to the one empty page: a ref that fails to resolve dies in the App arm's
+    // authorizationDenied() — the FORBIDDEN code the resolver's catch matches — while an App that
+    // resolves but is not the caller's dies later, at canSeeSecretOwner. Pin both halves against
+    // the same answer: either path diverging is an App-existence oracle on this door.
+    const outsiderCtx = ctx(outsider.id);
+    await expect(Q.secrets({}, { ownerType: 'app', ownerRef: MISSING }, outsiderCtx))
+      .resolves.toEqual({ items: [], total: 0 });
+    await expect(Q.secrets({}, { ownerType: 'app', ownerRef: app.urn }, outsiderCtx))
       .resolves.toEqual({ items: [], total: 0 });
   });
 });
