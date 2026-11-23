@@ -47,6 +47,13 @@ export interface SpliceOptions {
    * "unrestricted", and must not turn a foreign URN into a read.
    */
   foreign?: boolean;
+  /**
+   * #4689 (ruling A): a further test a foreign memory must pass before a URN tag is followed into it, on top of
+   * `access`. Consulted only with `foreign` set, and only after the lookup is charged, so a refusal costs what a
+   * follow costs and reads as the notice, the same as a missing target (cor:dmo:150:05). An executed run passes
+   * the adoption rule here (`partialMemoryFollowable`); a render passes nothing, since its reader is the caller.
+   */
+  followForeign?: (memoryId: string) => Promise<boolean>;
   memo?: IncludeReadMemo;
   /**
    * #2135 — when set, the `{{>` of every include tag written as code is replaced by this guard in the
@@ -283,7 +290,9 @@ async function expandTag(
       memo.targetIdentityByUrn.set(tag.target, identity);
     }
     const resolved = await identity;
-    if (!resolved || (resolved.memoryId !== includerMemoryId && !opts.foreign)) return unresolved(opts);
+    if (!resolved) return unresolved(opts);
+    if (resolved.memoryId !== includerMemoryId
+      && (!opts.foreign || (opts.followForeign && !(await opts.followForeign(resolved.memoryId))))) return unresolved(opts);
     memoryId = resolved.memoryId;
     loc = resolved.loc;
     targetId = resolved.id;

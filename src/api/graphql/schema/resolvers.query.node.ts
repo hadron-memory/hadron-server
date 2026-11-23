@@ -59,8 +59,7 @@ import {
   validateUrnType,
   splitNodeUrn,
 } from '../../../lib/urn.js';
-import { compileTemplate } from '../../../lib/template.js';
-import { chargeRequestServed, resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { compileRunNodeContent, resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -707,7 +706,7 @@ export const nodeQueries = {
             loadMemoryUrn(ctx, memoryId).then((u: string | null) => u ?? memoryId),
           // #40: each compiled piece is served, so it counts toward the request's aggregate.
           compileTemplate: (content: string, data: Record<string, string> | null, memoryId: string) =>
-            compileTemplate(content, data, memoryId, ctx.db, {}).then(text => chargeRequestServed(ctx, content, text)),
+            compileRunNodeContent(ctx, content, data, memoryId),
           // visibleEdges was already filtered through this caller's read gate.
           includeTarget: target => !!target,
           onTargetInlined: (target) => inlined.push(target),

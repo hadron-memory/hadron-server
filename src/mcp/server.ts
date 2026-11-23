@@ -305,7 +305,6 @@ import { resolveNodeRef, isConcealedNodeRefAmbiguity } from '../lib/entityRef/no
 import { resolveChannelRefId } from '../lib/entityRef/channelRef.js';
 import { sortSiblings } from '../lib/siblingOrder.js';
 import { assembleRunNodePrompt } from '../lib/runNodeRender.js';
-import { compileTemplate } from '../lib/template.js';
 import {
   NodeNotFoundError,
   EdgeNotFoundError,
@@ -344,7 +343,7 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // #1005: the SHARED App-participation predicate (#943) — reused here so
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
-import { chargeRequestServed, resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
+import { compileRunNodeContent, resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
 import {
   CONTENT_RESOLUTION_LIMIT_EXCEEDED, isContentResolutionLimitError, resolutionLimitMessage, resolutionLimitPhrase,
   type ResolutionLimit,
@@ -9248,7 +9247,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     const rendered = await assembleRunNodePrompt({ ...node, loc }, args, {
       memoryUrnOf: memoizedMemoryUrnLookup(),
       compileTemplate: (content, data, memoryId) =>
-        compileTemplate(content, data, memoryId, db, {}).then((text) => chargeRequestServed(readCtx, content, text)),
+        compileRunNodeContent(readCtx, content, data, memoryId),
       // The run node's OWN memory was gated by loadNodeForRun; this gates each
       // dependency separately, because an edge can cross memories (#781).
       includeTarget: (target) => !!target && canRead(target.memoryId),

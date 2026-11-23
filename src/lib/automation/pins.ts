@@ -9,6 +9,7 @@ import type { PrismaClient, AppRun } from '../../generated/prisma/index.js';
 import { canonicalizeAutomationJson } from './format.js';
 import { runAuthContext } from '../auth/runPrincipal.js';
 import { canReadMemory } from '../../mcp/access-control.js';
+import { partialMemoryFollowable } from './partialFollow.js';
 import type { AuthContext } from '../../middleware/auth.js';
 import { NodeNotFoundError } from '../entityRef/errors.js';
 import { resolveNodeRef } from '../entityRef/nodeRef.js';
@@ -176,7 +177,7 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
           where: { urn: parts.memoryUrn },
           select: { id: true, organizationId: true, isEncrypted: true, deletedAt: true },
         });
-        if (mem && !mem.deletedAt && !mem.isEncrypted && mem.organizationId === organizationId && await canReadMemory(db, principal, mem.id)) {
+        if (mem && await partialMemoryFollowable(db, principal, organizationId, mem)) {
           targetMemoryId = mem.id;
           loc = parts.loc;
         }
