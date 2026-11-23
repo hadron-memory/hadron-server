@@ -26,7 +26,7 @@ import type {
   NodePropertySort,
 } from './provider.js';
 import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
-import { vectorSearchNodes, vectorSearchChunks } from '../../services/embedding/vectors.js';
+import { vectorSearchNodes, vectorSearchChunks, vectorRanksOf, type NodeVectorScope } from '../../services/embedding/vectors.js';
 import { UnindexableQueryError, compileBooleanQuery } from './tsquery.js';
 import { compileNodeWhere, compileNodePropertySort } from './nodeWhere.js';
 import { regexSearchTimeoutMs } from './regexTimeout.js';
@@ -159,7 +159,7 @@ const REGEX_DEFAULT_FIELDS = ['name', 'alias', 'loc', 'tags', 'description', 'ab
  * `filterClause` the lexical legs use so the legs cannot disagree on scope. Absent filter ⇒ no fragment (the
  * callers that pass none keep their own predicates).
  */
-function vectorFilterSql(opts: VectorSearchOpts): Prisma.Sql | undefined {
+function vectorFilterSql(opts: Omit<VectorSearchOpts, 'limit' | 'onWindow'>): Prisma.Sql | undefined {
   // BLIND P2 (#4665): `includeDeleted` alone must still reach the statement, or the default deleted rule (applied only when
   // no fragment exists) would hide tombstones from a caller who asked for them, while ANY other filter would show them.
   if (!opts.filter && !opts.excludeNodeIds?.length && !opts.includeDeleted) return undefined;
@@ -177,6 +177,24 @@ function vectorFilterSql(opts: VectorSearchOpts): Prisma.Sql | undefined {
     else values.push(params[Number(parts[i]) - 1]);
   }
   return Prisma.sql(Object.assign(strings, { raw: strings }) as unknown as TemplateStringsArray, ...values);
+}
+
+/**
+ * #4779 (BLIND P2-3) — the ONE mapping from provider options to a node-level vector scope, shared by `vectorSearch` and
+ * `vectorRanks`, so the page ranking and the rank lookup can never disagree on eligibility (filter fragment, memory scope,
+ * candidate set, abstract-only, open threads, content scope and its default, the request deadline).
+ */
+function nodeVectorScopeOf(opts: Omit<VectorSearchOpts, 'limit' | 'onWindow'>): NodeVectorScope {
+  return {
+    filterSql: vectorFilterSql(opts),
+    memoryIds: opts.memoryIds,
+    queryEmbedding: opts.queryEmbedding,
+    candidateNodeIds: opts.candidateNodeIds,
+    abstractOnly: opts.abstractOnly,
+    hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
+    scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
+    deadlineAt: opts.deadlineAt,
+  };
 }
 
 export const postgresRetrievalProvider: NodeRetrievalProvider = {
@@ -321,17 +339,13 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
   },
 
   vectorSearch(opts: VectorSearchOpts): Promise<VectorHit[]> {
-    return vectorSearchNodes(opts.db, {
-      filterSql: vectorFilterSql(opts),
-      memoryIds: opts.memoryIds,
-      queryEmbedding: opts.queryEmbedding,
-      limit: opts.limit,
-      onWindow: opts.onWindow,
-      candidateNodeIds: opts.candidateNodeIds,
-      abstractOnly: opts.abstractOnly,
-      hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
-      scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
-    });
+    return vectorSearchNodes(opts.db, { ...nodeVectorScopeOf(opts), limit: opts.limit, onWindow: opts.onWindow });
+  },
+
+  async vectorRanks(opts) {
+    // #4779 (BLIND P2-3): the SAME scope mapping as vectorSearch, so ranks and pages share one eligibility.
+    const { ranks, stopped } = await vectorRanksOf(opts.db, { ...nodeVectorScopeOf(opts), nodeIds: opts.nodeIds });
+    return { ranks, stoppedEarly: stopped };
   },
 
   vectorSearchChunks(opts: VectorSearchOpts): Promise<ChunkHit[]> {
@@ -343,6 +357,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       onWindow: opts.onWindow,
       hasOpenThreads: opts.hasOpenThreads, syntheticCommentMemoryIds: opts.syntheticCommentMemoryIds,
       scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
+      deadlineAt: opts.deadlineAt,
     });
   },
 };
