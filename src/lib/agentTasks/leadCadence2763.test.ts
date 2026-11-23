@@ -309,27 +309,34 @@ describe('#4375 the alarm watches every lead (rulings 0270, 0271)', () => {
   });
 
   it('an open episode ends when its worker stops being a lead (the escalation stops), and a later stint can raise a new alarm (Elena P3)', async () => {
+    // Cass leads Ada (Ada reports to her) and Ada leads Liam. Both are late at NOW, so each has its own alarm and episode;
+    // every assertion below names the lead it is about.
     w.Cass = await mk('Cass', null, 'owner');
     await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Cass.id } });
     await lateAda();
-    await evaluateLeadCadence(db, NOW); // Cass leads Ada, so she is late too and raises her own alarm: this case is about Ada's
-    expect(await alarms()).toHaveLength(1);
-    const [a] = await alarms();
+    await evaluateLeadCadence(db, NOW);
+    expect(await alarms('Ada')).toHaveLength(1);
+    expect(await alarms('Cass')).toHaveLength(1);
+    const [a] = await alarms('Ada');
+    const cassEpisode = () => db.leadCadenceEpisode.findFirstOrThrow({ where: { workerId: w.Cass.id } });
     const { pendingTaskWakes } = await import('./taskWakes.js');
-    expect(((await pendingTaskWakes(db, [w.Cass.id], NOW)).get(w.Cass.id) ?? []).some((p) => p.eventId === a.id)).toBe(true);
+    const adaWakes = async (at: Date) => ((await pendingTaskWakes(db, [w.Cass.id], at)).get(w.Cass.id) ?? []).some((p) => p.eventId === a.id);
+    expect(await adaWakes(NOW)).toBe(true);
     await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: null } }); // nobody reports to Ada any more
-    await evaluateLeadCadence(db, later(1)); // (Cass already has her open episode: nothing new is raised)
+    await evaluateLeadCadence(db, later(1));
     const ep = await db.leadCadenceEpisode.findUniqueOrThrow({ where: { eventId: a.id } });
-    expect(ep.endedAt?.getTime()).toBe(later(1).getTime()); // ended by the pass, at its time
-    expect(((await pendingTaskWakes(db, [w.Cass.id], later(1))).get(w.Cass.id) ?? []).some((p) => p.eventId === a.id)).toBe(false);
-    expect(await alarms()).toHaveLength(1); // no second alarm for the same stint
+    expect(ep.endedAt?.getTime()).toBe(later(1).getTime()); // Ada's episode: ended by the pass, at its time
+    expect(await adaWakes(later(1))).toBe(false); // and her escalation stopped
+    expect((await cassEpisode()).endedAt).toBeNull(); // Cass still leads Ada: her own episode is untouched
+    expect(await alarms('Ada')).toHaveLength(1); // no second alarm for the same stint
     await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: w.Ada.id } }); // Ada leads again
     await evaluateLeadCadence(db, later(2)); // a fresh stint: not late at the first pass back
     await evaluateLeadCadence(db, later(61)); // 59 minutes on
-    expect(await alarms()).toHaveLength(1);
+    expect(await alarms('Ada')).toHaveLength(1);
     await evaluateLeadCadence(db, later(63)); // 61 minutes: a new episode, a new alarm
-    expect(await alarms()).toHaveLength(2);
+    expect(await alarms('Ada')).toHaveLength(2);
     expect(await db.leadCadenceEpisode.count({ where: { workerId: w.Ada.id } })).toBe(2);
+    expect(await alarms('Cass')).toHaveLength(1); // Cass's one episode is still open: no second alarm for her either
   });
 
   it('an App with no lead raises nothing', async () => {

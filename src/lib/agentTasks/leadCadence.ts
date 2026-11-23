@@ -28,12 +28,12 @@
  *
  * EPISODES. The alarm stream is append-only and `agent_team_events_episode_uniq` does not dedupe a NULL task id, so the
  * episode is a row in `lead_cadence_episodes` whose partial unique index admits one OPEN row per lead, inserted in
- * the same SERIALIZABLE transaction as the event. The loser of a race rolls back and raises nothing. An episode ends
- * ONLY at the lead's next counted assignment: neither a shortage of free workers nor a pause ends it, so busy/free
- * toggles never raise a second alarm. The next lateness after that opens a new one. An episode also ends when its worker
- * STOPS BEING A LEAD (nobody reports to it any more): the alarm says a lead stopped assigning, which is no longer true of
- * a worker that leads nobody, and an ended episode is what stops the alarm's escalation up the reporting line. Its
- * `ended_at` is the pass's time.
+ * the same SERIALIZABLE transaction as the event. The loser of a race rolls back and raises nothing. An episode ends in
+ * exactly two ways. (1) At the lead's next counted assignment: neither a shortage of free workers nor a pause ends it, so
+ * busy/free toggles never raise a second alarm; the next lateness after that opens a new one. (2) When its worker STOPS
+ * BEING A LEAD (nobody reports to it any more): the alarm says a lead stopped assigning, which is no longer true of a
+ * worker that leads nobody, and an ended episode is what stops the alarm's escalation up the reporting line. Its
+ * `ended_at` is the pass's time; if the worker leads again, the next lateness opens a new episode from a fresh clock.
  *
  * WIRE. Emitted under `alarm.lead-cadence` only. Events raised before #4375 carry `alarm.coordinator-cadence`; they are
  * history and are not rewritten, and every reader matches both (`LEAD_CADENCE_EVENT_TYPES`).
