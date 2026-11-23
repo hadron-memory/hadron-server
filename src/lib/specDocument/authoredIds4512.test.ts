@@ -28,7 +28,7 @@ describe('#4512 authored ids equal to an assigned anchor', () => {
     ['unquoted', '<span id=fx-110-a>s</span>', '<span>s</span>'],
     ['upper-case attribute name', '<span ID="fx-110-a">s</span>', '<span>s</span>'],
     ['spaces around =', '<span id = "fx-110-a">s</span>', '<span>s</span>'],
-    ['tag spread over lines', '<span\n  class="c"\n  id="fx-110-a">s</span>', '<span\n  class="c">s</span>'],
+    ['tag spread over lines', '<span\n  class="c"\n  id="fx-110-a">s</span>', '<span\n  class="c"\n>s</span>'],
   ])('%s', (_n, body, kept) => {
     const out = renderSpecDocument(doc([part('fx:110:a', body)]));
     expect(out).toContain(kept);
@@ -182,5 +182,26 @@ describe('#4512 the scanner on its own (review findings)', () => {
   });
   it('D1: a paragraph that starts with a tag is handled like any other text', () => {
     expect(run('<b>bold</b> `<i id="fx-110-a">`')).toBe('<b>bold</b> `<i>`');
+  });
+
+  it('F9/E1: an unassigned id= that opens a quote cannot swallow a live id after it', () => {
+    expect(run('<a title="id=" id="fx-110-a">')).toBe('<a title="id=">');
+    expect(run('say id=" then <b id="fx-110-a"> end"')).toBe('say id=" then <b> end"');
+    expect(run('<a id="other" title=\'id=\' id="fx-110-a">')).toBe('<a id="other" title=\'id=\'>');
+  });
+  it('E2: the whitespace trim never eats newlines outside a tag', () => {
+    expect(run('line one\n\nid="fx-110-a"\nline two')).toBe('line one\n\n\nline two');
+    expect(run('<span\n  class="c"\n  id="fx-110-a">s</span>')).toBe('<span\n  class="c"\n>s</span>');
+  });
+  it('E3: a URL query key id= is not an attribute and is not cut', () => {
+    expect(run('see https://x.test/p?id=fx-110-a now')).toBe('see https://x.test/p?id=fx-110-a now');
+    expect(run('see https://x.test/p?a=1&id=fx-110-a now')).toBe('see https://x.test/p?a=1&id=fx-110-a now');
+    expect(run('see https://x.test/p#id=fx-110-a now')).toBe('see https://x.test/p#id=fx-110-a now');
+  });
+  it('is linear when an unassigned quoted id keeps being retried', () => {
+    const t0 = Date.now();
+    run('id="' + 'id= '.repeat(60000) + '"');
+    run('id="a" '.repeat(40000));
+    expect(Date.now() - t0).toBeLessThan(5000);
   });
 });

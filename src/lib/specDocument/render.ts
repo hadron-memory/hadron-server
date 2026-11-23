@@ -172,20 +172,28 @@ function decodeNumericRefs(v: string): string {
   });
 }
 
-/** One `id` attribute: the name (not the tail of another name), `=`, then a quoted or bare value. Linear: no nested quantifier, each alternative stops at a delimiter. */
-const ID_ATTR = /(?<![\w:.-])id[ \t\r\n\f]*=[ \t\r\n\f]*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/gi;
+/**
+ * One `id` attribute: the name (not the tail of another name, and not a URL query key such as `?id=`), `=`, then a
+ * quoted or bare value. Linear: no nested quantifier, each alternative stops at a delimiter.
+ */
+const ID_ATTR = /(?<![\w:.?&=#-])id[ \t\r\n\f]*=[ \t\r\n\f]*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/gi;
 const isWs = (c: string | undefined): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
 
-/** `text` without every `id` attribute whose value is in `assigned`; the whitespace before it goes too unless an attribute follows with none. */
+/**
+ * `text` without every `id` attribute whose value is in `assigned`. The spaces and tabs before it go too, unless another
+ * attribute follows with none; a newline never goes. After an attribute that is not assigned the scan restarts just past
+ * its `id`, so a quote that attribute opened cannot swallow a live one after it (`<a title="id=" id="X">`).
+ */
 function dropAssignedIdAttrs(text: string, assigned: ReadonlySet<string>): string {
   let out = '';
   let copied = 0;
-  for (const m of text.matchAll(ID_ATTR)) {
-    if (!assigned.has(decodeNumericRefs(m[1] ?? m[2] ?? m[3] ?? ''))) continue;
+  const re = new RegExp(ID_ATTR.source, ID_ATTR.flags);
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    if (!assigned.has(decodeNumericRefs(m[1] ?? m[2] ?? m[3] ?? ''))) { re.lastIndex = m.index + 2; continue; }
     let from = m.index;
     const to = m.index + m[0].length;
     const after = text[to];
-    if (after === undefined || isWs(after) || after === '/' || after === '>') while (from > copied && isWs(text[from - 1])) from -= 1;
+    if (after === undefined || isWs(after) || after === '/' || after === '>') while (from > copied && (text[from - 1] === ' ' || text[from - 1] === '\t')) from -= 1;
     out += text.slice(copied, from);
     copied = to;
   }
@@ -193,12 +201,13 @@ function dropAssignedIdAttrs(text: string, assigned: ReadonlySet<string>): strin
 }
 
 /**
- * #4512 (cor:spc:030:02 "Authored ids", scope call by Peter 2026-11-23 after three review rounds on a hand-written
- * HTML/Markdown scanner): every `id` attribute whose value is an anchor assigned in this document is removed, anywhere
- * in authored text except inside a fenced code block (CommonMark fence rules). Only the attribute goes; every other
- * byte stays. NOT recognised, on purpose: inline code, comments, CDATA, processing instructions, indented code and
- * HTML-block structure. An assigned id written there is removed too: the worst case is a slightly altered code sample,
- * never a second element carrying a server anchor. One linear pass; named character references in an id are not decoded.
+ * #4512 (cor:spc:030:02 "Authored ids"; Peter's scope call, chat 142927 and 142932, after three review rounds on a
+ * hand-written HTML/Markdown scanner): every `id` attribute whose value is an anchor assigned in this document is
+ * removed, anywhere in authored text, with NO exemption. Only the attribute goes; every other byte stays. Code (fenced,
+ * indented, inline), comments, CDATA, processing instructions and HTML-block structure are not recognised, on purpose:
+ * an assigned id written there is removed too, and the worst case is a slightly altered code sample, never a second
+ * element carrying a server anchor. One linear pass. Limits: named character references in an id are not decoded, and
+ * an id whose value is split by a blockquote marker is not seen.
  */
 export function neutraliseAssignedIds(text: string, assigned: ReadonlySet<string>): string {
   return assigned.size === 0 || !/id/i.test(text) ? text : dropAssignedIdAttrs(text, assigned);
