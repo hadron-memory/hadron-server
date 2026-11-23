@@ -24,7 +24,10 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 /** The names of required, default-less arguments the caller did not supply, in declaration order. */
-export function missingRequiredTaskArgs(nodeData: unknown, callerArgs: Record<string, unknown> | undefined): string[] {
+export function missingRequiredTaskArgs(nodeData: unknown, callerArgsInput: unknown): string[] {
+  // Any caller value is accepted: null, an array, a string or a number is "no argument object",
+  // so every required argument reads as missing (a refusal naming them), never a TypeError.
+  const callerArgs = isPlainObject(callerArgsInput) ? callerArgsInput : undefined;
   if (!isPlainObject(nodeData)) return [];
   const declared = nodeData.args;
   if (!isPlainObject(declared)) return [];
