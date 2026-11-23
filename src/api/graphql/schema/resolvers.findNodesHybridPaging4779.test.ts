@@ -272,6 +272,29 @@ describe('#4779 BLIND F2/F3 (Elena): hybrid hydration drops and the keyword wide
     } finally { await db.node.update({ where: { id: id.X! }, data: { deletedAt: null } }); }
   }, 60_000);
 
+  it('LOCAL F1 (Abigail, ff757c61) / BLIND N1: the re-ranking reads as deep as the first page actually reached, not only page + the drops counted', async () => {
+    // A structured filter every node meets (locPrefix 'n-') reads both legs 5x the page deep, so no vector-rank lookup runs for
+    // the nodes below (a lookup would see a deletion and rank the node out instead). Fused order: X, A, C, D, ... X (1) and
+    // C (3) are deleted after the first ranking: the limit-2 page fills from A and D and reaches position 4, while only X
+    // lies inside the page window (page + dropped = 3). The re-ranking must be certified to depth 4, so its vector leg is
+    // read 5 x 4 = 20 deep (15 with the old page + dropped).
+    keywordLeg(KW);
+    const original = provider.vectorSearch.bind(provider);
+    const limits: number[] = [];
+    vi.spyOn(provider, 'vectorSearch').mockImplementation(async (a) => {
+      limits.push(a.limit);
+      const hits = await original(a);
+      if (limits.length === 1) for (const n of [id.X!, id.C!]) await db.node.update({ where: { id: n }, data: { deletedAt: new Date() } });
+      return hits;
+    });
+    try {
+      const res = await findNodes({ query: 'q', mode: 'hybrid', limit: 2, filter: { locPrefix: 'n-' } });
+      expect(limits[0]).toBe(10);
+      expect(limits[1]).toBe(20);
+      expect(names(res.hits)).toEqual(['A', 'D']);
+    } finally { for (const n of [id.X!, id.C!]) await db.node.update({ where: { id: n }, data: { deletedAt: null } }); }
+  }, 60_000);
+
   it('F3: the keyword widening stops at the request deadline (never all the way to 2000 past it), and the page says stopped_early', async () => {
     const endless = Array.from({ length: 5000 }, (_, i) => `nohit-${i}`);
     const spy = vi.spyOn(provider, 'lexicalSearch').mockImplementation(async (a: any) => {
