@@ -112,7 +112,7 @@ import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { refuseStoppedAssignee } from '../../../lib/stopSignals/enforce.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
-import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
+import { mayStillDriveWorkerApp } from '../../../lib/ownWorkerSessions.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { touchSessionIfLive } from '../../../lib/sessionActivity.js';

@@ -21,7 +21,7 @@
 
 import { createHash, createHmac } from 'node:crypto';
 import { GraphQLError } from 'graphql';
-import { attentionTokenSecret } from '../teamAttention.js';
+import { workerProofSecret } from '../ownWorkerSessions.js';
 import { safeEqual } from '../constantTime.js';
 
 export const WAKE_PROOF_VERSION = 3;
@@ -55,7 +55,7 @@ const refuse = (code: string, message: string): never => {
 };
 
 function wakeKey(): Buffer {
-  return createHmac('sha256', attentionTokenSecret()).update('hadron-wake-proof-v1').digest();
+  return createHmac('sha256', workerProofSecret()).update('hadron-wake-proof-v1').digest();
 }
 
 export function signWakeProof(proof: WakeProof): string {
@@ -172,7 +172,7 @@ export type BatchProof = {
 };
 
 function batchProofKey(): Buffer {
-  return createHmac('sha256', attentionTokenSecret()).update('hadron-batch-proof-v1').digest();
+  return createHmac('sha256', workerProofSecret()).update('hadron-batch-proof-v1').digest();
 }
 
 /** The batch's stable identity: worker, each channel's incarnation, range and rendered seqs, and the rendered text. */
