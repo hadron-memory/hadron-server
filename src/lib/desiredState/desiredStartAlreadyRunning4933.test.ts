@@ -177,7 +177,7 @@ describe('#4933: when the host does not run the agent, the worker is started as 
 describe('#4933: agentRunsOnAnyHost, directly', () => {
   const now = new Date('2026-11-23T00:00:00Z');
   const t = (o: Record<string, unknown>) => ({ host: { id: 'h' }, status: 'idle', reason: null, reportedAt: new Date(now.getTime() - 1000).toISOString(), ...o });
-  it('says yes for a fresh busy, idle or locked report on the same host', () => {
+  it('says yes for a fresh busy, idle or locked report, from this host or any other', () => {
     for (const status of ['busy', 'idle', 'locked']) expect(agentRunsOnAnyHost(t({ status }), now)).toBe(true);
     expect(agentRunsOnAnyHost(t({ host: { id: 'anywhere-else' } }), now)).toBe(true);
   });
@@ -347,6 +347,9 @@ describe('#4941: freshness is judged on reportedAt (the server\'s clock), not th
   it('a host clock an hour fast (checkedAt in the future, reportedAt just now) still counts as running', () => {
     expect(agentRunsOnAnyHost(t(new Date(now.getTime() + 3_600_000), new Date(now.getTime() - 1000)), now)).toBe(true);
   });
+  it('a legacy row with a fresh checkedAt and no reportedAt decides nothing: the guard is off for it until its next report', () => {
+    expect(agentRunsOnAnyHost({ host: { id: 'h' }, status: 'idle', reason: null, checkedAt: now.toISOString() } as never, now)).toBe(false);
+  });
   it('a report the server stored long ago is stale even when its checkedAt looks fresh', () => {
     expect(agentRunsOnAnyHost(t(new Date(now.getTime() - 1000), new Date(now.getTime() - TERMINAL_FRESH_MS - 1)), now)).toBe(false);
   });
@@ -430,6 +433,9 @@ describe('#4941: the log of what was seen', () => {
       const t0 = new Date();
       for (const at of [t0, new Date(t0.getTime() + LONG_HOLD_LOG_MS - 60_000), new Date(t0.getTime() + LONG_HOLD_LOG_MS), new Date(t0.getTime() + LONG_HOLD_LOG_MS + 60 * 60_000)]) {
         await reportAt(new Date(at.getTime() - 1000));
+        // Each pass must answer `running` itself: were the guard off, the lapsed registration would answer `no-host` and
+        // an empty starts() would prove nothing (blind F6).
+        expect(await startDesiredWorker(db, { appId: app.id, workerId: kit.id, hostId: 'orca1' }, at)).toBe('running');
         await startDesiredWorkers(db, at);
       }
       expect(lines(info).map((l) => l.match(/\(([a-z ]+)\)$/)?.[1])).toEqual(['already running', 'held a long time']);
@@ -453,13 +459,15 @@ describe('#4941: the log of what was seen', () => {
     }
   });
 
-  it('pruneRunningLog keeps what it is told to keep', async () => {
+  it('pruneRunningLog removes exactly the workers it is not told to keep', async () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     try {
       await report({ status: 'idle' });
       await tick();
       pruneRunningLog(new Set([kit.id]));
       expect(runningLogSize()).toBe(1);
+      pruneRunningLog(new Set(['someone-else']));
+      expect(runningLogSize()).toBe(0);
     } finally {
       info.mockRestore();
     }

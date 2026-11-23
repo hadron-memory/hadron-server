@@ -49,7 +49,7 @@ import {
   fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, startSettingsFor, type StartHold,
 } from '../hostOperations/launch.js';
 import { loadHostDesiredState } from './desiredState.js';
-import { AGENT_ABSENT_REASONS, AGENT_PRESENT_STATUSES, type WorkerTerminal } from '../workerTerminal.js';
+import { AGENT_ABSENT_REASONS, AGENT_PRESENT_STATUSES } from '../workerTerminal.js';
 
 export const START_FAILING_EVENT_TYPE = 'alarm.start-failing';
 /** The reason a desired-state start records (`HostOperation.issuedReason`). */
@@ -72,11 +72,8 @@ export const TERMINAL_FRESH_MS = 5 * 60_000;
  */
 export const TERMINAL_FUTURE_TOLERANCE_MS = 2 * 60_000;
 
-/** The stored `Worker.terminal` JSON; read defensively (a row may predate a key), so every key is optional here and a value is an unvalidated string. */
-type StoredTerminal = Partial<Record<Extract<keyof WorkerTerminal, 'status' | 'reportedAt'>, string>> & {
-  reason?: string | null;
-  host?: Partial<WorkerTerminal['host']>;
-};
+/** The stored `Worker.terminal` JSON, read defensively (a row may predate a key): every key optional, every value an unvalidated string. */
+type StoredTerminal = { host?: { id?: string }; status?: string; reason?: string | null; reportedAt?: string };
 
 /** The stored `Worker.terminal` JSON as a typed value, or null when it is not an object (the DB CHECK makes it one). */
 function asTerminal(value: unknown): StoredTerminal | null {
@@ -86,7 +83,7 @@ function asTerminal(value: unknown): StoredTerminal | null {
 /**
  * Does the worker's last report say its agent is up on SOME host right now? (#4933, renamed from `hostRunsAgent` in
  * #4941, which read as the host the pass is starting on.) The reading, which cor:agt:070:08 does not state ("the
- * registered host"; it is silent on a worker registered on several hosts): ANY registering host's report counts, because
+ * registered host"; it is silent on a worker registered on several hosts): the guard never looks at which host reported (any report counts), because
  * the stored report names the one host the agent is on, and a start on another of the worker's hosts would make a second
  * agent (the loop tries the hosts in id order, so the reporting one may not be first). Agent present is
  * `AGENT_PRESENT_STATUSES` (cor:agt:070:01: busy, idle, locked; `dark` and any status this code does not know say no),
@@ -103,7 +100,8 @@ export function agentRunsOnAnyHost(terminal: StoredTerminal | null, now: Date): 
 /**
  * Workers whose last logged state is `already running`, with when it was first seen (a pass's `now`) and whether the
  * long-hold line was written. The log is per process: a restart forgets it, so `since` restarts and a long hold logs
- * `already running` again (log only). An entry goes when the worker is started, when a pass no longer lists it as startable
+ * `already running` again (log only). A `skipped` pass (lock contention, a brief absence from the startable list)
+ * also forgets the entry and restarts the clock. An entry goes when the worker is started, when a pass no longer lists it as startable
  * (`pruneRunningLog`, so a deleted or retired worker's id is not held for the life of the process), or the process ends.
  */
 const loggedRunning = new Map<string, { since: number; longHoldLogged: boolean }>();
@@ -117,7 +115,7 @@ export function resetDesiredStartStateLog(): void {
  * started over would break the cor:agt:070:08 guard). A host that reports `idle` forever is the case it is for.
  */
 export const LONG_HOLD_LOG_MS = 6 * 60 * 60_000;
-/** For tests and the pass: the workers the log remembers. */
+/** For tests: how many workers the log remembers. */
 export function runningLogSize(): number {
   return loggedRunning.size;
 }
