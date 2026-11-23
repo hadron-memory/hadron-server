@@ -10,8 +10,6 @@ import { cleanDb, createDbWorkerAttribution } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { approvedMergeProof } from '../../../test/mergeConsent.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { questionDataSchema, type AnswerEntry, type QuestionData } from '../../../lib/questions/codec.js';
-import { questionName, renderQuestion, renderQuestionAbstract } from '../../../lib/questions/render.js';
 import * as questionsModule from './resolvers.questions.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -56,23 +54,18 @@ const ids = (page: { items: Array<{ row: { id: string } }> }) => page.items.map(
 const idSet = (page: { items: Array<{ row: { id: string } }> }) => ids(page).sort();
 const rowOf = (id: string) => db.node.findUniqueOrThrow({ where: { id } });
 
-/** Append an answer-list entry consistently, standing in for the answer door (the S3 door is a later slice's). */
-async function writeAnswerForTest(id: string, entry: Partial<AnswerEntry> & Pick<AnswerEntry, 'by'>): Promise<void> {
-  const row = await rowOf(id);
-  const d = questionDataSchema.parse(row.data);
-  const full: AnswerEntry = { kind: 'answer', key: null, text: null, reason: null, at: '2026-10-06T21:00:00.000Z', via: 'portal', ...entry };
-  const answers = [...d.answers, full];
-  const next: QuestionData = { ...d, answers, status: full.kind === 'answer' ? 'answered' : 'open' };
-  await db.node.update({
-    where: { id },
-    data: {
-      name: questionName(next), abstract: renderQuestionAbstract(next), content: renderQuestion(next),
-      data: next as never, revisionContentHash: 'refresh',
-    },
-  });
+/**
+ * Answer and take back through the REAL doors (#4427). The doors stamp `at` from the clock, so each call runs with `Date`
+ * (only Date: timers stay real, the database is awaited) set to the instant the test names.
+ */
+async function atTime<T>(at: string, fn: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers({ toFake: ['Date'], now: new Date(at) });
+  try { return await fn(); } finally { vi.useRealTimers(); }
 }
-const answerAt = (id: string, by: string, at: string) => writeAnswerForTest(id, { kind: 'answer', key: 'yes', by, at });
-const retractAt = (id: string, by: string, at: string) => writeAnswerForTest(id, { kind: 'retraction', by, at });
+const answerAt = (id: string, by: string, at: string) => atTime(at, async () =>
+  M.answerQuestion(null, { ref: id, input: { optionKey: 'yes' }, expectedRevision: (await rowOf(id)).revSeq }, as(by)));
+const retractAt = (id: string, by: string, at: string) => atTime(at, async () =>
+  M.retractQuestionAnswer(null, { ref: id, expectedRevision: (await rowOf(id)).revSeq }, as(by)));
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -228,7 +221,7 @@ describe('#4428 acceptance 6: answered', () => {
     // A question answered and THEN withdrawn keeps its answer entry but is WITHDRAWN: in neither list.
     const answeredThenWithdrawn = await ask(logA.row.id, simple({ tier: 'ANSWERED' }));
     await answerAt(answeredThenWithdrawn.row.id, holger.id, '2026-10-06T21:00:00.000Z');
-    await M.withdrawQuestion(null, { ref: answeredThenWithdrawn.row.id, reason: 'moot', expectedRevision: 1 }, as(holger.id));
+    await M.withdrawQuestion(null, { ref: answeredThenWithdrawn.row.id, reason: 'moot', expectedRevision: (await rowOf(answeredThenWithdrawn.row.id)).revSeq }, as(holger.id)); // the real answer moved the revision
 
     const yes = await Q.questions(null, { appRef: app.id, answered: true }, as(reader.id));
     expect(idSet(yes)).toEqual([decided, unconfirmed].map((v) => v.row.id).sort());
