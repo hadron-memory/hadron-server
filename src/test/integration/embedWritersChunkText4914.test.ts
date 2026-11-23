@@ -25,7 +25,12 @@ const ABSTRACT = 'Abstract sentinel 4914.';
 // Several passages, with non-ASCII text, quotes, inner line breaks and edge whitespace: "verbatim" means none is altered.
 const CONTENT = `  Für 4914: “first” passage, it's here.\n\n${'Zażółć gęślą jaźń; second passage 🙂 runs on. '.repeat(4)}\n\tlast passage\\ends with spaces.  \n`;
 
-const embed = vi.fn(async (texts: string[]) => texts.map(() => [1, ...new Array<number>(DIM - 1).fill(0)]));
+// Each provider call answers with its own vector, so a re-embed that wrote shows in the stored row.
+let calls = 0;
+const embed = vi.fn(async (texts: string[]) => {
+  calls += 1;
+  return texts.map(() => [1, calls, ...new Array<number>(DIM - 2).fill(0)]);
+});
 let ctx: GqlContext;
 let orgId: string;
 
@@ -38,6 +43,7 @@ beforeEach(async () => {
   await cleanDb(db);
   sessionKeyCache.clear();
   embed.mockClear();
+  calls = 0;
   vi.stubEnv('EMBEDDING_API_URL', 'http://stub.invalid/api/embed');
   setEmbeddingClientForTests({ provider: 'test', model: 'stub-4914', dim: DIM, embed });
   const org = await db.organization.create({ data: { id: generateId(), name: 'embed4914', urn: 'embed4914' } });
@@ -57,6 +63,8 @@ afterEach(async () => {
 /** Write one node into an encrypted memory acknowledged for `embeddingSource`; return the vector rows the embed stored. */
 async function embedInto(embeddingSource: 'abstract' | 'contentChunks' | 'both') {
   const memory = await resolvers.Mutation.createMemory({}, { orgRef: orgId, name: `embed-${embeddingSource.toLowerCase()}` }, ctx);
+  // Encrypted and not yet indexed, set directly: the case in which updateMemory asks for the acknowledgement. The writes
+  // below read the cached key by memory id alone, so any valid data key serves.
   await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: false, isEncrypted: true } });
   const updated = await resolvers.Mutation.updateMemory(
     {},
@@ -65,7 +73,8 @@ async function embedInto(embeddingSource: 'abstract' | 'contentChunks' | 'both')
   );
   expect(updated.vectorIndexEncryptedAckAt, 'the risk is acknowledged').not.toBeNull();
   sessionKeyCache.set('embed4914', memory.id, parseDataKey(generateDataKey().raw.toString('base64')));
-  // The dispatcher admits a fresh prompt only when no sweep is due; a refused prompt is dropped, not queued.
+  // The dispatcher (one per process) admits a fresh prompt only when no sweep is due; a refused prompt is dropped, not
+  // queued. No timer makes one due here: the worker loop starts with the server (src/server.ts), which this file never builds, so only writes and their jobs nudge it.
   await idle();
 
   const { id: nodeId } = await resolvers.Mutation.createNode(
@@ -89,6 +98,12 @@ const storedRows = (nodeId: string) => db.nodeEmbedding.findMany({
   select: { kind: true, chunkIndex: true, charStart: true, charEnd: true, chunkText: true },
 });
 
+async function abstractVector(nodeId: string): Promise<{ id: string; second: number }> {
+  const [row] = await db.$queryRaw<{ id: string; v: string }[]>`
+    SELECT id, embedding::text AS v FROM node_embeddings WHERE node_id = ${nodeId} AND kind = 'abstract'`;
+  return { id: row!.id, second: (JSON.parse(row!.v) as number[])[1]! };
+}
+
 describe('#4914 what the embed writers store in chunk_text for an encrypted, acknowledged memory', () => {
   it.each(['contentChunks', 'both'] as const)('%s: every chunk row holds its passage verbatim, and an abstract row holds none', async (source) => {
     const { rows } = await embedInto(source);
@@ -98,12 +113,15 @@ describe('#4914 what the embed writers store in chunk_text for an encrypted, ack
     const chunks = rows.filter((r) => r.kind === 'chunk');
     expect(chunks.map((r) => r.chunkText)).toEqual(expected.map((c) => c.text));
     // Against the written content itself, independent of the chunker's own `text`.
-    for (const r of chunks) expect(r.chunkText).toBe(CONTENT.slice(r.charStart!, r.charEnd!));
+    for (const r of chunks) {
+      expect([r.charStart, r.charEnd]).toEqual([expect.any(Number), expect.any(Number)]);
+      expect(r.chunkText).toBe(CONTENT.slice(r.charStart!, r.charEnd!));
+    }
     // and to the provider, the same passages
     expect(embed.mock.calls.flatMap(([texts]) => texts)).toEqual([...(source === 'both' ? [ABSTRACT] : []), ...expected.map((c) => c.text)]);
 
-    const rest = rows.filter((r) => r.kind !== 'chunk').map(({ kind, chunkText }) => ({ kind, chunkText }));
-    expect(rest).toEqual(source === 'both' ? [{ kind: 'abstract', chunkText: null }] : []);
+    const nonChunkRows = rows.filter((r) => r.kind !== 'chunk').map(({ kind, chunkText }) => ({ kind, chunkText }));
+    expect(nonChunkRows).toEqual(source === 'both' ? [{ kind: 'abstract', chunkText: null }] : []);
   });
 
   it('abstract: the one row is the abstract vector, and no text is stored', async () => {
@@ -111,10 +129,15 @@ describe('#4914 what the embed writers store in chunk_text for an encrypted, ack
     const onlyAbstract = [{ kind: 'abstract', chunkIndex: null, charStart: null, charEnd: null, chunkText: null }];
     expect(rows).toEqual(onlyAbstract);
 
+    const before = await abstractVector(nodeId);
     // A re-embed takes the writer's ON CONFLICT branch, which must store none either.
     await resolvers.Mutation.updateNode({}, { input: { id: nodeId, abstract: `${ABSTRACT} Edited.` } } as never, ctx);
     await idle();
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).embeddingWorkToken, 'the re-embed completed').toBeNull();
     expect(await storedRows(nodeId)).toEqual(onlyAbstract);
+    const after = await abstractVector(nodeId);
+    expect(after.id, 'the same row, updated in place').toBe(before.id);
+    expect([before.second, after.second], 'holding the second call\'s vector').toEqual([1, 2]);
     expect(embed.mock.calls.flatMap(([texts]) => texts), 'only the abstracts were embedded').toEqual([ABSTRACT, `${ABSTRACT} Edited.`]);
   });
 });
