@@ -3,9 +3,11 @@
  * roots never on argv (mode-0600 files or piped stdin only), the run is atomic and idempotent, verification
  * unwraps every row under the NEW root only (a re-wrap that wrote nothing exits 1), and no log line echoes a root.
  */
+import { randomBytes } from 'node:crypto';
 import { chmod, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Client, escapeIdentifier } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../src/integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../../src/test/helpers.js';
@@ -22,7 +24,7 @@ vi.mock('../../src/lib/secrets/rotation.js', async (orig) => {
     ...real,
     rewrapSecretRootKeys: (...args: Parameters<typeof real.rewrapSecretRootKeys>) =>
       fake.silentRewrap
-        // It still takes the BEFORE pass under the lock, as the real one does: only the writes are missing.
+        // It still takes the BEFORE pass in a transaction (without the lock: nothing contends here); only the writes are missing.
         ? args[0].$transaction(async (tx) => { await args[3]?.(tx); return { rows: 1, rewrapped: 1 }; })
         : real.rewrapSecretRootKeys(args[0], args[1], args[2], fake.skipBefore ? undefined : args[3]),
   };
@@ -255,6 +257,38 @@ describe('secrets-root re-wrap tool: the run', () => {
       expect(line).not.toContain(ROOT_A);
       expect(line).not.toContain(ROOT_B);
       expect(line).not.toContain(w);
+    }
+  });
+});
+
+describe('secrets-root re-wrap tool: the credential (#4573)', () => {
+  it('the serve role is refused by name, exits 1, and changes nothing: keys, root check, and no URL or password in the log', async () => {
+    await mint();
+    const before = await wrapped();
+    const role = `rewrap_serve_${randomBytes(5).toString('hex')}`;
+    const password = randomBytes(12).toString('hex');
+    const admin = new Client({ connectionString: process.env.DATABASE_URL });
+    await admin.connect();
+    try {
+      await admin.query(`CREATE ROLE ${escapeIdentifier(role)} LOGIN NOSUPERUSER PASSWORD '${password}'`);
+      await admin.query(`GRANT USAGE ON SCHEMA public TO ${escapeIdentifier(role)}`);
+      // What runtime-role.sql leaves the serve role on the two tables the re-wrap touches.
+      await admin.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON public.secret_app_keys TO ${escapeIdentifier(role)}`);
+      await admin.query(`GRANT SELECT, INSERT ON public.secret_root_check TO ${escapeIdentifier(role)}`);
+      const url = new URL(process.env.DATABASE_URL!);
+      url.username = role;
+      url.password = password;
+      const [from, to] = await rootPair();
+      expect(await main(['--from-root-file', from, '--to-root-file', to], io({ env: { DATABASE_URL: url.toString() } }))).toBe(1);
+      expect(lines).toEqual([expect.stringContaining('refused_not_owner')]);
+      expect(lines.join('\n')).not.toContain(password);
+      expect(lines.join('\n')).not.toContain('postgresql:');
+      expect(await wrapped()).toBe(before);
+      expect((await db.secretRootCheck.findUniqueOrThrow({ where: { id: 1 } })).checkValue).toBe(rootCheckValue(Buffer.from(ROOT_A, 'hex')));
+    } finally {
+      await admin.query(`DROP OWNED BY ${escapeIdentifier(role)}`).catch(() => undefined);
+      await admin.query(`DROP ROLE IF EXISTS ${escapeIdentifier(role)}`);
+      await admin.end();
     }
   });
 });

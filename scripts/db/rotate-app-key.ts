@@ -42,12 +42,12 @@ export async function main(argv: readonly string[], io: RotateToolIo): Promise<n
   const db = new PrismaClient({ datasourceUrl: io.env.DATABASE_URL });
   try {
     // A large App's re-encrypt can outlast Prisma's 5 s default; the run is an attended ops step.
-    const { handle, moved, older } = await db.$transaction(async (tx) => {
+    const { handle, reencrypted, underOlderKeys } = await db.$transaction(async (tx) => {
       const h = await rotateAppKey(tx, appId);
-      const n = reencrypt ? await reencryptAppSecretVersions(tx, appId) : null;
-      return { handle: h, moved: n, older: await tx.secretVersion.count({ where: { appId, keyVersion: { not: h.keyVersion } } }) };
+      const count = reencrypt ? await reencryptAppSecretVersions(tx, appId) : null;
+      return { handle: h, reencrypted: count, underOlderKeys: await tx.secretVersion.count({ where: { appId, keyVersion: { not: h.keyVersion } } }) };
     }, { timeout: 10 * 60 * 1000, maxWait: 60 * 1000 });
-    io.log(`${TAG} ok app=${appId} key_version=${handle.keyVersion}${moved === null ? '' : ` reencrypted=${moved}`} under_older_keys=${older}`);
+    io.log(`${TAG} ok app=${appId} key_version=${handle.keyVersion}${reencrypted === null ? '' : ` reencrypted=${reencrypted}`} under_older_keys=${underOlderKeys}`);
     handle.encryptionKey.fill(0);
     handle.fingerprintKey.fill(0);
     return 0;

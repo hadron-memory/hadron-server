@@ -53,7 +53,7 @@ export async function rotateAppKey(db: Prisma.TransactionClient, appId: string):
  * the version rows it rewrites (so a concurrent purge either deletes a row first or waits). Refuses
  * `SECRET_KEY_UNAVAILABLE`, moving nothing, when the root is missing or is not the recorded active root, or any
  * version's key does not unwrap. For as long as that transaction runs, the App's stores and key rotations and any root
- * re-wrap wait for it (reads do not); runbook B says when to run it (#4573). An App with no active key has no versions to move. No value is ever logged; each
+ * re-wrap wait for it (reads do not); section B of the runbook named above says when to run it (#4573). An App with no active key has no versions to move. No value is ever logged; each
  * plaintext buffer is zeroed after use.
  */
 export async function reencryptAppSecretVersions(db: Prisma.TransactionClient, appId: string): Promise<number> {

@@ -7,6 +7,9 @@
  *       --from-root-file /run/secrets/secret-root-from --to-root-file /run/secrets/secret-root-to
  *   # or, with no flags, two root lines on piped stdin (from first, then to)
  *
+ * The credential must be the OWNER's: the serve role may not move the recorded root check (#4573), so a run under it is
+ * refused with nothing changed.
+ *
  * The roots NEVER appear on the command line: argv is world-readable through ps and /proc/<pid>/cmdline and lands
  * in shell history. They come from mode-0600 files (a looser mode is refused; mode and bytes are read from the same
  * descriptor) or from piped stdin (a terminal is refused, since it would echo them). They are validated as 64 hex
@@ -25,7 +28,7 @@
 import { createHash } from 'crypto';
 import { open, readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { PrismaClient, type Prisma } from '../../src/generated/prisma/index.js';
+import { Prisma, PrismaClient } from '../../src/generated/prisma/index.js';
 import { appKeyAad, rootCheckValue, SecretKeyUnavailableError } from '../../src/lib/secrets/appKeys.js';
 import { rewrapSecretRootKeys } from '../../src/lib/secrets/rotation.js';
 import { decryptBytesAad } from '../../src/lib/tokenCrypto.js';
@@ -47,6 +50,10 @@ const usage = (io: Pick<SecretRewrapToolIo, 'log'>, line: string): number => {
   io.log(`${TAG}.usage: ${line}`);
   return 2;
 };
+
+/** Postgres 42501, as Prisma reports it from a raw statement (P2010 with the SQLSTATE in `meta.code`). */
+const isPermissionDenied = (e: unknown): boolean =>
+  e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2010' && e.meta?.code === '42501';
 
 /** Thrown inside the re-wrap's transaction to roll it back when the BEFORE pass failed (already logged). */
 class BeforePassFailed extends Error {}
@@ -159,13 +166,17 @@ export async function main(argv: readonly string[], io: SecretRewrapToolIo): Pro
       });
     } catch (e) {
       if (e instanceof BeforePassFailed) return 1;
+      if (isPermissionDenied(e)) {
+        io.log(`${TAG}.refused_not_owner: permission denied; run with the OWNER credential as DATABASE_URL; nothing was changed`);
+        return 1;
+      }
       io.log(e instanceof SecretKeyUnavailableError ? `${TAG}.refused: an App key, or the recorded root check, names neither root; nothing was changed` : `${TAG}.rewrap_failed`);
       return 1;
     }
     const after = await unwrapDigests(db, [toRoot], 'after', io.log);
     const { before } = taken;
     if (after === null || before === null || before.size !== after.size || [...before].some(([k, digest]) => after.get(k) !== digest)) {
-      io.log(`${TAG}.verify_failed: rows or key bytes changed across the re-wrap (before=${before?.size ?? 'not taken'} after=${after?.size ?? 'unreadable'})`);
+      io.log(`${TAG}.verify_failed: rows or key bytes changed across the re-wrap, or a key was minted after it; stop writers and re-run (before=${before?.size ?? 'not taken'} after=${after?.size ?? 'unreadable'})`);
       return 1;
     }
     const recorded = await db.secretRootCheck.findUnique({ where: { id: 1 }, select: { checkValue: true } });
