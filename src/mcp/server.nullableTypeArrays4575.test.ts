@@ -28,14 +28,14 @@ const NULLABLE: Record<string, { fields: string[]; required: Record<string, unkn
   },
 };
 
-async function withClient<T>(fn: (client: Client) => Promise<T>): Promise<T> {
+async function withClient<T>(fn: (client: Client, server: ReturnType<typeof createMcpServerInstance>) => Promise<T>): Promise<T> {
   const server = createMcpServerInstance(AUTH as never, () => undefined, { kind: 'multi-app' });
   const client = new Client({ name: 'nullable-4575', version: '1' });
   const [local, remote] = InMemoryTransport.createLinkedPair();
-  await server.connect(remote);
-  await client.connect(local);
   try {
-    return await fn(client);
+    await server.connect(remote);
+    await client.connect(local);
+    return await fn(client, server);
   } finally {
     await client.close();
     await server.close();
@@ -60,7 +60,7 @@ describe('#4575 nullable inputs on the wire', () => {
     });
   });
 
-  it('keeps a union that already had another member as anyOf (nothing else changed spelling)', async () => {
+  it('keeps update_edge.condition and .data (unions with another member) as anyOf', async () => {
     await withClient(async (client) => {
       const { tools } = await client.listTools();
       const edge = tools.find((t) => t.name === 'hadron_update_edge')?.inputSchema as { properties: Record<string, { anyOf?: unknown[] }> };
@@ -85,6 +85,32 @@ describe('#4575 the server parses a nullable input as before', () => {
         }
         const omitted = await client.callTool({ name: tool, arguments: { ...required } });
         expect(refusedAsInput(omitted), `${tool} omitted: ${textOf(omitted)}`).toBe(false);
+      });
+    });
+  }
+});
+
+describe('#4575 the PARSED arguments keep omission and null apart', () => {
+  // `validateToolInput` is the SDK's own step: the value it returns is exactly what the tool handler receives. Omission must stay
+  // absent (the handler keeps the stored value) and null must stay null (the handler clears it), or a clear would turn into a no-op.
+  type Registered = Record<string, unknown>;
+  const parsed = (server: unknown, tool: string, args: Record<string, unknown>) =>
+    (server as { validateToolInput: (t: unknown, a: unknown, n: string) => Promise<Record<string, unknown>> }).validateToolInput(
+      (server as { _registeredTools: Registered })._registeredTools[tool], args, tool);
+
+  for (const [tool, { fields, required }] of Object.entries(NULLABLE)) {
+    it(`${tool}: null arrives as null, a string as itself, an omitted field stays absent`, async () => {
+      await withClient(async (_client, server) => {
+        const omitted = await parsed(server, tool, { ...required });
+        for (const f of fields) {
+          expect(Object.prototype.hasOwnProperty.call(omitted, f), `${tool}.${f} omitted`).toBe(false);
+          const withNull = await parsed(server, tool, { ...required, [f]: null });
+          expect(withNull[f], `${tool}.${f} null`).toBeNull();
+          // Only the field that was given appears: no sibling is filled in by a default.
+          expect(Object.keys(withNull).sort(), `${tool}.${f} keys`).toEqual([...Object.keys(required), f].sort());
+          const withText = await parsed(server, tool, { ...required, [f]: 'text' });
+          expect(withText[f], `${tool}.${f} string`).toBe('text');
+        }
       });
     });
   }
