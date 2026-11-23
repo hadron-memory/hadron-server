@@ -1,4 +1,5 @@
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { assertNoGenericMessageSeqWrite } from '../../../lib/legacyMessageSeq.js';
 import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
@@ -2756,8 +2757,18 @@ async function createNodeInInstallMemory(input: CreateNodeArgs, ctx: Context) {
 
 /** The caller's view of an App's install memory, creating nothing: a miss and a refusal read the same. */
 export async function findCallerInstallMemory(ctx: Context, install: InstallTarget): Promise<{ id: string }> {
-  const { appId, agentId } = await resolveInstallTarget(ctx.db, install);
-  const row = await findInstallMemory(ctx.db, appId, agentId);
+  let ids: { appId: string; agentId: string };
+  try {
+    ids = await resolveInstallTarget(ctx.db, install);
+  } catch (e) {
+    // #4893/#2975: a name-resolution failure on either arm — typed miss, malformed or
+    // ambiguous ref — is the same "not customised yet"; a database fault propagates.
+    if (refNamesNothing(e, { ambiguousNamesNothing: true })) {
+      throw new GraphQLError('This App has not customised that Agent yet.', { extensions: { code: 'INSTALL_MEMORY_NOT_FOUND' } });
+    }
+    throw e;
+  }
+  const row = await findInstallMemory(ctx.db, ids.appId, ids.agentId);
   if (!row || !(await canReadMemoryRecord(ctx, row))) {
     throw new GraphQLError('This App has not customised that Agent yet.', { extensions: { code: 'INSTALL_MEMORY_NOT_FOUND' } });
   }

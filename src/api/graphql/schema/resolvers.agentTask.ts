@@ -95,6 +95,7 @@ import { tickBatch } from './tickBatch.js';
 import { type Context, isAppParticipant, clampListTake, LIST_PAGE_MAX, withoutRequestCaches, pageArgs, pageEnvelope, loadAppUrn } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { getPortalBaseUrl } from '../../../lib/portalUrl.js';
 import { parseTaskHandle, composeTaskHandle, handleDepth, MAX_HANDLE_DEPTH, MAX_HANDLE_LENGTH, agentTaskUrn } from '../../../lib/agentTasks/handle.js';
@@ -352,7 +353,7 @@ export async function resolveParticipatedApp(ctx: Context, appRef: string): Prom
   try {
     ({ id: appId } = await resolveAppRef(ctx.db, appRef));
   } catch (e) {
-    if (e instanceof AppNotFoundError) throw appNotFound(appRef);
+    if (isAppRefResolutionFailure(e)) throw appNotFound(appRef);
     throw e;
   }
   const app = await loadApp(ctx, appId);
@@ -511,7 +512,7 @@ export async function withHostKeyTickerApp<T>(
   try {
     ({ id: appId } = await resolveAppRef(ctx.db, appRef));
   } catch (e) {
-    if (e instanceof AppNotFoundError) throw appNotFound(appRef);
+    if (isAppRefResolutionFailure(e)) throw appNotFound(appRef);
     throw e;
   }
   if (!key || appId !== key.appId) throw appNotFound(appRef);
@@ -536,7 +537,7 @@ export async function withReadableApp<T>(
 ): Promise<T> {
   if (isRunPrincipal(ctx) && !ctx.userId && allowRun) {
     let id: string;
-    try { ({ id } = await resolveAppRef(ctx.db, appRef)); } catch (e) { if (e instanceof AppNotFoundError) throw appNotFound(appRef); throw e; }
+    try { ({ id } = await resolveAppRef(ctx.db, appRef)); } catch (e) { if (isAppRefResolutionFailure(e)) throw appNotFound(appRef); throw e; }
     if (id !== ctx.appId) throw appNotFound(appRef);
     return inRunTeamReadTx(ctx, id, () => { throw appNotFound(appRef); }, body);
   }
@@ -553,7 +554,7 @@ export async function withReadableApp<T>(
   try {
     ({ id: appId } = await resolveAppRef(ctx.db, appRef));
   } catch (e) {
-    if (e instanceof AppNotFoundError) throw appNotFound(appRef);
+    if (isAppRefResolutionFailure(e)) throw appNotFound(appRef);
     throw e;
   }
   if (appId !== key.appId) throw appNotFound(appRef);
@@ -646,7 +647,7 @@ export async function resolveTaskRef(ctx: Context, ref: unknown, inApp?: string)
     try {
       appId = (await resolveAppRef(ctx.db, handle.appUrn)).id;
     } catch (e) {
-      if (e instanceof AppNotFoundError) return null;
+      if (isAppRefResolutionFailure(e)) return null;
       throw e;
     }
     if (inApp && appId !== inApp) return null;
@@ -1541,7 +1542,7 @@ export async function createRootTaskForRun(
     try {
       namedAppId = (await resolveAppRef(principal.db, input.appRef)).id;
     } catch (e) {
-      if (!(e instanceof AppNotFoundError)) throw e;
+      if (!isAppRefResolutionFailure(e)) throw e;
     }
     // Another App, or none: the same answer as a missing one.
     if (namedAppId !== run.appId) throw appNotFound(input.appRef);
@@ -1696,7 +1697,7 @@ async function prepareTaskCreate(ctx: Context, input: CreateInput, inApp?: { app
       try {
         namedAppId = (await resolveAppRef(ctx.db, input.appRef)).id;
       } catch (e) {
-        if (!(e instanceof AppNotFoundError)) throw e;
+        if (!isAppRefResolutionFailure(e)) throw e;
       }
       if (namedAppId !== app.id) throw notFound(parentRef);
     }
@@ -1708,7 +1709,7 @@ async function prepareTaskCreate(ctx: Context, input: CreateInput, inApp?: { app
       try {
         namedAppId = (await resolveAppRef(ctx.db, input.appRef)).id;
       } catch (e) {
-        if (!(e instanceof AppNotFoundError)) throw e;
+        if (!isAppRefResolutionFailure(e)) throw e;
       }
       if (namedAppId !== inApp.app.id) throw appNotFound(input.appRef);
     }

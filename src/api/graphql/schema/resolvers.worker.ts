@@ -1,6 +1,6 @@
 import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { personalOrgAgentServeAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
-import { requireWorkerReadAccess, locateTeamAgent, forbidden, appNotFound, resolveAppRefConcealed, isAppGateRefusal, type AppRow } from '../../../lib/auth/workerRead.js';
+import { requireWorkerReadAccess, locateTeamAgent, forbidden, appNotFound, resolveAppRefConcealed, isAppGateRefusal, isAppRefResolutionFailure, type AppRow } from '../../../lib/auth/workerRead.js';
 export { requireWorkerReadAccess, locateTeamAgent, ROLES_BRANCH_PREFIX } from '../../../lib/auth/workerRead.js';
 import { listAppInstallations, resolveAppInstallation, resolveUnfilteredAppInstallation, lockAppInstallation } from '../../../lib/appInstallations.js';
 import { lockStaffingAct } from '../../../lib/auth/staffingAct.js';
@@ -1990,7 +1990,10 @@ export const workerQueries = {
       let appId: string;
       try {
         ({ id: appId } = await resolveAppRef(ctx.db, appRef));
-      } catch {
+      } catch (e) {
+        // #4893/#2975: only a name-resolution outcome collapses into WORKER_NOT_FOUND; a
+        // database fault propagates (it is not "worker not found").
+        if (!isAppRefResolutionFailure(e)) throw e;
         throw new GraphQLError('Worker not found.', {
           extensions: { code: 'WORKER_NOT_FOUND', workerRef: trimmed },
         });
