@@ -5102,7 +5102,13 @@ export const typeDefs = `#graphql
     caller-org scope as apps — never exposes a foreign org's App.
     """
     appAgents: [AppAgent!]!
-    "Adoption count. #551: the owning tenant's view (0 otherwise): the owning org's members, or for a user-owned agent its owner (#1693)."
+    """
+    Adoption count: the owning tenant's total (#551). It counts every live
+    install of this Agent, including Apps the viewer may not be able to read,
+    so it can exceed the length of apps. It is 0 for any viewer outside the
+    owning tenant: the owning org's members, or for a user-owned agent its
+    owner (#1693). It is not the number of Apps the viewer can read.
+    """
     appCount: Int!
     """
     Org grants for this Agent (which orgs were granted it). #551: the agent's
