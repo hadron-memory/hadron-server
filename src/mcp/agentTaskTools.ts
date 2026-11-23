@@ -72,6 +72,10 @@ type ExternalTasksReportView = { appId: string; exist: boolean | null; reportedA
 export function mcpExternalTasksReportArgs(args: { session?: unknown; appRef: string; exist: boolean }): { appRef: string; exist: boolean } {
   return { appRef: args.appRef, exist: args.exist };
 }
+/** #4960: the report is a no-op when the stored answer already equals the requested one; the tool says so. Exported to pin it (the tool is switched off). */
+export function mcpExternalTasksReportLead(stored: boolean | null, requested: boolean): string {
+  return stored === requested ? 'Already reported.' : 'Reported.';
+}
 const renderExternalTasksReport = (r: ExternalTasksReportView): string =>
   r.exist === null
     ? 'This App has never reported external tasks, so its lead cadence alarm does not exist.'
@@ -692,8 +696,11 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       'true. There is no staleness rule. A report of false only stops new alarms; it does not end an open one.',
     SHAPE_HADRON_EXTERNAL_TASKS_REPORT_SET,
     async (args) =>
-      writeOther('hadron_external_tasks_report_set', args.session, async (ctx) =>
-        `Reported.\n\n${renderExternalTasksReport(await MA.reportExternalTasks({}, mcpExternalTasksReportArgs(args), ctx))}`),
+      writeOther('hadron_external_tasks_report_set', args.session, async (ctx) => {
+        const stored = (await QA.externalTasksReport({}, { appRef: args.appRef }, ctx)).exist;
+        const after = await MA.reportExternalTasks({}, mcpExternalTasksReportArgs(args), ctx);
+        return `${mcpExternalTasksReportLead(stored, args.exist)}\n\n${renderExternalTasksReport(after)}`;
+      }),
   );
 
   // #4921 slice A: the App's role lists. Disabled like every team tool (#3082 R1); each delegates to the GraphQL resolver.
