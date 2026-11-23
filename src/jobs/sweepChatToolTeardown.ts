@@ -33,10 +33,13 @@ export function startChatToolTeardownSweepLoop(
       running = false;
     }
   };
-  return setTimeout(() => {
+  // unref'd like the interval below: the first pass alone must never hold a draining process open (#4945).
+  const initial = setTimeout(() => {
     void run();
     setInterval(run, intervalMs).unref();
   }, initialDelayMs);
+  initial.unref();
+  return initial;
 }
 
 if (isProcessEntry(import.meta.url)) {

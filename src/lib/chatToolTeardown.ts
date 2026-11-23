@@ -37,7 +37,8 @@ export type TeardownAttempt = 'confirmed' | 'failed' | 'capped' | 'skipped';
 /** Ten attempts, then CAPPED with one alarm (cor:int:030:03 clause 4). */
 export const CHAT_TOOL_TEARDOWN_MAX_ATTEMPTS = 10;
 export const CHAT_TOOL_TEARDOWN_CAPPED_TAG = 'chat_tool_teardown.capped';
-const SWEEP_BATCH = 20;
+/** Intents one sweep pass attempts at most; the rest wait for the next pass (oldest, never-attempted first). */
+export const CHAT_TOOL_TEARDOWN_SWEEP_BATCH = 20;
 const RECONCILE_BATCH = 100;
 
 type IntentRow = { id: string; kind: string; provider: string; tool_connection_id: string };
@@ -45,12 +46,24 @@ const asTeardown = (r: IntentRow): ChatToolTeardown => ({ kind: r.kind as ChatTo
 const NOW_UTC = Prisma.sql`(clock_timestamp() AT TIME ZONE 'UTC')`;
 
 /**
+ * The wait after the attempt just made (cor:int:030:03 clause 4): 5 minutes doubling, at most 72 x 5 = 360 minutes (6 hours). ONE
+ * fragment, shared by the claim, the sweep's scan and the crash cap, so the three can never disagree about when an intent is due.
+ */
+const WAIT_AFTER_LAST_ATTEMPT = Prisma.sql`interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72)`;
+/** An intent is DUE when it was never attempted, or its wait has passed. */
+const dueAt = (nowUtc: string) => Prisma.sql`(last_attempt_at IS NULL OR last_attempt_at + ${WAIT_AFTER_LAST_ATTEMPT} <= ${nowUtc}::timestamp)`;
+
+/**
  * `WITH gone AS (<the soft-delete, RETURNING id, provider, tool_connection_id>) INSERT <one intent per row>`: the soft-delete and its
  * intents are ONE statement, so they commit together or not at all. A repeat meets the (kind, tool_connection_id) unique key and
  * records nothing. The key is safe because a tool connection id is never reused: every registration mints a fresh one, and both
  * connection tables hold a UNIQUE tool_connection_id over live AND soft-deleted rows, so core cannot even insert a second row with an
  * id an intent already names (pinned in chatToolTeardown4847.test.ts); the intent is also never consulted for a live row, by that same key.
- * A hard-deleted row (a URN reclaim) is covered only by the tool's own contract: a registration id is never minted twice. One path
+ * A hard-deleted row (a URN reclaim) is covered only by the tool's own contract: a registration id is never minted twice
+ * (cor:int:030:03 clause 3, still Proposed: the contract is the tool's, and this code relies on it). The same contract has a
+ * tool-side corollary: a future purge of soft-deleted connection rows in hadrontool-telegram or hadrontool-slack must keep a
+ * tombstone for the id, or a repeat DELETE would answer not-found, which core never counts as success, and retry to the cap
+ * (the comment in each tool's src/routes/connections.ts, hadrontool-telegram#9 and hadrontool-slack#7). One path
  * serves the doors, the org and App paths and the reconciliation without ever doubling an intent.
  */
 function recordIntents(kind: ChatToolKind, softDelete: Prisma.Sql): Prisma.Sql {
@@ -121,11 +134,11 @@ function reportCapped(c: { intentId: string; kind: string; provider: string; too
  */
 export async function attemptChatToolTeardown(db: PrismaClient, intentId: string, now: Date = new Date()): Promise<TeardownAttempt> {
   const nowUtc = toNaiveUtc(now);
-  const claimed = await db.$queryRaw<Array<{ kind: string; provider: string; tool_connection_id: string; attempts: number }>>`
+  const claimed = await db.$queryRaw<Array<{ kind: string; provider: string; tool_connection_id: string; attempts: number }>>(Prisma.sql`
     UPDATE chat_tool_teardown_intents SET attempts = attempts + 1, last_attempt_at = ${nowUtc}::timestamp
     WHERE id = ${intentId} AND state = 'PENDING' AND attempts < ${CHAT_TOOL_TEARDOWN_MAX_ATTEMPTS}
-      AND (last_attempt_at IS NULL OR last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72) <= ${nowUtc}::timestamp)
-    RETURNING kind, provider, tool_connection_id, attempts`;
+      AND ${dueAt(nowUtc)}
+    RETURNING kind, provider, tool_connection_id, attempts`);
   const intent = claimed[0];
   if (!intent) return 'skipped';
   const call = intent.kind === 'slack' ? deleteSlackToolConnection : deleteTelegramToolConnection;
@@ -197,11 +210,11 @@ export async function reconcileOrphanedChatToolConnections(db: PrismaClient, lim
  */
 async function capExhausted(db: PrismaClient, now: Date): Promise<number> {
   const nowUtc = toNaiveUtc(now);
-  const rows = await db.$queryRaw<Array<{ id: string; kind: string; provider: string; tool_connection_id: string; attempts: number }>>`
+  const rows = await db.$queryRaw<Array<{ id: string; kind: string; provider: string; tool_connection_id: string; attempts: number }>>(Prisma.sql`
     UPDATE chat_tool_teardown_intents SET state = 'CAPPED', capped_at = ${nowUtc}::timestamp
     WHERE state = 'PENDING' AND attempts >= ${CHAT_TOOL_TEARDOWN_MAX_ATTEMPTS}
-      AND last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72) <= ${nowUtc}::timestamp
-    RETURNING id, kind, provider, tool_connection_id, attempts`;
+      AND last_attempt_at + ${WAIT_AFTER_LAST_ATTEMPT} <= ${nowUtc}::timestamp
+    RETURNING id, kind, provider, tool_connection_id, attempts`);
   for (const r of rows) reportCapped({ intentId: r.id, kind: r.kind, provider: r.provider, toolConnectionId: r.tool_connection_id, attempts: r.attempts });
   return rows.length;
 }
@@ -217,11 +230,11 @@ export async function chatToolTeardownSweepTick(
   const reconciled = await reconcileOrphanedChatToolConnections(db);
   let capped = await capExhausted(db, now);
   const nowUtc = toNaiveUtc(now);
-  const due = await db.$queryRaw<Array<{ id: string }>>`
+  const due = await db.$queryRaw<Array<{ id: string }>>(Prisma.sql`
     SELECT id FROM chat_tool_teardown_intents
     WHERE state = 'PENDING' AND attempts < ${CHAT_TOOL_TEARDOWN_MAX_ATTEMPTS}
-      AND (last_attempt_at IS NULL OR last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72) <= ${nowUtc}::timestamp)
-    ORDER BY last_attempt_at NULLS FIRST, id LIMIT ${SWEEP_BATCH}`;
+      AND ${dueAt(nowUtc)}
+    ORDER BY last_attempt_at NULLS FIRST, id LIMIT ${CHAT_TOOL_TEARDOWN_SWEEP_BATCH}`);
   let attempted = 0;
   let confirmed = 0;
   for (const { id } of due) {
@@ -244,12 +257,13 @@ export async function requeueCappedChatToolTeardowns(db: PrismaClient, opts: { i
   return rows.length;
 }
 
-/** The capped intents, for an operator: ids and handles only (never a token), oldest cap first. */
+/** The capped intents (or just the one named by `id`, when it is capped), for an operator: ids and handles only (never a token), oldest cap first. */
 export async function listCappedChatToolTeardowns(
   db: PrismaClient,
+  opts: { id?: string } = {},
 ): Promise<Array<{ id: string; kind: string; provider: string; toolConnectionId: string; attempts: number; cappedAt: Date | null }>> {
   return db.chatToolTeardownIntent.findMany({
-    where: { state: 'CAPPED' },
+    where: { state: 'CAPPED', ...(opts.id === undefined ? {} : { id: opts.id }) },
     orderBy: [{ cappedAt: 'asc' }, { id: 'asc' }],
     select: { id: true, kind: true, provider: true, toolConnectionId: true, attempts: true, cappedAt: true },
   });

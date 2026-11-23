@@ -1076,3 +1076,9 @@ ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
 \ir secret-read-client-own-worker.sql
 -- #4001: finite auto-delete terms, after the grants and read-client invariants.
 \ir secret-auto-delete-invariants.sql
+
+-- #4945 (cor:int:030:03 clause 4): a chat tool teardown intent's state is one of the three the code writes
+-- (Prisma cannot model the CHECK; the migration carries the same statements, behind an HDPRF preflight).
+ALTER TABLE chat_tool_teardown_intents DROP CONSTRAINT IF EXISTS chk_chat_tool_teardown_state;
+ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_state
+  CHECK (state IN ('PENDING', 'CONFIRMED', 'CAPPED'));
