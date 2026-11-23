@@ -1,8 +1,9 @@
 /** #4001 S6: real passkey activation, reads and shared sweep against a private test DB. */
 import { createHash } from 'node:crypto';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { withGrantsTriggerOff } from '../../../test/secretAutoDeleteTrigger.js';
 import { generateId } from '../../../lib/id.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { createPendingGrant } from '../../../lib/grants/create.js';
@@ -225,12 +226,10 @@ it('rejects a stranger marking a real or missing secret with the same ruled refu
 
 it('rechecks a historical unbounded pending mark at signing without consuming or activating it', async () => {
   const grantId = generateId();
-  // Model the old generic door before the new NOT VALID CHECK existed; every signature/activation guard stays enabled.
-  await db.$transaction(async tx => {
-    await tx.$executeRawUnsafe('DROP TRIGGER secret_auto_delete_limit ON grants');
+  // Model the old generic door before the finite-end guard existed; every signature/activation guard stays enabled.
+  await withGrantsTriggerOff('secret_auto_delete_limit', async tx => {
     await tx.grant.create({ data: { id: grantId, appId, workerId, requestedByUserId: ownerId,
       action: 'secret.reveal', values: { secret: secretId, 'auto-delete': 'delete' }, reason: 'historical pending mark' } });
-    await tx.$executeRawUnsafe('CREATE TRIGGER secret_auto_delete_limit BEFORE INSERT OR UPDATE ON grants FOR EACH ROW EXECUTE FUNCTION hadron_guard_secret_auto_delete_limit()');
   });
   await expect(sign(grantId)).rejects.toMatchObject({ code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT' });
   expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).activatedAt).toBeNull();
@@ -240,11 +239,9 @@ it('rechecks a historical unbounded pending mark at signing without consuming or
 
 it('lets a historical unbounded pending mark be revoked, and the revocation cannot be undone', async () => {
   const grantId = generateId();
-  await db.$transaction(async tx => {
-    await tx.$executeRawUnsafe('DROP TRIGGER secret_auto_delete_limit ON grants');
+  await withGrantsTriggerOff('secret_auto_delete_limit', async tx => {
     await tx.grant.create({ data: { id: grantId, appId, workerId, requestedByUserId: ownerId,
       action: 'secret.reveal', values: { secret: secretId, 'auto-delete': 'delete' }, reason: 'historical pending mark' } });
-    await tx.$executeRawUnsafe('CREATE TRIGGER secret_auto_delete_limit BEFORE INSERT OR UPDATE ON grants FOR EACH ROW EXECUTE FUNCTION hadron_guard_secret_auto_delete_limit()');
   });
   await expect(resolvers.Mutation.revokeGrant({}, { ref: grantId }, ctx())).resolves.toMatchObject({ id: grantId });
   expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).revokedAt).not.toBeNull();
@@ -253,11 +250,9 @@ it('lets a historical unbounded pending mark be revoked, and the revocation cann
 
 it('keeps historical unbounded marks maintainable on withdrawal and holder departure', async () => {
   const ids = [generateId(), generateId()];
-  await db.$transaction(async tx => {
-    await tx.$executeRawUnsafe('DROP TRIGGER secret_auto_delete_limit ON grants');
+  await withGrantsTriggerOff('secret_auto_delete_limit', async tx => {
     for (const id of ids) await tx.grant.create({ data: { id, appId, workerId, requestedByUserId: ownerId,
       action: 'secret.reveal', values: { secret: secretId, 'auto-delete': 'delete' }, reason: 'historical pending mark' } });
-    await tx.$executeRawUnsafe('CREATE TRIGGER secret_auto_delete_limit BEFORE INSERT OR UPDATE ON grants FOR EACH ROW EXECUTE FUNCTION hadron_guard_secret_auto_delete_limit()');
   });
   // A writer that names an unchanged term column is still a lifecycle-only update.
   await db.$executeRaw`UPDATE grants SET action = action WHERE id = ${ids[0]}`;
@@ -302,4 +297,142 @@ it('a signed historical unbounded grant can spend while the new guard is enabled
   await expect(reveal(clientId)).resolves.toMatchObject({ value: JSON.stringify('s6-latest') });
   expect((await db.grant.findUniqueOrThrow({ where: { id } })).useCount).toBe(1);
   expect(await exists()).toBe(1);
+});
+
+// #4635 follow-ups: expiry plus budget, the real-time end of a window, and a reveal racing the sweep.
+// Every deadline below is the database clock's, never a faked one, so these cover the real predicate the sweep judges.
+describe('#4635 a signed delete mark with both a window and a read budget ends at whichever comes first', () => {
+  it('the budget first: the last read deletes before the window ends, and the later sweep finds nothing', async () => {
+    const a = await client('delete', 2, await dbDeadline(60));
+    expect(await reveal(a.clientId)).toMatchObject({ readsLeft: 1 });
+    expect(await exists()).toBe(1);
+    expect(await reveal(a.clientId)).toMatchObject({ value: JSON.stringify('s6-latest'), readsLeft: 0 });
+    expect(await exists()).toBe(0);
+    expect(await deletedEvents()).toBe(1);
+    expect(await secretSweepTick(db)).toMatchObject({ deleted: 0 });
+    expect(await deletedEvents()).toBe(1);
+  });
+
+  it('the window first: reads left are refused once it ends, nothing deletes until the sweep, then one deletion', async () => {
+    const a = await client('delete', 5, await dbDeadline(4));
+    expect(await reveal(a.clientId)).toMatchObject({ readsLeft: 4 });
+    await expired(a.grantId);
+    // Real time, no sweep yet: the read door refuses a read the budget would still allow, and a refused read
+    // neither spends nor deletes (the secret waits for the sweep, which owns window-end deletion).
+    expect(await failure(reveal(a.clientId))).toBe('SECRET_READ_CLIENT_EXPIRED');
+    expect(await exists()).toBe(1);
+    expect((await db.grant.findUniqueOrThrow({ where: { id: a.grantId } })).useCount).toBe(1);
+    expect(await secretSweepTick(db)).toMatchObject({ deleted: 1 });
+    expect(await exists()).toBe(0);
+    expect(await deletedEvents()).toBe(1);
+    expect(await failure(reveal(a.clientId))).toBe('SECRET_DELETED');
+  });
+});
+
+describe('#4635 a read racing the sweep', () => {
+  it('a sweep skips a secret whose row a reader holds, and deletes it once the reader lets go', async () => {
+    const due = await client('delete', null, await dbDeadline(3));
+    await expired(due.grantId);
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let locked!: () => void;
+    const lockTaken = new Promise<void>(resolve => { locked = resolve; });
+    const reader = db.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM secrets WHERE id = ${secretId} FOR UPDATE`;
+      locked();
+      await held;
+    }, { timeout: 20_000 });
+    await lockTaken;
+    try {
+      expect(await secretSweepTick(db)).toMatchObject({ deleted: 0 });
+      expect(await exists()).toBe(1);
+      expect(await deletedEvents()).toBe(0);
+    } finally {
+      release();
+      await reader;
+    }
+    expect(await secretSweepTick(db)).toMatchObject({ deleted: 1 });
+    expect(await exists()).toBe(0);
+    expect(await deletedEvents()).toBe(1);
+  }, 30_000);
+
+  it('a last read and the sweep at the same moment: one deletion, and the read either got the value and spent or was refused and did not', async () => {
+    for (let round = 0; round < 3; round++) {
+      if (round > 0) secretId = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: `tok-${round}`, kind: 'generic', value: 's6-canary' }, ctx())).id;
+      const due = await client('delete', null, await dbDeadline(3));
+      const last = await client('delete', 1);
+      await expired(due.grantId);
+      const [read] = await Promise.allSettled([reveal(last.clientId), secretSweepTick(db)]);
+      expect(await exists()).toBe(0);
+      expect(await db.secretVersion.count({ where: { secretId } })).toBe(0);
+      expect(await deletedEvents()).toBe(1);
+      const spent = (await db.grant.findUniqueOrThrow({ where: { id: last.grantId } })).useCount;
+      const revealEvents = await db.secretEvent.count({ where: { secretId, kind: 'REVEAL', outcome: 'OK' } });
+      if (read.status === 'fulfilled') {
+        // The reader won the row: it saw the value, spent its one read and wrote its one reveal event.
+        expect(read.value).toMatchObject({ readsLeft: 0 });
+        expect([spent, revealEvents]).toEqual([1, 1]);
+      } else {
+        // The sweep won: the reader is told the secret is gone and nothing was spent or revealed.
+        expect(read.reason).toMatchObject({ extensions: { code: 'SECRET_DELETED' } });
+        expect([spent, revealEvents]).toEqual([0, 0]);
+        // A refused read is still audited, as a REVEAL row carrying the refusal code (never a success row).
+        expect(await db.secretEvent.count({ where: { secretId, kind: 'REVEAL', outcome: 'SECRET_DELETED' } })).toBe(1);
+      }
+    }
+  }, 60_000);
+});
+
+describe('#4635 poison batch: one secret whose deletion fails must not stop the others in its batch', () => {
+  const POISON_FN = 'zz_poison_secret_delete_4635';
+  afterEach(async () => {
+    await db.$executeRawUnsafe('DROP TRIGGER IF EXISTS zz_poison_secret_delete_4635 ON secrets');
+    await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS ${POISON_FN}()`);
+  });
+
+  /** Two due secrets, the first-created (so first by id) poisoned: its DELETE raises. Returns both ids. */
+  async function poisonedFirstAndGood() {
+    const poisoned = secretId;
+    const dueA = await client('delete', null, await dbDeadline(3));
+    secretId = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'tok-good', kind: 'generic', value: 's6-canary' }, ctx())).id;
+    const good = secretId;
+    const dueB = await client('delete', null, await dbDeadline(3));
+    // The pins below rely on the poisoned id sorting first in the sweep's `ORDER BY s.id`.
+    expect([poisoned, good].sort()[0]).toBe(poisoned);
+    await db.$executeRawUnsafe(`CREATE FUNCTION ${POISON_FN}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'poisoned delete CANARY'; END $$`);
+    await db.$executeRawUnsafe(`CREATE TRIGGER zz_poison_secret_delete_4635 BEFORE DELETE ON secrets FOR EACH ROW WHEN (OLD.id = '${poisoned}') EXECUTE FUNCTION ${POISON_FN}()`);
+    await expired(dueA.grantId); await expired(dueB.grantId);
+    return { poisoned, good };
+  }
+  const expectPoisonedKept = async (poisoned: string) => {
+    expect(await db.secret.count({ where: { id: poisoned } })).toBe(1);
+    expect(await db.secretVersion.count({ where: { secretId: poisoned } })).toBe(2);
+    expect(await db.secretEvent.count({ where: { secretId: poisoned, kind: 'DELETE' } })).toBe(0);
+  };
+
+  it('a due secret that cannot be deleted stays, is logged by code alone, and a later due secret in the same batch is deleted', async () => {
+    const { poisoned, good } = await poisonedFirstAndGood();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      expect(await secretSweepTick(db)).toMatchObject({ deleted: 1 });
+      const logged = JSON.stringify(error.mock.calls);
+      expect(logged).toContain('secret_sweep.auto_delete_row_failed');
+      expect(logged).not.toContain('CANARY');
+      expect(logged).not.toContain(poisoned);
+    } finally { error.mockRestore(); }
+    await expectPoisonedKept(poisoned);
+    expect(await db.secret.count({ where: { id: good } })).toBe(0);
+    expect(await db.secretEvent.count({ where: { secretId: good, kind: 'DELETE' } })).toBe(1);
+  }, 30_000);
+
+  it('with a batch size of one, a poisoned first secret does not stop the pass: the next batch starts after it', async () => {
+    const { poisoned, good } = await poisonedFirstAndGood();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      // Before the keyset cursor this re-selected the poisoned id every batch and broke on deleted < batchSize: 0 deleted.
+      expect(await deletion.sweepSecretAutoDelete(db, 1)).toBe(1);
+    } finally { error.mockRestore(); }
+    await expectPoisonedKept(poisoned);
+    expect(await db.secret.count({ where: { id: good } })).toBe(0);
+  }, 30_000);
 });

@@ -30,7 +30,7 @@ import { loadLastEventBySession, recentlyTouchedFilter, sessionActivityAt, toNai
 import { loadWorkerCheckStatuses, type WorkerCheckStatus } from '../workerCheckStatus.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { computeDueWakes } from '../tickers/dueWakes.js';
-import type { AlarmChain } from './events.js';
+import { LEAD_CADENCE_EVENT_TYPE, LEGACY_LEAD_CADENCE_EVENT_TYPE, type AlarmChain } from './events.js';
 import { darkAlarmChain } from './alarmChain.js';
 import { isSerializationFailure } from './serializationFailure.js';
 
@@ -265,8 +265,9 @@ export async function evaluateDarkWorkers(db: PrismaClient, now = new Date()): P
 /** The evidence a dark-worker alarm carries beyond its reason: shown only to a reader of the worker's internals. */
 const EVIDENCE_KEYS: Record<string, readonly string[]> = {
   'alarm.dark-worker': ['lastCheckedAt', 'oldestWakeAgeSeconds'],
-  // #2763: when the coordinator last assigned and how many lane workers were free describe the team's internals.
-  'alarm.coordinator-cadence': ['lastAssignedAt', 'freeWorkerCount'],
+  // #2763: when the lead last assigned and how many workers under it were free describe the team's internals.
+  [LEAD_CADENCE_EVENT_TYPE]: ['lastAssignedAt', 'freeWorkerCount'],
+  [LEGACY_LEAD_CADENCE_EVENT_TYPE]: ['lastAssignedAt', 'freeWorkerCount'],
 };
 
 /**

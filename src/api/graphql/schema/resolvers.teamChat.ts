@@ -90,7 +90,7 @@ import {
   resumeOwnLapsedSessionInTx,
   mayStillDriveWorkerApp,
   channelIncarnationChanged,
-} from '../../../lib/teamAttention.js';
+} from '../../../lib/ownWorkerSessions.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
 // listing and the shared chat-loc gate both have to exclude `chats:team`, and

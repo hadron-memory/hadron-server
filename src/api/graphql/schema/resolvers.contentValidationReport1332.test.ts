@@ -19,6 +19,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import {
   ContentValidationRefusal,
   deriveReporter,
+  judgeValidationTaskSet,
   recordContentValidationReportInTx,
   VALIDATION_TASK_SELECT,
   type ContentValidationReportInput,
@@ -911,8 +912,7 @@ describe('#3567 pins for the surviving #3534 mutants', () => {
   });
 
   it('v5 (cor:dmo:160:01 refusal 3, ruling 0199): a deleted task listed before a hidden live one still answers WRONG_TASK, not TASK_BROKEN', async () => {
-    // The deleted task is created FIRST and already deleted (a later UPDATE writes a new row version after the
-    // hidden task's), so the unordered task read returns it first (asserted below).
+    // The deleted task is created in its final state (deleted), so no UPDATE moves its row version.
     const deletedTask = (await db.node.create({ data: { id: generateId(), memoryId, loc: 'deleted-task', name: 'Gone', isRunnable: true, content: 'x', deletedAt: new Date() } })).id;
     const hidden = await taskInOtherOrg('cv-v5');
     // A runnable guide node is judged under two rule keys: 'guide' and 'task'.
@@ -921,10 +921,23 @@ describe('#3567 pins for the surviving #3534 mutants', () => {
     const config = await db.memoryConfig.findUniqueOrThrow({ where: { memoryId } });
     await db.nodeRoleRule.updateMany({ where: { configId: config.id, role: 'guide' }, data: { validationTaskId: deletedTask } });
     await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'task', validationTaskId: hidden.task, validationTaskRequired: true } });
-    // Precondition, not a rule: the same unordered read the recorder makes returns the deleted task first.
-    // If the planner order ever flips, this fails loudly instead of the pin passing without testing anything.
-    const order = await db.$transaction((tx) => tx.node.findMany({ where: { id: { in: [deletedTask, hidden.task] } }, select: VALIDATION_TASK_SELECT }));
-    expect(order.map((t) => t.id)).toEqual([deletedTask, hidden.task]);
+    // #4943: the recorder's task read is unordered, and the planner returns either order (it flipped on CI twice on
+    // 2026-11-23), so the order this pin needs is DRIVEN, not hoped for. The recorder's own judgement runs over the real
+    // rows with the deleted task listed first (the order v5_break, `break` for `continue`, turns into BROKEN), and then
+    // listed second. Nothing here depends on heap or planner order.
+    const rows = await db.node.findMany({ where: { id: { in: [deletedTask, hidden.task] } }, select: VALIDATION_TASK_SELECT });
+    const deletedRow = rows.find((t) => t.id === deletedTask);
+    const hiddenRow = rows.find((t) => t.id === hidden.task);
+    expect(deletedRow?.deletedAt, 'the deleted task is deleted').toBeInstanceOf(Date);
+    expect(hiddenRow?.deletedAt, 'the hidden task is live').toBeNull();
+    const node = await db.node.findUniqueOrThrow({ where: { id: nodeId }, select: { role: true, isRunnable: true } });
+    const rules = await db.nodeRoleRule.findMany({ where: { configId: config.id } });
+    const canReadTaskMemory = async (m: string) => m !== hidden.mem; // leo is not a member of the hidden task's org
+    for (const listed of [[deletedRow!, hiddenRow!], [hiddenRow!, deletedRow!]]) {
+      const judged = await judgeValidationTaskSet({ role: node.role, runnable: node.isRunnable, rules, loadTasks: async () => listed, canReadTaskMemory });
+      expect(judged.state, `listed ${listed.map((t) => (t.id === deletedTask ? 'deleted' : 'hidden')).join(', ')}`).toBe('UNAVAILABLE');
+    }
+    // End to end, in whatever order the planner returns: WRONG_TASK, and nothing recorded.
     expect(await refusal(report(person(leo), { validationTaskRef: hidden.task }))).toBe('CONTENT_VALIDATION_WRONG_TASK');
     expect(await reportCount()).toBe(0);
   });

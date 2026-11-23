@@ -24,7 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../test/helpers.js';
-import { generateId } from '../lib/id.js';
+import { insertHistoricalMark } from '../test/secretAutoDeleteTrigger.js';
 import { insertSoftPasskey, softPasskey, type SoftPasskey } from '../test/softPasskey.js';
 import { upsertPlatformActions } from '../lib/grants/actions.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
@@ -71,22 +71,10 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-/** A pending mark written the way the old generic door wrote it: the limit trigger is disabled for the insert and enabled again (the migration's own definition stays in place). */
-async function historicalMark(terms: { expiresInSeconds: number | null }): Promise<string> {
-  const id = generateId();
-  await db.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER secret_auto_delete_limit');
-    await tx.$executeRawUnsafe(
-      `INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, expires_at, created_at, updated_at)
-       VALUES ($1, $2, $3, 'secret.reveal', $4::jsonb, 'historical mark', NULL,
-         CASE WHEN $5::int IS NULL THEN NULL ELSE (clock_timestamp() AT TIME ZONE 'UTC') + make_interval(secs => $5::int) END,
-         (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`,
-      id, appId, workerId, JSON.stringify({ secret: secretId, 'auto-delete': 'delete' }), terms.expiresInSeconds,
-    );
-    await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER secret_auto_delete_limit');
-  });
-  return id;
-}
+/** A pending mark written the way the old generic door wrote it (the shared fixture switches the limit trigger off for the insert only). */
+const historicalMark = (terms: { expiresInSeconds: number | null }) => insertHistoricalMark({
+  appId, holder: { workerId }, action: 'secret.reveal', values: { secret: secretId, 'auto-delete': 'delete' }, expiresInSeconds: terms.expiresInSeconds,
+});
 const openRequest = (grantId: string) => db.$transaction((tx) => createGrantSigningRequestInTransaction(tx, grantId, {
   appId, requester: { userId: requester.id, appId: null, workerId: null, sessionId: null },
 }));

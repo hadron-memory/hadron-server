@@ -18,6 +18,19 @@ export const E2E_SCRIPT_WRITE_RESULT = 'runs:script-write-result';
 export const E2E_SCRIPT_REFUSED_RESULT = 'denied:script-refused-result';
 export const E2E_SCRIPT_GRANT_PREFIX = 'runs';
 
+/**
+ * #4753: the flow fixtures exist only on a stack started with E2E_RUN_WORKER=true (README). stack.sh maps exactly that
+ * value to DISABLE_RUN_WORKER=false inside the container and leaves every other value `true`, so the seed and the verifier,
+ * which both run in the container, read the one variable the run worker itself reads, and only the exact value `false`
+ * counts (an unset or mistyped value leaves the fixtures off, as for the worker).
+ *
+ * The two readers are not the same predicate off that path: the server runs the worker unless DISABLE_RUN_WORKER is exactly
+ * `true` (src/server.ts), while this enables the fixtures only on exactly `false`. Under stack.sh they always agree, since it
+ * sets one or the other; a variable set by hand to anything else (e.g. `0`) would run the worker without its flows seeded.
+ */
+export const e2eFlowFixturesEnabled = (env: Record<string, string | undefined> = process.env): boolean =>
+  env.DISABLE_RUN_WORKER === 'false';
+
 export const e2eFlowsMemoryUrn = (org: string): string => `${org}:flows`;
 /** The canonical node URN of a loc in the org's fixture flow memory. */
 export const e2eFlowNodeUrn = (org: string, loc: string): string => `hrn:node:${org}:flows:${loc}`;
@@ -44,4 +57,13 @@ export async function seedE2eScriptFlow(db: PrismaClient, o: {
   await node(E2E_SCRIPT_WRITE_ENTRY, { data: call(E2E_SCRIPT_WRITE_RESULT) as never });
   await node(E2E_SCRIPT_REFUSED_ENTRY, { data: call(E2E_SCRIPT_REFUSED_RESULT) as never });
   return { memoryId };
+}
+
+/** #4753: seed the flows only when the stack runs the worker; `null` when it does not (nothing is written). */
+export async function seedE2eScriptFlowIfEnabled(
+  db: PrismaClient,
+  o: Parameters<typeof seedE2eScriptFlow>[1],
+  env: Record<string, string | undefined> = process.env,
+): Promise<{ memoryId: string } | null> {
+  return e2eFlowFixturesEnabled(env) ? seedE2eScriptFlow(db, o) : null;
 }

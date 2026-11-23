@@ -168,7 +168,15 @@ export interface VectorSearchOpts {
    * produce without exhaustion. A provider that never calls it is treated as
    * not exhausted.
    */
-  onWindow?: (w: { exhausted: boolean }) => void;
+  onWindow?: (w: { exhausted: boolean; stoppedEarly?: boolean }) => void;
+  /**
+   * #2772 (cor:api:090:04): the structured filters, the memory scope and the caller's exclusions run INSIDE the
+   * ranking statement, before the page is chosen; there is no candidate cap. The provider reports `stoppedEarly`
+   * through onWindow when the work budget cut the search short.
+   */
+  filter?: NodeSqlFilter;
+  includeDeleted?: boolean;
+  excludeNodeIds?: string[];
   /**
    * #1608 — a COMMENTS-scoped search is answered EXACTLY over comment vectors
    * (no ANN window), so it finds every matching comment (cor:dmo:110:08).
@@ -176,6 +184,12 @@ export interface VectorSearchOpts {
    * drops comments from a CONTENT result.
    */
   contentScope?: ContentScope | null;
+  /**
+   * #4779 (BLIND P2-2): the request's ONE vector work-budget deadline (epoch ms). A request that makes several vector calls
+   * (a hybrid page's leg, its rank lookups, a re-ranking) passes the same value to each, so `VECTOR_SEARCH_TIMEOUT_MS`
+   * bounds the request, not each call. Absent = each call has its own budget.
+   */
+  deadlineAt?: number;
 }
 
 export interface NodeRetrievalProvider {
@@ -183,6 +197,12 @@ export interface NodeRetrievalProvider {
   regexSearch(opts: RegexSearchOpts): Promise<LexicalHit[]>;
   vectorSearch(opts: VectorSearchOpts): Promise<VectorHit[]>;
   vectorSearchChunks(opts: VectorSearchOpts): Promise<ChunkHit[]>;
+  /**
+   * #4779 — the exact node-level vector rank (1-based, in the exact ranking's order) of each of `nodeIds`, over the SAME
+   * eligibility as {@link vectorSearch} with these options (`limit` and `onWindow` are ignored). A node with no eligible
+   * vector is absent. `stoppedEarly` when the work budget ended the lookup. Hybrid search certifies its fused page with it.
+   */
+  vectorRanks(opts: Omit<VectorSearchOpts, 'limit' | 'onWindow'> & { nodeIds: string[] }): Promise<{ ranks: Map<string, number>; stoppedEarly: boolean }>;
   /**
    * No-query filtered browse (cor:api:090:02): the structured filter (incl. a
    * `where` predicate) applied + sorted + paged in SQL, returning ordered node

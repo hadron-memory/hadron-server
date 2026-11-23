@@ -3,7 +3,8 @@
  * 2026-11-12: "A superseded version is hard-deleted 30 days after it was superseded (the current one never; the
  * 50-version cap purges the oldest early)").
  *
- * `SECRET_VERSION_RETENTION_DAYS`: a plain decimal integer from 1 to 3650, read per call. Unset is the default (30)
+ * `SECRET_VERSION_RETENTION_DAYS`: a plain decimal integer from 1 to 3650 (surrounding whitespace is
+ * ignored, so ' 90 ' is 90), read per call. Unset is the default (30)
  * silently. An empty or invalid value (0, negatives, fractions, exponent, hex or signed spellings, above 3650, junk)
  * is ALSO the default, with one warn line per process, so a typo can neither keep old values forever nor purge them
  * at once. The warning names the variable and never echoes the value.
