@@ -53,9 +53,9 @@ describe('#4512 authored ids equal to an assigned anchor', () => {
     expect(out).toContain('<span id="fx-110-zzz">z</span>');
   });
   it('fenced code and inline code that show an id are untouched', () => {
-    const body = 'Write `<a id="fx-110-a"></a>` like so:\n\n```html\n<a id="fx-110-a"></a>\n```';
+    const body = 'Write `<a id="fx-110-a"></a>` like so:\n\n```html\n<a id="fx-110-a"></a>\n```\n\n~~~\n<a id="fx-110-a"></a>\n~~~';
     const out = renderSpecDocument(doc([part('fx:110:a', body)]));
-    expect(count(out, 'id="fx-110-a"')).toBe(3);
+    expect(count(out, 'id="fx-110-a"')).toBe(4);
   });
   it('an attribute VALUE that mentions an id is not an id', () => {
     const out = renderSpecDocument(doc([part('fx:110:a', '<a title=\'id="fx-110-a"\' href="#x">l</a>')]));

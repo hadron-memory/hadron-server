@@ -164,6 +164,53 @@ export function splitAtClosingRule(text: string): { body: string; tail: string }
   return { body: text, tail: '' };
 }
 
+/** One HTML start tag, quote-aware so a `>` inside an attribute value does not end it. */
+const HTML_TAG = /<[A-Za-z][^\s/>]*(?:"[^"]*"|'[^']*'|[^'">])*>/g;
+/** One attribute inside a start tag: name, then an optional quoted or bare value. */
+const HTML_ATTR = /\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
+/** An inline code span (CommonMark 6.1): a backtick run, anything, the same run. */
+const CODE_SPAN = /(`+)(?:(?!\1)[\s\S])+?\1(?!`)/g;
+
+/** `tag` without every `id` attribute whose value is in `assigned`; every other byte stays. */
+function dropAssignedIds(tag: string, assigned: ReadonlySet<string>): string {
+  const nameEnd = /^<[A-Za-z][^\s/>]*/.exec(tag)![0].length;
+  const rest = tag.slice(nameEnd);
+  return `${tag.slice(0, nameEnd)}${rest.replace(HTML_ATTR, (all, name: string, dq?: string, sq?: string, bare?: string) => (
+    name.toLowerCase() === 'id' && assigned.has(dq ?? sq ?? bare ?? '') ? '' : all
+  ))}`;
+}
+
+/**
+ * #4512 (cor:spc:030:02 "Authored ids"): an `id` in authored text that equals an anchor assigned in this
+ * document is removed, so the server's own `<a id>` element is the only carrier. Only the attribute goes;
+ * the rest of the authored text is as written. An id that is not an assigned anchor is left alone, and so
+ * is text in fenced code or an inline code span (it is shown, not parsed as an element).
+ */
+export function neutraliseAssignedIds(text: string, assigned: ReadonlySet<string>): string {
+  if (assigned.size === 0 || !/id/i.test(text)) return text;
+  const chunk = (c: string): string => {
+    let out = '';
+    let last = 0;
+    for (const m of c.matchAll(CODE_SPAN)) {
+      out += c.slice(last, m.index).replace(HTML_TAG, (t) => dropAssignedIds(t, assigned)) + m[0];
+      last = m.index + m[0].length;
+    }
+    return out + c.slice(last).replace(HTML_TAG, (t) => dropAssignedIds(t, assigned));
+  };
+  const out: string[] = [];
+  let pending: string[] = [];
+  let fence: OpenFence | null = null;
+  const flush = (): void => { if (pending.length) out.push(...chunk(pending.join('\n')).split('\n')); pending = []; };
+  for (const line of text.split('\n')) {
+    const wasOpen = fence !== null;
+    const step = stepFence(line, fence);
+    fence = step.open;
+    if (step.fenceLine || wasOpen) { flush(); out.push(line); } else pending.push(line);
+  }
+  flush();
+  return out.join('\n');
+}
+
 const SPEC_CORE_DIV = /^<div class="spec-core"[^>]*><\/div>\s*$/;
 
 /** Drop the spec's own H1 and the `spec-core` divider divs; optionally move every heading down one level. */
@@ -249,7 +296,7 @@ const heading = (p: DocPart): string => (p.name === p.loc || p.name.startsWith(`
 function shownBody(p: DocPart, shift: boolean, links: ReadonlyMap<string, LinkResolution>, anchors: ReadonlyMap<string, string>): string | null {
   if (p.isPlaceholder || p.superseded || p.body == null) return null;
   const { body } = splitAtClosingRule(p.body);
-  const cleaned = renderLinks(cleanBody(body, shift), links, anchors);
+  const cleaned = neutraliseAssignedIds(renderLinks(cleanBody(body, shift), links, anchors), new Set(anchors.values()));
   return cleaned === '' ? null : cleaned;
 }
 
@@ -298,7 +345,7 @@ export function renderSpecDocument(input: DocInput): string {
   }
 
   if (!feature.isPlaceholder && feature.body != null) {
-    const tail = renderLinks(trimNewlines(splitAtClosingRule(feature.body).tail), links, anchors);
+    const tail = neutraliseAssignedIds(renderLinks(trimNewlines(splitAtClosingRule(feature.body).tail), links, anchors), new Set(anchors.values()));
     if (tail !== '') blocks.push(tail);
   }
   return `${blocks.join('\n\n')}\n`;
