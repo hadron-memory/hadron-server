@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -995,13 +995,24 @@ describe('CLI entry and single instance', () => {
     } catch { /* gone */ }
     return { pid, alive: state !== 'unreadable' && state !== 'Z' && state !== 'X', state, startTicks, cmdline };
   };
-  async function startLockHolder(marker: string): Promise<{ pid: number; stop: () => void }> {
-    const holder = spawn('node', ['-e', "process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)", marker], { stdio: ['ignore', 'pipe', 'ignore'] });
-    await new Promise<void>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error(`holder never reported ready: ${JSON.stringify(snapshotOf(holder.pid))}`)), 10_000);
-      holder.once('error', (e) => { clearTimeout(t); reject(e); });
-      holder.stdout!.once('data', () => { clearTimeout(t); resolve(); });
-    });
+  /**
+   * A synthetic live holder, handed out only once it is RECOGNIZABLE: it reported ready (its exec finished and it runs),
+   * and /proc shows it alive with `marker` in its cmdline. A pid from spawn() alone is not enough (#4297: see the
+   * late-identity pin below), so every lock test takes its holder from here. `launch` replaces the default holder
+   * process; it must print a line on stdout once it runs. A holder that never qualifies is killed, not leaked.
+   */
+  async function startLockHolder(marker: string, launch?: () => ChildProcess): Promise<{ pid: number; stop: () => void }> {
+    const holder = launch ? launch()
+      : spawn('node', ['-e', "process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)", marker], { stdio: ['ignore', 'pipe', 'ignore'] });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error(`holder never reported ready: ${JSON.stringify(snapshotOf(holder.pid))}`)), 10_000);
+        holder.once('error', (e) => { clearTimeout(t); reject(e); });
+        holder.stdout!.once('data', () => { clearTimeout(t); resolve(); });
+      });
+      const snap = snapshotOf(holder.pid);
+      if (!snap.alive || !snap.cmdline.includes(marker)) throw new Error(`holder ready but not recognizable as ${marker}: ${JSON.stringify(snap)}`);
+    } catch (e) { holder.kill(); throw e; }
     return { pid: holder.pid!, stop: () => { holder.kill(); } };
   }
   const writeLockFor = (pid: number): void => {
@@ -1075,34 +1086,80 @@ describe('CLI entry and single instance', () => {
     const stateDir = join(dir, 'ticker-wake');
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, 'lock'), '999999999');
-    // The first contender is a live process named ticker-wake (liveness is judged from /proc cmdline).
-    const first = spawn('node', ['-e', 'setTimeout(() => {}, 20000)', 'ticker-wake'], { stdio: 'ignore' });
+    // The first contender is a live process named ticker-wake (liveness is judged from /proc cmdline), handed out only
+    // once /proc recognizes it (#4297); the nested contender's own pid can never be the holder's (NOT_A_PID).
+    const first = await startLockHolder('ticker-wake');
     try {
       let nested = '';
-      const release = acquireLock(stateDir, first.pid!, {
+      let atDecision: HolderSnapshot | undefined;
+      const release = acquireLock(stateDir, first.pid, {
         beforeUnlink: () => {
-          try { acquireLock(stateDir, process.pid + 1); nested = 'GOT'; } catch (e) { nested = (e as Error).message; }
+          atDecision = snapshotOf(first.pid);
+          try { acquireLock(stateDir, NOT_A_PID); nested = 'GOT'; } catch (e) { nested = (e as Error).message; }
         },
       });
-      expect(nested).toContain('taking over');
+      expect(nested, `takeover owner at the nested decision: ${JSON.stringify(atDecision)}`).toContain('taking over');
       expect(readFileSync(join(stateDir, 'lock'), 'utf8')).toBe(String(first.pid));
       release();
       expect(existsSync(join(stateDir, 'lock.takeover'))).toBe(false);
-    } finally { first.kill(); }
+    } finally { first.stop(); }
+  });
+
+  // #4297 (2026-11-23 merge-queue sighting, the takeover-race sibling): a pid from `spawn` is not yet a recognizable
+  // ticker-wake. libuv resumes the parent when the child's exec begins (the close-on-exec pipe closes, or the vfork parent
+  // is released), and the kernel fills in the new /proc cmdline only later in the same exec, so under load a contender can
+  // read an empty cmdline and judge a live holder gone. This holder models that window deterministically and wider: a
+  // shell that sleeps, then execs the ticker-wake holder, with the marker in the environment so the shell's own cmdline
+  // does not carry it. Through startLockHolder the race is judged against a recognizable holder; with the pid used the
+  // moment spawn returns (the takeover tests before #4297) the nested contender is told "left behind".
+  const spawnLateIdentity = (): ChildProcess => spawn('sh', ['-c',
+    `sleep 0.5; exec node -e "process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)" "$HOLDER_MARKER"`,
+  ], { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, HOLDER_MARKER: 'ticker-wake' } });
+  /** A nested contender's own pid: above PID_MAX_LIMIT (2^22), so it is never a live process and never the holder's pid. */
+  const NOT_A_PID = 4_194_305;
+
+  it('stale-lock takeover race with a holder whose identity appears after spawn returns: the nested contender is told "taking over" (#4297)', async () => {
+    const stateDir = join(dir, 'ticker-wake');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'lock'), '999999999');
+    const first = await startLockHolder('ticker-wake', spawnLateIdentity);
+    try {
+      let nested = '';
+      let atDecision: HolderSnapshot | undefined;
+      const release = acquireLock(stateDir, first.pid, {
+        beforeUnlink: () => {
+          atDecision = snapshotOf(first.pid);
+          try { acquireLock(stateDir, NOT_A_PID); nested = 'GOT'; } catch (e) { nested = (e as Error).message; }
+        },
+      });
+      expect(nested, `takeover owner at the nested decision: ${JSON.stringify(atDecision)}`).toContain('taking over');
+      release();
+      expect(existsSync(join(stateDir, 'lock.takeover'))).toBe(false);
+    } finally { first.stop(); }
+  });
+
+  it('the holder fixture refuses a holder that runs but is not recognizable, and kills it (#4297)', async () => {
+    const err = await startLockHolder('ticker-wake', () => spawn('node', ['-e', "process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)", 'some-other-tool'],
+      { stdio: ['ignore', 'pipe', 'ignore'] })).then(() => null, (e: Error) => e);
+    expect(err?.message).toContain('not recognizable as ticker-wake');
+    const pid = Number(/"pid":(\d+)/.exec(err!.message)?.[1]);
+    expect(pid).toBeGreaterThan(0);
+    for (let i = 0; i < 50 && snapshotOf(pid).alive; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(snapshotOf(pid).alive).toBe(false); // not leaked
   });
 
   it('stale-lock takeover never unlinks a live replacement owner that arrived after the stale judgment', async () => {
     const stateDir = join(dir, 'ticker-wake');
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, 'lock'), '999999999');
-    const holder = spawn('node', ['-e', 'setTimeout(() => {}, 20000)', 'ticker-wake'], { stdio: 'ignore' });
+    const holder = await startLockHolder('ticker-wake'); // recognizable before the replacement arrives (#4297)
     try {
       expect(() => acquireLock(stateDir, process.pid, {
         afterJudgedStale: () => { writeFileSync(join(stateDir, 'lock'), String(holder.pid)); }, // replacement arrives
       })).toThrow('holds');
       expect(readFileSync(join(stateDir, 'lock'), 'utf8')).toBe(String(holder.pid)); // left intact
       expect(existsSync(join(stateDir, 'lock.takeover'))).toBe(false);
-    } finally { holder.kill(); }
+    } finally { holder.stop(); }
   });
 
   it('a takeover file left behind by a dead process fails closed for operator cleanup, and is not removed', async () => {
