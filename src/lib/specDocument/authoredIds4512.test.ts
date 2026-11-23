@@ -192,7 +192,7 @@ describe('#4512 the scanner on its own (review findings)', () => {
     expect(run('<a id="other" title=\'id=\' id="fx-110-a">')).toBe('<a id="other" title=\'id=\'>');
   });
   it('E2: the whitespace trim never eats newlines outside a tag', () => {
-    expect(run('line one\n\nid="fx-110-a"\nline two')).toBe('line one\n\n\nline two');
+    expect(run('line one\n\nid="fx-110-a"\nline two')).toBe('line one\n\nid="fx-110-a"\nline two');
     expect(run('<span\n  class="c"\n  id="fx-110-a">s</span>')).toBe('<span\n  class="c"\n>s</span>');
   });
   it('E3: a URL query key id= is not an attribute and is not cut', () => {
