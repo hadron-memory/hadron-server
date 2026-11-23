@@ -35,7 +35,8 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { id: generateId(), name: 'cad-org', urn: `cad-${suffix}.com` } });
   user = await db.user.create({ data: { id: generateId(), githubId: 98_200 + Math.floor(Math.random() * 1000), githubUsername: `cad-${suffix}`, roles: ['READER'] } });
   agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'Engineer', urn: `${org.urn}:engineer`, visibility: 'ORGANIZATION' } });
-  app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
+  // #4937: the alarm exists only for an App whose latest report says external tasks exist; the rule tests below run with it.
+  app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team`, externalTasksExist: true } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   const memory = await db.memory.create({
@@ -368,6 +369,104 @@ describe('#4375 the alarm watches every lead (rulings 0270, 0271)', () => {
     await evaluateLeadCadence(db, at(70));
     expect(await evaluateLeadCadence(db, NOW)).toHaveLength(1);
     expect(await alarms('Ada')).toHaveLength(1);
+  });
+});
+
+const report = (externalTasksExist: boolean | null) => db.app.update({ where: { id: app.id }, data: { externalTasksExist } });
+
+describe('#4937 the alarm exists only while the App\'s latest report says external tasks exist (cor:agt:050:31)', () => {
+  it('an App that never reported raises no alarm for a lead idle far past the window with a free worker under it, and keeps its clocks', async () => {
+    await report(null);
+    await lateAda();
+    expect(await evaluateLeadCadence(db, NOW)).toEqual([]);
+    expect(await evaluateLeadCadence(db, later(600))).toEqual([]);
+    expect(await alarms()).toHaveLength(0);
+    expect(await db.leadCadenceEpisode.count()).toBe(0);
+    expect(await db.leadCadenceClock.count({ where: { workerId: w.Ada.id } })).toBe(1);
+  });
+
+  it('a latest report of none raises no alarm; a latest report that says tasks exist does', async () => {
+    await report(false);
+    await lateAda();
+    expect(await evaluateLeadCadence(db, NOW)).toEqual([]);
+    await report(true);
+    expect(await evaluateLeadCadence(db, later(1))).toHaveLength(1);
+    expect(await alarms()).toHaveLength(1);
+  });
+
+  it('the first report alarms AT ONCE for a lead already idle for the window: the clock is its last assignment, not the report time', async () => {
+    await report(null);
+    await lateAda(); // Ada last assigned 90 minutes before NOW; observed at NOW-70
+    expect(await evaluateLeadCadence(db, NOW)).toEqual([]);
+    await report(true); // reported now, at NOW
+    expect(await evaluateLeadCadence(db, NOW)).toHaveLength(1);
+  });
+
+  it('a flip back to exists alarms at once for a lead still idle', async () => {
+    await lateAda();
+    await report(false);
+    expect(await evaluateLeadCadence(db, NOW)).toEqual([]);
+    await report(true);
+    expect(await evaluateLeadCadence(db, later(1))).toHaveLength(1);
+  });
+
+  it('a report of none does not end an open episode: it stays open, raises nothing new, and still ends at the lead\'s next assignment', async () => {
+    await lateAda();
+    expect(await evaluateLeadCadence(db, NOW)).toHaveLength(1);
+    await report(false);
+    expect(await evaluateLeadCadence(db, later(5))).toEqual([]);
+    expect(await db.leadCadenceEpisode.count({ where: { workerId: w.Ada.id, endedAt: null } })).toBe(1);
+    await event('task.assigned', 'Ada', -6);
+    await evaluateLeadCadence(db, later(7));
+    expect(await db.leadCadenceEpisode.count({ where: { workerId: w.Ada.id, endedAt: null } })).toBe(0);
+    expect(await alarms()).toHaveLength(1);
+  });
+
+  it('a lead that assigned a task to ITSELF inside the window is not alarmed (self-assignment counts)', async () => {
+    await bind('Ada');
+    await bind('Liam');
+    await event('task.assigned', 'Ada', 20, 'Ada');
+    await evaluateLeadCadence(db, at(70));
+    expect(await evaluateLeadCadence(db, NOW)).toEqual([]);
+    expect(await evaluateLeadCadence(db, later(39))).toEqual([]);
+    expect(await evaluateLeadCadence(db, later(41))).toHaveLength(1); // 61 minutes after the assignment
+  });
+
+  it('no clause reads queued Hadron tasks: a queue of pending tasks neither alarms under a report of none nor under a report of exists with no free worker', async () => {
+    await lateAda();
+    await db.agentTask.createMany({ data: [1, 2, 3].map((n) => ({ appId: app.id, title: `Q${n}`, ownerUserId: user.id })) });
+    await report(false);
+    expect(await evaluateLeadCadence(db, NOW)).toEqual([]);
+    await report(true);
+    await db.agentTask.create({ data: { appId: app.id, title: 'busy', ownerUserId: user.id, assigneeWorkerId: w.Liam.id, assignedAt: at(10) } });
+    expect(await evaluateLeadCadence(db, later(1))).toEqual([]);
+  });
+
+  it('there is no staleness rule: a report made long ago still counts as the latest', async () => {
+    await db.app.update({ where: { id: app.id }, data: { externalTasksExist: true, externalTasksReportedAt: new Date('2025-01-01T00:00:00.000Z') } });
+    await lateAda();
+    expect(await evaluateLeadCadence(db, NOW)).toHaveLength(1);
+  });
+
+  it('the report is per App: another App\'s report does not switch this one on', async () => {
+    await report(null);
+    await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other`, externalTasksExist: true } });
+    await lateAda();
+    expect(await evaluateLeadCadence(db, NOW)).toEqual([]);
+  });
+
+  it('a report of none that commits between the pass\'s reads and the raise transaction publishes nothing', async () => {
+    await lateAda();
+    const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    const spy = vi.spyOn(db, '$transaction').mockImplementationOnce((async (...a: unknown[]) => {
+      await report(false);
+      return real(...a);
+    }) as never);
+    expect(await evaluateLeadCadence(db, NOW)).toEqual([]);
+    spy.mockRestore();
+    expect(await alarms()).toHaveLength(0);
+    expect(await db.leadCadenceEpisode.count()).toBe(0);
+    expect(await db.agentTeamAlarmSchedule.count()).toBe(0);
   });
 });
 
