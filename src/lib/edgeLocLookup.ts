@@ -38,6 +38,21 @@ import { deriveEdgeLoc, deriveEdgeLocAlternates, compareMigratedSuffix, migrated
  * No retry is added here or in the callers: the error reaches them as any other transaction failure does, and
  * wrapping the move in a deadlock retry is a follow-up. Pinned in `edgeLocLock4718.test.ts`.
  *
+ * PRECONDITION FOR CALLERS (#4888). Hold the memory channel key AND the exclusive advisory locks over the full path (strict
+ * ancestors + exact loc) of every edge endpoint you will write, BEFORE calling. That is what keeps the two-edge cycle above
+ * unreachable: an edge `moveNodeSubtree` re-keys has an endpoint at or under the moved source `S`, so that endpoint's path
+ * contains `S`, the mover holds `S`'s key (`lockSourceForMove`) and the writer holds the same key, so they serialize on the
+ * advisory keys before either reaches an edge row. Audited callers: `syncGraphFromGithub.ts` (channel key, then
+ * `acquireLockSet` over the edge source path and external-target snapshots) and `pendingEdgePromotion.ts` (channel key, then
+ * both endpoints' paths). The tombstone archive's edge update runs after its own address locks and only touches edges to
+ * deleted endpoints, which the writers' live-endpoint checks skip. A NEW caller without those keys can form the cycle:
+ * add them, or wrap its transaction in a retry, before using this function. It is argued from the lock keys, not proven by a
+ * test (the pin drives the seam without the keys on purpose).
+ *
+ * When the bound is hit with the lock still unheld, the newest selection is returned (the caller's upsert is still safe
+ * against a twin only while the row stays), and ONE `edge_loc_lock_cap_reached` warn line records it; it names no loc,
+ * name or id.
+ *
  * It is only a lock when `db` is the caller's open transaction client; outside a transaction it ends with the statement.
  *
  * LOCK ORDER (one fixed order across paths; the order among SEVERAL edge rows is each writer's own, which is the case above):
@@ -74,7 +89,11 @@ export async function derivedEdgeLocForUpsert(
     // FOR KEY SHARE conflicts with a delete and with a key (loc) update, and waits for either to finish.
     const held = await db.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM edges WHERE id = ${picked.lock} AND memory_id = ${edge.memoryId} AND loc = ${picked.loc} FOR KEY SHARE`;
-    if (held.length > 0 || attempt >= MAX_LOCK_ATTEMPTS) return picked.loc;
+    if (held.length > 0) return picked.loc;
+    if (attempt >= MAX_LOCK_ATTEMPTS) {
+      console.warn(JSON.stringify({ event: 'edge_loc_lock_cap_reached', attempts: attempt + 1 }));
+      return picked.loc;
+    }
   }
 }
 
