@@ -7,6 +7,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { derivedEdgeLocForUpsert } from './edgeLocLookup.js';
+import pg from 'pg';
 
 const NAME = 'a😀b';
 const MIGRATED = 'root:a-b:leaf';
@@ -54,6 +55,61 @@ async function waitForLockWaiters(n: number) {
     await new Promise((res) => setTimeout(res, 5));
   }
   throw new Error('the expected lock wait was never observed');
+}
+
+/**
+ * #4940: waiters the pin under test must NOT mistake for its own. One sits in ANOTHER database (a parallel test worker's
+ * clone, or `postgres`), one in THIS database blocked behind a holder that has nothing to do with the writer. Both stay
+ * blocked until `release()`. A barrier that counts any row-lock waiter in the cluster releases on either.
+ */
+async function startDecoyWaiters() {
+  const otherName = `edgelock_decoy_${generateId().replace(/\W/g, '').slice(0, 16).toLowerCase()}`;
+  const url = new URL(process.env.DATABASE_URL!);
+  const admin = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  await admin.connect();
+  await admin.query(`CREATE DATABASE ${otherName}`);
+  const toOther = () => { const u = new URL(url); u.pathname = `/${otherName}`; return new pg.Client({ connectionString: u.toString() }); };
+  const holderOther = toOther();
+  const waiterOther = toOther();
+  await holderOther.connect();
+  await waiterOther.connect();
+  await holderOther.query('CREATE TABLE d(id int PRIMARY KEY); INSERT INTO d VALUES (1)');
+  await holderOther.query('BEGIN; UPDATE d SET id = 1 WHERE id = 1');
+  const otherBlocked = waiterOther.query('UPDATE d SET id = 1 WHERE id = 1').catch(() => undefined);
+
+  const sameTable = `decoy4940_${generateId().replace(/\W/g, '').slice(0, 12).toLowerCase()}`;
+  await db.$executeRawUnsafe(`CREATE TABLE ${sameTable}(id int PRIMARY KEY)`);
+  await db.$executeRawUnsafe(`INSERT INTO ${sameTable} VALUES (1)`);
+  let releaseSame!: () => void;
+  const sameRelease = new Promise<void>((r) => { releaseSame = r; });
+  let sameHeld!: () => void;
+  const sameHolds = new Promise<void>((r) => { sameHeld = r; });
+  const holderSame = db.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`UPDATE ${sameTable} SET id = 1 WHERE id = 1`);
+    sameHeld();
+    await sameRelease;
+  }, { timeout: 60_000 });
+  await sameHolds;
+  const waiterSame = db.$transaction((tx) => tx.$executeRawUnsafe(`UPDATE ${sameTable} SET id = 1 WHERE id = 1`), { timeout: 60_000 }).catch(() => undefined);
+  // Both decoys are really blocked before the pin starts.
+  const until = Date.now() + 10_000;
+  for (;;) {
+    const [r] = await db.$queryRaw<Array<{ n: number }>>`
+      SELECT count(DISTINCT pid)::int AS n FROM pg_locks WHERE NOT granted AND locktype IN ('transactionid', 'tuple') AND pid <> pg_backend_pid()`;
+    if (r.n >= 2) break;
+    if (Date.now() > until) throw new Error('the decoy waiters never blocked');
+    await new Promise((res) => setTimeout(res, 5));
+  }
+  return async function release() {
+    await holderOther.query('COMMIT').catch(() => undefined);
+    releaseSame();
+    await Promise.all([otherBlocked, holderSame, waiterSame]);
+    await holderOther.end();
+    await waiterOther.end();
+    await db.$executeRawUnsafe(`DROP TABLE ${sameTable}`);
+    await admin.query(`DROP DATABASE ${otherName}`);
+    await admin.end();
+  };
 }
 
 describe('derivedEdgeLocForUpsert holds the selected migrated row to commit (#4718)', () => {
@@ -173,7 +229,16 @@ describe('KNOWN, ACCEPTED: a writer key-sharing two edges against a mover re-key
   // current caller can form it). Pinned as the recorded behavior of the synthetic cycle, not as a request to make it
   // succeed. Exactly one side is the deadlock victim (40P01); which one is the database's choice (it depends on who
   // waits longest), so the pin asserts that and never names a role. No sleep: both sides advance on OBSERVED lock waits.
-  it('one side aborts 40P01, the other commits, and a retry of the victim completes with both edges carried', async () => {
+  it('one side aborts 40P01, the other commits, and a retry of the victim completes with both edges carried, with unrelated lock waiters present (#4940)', async () => {
+    const releaseDecoys = await startDecoyWaiters();
+    try {
+      await runTwoEdgeCycle();
+    } finally {
+      await releaseDecoys();
+    }
+  });
+
+  async function runTwoEdgeCycle() {
     const { org, graph } = await createDbOrgAndGraph(db, { orgName: 'edge-lock-multi', graphName: 'edge/multi4718' });
     const dest = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: 'edge-lock-multi:edge/dest', name: 'edge/dest', class: 'knowledge' },
@@ -228,7 +293,7 @@ describe('KNOWN, ACCEPTED: a writer key-sharing two edges against a mover re-key
       await db.$transaction((tx) => move(tx), { timeout: 20_000 });
       expect(await db.edge.count({ where: { sourceId: source.id, memoryId: dest.id } })).toBe(2);
     }
-  });
+  }
 });
 
 describe('the post-lock re-check and the capped re-select loop (#4888)', () => {
