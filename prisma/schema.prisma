@@ -3668,7 +3668,7 @@ model ChatToolTeardownIntent {
   provider         String
   toolConnectionId String    @map("tool_connection_id")
   connectionId     String?   @map("connection_id")
-  /// 'PENDING' | 'CONFIRMED' | 'CAPPED'.
+  /// 'PENDING' | 'CONFIRMED' | 'CAPPED' (chk_chat_tool_teardown_state, #4945: Prisma cannot model it; post-push.sql and the migration carry it).
   state            String    @default("PENDING")
   attempts         Int       @default(0)
   lastAttemptAt    DateTime? @map("last_attempt_at")
