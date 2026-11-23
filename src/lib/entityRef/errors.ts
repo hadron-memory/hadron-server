@@ -286,8 +286,10 @@ export class InvalidContentScopeError extends Error {
 }
 
 /**
- * Spec 033 FR-026 — the four-point embedding-inversion disclosure that must
- * accompany an opt-in to vector indexing on an encrypted memory. Single
+ * Spec 033 FR-026 — the four-point disclosure that must accompany an opt-in
+ * to vector indexing on an encrypted memory: plaintext vectors, the verbatim
+ * chunk text stored unencrypted beside them (#433), what a database viewer
+ * sees, and that a revoke removes both. Single
  * source of truth for the disclosure copy: the error message below quotes
  * it, the `updateMemory` typeDefs doc-comment quotes it, and the
  * EncryptedVectorIndexNotAcknowledgedError.disclosure property exposes it
@@ -295,16 +297,17 @@ export class InvalidContentScopeError extends Error {
  */
 export const FR_026_DISCLOSURE = [
   '(a) Stored vectors are plaintext — they are NOT encrypted at rest the way the content column is.',
-  '(b) Embedding inversion can partially reconstruct source text from a vector (partial, not full reconstruction).',
-  '(c) Anyone with database access is therefore a potential viewer of that partial content, even though the content column itself is encrypted.',
-  '(d) The opt-in is revocable; revoking stops further indexing AND removes the memory\'s already-stored vectors.',
+  '(b) When the index includes content passages (embeddingSource contentChunks or both), the verbatim text of each indexed chunk is ALSO stored UNENCRYPTED, in node_embeddings.chunk_text next to its vector: a database dump holds that text in full, readable form. Embedding inversion can additionally reconstruct source text, partially, from a vector alone.',
+  '(c) Anyone with database access is therefore a potential viewer of that text (the full text of every indexed chunk, and whatever inversion recovers from the vectors), even though the content column itself is encrypted.',
+  '(d) The opt-in is revocable; revoking stops further indexing AND removes the memory\'s already-stored vectors and their chunk text.',
 ] as const;
 
 /**
  * 033-rag-vector-retrieval — surfaced by `updateMemory`/`createMemory` when a
  * caller tries to enable the vector index on an ENCRYPTED memory without
  * acknowledging the embedding-inversion disclosure (FR-026). Stored vectors
- * are plaintext and partially invertible, so an encrypted memory must not be
+ * are plaintext and partially invertible, and (with content passages) their
+ * verbatim chunk text is stored unencrypted, so an encrypted memory must not be
  * silently indexed; the caller affirms via `acknowledgeVectorInversionRisk`.
  * The CHECK constraint `chk_memory_vector_encrypted_ack` is the DB backstop.
  *

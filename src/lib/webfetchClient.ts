@@ -97,6 +97,8 @@ export interface HttpRequestInput {
   json?: unknown;
   maxBytes?: number;
   auth?: WebFetchAuth;
+  /** hadrontool-webfetch#10 (cor:web:010:02): `none` returns a 3xx as-is and never follows it, so a credential reaches no second hop. */
+  redirects?: 'follow' | 'none';
 }
 
 export interface HttpRequestResult {
@@ -285,6 +287,18 @@ export function checkUrl(input: CheckUrlInput): Promise<CheckUrlResult> {
  */
 export function httpRequest(input: HttpRequestInput): Promise<HttpRequestResult> {
   return runOperation<HttpRequestResult>('http-request', input);
+}
+
+/**
+ * #4882: the contract the tool declares at `GET /ops/contract` (hadrontool-webfetch#13). A build that predates it answers 404, which
+ * `runToolRequest` surfaces as a WEBFETCH_TOOL_ERROR; the gate in `webfetchContract.ts` reads every failure as "declares nothing".
+ */
+export interface WebfetchContractDeclaration {
+  contract?: unknown;
+  capabilities?: unknown;
+}
+export function getWebfetchContract(): Promise<WebfetchContractDeclaration> {
+  return runToolRequest<WebfetchContractDeclaration>('/ops/contract', 'GET');
 }
 
 /** Create one durable GET-only watch job. One request; no blind retries. */

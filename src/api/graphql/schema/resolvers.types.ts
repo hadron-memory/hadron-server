@@ -17,6 +17,7 @@ import { callerIsWorkerSession } from './resolvers.instruction.js';
 import { servedPromptOwnerFields, servedPromptTypeResolvers } from './resolvers.servedPrompt.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { loadViewerManages } from './resolvers.appViewerManages.js';
+import { loadSelfJoinFacts } from './resolvers.appSelfJoinFacts.js';
 import { resolveSelfJoinRole, SelfJoinNotAllowedError } from '../../../controller/operations/joinApp.js';
 import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
@@ -66,6 +67,7 @@ import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
+import { resendSenderDomainVerified } from '../../../lib/resendSenders.js';
 import { publicAssetUrl, isPublicHotlinkEnabled } from '../../assetPublic.js';
 import { canManageAssetPublicLink, PUBLIC_LINK_MEMORY_SELECT } from '../../../lib/asset/publicLink.js';
 import {
@@ -96,6 +98,7 @@ import {
   requireAppRead,
   canReadApp,
   appChildrenWithheld,
+  isUserOwnedAppOwnerMember,
   APP_OWNER_MEMBER_ROLE,
   userOwnedAppOwnerMemberWhere,
   safeCanonicalUrn,
@@ -427,6 +430,20 @@ async function loadReadableNestedApp(ctx: Context, appId: string) {
 async function appProjectionWithheld(ctx: Context, appId: string): Promise<boolean> {
   const app = await loadApp(ctx, appId);
   return !!app && appChildrenWithheld(ctx, app);
+}
+
+/**
+ * #3765 (ruling 0260, cor:dmo:050:12): is this App's ROSTER (members, memberCount, appAgents, agents, and the same install fact as
+ * agentId / agent / installedAgentUrn) withheld from the caller? Everything {@link appProjectionWithheld} withholds, except from a
+ * current owner-role member of the user-owned App: "the same rights as the App's owner, except a user-owned App's AI
+ * configuration". The member is decided by {@link isUserOwnedAppOwnerMember} in its own statement (a live, non-impersonated user with
+ * a CURRENT owner-role row on a live user-owned App), never from a cached or token-carried role. The AI configuration fields keep
+ * {@link appProjectionWithheld}, so this arm cannot loosen them.
+ */
+async function appRosterWithheld(ctx: Context, appId: string): Promise<boolean> {
+  const app = await loadApp(ctx, appId);
+  if (!app || !appChildrenWithheld(ctx, app)) return false;
+  return !(await isUserOwnedAppOwnerMember(ctx, app));
 }
 
 async function filterReadableAppRows<T extends {
@@ -1241,6 +1258,18 @@ export const typeResolvers = {
   ResendSender: {
     hasApiKey: (s: { apiKeyEncrypted?: string | null }) => s.apiKeyEncrypted != null,
     from: (s: { fromAddress: string }) => s.fromAddress,
+    // #4865 — authorize BEFORE the lookup. This field spends the org's Resend key at the
+    // capability tool, so it re-derives the sender's own read gate (resendSender's
+    // isOrgMemberOrAdmin) instead of trusting whatever query handed the object out: the list
+    // also answers App keys of the org, which are not members. No access, no decrypt, no call.
+    domainVerified: async (
+      s: { organizationId: string; fromAddress: string; apiKeyEncrypted: string },
+      _: unknown,
+      ctx: Context,
+    ): Promise<boolean | null> => {
+      if (!(await isOrgMemberOrAdmin(ctx, s.organizationId))) return null;
+      return resendSenderDomainVerified(s);
+    },
   },
   CompiledBootPrompt: {
     lintWarnings: (r: { node: { id: string }; revNo: number }, args: { first?: number | null; after?: string | null }, ctx: Context) =>
@@ -1975,21 +2004,20 @@ export const typeResolvers = {
      */
     selfJoin: async (a: { id: string }, _: unknown, ctx: Context) => {
       if (!ctx.userId || isRefusedPrincipal(ctx)) return null;
-      // Re-read the App by id: a route that reaches App with a narrower select leaves the lifecycle columns undefined, and
-      // reading `undefined` as "installed" would answer OPEN where joinApp refuses (BLIND P2-2). The ownership columns the read
-      // gate needs come from the same fresh row, never from what the parent happens to carry.
-      const app = await ctx.db.app.findUnique({
-        where: { id: a.id },
-        select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
-      });
-      if (!app || app.deletedAt) return null;
+      // Re-read the App by id (batched per request, resolvers.appSelfJoinFacts.ts): a route that reaches App with a narrower select
+      // leaves the lifecycle columns undefined, and reading `undefined` as "installed" would answer OPEN where joinApp refuses
+      // (BLIND P2-2). The ownership columns the read gate needs come from the same fresh row, never from what the parent carries.
+      const facts = await loadSelfJoinFacts(ctx, a.id);
+      if (!facts || facts.app.deletedAt) return null;
+      const app = facts.app;
       if (!(await canReadApp(ctx, app))) return null;
       // The shared gate decision (resolveSelfJoinRole) is joinApp's own; the rows around it are pinned one by one against the real
-      // joinApp. ONE deliberate difference: joinApp checks the lifecycle first, then the idempotent re-join, but a member is
-      // answered MEMBER before the lifecycle check (condition 4: a member learns nothing new, and MEMBER is only what they know),
-      // so a member of an uninstalled App reads MEMBER where joinApp would refuse it as uninstalled (pinned).
-      const member = await ctx.db.appMember.findUnique({ where: { appId_userId: { appId: app.id, userId: ctx.userId } }, select: { userId: true } });
-      if (member) return { state: 'MEMBER', role: null };
+      // joinApp. TWO deliberate differences, each pinned: (1) joinApp checks the lifecycle first, then the idempotent re-join, but a
+      // member is answered MEMBER before the lifecycle check (condition 4: a member learns nothing new, and MEMBER is only what they
+      // know), so a member of an uninstalled App reads MEMBER where joinApp refuses it as uninstalled; (2) capacity is outside the
+      // answer (condition 2: a state and a role, never maxMembers or a member count, and answering FULL would reveal that the count
+      // reached the maximum), so a full App reads OPEN where joinApp refuses it with MaxMembersExceededError.
+      if (facts.isMember) return { state: 'MEMBER', role: null };
       if (app.uninstalledAt) return { state: 'CLOSED', role: null };
       try { return { state: 'OPEN', role: await resolveSelfJoinRole(ctx.db, app.id) }; }
       catch (e) { if (e instanceof SelfJoinNotAllowedError) return { state: 'CLOSED', role: null }; throw e; } // any other failure is a real failure, never CLOSED
@@ -2046,7 +2074,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       // #2640: the URN names the primary Agent, so it answers as that Agent's own read does.
       const agentUrn = (await readablePrimaryAgent(ctx, a))?.urn;
       if (!agentUrn) return null;
@@ -2081,7 +2109,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ): Promise<string | null> => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       return (await readablePrimaryAgent(ctx, a))?.id ?? null;
     },
     agent: async (
@@ -2089,7 +2117,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       const eager = readPrimaryAgentRecordFromEager(a) as (NestedAgentRow & Record<string, unknown>) | null | undefined;
       if (eager !== undefined) return readableNestedAgent(ctx, eager);
       const agent = await getPrimaryAgent(ctx.db, a.id, { include: AGENT_INCLUDE });
@@ -2100,7 +2128,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       const installs = await listAppInstallations(ctx.db,a.id);
       const agents = await ctx.db.agent.findMany({where:{id:{in:installs.map(r=>r.agentId)}},include:AGENT_INCLUDE});
       const byId = new Map(agents.map(agent=>[agent.id,agent]));
@@ -2113,7 +2141,7 @@ export const typeResolvers = {
         .filter((ag): ag is NonNullable<typeof ag> => ag !== null);
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       if (!(await loadReadableNestedApp(ctx, a.id))) return [];
       return ctx.db.appMember.findMany({
         where: { appId: a.id },
@@ -2121,7 +2149,7 @@ export const typeResolvers = {
       });
     },
     memberCount: async (a: { id: string }, _: unknown, ctx: Context) => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       if (!(await loadReadableNestedApp(ctx, a.id))) return 0;
       return ctx.db.appMember.count({ where: { appId: a.id } });
     },
@@ -2200,7 +2228,7 @@ export const typeResolvers = {
     // parent App onto each row so `AppAgent.app` resolves without an
     // N+1 DB lookup per row.
     appAgents: async (a: { id: string; appAgents?: unknown } & Record<string, unknown>, _: unknown, ctx: Context) => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       const installs = await listAppInstallations(ctx.db,a.id);
       const eager = readAllAgentRecordsFromEager(a) ?? [];
       const agents = new Map(eager.map(agent=>[(agent as {id:string}).id,agent] as const));

@@ -47,9 +47,12 @@ import { GraphQLError } from 'graphql';
  *   WEBSEARCH_PROVIDER_API_KEY  the provider's API key, passed inline per request (optional)
  *   WEBSEARCH_PROVIDER_AUTH     'bearer' (default) | 'header' — how the key is carried
  *   WEBSEARCH_PROVIDER_HEADER   header name when WEBSEARCH_PROVIDER_AUTH='header' (e.g. X-Subscription-Token)
+ *   WEBSEARCH_TOOL_CONTRACT_VERSION  the contract version the tool declares (optional; #647 S1). Anything
+ *                               other than WEB_SEARCH_CONTRACT_VERSION is refused (WEBSEARCH_TOOL_CONTRACT_MISMATCH)
+ *                               before any request. Unset = not declared, searches proceed.
  *
  * Error surface: WEBSEARCH_TOOL_NOT_CONFIGURED / WEBSEARCH_TOOL_UNREACHABLE /
- * WEBSEARCH_TOOL_ERROR as GraphQL extensions.code — plus pass-through of the
+ * WEBSEARCH_TOOL_ERROR / WEBSEARCH_TOOL_CONTRACT_MISMATCH as GraphQL extensions.code — plus pass-through of the
  * tool's own stable, typed codes (validation_error, provider_not_configured,
  * provider_unauthorized, provider_rejected, provider_rate_limited,
  * upstream_unreachable, upstream_timeout) via extensions.webSearchErrorCode.
@@ -69,6 +72,20 @@ import { GraphQLError } from 'graphql';
  * version", not "looks similar".
  */
 export const WEB_SEARCH_CONTRACT_VERSION = 'web-search@1' as const;
+
+/**
+ * The mismatch text for a tool declaring a contract version other than the one
+ * this core speaks, or `undefined` when the declaration is absent or matches
+ * (so a returned string means REFUSE; #647 S1). Absent is accepted: the declaration is opt-in per deployment, and
+ * `webSearch` also refuses an answer whose own `contractVersion` differs. Shared
+ * by `webSearch` (declared via `WEBSEARCH_TOOL_CONTRACT_VERSION`) and the
+ * conformance runner, so both refuse the same tools for the same reason.
+ */
+export function contractVersionMismatch(declared: string | undefined): string | undefined {
+  const d = declared?.trim();
+  if (!d || d === WEB_SEARCH_CONTRACT_VERSION) return undefined;
+  return `The search tool declares ${d}; this core speaks ${WEB_SEARCH_CONTRACT_VERSION}. Refused before any request.`;
+}
 
 /**
  * Core-sourced provider credential, passed inline per request (`cor:web:020:02`).
@@ -191,6 +208,10 @@ export function providerCredentialFromEnv(): { provider?: string; auth?: WebSear
  */
 export async function webSearch(input: WebSearchInput): Promise<WebSearchResponse> {
   const { baseUrl, token } = toolConfig();
+  // #647 S1: a tool declaring another contract version cannot read a v1 query.
+  // Refuse before sourcing the credential, so nothing is sent anywhere.
+  const mismatch = contractVersionMismatch(process.env.WEBSEARCH_TOOL_CONTRACT_VERSION);
+  if (mismatch) throw new GraphQLError(mismatch, { extensions: { code: 'WEBSEARCH_TOOL_CONTRACT_MISMATCH' } });
   const { provider, auth } = providerCredentialFromEnv();
 
   const requestBody = {
@@ -276,6 +297,15 @@ export async function webSearch(input: WebSearchInput): Promise<WebSearchRespons
     throw new GraphQLError('Web search service returned an unexpected response.', {
       extensions: { code: 'WEBSEARCH_TOOL_ERROR' },
     });
+  }
+  // #647 S1: a tool that answers in another contract version is refused at
+  // request time, whatever the deployment declared. Absent is accepted (the
+  // field is optional in the envelope); a present, different value is not.
+  if (payload.contractVersion !== undefined && payload.contractVersion !== WEB_SEARCH_CONTRACT_VERSION) {
+    throw new GraphQLError(
+      `The search tool answered as ${JSON.stringify(payload.contractVersion)}; this core speaks ${WEB_SEARCH_CONTRACT_VERSION}.`,
+      { extensions: { code: 'WEBSEARCH_TOOL_CONTRACT_MISMATCH' } },
+    );
   }
   return payload as unknown as WebSearchResponse;
 }

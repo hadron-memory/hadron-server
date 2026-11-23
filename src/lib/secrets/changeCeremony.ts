@@ -2,6 +2,7 @@ import { deleteLockedAppSecret } from './autoDelete.js';
 import { lockProtectionClients, endProtectionClients } from './protection.js';
 /** #3999; cor:sec:070:02. Separate proof and change assertions; the requester, browser and immutable request bind both. */
 import { createHash, randomBytes } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
@@ -26,6 +27,13 @@ export const secretProofChallenge = (requestId: string, ceremonyId: string) => h
 export const secretChangeChallenge = (r: ChangeRequest) => hash(JSON.stringify(['hadron-secret-change:v1', r.id, r.requester_id,
  r.app_id,r.secret_id,r.secret_name,r.secret_kind,r.metadata,r.operation,r.snapshot,r.size_bytes,r.key_version,r.protected_result,r.write_version,
  r.staged_value_encrypted === null ? null : hash(r.staged_value_encrypted).toString('hex'),r.expires_at.toISOString()]));
+
+/**
+ * #4703: the decline challenge. A separate string from the approve challenge, so an assertion made to approve can never end the
+ * request and a decline assertion can never approve it. It binds the request's identity, requester and deadline.
+ */
+export const secretDeclineChallenge = (r: ChangeRequest) => hash(JSON.stringify(['hadron-secret-change-decline:v1', r.id, r.requester_id,
+ r.app_id, r.secret_name, r.operation, r.snapshot, r.expires_at.toISOString()]));
 
 async function request(db: Prisma.TransactionClient, id: string): Promise<ChangeRequest | null> {
  const [r] = await db.$queryRaw<ChangeRequest[]>`SELECT * FROM secret_change_requests WHERE id=${id}`;
@@ -83,6 +91,9 @@ export async function proveSecretChange(db: PrismaClient, a: SecretAssertion) {
   if (current.state !== 'open' || current.expires_at <= now) return { outcome:'ended' as const,state:current.expires_at <= now && current.state==='open'?'expired':current.state };
   const nonce = randomBytes(32).toString('base64url'), challenge=secretChangeChallenge(current);
   const ceremony=await createCeremony(tx,{purpose:'SECRET_CHANGE',browserNonceHash:hash(nonce).toString('hex'),ttlSeconds:600,challengeHash:hash(challenge).toString('hex')});
+  // #4703: the requester may end their own request instead; its own ceremony, bound to the decline challenge.
+  const declineChallenge=secretDeclineChallenge(current);
+  const declineCeremony=await createCeremony(tx,{purpose:'SECRET_CHANGE',browserNonceHash:hash(nonce).toString('hex'),ttlSeconds:600,challengeHash:hash(declineChallenge).toString('hex')});
   const app=await tx.app.findUniqueOrThrow({where:{id:r.app_id}});
   const appUrn = emitEntityUrnV2('app', app.urn);
   // The pinned urn-lib version has only the former org/user secret arity; the App owner marker is cor:urn:010:01.
@@ -92,7 +103,7 @@ export async function proveSecretChange(db: PrismaClient, a: SecretAssertion) {
    ? (current.secret_id ? (current.write_version ? 'Store a new version' : 'Update secret metadata') : 'Create a protected secret') +
      (current.protected_result === null ? '' : current.protected_result ? ' and turn protection on' : ' and turn protection off')
    : ({DELETE:'Delete this secret',SET_PROTECTED:'Turn protection on',CLEAR_PROTECTED:'Turn protection off'} as const)[current.operation];
-  return { outcome:'change' as const,nonce,ceremonyId:ceremony.id,challenge:challenge.toString('base64url'),rpId:passkeyRpId(),
+  return { outcome:'change' as const,nonce,ceremonyId:ceremony.id,challenge:challenge.toString('base64url'),rpId:passkeyRpId(),decline:{ceremonyId:declineCeremony.id,challenge:declineChallenge.toString('base64url')},
    summary:{app:appUrn,secret:secretUrn,operation:current.operation,change,...(current.operation==='STORE'?{metadata:current.metadata}:{}),sizeBytes:current.size_bytes,requester:current.requester_id,expiresAt:current.expires_at.toISOString()} };
  });
 }
@@ -129,7 +140,9 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
    await deleteLockedAppSecret(tx,secret,actor);return null;
   }
   if(r.operation==='STORE'){
-   const wasProtected = secret?.protected;
+   // #4717 items 1-2 (cor:sec:010:05): a create starts unprotected in the trail and ends protected, so it records PROTECT;
+   // a protection change that leaves the metadata as it was records only the protection event, never a METADATA event.
+   const before = secret ? { protected: secret.protected, metadata: secret.metadata } : null;
    let plaintext: Buffer | null = null;
    if(r.write_version){
     if(!r.staged_value_encrypted || r.key_version===null || r.size_bytes===null)throw refuse();
@@ -140,10 +153,12 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
     if(!secret)secret=await tx.secret.create({data:{ownerType:'app',ownerId:r.app_id,name:r.secret_name,kind:r.secret_kind,metadata:r.metadata as Prisma.InputJsonValue,valueEncrypted:null,protected:true,createdBy:r.requester_id}});
     const versionNo=r.write_version?await addAppSecretVersion(tx,secret,plaintext!.toString('utf8'),r.size_bytes!,actor):newest?.versionNo??null;
     await tx.secret.update({where:{id:secret.id},data:{metadata:r.metadata as Prisma.InputJsonValue,updatedBy:r.requester_id,...(r.protected_result===null?{}:{protected:r.protected_result})}});
-    await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:!r.write_version?'METADATA':newest?'VERSION':'STORE',versionNo,actor});
-    if (wasProtected !== undefined && r.protected_result !== null && r.protected_result !== wasProtected) {
-     await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:r.protected_result?'PROTECT':'UNPROTECT',actor});
-    }
+    // before === null only for a protected create (the sole STORE staged with secret_id null), whose row is born protected.
+    const protectedAfter = r.protected_result ?? before?.protected ?? true;
+    const protectionChanged = (before?.protected ?? false) !== protectedAfter;
+    const protectionOnly = !r.write_version && protectionChanged && before !== null && isDeepStrictEqual(r.metadata, before.metadata);
+    if (!protectionOnly) await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:!r.write_version?'METADATA':newest?'VERSION':'STORE',versionNo,actor});
+    if (protectionChanged) await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:protectedAfter?'PROTECT':'UNPROTECT',actor});
    }finally{plaintext?.fill(0);}
   }else{
    if(!secret)throw refuse();
@@ -154,6 +169,46 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
    await endProtectionClients(tx,secret.id,protectionGrants,r.requester_id);
   }
   await tx.$executeRaw`UPDATE secret_change_requests SET state='completed',ended_at=(${now.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${r.id}`;
+  return null;
+ });
+ if(result instanceof GraphQLError)throw result;
+}
+/**
+ * #4703 (cor:sec:070:02): the requester ends their own open request with a passkey proof, as for approve. Only the requester
+ * (any other person is refused as for a missing request), one guarded `open` -> `declined` update under the request's row lock,
+ * and the database clears the staged value with the state. Same standing and cooling-off judgment as completion; an open
+ * request past its deadline ends `expired`, never `declined`. Locks: the user anchor, then the request, then the credential
+ * (the order completion takes them in, minus the secret lock a decline does not need).
+ */
+export async function declineSecretChange(db: PrismaClient, a: SecretAssertion): Promise<void> {
+ const located=await request(db,a.requestId);if(!located)throw refuse();
+ const verified=await verify(db,a,secretDeclineChallenge(located));
+ if(verified.snapshot.ownerId!==located.requester_id||!signingSurfacePolicy().signing)throw refuse();
+ const user=await db.user.findUnique({where:{id:located.requester_id},select:{roles:true,deletedAt:true}});
+ if(!user||user.deletedAt)throw refuse();
+ const ctx={db,userId:located.requester_id,roles:user.roles} as Context;
+ const result=await withAuthorizedTx(ctx,[{kind:'user',id:located.requester_id}],async(txCtx)=>{
+  await requirePersonOnlyAct(txCtx,'secret.change',refuse);
+ },async(tx)=>{
+  const [r]=await tx.$queryRaw<ChangeRequest[]>`SELECT * FROM secret_change_requests WHERE id=${located.id} FOR UPDATE`;
+  if(!r||r.requester_id!==verified.snapshot.ownerId)throw refuse();
+  // Lock the credential before the decision clock, so waiting cannot preserve an expired cooling-off or request judgment.
+  const [cred]=await tx.$queryRaw<Array<{window_ends_at:Date|null;window_outcome:string|null}>>`SELECT window_ends_at,window_outcome FROM passkey_credentials WHERE id=${verified.snapshot.passkeyId} FOR UPDATE`;
+  const [{now}]=await tx.$queryRaw<Array<{now:Date}>>`SELECT hadron_signing_now() AS now`;
+  if(r.state!=='open')throw refuse();
+  if(r.expires_at<=now){
+   await tx.$executeRaw`UPDATE secret_change_requests SET state='expired',ended_at=(${now.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${r.id} AND state='open'`;
+   return new GraphQLError('This secret change is no longer available.',{extensions:{code:'SECRET_CHANGE_REQUEST_EXPIRED'}});
+  }
+  // A credential that vanished between verification and this lock is a refusal, not a cooling-off (#4798 BLIND F3).
+  if(!cred)throw refuse();
+  if(cred.window_outcome===null&&cred.window_ends_at!==null&&cred.window_ends_at>now)throw new GraphQLError('This passkey is still in its cooling-off period.',{extensions:{code:'PASSKEY_COOLING_OFF'}});
+  const decided=await decideCeremonyAssertion(tx,{ceremonyId:a.ceremonyId,browserNonceHash:a.browserNonceHash,purpose:'SECRET_CHANGE',verified:verified.snapshot});
+  if(!decided||decided.ownerId!==r.requester_id)throw refuse();
+  // The one transition: guarded on `open`, so nothing else that ended the request is ever overwritten. The staged value is
+  // cleared by the table's own trigger in the same statement.
+  const moved=await tx.$executeRaw`UPDATE secret_change_requests SET state='declined',ended_at=(${now.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${r.id} AND state='open'`;
+  if(moved!==1)throw refuse();
   return null;
  });
  if(result instanceof GraphQLError)throw result;

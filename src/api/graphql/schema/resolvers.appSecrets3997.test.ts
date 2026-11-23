@@ -1,6 +1,7 @@
 /** S2 preparation: public resolver acceptance, independent of S1 key-helper API. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
+import { bigintAsString } from '../../../test/bigintJson.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -216,7 +217,7 @@ describe('App secrets S2 public acceptance', () => {
       await resolvers.Mutation.updateSecret({}, { ref: secret.id, value: 'CANARY-TWO-9f3a' }, context(memberId));
       await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'bad kind', kind: 'nope', value: 'CANARY-THREE-9f3a' }, context(memberId)).catch((e: unknown) => lines.push(String((e as Error)?.message)));
     } finally { spies.forEach((x) => x.mockRestore()); out.mockRestore(); err.mockRestore(); }
-    const rows = JSON.stringify([await db.secret.findMany(), await db.secretEvent.findMany(), await db.secretVersion.findMany()]);
+    const rows = JSON.stringify([await db.secret.findMany(), await db.secretEvent.findMany(), await db.secretVersion.findMany()], bigintAsString);
     expect(rows).not.toMatch(/CANARY-/);
     expect(lines.join('\n')).not.toMatch(/CANARY-/);
   });
@@ -369,10 +370,10 @@ describe('App secrets S2 public acceptance', () => {
     await resolvers.Mutation.updateSecret({}, { ref: s.id, value: 'EVENT-CANARY-2' }, context(memberId));
     await resolvers.Mutation.updateSecret({}, { ref: s.id, metadata: { a: 1 } }, context(memberId));
     await resolvers.Mutation.deleteSecret({}, { ref: s.id }, context(memberId));
-    const events = await db.secretEvent.findMany({ where: { secretId: s.id }, orderBy: { at: 'asc' } });
+    const events = await db.secretEvent.findMany({ where: { secretId: s.id }, orderBy: [{ at: 'asc' }, { seq: 'asc' }] });
     expect(events.map((e) => e.kind)).toEqual(['STORE', 'VERSION', 'METADATA', 'DELETE']);
     expect(events.every((e) => e.outcome === 'OK' && e.actorUserId === memberId && e.secretName === 'audited')).toBe(true);
-    expect(JSON.stringify(events)).not.toContain('EVENT-CANARY');
+    expect(JSON.stringify(events, bigintAsString)).not.toContain('EVENT-CANARY');
     await expect(db.secretEvent.update({ where: { id: events[0].id }, data: { outcome: 'x' } })).rejects.toBeTruthy();
     await expect(db.secretEvent.delete({ where: { id: events[0].id } })).rejects.toBeTruthy();
     await expect(db.$executeRaw`TRUNCATE TABLE secret_events`).resolves.toBeDefined(); // owner-only; the serve role's revoke is pinned below

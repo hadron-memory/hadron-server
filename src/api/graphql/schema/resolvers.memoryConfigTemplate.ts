@@ -48,6 +48,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { EntityNotFoundError } from '../../../lib/entityRef/errors.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { assertValidRuleRole } from '../../../lib/governedRole.js';
 import { AiConfigValidationError, validateAiConfigName } from '../../../lib/aiConfig.js';
 import { generateId } from '../../../lib/id.js';
@@ -395,7 +396,10 @@ async function filterWhere(ctx: Context, filter: MemoryConfigTemplateFilter | nu
     try {
       return (await fn()).id;
     } catch (e) {
-      if (e instanceof EntityNotFoundError) return null;
+      // #4893/#2975: a name-resolution failure on any arm (typed miss, malformed or
+      // ambiguous ref) matches nothing — the '' filter below answers the empty list,
+      // never an oracle. A database fault propagates.
+      if (refNamesNothing(e, { ambiguousNamesNothing: true })) return null;
       throw e;
     }
   };

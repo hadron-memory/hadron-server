@@ -20,8 +20,9 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
-import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../urn.js';
+import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical, UrnNotQualifiedError } from '../urn.js';
 import { MemoryNotFoundError } from '../asset/gate.js';
+import { refHasUnstorableChars } from './refNamesNothing.js';
 import { resolveLegacyAlias } from './legacyAlias.js';
 import { findLiveUrnAliasTargets, dedupeById } from '../urnAlias.js';
 
@@ -40,6 +41,9 @@ export async function resolveMemoryRef(
   ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
+  // #2975 §10 / Baylor P2 on #4948 (the memory arm, for the doors that fold memory refs):
+  // an unstorable code point is a DRIVER fault past the grammar, not a miss — reject it first.
+  if (refHasUnstorableChars(ref)) throw new UrnNotQualifiedError(ref, undefined, 'memory');
   const isId = isIdFunc(ref);
   if (!isId) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).

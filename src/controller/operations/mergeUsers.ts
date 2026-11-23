@@ -95,6 +95,7 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   connection_grants: ['created_by', 'updated_by', 'deleted_by'],
   principal_grants: ['created_by', 'updated_by', 'deleted_by'],
   slack_connections: ['created_by', 'deleted_by'],
+  telegram_connections: ['created_by', 'deleted_by'],
   mcp_servers: ['created_by', 'updated_by'],
   home_assistant_instances: ['created_by', 'updated_by'],
   apps: ['created_by', 'updated_by', 'deleted_by'],

@@ -376,7 +376,7 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
 // first write must prove it is WAITING on them (pg_locks barrier) and then be refused with no
 // memory created. Pinned at the guarded write itself (the transaction), not the resolver.
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
-import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
+import { waitForLockWaitersOfType, withLockHolders } from '../../../test/lockWait.js';
 
 async function hold(
   lock: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<unknown>,
@@ -719,8 +719,9 @@ describe('#2044 install memory — lock order and the pooled-only writers (Diego
       // delete of them cannot cycle with it.
       await db.$transaction(async (tx) => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
-        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${row!.id} FOR UPDATE NOWAIT`;
-        await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${row!.id} FOR UPDATE NOWAIT`;
+        // #3272: a 55P03 here names the backends holding locks (pid, query), so the next sighting identifies the holder.
+        await withLockHolders(db, 'memories', () => tx.$queryRaw`SELECT id FROM memories WHERE id = ${row!.id} FOR UPDATE NOWAIT`);
+        await withLockHolders(db, 'nodes', () => tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${row!.id} FOR UPDATE NOWAIT`);
       });
     } finally {
       revoker.release();

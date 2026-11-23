@@ -90,7 +90,11 @@ Only the exact value `true` counts; every other value leaves the default. It swi
 stays off, so no schedule fires and cadence is out of scope. The stack still holds no LLM key, mail or tool URL, so an LLM
 node fails for want of an AI config instead of spending. The flag applies from first boot, like the passkey switches.
 
-Each org seeds a synthetic `<org>:flows` memory with two entry flows. A script node makes one run-tool call with no model hop
+The script-node fixture flows (the `<org>:flows` memory and the App's one write grant, #4624) are seeded only on that stack: the seed,
+its `--check` and `stack.sh check` all read the container's `DISABLE_RUN_WORKER` (`false` only for `E2E_RUN_WORKER=true`), so the default stack
+holds no flows memory and verifies green, and a worker stack holds it and verifies green too (#4753).
+
+On a worker stack each org seeds a synthetic `<org>:flows` memory with two entry flows. A script node makes one run-tool call with no model hop
 (`hadron_create_node`, an in-process write), so these run without any AI config. Both run through the product's own path:
 `triggerAppRun` as an org admin (name the agent, e.g. the coordinator: the App has two) resolves the principal and consent,
 and the write is authorized by the App's write grant on the `runs` prefix, not by the fixture.
@@ -179,8 +183,9 @@ Credentials are freshly random on every new stack.
 checks. Only hashes are stored in DB, with raw values in a stack-scoped
 credential volume for check scripts. Seed and application logs do not print
 the raw credentials. Capture the final output privately if needed; `down`
-removes the credential volume. Signing and encryption keys are also randomly generated inside each fresh
-app launch, so a JWT from one stack does not authenticate to another. These
+removes the credential volume. Signing, encryption and App-secret root keys (`JWT_SECRET`, `HADRON_ENCRYPTION_KEY`, `SECRET_ROOT_KEY`, #4747) are also randomly generated inside each fresh
+app launch, so a JWT from one stack does not authenticate to another, and App secrets can be stored on a fresh stack with no manual change. The root key is
+never logged and never a development, test or production value; it is safe per launch because a stack's database is empty when it starts. These
 fixtures belong only in this local environment.
 
 ## Sign-in simulation limits

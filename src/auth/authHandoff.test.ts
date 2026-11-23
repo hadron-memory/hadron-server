@@ -18,6 +18,7 @@ import {
   issueLoginCode,
   redeemLoginCode,
   issueExchangeStartNonce,
+  peekExchangeStartNonce,
   redeemExchangeStartNonce,
 } from './authHandoff.js';
 
@@ -131,6 +132,7 @@ describe('exchange-start nonces', () => {
       redirect: '/app/orgs/org_123/integrations',
       origin: 'portal',
       flowId: null, // #2913: only a GraphQL start has a flow
+      loginHint: null, // #2948: only a hint-carrying Google start has one
     });
     // Single use.
     expect(await redeemExchangeStartNonce(nonce)).toBeNull();
@@ -151,7 +153,18 @@ describe('exchange-start nonces', () => {
       redirect: '/',
       origin: 'graphql',
       flowId: null, // #2913: no flow was named at issue time
+      loginHint: null, // #2948: no hint was named at issue time
     });
+    expect(await redeemExchangeStartNonce(nonce, 'gmail')).toBeNull();
+  });
+
+  // #4684: only a null hint was unit-tested; a non-null one must survive both the peek and the single-use redeem.
+  it('a non-null login hint round-trips through peek and redeem (#2948, #4684)', async () => {
+    const nonce = await issueExchangeStartNonce({ userId, orgId: 'org_123', redirect: '/', provider: 'gmail', origin: 'graphql', loginHint: 'me@example.com' });
+    expect(await peekExchangeStartNonce(nonce, 'gmail')).toMatchObject({ userId, orgId: 'org_123', loginHint: 'me@example.com' });
+    // Peeking leaves it redeemable, and the redeem returns the same hint exactly once.
+    expect(await redeemExchangeStartNonce(nonce, 'gmail')).toMatchObject({ userId, orgId: 'org_123', loginHint: 'me@example.com' });
+    expect(await peekExchangeStartNonce(nonce, 'gmail')).toBeNull();
     expect(await redeemExchangeStartNonce(nonce, 'gmail')).toBeNull();
   });
 

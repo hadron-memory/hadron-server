@@ -21,6 +21,7 @@ import {
   resolveOrgScope,
 } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
@@ -85,7 +86,8 @@ export const channelQueries = {
     if (filter?.appRef) {
       try {
         memoryWhere.push({ appId: (await resolveAppRef(ctx.db, filter.appRef.trim())).id });
-      } catch {
+      } catch (e) {
+        if (!isAppRefResolutionFailure(e)) throw e;
         return empty;
       }
     }

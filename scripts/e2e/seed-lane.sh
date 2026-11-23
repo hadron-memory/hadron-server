@@ -16,6 +16,8 @@ export PASSKEY_REGISTRATION_ENABLED=$([[ "$ROW_REGISTRATION" == true ]] && echo 
 export SIGNING_CEREMONY_ORIGINS=http://localhost:5173 PASSKEY_RP_ID=localhost
 export JWT_SECRET=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
 export HADRON_ENCRYPTION_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
+# #4747: a dedicated App-secret root key per lane (R18); assigned, so one from the caller's shell is replaced.
+export SECRET_ROOT_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
 export RATE_LIMIT_KEYRING=$(node -e "process.stdout.write(JSON.stringify({current:'e2e',keys:{e2e:require('crypto').randomBytes(32).toString('hex')}}))")
 if [[ "${ROW_MUTATE:-}" == drop-registration ]]; then
   surface=src/lib/signing/surface.ts

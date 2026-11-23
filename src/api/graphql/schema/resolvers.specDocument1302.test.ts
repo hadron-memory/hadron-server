@@ -283,7 +283,10 @@ describe('review round 1 (#3535 LOCAL, SECURITY, UX)', () => {
     expect(doc.markdown).toContain('Superseded.');
   });
 
-  it('a cap race: rows inserted after the first look are still refused, never rendered', async () => {
+  // #4768: slow, not blocked. The case creates SPEC_DOCUMENT_MAX_NODES nodes and reads the document twice: about 2.5-3.6 s solo on a busy host,
+  // 4.7-5.3 s with extra CPU load and 5.5 s (timed out at the 5000 ms default) under heavy load, as in a shared CI shard. A per-case
+  // limit, never a global testTimeout (#2003, the #2085/#2107 idiom); the assertions are unchanged, so a real blocking fault still fails.
+  it('a cap race: rows inserted after the first look are still refused, never rendered', { timeout: 30_000 }, async () => {
     await spec('big:1', 'Feature: Big', 'root');
     await db.node.createMany({
       data: Array.from({ length: SPEC_DOCUMENT_MAX_NODES - 1 }, (_, i) => ({

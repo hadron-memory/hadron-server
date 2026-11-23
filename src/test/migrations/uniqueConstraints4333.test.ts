@@ -14,7 +14,7 @@ import { maintenanceUrl, withDbName } from '../dbWorkers.js';
 import { cleanDb } from '../helpers.js';
 
 const CONSTRAINTS: Array<[table: string, name: string, columns: string]> = [
-  ['coordinator_cadence_episodes', 'coordinator_cadence_episodes_event_id_key', 'UNIQUE (event_id)'],
+  ['lead_cadence_episodes', 'lead_cadence_episodes_event_id_key', 'UNIQUE (event_id)'],
   ['dark_worker_episodes', 'dark_worker_episodes_event_id_key', 'UNIQUE (event_id)'],
   ['host_sweep_episodes', 'host_sweep_episodes_event_id_key', 'UNIQUE (event_id)'],
   ['post_limit_episodes', 'post_limit_episodes_event_id_key', 'UNIQUE (event_id)'],
@@ -85,15 +85,15 @@ const uniqueConstraints = async (pg: Client) =>
 describe('#4333 prisma/unique-constraint-invariants.sql from the push-only state', () => {
   it('promotes each index in place, and a re-run with a dependent foreign key changes nothing (#4638 BLIND F1, F2)', async () => {
     await withPushOnlyDb({}, async (pg) => {
-      const before = await indexOid(pg, 'coordinator_cadence_episodes_event_id_key');
+      const before = await indexOid(pg, 'lead_cadence_episodes_event_id_key');
       await pg.query(FILE);
       expect(await uniqueConstraints(pg)).toBe(CONSTRAINTS.length);
-      expect(await indexOid(pg, 'coordinator_cadence_episodes_event_id_key')).toBe(before);
+      expect(await indexOid(pg, 'lead_cadence_episodes_event_id_key')).toBe(before);
 
-      await pg.query('CREATE TABLE pin4333_ref (event_id text REFERENCES coordinator_cadence_episodes (event_id))');
+      await pg.query('CREATE TABLE pin4333_ref (event_id text REFERENCES lead_cadence_episodes (event_id))');
       await pg.query(FILE);
       expect(await uniqueConstraints(pg)).toBe(CONSTRAINTS.length);
-      expect(await indexOid(pg, 'coordinator_cadence_episodes_event_id_key')).toBe(before);
+      expect(await indexOid(pg, 'lead_cadence_episodes_event_id_key')).toBe(before);
       expect((await pg.query(`SELECT 1 FROM pg_constraint WHERE contype = 'f' AND conrelid = 'pin4333_ref'::regclass`)).rowCount).toBe(1);
     });
   }, 60_000);
@@ -102,10 +102,10 @@ describe('#4333 prisma/unique-constraint-invariants.sql from the push-only state
     await withPushOnlyDb({}, async (pg) => {
       await pg.query('DROP INDEX start_failing_episodes_event_id_key');
       await pg.query('ALTER TABLE start_failing_episodes ADD CONSTRAINT start_failing_episodes_event_id_key UNIQUE (id, event_id)');
-      const first = await indexOid(pg, 'coordinator_cadence_episodes_event_id_key');
+      const first = await indexOid(pg, 'lead_cadence_episodes_event_id_key');
       await expect(pg.query(FILE)).rejects.toThrow(/start_failing_episodes\.start_failing_episodes_event_id_key exists as UNIQUE \(id, event_id\), not UNIQUE \(event_id\)/);
       await pg.query('ROLLBACK');
-      expect(await indexOid(pg, 'coordinator_cadence_episodes_event_id_key')).toBe(first);
+      expect(await indexOid(pg, 'lead_cadence_episodes_event_id_key')).toBe(first);
       expect(await uniqueConstraints(pg)).toBe(1);
     });
   }, 60_000);
@@ -118,10 +118,10 @@ describe('#4333 prisma/unique-constraint-invariants.sql from the push-only state
   ])('refuses an index with %s and rolls back every earlier promotion (#4638 BLIND delta F1, F3)', async (_label, name, definition) => {
     await withPushOnlyDb({ [name]: definition }, async (pg) => {
       // The FIRST block's index is eligible: it would be promoted before the refusing block runs.
-      const first = await indexOid(pg, 'coordinator_cadence_episodes_event_id_key');
+      const first = await indexOid(pg, 'lead_cadence_episodes_event_id_key');
       await expect(pg.query(FILE)).rejects.toThrow(new RegExp(`index ${name} is not the plain unique index`));
       await pg.query('ROLLBACK');
-      expect(await indexOid(pg, 'coordinator_cadence_episodes_event_id_key')).toBe(first);
+      expect(await indexOid(pg, 'lead_cadence_episodes_event_id_key')).toBe(first);
       expect(await uniqueConstraints(pg)).toBe(0);
     });
   }, 60_000);

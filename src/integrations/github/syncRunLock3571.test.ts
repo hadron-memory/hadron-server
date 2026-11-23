@@ -24,7 +24,9 @@ describe('#3571 the sync-run lock connection', () => {
       const pid = await holderPid(memoryId);
       expect(pid).toBeDefined();
       await db.$queryRaw`SELECT pg_terminate_backend(${pid}::int)`;
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // #4731: poll for the connection-lost log against a deadline, not a fixed sleep.
+      const deadline = Date.now() + 10_000;
+      while (errors.mock.calls.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
       await expect(release()).resolves.toBeUndefined();
       expect(unhandled).toEqual([]);
       expect(errors).toHaveBeenCalledWith('[git-sync] sync-run lock connection lost', { code: expect.any(String) });
@@ -42,7 +44,8 @@ describe('#3571 the sync-run lock connection', () => {
     try {
       await expect(acquireSyncRunLock('no-url')).rejects.toThrow(/DATABASE_URL is not set/);
     } finally {
-      process.env.DATABASE_URL = saved;
+      // #4731: assigning undefined would store the string 'undefined'.
+      if (saved === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = saved;
     }
   });
 });

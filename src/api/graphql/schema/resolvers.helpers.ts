@@ -238,6 +238,8 @@ export interface Context {
   readableAgentCache?: Map<string, Promise<unknown | null>>;
   // #2109 — App.viewerManages: per-request, per-caller facts and the same-tick batch (see resolvers.appViewerManages.ts).
   viewerManagesCache?: import('./resolvers.appViewerManages.js').ViewerManagesCache;
+  // #4758 — App.selfJoin: the fresh App row and the caller's membership, batched per request (see resolvers.appSelfJoinFacts.ts).
+  selfJoinFactsCache?: import('./resolvers.appSelfJoinFacts.js').SelfJoinFactsCache;
   entryNodeCache?: Map<string, Promise<{ memoryId: string } | null>>;
   // Request-scoped memo for NodeRevision.editedByUser / approvedByUser
   // candidate lookups (#620) — a node's history repeats the same few editor
