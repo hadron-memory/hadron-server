@@ -17,7 +17,7 @@ import { postgresRetrievalProvider as provider } from '../../lib/retrieval/postg
 import { chunkVectorEligibility } from './vectors.js';
 
 const DIM = 768;
-const q = Array.from({ length: DIM }, (_, i) => (i === 1 ? 1 : 0));
+const q: number[] = Array.from({ length: DIM }, (_, i) => (i === 1 ? 1 : 0));
 const lit = (i: number) => { const v = q.slice(); v[2] = i * 0.05; return `'[${v.join(',')}]'::vector`; };
 
 let mem: string; let otherMem: string;
