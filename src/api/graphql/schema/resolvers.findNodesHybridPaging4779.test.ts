@@ -128,7 +128,8 @@ describe('#4779 BLIND F13 (Elena): certification agrees with RRF over the full l
       const universe = Array.from({ length: 4 + Math.floor(rnd() * 26) }, (_, i) => `n${i}`);
       const kwFull = shuffle(universe).slice(0, Math.floor(rnd() * universe.length));
       const vecFull = shuffle(universe).slice(0, Math.floor(rnd() * universe.length) + 1);
-      const truth = certifiedHybridRanking({ ids: kwFull, exhausted: true }, { ids: vecFull, exhausted: true }, 1).ranked.map((r) => r.nodeId);
+      // BLIND F7: the truth is plain RRF over the full legs (keyword list first, so first-seen ties are keyword-first).
+      const truth = reciprocalRankFusionScored([kwFull, vecFull], (x) => x).map((e) => e.item);
       const page = 1 + Math.floor(rnd() * 6);
       const dk = Math.floor(rnd() * (kwFull.length + 1));
       const dv = Math.floor(rnd() * (vecFull.length + 1));
@@ -267,7 +268,7 @@ describe('#4779 BLIND F2/F3 (Elena): hybrid hydration drops and the keyword wide
       const res = await findNodes({ query: 'q', mode: 'hybrid', limit: 2, offset: 2 });
       const want = reciprocalRankFusionScored([KW.filter((n) => n !== 'X'), VEC.filter((n) => n !== 'X')], (x) => x).map((e) => e.item);
       expect(names(res.hits)).toEqual(want.slice(2, 4));
-      expect(calls).toBe(2); // re-ranked deeper once
+      expect(calls).toBeGreaterThanOrEqual(2); // re-ranked deeper (BLIND N5: count not pinned exactly)
     } finally { await db.node.update({ where: { id: id.X! }, data: { deletedAt: null } }); }
   }, 60_000);
 
@@ -303,6 +304,25 @@ describe('#4779 P3-1: a page left short by hydration', () => {
       expect(names(res.hits)).toEqual(['B', 'X', 'E']);
       expect(res.degraded).toBeNull();
       expect(calls).toBe(2);
+    } finally { await db.node.update({ where: { id: id.A! }, data: { deletedAt: null } }); }
+  }, 60_000);
+
+  it('LOCAL F1 (Abigail): a re-ranking that stops early keeps the usable first page (flagged), never an emptier one', async () => {
+    const original = provider.vectorSearch.bind(provider);
+    let calls = 0;
+    vi.spyOn(provider, 'vectorSearch').mockImplementation(async (a) => {
+      if (calls++ === 0) {
+        const hits = await original(a);
+        await db.node.update({ where: { id: hits[0]!.nodeId }, data: { deletedAt: new Date() } });
+        return hits;
+      }
+      a.onWindow?.({ exhausted: false, stoppedEarly: true }); // the re-ranking ran out of the request's budget
+      return [];
+    });
+    try {
+      const res = await findNodes({ query: 'q', mode: 'vector', limit: 3 });
+      expect(names(res.hits)).toEqual(['B', 'X']);
+      expect(res.degraded ?? '').toContain('stopped_early');
     } finally { await db.node.update({ where: { id: id.A! }, data: { deletedAt: null } }); }
   }, 60_000);
 

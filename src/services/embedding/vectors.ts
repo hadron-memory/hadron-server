@@ -439,10 +439,14 @@ export function isStatementTimeout(e: unknown, phase?: 'waiting' | 'running'): b
  * the work budget ending the search (cor:api:090:04), not the pool failing. A wait that had its full `maxWait` and still
  * timed out stays an error that reaches alerting.
  */
-function isVectorEarlyStop(e: unknown, phase: 'waiting' | 'running', txMs: number): boolean {
+function isVectorEarlyStop(e: unknown, phase: 'waiting' | 'running', txMs: number, deadline: number): boolean {
   if (isStatementTimeout(e, phase)) return true;
-  const code = (e as { code?: string } | null)?.code;
-  return code === 'P2028' && phase === 'waiting' && txMs < VECTOR_TX_MAX_WAIT_MS;
+  const err = e as { code?: string; message?: string; meta?: { message?: string } } | null;
+  // BLIND N2 (Elena): only Prisma's connection-wait timeout (not any Transaction API error), only when the wait was
+  // capped by the request's deadline (not the ordinary maxWait), and only when that deadline has in fact passed.
+  return err?.code === 'P2028' && phase === 'waiting'
+    && /unable to start a transaction/i.test(`${err.message ?? ''} ${err.meta?.message ?? ''}`)
+    && txMs < VECTOR_TX_MAX_WAIT_MS && Date.now() >= deadline - 25;
 }
 
 /** Prisma options for one budgeted vector transaction: its clock runs past the budget so Postgres ends the statement first. */
@@ -477,14 +481,14 @@ async function setIterativeScan(tx: Prisma.TransactionClient): Promise<void> {
  * calls (a hybrid page's vector leg, its rank lookups and a re-ranking all share it, set once by the resolver); a call
  * never gets more than what is left of it, so one budget bounds the whole request, not each call.
  */
-function budgetClock(budgetMs: number, deadlineAt?: number): { left: () => number; txMs: number } {
+function budgetClock(budgetMs: number, deadlineAt?: number): { left: () => number; txMs: number; deadline: number } {
   const deadline = deadlineAt == null ? Date.now() + budgetMs : Math.min(Date.now() + budgetMs, deadlineAt);
   const left = () => {
     const ms = deadline - Date.now();
     if (ms < 1) throw Object.assign(new Error('canceling statement due to statement timeout'), { meta: { code: '57014' } });
     return Math.trunc(ms);
   };
-  return { left, txMs: Math.max(1, Math.trunc(deadline - Date.now())) };
+  return { left, txMs: Math.max(1, Math.trunc(deadline - Date.now())), deadline };
 }
 
 /**
@@ -496,10 +500,12 @@ async function oneStatementUnderBudget<R>(
 ): Promise<{ rows: R[]; stopped: boolean }> {
   let phase: 'waiting' | 'running' = 'waiting';
   let txMs = Number.POSITIVE_INFINITY;
+  let deadline = Number.POSITIVE_INFINITY;
   try {
     const clock = budgetClock(vectorSearchTimeoutMs(), deadlineAt);
     const left = clock.left;
     txMs = clock.txMs;
+    deadline = clock.deadline;
     left(); // a request whose deadline already passed stops here, before taking a connection
     const rows = await db.$transaction(async (tx) => {
       phase = 'running';
@@ -508,7 +514,7 @@ async function oneStatementUnderBudget<R>(
     }, vectorTxOptions(txMs));
     return { rows, stopped: false };
   } catch (e) {
-    if (!isVectorEarlyStop(e, phase, txMs)) throw e;
+    if (!isVectorEarlyStop(e, phase, txMs, deadline)) throw e;
     return { rows: [], stopped: true };
   }
 }
@@ -573,10 +579,12 @@ async function rankUnderBudget<R>(
   const iterative = await iterativeScanSupported(db);
   let phase: 'waiting' | 'running' = 'waiting';
   let txMs = Number.POSITIVE_INFINITY;
+  let deadline = Number.POSITIVE_INFINITY;
   try {
     const clock = budgetClock(vectorSearchTimeoutMs(), o.deadlineAt);
     const left = clock.left;
     txMs = clock.txMs;
+    deadline = clock.deadline;
     left(); // a request whose deadline already passed stops here, before taking a connection
     return await db.$transaction(async (tx) => {
       phase = 'running';
@@ -619,7 +627,7 @@ async function rankUnderBudget<R>(
       return { rows: best, exhausted: o.distinctCount(best) < o.need, stopped: false };
     }, vectorTxOptions(txMs));
   } catch (e) {
-    if (!isVectorEarlyStop(e, phase, txMs)) throw e;
+    if (!isVectorEarlyStop(e, phase, txMs, deadline)) throw e;
     return { rows: best, exhausted: false, stopped: true };
   }
 }

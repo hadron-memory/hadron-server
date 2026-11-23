@@ -180,8 +180,10 @@ describe('#4779 P2-2: one interactive transaction per search', () => {
 
   it('BLIND F1 (Elena): a pool wait cut short by the REQUEST deadline is the early stop, not an error', async () => {
     setIterativeScanSupportForTests(true);
+    // Like Prisma: the connection wait fails once the maxWait it was given has passed.
     const fake = new Proxy(db, { get(t, p) {
-      if (p === '$transaction') return () => Promise.reject(Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' }));
+      if (p === '$transaction') return (_fn: unknown, o: { maxWait: number }) => new Promise((_res, rej) => setTimeout(
+        () => rej(Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' })), o.maxWait));
       const v = Reflect.get(t, p);
       return typeof v === 'function' ? v.bind(t) : v;
     } }) as typeof db;
@@ -192,7 +194,9 @@ describe('#4779 P2-2: one interactive transaction per search', () => {
     const nodes = await vectorSearchNodes(fake, { memoryIds: [winMem], queryEmbedding: q, limit: 3, scope: 'COMMENTS', deadlineAt: Date.now() + 300, onWindow: (w) => windows.push(w) });
     expect(nodes).toEqual([]);
     expect(windows.at(-1)).toMatchObject({ stoppedEarly: true });
-  });
+    // BLIND N2: the same timeout with the ORDINARY maxWait (no request deadline cut it) is pool pressure: an error.
+    await expect(vectorSearchNodes(fake, { memoryIds: [winMem], queryEmbedding: q, limit: 3 })).rejects.toMatchObject({ code: 'P2028' });
+  }, 30_000);
 
   it('load: concurrent shallow and deep searches on a 2-connection pool all complete (no P2028)', async () => {
     setIterativeScanSupportForTests(true);

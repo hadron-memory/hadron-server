@@ -2316,10 +2316,15 @@ export const nodeQueries = {
         r.stats.dropped > 0 && !r.exhausted && (r.stats.pageCount < finalLimit || r.stats.consumed > depth);
       let attempt = await rankedPage(page);
       if (incomplete(attempt, page)) {
+        const first = attempt;
         rankingIncomplete = false; // the second attempt's ranking replaces the first's, flags included
-        const depth = page + attempt.stats.dropped;
+        // BLIND N1 (Elena): deep enough to cover where the first page actually reached, not only page + the drops counted.
+        const depth = Math.max(page + first.stats.dropped, first.stats.consumed);
         attempt = await rankedPage(depth);
         if (incomplete(attempt, depth)) rankingIncomplete = true;
+        // LOCAL F1 (Abigail): a re-ranking that stopped early (e.g. it started past the request deadline) and came back with
+        // a smaller page must not replace the usable first page; keep the first, flagged incomplete as it already was.
+        if (rankingIncomplete && attempt.stats.pageCount < first.stats.pageCount) attempt = first;
       }
       const env = stoppedEnvelope(attempt.built.hits.length, attempt.built.degraded, attempt.built.reason);
       return { ...attempt.built, reason: env.reason, degraded: env.degraded };
