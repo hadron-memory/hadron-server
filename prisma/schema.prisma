@@ -3649,6 +3649,38 @@ model TelegramEventReceipt {
   @@map("telegram_event_receipts")
 }
 
+/// A durable request to drop one chat tool's side of a connection (Telegram or Slack) once core has deleted its row
+/// (#4847; hrn:node:hadronmemory.com:specs:cor:int:030:03). Recorded in the deleting transaction, attempted after the commit,
+/// retried by a sweep until the tool CONFIRMS, capped after ten attempts with one alarm.
+///
+/// Relationships: none by foreign key, on purpose. A URN reclaim hard-deletes an App and the connection rows cascade away with it;
+/// the intent must outlive them. `connectionId` is the core row it was recorded for (informational only); `toolConnectionId` is the
+/// tool's own handle for the registration, the only thing the tool call needs.
+///
+/// Behaviour: `state` PENDING until the tool answers a success (CONFIRMED) or the tenth attempt fails (CAPPED: one alarm, no more
+/// retries, an operator requeues it). `attempts` counts claims; the wait after attempt n is 5 minutes doubling to at most 6 hours.
+/// A row exists only for a deletion that happened after this table did: older orphans have no intent and are out of scope.
+model ChatToolTeardownIntent {
+  id               String    @id @default(cuid())
+  /// 'telegram' | 'slack'.
+  kind             String
+  /// The client's dispatch key ('telegram' | 'slack' today).
+  provider         String
+  toolConnectionId String    @map("tool_connection_id")
+  connectionId     String?   @map("connection_id")
+  /// 'PENDING' | 'CONFIRMED' | 'CAPPED'.
+  state            String    @default("PENDING")
+  attempts         Int       @default(0)
+  lastAttemptAt    DateTime? @map("last_attempt_at")
+  confirmedAt      DateTime? @map("confirmed_at")
+  cappedAt         DateTime? @map("capped_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@unique([kind, toolConnectionId])
+  @@index([state, lastAttemptAt])
+  @@map("chat_tool_teardown_intents")
+}
+
 /// The server's record of one web-polling job that a headless run started: which run, App, agent and user the
 /// job belongs to, and under which policy. When the polling tool later reports a change, this row decides which
 /// run principal that event may wake.
@@ -7304,12 +7336,17 @@ model AppAutomationReadGrantEvent {
 ///   node's current file. A REMOVE row is an old path that a move left behind, named by `removeLoc`
 ///   (`removeLoc` is empty for WRITE). `branch` is the branch the attempt resolved to, empty only for older
 ///   rows written before the branch was recorded.
-/// - A row exists only while the last settled attempt failed. A success deletes it, and so does an ordinary
-///   write to a memory that is not mirrored (src/integrations/github/mirrorObligations.ts, the only writer).
+/// - A row exists while the debt is unapplied. A success deletes it, and so does an ordinary
+///   write to a memory that is not mirrored. FAILED/NOT_CLONED/EXHAUSTED rows are written by
+///   src/integrations/github/mirrorObligations.ts after a settled attempt; a PENDING row is born
+///   from the #425 nodes trigger the moment a delete removes the node's file from what the mirror
+///   owes, before any attempt has run (prisma/git-mirror-obligation-invariants.sql).
 /// - `attemptSeq` comes from the sequence `git_mirror_attempt_seq`, taken inside the per-memory checkout lock
 ///   and settled before the lock is released. A settle only applies over a lower `attemptSeq`, so a late
-///   settle never overwrites a newer one.
-/// - `state`: FAILED can be retried, NOT_CLONED means there is no local clone, EXHAUSTED means the retry sweep
+///   settle never overwrites a newer one. The #425 trigger takes a sequence value at capture, so its row
+///   is fenced against exactly like any older attempt.
+/// - `state`: PENDING is a captured, never-attempted delete debt due on the next sweep pass; FAILED can be
+///   retried, NOT_CLONED means there is no local clone, EXHAUSTED means the retry sweep
 ///   reached its attempt cap (an ordinary write can still settle the row).
 /// - `errorClass` is one of a fixed set of words (CHECK in prisma/git-mirror-obligation-invariants.sql). No
 ///   exception text, URL or token is ever stored.
@@ -7347,9 +7384,12 @@ enum GitMirrorObligationKind {
   @@map("git_mirror_obligation_kind")
 }
 
+/// PENDING = a delete debt the nodes trigger captured, no attempt run yet (#425, due on the next sweep pass);
 /// FAILED = retryable failure; NOT_CLONED = no local clone; EXHAUSTED = sweep cap reached (ordinary writes still
 /// settle).
 enum GitMirrorObligationState {
+  /// #425: the nodes trigger captured the debt; no attempt has run yet. Due on the next sweep pass.
+  PENDING
   FAILED
   NOT_CLONED
   EXHAUSTED

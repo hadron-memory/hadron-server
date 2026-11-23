@@ -8,6 +8,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { createTelegramToolConnection, deleteTelegramToolConnection } from '../../../lib/telegramClient.js';
+import { dispatchChatToolTeardown, recordChatToolTeardown } from '../../../lib/chatToolTeardown.js';
 import type { Context } from './resolvers.helpers.js';
 import { isOrgMemberOrAdmin, requireOrgRole } from './resolvers.helpers.js';
 
@@ -89,12 +90,17 @@ export const telegramMutations = {
     }
     await requireOrgRole(ctx, connection.organizationId, 'ADMIN');
     // App and org deletion tear their connections down through the shared path in src/lib/chatToolTeardown.ts (#4828); this is the single-connection door.
-    // Guarded on the live row so a concurrent double delete tears the tool down once.
-    const { count } = await ctx.db.telegramConnection.updateMany({
-      where: { id: connection.id, deletedAt: null },
-      data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+    // The guarded soft delete and the teardown INTENT are one transaction (#4847): a concurrent double delete records and asks the tool once,
+    // and a call that fails or is lost is retried by the sweep. A deleted row stays NOT_FOUND to an admin: no door reaches it (cor:dmo:080:04).
+    const torn = await ctx.db.$transaction(async (tx) => {
+      const { count } = await tx.telegramConnection.updateMany({
+        where: { id: connection.id, deletedAt: null },
+        data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+      });
+      if (count !== 1) return null;
+      return recordChatToolTeardown(tx, { kind: 'telegram', id: connection.id, provider: connection.provider, toolConnectionId: connection.toolConnectionId });
     });
-    if (count === 1) void deleteTelegramToolConnection(connection.provider, connection.toolConnectionId);
+    if (torn) dispatchChatToolTeardown([torn]);
     return true;
   },
 };

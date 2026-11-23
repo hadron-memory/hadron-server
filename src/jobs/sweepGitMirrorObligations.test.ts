@@ -248,10 +248,17 @@ it('never logs or stores a token-bearing Git provider error',async()=>{
  await tick();expect((await rows())[0]).toMatchObject({state:'FAILED',errorClass:'TOKEN_UNAVAILABLE',attempts:2});
  expect(JSON.stringify(await rows(),(_,v)=>typeof v==='bigint'?v.toString():v)).not.toContain(TOKEN);expect(errors.join('\n')).not.toContain(TOKEN);
 });
-it('clears a missing or soft-deleted WRITE without Git or republishing a tombstone',async()=>{
+it('clears a missing or pre-#425 tombstoned WRITE without Git or republishing a tombstone',async()=>{
  const n=await makeNode();await owe(n.id);const path=nodeFilePath(local,n.loc,'mirror430-org:mem');writeFileSync(path,'pre-existing tombstone file');
  await db.node.update({where:{id:n.id},data:{deletedAt:new Date()}});await owe('hard-missing');
+ await db.gitMirrorObligation.deleteMany({where:{memoryId,kind:'REMOVE'}}); // a tombstone predating #425 owes no capture
  await tick();expect(await rows()).toEqual([]);expect(commands).toEqual([]);expect(readFileSync(path,'utf8')).toBe('pre-existing tombstone file');
+});
+it('#425: a soft delete owes a REMOVE, and an unidentifiable file is refused, never force-dropped',async()=>{
+ const n=await makeNode();const path=nodeFilePath(local,n.loc,'mirror430-org:mem');writeFileSync(path,'pre-existing tombstone file');
+ await db.node.update({where:{id:n.id},data:{deletedAt:new Date()}});await owe('hard-missing');
+ await tick();expect(await rows()).toEqual([expect.objectContaining({kind:'REMOVE',removeLoc:n.loc,state:'FAILED',errorClass:'TREE_WRITE',attempts:2})]);
+ expect(existsSync(path)).toBe(true);expect(readFileSync(path,'utf8')).toBe('pre-existing tombstone file');
 });
 it('a late cap-reaching settle cannot turn a newer row into EXHAUSTED',async()=>{
  const n=await makeNode();await owe(n.id,{attempts:9});const stale=await takeAttemptSeq(db);const newer=await takeAttemptSeq(db);

@@ -9,6 +9,7 @@ import { GraphQLError } from 'graphql';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { createSlackToolConnection, deleteSlackToolConnection } from '../../../lib/slackClient.js';
+import { dispatchChatToolTeardown, recordChatToolTeardown } from '../../../lib/chatToolTeardown.js';
 import type { Context } from './resolvers.helpers.js';
 import { isOrgMemberOrAdmin, requireOrgRole } from './resolvers.helpers.js';
 
@@ -94,11 +95,17 @@ export const slackMutations = {
       throw new GraphQLError('Slack connection not found.', { extensions: { code: 'NOT_FOUND' } });
     }
     await requireOrgRole(ctx, connection.organizationId, 'ADMIN');
-    await ctx.db.slackConnection.update({
-      where: { id: connection.id },
-      data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+    // The guarded soft delete and the teardown INTENT are one transaction (#4847): a concurrent double delete records and asks the tool
+    // once (before, both passed the lookup and both asked), and a call that fails or is lost is retried by the sweep.
+    const torn = await ctx.db.$transaction(async (tx) => {
+      const { count } = await tx.slackConnection.updateMany({
+        where: { id: connection.id, deletedAt: null },
+        data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+      });
+      if (count !== 1) return null;
+      return recordChatToolTeardown(tx, { kind: 'slack', id: connection.id, provider: connection.provider, toolConnectionId: connection.toolConnectionId });
     });
-    void deleteSlackToolConnection(connection.provider, connection.toolConnectionId);
+    if (torn) dispatchChatToolTeardown([torn]);
     return true;
   },
 };

@@ -101,6 +101,7 @@ import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories
 import { startSecretChangeSweepLoop } from './jobs/sweepSecretChanges.js';
 import { startPasskeyCeremonySweepLoop } from './jobs/sweepPasskeyCeremonies.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
+import { startChatToolTeardownSweepLoop } from './jobs/sweepChatToolTeardown.js';
 import { secretSweepDisabledReason, startSecretSweepLoop } from './jobs/secretSweep.js';
 import { startGitMirrorObligationSweepLoop } from './jobs/sweepGitMirrorObligations.js';
 import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
@@ -1949,6 +1950,11 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
 
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
     startMergeConsentSweepLoop(db);
+  }
+
+  // Background job (#4847, cor:int:030:03): reconcile, cap and retry the chat tool teardown intents (Telegram, Slack) every 5 minutes.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_CHAT_TOOL_TEARDOWN_SWEEP !== 'true') {
+    startChatToolTeardownSweepLoop(db);
   }
 
   // #4003 (S8 of #3991) — App secret retention: superseded versions past SECRET_VERSION_RETENTION_DAYS or the

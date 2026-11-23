@@ -10,11 +10,12 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { deleteUserAccount } from '../controller/operations/deleteUser.js';
+import { chatToolTeardownIdle } from './chatToolTeardown.js';
 import { deleteSlackToolConnection } from './slackClient.js';
 import { deleteTelegramToolConnection } from './telegramClient.js';
 
-vi.mock('./slackClient.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('./slackClient.js')>()), deleteSlackToolConnection: vi.fn().mockResolvedValue(undefined) }));
-vi.mock('./telegramClient.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('./telegramClient.js')>()), deleteTelegramToolConnection: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('./slackClient.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('./slackClient.js')>()), deleteSlackToolConnection: vi.fn().mockResolvedValue(true) }));
+vi.mock('./telegramClient.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('./telegramClient.js')>()), deleteTelegramToolConnection: vi.fn().mockResolvedValue(true) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('./bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 
@@ -44,12 +45,12 @@ const calls = () => ({
   slack: slackDelete.mock.calls.map((c) => c[1]).sort(),
 });
 /** The teardown is fire-and-forget after commit: let the microtask queue run before reading the calls. */
-const settle = () => new Promise<void>((r) => setImmediate(r));
+const settle = () => chatToolTeardownIdle();
 
 beforeEach(async () => {
   await cleanDb(db);
-  slackDelete.mockReset().mockResolvedValue(undefined);
-  telegramDelete.mockReset().mockResolvedValue(undefined);
+  slackDelete.mockReset().mockResolvedValue(true);
+  telegramDelete.mockReset().mockResolvedValue(true);
   org = await db.organization.create({ data: { id: generateId(), name: 'td-org', urn: 'td-org' } });
   otherOrg = await db.organization.create({ data: { id: generateId(), name: 'td-other', urn: 'td-other' } });
   appA = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'a', urn: 'td-org::a' } });
