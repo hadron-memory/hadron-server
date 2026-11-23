@@ -7222,7 +7222,10 @@ export function createMcpServerInstance(
     'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     SHAPE_HADRON_UPDATE_NODE,
     async (mcpArgs) => {
-      const { urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, appendContent, prependContent, separator, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, addEdges, removeEdges, reason, install } = mcpArgs;
+      const { urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, appendContent, prependContent, separator, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, addEdges: rawAddEdges, removeEdges: rawRemoveEdges, reason, install } = mcpArgs;
+      // #4929 (item 4): an empty addEdges / removeEdges is absent, exactly as if omitted (no write, snapshot, event or receipt line). Not `edges`: `edges: []` still clears (cor:api:210:02).
+      const addEdges = rawAddEdges?.length ? rawAddEdges : undefined;
+      const removeEdges = rawRemoveEdges?.length ? rawRemoveEdges : undefined;
       // #340: append/prepend join the body read under the row lock (inside the transaction below). The argument refusals need
       // no read, so they come first and write nothing.
       const appending = appendContent !== undefined || prependContent !== undefined;
@@ -7530,7 +7533,9 @@ export function createMcpServerInstance(
       // #340: the joined body is only known under the lock, so an append always enters the transaction.
       let appendedBody: string | null | undefined;
       let appendWritten = false;
-      if (Object.keys(data).length > 0 || edgeWrite || expectedRevision !== undefined || appending) {
+      // #4929 (item 4): a call that supplies nothing to write (an empty addEdges / removeEdges is absent) enters no transaction and announces no write.
+      const writes = Object.keys(data).length > 0 || edgeWrite || expectedRevision !== undefined || appending;
+      if (writes) {
         // Spec 049 S4: the write holds the address lock and the gate runs
         // under it — the check above is the fast refusal, this the
         // authoritative one (Copilot on PR #1165).
@@ -7755,12 +7760,14 @@ export function createMcpServerInstance(
 
       // Announce the write (event pivot): the git mirror subscriber re-reads
       // and mirrors (encrypted memories punt there — see hadron_create_node).
-      void publishNodeWritten({
-        nodeId: existing.id,
-        memoryId: existing.memoryId,
-        ownerRepo: '',
-        clientId: auth.clientId,
-      });
+      if (writes) {
+        void publishNodeWritten({
+          nodeId: existing.id,
+          memoryId: existing.memoryId,
+          ownerRepo: '',
+          clientId: auth.clientId,
+        });
+      }
 
       // 033 — re-embed when content or abstract changed (existing.* is plaintext
       // on the MCP path, #206). Other-field-only updates don't touch the index.
