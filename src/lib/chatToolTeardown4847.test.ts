@@ -369,8 +369,32 @@ describe('#4847 blind P2: a tool connection id is never reused, so the one-inten
   it('core cannot hold a second connection row with the id of a deleted one (both tables), so no intent can be shadowed', async () => {
     await M.deleteApp({}, { ref: appA.id }, ctx(admin.id));
     await settle();
-    await expect(telegram(org.id, appB.id, 'tg-a')).rejects.toMatchObject({ code: 'P2002' });
-    await expect(slack(org.id, appB.id, 'sl-a')).rejects.toMatchObject({ code: 'P2002' });
+    // A FRESH App: appB already holds a live Telegram connection, which would fail on the one-active-per-App index instead.
+    const fresh = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'fresh', urn: 'dt-org::fresh' } });
+    await expect(telegram(org.id, fresh.id, 'tg-a')).rejects.toMatchObject({ code: 'P2002', meta: { target: ['tool_connection_id'] } });
+    await expect(slack(org.id, fresh.id, 'sl-a')).rejects.toMatchObject({ code: 'P2002', meta: { target: ['tool_connection_id'] } });
+  });
+
+  it('one intent whose claim throws (a database fault) does not stop the sweep tick: the next due intent is still attempted', async () => {
+    await db.$transaction((tx) => softDeleteChatToolConnections(tx, { appId: appA.id }, null));
+    const first = (await db.chatToolTeardownIntent.findMany({ orderBy: { id: 'asc' } }))[0]!.id;
+    let thrown = false;
+    const faulty = new Proxy(db, { get: (target, prop, receiver) => {
+      if (prop !== '$queryRaw') return Reflect.get(target, prop, receiver);
+      return (strings: TemplateStringsArray, ...values: unknown[]) => {
+        if (!thrown && Array.isArray(strings) && strings.join('?').includes('SET attempts = attempts + 1') && values.includes(first)) {
+          thrown = true;
+          return Promise.reject(new Error('simulated database fault'));
+        }
+        return (target.$queryRaw as any)(strings, ...values);
+      };
+    } }) as typeof db;
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const out = await chatToolTeardownSweepTick(faulty, minutes(10_000));
+    errors.mockRestore();
+    expect(thrown).toBe(true);
+    expect(out.attempted).toBe(1);
+    expect(calls().telegram.length + calls().slack.length).toBe(1);
   });
 
   it('a PENDING intent that has used every attempt is never claimed again (the cap guard attempts < MAX)', async () => {

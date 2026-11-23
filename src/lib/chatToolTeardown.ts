@@ -50,8 +50,8 @@ const NOW_UTC = Prisma.sql`(clock_timestamp() AT TIME ZONE 'UTC')`;
  * records nothing. The key is safe because a tool connection id is never reused: every registration mints a fresh one, and both
  * connection tables hold a UNIQUE tool_connection_id over live AND soft-deleted rows, so core cannot even insert a second row with an
  * id an intent already names (pinned in chatToolTeardown4847.test.ts); the intent is also never consulted for a live row, by that same key.
- * (PR #4927 blind review P2: the re-issue it feared is refused by the database; a hard-deleted row, a URN reclaim, would need the tool itself to re-mint an id.)
- * so one path serves the doors, the org and App paths and the reconciliation without ever doubling an intent.
+ * A hard-deleted row (a URN reclaim) is covered only by the tool's own contract: a registration id is never minted twice. One path
+ * serves the doors, the org and App paths and the reconciliation without ever doubling an intent.
  */
 function recordIntents(kind: ChatToolKind, softDelete: Prisma.Sql): Prisma.Sql {
   return Prisma.sql`
