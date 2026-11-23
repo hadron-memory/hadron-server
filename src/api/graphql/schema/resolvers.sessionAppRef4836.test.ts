@@ -22,18 +22,21 @@
  * authorization refusal) is pinned on the launch-grant path, the one place
  * this mutation still refuses a caller it already told the worker exists.
  *
- * Red-first note (#4844 fold, LOCAL F2): these pins and the implementation
- * landed in one commit (78af34826), so history cannot show the pins red. The
- * rerun: with this file held and the production change reverted
- * (reverse-apply the production hunks of aac9cd966 and 78af34826 to
- * resolvers.mutation.session.ts), 24 of 31 pins fail (re-measured 2026-11-23,
- * #4853; the 21 of 28 recorded before it was exact for the 28 `it` blocks
- * on main then, and #4853 added three member-side pins, all red); the 7 that
- * pass are the member regression pins, which are green on main by design.
+ * Red-first note: these pins and the implementation landed in one commit
+ * (78af34826) and the #4844 fold (aac9cd966) changed both again, so history
+ * cannot show the pins red. The rerun: with this file held and the production
+ * hunks of both commits reverse-applied to resolvers.mutation.session.ts
+ * (`for c in aac9cd966 78af34826; do git show $c -- <that file> | git apply -R; done`),
+ * 24 of 31 pins fail (re-measured 2026-11-23, #4853). The 7 that pass: the
+ * pure-key own-App pin, the pure-key own-uninstalled pin, the two member
+ * regression pins (start by PK/URN, uninstalled by PK), the launch-grant
+ * FORBIDDEN pin, the narrow-catch fault pin (it kills only a BROADENED catch,
+ * and the unfolded code propagates the fault too) and the MCP shape pin.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError, buildSchema, defaultFieldResolver, graphql } from 'graphql';
 import { createHash } from 'node:crypto';
+import type { Prisma } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
@@ -234,8 +237,8 @@ describe('#4836 — a pure App key naming any other App gets the same unknown-Ap
     const gone = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'Gone Key App', urn: `${org.urn}:gone-key`, uninstalledAt: new Date() },
     });
-    // One call, one non-vacuous assertion: capture the rejection (the 1037 file's shape) so a resolved call
-    // fails with its own message instead of being swallowed by the catch.
+    // Capture the rejection (the shape resolvers.startSessionAmbientApp1037.test.ts uses): a call that
+    // resolves fails with its own message, not a misleading assertion on `extensions.code`.
     const e = await startSession(ctx(undefined, gone.id), { appRef: gone.id }).then(
       () => { throw new Error('expected APP_UNINSTALLED'); },
       (x: unknown) => x,
@@ -277,14 +280,14 @@ describe('#4836 — a caller WITH standing keeps the specific answers (regressio
   });
 });
 
-describe('#4836 — a MEMBER gets the concealed answer for malformed and ambiguous refs too (cor:dmo:070:05; the SDL says "to a member exactly as to an outsider")', () => {
+describe('#4836 — a MEMBER gets the concealed answer for unresolvable and ambiguous refs too (cor:dmo:070:05; the SDL says "to a member exactly as to an outsider")', () => {
   // The fold runs before standing is judged, so these never reach the reach gate: a member is
   // told nothing more than an outsider about a ref that does not resolve.
   it('a member naming a malformed bare ref CARRYING A CANARY', async () => {
     await concealedRefusal(startSession(ctx(appMember.id), { appRef: CANARY }), [CANARY]);
   });
 
-  it('a member naming a canary inside an otherwise well-formed App URN', async () => {
+  it('a member naming a well-shaped App URN whose last segment is the canary', async () => {
     const ref = `hrn:app:${org.urn}:${CANARY}`;
     await concealedRefusal(startSession(ctx(appMember.id), { appRef: ref }), [ref, CANARY]);
   });
@@ -292,10 +295,14 @@ describe('#4836 — a MEMBER gets the concealed answer for malformed and ambiguo
   it('a member naming an ambiguous legacy URN (two live rows claim it)', async () => {
     const legacyUrn = `${org.urn}:legacy-dup-member`;
     for (const slug of ['dup-ma', 'dup-mb']) {
-      await db.app.create({
+      const dup = await db.app.create({
         data: { id: generateId(), organizationId: org.id, name: `Dup ${slug}`, urn: `${org.urn}:${slug}`, legacyUrn },
       });
+      // Standing in BOTH candidates, so a lookup that judged standing first could reveal the ambiguity.
+      await db.appMember.create({ data: { appId: dup.id, userId: appMember.id, role: 'reader' } });
     }
+    // The ambiguity is really there: two live rows claim this legacy URN.
+    expect(await db.app.count({ where: { legacyUrn, deletedAt: null, uninstalledAt: null } })).toBe(2);
     const ref = `hrn:app:${legacyUrn}`;
     await concealedRefusal(startSession(ctx(appMember.id), { appRef: ref }), [ref, legacyUrn]);
   });
@@ -371,10 +378,11 @@ describe('#4836 — the envelope through the real GraphQL schema (full execution
     });
 
   it('a missing App and an existing-but-inaccessible App answer the SAME bytes over the wire', async () => {
-    // Each assertion below is tied to the value its call SENT (Braxton F5, #4853): the constants are what the
+    // Each assertion below is tied to the value its call SENT (#4853): the constants are what the
     // calls send, so a renamed ref moves the call and the assertion together instead of leaving an
     // absence check that can no longer fail.
-    const missingRef = `hrn:app:${org.urn}:no-such-app`;
+    const missingSlug = 'no-such-app';
+    const missingRef = `hrn:app:${org.urn}:${missingSlug}`;
     const existingRef = app.id;
     const missing = await exec(missingRef, ctx(outsider.id));
     const existing = await exec(existingRef, ctx(outsider.id));
@@ -384,13 +392,11 @@ describe('#4836 — the envelope through the real GraphQL schema (full execution
       expect(r.errors![0]!.extensions?.code).toBe('APP_NOT_FOUND');
     }
     expect(JSON.stringify(existing.errors![0]!.extensions)).toBe('{"code":"APP_NOT_FOUND"}');
-    // Meaningful absence (Braxton F3, #4844): each call's OWN inputs — the missing call's sent URN (whole,
+    // Meaningful absence (#4844): each call's OWN inputs — the missing call's sent URN (whole,
     // and its slug and org parts), the existing call's App PK — must not appear. (The old
     // `not.toContain(CANARY)` here could never fail: the `missing` call never sent the canary.)
-    expect(missingRef).toContain('no-such-app'); // the substrings below are parts of what was sent
-    expect(missingRef).toContain(org.urn);
     expect(JSON.stringify(missing.errors)).not.toContain(missingRef);
-    expect(JSON.stringify(missing.errors)).not.toContain('no-such-app');
+    expect(JSON.stringify(missing.errors)).not.toContain(missingSlug);
     expect(JSON.stringify(missing.errors)).not.toContain(org.urn);
     expect(JSON.stringify(existing.errors)).not.toContain(existingRef);
   });
@@ -411,20 +417,23 @@ describe('#4836 — the envelope through the real GraphQL schema (full execution
     // formatter masks it as INTERNAL_SERVER_ERROR (cor:api:260:01 — never
     // APP_NOT_FOUND), and no session row is written.
     const fault = new Error('sar4836: db fault inside the ref lookup');
-    // Seam (Braxton F2, #4853): the spy faults ONLY the ref lookup (the `where` carries this ref's URN) and
-    // passes every other `app.findFirst` through, and the pin asserts it fired on that exact `where`. A
-    // refactor that puts another `findFirst` ahead of the lookup, or moves the lookup off `app.findFirst`,
-    // fails here instead of silently leaving the narrow-catch mutant-kill measuring a different call.
+    // Seam (#4853): the spy faults ONLY a `findFirst` whose whole `where` is the ref lookup's (this URN, live
+    // and installed rows), and passes every other `app.findFirst` through. The pin therefore fails if the
+    // lookup stops using `app.findFirst` or changes its `where`, instead of measuring some other call. It
+    // does NOT detect a second lookup of the same shape placed outside the narrow catch; other
+    // `findFirst` calls ahead of the lookup are harmless and pass through.
     const refUrn = `${org.urn}:no-such-app`;
-    const original = db.app.findFirst.bind(db.app) as (args: any) => Promise<unknown>;
-    const spy = vi.spyOn(db.app, 'findFirst').mockImplementation(((args: any) =>
-      args?.where?.urn === refUrn ? Promise.reject(fault) : original(args)) as any);
+    const lookupWhere = { urn: refUrn, uninstalledAt: null, deletedAt: null };
+    const original = db.app.findFirst.bind(db.app);
+    const spy = vi.spyOn(db.app, 'findFirst').mockImplementation(((args: { where?: Prisma.AppWhereInput }) =>
+      JSON.stringify(args?.where) === JSON.stringify(lookupWhere) ? Promise.reject(fault) : original(args)) as typeof db.app.findFirst);
     try {
       await expect(
         startSession(ctx(outsider.id), { appRef: `hrn:app:${refUrn}` }),
       ).rejects.toThrow('sar4836: db fault inside the ref lookup');
-      expect(spy.mock.calls.some(([a]) => (a as any)?.where?.urn === refUrn), 'the fault pin never reached the ref lookup').toBe(true);
+      spy.mockClear();
       const r = await exec(`hrn:app:${refUrn}`, ctx(outsider.id));
+      expect(spy.mock.calls.filter(([a]) => JSON.stringify((a as { where?: Prisma.AppWhereInput }).where) === JSON.stringify(lookupWhere)), 'the wire call never reached the ref lookup').toHaveLength(1);
       expect(r.errors).toHaveLength(1);
       expect(r.errors![0]!.message).not.toBe('App not found.');
       const e = r.errors![0]!;
