@@ -741,7 +741,7 @@ export async function evaluateStalls(db: PrismaClient, now = new Date(), anchor:
     for (const i of inputs) due.push(...stallCandidates(i, windows.get(i.task.appId) as StallWindows, now));
     // #4273: an episode whose alarm is already raised is the common case on every pass after the first, and
     // `raiseStallAlarm` would reload the task's inputs in its own transaction only to find the unique key
-    // (task, type, episode start) taken. One read for the page answers it; a key raised between this read and the
+    // (app, task, type, episode start) taken. One read for the page answers it; a key raised between this read and the
     // raise is still refused by that same unique key, so the alarms are the ones raised before.
     const raisedKeys = await loadRaisedEpisodeKeys(db, due);
     for (const c of due) {
@@ -764,13 +764,14 @@ export async function evaluateStalls(db: PrismaClient, now = new Date(), anchor:
 
 /**
  * #4273 — the keys (`alarmEpisodeKey`) of these candidates' episodes whose alarm event already exists. Asks for exactly the
- * candidates' own (task, type, episode start) tuples, served by that unique key, so a task with a long alarm history
+ * candidates' own (app, task, type, episode start) tuples, served by that unique key, so a task with a long alarm history
  * (every earlier episode) costs one row per candidate, never one per past episode (Diego P2 on 34689907).
  *
- * #4285 (Arianna New-3): the join predicate IS the unique key `agent_team_events_episode_uniq` (task_id, type,
- * episode_start) (schema.prisma `@@unique([taskId, type, episodeStart])`), the same key `appendAlarmEvent` (events.ts) inserts
- * under `ON CONFLICT (task_id, type, episode_start) DO NOTHING`. A row this read finds is therefore exactly a row that
- * insert would refuse, so skipping it changes no outcome. Change the three together. No resolution state lives outside
+ * #4285 (Arianna New-3), #4344: the join predicate IS the unique key `agent_team_events_episode_app_uniq` (app_id, task_id,
+ * type, episode_start) (schema.prisma `@@unique([appId, taskId, type, episodeStart])`), the same key `appendAlarmEvent`
+ * (events.ts) inserts under `ON CONFLICT (app_id, task_id, type, episode_start) DO NOTHING`. A row this read finds is
+ * therefore exactly a row that insert would refuse, so skipping it changes no outcome. The App is in the key since #4344
+ * (Holger's ruling A): an alarm row of another App naming this task is not this App's alarm and no longer hides it. Change the three together. No resolution state lives outside
  * the key: an acknowledged or escalation-ended alarm keeps its row and so still takes the key (pinned in
  * stallPassCost4273.test.ts, the "what the skip replaces" block).
  */
@@ -780,8 +781,8 @@ async function loadRaisedEpisodeKeys(db: Db, candidates: StallCandidate[]): Prom
   const rows = await db.$queryRaw<{ taskId: string; type: string; episodeStart: Date }[]>`
     SELECT e.task_id AS "taskId", e.type, e.episode_start AS "episodeStart"
     FROM unnest(${candidates.map((c) => c.taskId)}::text[], ${candidates.map((c) => STALL_EVENT_TYPE[c.rule])}::text[],
-                ${candidates.map((c) => toNaiveUtc(c.episodeStart))}::timestamp[]) AS p(task_id, type, start)
-    JOIN agent_team_events e ON e.task_id = p.task_id AND e.type = p.type AND e.episode_start = p.start`;
+                ${candidates.map((c) => toNaiveUtc(c.episodeStart))}::timestamp[], ${candidates.map((c) => c.appId)}::text[]) AS p(task_id, type, start, app_id)
+    JOIN agent_team_events e ON e.app_id = p.app_id AND e.task_id = p.task_id AND e.type = p.type AND e.episode_start = p.start`;
   for (const r of rows) out.add(alarmEpisodeKey(r.taskId, r.type, r.episodeStart));
   return out;
 }

@@ -7787,6 +7787,9 @@ model AgentTeamEvent {
   escalationEnd AlarmEscalationEnd?
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
+  /// #4344 (ruling A): the App joins the key. The three-column index above is kept until the contract migration drops it
+  /// (an image still writing the three-column ON CONFLICT target would raise 42P10 without it).
+  @@unique([appId, taskId, type, episodeStart], map: "agent_team_events_episode_app_uniq")
   @@index([appId, createdAt])
   /// #4084: the changed-since read's commit-safe order (agentTaskExternalIdChanges).
   @@index([appId, txId, createdAt, id])
