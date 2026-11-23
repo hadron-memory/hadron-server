@@ -18,7 +18,6 @@ import { APP_KEY_PREFIX, hashAppKey } from '../../middleware/auth.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { cleanDb } from '../../test/helpers.js';
-import { dbNowPlus } from '../grants/grantFixtures3668.js';
 import { seedTriggerWorld, triggerGrant, useCount, useEvents, workerOf, type TriggerWorld } from '../grants/triggerGrantFixtures3483.js';
 import { createPendingGrant } from '../grants/create.js';
 import { restartDarkSession } from './darkRestart.js';
@@ -238,10 +237,18 @@ describe('#4855 who may: a signed grant held by that worker, naming the target, 
     await untouched(s.id, g);
   });
 
-  it('an expired grant allows nothing', async () => {
+  it('an expired grant allows nothing (backdated, no sleeping)', async () => {
     const s = await kitSession();
-    const g = await grant(kit, { expires_at: dbNowPlus('1 second') });
-    await new Promise((r) => setTimeout(r, 1500));
+    const g = await grant();
+    // The guard refuses a row that expires before it began, so the whole life is moved into the past with the trigger off, in one transaction.
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
+      await tx.$executeRawUnsafe(`UPDATE grants SET activated_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '2 hours', created_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '2 hours',
+        expires_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 hour' WHERE id = $1`, g);
+      await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
+    });
+    const [row] = await db.$queryRawUnsafe<Array<{ expired: boolean }>>(`SELECT expires_at < (clock_timestamp() AT TIME ZONE 'UTC') AS expired FROM grants WHERE id = $1`, g);
+    expect(row!.expired).toBe(true);
     expect(await code(restart())).toBe(REFUSED);
     await untouched(s.id, g);
   });
