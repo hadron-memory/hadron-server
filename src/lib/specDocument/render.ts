@@ -173,106 +173,39 @@ function decodeNumericRefs(v: string): string {
 }
 
 /**
- * One `id` attribute: the name, `=`, then a quoted or bare value. The name counts only at an attribute position: start of
- * text, after whitespace, a quote or a slash (the slash only where the caller finds it inside a tag), or after the
- * blockquote markers that open a line; such markers between `=` and the value are skipped as well,
- * as the renderer drops it. Linear: no nested quantifier, each alternative stops at a delimiter.
+ * One `id` attribute, found by its text alone (no tag, quote or block is judged): the name `id` not glued to a longer
+ * name or a URL query key (`data-id`, `?id=`, `&id=`, `#id=`, `a:id`), then `=`, then a quoted or bare value. Blanks and
+ * `>` (a blockquote marker the renderer drops) may sit before the `=` and before the value. Linear: each `id=` scans only
+ * its own run of blanks and its own value, and a value never contains the next match's start.
  */
-const ID_ATTR = /(?<=^|[ \t\r\n\f"'/]|[\r\n][ \t]{0,3}(?:>[ \t]?)+)id[ \t\r\n\f]*=(?:[ \t\r\n\f]|(?<=[\r\n][ \t]{0,3}(?:>[ \t]?)*)>)*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/gi;
-const isWs = (c: string | undefined): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
-
-/** `<name` ending at whitespace, `/` or `>` (so an autolink `<https://x>` is no tag), or `</`, `<!`, `<?`. */
-const TAG_OPEN = /^<(?:[A-Za-z][A-Za-z0-9-]*(?::[A-Za-z0-9][A-Za-z0-9-]*)*(?=[\s/>])|[/!?])/;
-const Z_TEXT = 0;
-const Z_TAG = 1;
-const Z_QUOTED = 2;
-/**
- * Where each character sits: outside any tag, inside a tag, or inside a quoted value of a tag. A tag opens at `<` plus a
- * name, `/`, `!` or `?` and closes at the next `>` outside a quote; a blank line ends a tag that never closed, so one
- * stray `<` cannot silence the rest of the text. One forward pass; only a position test, nothing is parsed or rewritten.
- */
-function tagZones(text: string): Uint8Array {
-  const z = new Uint8Array(text.length);
-  let state = Z_TEXT;
-  let quote = '';
-  let lineBlank = true;
-  let markers = true; // the line so far is only whitespace and `>`: those `>` are blockquote markers
-  for (let i = 0; i < text.length; i += 1) {
-    const c = text[i];
-    if (c === '\n' || (c === '\r' && text[i + 1] !== '\n')) { if (lineBlank) state = Z_TEXT; lineBlank = true; markers = true; z[i] = state; continue; }
-    const atLineStart = markers && c === '>';
-    if (c !== ' ' && c !== '\t' && c !== '\r') lineBlank = false;
-    if (c !== ' ' && c !== '\t' && c !== '\r' && c !== '>') markers = false;
-    if (state === Z_TEXT) {
-      if (c === '<' && TAG_OPEN.test(text.slice(i, i + 80))) { state = Z_TAG; z[i] = Z_TAG; }
-    } else if (state === Z_TAG) {
-      z[i] = Z_TAG;
-      if (c === '>' && !atLineStart) state = Z_TEXT; // a `>` among a line's leading markers is a blockquote marker, not the tag's end
-      else if (c === '"' || c === "'") { state = Z_QUOTED; quote = c; z[i] = Z_QUOTED; }
-    } else {
-      z[i] = Z_QUOTED;
-      if (c === quote) { state = Z_TAG; z[i] = Z_TAG; }
-    }
-  }
-  return z;
-}
+const ID_ATTR = /(?<![\w:.?&=#-])id[\s>]*=[\s>]*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/gi;
 
 /**
- * One pass: `text` without every `id` attribute, inside a tag, whose value is in `assigned`. The spaces and tabs before it
- * go too (never a newline outside it) unless another attribute follows with none; an attribute that fills its own line
- * takes that line's break with it, so no blank line opens inside the tag. After an attribute that is not assigned the scan
- * restarts just past its `id`, so a quote it opened cannot swallow a live one after it (`<a title="id=" id="X">`).
+ * #4512 (cor:spc:030:02 "Authored ids"; Peter's approach ruling, chat 143451, after five review rounds on removing the
+ * attribute): an `id` attribute whose value equals an anchor assigned in this document is RENAMED `data-id`. The value,
+ * the spacing, the line breaks and every other byte stay exactly as written, so no cut can join two neighbours into a
+ * new live id, leave a blank line inside a tag or change the Markdown around it, and a `data-id` is never an anchor
+ * target. Nothing about tags, quotes, code, comments or blocks is judged: an assigned id written anywhere (code sample,
+ * comment, prose, URL path) is renamed too, and the worst case is a slightly altered sample, never a second element
+ * carrying a server anchor. Limits: named character references in an id are not decoded, and a URL query key is not
+ * an attribute (`?id=`, `&id=`, `#id=`) and is left alone.
  */
-function dropAssignedIdAttrsOnce(text: string, assigned: ReadonlySet<string>): string {
-  const zones = tagZones(text);
+export function neutraliseAssignedIds(text: string, assigned: ReadonlySet<string>): string {
+  if (assigned.size === 0 || !/id/i.test(text)) return text;
   let out = '';
   let copied = 0;
   const re = new RegExp(ID_ATTR.source, ID_ATTR.flags);
   for (let m = re.exec(text); m !== null; m = re.exec(text)) {
-    const zone = zones[m.index];
-    const prev = text[m.index - 1];
-    if (zone === Z_TEXT || (prev === '/' && zone !== Z_TAG)) { re.lastIndex = m.index + 2; continue; }
+    // Resume just past the name, so a value that holds another `id=` is still searched.
+    re.lastIndex = m.index + 2;
     let value = m[1] ?? m[2] ?? m[3] ?? '';
-    let to = m.index + m[0].length;
     // A bare value read up to the tag-closing slash (`<a id=X/>`) is the value without that slash.
-    if (m[3] !== undefined && value.endsWith('/') && text[to] === '>') { value = value.slice(0, -1); to -= 1; }
-    if (!assigned.has(decodeNumericRefs(value))) { re.lastIndex = m.index + 2; continue; }
-    let from = m.index;
-    const after = text[to];
-    if (after === undefined || isWs(after) || after === '/' || after === '>') while (from > copied && (text[from - 1] === ' ' || text[from - 1] === '\t')) from -= 1;
-    if (from === 0 || text[from - 1] === '\n') {
-      let k = to;
-      while (text[k] === ' ' || text[k] === '\t' || text[k] === '\r') k += 1;
-      if (text[k] === '\n') to = k + 1;
-    }
-    out += text.slice(copied, from);
-    copied = to;
+    if (m[3] !== undefined && value.endsWith('/') && text[m.index + m[0].length] === '>') value = value.slice(0, -1);
+    if (!assigned.has(decodeNumericRefs(value))) continue;
+    out += `${text.slice(copied, m.index)}data-id`;
+    copied = m.index + 2;
   }
   return copied === 0 ? text : out + text.slice(copied);
-}
-
-/** Passes until nothing changes: cutting an inner match can join its neighbours into a new live id (`id="id='X'X"`). Each pass is linear; the cap bounds an adversarial nest. */
-function dropAssignedIdAttrs(text: string, assigned: ReadonlySet<string>): string {
-  let cur = text;
-  for (let pass = 0; pass < 64; pass += 1) {
-    const next = dropAssignedIdAttrsOnce(cur, assigned);
-    if (next === cur) break;
-    cur = next;
-  }
-  return cur;
-}
-
-/**
- * #4512 (cor:spc:030:02 "Authored ids"; Peter's scope call, chat 142927 and 142932, after three review rounds on a
- * hand-written HTML/Markdown scanner): every `id` attribute whose value is an anchor assigned in this document is
- * removed, anywhere in authored text, with NO exemption. Only the attribute goes; every other byte stays. Code (fenced,
- * indented, inline), comments, CDATA, processing instructions and HTML-block structure are not recognised, on purpose:
- * an assigned id written there is removed too, and the worst case is a slightly altered code sample, never a second
- * element carrying a server anchor. Only inside a tag (see `tagZones`); id= in prose is left alone. Limits: named character references in an id are not decoded, and
- * an id whose value is split by a blockquote marker is not seen.
- */
-export function neutraliseAssignedIds(text: string, assigned: ReadonlySet<string>): string {
-  return assigned.size === 0 || !/id/i.test(text) ? text : dropAssignedIdAttrs(text, assigned);
 }
 
 const SPEC_CORE_DIV = /^<div class="spec-core"[^>]*><\/div>\s*$/;

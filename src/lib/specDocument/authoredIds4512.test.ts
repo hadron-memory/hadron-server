@@ -1,265 +1,144 @@
-/** #4512 / cor:spc:030:02 "Authored ids": an authored id equal to an assigned anchor is removed; any other authored text stays. */
+/**
+ * #4512 / cor:spc:030:02 "Authored ids": an authored `id` attribute equal to an anchor assigned in this document is
+ * renamed `data-id` (Peter's approach ruling, chat 143451). Every review probe of #4991 (D5, E1-E5, F1-F5, G1-G5, QA and
+ * local findings) is a pin here: it must end with no live assigned id and no byte changed but the attribute name.
+ */
 import { describe, expect, it } from 'vitest';
 import { neutraliseAssignedIds, renderSpecDocument, type DocInput, type DocPart } from './render.js';
+
+const A = new Set(['fx-110-a']);
+const run = (t: string): string => neutraliseAssignedIds(t, A);
+/** A live assigned id: an `id` attribute (not data-id, not a query key) whose value is the anchor. */
+const LIVE = /(?<![\w:.?&=#-])id[\s>]*=[\s>]*["']?fx-110-a(?![\w-])/i;
+const live = (t: string): boolean => LIVE.test(run(t));
 
 const part = (loc: string, body: string | null, name = 'Rule: Entry'): DocPart => ({
   loc, name, body, isPlaceholder: false, superseded: false, supersededBy: [], approval: { state: 'NOT_APPROVED' }, minted: false,
 });
-function doc(parts: DocPart[], feature: DocPart = part('fx:110', 'Feature body.', 'Feature: F')): DocInput {
-  return { memory: 'synthetic:specs', renderedAt: new Date('2026-11-06T00:00:00Z'), feature, parts, links: new Map() };
-}
-const count = (s: string, needle: string) => s.split(needle).length - 1;
-const COLLIDING = '<a id="fx-110-a"></a>\n\n## Rule: Entry [fx:110:a]\n\nauthored text';
+const doc = (parts: DocPart[], feature: DocPart = part('fx:110', 'Feature body.', 'Feature: F')): DocInput =>
+  ({ memory: 'synthetic:specs', renderedAt: new Date('2026-11-06T00:00:00Z'), feature, parts, links: new Map() });
+const count = (s: string, needle: string): number => s.split(needle).length - 1;
 
-describe('#4512 authored ids equal to an assigned anchor', () => {
-  it('the colliding authored anchor-then-heading copy is neutralised: exactly one id, on the server block', () => {
-    const out = renderSpecDocument(doc([part('fx:110:a', COLLIDING)]));
-    expect(count(out, 'id="fx-110-a"')).toBe(1);
+describe('#4512 the renamed attribute, in a rendered document', () => {
+  it('the colliding authored anchor-then-heading copy: exactly one id, on the server block', () => {
+    const out = renderSpecDocument(doc([part('fx:110:a', '<a id="fx-110-a"></a>\n\n## Rule: Entry [fx:110:a]\n\nauthored text')]));
+    expect(count(out, ' id="fx-110-a"')).toBe(1);
     expect(out).toContain('<a id="fx-110-a"></a>\n\n## Rule: Entry [fx:110:a]\nApproval: NOT_APPROVED');
+    expect(out).toContain('<a data-id="fx-110-a"></a>');
     expect(out).toContain('authored text');
-    expect(out).toContain('### Rule: Entry [fx:110:a]');
   });
-  it('removes only the id attribute, leaving the other attributes and text', () => {
-    const out = renderSpecDocument(doc([part('fx:110:a', '<div class="x" id=\'fx-110-a\' title="t">hi</div>')]));
-    expect(out).toContain('<div class="x" title="t">hi</div>');
-    expect(count(out, 'fx-110-a"')).toBe(1);
-  });
-  it.each([
-    ['unquoted', '<span id=fx-110-a>s</span>', '<span>s</span>'],
-    ['upper-case attribute name', '<span ID="fx-110-a">s</span>', '<span>s</span>'],
-    ['spaces around =', '<span id = "fx-110-a">s</span>', '<span>s</span>'],
-    ['tag spread over lines', '<span\n  class="c"\n  id="fx-110-a">s</span>', '<span\n  class="c"\n>s</span>'],
-  ])('%s', (_n, body, kept) => {
-    const out = renderSpecDocument(doc([part('fx:110:a', body)]));
-    expect(out).toContain(kept);
-    expect(out).not.toMatch(/id\s*=\s*["']?fx-110-a(?!["']?><\/a>\n\n## Rule)/i);
-  });
-  it('an authored id equal to a SUFFIXED assigned anchor is neutralised too', () => {
+  it('a suffixed assigned anchor is neutralised too, and the server block keeps it', () => {
     const out = renderSpecDocument(doc([part('fx:110:a-b', 'x'), part('fx:110:a:b', '<a id="fx-110-a-b-2"></a>')]));
-    expect(count(out, 'id="fx-110-a-b-2"')).toBe(1);
-    expect(out.indexOf('id="fx-110-a-b-2"')).toBeLessThan(out.indexOf('## Rule: Entry [fx:110:a:b]'));
+    expect(count(out, ' id="fx-110-a-b-2"')).toBe(1);
+    expect(out.indexOf(' id="fx-110-a-b-2"')).toBeLessThan(out.indexOf('## Rule: Entry [fx:110:a:b]'));
   });
-  it('the Feature body and the Feature tail are neutralised as well, the tail after the Rules section', () => {
+  it('the Feature body and the Feature tail are neutralised, the tail after the Rules section', () => {
     const feature = part('fx:110', '<a id="fx-110-a"></a>head\n\n---\n\n<a id="fx-110-a"></a>tail', 'Feature: F');
     const out = renderSpecDocument(doc([part('fx:110:a', 'x')], feature));
-    expect(count(out, 'id="fx-110-a"')).toBe(1);
+    expect(count(out, ' id="fx-110-a"')).toBe(1);
     expect(out).toContain('head');
     expect(out.indexOf('head')).toBeLessThan(out.indexOf('# Rules'));
     expect(out.indexOf('tail')).toBeGreaterThan(out.indexOf('## Rule: Entry [fx:110:a]'));
-    expect(out.endsWith('<a></a>tail\n')).toBe(true);
+    expect(out.endsWith('<a data-id="fx-110-a"></a>tail\n')).toBe(true);
   });
-  it('an unassigned authored id is untouched', () => {
-    const body = '<a id="my-own-anchor"></a>\n\ntext <span id="fx-110-zzz">z</span>';
-    const out = renderSpecDocument(doc([part('fx:110:a', body)]));
-    expect(out).toContain('<a id="my-own-anchor"></a>');
-    expect(out).toContain('<span id="fx-110-zzz">z</span>');
+  it('a body with no collision renders byte for byte as before, HTML, code and CRLF included', () => {
+    const rich = 'a <b>x</b>  <div  class = "c"\tdata-x=\'1\'>t</div>\r\n\r\n`code <a id="other">` ~ <br/> data-id="fx-110-a" ?id=fx-110-a';
+    expect(renderSpecDocument(doc([part('fx:110:a', rich)]))).toContain(rich);
+    expect(renderSpecDocument(doc([part('fx:110:a', 'Rule body.')]))).toBe('# Feature: F [fx:110]\n\nsynthetic:specs · rendered 2026-11-06T00:00Z\n\nReadiness: 2 specs · 0 approved · 0 minted · 0 superseded · no open questions\n\nFeature body.\n\n# Rules\n\n<a id="fx-110-a"></a>\n\n## Rule: Entry [fx:110:a]\nApproval: NOT_APPROVED · Mint: unminted\n\nRule body.\n');
   });
-  it('code is no exemption: an assigned id in fenced, tilde-fenced and inline code is removed too (the stated trade)', () => {
-    const body = 'Write `<a id="fx-110-a"></a>` like so:\n\n```html\n<a id="fx-110-a"></a>\n```\n\n~~~\n<a id="fx-110-a"></a>\n~~~';
-    const out = renderSpecDocument(doc([part('fx:110:a', body)]));
-    expect(count(out, 'id="fx-110-a"')).toBe(1); // the server block only
-    expect(out).toContain('Write `<a></a>` like so:');
-    expect(out).toContain('```html\n<a></a>\n```');
-  });
-  it('an assigned id inside another attribute value goes too (over-neutralised on purpose); the rest of the tag stays', () => {
-    const out = renderSpecDocument(doc([part('fx:110:a', '<a title="see id=fx-110-a here" id="fx-110-a" href="#x">l</a>')]));
-    expect(count(out, 'id="fx-110-a"')).toBe(1);
-    expect(out).toContain('href="#x">l</a>');
-  });
-  it('a body with no colliding id renders byte-for-byte as before', () => {
-    const out = renderSpecDocument(doc([part('fx:110:a', 'Rule body.')]));
-    const rich = 'a <b>x</b>  <div  class = "c"\tdata-x=\'1\'>t</div>\r\n\r\n`code <a id="other">` ~ <br/>';
-    const same = renderSpecDocument(doc([part('fx:110:a', rich)]));
-    expect(same).toContain(rich);
-    expect(out).toBe('# Feature: F [fx:110]\n\nsynthetic:specs · rendered 2026-11-06T00:00Z\n\nReadiness: 2 specs · 0 approved · 0 minted · 0 superseded · no open questions\n\nFeature body.\n\n# Rules\n\n<a id="fx-110-a"></a>\n\n## Rule: Entry [fx:110:a]\nApproval: NOT_APPROVED · Mint: unminted\n\nRule body.\n');
+  it('a very long body (150k lines) renders', () => {
+    const body = 'a\n'.repeat(150000) + '<a id="fx-110-a"></a>';
+    expect(run(body).endsWith('<a data-id="fx-110-a"></a>')).toBe(true);
+    expect(count(renderSpecDocument(doc([part('fx:110:a', body)])), ' id="fx-110-a"')).toBe(1);
   });
 });
 
-describe('#4512 the scanner on its own (review findings)', () => {
-  const A = new Set(['fx-110-a']);
-  const run = (t: string) => neutraliseAssignedIds(t, A);
-  it('a stray backtick in an earlier paragraph does not hide an id in a later one', () => {
-    expect(run('it`s odd\n\n<a id="fx-110-a"></a> and `code` x')).toBe('it`s odd\n\n<a></a> and `code` x');
+describe('#4512 what is renamed, and only that', () => {
+  it.each([
+    ['double quotes', '<a id="fx-110-a">', '<a data-id="fx-110-a">'],
+    ['single quotes', "<a id='fx-110-a'>", "<a data-id='fx-110-a'>"],
+    ['unquoted', '<span id=fx-110-a>s</span>', '<span data-id=fx-110-a>s</span>'],
+    ['upper-case name', '<span ID="fx-110-a">s</span>', '<span data-id="fx-110-a">s</span>'],
+    ['spaces around =', '<span id = "fx-110-a">s</span>', '<span data-id = "fx-110-a">s</span>'],
+    ['tag over several lines', '<span\n  class="c"\n  id="fx-110-a">s</span>', '<span\n  class="c"\n  data-id="fx-110-a">s</span>'],
+    ['no separator', '<div class="x"id="fx-110-a">', '<div class="x"data-id="fx-110-a">'],
+    ['slash separator', '<div/id="fx-110-a">', '<div/data-id="fx-110-a">'],
+    ['bare value before the closing slash (D5)', '<a href=/x id=fx-110-a/>', '<a href=/x data-id=fx-110-a/>'],
+    ['numeric reference', '<a id="fx&#45;110-a">', '<a data-id="fx&#45;110-a">'],
+    ['numeric reference without the semicolon', '<a id="fx-110&#45a">', '<a data-id="fx-110&#45a">'],
+  ])('%s', (_n, body, expected) => {
+    expect(run(body)).toBe(expected);
+    expect(live(body)).toBe(false);
   });
-  it('code spans are not recognised: an id in one is removed too', () => {
-    expect(run('a ` b\n\n`<a id="fx-110-a"></a>`')).toBe('a ` b\n\n`<a></a>`');
+  it.each([
+    ['an unassigned id', '<a id="other"></a>'],
+    ['an id in a longer name', '<a data-id="fx-110-a" xid="fx-110-a" my:id="fx-110-a" a.id="fx-110-a">'],
+    ['a URL query key or fragment', 'see https://x.test/p?id=fx-110-a&id=fx-110-a#id=fx-110-a now'],
+    ['a bare value that only starts like the anchor', '<a id=fx-110-ab>'],
+    ['an id whose value is the anchor plus a slash path', '<a id=fx-110-a/b>'],
+  ])('is untouched: %s', (_n, body) => {
+    expect(run(body)).toBe(body);
   });
-  it('backtick runs of different lengths are not a code span', () => {
-    expect(run('``<a id="fx-110-a"></a>`')).toBe('``<a></a>`');
-    expect(run('``<a id="fx-110-a"></a>``')).toBe('``<a></a>``');
+  it('the value of another attribute that mentions an id is renamed too, the rest of the tag stays', () => {
+    expect(run('<a title="see id=fx-110-a here" id="fx-110-a" href="#x">l</a>'))
+      .toBe('<a title="see data-id=fx-110-a here" data-id="fx-110-a" href="#x">l</a>');
   });
-  it('an escaped backtick does not open a span', () => {
-    expect(run('\\`<a id="fx-110-a"></a>`')).toBe('\\`<a></a>`');
-  });
-  it('a backtick inside an attribute value does not hide a real id', () => {
-    expect(run('<a title="`" id="fx-110-a"></a> `')).toBe('<a title="`"></a> `');
-  });
-  it('no separator or a slash before the attribute', () => {
-    expect(run('<div class="x"id="fx-110-a">')).toBe('<div class="x">');
-    expect(run('<div/id="fx-110-a">')).toBe('<div/>');
-  });
+});
 
-  it('prose with < and apostrophes does not hide a real tag', () => {
-    expect(run('a <b, don\'t <a id="fx-110-a"></a> it\'s fine <br>')).toBe('a <b, don\'t <a></a> it\'s fine <br>');
+describe('#4512 review probes: no live assigned id', () => {
+  it('F1/G1: nested cuts cannot join into a live id, at any depth', () => {
+    expect(live('<a id="id=\'fx-110-a\'fx-110-a">')).toBe(false);
+    for (const depth of [3, 64, 65, 200]) {
+      let inner = 'fx-110-a';
+      for (let i = 0; i < depth; i += 1) { const q = i % 2 ? '"' : "'"; inner = `id=${q}${inner}${q}fx-110-a`; }
+      expect(live(`<a ${inner}>`)).toBe(false);
+    }
   });
-  it('an escaped tag is not recognised: its assigned id is removed', () => {
-    expect(run('\\<a id="fx-110-a">')).toBe('\\<a>');
+  it.each([
+    ['G2: a quote in a comment', '<!-- \' --><a title="\'>" id="fx-110-a">'],
+    ['G2: an apostrophe in an unquoted value', '<div title=a\'b><a title="\'>" id="fx-110-a">'],
+    ['G2: backticks and quotes', '`<a "` <b title=\'">\' id="fx-110-a">'],
+    ['G2: an apostrophe before the slash form', '<div title=it\'s /id="fx-110-a">'],
+    ['G3: a tag over a blank line', '<pre\n\nid="fx-110-a">x</pre>'],
+    ['G3: a tag in a pre block over a blank line', '<pre>\n<a\n\nid="fx-110-a">x</a></pre>'],
+    ['G4: a very long tag name', `<x-${'a'.repeat(90)} id="fx-110-a">`],
+    ['G4: an underscore tag name', '<div><x_y id="fx-110-a"></x_y></div>'],
+    ['G4: a dotted tag name', '<div><x.y id="fx-110-a">'],
+    ['G5: nested markers with two spaces', '> > <a\n>  >id="fx-110-a">x</a>'],
+    ['G5: a marker in a list item', '10. > <a\n    >id="fx-110-a">x</a>'],
+    ['F2/F11: slashes between attributes', '<a b="c"/id="fx-110-a"> <a b/id=fx-110-a> <a//id="fx-110-a"> <div hidden/id="fx-110-a"> <div a=b /id="fx-110-a">'],
+    ['F3/F12: a marker directly before the name', '> <a\n>id="fx-110-a">x</a>'],
+    ['F12: nested markers and a CR line break', '> > <a\n> >id="fx-110-a">x</a> <a\r>id="fx-110-a">'],
+    ['E1/F9: an unassigned id= opens a quote first', '<a title="id=" id="fx-110-a"> say id=" then <b id="fx-110-a"> end"'],
+    ['E5: a marker between = and the value', '> <a id=\n> "fx-110-a">x</a> <a id=\n> > "fx-110-a">'],
+    ['E5: a break before the =', '> <a id\n> ="fx-110-a">'],
+    ['QA P2: comment openers that never close', '<!--> <b id="fx-110-a"> <!---> <b id="fx-110-a"> <!-- a --!> <b id="fx-110-a"> <![CDATA[ <b id="fx-110-a"> <? <b id="fx-110-a">'],
+    ['D6: a namespaced tag', '<o:p class="x" id="fx-110-a">'],
+    ['F5: a marker after id= outside a quote', '<div id=\n>fx-110-a</div> <div id="fx-110-a"\n>'],
+  ])('%s', (_n, body) => {
+    expect(live(body)).toBe(false);
   });
-  it('a numeric character reference in the id is decoded before comparing', () => {
-    expect(run('<a id="fx&#45;110-a"></a>')).toBe('<a></a>');
-    expect(run('<a id="fx&#x2d;110-zz"></a>')).toBe('<a id="fx&#x2d;110-zz"></a>');
+  it('the text outside the renamed attribute is byte for byte unchanged (F4/G7/G8: no line is cut, none is added)', () => {
+    const body = '<a\n  id="fx-110-a"\n  class="c">x</a>\n> <a\n> id="fx-110-a"\n> class="c">\r\n<a id="fx-110-a" id="fx-110-a"\n  class="c">';
+    const out = run(body);
+    expect(out).toBe(body.replace(/\bid="fx-110-a"/g, 'data-id="fx-110-a"'));
+    expect(out.length - body.length).toBe(5 * count(body, 'id="fx-110-a"'));
   });
-  it('is linear on hostile input', () => {
+});
+
+describe('#4512 linear time on hostile input', () => {
+  it('G10 and the older quadratic cases', () => {
     const t0 = Date.now();
+    run(`id=\n${'>'.repeat(300000)}`);
+    run(`id${' '.repeat(300000)}`);
     run('<a'.repeat(20000) + '\n\n' + '`'.repeat(20000) + '<a id="x" '.repeat(5000) + '"'.repeat(20000));
-    run('`a '.repeat(20000));
     run('<a x='.repeat(40000) + '>');
     run('id="'.repeat(40000));
+    run(`id="${'id= '.repeat(60000)}"`);
+    run('id="a" '.repeat(40000));
     run(' '.repeat(200000) + 'id');
     run('<!-- <b id="x"> '.repeat(20000) + '<![CDATA['.repeat(20000));
     run('<a x="<a x=\'<a x="'.repeat(8000));
     expect(Date.now() - t0).toBeLessThan(5000);
-  });
-
-  it('N1: removing an id never merges its neighbours or builds another tag', () => {
-    expect(run('<a id="fx-110-a"class="x">')).toBe('<a class="x">');
-    expect(run('<div hidden id="fx-110-a"title="t">')).toBe('<div hidden title="t">');
-    expect(run('<s id="fx-110-a"cript>')).toBe('<s cript>');
-  });
-  it('N2: an autolink or link destination is not cut unless it is indistinguishable from a tag (`<name/id=ASSIGNED`)', () => {
-    expect(run('<https://example.com/id=other>')).toBe('<https://example.com/id=other>');
-    expect(run('<https://example.com/a/id=fx-110-a>')).toBe('<https://example.com/a/id=fx-110-a>');
-    expect(run('see https://example.com/id=fx-110-a now')).toBe('see https://example.com/id=fx-110-a now');
-    expect(run('<docs/id=fx-110-a>')).toBe('<docs/>'); // a browser reads this as a tag with an id
-  });
-  it('N3: CRLF blank lines split blocks', () => {
-    expect(run('it`s odd\r\n\r\n<a id="fx-110-a"></a> and `code` x')).toBe('it`s odd\r\n\r\n<a></a> and `code` x');
-  });
-  it('N4: a list item or heading ends a block with no blank line', () => {
-    expect(run('- it`s odd\n- <a id="fx-110-a"></a> and `code` x')).toBe('- it`s odd\n- <a></a> and `code` x');
-    expect(run('# it`s\n<a id="fx-110-a"></a> `c`')).toBe('# it`s\n<a></a> `c`');
-  });
-  it('N5: backticks, backslashes and comments shield nothing: every assigned id attribute goes', () => {
-    expect(run('<div>`<a id="fx-110-a"></a>`</div>')).toBe('<div>`<a></a>`</div>');
-    expect(run('<div>\\<a id="fx-110-a"></a></div>')).toBe('<div>\\<a></a></div>');
-    expect(run('<!-- <a id="fx-110-a"></a> -->')).toBe('<!-- <a></a> -->');
-    expect(run('<!-- ` --> <a id="fx-110-a"></a> `')).toBe('<!-- ` --> <a></a> `');
-  });
-  it('N6: a bare value with = or a backtick is read to whitespace in an HTML block', () => {
-    expect(run('<div data-u=/x?y=1 id="fx-110-a">')).toBe('<div data-u=/x?y=1>');
-    expect(run('<div data-u=a`b id="fx-110-a">')).toBe('<div data-u=a`b>');
-  });
-  it('N7: a character reference without the semicolon is decoded', () => {
-    expect(run('<a id="fx-110&#45a"></a>')).toBe('<a></a>');
-    expect(run('<a id="fx-110&#45b"></a>')).toBe('<a id="fx-110&#45b"></a>');
-    expect(run('<a id="fx&#45;110-a"></a>')).toBe('<a></a>');
-  });
-
-  it.each([
-    ['<!--> <b id="fx-110-a">'],
-    ['<!---> <b id="fx-110-a">'],
-    ['<!-- a --!> <b id="fx-110-a">'],
-    ['<!--> <b id="fx-110-a"> -->'],
-    ['<!-- a --!> <b id="fx-110-a"> -->'],
-    ['<!-- never closed <b id="fx-110-a">'],
-    ['x <![CDATA[ never closed <b id="fx-110-a">'],
-    ['x <? never closed <b id="fx-110-a">'],
-  ])('QA P2: a comment-like opener that does not close hides no live id: %s', (body) => {
-    expect(run(body)).not.toContain('id="fx-110-a"');
-  });
-  it('a closed comment, CDATA and a processing instruction shield nothing either', () => {
-    expect(run('x <!-- <b id="fx-110-a"> --> y')).toBe('x <!-- <b> --> y');
-    expect(run('x <? <b id="fx-110-a"> ?> y')).toBe('x <? <b> ?> y');
-  });
-  it('local F8: a very long body (300 KB, 150k lines) renders; no argument-spread overflow', () => {
-    const body = 'a\n'.repeat(150000) + '<a id="fx-110-a"></a>';
-    expect(run(body).endsWith('<a></a>')).toBe(true);
-    const out = renderSpecDocument(doc([part('fx:110:a', body)]));
-    expect(count(out, 'id="fx-110-a"')).toBe(1);
-  });
-
-  it('D6: a namespaced tag (<o:p>) loses an assigned id; a longer attribute name that ends in id is not an id', () => {
-    expect(run('<o:p class="x" id="fx-110-a">')).toBe('<o:p class="x">');
-    expect(run('<a data-id="fx-110-a" xid="fx-110-a" my:id="fx-110-a">')).toBe('<a data-id="fx-110-a" xid="fx-110-a" my:id="fx-110-a">');
-  });
-  it('D1: a paragraph that starts with a tag is handled like any other text', () => {
-    expect(run('<b>bold</b> `<i id="fx-110-a">`')).toBe('<b>bold</b> `<i>`');
-  });
-
-  it('F9/E1: an unassigned id= that opens a quote cannot swallow a live id after it', () => {
-    expect(run('<a title="id=" id="fx-110-a">')).toBe('<a title="id=">');
-    expect(run('say id=" then <b id="fx-110-a"> end"')).toBe('say id=" then <b> end"');
-    expect(run('<a id="other" title=\'id=\' id="fx-110-a">')).toBe('<a id="other" title=\'id=\'>');
-  });
-  it('E2: the whitespace trim never eats newlines outside a tag', () => {
-    expect(run('line one\n\nid="fx-110-a"\nline two')).toBe('line one\n\nid="fx-110-a"\nline two');
-    expect(run('<span\n  class="c"\n  id="fx-110-a">s</span>')).toBe('<span\n  class="c"\n>s</span>');
-  });
-  it('E3: a URL query key id= is not an attribute and is not cut', () => {
-    expect(run('see https://x.test/p?id=fx-110-a now')).toBe('see https://x.test/p?id=fx-110-a now');
-    expect(run('see https://x.test/p?a=1&id=fx-110-a now')).toBe('see https://x.test/p?a=1&id=fx-110-a now');
-    expect(run('see https://x.test/p#id=fx-110-a now')).toBe('see https://x.test/p#id=fx-110-a now');
-  });
-  it('is linear when an unassigned quoted id keeps being retried', () => {
-    const t0 = Date.now();
-    run('id="' + 'id= '.repeat(60000) + '"');
-    run('id="a" '.repeat(40000));
-    expect(Date.now() - t0).toBeLessThan(5000);
-  });
-
-  it('D5: a bare value joined to the tag-closing slash is the assigned id', () => {
-    expect(run('<a id=fx-110-a/>')).toBe('<a/>');
-    expect(run('<a href=x id=fx-110-a />')).toBe('<a href=x />');
-    expect(run('<a id=fx-110-a/b>')).toBe('<a id=fx-110-a/b>');
-  });
-  it('Peter test: id counts only as an attribute name after whitespace, a quote, or the slash right after a tag name', () => {
-    expect(run('see https://x.test/id=fx-110-a now')).toBe('see https://x.test/id=fx-110-a now');
-    expect(run('a/b/id=fx-110-a')).toBe('a/b/id=fx-110-a');
-    expect(run('<div/id="fx-110-a">')).toBe('<div/>');
-    expect(run('<a href="x"id="fx-110-a">')).toBe('<a href="x">');
-  });
-  it('E5: a blockquote marker between = and the value does not hide the id', () => {
-    expect(run('> <a id=\n> "fx-110-a">x</a>')).toBe('> <a>x</a>');
-  });
-
-  it('F1: cutting an inner match cannot leave a live id (the scan repeats to a fixed point)', () => {
-    expect(run('<a id="id=\'fx-110-a\'fx-110-a">')).toBe('<a>');
-    expect(run('<a id="id=\'id=\\"fx-110-a\\"fx-110-a\'fx-110-a">')).not.toMatch(/id\s*=\s*["']?fx-110-a/);
-  });
-  it('F2 (QA F1): a slash that separates attributes is a boundary inside a tag', () => {
-    expect(run('<a b="c"/id="fx-110-a">')).toBe('<a b="c"/>');
-    expect(run('<a b/id=fx-110-a>')).toBe('<a b/>');
-    expect(run('<a//id="fx-110-a">')).toBe('<a//>');
-    expect(run('<a href="https://x.test/id=fx-110-a">l</a>')).toBe('<a href="https://x.test/id=fx-110-a">l</a>');
-  });
-  it('F3: a blockquote > at the line start directly before id', () => {
-    expect(run('> <a\n>id="fx-110-a">x</a>')).toBe('> <a\n>>x</a>');
-  });
-  it('F4: removing an attribute that fills a line leaves no blank line inside the tag', () => {
-    const out = run('<a\n  id="fx-110-a"\n  class="c">x</a>');
-    expect(out).toBe('<a\n  class="c">x</a>');
-    expect(out).not.toMatch(/\n[ \t]*\n/);
-  });
-  it('F5 and QA F2: id= outside any tag is prose and is not touched', () => {
-    expect(run('see id=fx-110-a here')).toBe('see id=fx-110-a here');
-    expect(run('text\nid=\n> "fx-110-a" more')).toBe('text\nid=\n> "fx-110-a" more');
-    expect(run('line one\n\nid="fx-110-a"\nline two')).toBe('line one\n\nid="fx-110-a"\nline two');
-  });
-  it('a tag that never closes ends at the blank line, so a later tag is still seen', () => {
-    expect(run('<a x="\n\n<b id="fx-110-a">')).toBe('<a x="\n\n<b>');
-    expect(run('<a\n\nsee id=fx-110-a here')).toBe('<a\n\nsee id=fx-110-a here'); // the stray < does not make the next paragraph a tag
-  });
-
-  it('F11: a slash between attributes in an HTML block', () => {
-    expect(run('<div title="x"/id="fx-110-a">')).toBe('<div title="x"/>');
-    expect(run('<div hidden/id="fx-110-a">')).toBe('<div hidden/>');
-    expect(run('<div a=b /id="fx-110-a">')).toBe('<div a=b />');
-  });
-  it('F12: nested blockquote markers, a marker before the name, bare CR line breaks', () => {
-    expect(run('> > <a\n> >id="fx-110-a">x</a>')).toBe('> > <a\n> >>x</a>');
-    expect(run('> <a id=\n> > "fx-110-a">x</a>')).toBe('> <a>x</a>');
-    expect(run('<a\r>id="fx-110-a">x</a>')).toBe('<a\r>>x</a>');
-    expect(run('<a\r\r<b id="fx-110-a">')).toBe('<a\r\r<b>');
-    expect(run('<a id=\r> "fx-110-a">x</a>')).toBe('<a>x</a>');
   });
 });
