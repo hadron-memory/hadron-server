@@ -308,6 +308,7 @@ import { assembleRunNodePrompt } from '../lib/runNodeRender.js';
 import { compileTemplate } from '../lib/template.js';
 import {
   NodeNotFoundError,
+  EdgeNotFoundError,
   AmbiguousLegacyUrnError,
   NodeAbstractTooLongError,
   InvalidContentScopeError,
@@ -315,6 +316,7 @@ import {
 import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
+import { resolveEdgeRef } from '../lib/entityRef/edgeRef.js';
 import { resolveAgentRef } from '../lib/entityRef/agentRef.js';
 import { resolveWorkerRef } from '../lib/entityRef/workerRef.js';
 import {
@@ -334,6 +336,8 @@ import {
 } from '../api/graphql/schema/resolvers.mutation.session.js';
 import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { deleteEdgeInDoorTx, nodeDoorTxContext } from '../api/graphql/schema/resolvers.mutation.node.js';
+import { lockInstallAuthoritiesFirst } from '../api/graphql/schema/installMemory.js';
 import { validationTaskSetsForNodes } from '../api/graphql/schema/resolvers.validationTaskSet.js';
 import type { ValidationTaskSet } from '../lib/contentValidationReport.js';
 import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
@@ -1255,6 +1259,54 @@ async function replaceOutgoingEdgesInTransaction(
     }
   }
   return null;
+}
+
+/**
+ * #860: ADD outgoing edges to `sourceNodeId` without touching any other edge, in the caller's transaction. Each item is
+ * exactly what the replace path writes per edge (same locs, same authored flag), and re-adding an edge that already
+ * exists is the idempotent case `addEdge` documents: the occupant of the loc must be the same live edge (same source,
+ * target and fields) to count as `unchanged`; any other occupant is an `edge_loc_conflict` and aborts the whole call.
+ * Caller has already validated targets via `resolveEdgeRefs`.
+ */
+async function addOutgoingEdgesInTransaction(
+  tx: Prisma.TransactionClient,
+  args: { sourceNodeId: string; sourceLoc: string; sourceMemoryId: string; resolved: ResolvedEdge[]; createdBy: string | null },
+): Promise<{ error: string } | { added: number; unchanged: number }> {
+  const source = { id: args.sourceNodeId, loc: args.sourceLoc, memoryId: args.sourceMemoryId };
+  const targets = args.resolved.map((edge) => ({ id: edge.targetNodeId, loc: edge.targetLoc, memoryId: edge.targetMemoryId }));
+  const live = await liveEdgeEndpointSet(tx, [source, ...targets]);
+  if (!live.has(source.id)) return { error: `Source node not found: "${source.id}".` };
+  const missing = args.resolved.find((edge) => !live.has(edge.targetNodeId));
+  if (missing) return { error: `Edge target not found: "${missing.targetNodeId}"` };
+  let added = 0;
+  let unchanged = 0;
+  for (const e of args.resolved) {
+    const loc = e.loc ?? deriveEdgeLoc(args.sourceLoc, e.name, e.targetLoc);
+    const { count } = await tx.edge.createMany({
+      data: [{
+        id: generateId(),
+        memoryId: args.sourceMemoryId,
+        sourceId: args.sourceNodeId,
+        targetId: e.targetNodeId,
+        loc,
+        locAuthored: isAuthoredLoc(e.loc), // #2947
+        name: e.name,
+        description: e.description,
+        isRunnable: e.isRunnable,
+        createdBy: args.createdBy,
+      }],
+      skipDuplicates: true,
+    });
+    if (count === 1) { added += 1; continue; }
+    const occupant = await tx.edge.findUnique({ where: { loc_memoryId: { loc, memoryId: args.sourceMemoryId } } });
+    if (!occupant || occupant.deletedAt || occupant.sourceId !== args.sourceNodeId || occupant.targetId !== e.targetNodeId ||
+        occupant.name !== e.name || occupant.description !== e.description || occupant.isRunnable !== e.isRunnable ||
+        occupant.condition !== null || occupant.priority !== 0 || occupant.data !== null) {
+      throw new EdgeLocConflictError('[edge_loc_conflict] An edge loc is already occupied; choose unique edge locs.');
+    }
+    unchanged += 1;
+  }
+  return { added, unchanged };
 }
 
 /**
@@ -7120,9 +7172,9 @@ export function createMcpServerInstance(
     'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     SHAPE_HADRON_UPDATE_NODE,
     async (mcpArgs) => {
-      const { urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install } = mcpArgs;
+      const { urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, addEdges, removeEdges, reason, install } = mcpArgs;
       if (install) {
-        if (edges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `isRunnable` or `abstractStillAccurate`.');
+        if (edges || addEdges || removeEdges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `addEdges`, `removeEdges`, `isRunnable` or `abstractStillAccurate`.');
         return writeInstallNodeViaGraphql('update', install, {
           authoredWith,
           loc: rawUrn, expectedRevision, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
@@ -7158,8 +7210,13 @@ export function createMcpServerInstance(
       if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memory.id)}`);
       }
+      // #860: `edges` replaces the whole set; the additive pair is a different intent, so the two never combine.
+      // Judged after authorization (no oracle) and before any write or edge resolution.
+      if (edges !== undefined && (addEdges !== undefined || removeEdges !== undefined)) {
+        return refusalResult('`edges` replaces the whole outgoing set and cannot be combined with `addEdges` or `removeEdges`; use `addEdges` / `removeEdges` alone to change some edges and keep the rest.');
+      }
       // #4096: typed refusal for caller text carrying a NUL, after authorization and before any write.
-      const unstorableUpdate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent, reason, properties, data: nodeData, ...edgeTextFields(edges) });
+      const unstorableUpdate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent, reason, properties, data: nodeData, removeEdgeRefs: removeEdges, ...edgeTextFields(edges ?? addEdges) });
       if (unstorableUpdate) return unstorableUpdate;
       // #4039 (B4): the same save-time check as hadron_create_node, before any write.
       const entryRefusal = entryConditionRefusal(loc, nodeData);
@@ -7201,7 +7258,7 @@ export function createMcpServerInstance(
                 context: 'node-write',
                 surface: 'mcp',
                 canReplay: (kind) =>
-                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, expectedRevision }, kind, 'update'),
+                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, addEdges, removeEdges, reason, expectedRevision }, kind, 'update'),
               }
             : {},
         );
@@ -7253,6 +7310,60 @@ export function createMcpServerInstance(
         if ('error' in r) return refusalResult(r.error);
         resolvedEdges = r.resolved;
       }
+
+      // #860: the additive pair. addEdges takes exactly what `edges` takes, through the same resolver; removeEdges names
+      // edges of THIS node by the identifier hadron_delete_edge takes. Both are resolved before any write.
+      let resolvedAdds: ResolvedEdge[] | null = null;
+      if (addEdges !== undefined) {
+        for (const edge of addEdges) {
+          try {
+            if (!isId(edge.targetUrn)) assertFullyQualifiedUrn(edge.targetUrn, 'node');
+          } catch (e) {
+            if (e instanceof UrnNotQualifiedError) return textResult(`Edge target: ${e.message}`);
+            throw e;
+          }
+        }
+        const r = await resolveEdgeRefs(
+          addEdges.map((e) => ({
+            targetId: e.targetUrn,
+            name: e.name ?? null,
+            loc: e.loc ?? null,
+            description: e.description ?? null,
+            isRunnable: e.isRunnable ?? null,
+          })),
+          existing.memoryId,
+          auth,
+        );
+        if ('error' in r) return refusalResult(r.error);
+        resolvedAdds = r.resolved;
+      }
+      let removeTargets: Array<{ edgeId: string; ref: string; memoryId: string }> | null = null;
+      if (removeEdges !== undefined) {
+        removeTargets = [];
+        const seen = new Set<string>();
+        for (const ref of removeEdges) {
+          // The one answer deleteEdge gives for an unknown, foreign or unreadable edge: no existence oracle.
+          const notFound = refusalResult(`Edge not found: "${ref}"`);
+          let edgeId: string;
+          try {
+            ({ id: edgeId } = await resolveEdgeRef(db, ref));
+          } catch (e) {
+            if (e instanceof EdgeNotFoundError) return notFound;
+            if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+            throw e;
+          }
+          const owned = await db.edge.findUnique({ where: { id: edgeId }, select: { sourceId: true, memoryId: true } });
+          // Scoped to this node's own outgoing edges: another node's edge, in any memory, is not found here.
+          if (!owned || owned.sourceId !== existing.id || owned.memoryId !== existing.memoryId) return notFound;
+          if (seen.has(edgeId)) continue;
+          seen.add(edgeId);
+          removeTargets.push({ edgeId, ref, memoryId: owned.memoryId });
+        }
+      }
+      const edgeWrite = resolvedEdges !== null || resolvedAdds !== null || removeTargets !== null;
+      // True only while the removal loop runs, so its refusal mappings never reformat an unrelated refusal on a combined call.
+      let removing = false;
+      const edgeReceipt = { removed: 0, added: 0, unchanged: 0 };
 
       // Spec 031 — length-cap + trim-then-check the abstract BEFORE the
       // revision snapshot, so an over-cap abstract aborts cleanly without
@@ -7381,16 +7492,24 @@ export function createMcpServerInstance(
 
       let includePinContentSaved = false;
       let includePinPriorContent: string | null = null;
-      if (Object.keys(data).length > 0 || resolvedEdges !== null || expectedRevision !== undefined) {
+      if (Object.keys(data).length > 0 || edgeWrite || expectedRevision !== undefined) {
         // Spec 049 S4: the write holds the address lock and the gate runs
         // under it — the check above is the fast refusal, this the
         // authoritative one (Copilot on PR #1165).
         try {
           await db.$transaction(async (tx) => {
+            // #860: removeEdges is deleteEdge's door per item, so it takes deleteEdge's FIRST locks in deleteEdge's order: the
+            // install authority, or for an Agent's own system memory the Agent-definition authority (lockInstallAuthorityFirst takes
+            // it itself, so #2206's 'authority before any memory lock' holds), then the memory row FOR SHARE, before any node or
+            // loc lock. The call just below re-enters the Agent-definition authority already held in this transaction.
+            if (removeTargets !== null) {
+              await lockInstallAuthoritiesFirst(tx, objectCtx(), [existing.memoryId]);
+              await tx.$queryRaw`SELECT id FROM memories WHERE id = ${existing.memoryId} FOR SHARE`;
+            }
             // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
             await lockAgentDefinitionAuthority(tx, auth.userId ?? null, existing.memoryId);
-            if (resolvedEdges !== null) {
-              await lockOutgoingEdgeMemories(tx, existing.memoryId, resolvedEdges);
+            if (resolvedEdges !== null || resolvedAdds !== null) {
+              await lockOutgoingEdgeMemories(tx, existing.memoryId, [...(resolvedEdges ?? []), ...(resolvedAdds ?? [])]);
             }
             await lockLocForWrite(tx, memory.id, loc);
             // #1072/#1185/#1323 — read and snapshot only after the address
@@ -7462,14 +7581,14 @@ export function createMcpServerInstance(
             });
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
-            if (Object.keys(data).length === 0 && resolvedEdges === null) return;
+            if (Object.keys(data).length === 0 && !edgeWrite) return;
             // Snapshot the ciphertext row, but compare the caller's plaintext
             // with a decrypted copy. An identical encrypted save is a no-op.
             const currentForDiff = updKey
               ? decryptNodeFieldsWithKey({ ...current }, updKey)
               : current;
             const changedFields = diffNodeChanges(currentForDiff, plaintextUpdates);
-            if (changedFields.length === 0 && resolvedEdges === null) return;
+            if (changedFields.length === 0 && !edgeWrite) return;
             // #1328 — parity with writeNodeCore, before the snapshot.
             const authoredChange = authoredContentChanged(changedFields);
             const authoredStamp = await assertAuthoring(tx, memory.id, {
@@ -7505,6 +7624,30 @@ export function createMcpServerInstance(
               });
               if (edgeError) throw new InlineEdgeEndpointError(edgeError);
             }
+            // #860: removals first, then additions, in this one transaction; a refused item aborts all of it.
+            if (removeTargets !== null || resolvedAdds !== null) {
+              if (removeTargets !== null && removeTargets.length > 0) {
+                const txCtx = await nodeDoorTxContext(objectCtx(), tx, [updated.memoryId]);
+                removing = true;
+                for (const target of removeTargets) {
+                  await deleteEdgeInDoorTx(tx, txCtx, { edgeId: target.edgeId, edgeRef: target.ref, memoryId: target.memoryId, expectedSourceId: updated.id });
+                  edgeReceipt.removed += 1;
+                }
+                removing = false;
+              }
+              if (resolvedAdds !== null) {
+                const added = await addOutgoingEdgesInTransaction(tx, {
+                  sourceNodeId: updated.id,
+                  sourceLoc: updated.loc,
+                  sourceMemoryId: updated.memoryId,
+                  resolved: resolvedAdds,
+                  createdBy: auth.clientId ?? null,
+                });
+                if ('error' in added) throw new InlineEdgeEndpointError(added.error);
+                edgeReceipt.added = added.added;
+                edgeReceipt.unchanged = added.unchanged;
+              }
+            }
             if (content !== undefined) {
               await applyIncludesInTransaction(tx, updated, content, auth, (currentForDiff.content as string | null) ?? null);
               includePinContentSaved = true;
@@ -7529,6 +7672,12 @@ export function createMcpServerInstance(
           if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return refusalResult(e.message);
           if (e instanceof EdgeLocConflictError) return refusalResult(e.message);
+          // #860: removeEdges' per-item refusals are deleteEdge's own, with its own text.
+          if (removing && e instanceof GraphQLError && (e.extensions?.code === 'EDGE_NOT_FOUND' || e.extensions?.code === 'INCLUDE_EDGE_DERIVED')) return refusalResult(e.message);
+          if (removing && isCommentGovernedError(e)) return refusalResult((e as Error).message);
+          // #860: whatever else deleteEdge's checks refuse (a boot-prompt row, write access revoked since the preflight) reaches the
+          // caller as deleteEdge's own text, through the same boundary that tool uses; anything untrusted stays a fault.
+          if (removing && e instanceof GraphQLError) return toolErrorResult(e, () => e.message, 'hadron_update_node:removeEdges');
           if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
           const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
@@ -7573,7 +7722,10 @@ export function createMcpServerInstance(
 
       const updatedUrn = await nodeUrn(loc, existing.memoryId);
       // #322: surface the stable PK (immutable across move/rename).
-      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})${includePinContentSaved ? renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId: existing.memoryId }, content, includePinPriorContent)) : ''}${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), existing.id))}`);
+      const edgeDeltaText = removeTargets !== null || resolvedAdds !== null
+        ? ` — edges: ${edgeReceipt.added} added, ${edgeReceipt.unchanged} unchanged, ${edgeReceipt.removed} removed`
+        : '';
+      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})${edgeDeltaText}${includePinContentSaved ? renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId: existing.memoryId }, content, includePinPriorContent)) : ''}${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), existing.id))}`);
     },
   );
 
@@ -7646,6 +7798,22 @@ export function createMcpServerInstance(
     for (const key of Object.keys(shape)) {
       if (key !== 'urn' && key !== 'session' && key in rest) fields[key] = rest[key];
     }
+    // #4864: the tasks-index edge is the task CREATE door's own argument, not a field of the node input.
+    let taskIndex: { agent: string; trigger: string } | undefined;
+    let taskSkill: { name: string; description: string } | undefined;
+    if (kind === 'task' && mode === 'create') {
+      const { agent, trigger } = fields as { agent?: unknown; trigger?: unknown };
+      delete fields.agent;
+      delete fields.trigger;
+      taskSkill = fields.skill as { name: string; description: string } | undefined;
+      delete fields.skill;
+      if (agent !== undefined || trigger !== undefined) {
+        if (typeof agent !== 'string' || agent.trim() === '' || typeof trigger !== 'string' || trigger.trim() === '') {
+          return textResult('hadron_create_task: "agent" and "trigger" go together: name the Agent whose tasks index lists this task and the trigger label for it.');
+        }
+        taskIndex = { agent, trigger };
+      }
+    }
     // #1291: the merge option is the task door's own argument, not a field of the node input.
     const mergeExports = kind === 'task' && mode === 'update' && fields.mergeExports === true;
     delete fields.mergeExports;
@@ -7716,10 +7884,10 @@ export function createMcpServerInstance(
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
       )[doorName](
         {},
-        { input: { memoryId: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}) },
+        { input: { memoryId: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}), ...(taskIndex ? { index: taskIndex } : {}), ...(taskSkill ? { skill: taskSkill } : {}) },
         ctx,
       );
-      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
+      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${taskIndex ? ` · listed in the tasks index of ${taskIndex.agent} (trigger: ${taskIndex.trigger.trim()})` : ''}${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
     } catch (e) {
       return toolErrorResult(e, () => {
         const code = (e as { extensions?: { code?: string } }).extensions?.code;
@@ -7730,9 +7898,9 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_task',
-    'Create a RUNNABLE node — a task `hadron_run_task` can execute. This is the only way to author one: `hadron_create_node` refuses a write that would produce a runnable node, because authoring something the platform will EXECUTE is not the same act as writing prose. The runnable flag is set by this tool, so you do not pass it. Use it when you are deliberately writing a procedure for an agent to run; for ordinary notes, docs or findings use hadron_create_node.',
-    governedDoorArgs,
-    async (args) => callGovernedDoor('task', 'create', governedDoorArgs, args),
+    'Create a RUNNABLE node — a task `hadron_run_task` can execute. This is the only way to author one: `hadron_create_node` refuses a write that would produce a runnable node, because authoring something the platform will EXECUTE is not the same act as writing prose. The runnable flag is set by this tool, so you do not pass it. Use it when you are deliberately writing a procedure for an agent to run; for ordinary notes, docs or findings use hadron_create_node. To list the task on an Agent\'s task list in the same step, pass `agent` and `trigger` together: the node and one edge to the node the Agent\'s tasksIndexRef names are written in one transaction, so either both exist or neither does (the task must be created in that Agent\'s own system memory).',
+    taskCreateArgs,
+    async (args) => callGovernedDoor('task', 'create', taskCreateArgs, args),
   );
 
   server.tool(
@@ -13171,6 +13339,17 @@ const governedDoorArgs = {
   seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
   properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
   data: z.record(z.string(), z.unknown()).optional().describe('Runtime data bag'),
+};
+
+/** #4864: the CREATE door's own arguments, beside the shared ones. Absent from the update door: an edit never lists a task. */
+const taskCreateArgs = {
+  ...governedDoorArgs,
+  agent: z.string().optional().describe('The Agent (ID or URN) whose tasks index lists this task. Give it with `trigger`; the task must be created in that Agent\'s own system memory.'),
+  trigger: z.string().optional().describe('The trigger label of the tasks-index edge: what the Agent\'s task list shows for this task. One line of at most 200 characters. Give it with `agent`.'),
+  skill: z
+    .object({ name: z.string(), description: z.string() })
+    .optional()
+    .describe('Opt-in skill export: writes an enabled properties.exports.claudeSkill block with this name and description, checked by the skill lint (an error refuses the whole call). Omit it and no block is written.'),
 };
 
 /**

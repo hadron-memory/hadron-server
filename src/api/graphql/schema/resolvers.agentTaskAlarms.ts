@@ -74,6 +74,7 @@ import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { cancelLiveReset, holdForStopLease } from '../../../lib/contextReset/contextReset.js';
 import { effectiveWindows, STALL_WINDOW_DEFAULTS, type StallWindows } from '../../../lib/agentTasks/stall.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import { APP_ROLE_PURPOSES, isAppRolePurpose, normalizeRoleList, type AppRoleListsView } from '../../../lib/agentTasks/appRoleLists.js';
 import { normalizeWakeRoles, SATURATION_EVENT_TYPE, SATURATION_WAKE_ROLE_MAX_LENGTH, SATURATION_WAKE_ROLES_MAX } from '../../../lib/agentTasks/saturation.js';
 import { withRosterAppRead } from './resolvers.agentTaskMatching.js';
 import {
@@ -535,7 +536,72 @@ export const agentTaskAlarmMutations = {
     });
     return saturationWakeRolesView(ctx.db, app.id);
   },
+
+  /**
+   * #4921 slice A (the precedent is `setSaturationAlarmWakeRoles`; hrn:node:hadronmemory.com:specs:cor:agt:060:16): set ONE
+   * of the App's role lists, the whole list at once. Whoever manages the App (hrn:node:hadronmemory.com:specs:cor:dmo:050:12),
+   * through the precedent's door exactly: `resolveParticipatedApp` (a non-participant gets APP_NOT_FOUND, the missing
+   * App's answer), then `actorManagesApp` inside `inTaskWriteTx` (a participant who does not manage it gets
+   * APP_MANAGER_REQUIRED; an instructed worker is admitted only as #3323 admits it). Malformed input (an unknown purpose,
+   * a malformed list) is refused BAD_USER_INPUT before any of that. This list decides who may link a defect, hold the
+   * register pick and withdraw a verdict, so the manager-only gate is the contract, not a convenience. An existing row is
+   * read FOR UPDATE before the compare; writing the stored list again writes and records nothing (#3323's no-op rule).
+   * Slice A stores the list only: no door reads it yet.
+   */
+  setAppRoleList: async (
+    _: unknown,
+    { appRef, purpose, roles, instruction }: { appRef: string; purpose: unknown; roles: unknown; instruction?: ActInstruction | null },
+    ctx: Context,
+  ) => {
+    if (!isAppRolePurpose(purpose)) {
+      throw badInput(`purpose is one of ${Object.keys(APP_ROLE_PURPOSES).join(', ')}.`);
+    }
+    const next = normalizeRoleList(roles);
+    if (!next) {
+      throw badInput(
+        `roles is a list of at most ${SATURATION_WAKE_ROLES_MAX} role names, each 1 to ${SATURATION_WAKE_ROLE_MAX_LENGTH} characters ` +
+          'with no ":" or whitespace; the empty list clears it.',
+      );
+    }
+    const column = APP_ROLE_PURPOSES[purpose].column;
+    const participated = await resolveParticipatedApp(ctx, appRef);
+    const { app } = participated;
+    const actor = withInstruction(participated.actor, instruction);
+    requireWritable(ctx, app);
+    await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
+      if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
+        throw taskError('APP_MANAGER_REQUIRED', 'Only whoever manages the App sets its role lists.');
+      }
+      const [row] = await tx.$queryRaw<{ defectLinkRoles: string[]; registerPickRoles: string[]; reviewWithdrawRoles: string[] }[]>`
+        SELECT defect_link_roles AS "defectLinkRoles", register_pick_roles AS "registerPickRoles",
+               review_withdraw_roles AS "reviewWithdrawRoles"
+        FROM agent_task_stall_schedule WHERE app_id = ${freshApp.id} FOR UPDATE`;
+      const current = row?.[column] ?? [];
+      if (current.length === next.length && current.every((r, i) => r === next[i])) return; // #3323: a no-op writes nothing
+      await tx.agentTaskStallSchedule.upsert({
+        where: { appId: freshApp.id },
+        create: { appId: freshApp.id, [column]: next, updatedBy: ctx.userId ?? null },
+        update: { [column]: next, updatedBy: ctx.userId ?? null },
+      });
+      await recordInstructedManagerAct(tx, freshApp.id, actor, 'app.role-list');
+    });
+    const view = await appRoleListsView(ctx.db, app.id);
+    return { appId: app.id, purpose, roles: view[APP_ROLE_PURPOSES[purpose].field] };
+  },
 };
+
+async function appRoleListsView(db: Context['db'], appId: string): Promise<AppRoleListsView> {
+  const row = await db.agentTaskStallSchedule.findUnique({
+    where: { appId },
+    select: { defectLinkRoles: true, registerPickRoles: true, reviewWithdrawRoles: true },
+  });
+  return {
+    appId,
+    defectLink: row?.defectLinkRoles ?? [],
+    registerPick: row?.registerPickRoles ?? [],
+    reviewWithdraw: row?.reviewWithdrawRoles ?? [],
+  };
+}
 
 async function saturationWakeRolesView(db: Context['db'], appId: string) {
   const row = await db.agentTaskStallSchedule.findUnique({ where: { appId }, select: { saturationWakeRoles: true } });
@@ -569,6 +635,13 @@ export const agentTaskAlarmQueries = {
    */
   saturationAlarmWakeRoles: (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
     withRosterAppRead(ctx, appRef, (readCtx, app) => saturationWakeRolesView(readCtx.db, app.id)),
+
+  /**
+   * #4921 slice A: the App's three role lists, for whoever may read its roster, through the roster's gate and its
+   * refusal byte for byte (cor:agt:050:21, :23), as `saturationAlarmWakeRoles` does.
+   */
+  appRoleLists: (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
+    withRosterAppRead(ctx, appRef, (readCtx, app) => appRoleListsView(readCtx.db, app.id)),
 
   /**
    * Every availability record in an App — its workers' and its model

@@ -772,6 +772,7 @@ export type ManagerAct =
   | 'review.verdict-withdraw'
   // #4777: the saturation-alarm wake-roles list (cor:agt:060:16).
   | 'app.saturation-wake-roles'
+  | 'app.role-list'
   | 'app.model-group.set' | 'app.model-group.delete' | 'app.properties'
   // #3321 (S4b): the host-operation, stop-signal, ticker, settings, isolation and wake doors.
   | `host-operation.${'worker.start' | 'worker.end' | 'worktree.create' | 'worktree.remove'}`

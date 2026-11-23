@@ -6,6 +6,8 @@ import { controller } from './controller/controller.js';
 import { db } from './integrations/db/client.js';
 import { createReadiness } from './api/health.js';
 import { stoppingDrainWindowMs } from './lib/stoppingDrainWindow.js';
+import { applyHttpTimeouts } from './lib/httpTimeouts.js';
+import { clearPortFile, portFilePath, writePortFile } from './lib/portFile.js';
 import { closeHttpListenerOutcome } from './lib/httpShutdown.js';
 import { errorToken, logFailedShutdownSteps, type EmbeddingStopOutcomes, type StepOutcome } from './lib/shutdownSteps.js';
 
@@ -17,7 +19,11 @@ const readiness = createReadiness();
 
 const app = await createServer({ readiness });
 
+clearPortFile(); // #851: a stale port from a previous run of this container must never be read by the probe
 const httpServer = app.listen(port, () => {
+  // #851: the HEALTHCHECK reads the bound port from here, not from its own PORT. A failed write is loud: without the file the
+  // probe falls back to PORT, then 4000, which is wrong when PORT is a Doppler secret, and the replica would read unhealthy.
+  if (!writePortFile(httpServer)) console.warn(`could not write the bound port to ${portFilePath()}: the HEALTHCHECK will fall back to PORT, then 4000`);
   console.log(`hadron-server listening on http://localhost:${port}`);
   console.log(`GraphQL: http://localhost:${port}/graphql`);
   console.log(`MCP:     http://localhost:${port}/mcp`);
@@ -27,6 +33,13 @@ const httpServer = app.listen(port, () => {
     console.error('Startup graph sync failed:', err);
   });
 });
+
+// #851: keep-alive above every proxy's idle reuse (a closed-under-it connection is an intermittent 502); applied
+// before the first connection can arrive on the event loop turn after listen.
+{
+  const t = applyHttpTimeouts(httpServer);
+  console.log(`http timeouts: keepAliveTimeout=${t.keepAliveTimeoutMs}ms headersTimeout=${t.headersTimeoutMs}ms`);
+}
 
 // internal#4: close admission before graceful process exit. This is a lifecycle hook,
 // not a deployment/fencing action; rollout still requires the operator's cohort boundary.

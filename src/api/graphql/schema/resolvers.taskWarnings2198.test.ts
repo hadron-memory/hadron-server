@@ -174,6 +174,115 @@ describe('assignee warnings (create-with-assignee, assign, reassign)', () => {
   });
 });
 
+describe('#4855 an assignment that cannot start its worker because a session is open says so', () => {
+  const openSession = (w: { id: string }, updatedAt = new Date(Date.now() - 60 * 86_400_000)) =>
+    db.session.create({ data: { id: generateId(), userId: member.id, appId: app.id, workerId: w.id, agentId: teamAgentId, startedAt: updatedAt, updatedAt } });
+
+  it('a quiet open session: the assigner is told the start was skipped; the task is still assigned', async () => {
+    await openSession(liam);
+    const queued = await create(ctx(member.id), {});
+    const c = ctx(member.id);
+    const t = await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, c);
+    expect(t.assigneeWorkerId).toBe(liam.id);
+    expect(codes(c)).toContain('task.assign.session-open');
+  });
+
+  it('a live open session too (the platform starts nobody over an open session, live or quiet)', async () => {
+    await openSession(liam, new Date());
+    const queued = await create(ctx(member.id), {});
+    const c = ctx(member.id);
+    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, c);
+    expect(codes(c)).toContain('task.assign.session-open');
+  });
+
+  it('create naming the worker, and reassign, say it too', async () => {
+    await openSession(liam);
+    const named = ctx(member.id);
+    await create(named, { assignee: { worker: liam.id } });
+    expect(codes(named)).toContain('task.assign.session-open');
+    const t = await create(ctx(member.id), { assignee: { worker: rook.id } });
+    const r = ctx(member.id);
+    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: liam.id } }, r);
+    expect(codes(r)).toContain('task.assign.session-open');
+  });
+
+  it('no open session, or an ended one: nothing to say', async () => {
+    const queued = await create(ctx(member.id), {});
+    const none = ctx(member.id);
+    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, none);
+    expect(codes(none)).not.toContain('task.assign.session-open');
+    const s = await openSession(anne);
+    await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+    const ended = ctx(member.id);
+    await create(ended, { assignee: { worker: anne.id } });
+    expect(codes(ended)).not.toContain('task.assign.session-open');
+  });
+
+  it('only the ASSIGNEE\'s own session counts: another worker\'s open session says nothing about it', async () => {
+    await openSession(rook);
+    await openSession(anne, new Date());
+    const queued = await create(ctx(member.id), {});
+    const c = ctx(member.id);
+    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, c);
+    expect(codes(c)).not.toContain('task.assign.session-open');
+  });
+
+  it('a soft-deleted session is not open', async () => {
+    const s = await openSession(anne);
+    await db.session.update({ where: { id: s.id }, data: { deletedAt: new Date() } });
+    const c = ctx(member.id);
+    await create(c, { assignee: { worker: anne.id } });
+    expect(codes(c)).not.toContain('task.assign.session-open');
+  });
+
+  it('a worker taking work for itself is not advised, and a user assignee is not either', async () => {
+    await openSession(anne);
+    const self = ctx(member.id);
+    await asWorker(anne, teamAgentId, () => create(self, { assignee: { worker: anne.id } }));
+    expect(codes(self)).not.toContain('task.assign.session-open');
+    const user = ctx(member.id);
+    await create(user, { assignee: { user: member.id } });
+    expect(codes(user)).toEqual([]);
+  });
+
+  it('the text is fixed: the same for every worker, naming no worker, id or session', async () => {
+    const { TASK_WARNING_TEXT } = await import('./resolvers.taskWarnings.js');
+    const text = TASK_WARNING_TEXT['task.assign.session-open'];
+    expect(text).toBe('The assignee has an open session, so the platform does not start it over that session; the assignment reaches it through that session.');
+    for (const w of [anne, liam, rook]) expect(text).not.toContain(w.id);
+    expect(text).not.toMatch(/anne|liam|rook|[0-9a-f]{12}/i);
+    // and what is filed for two different workers is the same text
+    await openSession(liam);
+    await openSession(rook);
+    const a = ctx(member.id);
+    const b = ctx(member.id);
+    await create(a, { assignee: { worker: liam.id } });
+    await create(b, { assignee: { worker: rook.id } });
+    const filed = (c: Context) => (c.taskWarnings ?? []).filter((w) => w.warning.code === 'task.assign.session-open').map((w) => w.warning.text);
+    expect(filed(a)).toEqual([text]);
+    expect(filed(b)).toEqual([text]);
+  });
+
+  it('paused (a live session) and session-open come together, in the fixed order: the assigner hears both facts', async () => {
+    await db.workerWakeSettings.create({ data: { workerId: liam.id, pausedUntil: new Date(Date.now() + 3_600_000) } });
+    await openSession(rook, new Date());
+    await openSession(liam, new Date());
+    const queued = await create(ctx(member.id), {});
+    const c = ctx(member.id);
+    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, c);
+    expect(codes(c)).toEqual(['task.assign.assignee-paused', 'task.assign.session-open']);
+  });
+
+  it('it is worker state: filed only to a caller the roster would show it to (the others stay silent about it)', async () => {
+    const c = ctx(outsider.id);
+    await emitTaskWarnings(c, undefined, app.id, { codes: ['task.create.no-source', 'task.assign.session-open'] });
+    expect(codes(c)).toEqual(['task.create.no-source']);
+    const ok = ctx(member.id);
+    await emitTaskWarnings(ok, undefined, app.id, { codes: ['task.assign.session-open', 'task.create.no-source'] });
+    expect(codes(ok)).toEqual(['task.create.no-source', 'task.assign.session-open']);
+  });
+});
+
 describe('task.finish.open-children', () => {
   it('fires on finish with an open child, the finish still succeeds; none once the child is done', async () => {
     const parent = await create(ctx(member.id), { assignee: { worker: anne.id } });

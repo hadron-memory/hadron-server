@@ -56,12 +56,14 @@ const MA = resolvers.Mutation as unknown as {
   setModelFamilyAvailability: Resolver<{ input: Record<string, unknown> }, AvailabilityRow>;
   setAgentTaskStallSchedule: Resolver<{ appRef: string; input: Record<string, unknown> }, StallScheduleView>;
   setSaturationAlarmWakeRoles: Resolver<{ appRef: string; roles: string[] }, WakeRolesView>;
+  setAppRoleList: Resolver<{ appRef: string; purpose: string; roles: string[] }, { appId: string; purpose: string; roles: string[] }>;
 };
 const QA = resolvers.Query as unknown as {
   teamAvailability: Resolver<{ appRef: string }, { workers: AvailabilityRow[]; families: AvailabilityRow[] }>;
   teamRoster: Resolver<{ appRef: string }, { appId: string; asOf: Date; workers: RosterRow[] }>;
   agentTaskStallSchedule: Resolver<{ appRef: string }, StallScheduleView>;
   saturationAlarmWakeRoles: Resolver<{ appRef: string }, WakeRolesView>;
+  appRoleLists: Resolver<{ appRef: string }, RoleListsView>;
 };
 type WakeRolesView = { appId: string; roles: string[] };
 /**
@@ -72,6 +74,14 @@ type WakeRolesView = { appId: string; roles: string[] };
 export function mcpWakeRolesArgs(args: { session?: unknown; appRef: string; roles: string[] }): { appRef: string; roles: string[] } {
   return { appRef: args.appRef, roles: args.roles };
 }
+type RoleListsView = { appId: string; defectLink: string[]; registerPick: string[]; reviewWithdraw: string[] };
+/** #4921: the MCP role-list set tool keeps the GraphQL argument names; it drops `session`. Exported to pin it (the tool is switched off). */
+export function mcpRoleListArgs(args: { session?: unknown; appRef: string; purpose: string; roles: string[] }): { appRef: string; purpose: string; roles: string[] } {
+  return { appRef: args.appRef, purpose: args.purpose, roles: args.roles };
+}
+const renderRoleLists = (r: RoleListsView): string =>
+  [['defect link', r.defectLink], ['register pick', r.registerPick], ['review withdraw', r.reviewWithdraw]]
+    .map(([n, l]) => `${n as string}: ${(l as string[]).length ? (l as string[]).join(', ') : '(none listed)'}`).join('\n');
 const renderWakeRoles = (r: WakeRolesView): string =>
   r.roles.length ? `Saturation alarms wake these roles: ${r.roles.join(', ')}.` : 'Saturation alarms wake nobody (the list is empty).';
 type StallScheduleView = Record<StallScheduleKey, number> & { updatedAt: Date | null };
@@ -654,6 +664,29 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
         `Set.\n\n${renderWakeRoles(await MA.setSaturationAlarmWakeRoles({}, mcpWakeRolesArgs(args), ctx))}`),
   );
 
+  // #4921 slice A: the App's role lists. Disabled like every team tool (#3082 R1); each delegates to the GraphQL resolver.
+  off(
+    'hadron_role_lists',
+    'Read the role lists a team App has set, one per purpose (link a defect, the register pick\'s role route, withdraw a ' +
+      'negative review verdict): empty by default. Readers: whoever may read the App\'s roster (cor:agt:050:21).',
+    SHAPE_HADRON_ROLE_LISTS,
+    async ({ session, appRef }) =>
+      read(session, async (ctx) => textResult(renderRoleLists(await QA.appRoleLists({}, { appRef }, ctx)))),
+  );
+
+  off(
+    'hadron_role_list_set',
+    'Set ONE of a team App\'s role lists, the whole list at once: whoever manages the App only. Purpose is DEFECT_LINK, ' +
+      'REGISTER_PICK or REVIEW_WITHDRAW. Names are trimmed and lower-cased and duplicates collapse; at most 32 names of 1 to ' +
+      '64 characters with no ":" or whitespace; an empty list clears it. Slice A stores the list; no door reads it yet.',
+    SHAPE_HADRON_ROLE_LIST_SET,
+    async (args) =>
+      writeOther('hadron_role_list_set', args.session, async (ctx) => {
+        const r = await MA.setAppRoleList({}, mcpRoleListArgs(args), ctx);
+        return `Set ${r.purpose}: ${r.roles.length ? r.roles.join(', ') : '(none listed)'}.`;
+      }),
+  );
+
   off(
     'hadron_team_roster',
     HADRON_TEAM_ROSTER_DESCRIPTION,
@@ -808,6 +841,13 @@ const SHAPE_HADRON_STALL_SCHEDULE_GET = { appRef: z.string().describe('The team 
 const SHAPE_HADRON_SATURATION_WAKE_ROLES = { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ };
 const SHAPE_HADRON_SATURATION_WAKE_ROLES_SET = {
   appRef: z.string().describe('The team App (id or URN).'),
+  roles: z.array(z.string()).describe('The whole list of role names; an empty list clears it.'),
+  session: SESSION_WRITE,
+};
+const SHAPE_HADRON_ROLE_LISTS = { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ };
+const SHAPE_HADRON_ROLE_LIST_SET = {
+  appRef: z.string().describe('The team App (id or URN).'),
+  purpose: z.enum(['DEFECT_LINK', 'REGISTER_PICK', 'REVIEW_WITHDRAW']).describe('Which list.'),
   roles: z.array(z.string()).describe('The whole list of role names; an empty list clears it.'),
   session: SESSION_WRITE,
 };

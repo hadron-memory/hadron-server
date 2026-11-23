@@ -144,6 +144,12 @@ const doors: Record<string, Door> = {
     call: (instruction, c) => M.setSaturationAlarmWakeRoles({}, { appRef: f.app.id, roles: ['triager'], instruction }, c),
     took: async () => (await db.agentTaskStallSchedule.findUnique({ where: { appId: f.app.id } }))?.saturationWakeRoles?.[0] === 'triager',
   },
+  // #4921 slice A: the App role lists, the same door shape as the wake-roles list.
+  setAppRoleList: {
+    act: 'app.role-list',
+    call: (instruction, c) => M.setAppRoleList({}, { appRef: f.app.id, purpose: 'DEFECT_LINK', roles: ['triager'], instruction }, c),
+    took: async () => (await db.agentTaskStallSchedule.findUnique({ where: { appId: f.app.id } }))?.defectLinkRoles?.[0] === 'triager',
+  },
   setAppModelGroup: {
     act: 'app.model-group.set',
     call: (instruction, c) => M.setAppModelGroup({}, { appRef: f.app.id, name: 'fast', patterns: ['claude-*'], instruction }, c),

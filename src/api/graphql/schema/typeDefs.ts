@@ -7188,6 +7188,27 @@ export const typeDefs = `#graphql
   }
 
   """
+  #4864 — createTaskNode's optional tasks-index edge: the Agent whose index lists
+  the new task, and the trigger the edge carries (hrn:node:hadronmemory.com:specs:cor:dmo:050:15).
+  """
+  input TaskIndexInput {
+    "The Agent (ID or URN) whose tasks index lists this task. The node must be created in that Agent's own system memory."
+    agent: String!
+    "The edge's name: the trigger for this task, as the Agent's task list shows it. One line of at most 200 characters; surrounding space is trimmed."
+    trigger: String!
+  }
+
+  """
+  #4864 — createTaskNode's opt-in skill export: written as an enabled
+  properties.exports.claudeSkill block, validated by the skill lint (a finding at
+  error severity refuses the whole call). Omit it and no block is written.
+  """
+  input TaskSkillExportInput {
+    name: String!
+    description: String!
+  }
+
+  """
   Input for createNode. 'loc' and 'name' are required, plus EITHER 'memoryId'
   or 'install' (an App's install memory, #2044) — both or neither is an
   error (BAD_USER_INPUT). Creating is create-only — a live node at (memoryId,
@@ -9933,6 +9954,10 @@ export const typeDefs = `#graphql
     Readers: whoever may read the App's roster, with the roster's refusal byte for byte (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
     """
     saturationAlarmWakeRoles(appRef: ID!): SaturationAlarmWakeRoles!
+    """
+    #4921 — the App's role lists, one per purpose (link a defect, the register pick's role route, withdraw a negative review verdict). For whoever may read the App's roster, refused as the roster is (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
+    """
+    appRoleLists(appRef: ID!): AppRoleLists!
 
     """
     #1706 — every worker and model-family availability record in an App
@@ -12302,10 +12327,11 @@ export const typeDefs = `#graphql
     \`extensions.warnings\` (not in \`errors\`): a list of
     { path (the mutation's response key), code, text, register? }. Codes are a
     closed list per release (task.create.no-source, task.assign.assignee-unavailable,
-    task.assign.assignee-busy, task.assign.assignee-paused,
+    task.assign.assignee-busy, task.assign.assignee-paused, task.assign.session-open (#4855: the
+    assignee has an open session, live or quiet, so the platform did not start it; the assignment reaches it there),
     task.finish.open-children, from #3267 task.start.other-started,
     task.start.parent-ended (both on startAgentTask) and task.progress.children-ended
-    (on recordAgentTaskProgress; other-started and children-ended, like the three assign
+    (on recordAgentTaskProgress; other-started and children-ended, like the four assign
     facts, are filed only to a caller who may read the App's worker state), and from #2607 task.cancel.open-children on
     cancelAgentTask, alarm.ack.outside-chain on acknowledgeAlarm, and #2733 ticker.code.unmapped on createTicker);
     a client must tolerate unknown codes. Since #4793 task.create.no-source is no longer raised; it stays on the list so history recorded with it still reads. \`text\` is
@@ -12857,6 +12883,10 @@ export const typeDefs = `#graphql
     #3323: the App-manager arm also admits the manager's held worker on an instruction, recorded as one app.manager-act event, ids only.
     """
     setSaturationAlarmWakeRoles(appRef: ID!, roles: [String!]!, instruction: ActInstructionInput): SaturationAlarmWakeRoles!
+    """
+    #4921 — set ONE of the App's role lists, the whole list at once. Whoever manages the App only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12): a participant who does not manage it gets APP_MANAGER_REQUIRED, a caller who cannot see the App gets the missing App's answer. Names are trimmed and lower-cased and duplicates collapse; at most 32 names of 1 to 64 characters with no ':' or whitespace; an empty list clears it. Stores the list only: no door reads it yet.
+    """
+    setAppRoleList(appRef: ID!, purpose: AppRolePurpose!, roles: [String!]!, instruction: ActInstructionInput): AppRoleList!
 
     """
     #2831 S1 (hrn:node:hadronmemory.com:specs:cor:agt:060:12) - set an Agent's model group: the name is created or its whole pattern list replaced (no
@@ -13131,8 +13161,25 @@ export const typeDefs = `#graphql
     This mutation is not itself an MCP tool; its MCP counterpart is the
     deliberate hadron_create_task tool, separate from hadron_create_node,
     which refuses (#1301 names it in the refusal).
+
+    #4864 — with index, the SAME door also writes the task's tasks-index
+    edge, in its one transaction: the new node and one edge from it to the node
+    the Agent's tasksIndexRef names, labelled index.trigger, stored by id
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:15). Either both exist or neither
+    does. The node must be created in the Agent's own system memory, which is
+    also where the index must lie: an Agent with no pointer, an index elsewhere,
+    an existing loc and an unknown or unreadable Agent each refuse and write
+    nothing. Refusals that read only the input (a malformed loc, a blank trigger,
+    a skill the lint refuses) come first and disclose nothing; then the memory's
+    read and write checks and the task writer level
+    (hrn:node:hadronmemory.com:specs:cor:acl:010:03), so none of the refusals
+    that read the Agent or the memory tells a caller who may not write the memory
+    anything about it. With skill, it also writes an enabled properties.exports.claudeSkill
+    block with the given name and description, validated by the skill lint; by
+    default no block is written. Neither argument sets a role; without both the
+    door behaves exactly as before.
     """
-    createTaskNode(input: CreateNodeInput!): Node!
+    createTaskNode(input: CreateNodeInput!, index: TaskIndexInput, skill: TaskSkillExportInput): Node!
 
     """
     #1201 — the UPDATE door for the task kind, and the counterpart of
@@ -19150,6 +19197,34 @@ export const typeDefs = `#graphql
   type TeamAvailability {
     workers: [WorkerAvailability!]!
     families: [ModelFamilyAvailability!]!
+  }
+
+  """
+  #4921 — what an App lists a role list for. The App names the roles; the platform names none.
+  """
+  enum AppRolePurpose {
+    "Who may link a defect to a pull request."
+    DEFECT_LINK
+    "The role route of the register pick."
+    REGISTER_PICK
+    "Who may withdraw a negative review verdict besides the reviewer who recorded it."
+    REVIEW_WITHDRAW
+  }
+
+  "#4921 — one of an App's role lists after a set."
+  type AppRoleList {
+    appId: ID!
+    purpose: AppRolePurpose!
+    "Stored trimmed, lower-cased, de-duplicated and sorted; empty by default."
+    roles: [String!]!
+  }
+
+  "#4921 — an App's role lists, each stored trimmed, lower-cased, de-duplicated and sorted; empty by default."
+  type AppRoleLists {
+    appId: ID!
+    defectLink: [String!]!
+    registerPick: [String!]!
+    reviewWithdraw: [String!]!
   }
 
   """
