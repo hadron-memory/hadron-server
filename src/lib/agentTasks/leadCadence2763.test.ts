@@ -10,6 +10,7 @@ import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { ensureChannelWithRoot } from '../channels.js';
 import { evaluateLeadCadence } from './leadCadence.js';
+import { leadWorkerIds } from './leads.js';
 import { matchingTeamPool } from './matcher.js';
 import * as stopState from '../stopSignals/state.js';
 import { Prisma } from '../../generated/prisma/index.js';
@@ -17,6 +18,11 @@ import { eventPayloadFor } from './darkWorker.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
+// A pass-through spy, so a test can count how many times the lead set is read (#4950).
+vi.mock('./leads.js', async (orig) => {
+  const m = await orig<typeof import('./leads.js')>();
+  return { ...m, leadWorkerIds: vi.fn(m.leadWorkerIds) };
+});
 
 const MIN = 60_000;
 const NOW = new Date('2026-11-03T12:00:00.000Z');
@@ -338,6 +344,34 @@ describe('#4375 the alarm watches every lead (rulings 0270, 0271)', () => {
     expect(await alarms('Ada')).toHaveLength(2);
     expect(await db.leadCadenceEpisode.count({ where: { workerId: w.Ada.id } })).toBe(2);
     expect(await alarms('Cass')).toHaveLength(1); // Cass's one episode is still open: no second alarm for her either
+    // The re-raised alarm wakes Cass (the nearest owner) like the first one did, so the second stint is not silent.
+    const [, again] = await alarms('Ada');
+    expect(((await pendingTaskWakes(db, [w.Cass.id], later(63))).get(w.Cass.id) ?? []).some((p) => p.eventId === again.id)).toBe(true);
+  });
+
+  it('a pass reads the App\'s lead set once for its candidates; only each raise transaction reads it again (#4950)', async () => {
+    w.Cass = await mk('Cass', null, 'owner');
+    await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Cass.id } });
+    await lateAda();
+    vi.mocked(leadWorkerIds).mockClear();
+    const raised = await evaluateLeadCadence(db, NOW);
+    expect(raised).toHaveLength(2); // Ada and Cass are both late
+    // One read for the pass, shared by both candidates, plus one per raise transaction (the decision it re-derives). The
+    // count is an implementation detail on purpose: a SERIALIZABLE retry inside a raise would add a read, and this pin
+    // should then be revisited, not loosened silently.
+    expect(vi.mocked(leadWorkerIds)).toHaveBeenCalledTimes(1 + raised.length);
+  });
+
+  it('an open episode ends when its lead is retired while reports still point at it (the module doc\'s way 2, #4950)', async () => {
+    await lateAda();
+    await evaluateLeadCadence(db, NOW);
+    const [a] = await alarms('Ada');
+    expect((await db.leadCadenceEpisode.findUniqueOrThrow({ where: { eventId: a.id } })).endedAt).toBeNull();
+    // Ada retires; Liam's reportsTo still names her, so she is no longer a lead (a retired worker leads nobody).
+    await db.worker.update({ where: { id: w.Ada.id }, data: { retiredAt: later(1) } });
+    expect((await db.worker.findUniqueOrThrow({ where: { id: w.Liam.id } })).reportsToWorkerId).toBe(w.Ada.id);
+    await evaluateLeadCadence(db, later(2));
+    expect((await db.leadCadenceEpisode.findUniqueOrThrow({ where: { eventId: a.id } })).endedAt?.getTime()).toBe(later(2).getTime());
   });
 
   it('an App with no lead raises nothing', async () => {
@@ -534,6 +568,7 @@ describe('#4375 an alarm raised before the rename (type alarm.coordinator-cadenc
     const { pendingTaskWakes } = await import('./taskWakes.js');
     const pending = (await pendingTaskWakes(db, [w.Cass.id], NOW)).get(w.Cass.id) ?? [];
     expect(pending.find((p) => p.eventId === legacy.id)?.title).toBe('Ada has stopped assigning work');
+    expect(pending.find((p) => p.eventId === legacy.id)?.handle).toBe('CADENCE'); // the one entry serves both spellings (#4950)
     await db.leadCadenceEpisode.updateMany({ where: { eventId: legacy.id }, data: { endedAt: later(1) } });
     expect(((await pendingTaskWakes(db, [w.Cass.id], later(1))).get(w.Cass.id) ?? []).some((p) => p.eventId === legacy.id)).toBe(false);
   });
