@@ -59,13 +59,24 @@ const rowOf = (id: string) => db.node.findUniqueOrThrow({ where: { id } });
  * (only Date: timers stay real, the database is awaited) set to the instant the test names.
  */
 async function atTime<T>(at: string, fn: () => Promise<T>): Promise<T> {
+  // Not reentrant on purpose: a nested or concurrent call, or a caller's own fake clock, would be clobbered by the restore.
+  if (vi.isFakeTimers()) throw new Error('atTime does not nest: a fake clock is already installed');
   vi.useFakeTimers({ toFake: ['Date'], now: new Date(at) });
   try { return await fn(); } finally { vi.useRealTimers(); }
 }
-const answerAt = (id: string, by: string, at: string) => atTime(at, async () =>
-  M.answerQuestion(null, { ref: id, input: { optionKey: 'yes' }, expectedRevision: (await rowOf(id)).revSeq }, as(by)));
-const retractAt = (id: string, by: string, at: string) => atTime(at, async () =>
-  M.retractQuestionAnswer(null, { ref: id, expectedRevision: (await rowOf(id)).revSeq }, as(by)));
+/** The door must have written: the revision moved and the newest answer entry carries the instant the pin named. */
+async function viaDoor(id: string, at: string, kind: 'answer' | 'retraction', call: (revision: number) => Promise<unknown>): Promise<void> {
+  const before = (await rowOf(id)).revSeq;
+  await atTime(at, () => call(before));
+  const row = await rowOf(id);
+  expect(row.revSeq).toBeGreaterThan(before);
+  const entries = (row.data as { answers: Array<{ kind: string; at: string }> }).answers;
+  expect(entries[entries.length - 1]).toMatchObject({ kind, at: new Date(at).toISOString() });
+}
+const answerAt = (id: string, by: string, at: string) => viaDoor(id, at, 'answer', (revision) =>
+  M.answerQuestion(null, { ref: id, input: { optionKey: 'yes' }, expectedRevision: revision }, as(by)));
+const retractAt = (id: string, by: string, at: string) => viaDoor(id, at, 'retraction', (revision) =>
+  M.retractQuestionAnswer(null, { ref: id, expectedRevision: revision }, as(by)));
 
 beforeEach(async () => {
   await cleanDb(db);
