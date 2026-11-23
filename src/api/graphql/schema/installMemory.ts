@@ -94,13 +94,19 @@ export async function withInstallMemory<T>(
     if (isAppRefResolutionFailure(e)) throw new AppNotFoundError(target.appRef);
     throw e;
   }
-  const agentId = (await resolveAgentRef(ctx.db, target.agentRef)).id;
   const app = await ctx.db.app.findUnique({
     where: { id: appId },
     select: { id: true, organizationId: true, ownerUserId: true },
   });
   // Conceal retired anchors before their liveness refusal; the held gate below still decides.
   if (!app || !(await isAppParticipant(ctx, app))) throw new AppNotFoundError(target.appRef);
+  // NEW-1 (Elena's blind delta and Rook's §10 concur, ruling #141946): the Agent resolves only here,
+  // AFTER the participant gates. Resolving it earlier let a caller the gates were about to refuse tell
+  // an existing App (the Agent arm's typed error) from a missing one (the fold's AppNotFoundError) —
+  // an App-existence oracle on a concealment PR. Now every non-participant gets the one unknown-App
+  // answer above whatever their agentRef says; only a caller the gates admitted reaches the typed
+  // Agent contract (Elena F1), which is why this stays OUTSIDE the fold try above.
+  const agentId = (await resolveAgentRef(ctx.db, target.agentRef)).id;
   return withAuthorizedTx(
     ctx,
     [

@@ -646,7 +646,7 @@ export const secretQueries = {
       // ambiguous ref — is the empty page, as is a typed refusal an arm already folded (the App
       // arm's one denial for missing-and-not-yours). A database fault is none of those: the bare
       // catch that used to swallow it made a dead database indistinguishable from an empty owner.
-      if (e instanceof GraphQLError || refNamesNothing(e, { ambiguousNamesNothing: true })) {
+      if ((e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN') || refNamesNothing(e, { ambiguousNamesNothing: true })) {
         return { items: [], total: 0 };
       }
       throw e;
