@@ -7336,12 +7336,17 @@ model AppAutomationReadGrantEvent {
 ///   node's current file. A REMOVE row is an old path that a move left behind, named by `removeLoc`
 ///   (`removeLoc` is empty for WRITE). `branch` is the branch the attempt resolved to, empty only for older
 ///   rows written before the branch was recorded.
-/// - A row exists only while the last settled attempt failed. A success deletes it, and so does an ordinary
-///   write to a memory that is not mirrored (src/integrations/github/mirrorObligations.ts, the only writer).
+/// - A row exists while the debt is unapplied. A success deletes it, and so does an ordinary
+///   write to a memory that is not mirrored. FAILED/NOT_CLONED/EXHAUSTED rows are written by
+///   src/integrations/github/mirrorObligations.ts after a settled attempt; a PENDING row is born
+///   from the #425 nodes trigger the moment a delete removes the node's file from what the mirror
+///   owes, before any attempt has run (prisma/git-mirror-obligation-invariants.sql).
 /// - `attemptSeq` comes from the sequence `git_mirror_attempt_seq`, taken inside the per-memory checkout lock
 ///   and settled before the lock is released. A settle only applies over a lower `attemptSeq`, so a late
-///   settle never overwrites a newer one.
-/// - `state`: FAILED can be retried, NOT_CLONED means there is no local clone, EXHAUSTED means the retry sweep
+///   settle never overwrites a newer one. The #425 trigger takes a sequence value at capture, so its row
+///   is fenced against exactly like any older attempt.
+/// - `state`: PENDING is a captured, never-attempted delete debt due on the next sweep pass; FAILED can be
+///   retried, NOT_CLONED means there is no local clone, EXHAUSTED means the retry sweep
 ///   reached its attempt cap (an ordinary write can still settle the row).
 /// - `errorClass` is one of a fixed set of words (CHECK in prisma/git-mirror-obligation-invariants.sql). No
 ///   exception text, URL or token is ever stored.
@@ -7379,9 +7384,12 @@ enum GitMirrorObligationKind {
   @@map("git_mirror_obligation_kind")
 }
 
+/// PENDING = a delete debt the nodes trigger captured, no attempt run yet (#425, due on the next sweep pass);
 /// FAILED = retryable failure; NOT_CLONED = no local clone; EXHAUSTED = sweep cap reached (ordinary writes still
 /// settle).
 enum GitMirrorObligationState {
+  /// #425: the nodes trigger captured the debt; no attempt has run yet. Due on the next sweep pass.
+  PENDING
   FAILED
   NOT_CLONED
   EXHAUSTED
