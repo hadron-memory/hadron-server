@@ -254,3 +254,31 @@ it('revokes the serve role\'s write on actions after migrate and keeps its read;
   });
   await using(workerUrl, c => c.query(`REVOKE ALL ON public.actions FROM ${q(serve)}`));
 });
+
+// #4573 (#4553 §10 F2): the serve role reads secret_root_check and records the first value; only the owner's re-wrap moves it.
+it('revokes the serve role\'s UPDATE, DELETE and TRUNCATE on secret_root_check, table and column level, and keeps SELECT and INSERT', async () => {
+  const held = (c: Client, p: string) => c.query('SELECT has_table_privilege($1, \'public.secret_root_check\', $2) AS held', [serve, p]).then((r) => r.rows[0].held as boolean);
+  const revokes = (from: number) => fixtureSql.slice(from).filter(sql => /^\s*REVOKE\b[^;]*public\.secret_root_check/i.test(sql));
+  try {
+    await using(workerUrl, async c => {
+      await c.query(`GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, UPDATE (check_value) ON public.secret_root_check TO ${q(serve)}`);
+      await revokeRuntimeMigrations(c, serve);
+      await revokeRuntimeMigrations(c, serve);
+      for (const p of ['UPDATE', 'DELETE', 'TRUNCATE']) expect(await held(c, p), p).toBe(false);
+      for (const p of ['SELECT', 'INSERT']) expect(await held(c, p), p).toBe(true);
+      expect((await c.query('SELECT has_any_column_privilege($1, \'public.secret_root_check\', \'UPDATE\') AS held', [serve])).rows[0].held).toBe(false);
+      // A serve role that IS the connected owner keeps its own privileges (a single-role install).
+      const before = fixtureSql.length;
+      await revokeRuntimeMigrations(c, new URL(workerUrl).username);
+      expect(revokes(before)).toEqual([]);
+    });
+    // A connection that does not own the table cannot revoke on it, and says nothing.
+    await using(url(owner), async c => {
+      const before = fixtureSql.length;
+      await revokeRuntimeMigrations(c, serve);
+      expect(revokes(before)).toEqual([]);
+    });
+  } finally {
+    await using(workerUrl, c => c.query(`REVOKE ALL ON public.secret_root_check FROM ${q(serve)}`));
+  }
+});

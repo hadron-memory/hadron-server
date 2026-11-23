@@ -52,7 +52,8 @@ export async function rotateAppKey(db: Prisma.TransactionClient, appId: string):
  * transaction: it holds the shared root lock and the App's mint lock (so no rotation or re-wrap interleaves) and locks
  * the version rows it rewrites (so a concurrent purge either deletes a row first or waits). Refuses
  * `SECRET_KEY_UNAVAILABLE`, moving nothing, when the root is missing or is not the recorded active root, or any
- * version's key does not unwrap. An App with no active key has no versions to move. No value is ever logged; each
+ * version's key does not unwrap. For as long as that transaction runs, the App's stores and key rotations and any root
+ * re-wrap wait for it (reads do not); section B of the runbook named above says when to run it (#4573). An App with no active key has no versions to move. No value is ever logged; each
  * plaintext buffer is zeroed after use.
  */
 export async function reencryptAppSecretVersions(db: Prisma.TransactionClient, appId: string): Promise<number> {
@@ -121,11 +122,15 @@ function tryUnwrap(wrapped: string, aad: string, root: Buffer): Buffer | null {
  * It also refuses, before writing anything, when `from` equals `to`, and when a check value is recorded that names
  * neither root (#4553 F3): otherwise a store with no App keys would let any `--from` move the check silently. The
  * recorded value naming `to` is the post-switch re-run.
+ *
+ * `beforeRewrap` runs inside the transaction once the lock is held and before anything is read or written (#4573): the tool
+ * takes its BEFORE digests there, so no mint can land between them and the re-wrap. A throw rolls everything back.
  */
 export async function rewrapSecretRootKeys(
   db: PrismaClient,
   fromRootHex: string,
   toRootHex: string,
+  beforeRewrap?: (tx: Prisma.TransactionClient) => Promise<void>,
 ): Promise<{ rows: number; rewrapped: number }> {
   if (!HEX64.test(fromRootHex) || !HEX64.test(toRootHex)) throw new SecretKeyUnavailableError();
   const from = Buffer.from(fromRootHex, 'hex');
@@ -133,6 +138,7 @@ export async function rewrapSecretRootKeys(
   if (from.equals(to)) throw new SecretKeyUnavailableError();
   const out = await db.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${SECRET_ROOT_LOCK}))`;
+    await beforeRewrap?.(tx);
     const recorded = await tx.secretRootCheck.findUnique({ where: { id: 1 }, select: { checkValue: true } });
     if (recorded && recorded.checkValue !== rootCheckValue(from) && recorded.checkValue !== rootCheckValue(to)) {
       throw new SecretKeyUnavailableError();
@@ -167,7 +173,8 @@ export async function rewrapSecretRootKeys(
     await tx.$executeRaw`INSERT INTO secret_root_check (id, check_value) VALUES (1, ${check})
       ON CONFLICT (id) DO UPDATE SET check_value = EXCLUDED.check_value, updated_at = clock_timestamp() AT TIME ZONE 'UTC'`;
     return { rows: rows.length, rewrapped: writes.length };
-  });
+    // An attended ops step: the wait for in-flight mints and a pass over every key can outlast Prisma's 5 s default.
+  }, { timeout: 10 * 60 * 1000, maxWait: 60 * 1000 });
   appKeyCache.clear();
   return out;
 }

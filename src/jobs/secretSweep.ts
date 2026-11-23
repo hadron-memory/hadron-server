@@ -13,6 +13,7 @@
  * Run one tick by hand:
  *   pnpm tsx src/jobs/secretSweep.ts
  */
+import { pathToFileURL } from 'node:url';
 import { safeErrorCode, sweepSecretAutoDelete } from '../lib/secrets/autoDelete.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { purgeExpiredSecretEvents, purgeSupersededVersions } from '../lib/secrets/purge.js';
@@ -59,11 +60,16 @@ export function secretSweepDisabledReason(env: NodeJS.ProcessEnv = process.env):
   return null;
 }
 
-/** Start the minute loop (hourly retention, first tick after 60 s; ticks never overlap). Returns the initial timer. */
+export interface SecretSweepLoop {
+  /** No tick starts after this; one already running finishes. */
+  stop: () => void;
+}
+
+/** Start the minute loop (hourly retention, first tick after 60 s; ticks never overlap). */
 export function startSecretSweepLoop(
   db: PrismaClient,
   options: { intervalMs?: number; initialDelayMs?: number; legs?: SecretSweepLegs } = {},
-): NodeJS.Timeout {
+): SecretSweepLoop {
   const intervalMs = options.intervalMs ?? 60 * 1000;
   const initialDelayMs = options.initialDelayMs ?? 60 * 1000;
   let running = false;
@@ -82,15 +88,22 @@ export function startSecretSweepLoop(
       running = false;
     }
   };
-  const timer = setTimeout(() => {
+  let interval: NodeJS.Timeout | undefined;
+  const initial = setTimeout(() => {
     void run();
-    setInterval(() => void run(), intervalMs).unref();
+    interval = setInterval(() => void run(), intervalMs);
+    interval.unref();
   }, initialDelayMs);
-  timer.unref();
-  return timer;
+  initial.unref();
+  return {
+    stop: () => {
+      clearTimeout(initial);
+      clearInterval(interval);
+    },
+  };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const { db } = await import('../integrations/db/client.js');
   console.log(JSON.stringify(await secretSweepTick(db)));
   await db.$disconnect();
