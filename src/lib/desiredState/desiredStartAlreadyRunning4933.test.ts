@@ -230,6 +230,23 @@ describe('#4933: the state is logged once when first seen and again when it chan
     }
   });
 
+  it('a pass that leaves `running` by any other outcome forgets it: running again is logged again', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      await report({ status: 'idle' });
+      await tick();
+      expect(lines(info)).toHaveLength(1);
+      // Leave-alone makes the worker unstartable under the locks: the one worker's pass answers `skipped`, not `running`.
+      await M.setWorkerLeaveAlone({}, { input: { worker: kit.id, leaveAlone: true } }, ctx(admin.id));
+      expect(await startDesiredWorker(db, { appId: app.id, workerId: kit.id, hostId: 'orca1' }, new Date())).toBe('skipped');
+      await M.setWorkerLeaveAlone({}, { input: { worker: kit.id, leaveAlone: false } }, ctx(admin.id));
+      await tick();
+      expect(lines(info), 'a state that was left and re-entered was not logged again').toHaveLength(2);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it('a decision whose transaction then fails is not logged (the real transaction runs, then the commit is made to throw)', async () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});

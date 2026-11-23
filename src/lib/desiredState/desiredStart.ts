@@ -19,12 +19,13 @@
  * same as any start's, so the host contract does not change.
  *
  * ALREADY RUNNING (#4933, cor:agt:070:08 rev 21 and cor:agt:070:01). No platform start with no task is issued for a worker
- * whose Agent the host already runs: the host would refuse it ("an agent this host launched is still running") and
- * every minute would add a failed start, until the trip below stopped it. What the host has reported decides it: the
- * worker's stored terminal report (#2771) names THIS host, is fresh (`TERMINAL_FRESH_MS`), and shows an agent there (not
- * `busy`, `idle` or `locked`, and not an agent-absent reason). The state is logged once when it is first seen and again when it changes
- * (`already running`, then `starting` once the agent is gone; after the transaction commits), never as a failure, and it counts toward no trip and
- * raises no alarm. A stale or missing report decides nothing, so the start goes ahead as before.
+ * whose Agent a host already runs: that host would refuse it ("an agent this host launched is still running") and
+ * every minute would add a failed start, until the trip below stopped it. What the hosts have reported decides it: the
+ * worker's stored terminal report (#2771) is fresh (`TERMINAL_FRESH_MS`) and shows an agent (status `busy`, `idle` or
+ * `locked`, and a reason that is not agent-absent). The host it names does not matter: it is where the agent is, and a
+ * start on another of the worker's hosts would be a second agent. The state is logged once when first seen and again
+ * when a start follows (`already running`, then `starting`; after the transaction commits), never as a failure, and it
+ * counts toward no trip and raises no alarm. A stale or missing report decides nothing, so the start goes ahead as before.
  *
  * THE TRIP. Three failed platform starts of a worker in the last hour stop this loop starting it (counted under the
  * worker row lock, so two passes agree), and raise ONE task-less `alarm.start-failing` to its reporting line, nearest
@@ -97,11 +98,15 @@ export function resetDesiredStartStateLog(): void {
  * remembered): `already running` when first seen, and `starting` when a start is issued for a worker last seen running.
  */
 function noteOutcome(a: { appId: string; workerId: string; hostId: string }, outcome: Awaited<ReturnType<typeof startDesiredWorker>>): void {
-  if (outcome === 'running' && !loggedRunning.has(a.workerId)) {
+  if (outcome === 'running') {
+    if (loggedRunning.has(a.workerId)) return;
     loggedRunning.add(a.workerId);
-    console.info('[desired-start] no start issued: the host already runs this worker\'s agent (already running)', a);
-  } else if (outcome === 'issued' && loggedRunning.delete(a.workerId)) {
-    console.info('[desired-start] starting a worker whose agent the host no longer runs (starting)', a);
+    console.info('[desired-start] no start issued: a host already runs this worker\'s agent (already running)', a);
+    return;
+  }
+  // Any other outcome ends the remembered state, so a later return to running is logged again and no id stays forever.
+  if (loggedRunning.delete(a.workerId) && outcome === 'issued') {
+    console.info('[desired-start] starting a worker whose agent no host runs any more (starting)', a);
   }
 }
 
