@@ -80,6 +80,10 @@ beforeEach(async () => {
   await memory('KnowEnc', { visibility: 'ORGANIZATION', isEncrypted: true });
   await memory('GroupMem', { class: 'group', visibility: 'GROUP' });
   await memory('TeamSpace', { class: 'app', appId, sharedMemoryOfAgentId: alphaId });
+  // A group memory is readable through a MemoryMember grant; give the test callers who read it one.
+  for (const who of ['member', 'admin']) {
+    await db.memoryMember.create({ data: { memoryId: mem.GroupMem!, userId: user[who]!, role: 'reader' } });
+  }
   for (const k of ['KnowPub', 'KnowOrg', 'KnowNone', 'KnowEnc', 'GroupMem']) {
     await db.agentMemoryItem.create({ data: { agentId: alphaId, memoryId: mem[k]!, role: 'read' } });
   }
@@ -115,14 +119,25 @@ describe('#5003 — the SDL contract of the leaf', () => {
 });
 
 describe('#5003 — visibility rides the record gate, not the row\'s audience', () => {
-  it('a readable knowledge or group row returns its value; a knowledge row with none returns null', async () => {
+  it('a readable knowledge row returns its value; a knowledge row with none returns null', async () => {
     const rows = await scopeAll('member');
     expect(byKey(rows, 'KnowPub').visibility).toBe('PUBLIC');
     expect(byKey(rows, 'KnowOrg').visibility).toBe('ORGANIZATION');
-    expect(byKey(rows, 'GroupMem').visibility).toBe('GROUP');
     // A knowledge memory may legitimately have none: null, with the row readable (description proves the gate admitted it).
     expect(byKey(rows, 'KnowNone').visibility).toBeNull();
     expect(byKey(rows, 'KnowNone').description).toBe('d-KnowNone');
+  });
+
+  it('a group memory is never in this scope, so its GROUP value is not observable here (an Agent link caps to none)', async () => {
+    // The gate's acceptance 1 names "knowledge or group". The Agent-link cap table (src/lib/auth/agentMemoryLinkCap.ts) says
+    // group is "none: MemoryMember only, and an Agent holds none", and an App's own memories are class app, so a group
+    // memory cannot enter appMemoryScope. Pinned so the group half of the contract is a stated fact, not a silent gap: if a
+    // group memory ever becomes listable, this fails and the GROUP value must be pinned alongside it.
+    const record = await Q.memory({}, { ref: mem.GroupMem! }, ctx('member'));
+    expect(record, 'the member can read the group record itself (a MemoryMember grant)').toMatchObject({ visibility: 'GROUP' });
+    for (const who of ['member', 'admin']) {
+      expect(await scopeAll(who)).not.toEqual(expect.arrayContaining([expect.objectContaining({ memoryId: mem.GroupMem })]));
+    }
   });
 
   it('an app, system, personal or private row the caller can read shows null', async () => {
@@ -214,7 +229,7 @@ describe('#5003 — over the real GraphQL HTTP boundary', () => {
     expect(admin.errors).toBeUndefined();
     const adminRows = admin.data.appMemoryScope.items as Row[];
     expect(byKey(adminRows, 'KnowPub').visibility).toBe('PUBLIC');
-    expect(byKey(adminRows, 'GroupMem').visibility).toBe('GROUP');
+    expect(byKey(adminRows, 'KnowOrg').visibility).toBe('ORGANIZATION');
     expect(byKey(adminRows, 'sysAlpha').visibility).toBeNull(); // a system memory has no visibility (chk_memory_visibility_class)
     const reader = await post(await keyFor('reader'), SCOPE, { a: appId });
     expect(reader.errors).toBeUndefined();
