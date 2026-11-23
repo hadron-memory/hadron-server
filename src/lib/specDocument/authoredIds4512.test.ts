@@ -113,6 +113,7 @@ describe('#4512 the scanner on its own (review findings)', () => {
     const t0 = Date.now();
     run('<a'.repeat(20000) + '\n\n' + '`'.repeat(20000) + '<a id="x" '.repeat(5000) + '"'.repeat(20000));
     run('`a '.repeat(20000));
+    run('<!-- <b id="x"> '.repeat(20000) + '<![CDATA['.repeat(20000));
     run('<a x="<a x=\'<a x="'.repeat(8000));
     expect(Date.now() - t0).toBeLessThan(5000);
   });
@@ -153,6 +154,8 @@ describe('#4512 the scanner on its own (review findings)', () => {
     ['<!--> <b id="fx-110-a">'],
     ['<!---> <b id="fx-110-a">'],
     ['<!-- a --!> <b id="fx-110-a">'],
+    ['<!--> <b id="fx-110-a"> -->'],
+    ['<!-- a --!> <b id="fx-110-a"> -->'],
     ['<!-- never closed <b id="fx-110-a">'],
     ['x <![CDATA[ never closed <b id="fx-110-a">'],
     ['x <? never closed <b id="fx-110-a">'],

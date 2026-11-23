@@ -241,6 +241,7 @@ function neutraliseBlock(text: string, assigned: ReadonlySet<string>): string {
   const runs = new Map<number, number[]>();
   for (const m of text.matchAll(BACKTICK_RUN)) (runs.get(m[0].length) ?? runs.set(m[0].length, []).get(m[0].length)!).push(m.index);
   const next = new Map<number, number>();
+  const noMark = new Set<string>();
   // A block that opens with a tag is an HTML block: backticks and backslashes mean nothing in it.
   const html = /^ {0,3}<(?:[A-Za-z]|\/[A-Za-z]|!)/.test(text);
   let out = '';
@@ -251,10 +252,19 @@ function neutraliseBlock(text: string, assigned: ReadonlySet<string>): string {
     if (c === '<') {
       const raw = /^<(?:!--|\?|!\[CDATA\[)/.exec(text.slice(i, i + 9));
       if (raw) {
-        const endMark = raw[0] === '<!--' ? '-->' : raw[0] === '<?' ? '?>' : ']]>';
-        const e = text.indexOf(endMark, i + raw[0].length);
-        i = e < 0 ? text.length : e + endMark.length;
-        continue;
+        // Search for the end from just past `<!-`, so `<!-->` and `<!--->` close at once; `--!>` closes too (HTML parsing).
+        const from = raw[0] === '<!--' ? i + 2 : i + raw[0].length;
+        const marks = raw[0] === '<!--' ? ['-->', '--!>'] : raw[0] === '<?' ? ['?>'] : [']]>'];
+        let hit = -1;
+        let len = 0;
+        for (const mark of marks) {
+          if (noMark.has(mark)) continue;
+          const e = text.indexOf(mark, from);
+          if (e < 0) noMark.add(mark); // none after here means none after any later opener: keeps the scan linear
+          if (e >= 0 && (hit < 0 || e < hit)) { hit = e; len = mark.length; }
+        }
+        // A never-closed opener is plain text: skipping to the end of the block would leave a live id.
+        if (hit >= 0) { i = hit + len; continue; }
       }
     }
     if (c === '\\' && !html) { i += 2; continue; }
@@ -310,7 +320,7 @@ export function neutraliseAssignedIds(text: string, assigned: ReadonlySet<string
   const out: string[] = [];
   let pending: string[] = [];
   let fence: OpenFence | null = null;
-  const flush = (): void => { if (pending.length) out.push(...chunk(pending.join('\n')).split('\n')); pending = []; };
+  const flush = (): void => { if (pending.length) for (const l of chunk(pending.join('\n')).split('\n')) out.push(l); pending = []; };
   for (const line of text.split('\n')) {
     const wasOpen = fence !== null;
     const step = stepFence(line, fence);
