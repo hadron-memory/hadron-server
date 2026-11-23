@@ -4692,8 +4692,9 @@ model Worker {
   explicitNoTeam Boolean @default(false) @map("explicit_no_team")
   /// #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — the latest terminal report a HOST made for this worker, built by the server
   /// (`src/lib/workerTerminal.ts`): host {id,label}, status, prompt, reason (a closed code), lastTurnAt, checkedAt,
-  /// reportedAt. Null until a host first reports. A stored report that DECIDES NOTHING: it feeds no `checkStatus`,
-  /// availability, matcher, stall rule or alarm. No screen text is ever stored; `chk_workers_terminal_shape` (in
+  /// reportedAt. Null until a host first reports. A stored report that decides ONE thing (#4933): the platform issues no
+  /// desired-running start for a worker whose agent this host already runs (`src/lib/desiredState/desiredStart.ts`); it feeds no `checkStatus`,
+  /// availability, stall rule or alarm. No screen text is ever stored; `chk_workers_terminal_shape` (in
   /// prisma/host-operation-invariants.sql) allows exactly the keys above, so a write that bypasses the resolver still
   /// cannot store more. Read behind `maySeeWorkerInternals` (hrn:node:hadronmemory.com:specs:cor:dmo:050:11).
   /// #4225 S4a — the object also carries `contextTokens` and `contextMeasuredAt` (the worker's context size as its

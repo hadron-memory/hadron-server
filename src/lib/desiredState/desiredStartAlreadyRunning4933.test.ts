@@ -10,7 +10,6 @@
  * Cast as in desiredStart4231.test.ts (Kit, LONG_LIVED, held by Bo, registered on orca1 with a worktree; sweep APPLY).
  */
 
-import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -18,7 +17,8 @@ import { declareAllStopLanes } from '../../test/stopLanes.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
-import { hostRunsAgent, resetDesiredStartStateLog, startDesiredWorker, startDesiredWorkers, START_FAILING_EVENT_TYPE, TERMINAL_FRESH_MS } from './desiredStart.js';
+import { TERMINAL_REASONS } from '../workerTerminal.js';
+import { hostRunsAgent, TERMINAL_FUTURE_TOLERANCE_MS, resetDesiredStartStateLog, startDesiredWorker, startDesiredWorkers, START_FAILING_EVENT_TYPE, TERMINAL_FRESH_MS } from './desiredStart.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -33,7 +33,6 @@ let bo: { id: string };
 let app: { id: string };
 let ada: { id: string };
 let kit: { id: string };
-let sam: { id: string };
 let orca1: { id: string };
 
 /** A second host, orca2, registering Kit in its own worktree. */
@@ -67,26 +66,23 @@ beforeEach(async () => {
   resetDesiredStartStateLog();
   await cleanDb(db);
   const n = Math.floor(Math.random() * 1_000_000);
-  org = await db.organization.create({ data: { id: generateId(), name: 'S8', urn: `s8-4231-${n}.example` }, select: { id: true, urn: true } });
+  org = await db.organization.create({ data: { id: generateId(), name: 'S-4933', urn: `s-4933-${n}.example` }, select: { id: true, urn: true } });
   const u = (k: number, name: string) =>
-    db.user.create({ data: { id: generateId(), githubId: 42_310_000 + k * 1000 + (n % 1000), githubUsername: `s8-${name}-${n}`, roles: ['READER'] }, select: { id: true } });
+    db.user.create({ data: { id: generateId(), githubId: 49_330_000 + k * 1000 + (n % 1000), githubUsername: `s-4933-${name}-${n}`, roles: ['READER'] }, select: { id: true } });
   admin = await u(1, 'admin');
   bo = await u(2, 'bo');
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   const longAgent = (await M.createAgent({}, { orgRef: org.id, name: 'Coordinator' }, ctx(admin.id))).id;
-  const shortAgent = (await M.createAgent({}, { orgRef: org.id, name: 'Builder', lifecycle: 'SHORT_LIVED' }, ctx(admin.id))).id;
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: bo.id, role: 'member' } });
   const w = (agentId: string, name: string, extra: Record<string, unknown> = {}) =>
     db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId, name, slug: name.toLowerCase(), ...extra }, select: { id: true } });
   ada = await w(longAgent, 'Ada');
   kit = await w(longAgent, 'Kit', { heldByUserId: bo.id, heldAt: new Date(), reportsToWorkerId: ada.id });
-  sam = await w(shortAgent, 'Sam', { heldByUserId: bo.id, heldAt: new Date(), reportsToWorkerId: ada.id });
   orca1 = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd', label: 'orca1' }, select: { id: true } });
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(admin.id));
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 1', pollIntervalSeconds: 600, workers: [
     { worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] },
-    { worker: sam.id, family: 'claude', worktrees: ['hadron-server/sam'] },
   ] } }, keyCtx(orca1));
   await declareAllStopLanes(db, app.id);
   await sweep('APPLY');
@@ -112,7 +108,7 @@ async function hostFailsIssuedStarts() {
 }
 
 describe('#4933: a cleared-marker worker whose agent the host already runs is not started every minute', () => {
-  it('RED ON MAIN: leave-alone cleared, agent running, no open session: five passes, no start, no failed start, no alarm', async () => {
+  it('leave-alone cleared, agent running, no open session: five passes, no start, no failed start, no alarm', async () => {
     await M.setWorkerLeaveAlone({}, { input: { worker: kit.id, leaveAlone: true } }, ctx(admin.id));
     await M.setWorkerLeaveAlone({}, { input: { worker: kit.id, leaveAlone: false } }, ctx(admin.id));
     await report({ status: 'idle' });
@@ -138,8 +134,8 @@ describe('#4933: a cleared-marker worker whose agent the host already runs is no
     expect(await alarms(), 'an already-running worker was alarmed as a failing start').toHaveLength(0);
   });
 
-  it('a locked agent (a usage limit, say) is still an agent the host runs: no start', async () => {
-    await report({ status: 'locked', reason: 'rate_limited' });
+  it.each(['rate_limited', 'unrecognized'])('a locked agent (reason %s) is still an agent the host runs: no start', async (reason) => {
+    await report({ status: 'locked', reason });
     await tick();
     expect(await starts()).toHaveLength(0);
   });
@@ -192,30 +188,93 @@ describe('#4933: hostRunsAgent, directly', () => {
     expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() - TERMINAL_FRESH_MS - 1).toISOString() }), 'h', now)).toBe(false);
     expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() + 10 * 60_000).toISOString() }), 'h', now)).toBe(false);
   });
+  it('the future tolerance is inclusive too', () => {
+    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS).toISOString() }), 'h', now)).toBe(true);
+    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS + 1).toISOString() }), 'h', now)).toBe(false);
+  });
   it('the freshness boundary is inclusive', () => {
     expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() - TERMINAL_FRESH_MS).toISOString() }), 'h', now)).toBe(true);
   });
 });
 
 describe('#4933: the state is logged once when first seen and again when it changes', () => {
-  it('three passes while it runs: one `already running` line; the agent goes away: one `starting` line', async () => {
+  const lines = (info: { mock: { calls: unknown[][] } }) => info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('[desired-start]'));
+  it('three passes while it runs: one `already running` line; the agent goes away: one `starting` line; then nothing more', async () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     try {
       await report({ status: 'idle' });
       await tick();
       await tick();
       await tick();
-      const lines = () => info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('[desired-start]'));
-      expect(lines()).toHaveLength(1);
-      expect(lines()[0]).toContain('already running');
+      expect(lines(info)).toHaveLength(1);
+      expect(lines(info)[0]).toContain('(already running)');
       await report({ status: 'dark', reason: 'bare_shell' });
       await tick();
+      await hostFailsIssuedStarts();
       await tick();
-      expect(lines()).toHaveLength(2);
-      expect(lines()[1]).toContain('starting');
-      expect(await starts()).toHaveLength(1);
+      expect(lines(info)).toHaveLength(2);
+      expect(lines(info)[1]).toContain('(starting)');
+      expect(await starts()).toHaveLength(2);
     } finally {
       info.mockRestore();
     }
+  });
+
+  it('an ordinary first start logs nothing, and running again after a restart of the state logs once more', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      await tick();
+      expect(lines(info)).toHaveLength(0);
+      await hostFailsIssuedStarts();
+      await report({ status: 'busy' });
+      await tick();
+      expect(lines(info)).toHaveLength(1);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('a rolled-back decision is not remembered: nothing is logged when the transaction fails', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await report({ status: 'idle' });
+      // The decision is made inside the real transaction, then the commit "fails": the caller must not have logged.
+      const real = db.$transaction.bind(db) as (fn: unknown, opts?: unknown) => Promise<unknown>;
+      const tx = vi.spyOn(db, '$transaction').mockImplementationOnce((async (fn: unknown, opts?: unknown) => {
+        await real(fn, opts);
+        throw new Error('commit failed');
+      }) as never);
+      expect(await startDesiredWorker(db, { appId: app.id, workerId: kit.id, hostId: 'orca1' }, new Date())).toBe('skipped');
+      tx.mockRestore();
+      expect(lines(info)).toHaveLength(0);
+      await tick();
+      expect(lines(info)).toHaveLength(1);
+    } finally {
+      info.mockRestore();
+      err.mockRestore();
+    }
+  });
+});
+
+describe('#4933: a worker registered on two hosts, one of which runs its agent', () => {
+  it('no start on the other host either: the agent is up on one of them', async () => {
+    await registerOrca2();
+    await report({ status: 'idle', host: 'orca1' });
+    await tick();
+    expect(await starts(), 'a second agent was started on the other host').toHaveLength(0);
+  });
+});
+
+describe('#4933: every terminal reason has a decided meaning, so a new one cannot slip in silently', () => {
+  // When hadron-cli adds a reason, TERMINAL_REASONS gains it and this table must say whether it means no agent.
+  const absent = new Set(['no_terminal', 'bare_shell', 'no_agent']);
+  const now = new Date('2026-11-23T00:00:00Z');
+  const t = (reason: string) => ({ host: { id: 'h' }, status: 'locked', reason, checkedAt: now.toISOString() });
+  it.each([...TERMINAL_REASONS])('locked with %s', (reason) => {
+    expect(hostRunsAgent(t(reason), 'h', now)).toBe(!absent.has(reason));
+  });
+  it('the table names only reasons that exist', () => {
+    for (const r of absent) expect(TERMINAL_REASONS).toContain(r);
   });
 });

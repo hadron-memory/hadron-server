@@ -22,8 +22,8 @@
  * whose Agent the host already runs: the host would refuse it ("an agent this host launched is still running") and
  * every minute would add a failed start, until the trip below stopped it. What the host has reported decides it: the
  * worker's stored terminal report (#2771) names THIS host, is fresh (`TERMINAL_FRESH_MS`), and shows an agent there (not
- * `dark`, and not an agent-absent reason). The state is logged once when it is first seen and again when it changes
- * (`already-running`, then `starting` once the agent is gone), never as a failure, and it counts toward no trip and
+ * `busy`, `idle` or `locked`, and not an agent-absent reason). The state is logged once when it is first seen and again when it changes
+ * (`already running`, then `starting` once the agent is gone; after the transaction commits), never as a failure, and it counts toward no trip and
  * raises no alarm. A stale, missing or other-host report decides nothing, so the start goes ahead as before.
  *
  * THE TRIP. Three failed platform starts of a worker in the last hour stop this loop starting it (counted under the
@@ -62,33 +62,45 @@ export const START_FAILURE_WINDOW_MS = 60 * 60_000;
 export const TERMINAL_FRESH_MS = 5 * 60_000;
 /** Terminal reasons that say no agent is on the terminal, whatever the status (hadron-cli#1187 codes). */
 const AGENT_ABSENT_REASONS: ReadonlySet<string> = new Set(['no_terminal', 'bare_shell', 'no_agent']);
+/** How far ahead of the server's clock a report's `checkedAt` may be and still count (a host's clock may run a little fast). */
+export const TERMINAL_FUTURE_TOLERANCE_MS = 2 * 60_000;
 
-type StoredTerminal = { host?: { id?: string }; status?: string; reason?: string | null; checkedAt?: string } | null;
+type StoredTerminal = { host?: { id?: string }; status?: string; reason?: string | null; checkedAt?: string };
 
-/** Does the host's last report say it runs this worker's agent right now? (#4933) */
-export function hostRunsAgent(terminal: StoredTerminal, hostId: string, now: Date): boolean {
-  if (!terminal || terminal.host?.id !== hostId) return false;
-  if (terminal.status === 'dark' || (terminal.reason != null && AGENT_ABSENT_REASONS.has(terminal.reason))) return false;
-  if (terminal.status !== 'busy' && terminal.status !== 'idle' && terminal.status !== 'locked') return false;
-  const at = terminal.checkedAt ? Date.parse(terminal.checkedAt) : NaN;
-  return Number.isFinite(at) && now.getTime() - at <= TERMINAL_FRESH_MS && at <= now.getTime() + 2 * 60_000;
+/** The stored `Worker.terminal` JSON as a typed value, or null when it is not an object (the DB CHECK makes it one). */
+function asTerminal(value: unknown): StoredTerminal | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as StoredTerminal) : null;
 }
 
-/** The last state logged per worker, so a state is logged when first seen and when it changes, never every pass. */
-const loggedState = new Map<string, 'already-running' | 'starting'>();
+/**
+ * Does the host's last report say it runs this worker's agent right now? (#4933) Only `busy`, `idle` and `locked` show
+ * an agent (so `dark` and any status this code does not know say no), unless the reason says the agent is absent.
+ */
+export function hostRunsAgent(terminal: StoredTerminal | null, hostId: string, now: Date): boolean {
+  if (!terminal || terminal.host?.id !== hostId) return false;
+  if (terminal.status !== 'busy' && terminal.status !== 'idle' && terminal.status !== 'locked') return false;
+  if (terminal.reason != null && AGENT_ABSENT_REASONS.has(terminal.reason)) return false;
+  const at = terminal.checkedAt ? Date.parse(terminal.checkedAt) : NaN;
+  return Number.isFinite(at) && now.getTime() - at <= TERMINAL_FRESH_MS && at <= now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS;
+}
+
+/** Workers whose last logged state is `already running`; an entry goes when the worker is started or the process ends. */
+const loggedRunning = new Set<string>();
 /** For tests: forget what was logged. */
 export function resetDesiredStartStateLog(): void {
-  loggedState.clear();
+  loggedRunning.clear();
 }
-function noteState(a: { appId: string; workerId: string; hostId: string }, state: 'already-running' | 'starting'): void {
-  if (loggedState.get(a.workerId) === state) return;
-  loggedState.set(a.workerId, state);
-  console.info(
-    state === 'already-running'
-      ? '[desired-start] no start issued: the host already runs this worker\'s agent (already running)'
-      : '[desired-start] starting a worker whose agent the host does not run',
-    a,
-  );
+/**
+ * Log a state change once, AFTER the transaction that decided it committed (a rolled-back decision must not be
+ * remembered): `already running` when first seen, and `starting` when a start is issued for a worker last seen running.
+ */
+function noteOutcome(a: { appId: string; workerId: string; hostId: string }, outcome: string): void {
+  if (outcome === 'running' && !loggedRunning.has(a.workerId)) {
+    loggedRunning.add(a.workerId);
+    console.info('[desired-start] no start issued: the host already runs this worker\'s agent (already running)', a);
+  } else if (outcome === 'issued' && loggedRunning.delete(a.workerId)) {
+    console.info('[desired-start] starting a worker whose agent the host no longer runs (starting)', a);
+  }
 }
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -161,7 +173,8 @@ async function recentFailures(db: Db, workerId: string, now: Date): Promise<numb
 
 /**
  * Start one worker if it is still startable once every fence is held (file header). `issued` when a start was
- * inserted, `running` when the host already runs its agent (#4933), `tripped` when the failure limit stopped it, `no-host` when this host has no live registration listing a
+ * inserted, `running` when the host already runs its agent (#4933), `tripped` when the failure limit stopped it,
+ * `no-host` when this host has no live registration listing a
  * worktree for it (the caller tries the worker's next host), `skipped` otherwise.
  */
 export async function startDesiredWorker(
@@ -172,7 +185,7 @@ export async function startDesiredWorker(
 ): Promise<'issued' | 'tripped' | 'skipped' | 'no-host' | 'running'> {
   try {
     const owner = await db.app.findUnique({ where: { id: a.appId }, select: { organizationId: true, ownerUserId: true } });
-    return await db.$transaction(async (tx) => {
+    const outcome = await db.$transaction(async (tx) => {
       await lockAuthorityAnchors(tx, [
         { kind: 'app', id: a.appId },
         ...(owner?.organizationId ? [{ kind: 'org' as const, id: owner.organizationId }] : []),
@@ -193,11 +206,8 @@ export async function startDesiredWorker(
       const row = (await loadHostDesiredState(tx, a.appId, a.hostId, afterWaits(now, anchor)))?.workers.find((w) => w.workerId === a.workerId);
       if (!row || !startable(row)) return 'skipped';
       // #4933: before the failure count, so a worker the host already runs is neither started nor tripped nor alarmed.
-      const reported = (await tx.worker.findUnique({ where: { id: a.workerId }, select: { terminal: true } }))?.terminal as StoredTerminal;
-      if (hostRunsAgent(reported, a.hostId, now)) {
-        noteState(a, 'already-running');
-        return 'running';
-      }
+      const reported = asTerminal((await tx.worker.findUnique({ where: { id: a.workerId }, select: { terminal: true } }))?.terminal);
+      if (hostRunsAgent(reported, a.hostId, now)) return 'running';
       if ((await recentFailures(tx, a.workerId, now)) >= START_FAILURE_LIMIT) return 'tripped';
       await fenceHostDecision(tx, a.appId);
       const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, now, a.hostId)).find((r) => r.worktrees.length > 0);
@@ -211,9 +221,10 @@ export async function startDesiredWorker(
         settings: await startSettingsFor(tx, a.workerId, null, reg),
         taskId: null, issuer: { issuedBy: 'platform' }, hold, issuedReason: DESIRED_RUNNING,
       });
-      noteState(a, 'starting');
       return 'issued';
     });
+    noteOutcome(a, outcome);
+    return outcome;
   } catch (err) {
     console.error('[desired-start] starting a worker that should run failed:', a, err);
     return 'skipped';

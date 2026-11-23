@@ -5996,7 +5996,8 @@ export const typeDefs = `#graphql
     """
     checkStatus: WorkerCheckStatus
     """
-    #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — the latest terminal report a host made for this worker. Stored, decides nothing;
+    #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — the latest terminal report a host made for this worker. Stored; since #4933 a fresh report from the
+    registering host that shows an agent withholds the platform's desired-running start (hrn:node:hadronmemory.com:specs:cor:agt:070:08), and it decides nothing else;
     judge its age from checkedAt. Null until a host reports, and masked to null on the same read gate as checkStatus.
     """
     terminal: WorkerTerminal
@@ -12635,7 +12636,7 @@ export const typeDefs = `#graphql
     malformed input refuses the whole call and stores nothing (BAD_USER_INPUT); a worker this host does not register is
     refused for that item only (WORKER_NOT_FOUND, as setHostWorkerAvailability); an older report than the stored one
     is skipped (TERMINAL_REPORT_STALE). The result lists the stored items and the refused items, each refusal with a reason.
-    The report decides nothing: it feeds no check status, availability, matcher, stall rule or alarm.
+    Since #4933 it decides one thing: the platform issues no desired-running start for a worker whose agent this host already runs (hrn:node:hadronmemory.com:specs:cor:agt:070:08); it feeds no check status, availability, stall rule or alarm.
     """
     setHostWorkerTerminals(input: SetHostWorkerTerminalsInput!): SetHostWorkerTerminalsResult!
     """
