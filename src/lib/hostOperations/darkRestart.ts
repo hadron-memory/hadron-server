@@ -79,12 +79,13 @@ export async function restartDarkSession(
   const [me] = await tx.$queryRaw<Array<{ app_id: string; retired_at: Date | null }>>`
     SELECT app_id, retired_at FROM workers WHERE id = ${a.actor.workerId} FOR SHARE`;
   if (!me || me.app_id !== a.appId || me.retired_at !== null || a.actor.workerId === a.workerId) throw restartGrantRequired();
-  // The actor acts through a session, which must still be open under this lock: a serialized second call from a worker whose session the
-  // first call just ended is not that worker's act any more (two workers restarting each other).
-  if (a.actor.sessionId) {
-    const [mine] = await tx.$queryRaw<Array<{ ended_at: Date | null }>>`SELECT ended_at FROM sessions WHERE id = ${a.actor.sessionId} AND worker_id = ${a.actor.workerId} FOR SHARE`;
-    if (!mine || mine.ended_at !== null) throw restartGrantRequired();
-  }
+  // The actor acts through its own session, which must exist and still be open under this lock: a serialized second call from a worker whose
+  // session the first call just ended is not that worker's act any more (two workers restarting each other), and a caller with no session
+  // shows no liveness at all. The caller's assignment locks (workerLock.ts, id order) are already held here, before any row lock, so this
+  // read cannot cross another call's end-step: the calls are serialized on those locks first.
+  if (!a.actor.sessionId) throw restartGrantRequired();
+  const [mine] = await tx.$queryRaw<Array<{ ended_at: Date | null }>>`SELECT ended_at FROM sessions WHERE id = ${a.actor.sessionId} AND worker_id = ${a.actor.workerId} FOR SHARE`;
+  if (!mine || mine.ended_at !== null) throw restartGrantRequired();
   // Authority first, unlocked: a caller whose grant does not cover this target learns nothing about the target.
   const covers = (lock: 'UPDATE') => findCoveringGrants(tx, {
     appId: a.appId, action, workerId: a.actor.workerId, values: { worker: a.workerId }, order: 'CAPPED_FIRST', lock,

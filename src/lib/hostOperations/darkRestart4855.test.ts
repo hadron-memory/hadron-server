@@ -241,6 +241,7 @@ describe('#4855 who may: a signed grant held by that worker, naming the target, 
     const s = await kitSession();
     const g = await grant();
     // The guard refuses a row that expires before it began, so the whole life is moved into the past with the trigger off, in one transaction.
+    // The authority for an expired grant is the database's use guard plus the shared live predicate (they refuse the same way), so this pins the outcome, not which layer.
     await db.$transaction(async (tx) => {
       await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
       await tx.$executeRawUnsafe(`UPDATE grants SET activated_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '2 hours', created_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '2 hours',
@@ -503,10 +504,36 @@ describe('#4855 a worker without a covering grant takes no assignment lock on th
   });
 });
 
+describe('#4855 the assignment locks come before any row lock (blind delta D1: no lock-order cycle in a mutual restart)', () => {
+  it('a covering-grant caller WAITS under a held assignment lock (so the key is the production one), holding no lock on its own session row while it waits', async () => {
+    const holder = new Client({ connectionString: process.env.DATABASE_URL });
+    await holder.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query(`SELECT pg_advisory_xact_lock(hashtext('agent-task-matcher:worker'), hashtext($1))`, [kit]);
+      await grant();
+      await kitSession();
+      let settled: string | undefined;
+      const call = restart().then(() => { settled = 'ok'; }, (e: GraphQLError) => { settled = String(e.extensions?.code); });
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(settled).toBeUndefined();
+      // The waiting call holds no lock on its own session row: nothing it could block another call's end-step on.
+      const probe = await holder.query(`SELECT id FROM sessions WHERE id = $1 FOR UPDATE NOWAIT`, [w.sessionId]);
+      expect(probe.rowCount).toBe(1);
+      await holder.query('ROLLBACK');
+      await call;
+      expect(settled).toBe('ok');
+    } finally {
+      await holder.query('ROLLBACK').catch(() => undefined);
+      await holder.end();
+    }
+  });
+});
+
 describe('#4855 the library re-judges the actor under the transaction (a retirement that lands after the door resolved it)', () => {
   const direct = (actorId: string, over: Record<string, unknown> = {}) => db.$transaction((tx) => restartDarkSession(tx, {
     appId: w.appId, workerId: kit, now: new Date(),
-    actor: { workerId: actorId, sessionId: null, hostLaunched: false, userId: w.userId, agentId: w.agentId, ...over },
+    actor: { workerId: actorId, sessionId: w.sessionId, hostLaunched: false, userId: w.userId, agentId: w.agentId, ...over },
   }));
 
   it('a retired actor with a still-live grant is refused, and nothing is ended, started or spent', async () => {
@@ -534,6 +561,13 @@ describe('#4855 the library re-judges the actor under the transaction (a retirem
     expect(await code(direct(w.workerId, { sessionId: mine.id }))).toBe(REFUSED);
     expect(await useCount(g)).toBe(0);
     expect(await starts()).toHaveLength(0);
+  });
+
+  it('an actor with no session at all is refused (it shows no liveness)', async () => {
+    const g = await grant();
+    await kitSession();
+    expect(await code(direct(w.workerId, { sessionId: null }))).toBe(REFUSED);
+    expect(await useCount(g)).toBe(0);
   });
 
   it('control: the same call by the live holder succeeds', async () => {
