@@ -3,12 +3,12 @@
  * (`secret_app_keys`) from the old `SECRET_ROOT_KEY` to the new one, and move the root's key-check value with
  * them. Modelled on the stamp-key tool (`scripts/db/rewrap-stamp-signing-keys.ts`, #2973).
  *
- *   DATABASE_URL=<owner url> pnpm tsx scripts/db/rewrap-secret-keys.ts \
+ *   MIGRATE_DATABASE_URL=<owner url> pnpm tsx scripts/db/rewrap-secret-keys.ts \
  *       --from-root-file /run/secrets/secret-root-from --to-root-file /run/secrets/secret-root-to
  *   # or, with no flags, two root lines on piped stdin (from first, then to)
  *
- * The credential must be the OWNER's: the serve role may not move the recorded root check (#4573), so a run under it is
- * refused with nothing changed.
+ * The credential must be the OWNER's (MIGRATE_DATABASE_URL, else DATABASE_URL on a single-role install): the serve role
+ * may not move the recorded root check (#4573), so a run under it is refused with nothing changed.
  *
  * The roots NEVER appear on the command line: argv is world-readable through ps and /proc/<pid>/cmdline and lands
  * in shell history. They come from mode-0600 files (a looser mode is refused; mode and bytes are read from the same
@@ -16,14 +16,15 @@
  * characters and never logged.
  *
  * The re-wrap is one transaction ({@link rewrapSecretRootKeys}): atomic, idempotent, holding the secrets-root lock
- * that every mint holds shared. Verification is real: BEFORE, inside that transaction with the lock held, every row is unwrapped (under either root, since a
- * re-run starts with rows already under the new one) and SHA-256-committed in memory; AFTER, every row is unwrapped
- * under the NEW root ONLY and the commitments compared, and the recorded root check is read back and must name the new
- * root, so a re-wrap that wrote nothing exits 1 even with no App keys. The digests are never printed. An instance still running the old root after the switch mints nothing (the key-check value moved),
- * but the runbook still stops writers first and re-runs this tool after the switch as the proof. The inverse
- * argument order is the rollback. Runbook: hrn:node:hadronmemory.com:dev:ops:alpha:app-secrets-key-rotation.
+ * that every mint holds shared. Verification is real: BEFORE, inside that transaction with the lock held, every row is
+ * unwrapped (under either root, since a re-run starts with rows already under the new one) and SHA-256-committed in
+ * memory; AFTER, every row is unwrapped under the NEW root ONLY and the commitments compared, and the recorded root
+ * check is read back and must name the new root, so a re-wrap that wrote nothing exits 1 even with no App keys. The
+ * digests are never printed. An instance still running the old root after the switch mints nothing (the key-check
+ * value moved), but the runbook still stops writers first and re-runs this tool after the switch as the proof. The
+ * inverse argument order is the rollback. Runbook: hrn:node:hadronmemory.com:dev:ops:alpha:app-secrets-key-rotation.
  *
- * Exit codes: 0 ok, 1 failed (re-wrap or verify), 2 usage (bad input, open file mode, no DATABASE_URL).
+ * Exit codes: 0 ok, 1 failed (re-wrap or verify), 2 usage (bad input, open file mode, no database URL).
  */
 import { createHash } from 'crypto';
 import { open, readFile } from 'node:fs/promises';
@@ -148,14 +149,16 @@ export async function main(argv: readonly string[], io: SecretRewrapToolIo): Pro
 
   if (fromHex.toLowerCase() === toHex.toLowerCase()) return usage(io, 'the two roots are the same');
 
-  if (!io.env.DATABASE_URL) {
+  // The owner credential, as verify-runtime-role.ts and revoke-runtime-migrations.ts pick it: DATABASE_URL alone is a single-role install.
+  const databaseUrl = io.env.MIGRATE_DATABASE_URL || io.env.DATABASE_URL;
+  if (!databaseUrl) {
     io.log(`${TAG}.database_url_missing`);
     return 2;
   }
 
   const fromRoot = Buffer.from(fromHex, 'hex');
   const toRoot = Buffer.from(toHex, 'hex');
-  const db = new PrismaClient({ datasourceUrl: io.env.DATABASE_URL });
+  const db = new PrismaClient({ datasourceUrl: databaseUrl });
   try {
     const taken: { before: Map<string, string> | null } = { before: null };
     let out: { rows: number; rewrapped: number };
@@ -167,7 +170,7 @@ export async function main(argv: readonly string[], io: SecretRewrapToolIo): Pro
     } catch (e) {
       if (e instanceof BeforePassFailed) return 1;
       if (isPermissionDenied(e)) {
-        io.log(`${TAG}.refused_not_owner: permission denied; run with the OWNER credential as DATABASE_URL; nothing was changed`);
+        io.log(`${TAG}.refused_not_owner: permission denied; run with the OWNER credential (MIGRATE_DATABASE_URL); nothing was changed`);
         return 1;
       }
       io.log(e instanceof SecretKeyUnavailableError ? `${TAG}.refused: an App key, or the recorded root check, names neither root; nothing was changed` : `${TAG}.rewrap_failed`);

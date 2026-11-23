@@ -280,11 +280,16 @@ describe('secrets-root re-wrap tool: the credential (#4573)', () => {
       url.password = password;
       const [from, to] = await rootPair();
       expect(await main(['--from-root-file', from, '--to-root-file', to], io({ env: { DATABASE_URL: url.toString() } }))).toBe(1);
-      expect(lines).toEqual([expect.stringContaining('refused_not_owner')]);
+      expect(lines).toEqual([expect.stringMatching(/refused_not_owner: .*MIGRATE_DATABASE_URL/)]);
       expect(lines.join('\n')).not.toContain(password);
       expect(lines.join('\n')).not.toContain('postgresql:');
       expect(await wrapped()).toBe(before);
       expect((await db.secretRootCheck.findUniqueOrThrow({ where: { id: 1 } })).checkValue).toBe(rootCheckValue(Buffer.from(ROOT_A, 'hex')));
+
+      // With both set, as in the container, the owner credential wins over the serve one the server runs with.
+      lines = [];
+      expect(await main(['--from-root-file', from, '--to-root-file', to],
+        io({ env: { DATABASE_URL: url.toString(), MIGRATE_DATABASE_URL: process.env.DATABASE_URL } })), lines.join('\n')).toBe(0);
     } finally {
       await admin.query(`DROP OWNED BY ${escapeIdentifier(role)}`).catch(() => undefined);
       await admin.query(`DROP ROLE IF EXISTS ${escapeIdentifier(role)}`);
