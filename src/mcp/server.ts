@@ -288,6 +288,7 @@ import { assertRootAllocationAllowed, lockRootSiblings, nextSiblingSeq } from '.
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding, pendingAtForRevival } from '../services/embedding/enqueue.js';
+import { joinAppendedContent } from '../lib/appendContent.js';
 import { sessionKeyCache, SessionKeyConflictError } from '../lib/sessionKeyCache.js';
 import {
   isSessionLive,
@@ -305,6 +306,7 @@ import { resolveNodeRef, isConcealedNodeRefAmbiguity } from '../lib/entityRef/no
 import { resolveChannelRefId } from '../lib/entityRef/channelRef.js';
 import { sortSiblings } from '../lib/siblingOrder.js';
 import { assembleRunNodePrompt } from '../lib/runNodeRender.js';
+import { foreignIncludeReader } from '../lib/includes/foreignIncludeReader.js';
 import { compileTemplate } from '../lib/template.js';
 import {
   NodeNotFoundError,
@@ -621,6 +623,53 @@ export function mcpDoorCanReplay(
   return true;
 }
 
+/**
+ * Spec 032 — the abstractOriginHash partial-update matrix of hadron_update_node, as one rule (#340 runs it twice: on the
+ * pre-lock probe for a replace, and again under the row lock on the joined body for an append or prepend, so the two
+ * paths cannot drift). `undefined` keeps the stored hash, `null` clears it, a string sets it. `storedAbstract` and
+ * `nextContent` are PLAINTEXT (FR-009).
+ */
+export function updateAbstractOriginHash(
+  normalizedAbstract: string | null | undefined,
+  abstractStillAccurate: boolean | undefined,
+  storedAbstract: string | null,
+  nextContent: string | null | undefined,
+): string | null | undefined {
+  if (normalizedAbstract === undefined) {
+    // #1126 — the caller's assertion that the EXISTING abstract survives
+    // this edit. Row 2 (content updated, abstract absent) arms staleness
+    // on purpose, and that is right by default: the server cannot know
+    // whether an abstract written against the old content still describes
+    // the new one. `abstractStillAccurate` is the caller saying they
+    // checked — so this re-fingerprints the abstract already on the node
+    // against the content this call is writing, exactly as re-saving that
+    // identical text would (row 4). It writes no text of its own.
+    //
+    // Guarded on the node ACTUALLY having an abstract: FR-006/FR-007 hold
+    // that no abstract means no hash, and an unguarded assertion here
+    // would mint a ghost hash on an abstract-less node — a fingerprint
+    // for a thing that does not exist, which later reads would compare
+    // against and quietly trust.
+    const hasStoredAbstract =
+      typeof storedAbstract === 'string' && storedAbstract.trim() !== '';
+    if (abstractStillAccurate === true && hasStoredAbstract) {
+      // computeContentHash(null) is null, so clearing content through this
+      // path lands on FR-007's "abstract but no content ⇒ no hash" rather
+      // than needing its own branch.
+      return computeContentHash(nextContent ?? null);
+    } else {
+      return undefined;
+    }
+  } else if (normalizedAbstract === null) {
+    return null;
+  } else {
+    // `abstract` supplied: this already re-fingerprints against the new
+    // content, so `abstractStillAccurate` is redundant here and ignored
+    // rather than rejected — both spellings mean the same thing and the
+    // outcome is identical either way.
+    return computeContentHash(nextContent ?? null);
+  }
+}
 
 /** Cap on any one JSON field hadron_get_run renders, so a large envelope or trail cannot blow the MCP result ceiling (#1041). */
 const RUN_FIELD_RENDER_CAP = 20_000;
@@ -7173,9 +7222,19 @@ export function createMcpServerInstance(
     'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     SHAPE_HADRON_UPDATE_NODE,
     async (mcpArgs) => {
-      const { urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, addEdges, removeEdges, reason, install } = mcpArgs;
+      const { urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, appendContent, prependContent, separator, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, addEdges, removeEdges, reason, install } = mcpArgs;
+      // #340: append/prepend join the body read under the row lock (inside the transaction below). The argument refusals need
+      // no read, so they come first and write nothing.
+      const appending = appendContent !== undefined || prependContent !== undefined;
+      if (content !== undefined && appending) {
+        return refusalResult('`content` cannot be combined with `appendContent` or `prependContent`: `content` replaces the whole body, the other two add to it. Send one or the other.');
+      }
+      if (separator !== undefined && !appending) {
+        return refusalResult('`separator` applies only with `appendContent` or `prependContent`.');
+      }
       if (install) {
-        if (edges || addEdges || removeEdges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `addEdges`, `removeEdges`, `isRunnable` or `abstractStillAccurate`.');
+        // #340: writeInstallNodeViaGraphql has no append, so the new arguments are refused here rather than dropped.
+        if (edges || addEdges || removeEdges || isRunnable || abstractStillAccurate || appending || separator !== undefined) return textResult('`install` does not support `edges`, `addEdges`, `removeEdges`, `isRunnable`, `abstractStillAccurate`, `appendContent`, `prependContent` or `separator`.');
         return writeInstallNodeViaGraphql('update', install, {
           authoredWith,
           loc: rawUrn, expectedRevision, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
@@ -7217,7 +7276,7 @@ export function createMcpServerInstance(
         return refusalResult('`edges` replaces the whole outgoing set and cannot be combined with `addEdges` or `removeEdges`; use `addEdges` / `removeEdges` alone to change some edges and keep the rest.');
       }
       // #4096: typed refusal for caller text carrying a NUL, after authorization and before any write.
-      const unstorableUpdate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent, reason, properties, data: nodeData, removeEdgeRefs: removeEdges, ...edgeTextFields(edges ?? addEdges) });
+      const unstorableUpdate = unstorableTextRefusal({ name, description, abstract, content, appendContent, prependContent, separator, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent, reason, properties, data: nodeData, removeEdgeRefs: removeEdges, ...edgeTextFields(edges ?? addEdges) });
       if (unstorableUpdate) return unstorableUpdate;
       // #4039 (B4): the same save-time check as hadron_create_node, before any write.
       const entryRefusal = entryConditionRefusal(loc, nodeData);
@@ -7259,7 +7318,8 @@ export function createMcpServerInstance(
                 context: 'node-write',
                 surface: 'mcp',
                 canReplay: (kind) =>
-                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, addEdges, removeEdges, reason, expectedRevision }, kind, 'update'),
+                  // #340: appendContent/prependContent/separator are carried by no governed door, so a call with them never replays.
+                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, appendContent, prependContent, separator, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, addEdges, removeEdges, reason, expectedRevision }, kind, 'update'),
               }
             : {},
         );
@@ -7388,6 +7448,12 @@ export function createMcpServerInstance(
       const updKey = updMemEnc?.isEncrypted
         ? sessionKeyCache.getByMemoryId(existing.memoryId)
         : null;
+      // #340 (v1, Xavier's disposition): no append/prepend on an encrypted memory, locked or not. A wrong join of a
+      // decrypted body would corrupt the ciphertext silently; send the whole body as `content` instead. A memory that
+      // becomes encrypted while this write waits is refused by assertMemoryEncryptionStateForWrite under the lock.
+      if (appending && updMemEnc?.isEncrypted) {
+        return refusalResult('[append_unsupported_encrypted] `appendContent` and `prependContent` are not supported on an encrypted memory. Read the node and send the whole new body as `content`.');
+      }
       if (updMemEnc?.isEncrypted && !updKey) {
         return textResult(
           'This memory is encrypted and locked — call hadron_unlock_memory first (spec 041).',
@@ -7408,43 +7474,11 @@ export function createMcpServerInstance(
       // supplied (undefined = preserve, null = clear, string = set).
       // Hash always computed on plaintext per FR-009 (existing.* is
       // plaintext here — decrypted above for encrypted memories).
-      let nextAbstractOriginHash: string | null | undefined;
-      if (normalizedAbstract === undefined) {
-        // #1126 — the caller's assertion that the EXISTING abstract survives
-        // this edit. Row 2 (content updated, abstract absent) arms staleness
-        // on purpose, and that is right by default: the server cannot know
-        // whether an abstract written against the old content still describes
-        // the new one. `abstractStillAccurate` is the caller saying they
-        // checked — so this re-fingerprints the abstract already on the node
-        // against the content this call is writing, exactly as re-saving that
-        // identical text would (row 4). It writes no text of its own.
-        //
-        // Guarded on the node ACTUALLY having an abstract: FR-006/FR-007 hold
-        // that no abstract means no hash, and an unguarded assertion here
-        // would mint a ghost hash on an abstract-less node — a fingerprint
-        // for a thing that does not exist, which later reads would compare
-        // against and quietly trust.
-        const hasStoredAbstract =
-          typeof existing.abstract === 'string' && existing.abstract.trim() !== '';
-        if (abstractStillAccurate === true && hasStoredAbstract) {
-          const nextContent = content !== undefined ? content : existing.content;
-          // computeContentHash(null) is null, so clearing content through this
-          // path lands on FR-007's "abstract but no content ⇒ no hash" rather
-          // than needing its own branch.
-          nextAbstractOriginHash = computeContentHash(nextContent ?? null);
-        } else {
-          nextAbstractOriginHash = undefined;
-        }
-      } else if (normalizedAbstract === null) {
-        nextAbstractOriginHash = null;
-      } else {
-        // `abstract` supplied: this already re-fingerprints against the new
-        // content, so `abstractStillAccurate` is redundant here and ignored
-        // rather than rejected — both spellings mean the same thing and the
-        // outcome is identical either way.
-        const nextContent = content !== undefined ? content : existing.content;
-        nextAbstractOriginHash = computeContentHash(nextContent ?? null);
-      }
+      // #340: the same rule runs again under the lock on the joined body when this call appends or prepends.
+      const nextAbstractOriginHash = updateAbstractOriginHash(
+        normalizedAbstract, abstractStillAccurate, existing.abstract,
+        content !== undefined ? content : existing.content,
+      );
 
       // The authoritative at-rest snapshot and its #620 diff are built under
       // the address lock below, after this plaintext-derived hash is known.
@@ -7493,7 +7527,10 @@ export function createMcpServerInstance(
 
       let includePinContentSaved = false;
       let includePinPriorContent: string | null = null;
-      if (Object.keys(data).length > 0 || edgeWrite || expectedRevision !== undefined) {
+      // #340: the joined body is only known under the lock, so an append always enters the transaction.
+      let appendedBody: string | null | undefined;
+      let appendWritten = false;
+      if (Object.keys(data).length > 0 || edgeWrite || expectedRevision !== undefined || appending) {
         // Spec 049 S4: the write holds the address lock and the gate runs
         // under it — the check above is the fast refusal, this the
         // authoritative one (Copilot on PR #1165).
@@ -7580,6 +7617,22 @@ export function createMcpServerInstance(
               priorRunnable: current.isRunnable,
               nextRunnable: mergedGovernedState(current, { role, isRunnable }).isRunnable,
             });
+            // #340: join from the LOCKED row, after the move/delete, expectedRevision and role-writer re-checks, then
+            // feed the result to everything below exactly as if the caller had sent `content: <joined>` (diff,
+            // revision, includes, embedding). The abstract hash is re-derived from that body by the same rule.
+            if (appending) {
+              if (updKey) throw new Error('#340: append reached the write on an encrypted memory'); // refused above
+              appendedBody = joinAppendedContent(current.content, { prependContent, appendContent, separator });
+              data.content = appendedBody;
+              plaintextUpdates.content = appendedBody;
+              const lockedHash = updateAbstractOriginHash(normalizedAbstract, abstractStillAccurate, current.abstract, appendedBody);
+              delete data.abstractOriginHash;
+              delete plaintextUpdates.abstractOriginHash;
+              if (lockedHash !== undefined) {
+                data.abstractOriginHash = lockedHash;
+                plaintextUpdates.abstractOriginHash = lockedHash;
+              }
+            }
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
             if (Object.keys(data).length === 0 && !edgeWrite) return;
@@ -7649,8 +7702,10 @@ export function createMcpServerInstance(
                 edgeReceipt.unchanged = added.unchanged;
               }
             }
-            if (content !== undefined) {
-              await applyIncludesInTransaction(tx, updated, content, auth, (currentForDiff.content as string | null) ?? null);
+            if (appending) appendWritten = true;
+            const savedBody = content !== undefined ? content : appendedBody;
+            if (savedBody !== undefined) {
+              await applyIncludesInTransaction(tx, updated, savedBody, auth, (currentForDiff.content as string | null) ?? null);
               includePinContentSaved = true;
               includePinPriorContent = (currentForDiff.content as string | null) ?? null;
             }
@@ -7709,7 +7764,8 @@ export function createMcpServerInstance(
 
       // 033 — re-embed when content or abstract changed (existing.* is plaintext
       // on the MCP path, #206). Other-field-only updates don't touch the index.
-      if (content !== undefined || normalizedAbstract !== undefined) {
+      // #340: existing.content is the body this write stored (set from the updated row inside the transaction).
+      if (content !== undefined || normalizedAbstract !== undefined || appendWritten) {
         void enqueueNodeEmbedding(db, {
           nodeId: existing.id,
           workToken: existing.embeddingWorkToken,
@@ -7726,7 +7782,7 @@ export function createMcpServerInstance(
       const edgeDeltaText = removeTargets !== null || resolvedAdds !== null
         ? ` — edges: ${edgeReceipt.added} added, ${edgeReceipt.unchanged} unchanged, ${edgeReceipt.removed} removed`
         : '';
-      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})${edgeDeltaText}${includePinContentSaved ? renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId: existing.memoryId }, content, includePinPriorContent)) : ''}${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), existing.id))}`);
+      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})${edgeDeltaText}${includePinContentSaved ? renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId: existing.memoryId }, content !== undefined ? content : appendedBody, includePinPriorContent)) : ''}${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), existing.id))}`);
     },
   );
 
@@ -9245,10 +9301,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     // dependencies they pass: a Mustache compile over the node's memory, and no flow-routing edge inlined. A limit
     // refusal (#40) is thrown before anything is recorded and becomes the tool's named refusal in `runBundleResult`.
     const readCtx = scopeCtx();
+    // #4689: foreign URN includes resolve under the caller's own read access (cor:dmo:150:04).
+    const foreignReader = foreignIncludeReader(db, auth);
     const rendered = await assembleRunNodePrompt({ ...node, loc }, args, {
       memoryUrnOf: memoizedMemoryUrnLookup(),
       compileTemplate: (content, data, memoryId) =>
-        compileTemplate(content, data, memoryId, db, {}).then((text) => chargeRequestServed(readCtx, content, text)),
+        compileTemplate(content, data, memoryId, db, {}, undefined, { foreignReader }).then((text) => chargeRequestServed(readCtx, content, text)),
       // The run node's OWN memory was gated by loadNodeForRun; this gates each
       // dependency separately, because an edge can cross memories (#781).
       includeTarget: (target) => !!target && canRead(target.memoryId),

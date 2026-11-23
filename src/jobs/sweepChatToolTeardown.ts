@@ -33,10 +33,14 @@ export function startChatToolTeardownSweepLoop(
       running = false;
     }
   };
-  return setTimeout(() => {
+  // unref'd like the interval below: the first pass alone must never hold a draining process open (#4945). Only src/server.ts starts
+  // this loop, and the server's listener keeps the process alive; the hand-run entry below runs ONE tick and never starts the loop.
+  const initial = setTimeout(() => {
     void run();
     setInterval(run, intervalMs).unref();
   }, initialDelayMs);
+  initial.unref();
+  return initial;
 }
 
 if (isProcessEntry(import.meta.url)) {

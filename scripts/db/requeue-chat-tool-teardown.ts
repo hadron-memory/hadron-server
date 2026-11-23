@@ -13,6 +13,8 @@
  * `--apply` it lists and writes nothing; the listing carries ids and handles (kind, provider, the tool's connection id), never a
  * token. Only a CAPPED intent is touched: a pending or confirmed one is not.
  *
+ * `--id` without `--apply` is a dry run of that one intent. A failure logs the error's name and Prisma code, never the message or URL.
+ *
  * Exit codes: 0 ok (listed or requeued), 1 failed, nothing written; 2 usage.
  */
 import { pathToFileURL } from 'node:url';
@@ -46,7 +48,8 @@ export async function main(argv: readonly string[], io: RequeueToolIo): Promise<
   const db = new PrismaClient({ datasourceUrl: io.env.DATABASE_URL });
   try {
     if (!apply) {
-      const capped = await listCappedChatToolTeardowns(db);
+      // A dry run honours the selector: --id lists that one intent (and nothing when it is not capped), --all or none lists every one.
+      const capped = await listCappedChatToolTeardowns(db, byId ? { id: rest[1]! } : {});
       for (const c of capped) io.log(`${TAG} capped id=${c.id} kind=${c.kind} provider=${c.provider} tool_connection_id=${c.toolConnectionId} attempts=${c.attempts}`);
       io.log(`${TAG} dry_run capped=${capped.length} (pass --id <id> or --all with --apply to requeue)`);
       return 0;
@@ -54,8 +57,13 @@ export async function main(argv: readonly string[], io: RequeueToolIo): Promise<
     const n = await requeueCappedChatToolTeardowns(db, all ? { all: true } : { id: rest[1]! });
     io.log(`${TAG} ok requeued=${n}`);
     return 0;
-  } catch {
-    io.log(`${TAG}.failed`);
+  } catch (error) {
+    // The kind of failure, so an operator is not left guessing: the error's name and a Prisma code, never its message (which can
+    // carry the connection string or a value) and never the URL.
+    const rawCode = (error as { code?: unknown } | null)?.code;
+    const code = typeof rawCode === 'string' && /^[A-Za-z0-9_]{1,16}$/.test(rawCode) ? rawCode : '-';
+    const name = error instanceof Error && /^[A-Za-z0-9_]{1,64}$/.test(error.name) ? error.name : 'Error';
+    io.log(`${TAG}.failed name=${name} code=${code}`);
     return 1;
   } finally {
     await db.$disconnect().catch(() => undefined);

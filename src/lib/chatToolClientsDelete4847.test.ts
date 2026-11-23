@@ -15,7 +15,7 @@ const cases = [
 beforeEach(() => { vi.spyOn(console, 'error').mockImplementation(() => {}); });
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); for (const [, , url, tok] of cases) { delete process.env[url]; delete process.env[tok]; } });
 
-describe.each(cases)('%s delete client reports whether the tool confirmed', (provider, del, urlEnv) => {
+describe.each(cases)('%s delete client reports whether the tool confirmed', (provider, del, urlEnv, tokEnv) => {
   const configured = () => { process.env[urlEnv] = 'http://tool.test:8080/'; };
   it('a 200 is confirmed, and it sends DELETE to the connection id with the bearer when set', async () => {
     configured();
@@ -23,6 +23,17 @@ describe.each(cases)('%s delete client reports whether the tool confirmed', (pro
     vi.stubGlobal('fetch', fetchMock);
     await expect(del(provider, 'tool-1')).resolves.toBe(true);
     expect(fetchMock).toHaveBeenCalledWith('http://tool.test:8080/connections/tool-1', expect.objectContaining({ method: 'DELETE' }));
+  });
+  it('#4945: it sends the shared bearer when one is set, and no Authorization header when none is', async () => {
+    configured();
+    const fetchMock = vi.fn().mockImplementation(async () => new Response('{"deleted":true}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    process.env[tokEnv] = 'tool-secret-4945';
+    await del(provider, 'tool-1');
+    expect(fetchMock.mock.calls[0]![1].headers).toEqual({ authorization: 'Bearer tool-secret-4945' });
+    delete process.env[tokEnv];
+    await del(provider, 'tool-1');
+    expect(fetchMock.mock.calls[1]![1].headers).toEqual({});
   });
   it('a 404 (not found) is NOT a confirmation', async () => {
     configured();

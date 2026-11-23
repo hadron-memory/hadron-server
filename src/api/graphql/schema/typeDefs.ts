@@ -5102,7 +5102,13 @@ export const typeDefs = `#graphql
     caller-org scope as apps — never exposes a foreign org's App.
     """
     appAgents: [AppAgent!]!
-    "Adoption count. #551: the owning tenant's view (0 otherwise): the owning org's members, or for a user-owned agent its owner (#1693)."
+    """
+    Adoption count: the owning tenant's total (#551). It counts every live
+    install of this Agent, including Apps the viewer may not be able to read,
+    so it can exceed the length of apps. It is 0 for any viewer outside the
+    owning tenant: the owning org's members, or for a user-owned agent its
+    owner (#1693). It is not the number of Apps the viewer can read.
+    """
     appCount: Int!
     """
     Org grants for this Agent (which orgs were granted it). #551: the agent's
@@ -6001,7 +6007,8 @@ export const typeDefs = `#graphql
     """
     checkStatus: WorkerCheckStatus
     """
-    #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — the latest terminal report a host made for this worker. Stored, decides nothing;
+    #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — the latest terminal report a host made for this worker. Stored; since #4933 a fresh report from a host that
+    registers the worker and shows an agent withholds the platform's desired-running start on every host (hrn:node:hadronmemory.com:specs:cor:agt:070:08), and it decides nothing else;
     judge its age from checkedAt. Null until a host reports, and masked to null on the same read gate as checkStatus.
     """
     terminal: WorkerTerminal
@@ -9960,6 +9967,11 @@ export const typeDefs = `#graphql
     """
     saturationAlarmWakeRoles(appRef: ID!): SaturationAlarmWakeRoles!
     """
+    #4937 — the App's latest report of whether work exists outside Hadron (hrn:node:hadronmemory.com:specs:cor:agt:050:31), for whoever may
+    read its roster, with the roster's refusal byte for byte. exist is null until the App's first report.
+    """
+    externalTasksReport(appRef: ID!): ExternalTasksReport!
+    """
     #4921 — the App's role lists, one per purpose (link a defect, the register pick's role route, withdraw a negative review verdict). For whoever may read the App's roster, refused as the roster is (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
     """
     appRoleLists(appRef: ID!): AppRoleLists!
@@ -12640,7 +12652,7 @@ export const typeDefs = `#graphql
     malformed input refuses the whole call and stores nothing (BAD_USER_INPUT); a worker this host does not register is
     refused for that item only (WORKER_NOT_FOUND, as setHostWorkerAvailability); an older report than the stored one
     is skipped (TERMINAL_REPORT_STALE). The result lists the stored items and the refused items, each refusal with a reason.
-    The report decides nothing: it feeds no check status, availability, matcher, stall rule or alarm.
+    Since #4933 it decides one thing: the platform issues no desired-running start for a worker whose agent this host already runs (hrn:node:hadronmemory.com:specs:cor:agt:070:08); it feeds no check status, availability, stall rule or alarm.
     """
     setHostWorkerTerminals(input: SetHostWorkerTerminalsInput!): SetHostWorkerTerminalsResult!
     """
@@ -12905,6 +12917,16 @@ export const typeDefs = `#graphql
     #3323: the App-manager arm also admits the manager's held worker on an instruction, recorded as one app.manager-act event, ids only.
     """
     setSaturationAlarmWakeRoles(appRef: ID!, roles: [String!]!, instruction: ActInstructionInput): SaturationAlarmWakeRoles!
+    """
+    #4937 — report whether work exists OUTSIDE Hadron for the App (GitHub issues and the like; hrn:node:hadronmemory.com:specs:cor:agt:050:31).
+    Until an App's first report the lead cadence alarm does not exist for it; once the latest report says true it does. Whoever manages
+    the App only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12): a participant who does not manage it gets APP_MANAGER_REQUIRED, a caller
+    who cannot see the App gets the missing App's answer. There is no staleness rule: the latest report counts however old it is. A report
+    of false only stops NEW alarms; an open episode stays open until its lead assigns. Reporting the stored answer again changes nothing.
+    Refusals: BAD_USER_INPUT (before any other check), APP_NOT_FOUND, APP_MANAGER_REQUIRED, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    #3323: the App-manager arm also admits the manager's held worker on an instruction, recorded as one app.manager-act event, ids only.
+    """
+    reportExternalTasks(appRef: ID!, exist: Boolean!, instruction: ActInstructionInput): ExternalTasksReport!
     """
     #4921 — set ONE of the App's role lists, the whole list at once. Whoever manages the App only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12): a participant who does not manage it gets APP_MANAGER_REQUIRED, a caller who cannot see the App gets the missing App's answer. Names are trimmed and lower-cased and duplicates collapse; at most 32 names of 1 to 64 characters with no ':' or whitespace; an empty list clears it. Stores the list only: no door reads it yet.
     """
@@ -13664,6 +13686,14 @@ export const typeDefs = `#graphql
     MANUAL app run for the resolved task under that App and returns the run id
     (poll appRun(ref:) for status + output). runAsSelf attributes the run to
     the caller. Without appRef, behavior is unchanged.
+    Required task arguments (#317, hrn:node:hadronmemory.com:specs:cor:dmo:060:11):
+    when the task node's data.args declares an argument with required: true and no
+    default, args must carry it (present and not null) or the call is refused
+    BAD_USER_INPUT, naming every missing argument, before anything renders or runs
+    (no AppRun, no usage event). Judged after the read-access check, so a task the
+    caller cannot read answers as it always did. A hop of an already-minted run (the
+    run kernel assembling through this call) is exempt. Undeclared arguments pass through;
+    data_type is not checked and defaults are not filled in.
     Spec cor:api:060.
     """
     runTask(nodeRef: String!, args: JSON, appRef: ID, runAsSelf: Boolean, agentRef: ID): String!
@@ -17993,7 +18023,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); alarm.saturation (#3819: task-less and workerless: a family/tier/role combination the platform could not give work to, hrn:node:hadronmemory.com:specs:cor:agt:060:14; #4777: its chain names the App's workers whose roles its saturation-alarm list named when it was raised, each offered one wake while its episode is open, and is empty (waking nobody) when the list was, hrn:node:hadronmemory.com:specs:cor:agt:060:16; payload is reason (no-worker or none-eligible), family, tier and role, null for a dimension the task left open; only whoever manages the App acknowledges it, and acknowledging does not end its episode); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02); question.answered, question.answer-retracted (#4431: a question that blocks the task was answered, or its answer taken back; payload is questionId, code, revision and state only, never the answer; only question.answered wakes the task\'s assignee)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.lead-cadence (#2763, #4375: task-less, subjectWorker is the lead that stopped assigning: a worker that at least one worker reports to; events raised before #4375 carry the type alarm.coordinator-cadence, the same alarm under its old name); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); alarm.saturation (#3819: task-less and workerless: a family/tier/role combination the platform could not give work to, hrn:node:hadronmemory.com:specs:cor:agt:060:14; #4777: its chain names the App's workers whose roles its saturation-alarm list named when it was raised, each offered one wake while its episode is open, and is empty (waking nobody) when the list was, hrn:node:hadronmemory.com:specs:cor:agt:060:16; payload is reason (no-worker or none-eligible), family, tier and role, null for a dimension the task left open; only whoever manages the App acknowledges it, and acknowledging does not end its episode); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02); question.answered, question.answer-retracted (#4431: a question that blocks the task was answered, or its answer taken back; payload is questionId, code, revision and state only, never the answer; only question.answered wakes the task\'s assignee)."
     type: String!
     taskId: ID
     "The task's stored handle (hrn:node:hadronmemory.com:specs:cor:agt:050:01, Proposed). Null when taskId is null or the task no longer exists; never invented."
@@ -19266,6 +19296,17 @@ export const typeDefs = `#graphql
     defectLink: [String!]!
     registerPick: [String!]!
     reviewWithdraw: [String!]!
+  }
+
+  """
+  #4937 — whether work exists outside Hadron for an App, as its manager last reported it (hrn:node:hadronmemory.com:specs:cor:agt:050:31).
+  """
+  type ExternalTasksReport {
+    appId: ID!
+    "True: external tasks exist. False: none. Null: the App has never reported, so its lead cadence alarm does not exist."
+    exist: Boolean
+    "When the latest report that changed the answer was made (database clock); null until the first report."
+    reportedAt: DateTime
   }
 
   """
