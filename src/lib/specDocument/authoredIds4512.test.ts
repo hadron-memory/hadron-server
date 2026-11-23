@@ -9,8 +9,12 @@ import { neutraliseAssignedIds, renderSpecDocument, type DocInput, type DocPart 
 const A = new Set(['fx-110-a']);
 const run = (t: string): string => neutraliseAssignedIds(t, A);
 /** A live assigned id: an `id` attribute (not data-id, not a query key) whose value is the anchor. */
-const LIVE = /(?<![\w:.?&=#-])id[\s>]*=[\s>]*["']?fx-110-a(?![\w-])/i;
-const live = (t: string): boolean => LIVE.test(run(t));
+// An oracle written apart from the implementation: it ignores data-id first, decodes every numeric reference itself and
+// uses word boundaries, so a rename that the implementation misjudges still reads as live here.
+const decodeAll = (t: string): string => t.replace(/&#(?:x([0-9a-f]+)|([0-9]+));?/gi, (_a, h?: string, d?: string) => String.fromCodePoint(h ? parseInt(h, 16) : parseInt(d as string, 10)));
+const live = (t: string): boolean => /\bid[\s>]*=[\s>]*["']?fx-110-a(?![\w-])/i.test(decodeAll(run(t)).replace(/data-id/gi, ''));
+/** The probe input itself must read as live to the oracle, so a pin cannot pass by being inert. */
+const liveBefore = (t: string): boolean => /\bid[\s>]*=[\s>]*["']?fx-110-a(?![\w-])/i.test(decodeAll(t));
 
 const part = (loc: string, body: string | null, name = 'Rule: Entry'): DocPart => ({
   loc, name, body, isPlaceholder: false, superseded: false, supersededBy: [], approval: { state: 'NOT_APPROVED' }, minted: false,
@@ -116,7 +120,23 @@ describe('#4512 review probes: no live assigned id', () => {
     ['D6: a namespaced tag', '<o:p class="x" id="fx-110-a">'],
     ['F5: a marker after id= outside a quote', '<div id=\n>fx-110-a</div> <div id="fx-110-a"\n>'],
   ])('%s', (_n, body) => {
+    expect(liveBefore(body)).toBe(true);
     expect(live(body)).toBe(false);
+  });
+  it('F1 (blind full): zero-padded character references still match', () => {
+    expect(run('<a id="fx&#x000002d;110-a">')).toBe('<a data-id="fx&#x000002d;110-a">');
+    expect(run('<a id="fx&#0000000045;110-a">')).toBe('<a data-id="fx&#0000000045;110-a">');
+    expect(live('<a id="fx&#0000045;110-a"> <a id="fx&#x00002D;110-a">')).toBe(false);
+  });
+  it('F5 (blind full): an entity-encoded query separator is not an attribute', () => {
+    expect(run('see https://x.test/p?a=1&amp;id=fx-110-a now')).toBe('see https://x.test/p?a=1&amp;id=fx-110-a now');
+  });
+  it('F2 (blind full): part and Feature names in headings are neutralised', () => {
+    const feature = part('fx:110', 'Feature body.', 'Feature: F <a id="fx-110-a"></a>');
+    const out = renderSpecDocument(doc([part('fx:110:a', 'x', 'Rule: R <span id=\'fx-110-a\'>')], feature));
+    expect(count(out, ' id="fx-110-a"')).toBe(1);
+    expect(out).toContain('# Feature: F <a data-id="fx-110-a"></a> [fx:110]');
+    expect(out).toContain("## Rule: R <span data-id='fx-110-a'> [fx:110:a]");
   });
   it('the text outside the renamed attribute is byte for byte unchanged (F4/G7/G8: no line is cut, none is added)', () => {
     const body = '<a\n  id="fx-110-a"\n  class="c">x</a>\n> <a\n> id="fx-110-a"\n> class="c">\r\n<a id="fx-110-a" id="fx-110-a"\n  class="c">';

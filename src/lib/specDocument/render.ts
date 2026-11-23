@@ -166,7 +166,7 @@ export function splitAtClosingRule(text: string): { body: string; tail: string }
 
 /** The text of a numeric character reference decoded (`&#45;`, `&#x2d;`, and without the `;`), so an encoded id compares as a browser reads it. */
 function decodeNumericRefs(v: string): string {
-  return v.replace(/&#(?:[xX]([0-9a-fA-F]{1,6})|([0-9]{1,7}));?/g, (all, hex?: string, dec?: string) => {
+  return v.replace(/&#(?:[xX]0*([0-9a-fA-F]{1,6})|0*([0-9]{1,7}));?/g, (all, hex?: string, dec?: string) => {
     const cp = hex !== undefined ? parseInt(hex, 16) : parseInt(dec as string, 10);
     return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : all;
   });
@@ -174,11 +174,11 @@ function decodeNumericRefs(v: string): string {
 
 /**
  * One `id` attribute, found by its text alone (no tag, quote or block is judged): the name `id` not glued to a longer
- * name or a URL query key (`data-id`, `?id=`, `&id=`, `#id=`, `a:id`), then `=`, then a quoted or bare value. Blanks and
+ * name or a URL query key (`data-id`, `?id=`, `&id=`, `&amp;id=`, `#id=`, `a:id`), then `=`, then a quoted or bare value. Blanks and
  * `>` (a blockquote marker the renderer drops) may sit before the `=` and before the value. Linear: each `id=` scans only
  * its own run of blanks and its own value, and a value never contains the next match's start.
  */
-const ID_ATTR = /(?<![\w:.?&=#-])id[\s>]*=[\s>]*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/gi;
+const ID_ATTR = /(?<![\w:.?&=#;-])id[\s>]*=[\s>]*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/gi;
 
 /**
  * #4512 (cor:spc:030:02 "Authored ids"; Peter's approach ruling, chat 143451, after five review rounds on removing the
@@ -317,7 +317,7 @@ export function renderSpecDocument(input: DocInput): string {
   ].join(' · ');
 
   const blocks: string[] = [
-    `# ${heading(feature)}\n\n${input.memory} · rendered ${renderedStamp(input.renderedAt)}\n\nReadiness: ${readiness}`,
+    `# ${neutraliseAssignedIds(heading(feature), assigned)}\n\n${input.memory} · rendered ${renderedStamp(input.renderedAt)}\n\nReadiness: ${readiness}`,
   ];
   if (feature.isPlaceholder) blocks.push('Placeholder.');
   else {
@@ -330,7 +330,7 @@ export function renderSpecDocument(input: DocInput): string {
     if (members.length === 0) continue;
     blocks.push(`# ${g.heading}`);
     for (const p of members) {
-      const head = `<a id="${anchors.get(p.loc)}"></a>\n\n## ${heading(p)}\n${stateLine(p)}`;
+      const head = `<a id="${anchors.get(p.loc)}"></a>\n\n## ${neutraliseAssignedIds(heading(p), assigned)}\n${stateLine(p)}`;
       if (p.superseded) {
         blocks.push(`${head}\n\n${p.supersededBy.length ? `Superseded by ${p.supersededBy.join(', ')}.` : 'Superseded.'}`);
       } else if (p.isPlaceholder) {
