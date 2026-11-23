@@ -13686,6 +13686,14 @@ export const typeDefs = `#graphql
     MANUAL app run for the resolved task under that App and returns the run id
     (poll appRun(ref:) for status + output). runAsSelf attributes the run to
     the caller. Without appRef, behavior is unchanged.
+    Required task arguments (#317, hrn:node:hadronmemory.com:specs:cor:dmo:060:11):
+    when the task node's data.args declares an argument with required: true and no
+    default, args must carry it (present and not null) or the call is refused
+    BAD_USER_INPUT, naming every missing argument, before anything renders or runs
+    (no AppRun, no usage event). Judged after the read-access check, so a task the
+    caller cannot read answers as it always did. A hop of an already-minted run (the
+    run kernel assembling through this call) is exempt. Undeclared arguments pass through;
+    data_type is not checked and defaults are not filled in.
     Spec cor:api:060.
     """
     runTask(nodeRef: String!, args: JSON, appRef: ID, runAsSelf: Boolean, agentRef: ID): String!
