@@ -155,6 +155,19 @@ describe('#4141 cancelAppRun(ref:)', () => {
     expect((await db.appRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe('RUNNING');
   });
 
+  it('an ADMIN of ANOTHER org is FORBIDDEN on this org\'s run by PK and by URN (requireOrgRole runs on the resolved run), and the run is untouched', async () => {
+    const orgB = await db.organization.create({ data: { name: 'refs4141b', urn: 'refs4141b' } });
+    const adminB = await db.user.create({ data: { email: 'adminb4141@example.com', name: 'AdminB' } });
+    await db.orgMember.create({ data: { organizationId: orgB.id, userId: adminB.id, role: 'ADMIN' } });
+    const ctx = { userId: adminB.id, roles: [] as Context['roles'] };
+    const byPk = await cancel(runId, ctx);
+    const byUrn = await cancel(composeAppRunUrn(appUrn, runId), ctx);
+    expect(code(byPk)).toBe('FORBIDDEN');
+    expect(code(byUrn)).toBe('FORBIDDEN');
+    expect(message(byUrn)).toBe(message(byPk));
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe('RUNNING');
+  });
+
   it('a URN whose App segment names another App than the run is NOT_FOUND and cancels nothing', async () => {
     const other = await db.app.create({ data: { organizationId: orgId, urn: 'refs4141:other-app', name: 'Other' } });
     const out = await cancel(composeAppRunUrn(other.urn, runId));
@@ -185,6 +198,8 @@ describe('#4141 startAgentSession(agentRef:)', () => {
       expect(message(a)).toBe('Forbidden: App is not allowed to operate this agent');
     }
     expect(JSON.stringify(answers.map((a) => a.errors))).not.toContain(other.id);
+    // The ref is caller input too: no refusal echoes the unknown URN back.
+    expect(JSON.stringify(answers.map((a) => a.errors))).not.toContain('refs4141:nobody');
   });
 
   it('writes no session, memory, user or subscription row on any refusal', async () => {

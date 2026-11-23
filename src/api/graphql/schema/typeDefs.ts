@@ -16573,7 +16573,10 @@ export const typeDefs = `#graphql
     'agentRef' is the Agent's id or its hrn:agent URN (renamed from 'agentId',
     #4141). An Agent that does not exist, is deleted, or is not installed in
     this App all answer the one FORBIDDEN "App is not allowed to operate this
-    agent"; a relative URN is refused as URN_NOT_QUALIFIED.
+    agent". A ref that is neither an id nor a qualified hrn:agent URN (a
+    relative URN, a malformed ref, another entity's URN) is refused as
+    URN_NOT_QUALIFIED; cancelAppRun answers the same kind of ref with
+    BAD_USER_INPUT, its own door's existing shape code.
     """
     startAgentSession(
       agentRef: ID!
