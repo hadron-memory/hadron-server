@@ -13373,7 +13373,13 @@ async function openOrRejectMcpSession(
 //     one connector) move each other's App and memory between calls, with no warning. Sessionful serving reads it only
 //     when a connection is opened. Pinned in server.sessionless2605.test.ts; the session handle (H1/H2) fixes it.
 //   - No bound on requests in flight (plan Q6). That includes `subscriptions/listen`, a long-lived SSE response over
-//     POST, which the 405 does not stop and the stopping-drain shutdown close (#3797) does not track.
+//     POST, which the 405 does not stop and the stopping-drain shutdown close (#3797) does not track. The SDK's own cap
+//     on listen streams (1024) is one pool for every principal, so one caller can fill it for all.
+//   - Encrypted memories cannot be unlocked: `hadron_unlock_memory` and `hadron_lock_memory` hold the key per
+//     connection and answer "No active MCP session." here.
+//   - Turning the mode back off strands connected clients: they send no `Mcp-Session-Id`, and the sessionful path
+//     answers a non-initialize request without one with the SDK's 400 "Server not initialized", which clients treat
+//     as fatal until they restart.
 
 /** The exact value that selects sessionless serving. Anything else, including unset, is today's sessionful serving. */
 export const MCP_SERVING_MODE_SESSIONLESS = 'sessionless';
@@ -13433,11 +13439,15 @@ async function dispatchMcpSessionlessRequest(req: Request, res: Response): Promi
   }
 
   // The same refusals, in the same order, as a connection being opened (openOrRejectMcpSession), with one difference:
-  // a failed credential lookup answers 503 here, where the sessionful open lets the error propagate.
+  // a database failure answers 503 here (the credential lookup, and below the session binding and the principal's
+  // App and stored selections), where the sessionful open lets the error propagate. That path meets it once per
+  // connection and answers 503 on an open one (authenticateBoundMcpSession); this path meets it on every request, and
+  // Express 4 never answers a rejected async handler.
   let auth: AuthContext;
   try {
     auth = (await resolveCredentialContextWithStatus(req, db)).auth;
-  } catch {
+  } catch (error) {
+    mcpLog('error', 'mcp_sessionless_auth_failed', { name: (error as Error)?.name });
     res.status(503).json({ error: 'Authentication temporarily unavailable' });
     return;
   }
@@ -13456,12 +13466,20 @@ async function dispatchMcpSessionlessRequest(req: Request, res: Response): Promi
     return;
   }
 
-  await bindPresentedSession(req, db, auth);
-  // #2123: session-sensitive consumers read THIS request's binding result.
-  auth.requestSession = { sessionId: auth.sessionId, refused: auth.sessionBindingRefused === true };
-
-  const { cachedAppResolution, clientKey, restored } = await prepareMcpPrincipal(req, auth, null);
-  const principal: SessionlessPrincipal = { auth, cachedAppResolution, clientKey, restored };
+  let principal: SessionlessPrincipal;
+  try {
+    await bindPresentedSession(req, db, auth);
+    // #2123: session-sensitive consumers read THIS request's binding result.
+    auth.requestSession = { sessionId: auth.sessionId, refused: auth.sessionBindingRefused === true };
+    const { cachedAppResolution, clientKey, restored } = await prepareMcpPrincipal(req, auth, null);
+    principal = { auth, cachedAppResolution, clientKey, restored };
+  } catch (error) {
+    // A superseded session keeps its own refusal; anything else here is the database (see above).
+    if (respondSessionSuperseded(res, error)) return;
+    mcpLog('error', 'mcp_sessionless_prepare_failed', { name: (error as Error)?.name });
+    res.status(503).json({ error: 'Authentication temporarily unavailable' });
+    return;
+  }
   // The SDK forwards `req.auth` to the factory untouched and verifies nothing itself. No credential goes in it.
   (req as Request & { auth?: unknown }).auth = { token: '', clientId: '', scopes: [], extra: { [SESSIONLESS_PRINCIPAL_KEY]: principal } };
   await sessionlessMcpNodeHandler(req as never, res as never, req.body);

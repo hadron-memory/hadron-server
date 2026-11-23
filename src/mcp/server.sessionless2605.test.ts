@@ -8,7 +8,7 @@
  * Not covered here, on purpose: a named session supplying the App and memory for a call (the next slice), and real
  * client applications (the client-compatibility slice).
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
@@ -103,8 +103,11 @@ describe('#2605 MCP_SERVING_MODE', () => {
     expect(init.status).toBe(200);
     expect(init.sessionHeader).toBeTruthy();
     expect(mcpTransportStateForTests().sessionIds).toContain(init.sessionHeader);
-    // And a request with no session id that is not an initialize is still refused there.
-    expect((await post(rpc('tools/list'), { key })).status).not.toBe(200);
+    // And a request with no session id that is not an initialize is still refused there, with the SDK's 400: what a
+    // client connected in sessionless mode meets if the mode is turned back off (a known limit).
+    const stray = await post(rpc('tools/list'), { key });
+    expect(stray.status).toBe(400);
+    expect(stray.json?.error?.message).toMatch(/not initialized/i);
   });
 });
 
@@ -226,6 +229,20 @@ describe('#2605 sessionless serving', () => {
     expect((await post(call('hadron_list_memories'), { key })).status).toBe(401);
     expect((await post(rpc('tools/list'), { key: 'hdr_user_' + 'f'.repeat(64) })).status).toBe(401);
   });
+
+  it('answers 503 when the database fails after authentication, rather than leaving the request unanswered', async () => {
+    sessionless();
+    const key = await mintKey('portal');
+    // The session binding is the first database read after the credential; it runs on every sessionless request.
+    const failing = vi.spyOn(db.session, 'findUnique').mockRejectedValue(new Error('simulated database failure'));
+    try {
+      const res = await post(rpc('tools/list'), { key, headers: { 'x-hadron-session': 'sess-2605' } });
+      expect(res.status).toBe(503);
+      expect(res.json).toEqual({ error: 'Authentication temporarily unavailable' });
+    } finally {
+      failing.mockRestore();
+    }
+  }, 15_000);
 
   it('carries a selection between requests through the stored selection of an OAuth client', async () => {
     sessionless();
