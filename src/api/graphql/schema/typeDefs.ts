@@ -12664,6 +12664,23 @@ export const typeDefs = `#graphql
     issueHostOperation(input: IssueHostOperationInput!, instruction: ActInstructionInput): HostOperation!
 
     """
+    #4855 (hrn:node:hadronmemory.com:specs:cor:agt:070:08 S4a, Holger 2026-11-22; hrn:node:hadronmemory.com:specs:cor:acl:140:02) - end a DARK open session of a
+    worker and start the worker again, in one transaction, with no person in the loop. Dark is the caller's judgement (it
+    cannot get the session going or get an answer from it), never the platform's: an assignment alone never ends a session
+    (quiet is not dark, S4). The caller is a worker, through its own session, holding a live worker.session.restart grant
+    that a person who manages the App signed and that names the target worker (no wildcard); every other caller, and a
+    worker with no such grant for this target, gets the one refusal RESTART_GRANT_REQUIRED, before anything about the target
+    is read (a caller who is no participant of the App gets APP_NOT_FOUND, as at every task door). reason is required (at most 500 characters): what was tried and why it is dark. A LIVE session is never dark
+    (WORKER_LIVE). Also refused, with nothing ended and no use of the grant spent: WORKER_NOT_FOUND (the target is gone), NO_OPEN_SESSION, WORKER_NOT_HELD,
+    WORKER_RETIRED, WORKER_START_PENDING (a start is already in flight, so a restart and a fresh assignment cannot both
+    launch the worker), NO_LIVE_HOST (no live host lists the worker with a worktree), TEAM_PAUSED, WORKER_STOPPED. The
+    session is ended with endReason ended and no handoff; the start carries the worker's oldest open task, if any, and names
+    the caller as its issuer. The host collects it and the holder's agent binds as for any start. Each use is recorded as a
+    USE event of the grant.
+    """
+    restartWorkerSession(input: RestartWorkerSessionInput!): RestartWorkerSessionResult!
+
+    """
     #2162 — a context reset's protocol (hrn:node:hadronmemory.com:specs:cor:agt:050:27), for the host its
     worker.reset-context operation was issued to, with that host's key only, after collecting the operation
     (HOST_OPERATION_NOT_COLLECTED otherwise). Each step names the reset and its epoch (STALE_EPOCH when it moved), is
@@ -18668,6 +18685,25 @@ export const typeDefs = `#graphql
   type SetHostWorkerTerminalsResult {
     stored: [WorkerTerminalRef!]!
     refused: [WorkerTerminalRefusal!]!
+  }
+
+  "#4855 - the dark session to end and the worker to start again."
+  input RestartWorkerSessionInput {
+    appRef: String!
+    "The worker whose session is dark: its id, URN or name within the App."
+    worker: String!
+    "What was tried and why the session is dark (required, at most 500 characters)."
+    reason: String!
+  }
+
+  type RestartWorkerSessionResult {
+    "The worker.start operation issued."
+    operationId: ID!
+    hostId: String!
+    "The open task the start carries, or null when the worker has none."
+    taskId: ID
+    "The open sessions that were ended (endReason ended)."
+    endedSessionIds: [ID!]!
   }
 
   input IssueHostOperationInput {

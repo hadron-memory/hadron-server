@@ -41,7 +41,7 @@ import { assertSecretUseHeader, assertUrlWithinPrefix } from '../runner/secrets.
  * transaction and ends the new row through `endHeldGrants` (src/lib/grants/departure.ts; the insert guard's own FOR SHARE on the
  * holder is the backstop). Anchors before rows, agent before worker: the order every departure door takes.
  */
-import type { Prisma } from '../../generated/prisma/index.js';
+import { Prisma } from '../../generated/prisma/index.js';
 import { isAgentInstalledAndLicensed } from '../appAgent.js';
 import { generateId } from '../id.js';
 import { autoDeleteLimitRefusal } from '../secrets/autoDelete.js';
@@ -121,6 +121,11 @@ function valueMatchesType(type: string, value: unknown): boolean {
   // #3998 (cor:acl:140:09, secret forms): a secret id is ONE stored id, never a list or the wildcard; the mark is one of two tokens, exactly.
   if (type === 'secret-ref') return typeof value === 'string' && NODE_ID_RE.test(value);
   if (type === 'secret-mark') return value === 'keep' || value === 'delete';
+  // #4855: a worker is named by its stored id, one or a list, never the wildcard (the parameter refuses it and a list holds no '*').
+  if (type === 'worker-ref') {
+    const oneWorker = (v: unknown) => typeof v === 'string' && NODE_ID_RE.test(v);
+    return Array.isArray(value) ? value.length > 0 && value.every(oneWorker) : oneWorker(value);
+  }
   if (type === 'https-prefix') return isSecretUsePrefix(value);
   if (type === 'header-name') return isSecretUseHeaderName(value);
   if (type !== 'node-ref') return false;
@@ -242,6 +247,21 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
       if (!(await args.canReadMemory(memoryId))) { ok = false; break; }
     }
     if (!ok) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+  }
+
+  // #4855: a worker-ref names a live worker of THIS App. A missing, other-App or retired worker is the same refusal as a malformed id
+  // (no existence oracle, no cross-App naming). The worker rows are locked FOR SHARE, so a retirement that comes next waits for this
+  // insert. (A retired HOLDER is reached by nothing, workersReachedByGrant; a retired TARGET named by a live grant is refused by the door as WORKER_RETIRED.)
+  // A worker holder may not name itself (a worker never restarts itself, so that term could never be used).
+  for (const p of declared) {
+    if (p.type !== 'worker-ref') continue;
+    const v = (values as Record<string, unknown>)[p.name];
+    const ids = [...new Set((Array.isArray(v) ? v : [v]).filter((x): x is string => typeof x === 'string'))];
+    if (ids.length === 0) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    if (args.holder.kind === 'worker' && ids.includes(args.holder.id)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM workers WHERE id IN (${Prisma.join(ids)}) AND app_id = ${appId} AND retired_at IS NULL ORDER BY id FOR SHARE`;
+    if (rows.length !== ids.length) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
   }
 
   // #3998: a secret-ref names a secret of THIS App whose kind a model may read (an inject-only kind has no reveal client). A missing,

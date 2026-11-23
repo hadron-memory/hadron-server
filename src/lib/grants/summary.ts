@@ -51,7 +51,7 @@ export function summaryPlaceholders(template: string): string[] {
   return names;
 }
 
-const URN_KIND = { app: 'app', 'node-ref': 'node' } as const;
+const URN_KIND = { app: 'app', 'node-ref': 'node', 'worker-ref': 'worker' } as const;
 /**
  * The whole string must be a canonical grammar-v2 URN of the right entity kind: the strict v2 parser accepts it whole (so no
  * space, control character, brace or trailing text can ride behind a valid prefix) and carries no `#` fragment. A caller that
@@ -86,11 +86,12 @@ function secretMark(placeholder: string, mark: unknown): string {
 export const SUMMARY_FORMATTERS = {
   app: (urn: string) => canonical('app', 'app', urn),
   'node-ref': (urn: string, placeholder: string) => canonical('node-ref', placeholder, urn),
+  'worker-ref': (urn: string, placeholder: string) => canonical('worker-ref', placeholder, urn),
   'secret-ref': (urn: string, placeholder: string) => canonicalSecret(placeholder, urn),
   'secret-mark': (mark: string, placeholder: string) => secretMark(placeholder, mark),
 } as const;
 
-export type SummaryFormatters = { app: (urn: string) => string; 'node-ref': (urn: string, placeholder: string) => string; 'secret-ref': (urn: string, placeholder: string) => string; 'secret-mark': (mark: string, placeholder: string) => string };
+export type SummaryFormatters = { app: (urn: string) => string; 'node-ref': (urn: string, placeholder: string) => string; 'worker-ref': (urn: string, placeholder: string) => string; 'secret-ref': (urn: string, placeholder: string) => string; 'secret-mark': (mark: string, placeholder: string) => string };
 
 export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters = SUMMARY_FORMATTERS): string {
   const { action, app, values, refs } = input;
@@ -127,11 +128,11 @@ export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters =
         written.push(fmt['secret-mark'](entry as string, name));
         continue;
       }
-      if (param.type !== 'node-ref' && param.type !== 'secret-ref') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a parameter type the summary cannot write`);
+      if (param.type !== 'node-ref' && param.type !== 'secret-ref' && param.type !== 'worker-ref') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a parameter type the summary cannot write`);
       if (typeof entry !== 'string') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a value of a type the summary cannot write`);
       const ref = Object.prototype.hasOwnProperty.call(refs, entry) ? refs[entry] : undefined;
       if (!ref) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no resolved node`);
-      written.push(param.type === 'secret-ref' ? fmt['secret-ref'](ref.urn, name) : fmt['node-ref'](ref.urn, name));
+      written.push(param.type === 'secret-ref' ? fmt['secret-ref'](ref.urn, name) : param.type === 'worker-ref' ? fmt['worker-ref'](ref.urn, name) : fmt['node-ref'](ref.urn, name));
     }
     resolved.set(name, written.join(', '));
   }
