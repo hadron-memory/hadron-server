@@ -459,10 +459,10 @@ describe('the App, its AppAgent link and its Agent are held while the write deci
     expect(await refusal(principalOf(a))).toBe(REFUSED);
   }, 30_000);
 
-  it('positive control: an unrelated App edit that holds first also makes the judgement wait, and the judgement then still qualifies', async () => {
+  it('positive control: an unrelated App edit that holds first also makes the judgement wait, and the judgement then still qualifies (control, #4664)', async () => {
     const a = await app({ orgId: org.id, agents: [await agent(org.id, null)] });
     await judgeBehindHeldChange(a, (tx) => tx.app.update({ where: { id: a }, data: { name: 'held-edit' } }), true);
-    expect(await refusal(principalOf(a))).not.toBe(REFUSED);
+    expect(await refusal(principalOf(a))).toBeNull();
   }, 30_000);
 
   it('the race helper surfaces a fast failure of the competing change as itself, and rejects a change that never waited', async () => {
