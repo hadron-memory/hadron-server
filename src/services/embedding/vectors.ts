@@ -855,6 +855,41 @@ export interface ChunkHit {
  * kind='chunk' filter narrowing the index walk. Soft-deleted nodes are
  * filtered via the JOIN, then we truncate to k.
  */
+/** The chunk path's scope: the parts of {@link vectorSearchChunks}' options its eligibility reads. */
+export interface ChunkVectorScope {
+  memoryIds: string[];
+  hasOpenThreads?: boolean | null;
+  syntheticCommentMemoryIds?: string[];
+  /** #2772 — the structured filters, the caller's exclusions and the deleted rule (see NodeVectorScope.filterSql). */
+  filterSql?: Prisma.Sql;
+  /** #1608 — content, comments or both. Absent = ALL. */
+  scope?: 'CONTENT' | 'COMMENTS' | 'ALL';
+}
+
+/**
+ * #4938 F8 — ONE chunk eligibility fragment (`FROM … WHERE …` over `node_embeddings ne` joined to `nodes n`) per scope, the
+ * chunk counterpart of {@link nodeVectorEligibility}: the COMMENTS statement and the content walk, count and exact
+ * statement all read it, so the two scopes cannot drift apart on the stub rule, the open-thread filter, the access scope or
+ * the caller's filter (#3054's warning). It differs per scope only where the scope does:
+ * - COMMENTS: comment rows, with {@link COMMENT_NOT_DELETED} whatever the filter says (a deleted comment never ranks);
+ * - CONTENT / ALL: the filter owns the deleted predicate when there is one (an includeDeleted search keeps recoverable
+ *   tombstones), and CONTENT excludes comments inside the scan, before any limit.
+ */
+export function chunkVectorEligibility(opts: ChunkVectorScope): Prisma.Sql {
+  const threadSql = openThreadsVectorSql(opts.hasOpenThreads, opts.syntheticCommentMemoryIds);
+  const tail = Prisma.sql`WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB} ${threadSql} ${opts.filterSql ?? Prisma.empty}`;
+  if (opts.scope === 'COMMENTS') {
+    return Prisma.sql`FROM node_embeddings ne
+      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${COMMENT_NOT_DELETED} AND n.node_type = 'comment'
+      ${tail}`;
+  }
+  const deletedSql = opts.filterSql ? Prisma.empty : Prisma.sql`AND n.deleted_at IS NULL`;
+  const scopeSql = opts.scope === 'CONTENT' ? Prisma.sql`AND n.node_type <> 'comment'` : Prisma.empty;
+  return Prisma.sql`FROM node_embeddings ne
+    JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${deletedSql} ${scopeSql}
+    ${tail}`;
+}
+
 export async function vectorSearchChunks(
   db: PrismaClient,
   opts: {
@@ -878,20 +913,17 @@ export async function vectorSearchChunks(
     opts.onWindow?.({ exhausted: true });
     return [];
   }
-  const threadSql = openThreadsVectorSql(opts.hasOpenThreads, opts.syntheticCommentMemoryIds);
+  const eligibleFrom = chunkVectorEligibility(opts);
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const windowCut = opts.limit > windowRowsMax;
   const k = Math.min(opts.limit, windowRowsMax);
   const kAsk = windowCut ? k + 1 : k; // #4779: see vectorSearchNodes
-  const deletedSql = opts.filterSql ? Prisma.empty : Prisma.sql`AND n.deleted_at IS NULL`;
   if (opts.scope === 'COMMENTS') {
     // #4779 (P3-6): budgeted, as in vectorSearchNodes; the deleted rule is COMMENT_NOT_DELETED.
     const { rows, stopped } = await oneStatementUnderBudget(db, (tx) => tx.$queryRaw<{ node_id: string; chunk_index: number; char_start: number; char_end: number; chunk_text: string; distance: number }[]>`
       SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
              ne.embedding <=> ${qvec}::vector AS distance
-      FROM node_embeddings ne
-      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${COMMENT_NOT_DELETED} AND n.node_type = 'comment'
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB} ${threadSql} ${opts.filterSql ?? Prisma.empty}
+      ${eligibleFrom}
       ORDER BY distance ASC, ne.node_id ASC, ne.chunk_index ASC
       LIMIT ${kAsk}`, opts.deadlineAt);
     const cut = windowCut && rows.length > k;
@@ -901,12 +933,6 @@ export async function vectorSearchChunks(
       charEnd: Number(r.char_end), chunkText: r.chunk_text, score: 1 - Number(r.distance),
     }));
   }
-  const chunkScopeSql = opts.scope === 'CONTENT' ? Prisma.sql`AND n.node_type <> 'comment'` : Prisma.empty;
-  // #3054 / #2772: one eligibility fragment for the iterative scan, the count and the exact scan; the structured
-  // filters and the access scope ride in it, before the page is chosen.
-  const eligibleFrom = Prisma.sql`FROM node_embeddings ne
-    JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${deletedSql} ${chunkScopeSql}
-    WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB} ${threadSql} ${opts.filterSql ?? Prisma.empty}`;
   type ChunkRow = { node_id: string; chunk_index: number; char_start: number; char_end: number; chunk_text: string; distance: number };
   const ranked = await rankUnderBudget<ChunkRow>(db, {
     deadlineAt: opts.deadlineAt,
