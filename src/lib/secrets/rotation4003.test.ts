@@ -258,3 +258,34 @@ describe('deployment files (#4003)', () => {
     expect(file('scripts/dev-from-prod-snapshot.sh')).toMatch(/--exclude-table='secret_root_check'/);
   });
 });
+
+describe('two stores never wait on each other (#4573; #4553 local F1)', () => {
+  it('two transactions hold the active key row\'s share lock at once, and a rotation waits for both', async () => {
+    await ensure(appA);
+    const gate = () => { let open!: () => void; const p = new Promise<void>((r) => { open = r; }); return { open, p }; };
+    const [release, firstIn] = [gate(), gate()];
+    const first = db.$transaction(async (tx) => {
+      await ensureAppKey(tx, appA);
+      firstIn.open();
+      await release.p;
+    }, { timeout: 20_000 });
+    await firstIn.p;
+    try {
+      // With the first store still open, the second gets through: lock_timeout turns a wait into a named failure, never a hang.
+      const second = await db.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '2s'`);
+        return (await ensureAppKey(tx, appA)).keyVersion;
+      }, { timeout: 20_000 });
+      expect(second).toBe(1);
+      // The share lock is really held: retiring the row does wait.
+      await expect(db.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '300ms'`);
+        await rotateAppKey(tx, appA);
+      }, { timeout: 20_000 })).rejects.toThrow(/55P03|lock timeout/);
+    } finally {
+      release.open();
+      await first;
+    }
+    expect((await rotate(appA)).keyVersion).toBe(2);
+  });
+});

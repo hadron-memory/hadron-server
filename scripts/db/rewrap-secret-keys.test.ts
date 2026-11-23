@@ -11,7 +11,7 @@ import { db } from '../../src/integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../../src/test/helpers.js';
 import { generateId } from '../../src/lib/id.js';
 import { decryptBytesAad, encryptBytesAad } from '../../src/lib/tokenCrypto.js';
-import { appKeyAad, appKeyCache, ensureAppKey, unwrapAppKey } from '../../src/lib/secrets/appKeys.js';
+import { appKeyAad, appKeyCache, ensureAppKey, lockAppKeyMint, rootCheckValue, unwrapAppKey } from '../../src/lib/secrets/appKeys.js';
 import { main, type SecretRewrapToolIo } from './rewrap-secret-keys.js';
 
 /** #4553 §10 F3 (G4): a library re-wrap that reports success but wrote nothing, so the tool's own AFTER check is tested. */
@@ -21,7 +21,10 @@ vi.mock('../../src/lib/secrets/rotation.js', async (orig) => {
   return {
     ...real,
     rewrapSecretRootKeys: (...args: Parameters<typeof real.rewrapSecretRootKeys>) =>
-      fake.silentRewrap ? Promise.resolve({ rows: 1, rewrapped: 1 }) : real.rewrapSecretRootKeys(...args),
+      fake.silentRewrap
+        // It still takes the BEFORE pass under the lock, as the real one does: only the writes are missing.
+        ? args[0].$transaction(async (tx) => { await args[3]?.(tx); return { rows: 1, rewrapped: 1 }; })
+        : real.rewrapSecretRootKeys(...args),
   };
 });
 
@@ -111,6 +114,20 @@ describe('secrets-root re-wrap tool: root input (never argv)', () => {
     expect(await main([], io({ stdinIsTty: () => true, readStdin: async () => `${ROOT_A}\n${ROOT_B}\n` }))).toBe(2);
   });
 
+  it('a third stdin line is usage, and nothing runs (#4573)', async () => {
+    await mint();
+    const before = await wrapped();
+    expect(await main([], io({ readStdin: async () => `${ROOT_A}\n${ROOT_B}\n${'c3'.repeat(32)}\n` }))).toBe(2);
+    expect(lines.some((l) => l.includes('exactly two root lines'))).toBe(true);
+    expect(await wrapped()).toBe(before);
+    expect(lines.join('\n')).not.toContain('c3c3');
+  });
+
+  it('two stdin lines, blank lines ignored, still run (#4573)', async () => {
+    await mint();
+    expect(await main([], io({ readStdin: async () => `\n${ROOT_A}\n\n${ROOT_B}\n\n` }))).toBe(0);
+  });
+
   it('no DATABASE_URL is usage', async () => {
     expect(await main([], io({ env: {}, readStdin: async () => `${ROOT_A}\n${ROOT_B}\n` }))).toBe(2);
   });
@@ -141,6 +158,50 @@ describe('secrets-root re-wrap tool: the run', () => {
     expect(await main(['--from-root-file', from, '--to-root-file', to], io())).toBe(1);
     expect(lines.some((l) => l.includes('does not unwrap under the NEW root'))).toBe(true);
     expect(await wrapped()).toBe(before);
+  });
+
+  it('a run that wrote nothing on a store with no App keys exits 1: the recorded root check is read back (#4573)', async () => {
+    await mint();
+    await db.secretAppKey.deleteMany();
+    const [from, to] = await rootPair();
+    fake.silentRewrap = true;
+    expect(await main(['--from-root-file', from, '--to-root-file', to], io())).toBe(1);
+    expect(lines.some((l) => l.includes('verify_failed') && l.includes('root check'))).toBe(true);
+    expect((await db.secretRootCheck.findUniqueOrThrow({ where: { id: 1 } })).checkValue).toBe(rootCheckValue(Buffer.from(ROOT_A, 'hex')));
+  });
+
+  it('a successful run leaves the root check naming the new root, even with no App keys (#4573)', async () => {
+    const [from, to] = await rootPair();
+    expect(await main(['--from-root-file', from, '--to-root-file', to], io())).toBe(0);
+    expect((await db.secretRootCheck.findUniqueOrThrow({ where: { id: 1 } })).checkValue).toBe(rootCheckValue(Buffer.from(ROOT_B, 'hex')));
+  });
+
+  it('a key minted while the run waits for the root lock is in the BEFORE pass, so the run still verifies (#4573)', async () => {
+    await mint();
+    const other = (await createDbAppWithKey(db, 'rewrap-late', orgId)).app.id;
+    const [from, to] = await rootPair();
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedSignal = new Promise<void>((r) => { locked = r; });
+    const minter = db.$transaction(async (tx) => {
+      await lockAppKeyMint(tx, other);
+      locked();
+      await held;
+      await ensureAppKey(tx, other);
+    }, { timeout: 20_000 });
+    await lockedSignal;
+    const run = main(['--from-root-file', from, '--to-root-file', to], io());
+    // The run is past its first statement once it waits, ungranted, for the exclusive root lock in this database.
+    await vi.waitFor(async () => {
+      const waiting = await db.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_locks
+        WHERE locktype = 'advisory' AND NOT granted AND mode = 'ExclusiveLock' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`;
+      expect(waiting[0].n).toBe(1);
+    }, { timeout: 10_000, interval: 50 });
+    release();
+    await minter;
+    expect(await run, lines.join('\n')).toBe(0);
+    expect(lines.some((l) => /rows=2 rewrapped=2 verified=2/.test(l))).toBe(true);
   });
 
   it('--from equal to --to is usage, and nothing runs (#4553 F3)', async () => {
