@@ -247,5 +247,6 @@ describe('#4512 the scanner on its own (review findings)', () => {
   });
   it('a tag that never closes ends at the blank line, so a later tag is still seen', () => {
     expect(run('<a x="\n\n<b id="fx-110-a">')).toBe('<a x="\n\n<b>');
+    expect(run('<a\n\nsee id=fx-110-a here')).toBe('<a\n\nsee id=fx-110-a here'); // the stray < does not make the next paragraph a tag
   });
 });
