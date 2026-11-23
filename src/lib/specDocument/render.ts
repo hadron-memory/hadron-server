@@ -165,13 +165,17 @@ export function splitAtClosingRule(text: string): { body: string; tail: string }
 }
 
 const BACKTICK_RUN = /`+/g;
+/** A heading or thematic-break line is a block of its own. */
+const SINGLE_LINE_BLOCK = /^ {0,3}(?:#{1,6}(?:\s|$)|(?:[-*_][ \t]*){3,}$)/;
+/** A line that opens a new Markdown block (list item, heading, rule, quote), so an inline span cannot run across it. */
+const BLOCK_START = /^ {0,3}(?:[-*+](?:\s|$)|\d{1,9}[.)](?:\s|$)|#{1,6}(?:\s|$)|>|(?:[-*_][ \t]*){3,}$)/;
 const isWs = (c: string): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
 const ATTR_NAME_STOP = /[\s"'<>/=]/;
 const BARE_VALUE_STOP = /[\s"'=<>`]/;
 
 /** The text of a numeric character reference decoded (`&#45;`, `&#x2d;`), so an encoded id compares as the browser reads it. */
 function decodeNumericRefs(v: string): string {
-  return v.replace(/&#(?:[xX]([0-9a-fA-F]{1,6})|([0-9]{1,7}));/g, (all, hex?: string, dec?: string) => {
+  return v.replace(/&#(?:[xX]([0-9a-fA-F]{1,6})|([0-9]{1,7}));?/g, (all, hex?: string, dec?: string) => {
     const cp = hex !== undefined ? parseInt(hex, 16) : parseInt(dec as string, 10);
     return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : all;
   });
@@ -183,15 +187,19 @@ function decodeNumericRefs(v: string): string {
  * bare value. Returns the tag's end and the spans of the `id` attributes to drop, or null when it is not a
  * well-formed tag (the `<` is then plain text). It never leaves the block, so a quote cannot pair across paragraphs.
  */
-function scanTag(text: string, i: number, assigned: ReadonlySet<string>): { end: number; cuts: Array<[number, number]> } | null {
+function scanTag(text: string, i: number, assigned: ReadonlySet<string>, html: boolean): { end: number; cuts: Array<[number, number]> } | null {
   let j = i + 1;
   if (!/[A-Za-z]/.test(text[j] ?? '')) return null;
   while (j < text.length && /[A-Za-z0-9-]/.test(text[j])) j += 1;
+  // A tag name ends at whitespace, `/` or `>`: `<https://x>` is an autolink and `<a:b>` is no tag.
+  if (j >= text.length || !(isWs(text[j]) || text[j] === '/' || text[j] === '>')) return null;
   const cuts: Array<[number, number]> = [];
   for (;;) {
     const gapStart = j;
-    while (j < text.length && (isWs(text[j]) || text[j] === '/')) j += 1;
+    while (j < text.length && (isWs(text[j]) || (text[j] === '/' && (html || text[j + 1] === '>')))) j += 1;
     if (j >= text.length) return null;
+    // Inline HTML (CommonMark 6.6) needs whitespace before each attribute; an HTML block is read as a browser reads it.
+    if (!html && text[j] !== '>' && j === gapStart) return null;
     if (text[j] === '>') return { end: j + 1, cuts };
     const nameStart = j;
     while (j < text.length && !ATTR_NAME_STOP.test(text[j])) j += 1;
@@ -211,7 +219,7 @@ function scanTag(text: string, i: number, assigned: ReadonlySet<string>): { end:
         j = close + 1;
       } else {
         const vs = k;
-        while (k < text.length && !BARE_VALUE_STOP.test(text[k])) k += 1;
+        while (k < text.length && (html ? !(isWs(text[k]) || text[k] === '>') : !BARE_VALUE_STOP.test(text[k]))) k += 1;
         if (k === vs) return null;
         value = text.slice(vs, k);
         j = k;
@@ -219,8 +227,9 @@ function scanTag(text: string, i: number, assigned: ReadonlySet<string>): { end:
     }
     if (name.toLowerCase() === 'id' && value !== null && assigned.has(decodeNumericRefs(value))) {
       // Drop the attribute and the whitespace before it (a `/` or no separator stays, so the tag still parses).
+      // The whitespace before it goes too, unless the next attribute follows with none: then one separator stays.
       let from = nameStart;
-      while (from > gapStart && isWs(text[from - 1])) from -= 1;
+      if (isWs(text[j] ?? '') || text[j] === '/' || text[j] === '>') while (from > gapStart && isWs(text[from - 1])) from -= 1;
       cuts.push([from, j]);
     }
   }
@@ -232,13 +241,24 @@ function neutraliseBlock(text: string, assigned: ReadonlySet<string>): string {
   const runs = new Map<number, number[]>();
   for (const m of text.matchAll(BACKTICK_RUN)) (runs.get(m[0].length) ?? runs.set(m[0].length, []).get(m[0].length)!).push(m.index);
   const next = new Map<number, number>();
+  // A block that opens with a tag is an HTML block: backticks and backslashes mean nothing in it.
+  const html = /^ {0,3}<(?:[A-Za-z]|\/[A-Za-z]|!)/.test(text);
   let out = '';
   let i = 0;
   let copied = 0;
   while (i < text.length) {
     const c = text[i];
-    if (c === '\\') { i += 2; continue; }
-    if (c === '`') {
+    if (c === '<') {
+      const raw = /^<(?:!--|\?|!\[CDATA\[)/.exec(text.slice(i, i + 9));
+      if (raw) {
+        const endMark = raw[0] === '<!--' ? '-->' : raw[0] === '<?' ? '?>' : ']]>';
+        const e = text.indexOf(endMark, i + raw[0].length);
+        i = e < 0 ? text.length : e + endMark.length;
+        continue;
+      }
+    }
+    if (c === '\\' && !html) { i += 2; continue; }
+    if (c === '`' && !html) {
       let k = i;
       while (text[k] === '`') k += 1;
       const len = k - i;
@@ -251,7 +271,7 @@ function neutraliseBlock(text: string, assigned: ReadonlySet<string>): string {
       continue;
     }
     if (c === '<') {
-      const tag = scanTag(text, i, assigned);
+      const tag = scanTag(text, i, assigned, html);
       if (tag) {
         for (const [from, to] of tag.cuts) { out += text.slice(copied, from); copied = to; }
         i = tag.end;
@@ -273,7 +293,20 @@ function neutraliseBlock(text: string, assigned: ReadonlySet<string>): string {
  */
 export function neutraliseAssignedIds(text: string, assigned: ReadonlySet<string>): string {
   if (assigned.size === 0 || !/id/i.test(text)) return text;
-  const chunk = (c: string): string => c.split(/(\n[ \t]*\n)/).map((part, n) => (n % 2 === 1 ? part : neutraliseBlock(part, assigned))).join('');
+  const chunk = (c: string): string => {
+    const lines = c.split('\n');
+    const res: string[] = [];
+    let block: string[] = [];
+    const end = (): void => { if (block.length) res.push(neutraliseBlock(block.join('\n'), assigned)); block = []; };
+    for (const line of lines) {
+      if (line.trim() === '') { end(); res.push(line); continue; }
+      if (BLOCK_START.test(line)) end();
+      block.push(line);
+      if (SINGLE_LINE_BLOCK.test(line)) end();
+    }
+    end();
+    return res.join('\n');
+  };
   const out: string[] = [];
   let pending: string[] = [];
   let fence: OpenFence | null = null;

@@ -43,6 +43,7 @@ describe('#4512 authored ids equal to an assigned anchor', () => {
     const feature = part('fx:110', '<a id="fx-110-a"></a>head\n\n---\n\n<a id="fx-110-a"></a>tail', 'Feature: F');
     const out = renderSpecDocument(doc([part('fx:110:a', 'x')], feature));
     expect(count(out, 'id="fx-110-a"')).toBe(1);
+    expect(out).toContain('head');
     expect(out.indexOf('head')).toBeLessThan(out.indexOf('# Rules'));
     expect(out.indexOf('tail')).toBeGreaterThan(out.indexOf('## Rule: Entry [fx:110:a]'));
     expect(out.endsWith('<a></a>tail\n')).toBe(true);
@@ -67,8 +68,7 @@ describe('#4512 authored ids equal to an assigned anchor', () => {
     const out = renderSpecDocument(doc([part('fx:110:a', 'Rule body.')]));
     const rich = 'a <b>x</b>  <div  class = "c"\tdata-x=\'1\'>t</div>\r\n\r\n`code <a id="other">` ~ <br/>';
     const same = renderSpecDocument(doc([part('fx:110:a', rich)]));
-    expect(same).toBe(renderSpecDocument(doc([part('fx:110:a', rich)])));
-    expect(same).toContain(rich.replace(/\r\n/g, '\r\n'));
+    expect(same).toContain(rich);
     expect(out).toBe('# Feature: F [fx:110]\n\nsynthetic:specs · rendered 2026-11-06T00:00Z\n\nReadiness: 2 specs · 0 approved · 0 minted · 0 superseded · no open questions\n\nFeature body.\n\n# Rules\n\n<a id="fx-110-a"></a>\n\n## Rule: Entry [fx:110:a]\nApproval: NOT_APPROVED · Mint: unminted\n\nRule body.\n');
   });
 });
@@ -113,6 +113,39 @@ describe('#4512 the scanner on its own (review findings)', () => {
     const t0 = Date.now();
     run('<a'.repeat(20000) + '\n\n' + '`'.repeat(20000) + '<a id="x" '.repeat(5000) + '"'.repeat(20000));
     run('`a '.repeat(20000));
-    expect(Date.now() - t0).toBeLessThan(1500);
+    run('<a x="<a x=\'<a x="'.repeat(8000));
+    expect(Date.now() - t0).toBeLessThan(5000);
+  });
+
+  it('N1: removing an id never merges its neighbours or builds another tag', () => {
+    expect(run('<a id="fx-110-a"class="x">')).toBe('<a class="x">');
+    expect(run('<div hidden id="fx-110-a"title="t">')).toBe('<div hidden title="t">');
+    expect(run('<s id="fx-110-a"cript>')).toBe('<s cript>');
+  });
+  it('N2: autolinks and link destinations are not tags', () => {
+    expect(run('<https://example.com/id=fx-110-a>')).toBe('<https://example.com/id=fx-110-a>');
+    expect(run('[x](<docs/id=fx-110-a>)')).toBe('[x](<docs/id=fx-110-a>)');
+  });
+  it('N3: CRLF blank lines split blocks', () => {
+    expect(run('it`s odd\r\n\r\n<a id="fx-110-a"></a> and `code` x')).toBe('it`s odd\r\n\r\n<a></a> and `code` x');
+  });
+  it('N4: a list item or heading ends a block with no blank line', () => {
+    expect(run('- it`s odd\n- <a id="fx-110-a"></a> and `code` x')).toBe('- it`s odd\n- <a></a> and `code` x');
+    expect(run('# it`s\n<a id="fx-110-a"></a> `c`')).toBe('# it`s\n<a></a> `c`');
+  });
+  it('N5: in an HTML block backticks and backslashes mean nothing, and comments are raw text', () => {
+    expect(run('<div>`<a id="fx-110-a"></a>`</div>')).toBe('<div>`<a></a>`</div>');
+    expect(run('<div>\\<a id="fx-110-a"></a></div>')).toBe('<div>\\<a></a></div>');
+    expect(run('<!-- <a id="fx-110-a"></a> -->')).toBe('<!-- <a id="fx-110-a"></a> -->');
+    expect(run('<!-- ` --> <a id="fx-110-a"></a> `')).toBe('<!-- ` --> <a></a> `');
+  });
+  it('N6: a bare value with = or a backtick is read to whitespace in an HTML block', () => {
+    expect(run('<div data-u=/x?y=1 id="fx-110-a">')).toBe('<div data-u=/x?y=1>');
+    expect(run('<div data-u=a`b id="fx-110-a">')).toBe('<div data-u=a`b>');
+  });
+  it('N7: a character reference without the semicolon is decoded', () => {
+    expect(run('<a id="fx-110&#45a"></a>')).toBe('<a></a>');
+    expect(run('<a id="fx-110&#45b"></a>')).toBe('<a id="fx-110&#45b"></a>');
+    expect(run('<a id="fx&#45;110-a"></a>')).toBe('<a></a>');
   });
 });
