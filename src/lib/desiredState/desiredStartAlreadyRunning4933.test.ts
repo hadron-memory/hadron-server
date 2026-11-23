@@ -17,8 +17,8 @@ import { declareAllStopLanes } from '../../test/stopLanes.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
-import { TERMINAL_REASONS } from '../workerTerminal.js';
-import { hostRunsAgent, TERMINAL_FUTURE_TOLERANCE_MS, resetDesiredStartStateLog, startDesiredWorker, startDesiredWorkers, START_FAILING_EVENT_TYPE, TERMINAL_FRESH_MS } from './desiredStart.js';
+import { AGENT_PRESENT_STATUSES, TERMINAL_REASONS, TERMINAL_STATUSES } from '../workerTerminal.js';
+import { agentRunsOnAnyHost, LONG_HOLD_LOG_MS, pruneRunningLog, runningLogSize, TERMINAL_FUTURE_TOLERANCE_MS, resetDesiredStartStateLog, startDesiredWorker, startDesiredWorkers, START_FAILING_EVENT_TYPE, TERMINAL_FRESH_MS } from './desiredStart.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -168,28 +168,28 @@ describe('#4933: when the host does not run the agent, the worker is started as 
   });
 });
 
-describe('#4933: hostRunsAgent, directly', () => {
+describe('#4933: agentRunsOnAnyHost, directly', () => {
   const now = new Date('2026-11-23T00:00:00Z');
-  const t = (o: Record<string, unknown>) => ({ host: { id: 'h' }, status: 'idle', reason: null, checkedAt: new Date(now.getTime() - 1000).toISOString(), ...o });
+  const t = (o: Record<string, unknown>) => ({ host: { id: 'h' }, status: 'idle', reason: null, reportedAt: new Date(now.getTime() - 1000).toISOString(), ...o });
   it('says yes for a fresh busy, idle or locked report on the same host', () => {
-    for (const status of ['busy', 'idle', 'locked']) expect(hostRunsAgent(t({ status }), now)).toBe(true);
-    expect(hostRunsAgent(t({ host: { id: 'anywhere-else' } }), now)).toBe(true);
+    for (const status of ['busy', 'idle', 'locked']) expect(agentRunsOnAnyHost(t({ status }), now)).toBe(true);
+    expect(agentRunsOnAnyHost(t({ host: { id: 'anywhere-else' } }), now)).toBe(true);
   });
-  it('says no for null, dark, an unknown status, a missing, junk, stale or future checkedAt', () => {
-    expect(hostRunsAgent(null, now)).toBe(false);
-    expect(hostRunsAgent(t({ status: 'dark' }), now)).toBe(false);
-    expect(hostRunsAgent(t({ status: 'asleep' }), now)).toBe(false);
-    expect(hostRunsAgent(t({ checkedAt: undefined }), now)).toBe(false);
-    expect(hostRunsAgent(t({ checkedAt: 'junk' }), now)).toBe(false);
-    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() - TERMINAL_FRESH_MS - 1).toISOString() }), now)).toBe(false);
-    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() + 10 * 60_000).toISOString() }), now)).toBe(false);
+  it('says no for null, dark, an unknown status, a missing, junk, stale or future reportedAt', () => {
+    expect(agentRunsOnAnyHost(null, now)).toBe(false);
+    expect(agentRunsOnAnyHost(t({ status: 'dark' }), now)).toBe(false);
+    expect(agentRunsOnAnyHost(t({ status: 'asleep' }), now)).toBe(false);
+    expect(agentRunsOnAnyHost(t({ reportedAt: undefined }), now)).toBe(false);
+    expect(agentRunsOnAnyHost(t({ reportedAt: 'junk' }), now)).toBe(false);
+    expect(agentRunsOnAnyHost(t({ reportedAt: new Date(now.getTime() - TERMINAL_FRESH_MS - 1).toISOString() }), now)).toBe(false);
+    expect(agentRunsOnAnyHost(t({ reportedAt: new Date(now.getTime() + 10 * 60_000).toISOString() }), now)).toBe(false);
   });
   it('the future tolerance is inclusive too', () => {
-    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS).toISOString() }), now)).toBe(true);
-    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS + 1).toISOString() }), now)).toBe(false);
+    expect(agentRunsOnAnyHost(t({ reportedAt: new Date(now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS).toISOString() }), now)).toBe(true);
+    expect(agentRunsOnAnyHost(t({ reportedAt: new Date(now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS + 1).toISOString() }), now)).toBe(false);
   });
   it('the freshness boundary is inclusive', () => {
-    expect(hostRunsAgent(t({ checkedAt: new Date(now.getTime() - TERMINAL_FRESH_MS).toISOString() }), now)).toBe(true);
+    expect(agentRunsOnAnyHost(t({ reportedAt: new Date(now.getTime() - TERMINAL_FRESH_MS).toISOString() }), now)).toBe(true);
   });
 });
 
@@ -297,11 +297,106 @@ describe('#4933: every terminal reason has a decided meaning, so a new one canno
   // When hadron-cli adds a reason, TERMINAL_REASONS gains it and this table must say whether it means no agent.
   const absent = new Set(['no_terminal', 'bare_shell', 'no_agent']);
   const now = new Date('2026-11-23T00:00:00Z');
-  const t = (reason: string) => ({ host: { id: 'h' }, status: 'locked', reason, checkedAt: now.toISOString() });
+  const t = (reason: string) => ({ host: { id: 'h' }, status: 'locked', reason, reportedAt: now.toISOString() });
   it.each([...TERMINAL_REASONS])('locked with %s', (reason) => {
-    expect(hostRunsAgent(t(reason), now)).toBe(!absent.has(reason));
+    expect(agentRunsOnAnyHost(t(reason), now)).toBe(!absent.has(reason));
   });
   it('the table names only reasons that exist', () => {
     for (const r of absent) expect(TERMINAL_REASONS).toContain(r);
+  });
+});
+
+describe('#4941: every terminal STATUS has a decided meaning (cor:agt:070:01), so a new one cannot slip in silently', () => {
+  // When hadron-cli adds a status, TERMINAL_STATUSES gains it and this table must say whether it shows an agent.
+  const present = new Set(['busy', 'idle', 'locked']);
+  const now = new Date('2026-11-23T00:00:00Z');
+  it.each([...TERMINAL_STATUSES])('status %s', (status) => {
+    expect(agentRunsOnAnyHost({ host: { id: 'h' }, status, reason: null, reportedAt: now.toISOString() }, now)).toBe(present.has(status));
+    expect(AGENT_PRESENT_STATUSES.has(status)).toBe(present.has(status));
+  });
+  it('the shared list names only statuses that exist', () => {
+    for (const s of AGENT_PRESENT_STATUSES) expect(TERMINAL_STATUSES).toContain(s);
+  });
+});
+
+describe('#4941: freshness is judged on reportedAt (the server\'s clock), not the host\'s checkedAt', () => {
+  const now = new Date('2026-11-23T00:00:00Z');
+  const t = (checkedAt: Date, reportedAt: Date) => ({ host: { id: 'h' }, status: 'idle', reason: null, checkedAt: checkedAt.toISOString(), reportedAt: reportedAt.toISOString() });
+  it('a host clock an hour slow (checkedAt old, reportedAt just now) still counts as running', () => {
+    expect(agentRunsOnAnyHost(t(new Date(now.getTime() - 3_600_000), new Date(now.getTime() - 1000)), now)).toBe(true);
+  });
+  it('a host clock an hour fast (checkedAt in the future, reportedAt just now) still counts as running', () => {
+    expect(agentRunsOnAnyHost(t(new Date(now.getTime() + 3_600_000), new Date(now.getTime() - 1000)), now)).toBe(true);
+  });
+  it('a report the server stored long ago is stale even when its checkedAt looks fresh', () => {
+    expect(agentRunsOnAnyHost(t(new Date(now.getTime() - 1000), new Date(now.getTime() - TERMINAL_FRESH_MS - 1)), now)).toBe(false);
+  });
+});
+
+describe('#4941: the log of what was seen', () => {
+  const lines = (info: { mock: { calls: unknown[][] } }) => info.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('[desired-start]'));
+  const reportAt = (at: Date, status: 'idle' | 'dark' = 'idle', host = 'orca1') =>
+    db.worker.update({
+      where: { id: kit.id },
+      data: { terminal: { host: { id: host, label: host }, status, prompt: 'empty', reason: status === 'dark' ? 'no_terminal' : null, lastTurnAt: null, checkedAt: at.toISOString(), reportedAt: at.toISOString() } },
+    });
+
+  it('`starting` is logged when an earlier host answers no-host and a later host takes the start (it was forgotten silently)', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      await registerOrca2();
+      await report({ status: 'idle', host: 'orca2' });
+      await tick();
+      expect(lines(info)).toHaveLength(1);
+      // orca1 stops refreshing (its registration lapses); the agent goes away: orca1 answers no-host, orca2 takes the start.
+      await db.$executeRaw`UPDATE host_registrations SET refreshed_at = now() - interval '2 days' WHERE app_id = ${app.id} AND host_id = 'orca1'`;
+      await report({ status: 'dark', reason: 'no_terminal', host: 'orca2' });
+      await tick();
+      expect((await starts()).map((o) => o.hostId)).toEqual(['orca2']);
+      expect(lines(info).map((l) => l.match(/\((already running|starting)\)/)?.[1])).toEqual(['already running', 'starting']);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('a worker held for a long time gets ONE long-hold line, and is still never started', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      const t0 = new Date();
+      for (const at of [t0, new Date(t0.getTime() + LONG_HOLD_LOG_MS - 60_000), new Date(t0.getTime() + LONG_HOLD_LOG_MS), new Date(t0.getTime() + LONG_HOLD_LOG_MS + 60 * 60_000)]) {
+        await reportAt(new Date(at.getTime() - 1000));
+        await startDesiredWorkers(db, at);
+      }
+      expect(lines(info).map((l) => l.match(/\(([a-z ]+)\)$/)?.[1])).toEqual(['already running', 'held a long time']);
+      expect(await starts(), 'a long hold must never start the worker').toHaveLength(0);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('a worker no longer startable (sweep OFF stands in for deleted or retired) is pruned from the log by the next pass', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      await report({ status: 'idle' });
+      await tick();
+      expect(runningLogSize()).toBe(1);
+      await sweep('OFF');
+      await tick();
+      expect(runningLogSize()).toBe(0);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it('pruneRunningLog keeps what it is told to keep', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      await report({ status: 'idle' });
+      await tick();
+      pruneRunningLog(new Set([kit.id]));
+      expect(runningLogSize()).toBe(1);
+    } finally {
+      info.mockRestore();
+    }
   });
 });
