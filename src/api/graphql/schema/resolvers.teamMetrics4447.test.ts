@@ -45,6 +45,8 @@ async function run(vars: Record<string, unknown> = {}, userId: string | null = m
   if (result.body.kind !== 'single') throw new Error('Expected single GraphQL result');
   return result.body.singleResult;
 }
+/** The two fields the one-clock pin reads; the rest of the response stays untyped, as everywhere else in this file. */
+type TeamMetricsClock = { asOf: string; window: { since: string; until: string } };
 async function ok(vars: Record<string, unknown> = {}) {
   const r = await run(vars);
   expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
@@ -467,20 +469,25 @@ describe('#4850 truncation: a short list never reads as the whole one (cor:api:1
 
 describe('#4850 one clock: an omitted until is the instant the snapshots were read', () => {
   it('window.until equals asOf when until is omitted, however many times anything reads the clock (#4889: deterministic)', async () => {
-    // #4889 (LOCAL F1 on #4881, BLIND F1 on #4902): every argument-less `new Date()` steps the clock a full minute, so ANY two
-    // clock reads in the resolver answer different instants, wherever they sit relative to admission or each other. Only the
-    // no-argument constructor steps; Date.now(), parsing and Prisma's own timers are untouched. Red against the two-clock
-    // resolver main had before #4881 (8b88848a5), recorded in the PR.
+    // #4889 (LOCAL F1 on #4881, BLIND F1 on #4902) and #4913: every clock read steps the clock a full minute, through BOTH the
+    // argument-less `new Date()` and `Date.now()`, so ANY two clock reads in the resolver answer different instants, whichever
+    // API they use and wherever they sit relative to admission or each other. Parsing (`new Date(x)`) and Prisma's own timers
+    // are untouched. Red against the two-clock resolver main had before #4881 (8b88848a5), and against a second read written
+    // with Date.now(), recorded in the PR. The engagement guard fails the pin if the double was never consulted (a `Date`
+    // captured at module load would otherwise leave it vacuous).
     const RealDate = Date;
     let clock = RealDate.now();
+    let reads = 0;
     class SteppingDate extends RealDate {
       constructor(...args: unknown[]) {
-        if (args.length === 0) { clock += 60_000; super(clock); } else super(...(args as [string | number | Date]));
+        if (args.length === 0) { reads++; clock += 60_000; super(clock); } else super(...(args as [string | number | Date]));
       }
+      static now(): number { reads++; clock += 60_000; return clock; }
     }
     vi.stubGlobal('Date', SteppingDate);
-    let d: any;
+    let d: TeamMetricsClock;
     try { d = await ok(); } finally { vi.unstubAllGlobals(); }
+    expect(reads, 'the stepping Date double was never consulted: the pin is vacuous').toBeGreaterThan(0);
     expect(d.window.until).toBe(d.asOf);
     expect(new Date(d.window.until).getTime() - new Date(d.window.since).getTime()).toBe(7 * DAY);
   });
