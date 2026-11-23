@@ -10,8 +10,6 @@ import { cleanDb, createDbWorkerAttribution } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { approvedMergeProof } from '../../../test/mergeConsent.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { questionDataSchema, type AnswerEntry, type QuestionData } from '../../../lib/questions/codec.js';
-import { questionName, renderQuestion, renderQuestionAbstract } from '../../../lib/questions/render.js';
 import * as questionsModule from './resolvers.questions.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -56,23 +54,29 @@ const ids = (page: { items: Array<{ row: { id: string } }> }) => page.items.map(
 const idSet = (page: { items: Array<{ row: { id: string } }> }) => ids(page).sort();
 const rowOf = (id: string) => db.node.findUniqueOrThrow({ where: { id } });
 
-/** Append an answer-list entry consistently, standing in for the answer door (the S3 door is a later slice's). */
-async function writeAnswerForTest(id: string, entry: Partial<AnswerEntry> & Pick<AnswerEntry, 'by'>): Promise<void> {
-  const row = await rowOf(id);
-  const d = questionDataSchema.parse(row.data);
-  const full: AnswerEntry = { kind: 'answer', key: null, text: null, reason: null, at: '2026-10-06T21:00:00.000Z', via: 'portal', ...entry };
-  const answers = [...d.answers, full];
-  const next: QuestionData = { ...d, answers, status: full.kind === 'answer' ? 'answered' : 'open' };
-  await db.node.update({
-    where: { id },
-    data: {
-      name: questionName(next), abstract: renderQuestionAbstract(next), content: renderQuestion(next),
-      data: next as never, revisionContentHash: 'refresh',
-    },
-  });
+/**
+ * Answer and take back through the REAL doors (#4427). The doors stamp `at` from the clock, so each call runs with `Date`
+ * (only Date: timers stay real, the database is awaited) set to the instant the test names.
+ */
+async function atTime<T>(at: string, fn: () => Promise<T>): Promise<T> {
+  // Not reentrant on purpose: a nested or concurrent call, or a caller's own fake clock, would be clobbered by the restore.
+  if (vi.isFakeTimers()) throw new Error('atTime does not nest: a fake clock is already installed');
+  vi.useFakeTimers({ toFake: ['Date'], now: new Date(at) });
+  try { return await fn(); } finally { vi.useRealTimers(); }
 }
-const answerAt = (id: string, by: string, at: string) => writeAnswerForTest(id, { kind: 'answer', key: 'yes', by, at });
-const retractAt = (id: string, by: string, at: string) => writeAnswerForTest(id, { kind: 'retraction', by, at });
+/** The door must have written: the revision moved and the newest answer entry carries the instant the pin named. */
+async function viaDoor(id: string, at: string, kind: 'answer' | 'retraction', call: (revision: number) => Promise<unknown>): Promise<void> {
+  const before = (await rowOf(id)).revSeq;
+  await atTime(at, () => call(before));
+  const row = await rowOf(id);
+  expect(row.revSeq).toBeGreaterThan(before);
+  const entries = (row.data as { answers: Array<{ kind: string; at: string }> }).answers;
+  expect(entries[entries.length - 1]).toMatchObject({ kind, at: new Date(at).toISOString() });
+}
+const answerAt = (id: string, by: string, at: string) => viaDoor(id, at, 'answer', (revision) =>
+  M.answerQuestion(null, { ref: id, input: { optionKey: 'yes' }, expectedRevision: revision }, as(by)));
+const retractAt = (id: string, by: string, at: string) => viaDoor(id, at, 'retraction', (revision) =>
+  M.retractQuestionAnswer(null, { ref: id, expectedRevision: revision }, as(by)));
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -228,7 +232,7 @@ describe('#4428 acceptance 6: answered', () => {
     // A question answered and THEN withdrawn keeps its answer entry but is WITHDRAWN: in neither list.
     const answeredThenWithdrawn = await ask(logA.row.id, simple({ tier: 'ANSWERED' }));
     await answerAt(answeredThenWithdrawn.row.id, holger.id, '2026-10-06T21:00:00.000Z');
-    await M.withdrawQuestion(null, { ref: answeredThenWithdrawn.row.id, reason: 'moot', expectedRevision: 1 }, as(holger.id));
+    await M.withdrawQuestion(null, { ref: answeredThenWithdrawn.row.id, reason: 'moot', expectedRevision: (await rowOf(answeredThenWithdrawn.row.id)).revSeq }, as(holger.id)); // the real answer moved the revision
 
     const yes = await Q.questions(null, { appRef: app.id, answered: true }, as(reader.id));
     expect(idSet(yes)).toEqual([decided, unconfirmed].map((v) => v.row.id).sort());
@@ -301,19 +305,22 @@ describe('#4428 acceptance 9: sorts and paging', () => {
     const high2 = await ask(logA.row.id, simple({ priority: 'HIGH' }));
     const normal = await ask(logA.row.id, simple({ priority: 'NORMAL', tier: 'ANSWERED' }));
     const unanswered = [low, urgent, high1, high2];
+    const earlier = await ask(logA.row.id, simple({ priority: 'NORMAL', tier: 'ANSWERED' }));
     await answerAt(normal.row.id, holger.id, '2026-10-20T00:00:00.000Z');
+    await answerAt(earlier.row.id, holger.id, '2026-10-15T00:00:00.000Z');
     const withAsked = async (sort: string, extra: Record<string, unknown> = {}) =>
       ids(await Q.questions(null, { appRef: app.id, sort, ...extra }, as(reader.id)));
     // Newest ask first inside a priority: high2 was asked after high1.
-    expect(await withAsked('PRIORITY_DESC')).toEqual([urgent, high2, high1, normal, low].map((v) => v.row.id));
+    expect(await withAsked('PRIORITY_DESC')).toEqual([urgent, high2, high1, earlier, normal, low].map((v) => v.row.id));
     // Asked-at order follows the stored askedAt; equal instants fall to n.
     const desc = await withAsked('ASKED_AT_DESC');
     const asc = await withAsked('ASKED_AT_ASC');
     expect(desc.slice().reverse()).toEqual(asc);
-    expect(new Set(desc)).toEqual(new Set([...unanswered, normal].map((v) => v.row.id)));
+    expect(new Set(desc)).toEqual(new Set([...unanswered, normal, earlier].map((v) => v.row.id)));
     const answeredOrder = await withAsked('ANSWERED_AT_DESC');
-    expect(answeredOrder[0]).toBe(normal.row.id);
-    expect(answeredOrder.slice(1).sort()).toEqual(unanswered.map((v) => v.row.id).sort());
+    // Most recently answered first (a reversed comparator would put `earlier` first): normal (Oct 20), earlier (Oct 15), then the unanswered.
+    expect(answeredOrder.slice(0, 2)).toEqual([normal.row.id, earlier.row.id]);
+    expect(answeredOrder.slice(2).sort()).toEqual(unanswered.map((v) => v.row.id).sort());
     // Two pages of two plus one cover every question exactly once.
     const p1 = await withAsked('PRIORITY_DESC', { limit: 2, offset: 0 });
     const p2 = await withAsked('PRIORITY_DESC', { limit: 2, offset: 2 });

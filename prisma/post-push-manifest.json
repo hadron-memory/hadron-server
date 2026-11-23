@@ -328,6 +328,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_chat_tool_teardown_state",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_comment_meta_state_top_level",
       "kind": "check-constraint",
       "file": "comment-invariants.sql",
@@ -352,9 +358,9 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
-      "name": "chk_coordinator_cadence_episodes_shape",
+      "name": "chk_lead_cadence_episodes_shape",
       "kind": "check-constraint",
-      "file": "coordinator-cadence-invariants.sql",
+      "file": "lead-cadence-invariants.sql",
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
@@ -745,6 +751,12 @@
       "name": "chk_register_owner",
       "kind": "check-constraint",
       "file": "post-push.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_saturation_episodes_shape",
+      "kind": "check-constraint",
+      "file": "saturation-invariants.sql",
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
@@ -1276,6 +1288,18 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_git_mirror_cancel_node_removal",
+      "kind": "function",
+      "file": "git-mirror-obligation-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_git_mirror_capture_node_removal",
+      "kind": "function",
+      "file": "git-mirror-obligation-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_grant_holder_gone",
       "kind": "function",
       "file": "grant-invariants.sql",
@@ -1792,9 +1816,9 @@
       "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
-      "name": "coordinator_cadence_episodes_app_id_ended_at_idx",
+      "name": "lead_cadence_episodes_app_id_ended_at_idx",
       "kind": "index",
-      "file": "coordinator-cadence-invariants.sql",
+      "file": "lead-cadence-invariants.sql",
       "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
@@ -1924,6 +1948,12 @@
       "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
+      "name": "saturation_episodes_app_id_ended_at_idx",
+      "kind": "index",
+      "file": "saturation-invariants.sql",
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
       "name": "secret_change_requests_expiry",
       "kind": "index",
       "file": "secret-change-requests-invariants.sql",
@@ -1990,15 +2020,15 @@
       "why": "Sequence created by the raw-SQL corpus; no Prisma model exists for it."
     },
     {
-      "name": "coordinator_cadence_clocks",
+      "name": "lead_cadence_clocks",
       "kind": "table",
-      "file": "coordinator-cadence-invariants.sql",
+      "file": "lead-cadence-invariants.sql",
       "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
-      "name": "coordinator_cadence_episodes",
+      "name": "lead_cadence_episodes",
       "kind": "table",
-      "file": "coordinator-cadence-invariants.sql",
+      "file": "lead-cadence-invariants.sql",
       "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
@@ -2023,6 +2053,12 @@
       "name": "post_limit_episodes",
       "kind": "table",
       "file": "post-limit-invariants.sql",
+      "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
+    },
+    {
+      "name": "saturation_episodes",
+      "kind": "table",
+      "file": "saturation-invariants.sql",
       "why": "Table declared in the raw-SQL corpus, including idempotent declarations of tables also modeled in Prisma."
     },
     {
@@ -2326,15 +2362,15 @@
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
-      "name": "coordinator_cadence_clocks.worker_reference_fence_1162",
+      "name": "lead_cadence_clocks.worker_reference_fence_1162",
       "kind": "trigger",
-      "file": "coordinator-cadence-invariants.sql",
+      "file": "lead-cadence-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
-      "name": "coordinator_cadence_episodes.worker_reference_fence_1162",
+      "name": "lead_cadence_episodes.worker_reference_fence_1162",
       "kind": "trigger",
-      "file": "coordinator-cadence-invariants.sql",
+      "file": "lead-cadence-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
@@ -2539,6 +2575,24 @@
       "name": "nodes.boot_prompt_approval_entry_revisions",
       "kind": "trigger",
       "file": "boot-prompt-approval-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.git_mirror_node_remove_capture",
+      "kind": "trigger",
+      "file": "git-mirror-obligation-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.git_mirror_node_remove_restore",
+      "kind": "trigger",
+      "file": "git-mirror-obligation-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.git_mirror_node_remove_soft_delete",
+      "kind": "trigger",
+      "file": "git-mirror-obligation-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
@@ -2920,7 +2974,7 @@
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
-      "name": "coordinator_cadence_episodes_event_id_key",
+      "name": "lead_cadence_episodes_event_id_key",
       "kind": "unique-constraint",
       "file": "unique-constraint-invariants.sql",
       "why": "Table-level UNIQUE constraint defined in raw SQL; not expressible in the Prisma schema as written."
@@ -3070,9 +3124,9 @@
       "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
-      "name": "coordinator_cadence_episodes_one_open_uniq",
+      "name": "lead_cadence_episodes_one_open_uniq",
       "kind": "unique-index",
-      "file": "coordinator-cadence-invariants.sql",
+      "file": "lead-cadence-invariants.sql",
       "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
@@ -3184,6 +3238,18 @@
       "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
+      "name": "saturation_episodes_event_id_key",
+      "kind": "unique-index",
+      "file": "saturation-invariants.sql",
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "saturation_episodes_one_open_uniq",
+      "kind": "unique-index",
+      "file": "saturation-invariants.sql",
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
       "name": "scopes_agent_name_uniq",
       "kind": "unique-index",
       "file": "post-push.sql",
@@ -3247,6 +3313,18 @@
       "name": "team_stop_coverage_open_uniq",
       "kind": "unique-index",
       "file": "stop-signal-invariants.sql",
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "telegram_connections_app_active_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
+      "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "telegram_connections_bot_active_uniq",
+      "kind": "unique-index",
+      "file": "post-push.sql",
       "why": "Unique index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {

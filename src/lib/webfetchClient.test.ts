@@ -14,6 +14,7 @@ import {
   getPoll,
   listPolls,
   cancelPoll,
+  getWebfetchContract,
 } from './webfetchClient.js';
 
 const okJson = (body: unknown) =>
@@ -37,6 +38,16 @@ describe('webfetchClient', () => {
     delete process.env.WEBFETCH_TOOL_TOKEN;
   });
 
+  it('#4882 reads the declaration with a GET to /ops/contract, bearer attached, no body', async () => {
+    const f = fetchStub(async () => okJson({ contract: 'webfetch@2', capabilities: ['redirects-none'] }));
+    vi.stubGlobal('fetch', f);
+    await expect(getWebfetchContract()).resolves.toEqual({ contract: 'webfetch@2', capabilities: ['redirects-none'] });
+    const [url, init] = f.mock.calls[0]!;
+    expect(url).toBe('http://webfetch.test:8080/ops/contract');
+    expect(init).toMatchObject({ method: 'GET', headers: expect.objectContaining({ authorization: 'Bearer shhh' }) });
+    expect(init?.body).toBeUndefined();
+  });
+
   it('posts fetch-url to the ops plane with the bearer token and trims a trailing slash', async () => {
     process.env.WEBFETCH_TOOL_URL = 'http://webfetch.test:8080/';
     const fetchMock = fetchStub(async () =>
@@ -53,6 +64,15 @@ describe('webfetchClient', () => {
     expect(init!.method).toBe('POST');
     expect(init!.headers).toMatchObject({ authorization: 'Bearer shhh' });
     expect(JSON.parse(init!.body as string)).toEqual({ url: 'https://x.example', format: 'markdown' });
+  });
+
+  it('puts redirects:none and the inline auth on the wire for http-request (#4775 blind P1)', async () => {
+    const fetchMock = fetchStub(async () => okJson({ method: 'GET', finalUrl: 'https://x', status: 302, headers: {}, contentType: null, body: '', truncated: false }));
+    vi.stubGlobal('fetch', fetchMock);
+    await httpRequest({ method: 'GET', url: 'https://x', auth: { type: 'bearer', token: 't' }, redirects: 'none' });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('http://webfetch.test:8080/ops/http-request');
+    expect(JSON.parse(init!.body as string)).toMatchObject({ redirects: 'none', auth: { type: 'bearer', token: 't' } });
   });
 
   it('omits the authorization header when no token is set', async () => {

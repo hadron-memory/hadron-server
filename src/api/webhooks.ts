@@ -162,8 +162,9 @@ async function handleWebhook(db: PrismaClient, req: Request, res: Response): Pro
     }
     // #3689 (gate R2): a hook whose trigger names no Agent, or whose Agent's boot prompt cannot be served, is refused with
     // the boot-prompt code (cor:agt:040:07 / 040:10), not answered as an internal fault. 409: the trigger's own setup
-    // conflicts with launching, so a retry cannot succeed. The body carries the code only, as a denial's does.
-    const refusal = bootPromptRefusalCode(err);
+    // conflicts with launching, so a retry cannot succeed. The body carries the code only, as a denial's does. #3920: only a
+    // refusal of the `run` surface is the trigger's own; a boot-prompt refusal built for another surface is an unexpected error here.
+    const refusal = bootPromptRefusalCode(err, 'run');
     if (refusal) {
       res.status(409).json({ error: refusal });
       return;

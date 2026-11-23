@@ -31,6 +31,14 @@ function orderedAnchors(anchors: readonly AuthorityAnchor[]): AuthorityAnchor[] 
     a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id));
 }
 
+/**
+ * The advisory-lock key scheme of an anchor: `pg_advisory_xact_lock(hashtext(authorityAnchorDomain(kind)), hashtext(id))`, shared or
+ * exclusive. Exported so a test that stands in for a door on its own connection takes exactly the key the code takes (#4874).
+ */
+export function authorityAnchorDomain(kind: AuthorityAnchor['kind']): string {
+  return `authorization:${kind}`;
+}
+
 /** Acquire every anchor in one order so multi-anchor operations cannot cycle. */
 export async function lockAuthorityAnchors(
   tx: LockTx,
@@ -38,7 +46,7 @@ export async function lockAuthorityAnchors(
   mode: 'shared' | 'exclusive',
 ): Promise<void> {
   for (const anchor of orderedAnchors(anchors)) {
-    const domain = `authorization:${anchor.kind}`;
+    const domain = authorityAnchorDomain(anchor.kind);
     if (mode === 'shared') {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext(${domain}), hashtext(${anchor.id}))`;
     } else {

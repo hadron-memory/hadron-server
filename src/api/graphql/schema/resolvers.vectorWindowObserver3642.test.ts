@@ -119,7 +119,12 @@ function record(name: string, o: Observation, want: string[]) {
     returned: o.resultIds.length, expected: want.length, correct: JSON.stringify(o.resultIds) === JSON.stringify(want),
   });
 }
+// #4826: the default 5 s vector budget (cor:api:090:04 early stop) is cancelled by a loaded CI shard on the 2100-node
+// past-cap scan, so the page came back [] ('stopped_early'). These pins observe the ranking, not the budget: pin a
+// generous one, as the 2772 suites do, and restore the caller's value.
+const savedVectorTimeout = process.env.VECTOR_SEARCH_TIMEOUT_MS;
 afterAll(() => {
+  if (savedVectorTimeout === undefined) delete process.env.VECTOR_SEARCH_TIMEOUT_MS; else process.env.VECTOR_SEARCH_TIMEOUT_MS = savedVectorTimeout;
   resetEmbeddingClientForTests();
   delete process.env.EMBEDDING_API_URL;
   if (process.env.HADRON_OBSERVER_OUT) { mkdirSync(process.env.HADRON_OBSERVER_OUT, { recursive: true }); writeFileSync(`${process.env.HADRON_OBSERVER_OUT}/3642-report.json`, JSON.stringify(report, null, 2)); }
@@ -127,6 +132,7 @@ afterAll(() => {
 afterEach(() => vi.restoreAllMocks());
 beforeEach(async () => {
   await cleanDb(db);
+  process.env.VECTOR_SEARCH_TIMEOUT_MS = '60000';
   process.env.EMBEDDING_API_URL = 'http://stub.local/api/embed';
   setEmbeddingClientForTests(queryClient);
   const made = await createDbOrgAndGraph(db, { orgName: 'vo-org', graphName: 'vo/graph' });

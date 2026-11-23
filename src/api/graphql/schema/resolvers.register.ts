@@ -25,6 +25,7 @@ import {
   resolveOrgScope,
 } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
@@ -109,17 +110,24 @@ export const registerQueries = {
           attendee = { workerId: id };
           appId = w.appId;
         }
-      } catch {
+      } catch (e) {
+        // #4893/#2975: only a name-resolution failure is the empty answer; a database fault propagates.
+        if (!refNamesNothing(e, { ambiguousNamesNothing: true })) throw e;
         return [];
       }
     } else if (agentRef?.trim() && appRef?.trim()) {
-      try {
-        const [{ id: agentId }, { id: resolvedAppId }] = await Promise.all([resolveAgentRef(ctx.db, agentRef), resolveAppRef(ctx.db, appRef)]);
-        attendee = { agentId, appId: resolvedAppId };
-        appId = resolvedAppId;
-      } catch {
-        return [];
-      }
+      // #4893/#2975: only a name-resolution failure is the empty answer; a database fault
+      // propagates — even when the OTHER arm failed to resolve, so the two are settled
+      // separately and a fault always wins the fold (#4948: Promise.all settles
+      // with the first rejection, letting a malformed arm mask a faulting one).
+      // The settled pair is named `agentArm`/`appArm` so it cannot shadow the `app` row read below.
+      const [agentArm, appArm] = await Promise.allSettled([resolveAgentRef(ctx.db, agentRef), resolveAppRef(ctx.db, appRef)]);
+      const fault = [agentArm, appArm].find((r): r is PromiseRejectedResult =>
+        r.status === 'rejected' && !refNamesNothing(r.reason, { ambiguousNamesNothing: true }));
+      if (fault) throw fault.reason;
+      if (agentArm.status === 'rejected' || appArm.status === 'rejected') return [];
+      attendee = { agentId: agentArm.value.id, appId: appArm.value.id };
+      appId = appArm.value.id;
     } else {
       throw new GraphQLError('Pass workerRef, or agentRef with appRef.', { extensions: { code: 'BAD_USER_INPUT' } });
     }
@@ -159,10 +167,13 @@ export const registerQueries = {
       let ownerWhere: Prisma.RegisterEntryWhereInput | null = null;
       try {
         ownerWhere = { appId: (await resolveAppRef(ctx.db, ref)).id };
-      } catch {
+      } catch (appErr) {
+        // #4893/#2975: only a name-resolution failure falls through to the org arm; a fault propagates.
+        if (!refNamesNothing(appErr, { ambiguousNamesNothing: true })) throw appErr;
         try {
           ownerWhere = { organizationId: (await resolveOrgRef(ctx.db, ref)).id };
-        } catch {
+        } catch (orgErr) {
+          if (!refNamesNothing(orgErr, { ambiguousNamesNothing: true })) throw orgErr;
           return empty;
         }
       }
@@ -217,17 +228,21 @@ async function readableAttendee(
   }
   if (!attendee) {
     if (!appRef?.trim()) return null;
-    try {
-      const [{ id: agentId }, { id: resolvedAppId }] = await Promise.all([resolveAgentRef(ctx.db, attendeeRef), resolveAppRef(ctx.db, appRef)]);
-      // An Agent-in-App attendee EXISTS only as a live install — the same
-      // rule resolveRegister's attendeeColumns applies (Codex P1 on PR #1168).
-      const install = await resolveAppInstallation(ctx.db,resolvedAppId,agentId);
-      if (!install) return null;
-      attendee = { agentId, appId: resolvedAppId };
-      appId = resolvedAppId;
-    } catch {
-      return null;
-    }
+    // #4893/#2975: a name-resolution failure on either arm is the door's null; a database
+    // fault propagates even when the other arm also failed to resolve (#4948).
+    // `agentArm`/`appArm`, not `agent`/`app` — the settled pair used to shadow
+    // the `app` row read below it.
+    const [agentArm, appArm] = await Promise.allSettled([resolveAgentRef(ctx.db, attendeeRef), resolveAppRef(ctx.db, appRef)]);
+    const fault = [agentArm, appArm].find((r): r is PromiseRejectedResult =>
+      r.status === 'rejected' && !refNamesNothing(r.reason, { ambiguousNamesNothing: true }));
+    if (fault) throw fault.reason;
+    if (agentArm.status === 'rejected' || appArm.status === 'rejected') return null;
+    // An Agent-in-App attendee EXISTS only as a live install — the same
+    // rule resolveRegister's attendeeColumns applies (Codex P1 on PR #1168).
+    const install = await resolveAppInstallation(ctx.db, appArm.value.id, agentArm.value.id);
+    if (!install) return null;
+    attendee = { agentId: agentArm.value.id, appId: appArm.value.id };
+    appId = appArm.value.id;
   }
   if (!attendee || !appId) return null;
   const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null }, select: { id: true, organizationId: true, ownerUserId: true } });

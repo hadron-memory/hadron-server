@@ -15,6 +15,7 @@ import { loadStallInputs } from '../../../lib/agentTasks/stall.js';
 import * as warnings from './resolvers.taskWarnings.js';
 import * as workerGate from './resolvers.worker.js';
 import { appendTaskEvent } from '../../../lib/agentTasks/events.js';
+import { finishableParents, finishField, type Assignee } from '../../../test/finishWarningCarrier.js';
 useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
@@ -35,7 +36,12 @@ async function graphql(query: string, c = ctx()) {
   if (r.body.kind !== 'single') throw new Error('single response required');
   return r.body.singleResult;
 }
-const field = (alias: string) => `${alias}: createAgentTask(input:{appRef:"${app.id}",title:"Synthetic task",status:BACKLOG}) {id}`;
+// #4793: a source-less create no longer warns, so the recorded-warning carrier is finishing a started task that still has an open child
+// (task.finish.open-children, the one recorded code a mutation still raises). `field` finishes one such parent.
+const field = finishField;
+const parentsFor = (n: number, assignee: Assignee = { user: user.id }, as?: <T>(fn: () => Promise<T>) => Promise<T>) =>
+  finishableParents(M, ctx(), app.id, n, assignee, as);
+const RECORDED = 'task.finish.open-children';
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -62,22 +68,25 @@ describe('successful-field history', () => {
   it('history still records after optional enrichment has exhausted its request budget, without charging it', async () => {
     const c = ctx();
     c.taskWarningState = { spentMs: warnings.REQUEST_READ_BUDGET_MS + 50, gate: new Map(), registers: new Map(), team: new Map() };
-    const task = await runAsActor({ workerId: worker.id, agentId }, () => create(c));
+    const as = <T,>(fn: () => Promise<T>) => runAsActor({ workerId: worker.id, agentId }, fn);
+    const [id] = await parentsFor(1, { worker: worker.id }, as);
+    const task: { id: string } = await as<any>(() => M.finishAgentTask({}, { taskId: id, result: { outcome: 'succeeded' } }, c));
     expect(c.taskWarnings?.[0].warning.register).toBeUndefined();
     await flush(c);
     expect(await history()).toHaveLength(1);
-    expect((await history())[0]).toMatchObject({ taskId: task.id, actorWorkerId: worker.id, payload: { code: 'task.create.no-source' } });
+    expect((await history())[0]).toMatchObject({ taskId: task.id, actorWorkerId: worker.id, payload: { code: RECORDED } });
     expect(c.taskWarningState.spentMs).toBe(warnings.REQUEST_READ_BUDGET_MS + 50);
   });
 
   it('records each alias, including beyond the response cap, with closed payload and null-worker attribution', async () => {
-    const r = await graphql(`mutation { ${Array.from({ length: 23 }, (_, i) => field(`a${i}`)).join(' ')} }`);
+    const ids = await parentsFor(23);
+    const r = await graphql(`mutation { ${ids.map((id, i) => field(`a${i}`, id)).join(' ')} }`);
     expect(r.errors).toBeUndefined();
     expect(r.extensions?.warnings).toHaveLength(20);
     const rows = await history();
     expect(rows).toHaveLength(23);
     for (const row of rows) {
-      expect(row.payload).toEqual({ code: 'task.create.no-source' });
+      expect(row.payload).toEqual({ code: RECORDED });
       expect(row.actorUserId).toBe(user.id);
       expect(row.actorWorkerId).toBeNull();
       expect(row.actorAgentId).toBeNull();
@@ -92,12 +101,13 @@ describe('successful-field history', () => {
     const badResolvers = { ...resolvers, AgentTask: { ...resolvers.AgentTask, title: () => { throw new Error('synthetic result failure'); } } };
     const s = new ApolloServer<Context>({ typeDefs, resolvers: badResolvers, plugins: [taskWarningsPlugin] });
     try {
-      const r = await s.executeOperation({ query: `mutation { ${field('ok')} bad:createAgentTask(input:{appRef:"${app.id}",title:"bad",status:BACKLOG}) {id title} }` }, { contextValue: ctx() });
+      const [okId, badId] = await parentsFor(2);
+      const r = await s.executeOperation({ query: `mutation { ${field('ok', okId)} bad: finishAgentTask(taskId: "${badId}", result: { outcome: "succeeded" }) {id title} }` }, { contextValue: ctx() });
       expect(r.body.kind).toBe('single');
       const rows = await history();
-      expect(await db.agentTask.count({ where: { appId: app.id, title: { in: ['Synthetic task', 'bad'] } } })).toBe(2);
+      expect(await db.agentTask.count({ where: { id: { in: [okId, badId] }, status: 'finished' } })).toBe(2);
       expect(rows).toHaveLength(1);
-      expect(rows[0].taskId).toBe((await db.agentTask.findFirstOrThrow({ where: { appId: app.id, title: 'Synthetic task' } })).id);
+      expect(rows[0].taskId).toBe(okId);
     } finally { await s.stop(); }
   });
 
@@ -146,7 +156,8 @@ describe('successful-field history', () => {
   });
 
   it('keeps canonical App read gates and task filtering for history', async () => {
-    const r = await graphql(`mutation { ${field('ok')} }`);
+    const [pid] = await parentsFor(1);
+    const r = await graphql(`mutation { ${field('ok', pid)} }`);
     const taskId = (r.data as any).ok.id;
     const rows = await Q.agentTeamEvents({}, { appRef: app.id, types: ['task.warning'], taskId }, ctx());
     expect(rows).toHaveLength(1);
@@ -158,6 +169,7 @@ describe('successful-field history', () => {
   it('recording failure never changes the response and is not retried', async () => {
     const real = db.$transaction.bind(db);
     let attempts = 0;
+    const [pid] = await parentsFor(1);
     const spy = vi.spyOn(db, '$transaction').mockImplementation(((fn: any, options: any) => real(async (tx: any) => {
       const delegate = tx.agentTeamEvent;
       const eventModel = new Proxy({}, { get: (_, key) => key === 'create' ? createEvent : delegate[key] });
@@ -169,10 +181,10 @@ describe('successful-field history', () => {
       return fn(wrapped);
     }, options)) as any);
     try {
-      const r = await graphql(`mutation { ${field('ok')} }`);
+      const r = await graphql(`mutation { ${field('ok', pid)} }`);
       expect(r.errors).toBeUndefined();
       expect((r.data as any).ok.id).toBeTruthy();
-      expect(r.extensions?.warnings).toEqual([{ path: 'ok', code: 'task.create.no-source', text: warnings.TASK_WARNING_TEXT['task.create.no-source'] }]);
+      expect(r.extensions?.warnings).toEqual([{ path: 'ok', code: RECORDED, text: warnings.TASK_WARNING_TEXT[RECORDED] }]);
       expect(attempts).toBe(1);
       expect(await history()).toEqual([]);
     } finally { spy.mockRestore(); }
@@ -181,6 +193,7 @@ describe('successful-field history', () => {
   it.each([999, 1000, 1001])('#2636 cooperative deadline after first append: %ims, real committed prefix and no retry', async elapsed => {
     const real = db.$transaction.bind(db);
     const c = ctx();
+    const [firstId, secondId] = await parentsFor(2);
     // Apollo copies the context object; retain the same history queue for the retry probe.
     c.taskWarningHistory = [];
     const initial = Date.now();
@@ -212,11 +225,11 @@ describe('successful-field history', () => {
       return fn(new Proxy({}, { get: (_, key) => key === 'agentTeamEvent' ? eventModel : tx[key] }));
     }, options)) as any);
     try {
-      const response = await graphql(`mutation { ${field('first')} ${field('second')} }`, c);
+      const response = await graphql(`mutation { ${field('first', firstId)} ${field('second', secondId)} }`, c);
       expect(response.errors).toBeUndefined();
       const ids = [(response.data as any).first.id, (response.data as any).second.id];
       expect(response.extensions?.warnings).toEqual(['first', 'second'].map(path => ({
-        path, code: 'task.create.no-source', text: warnings.TASK_WARNING_TEXT['task.create.no-source'],
+        path, code: RECORDED, text: warnings.TASK_WARNING_TEXT[RECORDED],
       })));
       expect(observeFlush).toHaveBeenCalledTimes(1);
       expect(receivedQueue).toBe(c.taskWarningHistory);
@@ -226,7 +239,7 @@ describe('successful-field history', () => {
       // Query outside the completed history transaction: this proves COMMIT,
       // rather than only observing a mocked append or an eventual rollback.
       expect((await history()).map(row => row.taskId)).toEqual(expected);
-      expect(await db.agentTask.count({ where: { id: { in: ids }, title: 'Synthetic task', status: 'backlog' } })).toBe(2);
+      expect(await db.agentTask.count({ where: { id: { in: ids }, status: 'finished' } })).toBe(2);
       expect(c.taskWarningHistory).toEqual([]);
       const originalResponse = structuredClone(response);
       observeFlush.mockRestore();
@@ -240,6 +253,7 @@ describe('successful-field history', () => {
   it('the post-commit statement timeout cuts a stalled history write without rolling back the task', async () => {
     const real = db.$transaction.bind(db);
     let reached = false;
+    const [pid] = await parentsFor(1);
     const spy = vi.spyOn(db, '$transaction').mockImplementation(((fn: any, options: any) => real(async (tx: any) => {
       const delegate = tx.agentTeamEvent;
       const eventModel = new Proxy({}, { get: (_, key) => key === 'create' ? createEvent : delegate[key] });
@@ -252,11 +266,11 @@ describe('successful-field history', () => {
     }, options)) as any);
     try {
       const started = Date.now();
-      const r = await graphql(`mutation { ${field('ok')} }`);
+      const r = await graphql(`mutation { ${field('ok', pid)} }`);
       expect(r.errors).toBeUndefined();
       expect(reached).toBe(true);
       expect(Date.now() - started).toBeLessThan(3000);
-      expect(await db.agentTask.count({ where: { appId: app.id, title: 'Synthetic task' } })).toBe(1);
+      expect(await db.agentTask.count({ where: { id: pid, status: 'finished' } })).toBe(1);
       expect(await history()).toEqual([]);
     } finally { spy.mockRestore(); }
   });

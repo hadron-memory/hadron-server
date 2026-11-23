@@ -4,7 +4,7 @@
 import { GraphQLError } from 'graphql';
 import { type Context, clampListTake, toISO, safeCanonicalUrn } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { generateId } from '../../../lib/id.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import {
@@ -161,7 +161,20 @@ export const connectionGrantMutations = {
     try {
       ({ id: granteeAppId } = await resolveAppRef(ctx.db, appRef));
     } catch (e) {
-      if (e instanceof AppNotFoundError) throw badInput(`Grantee App not found: '${appRef}'.`);
+      // #4838: the grantee ref's failures answer WITHOUT echoing the caller's
+      // value — the URN parser's errors put it verbatim in their messages, so
+      // a token pasted into appRef by mistake would land in terminals, CI logs
+      // and error trackers. The typed code is unchanged (BAD_USER_INPUT), and
+      // the EXISTENCE ORACLE is deliberate (Holger via Vera, team chat #138453,
+      // option "No reach needed"; recorded as spec cor:dmo:080:04): a
+      // connection owner does not need to reach the grantee App — granting to
+      // a counterparty is the feature, and the owner learning whether that App
+      // exists is accepted. Only the echo goes. NARROW catch
+      // (review:narrow-catch-blocks): a database failure inside the lookup
+      // propagates; the shared class list lives in isAppRefResolutionFailure.
+      if (isAppRefResolutionFailure(e)) {
+        throw badInput('Grantee App not found.');
+      }
       throw e;
     }
 

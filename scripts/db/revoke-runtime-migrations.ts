@@ -13,7 +13,7 @@ export const CONNECT_TIMEOUT_MS = 15_000;
 
 /** Owner-only, psql-free. Absent serve role preserves legacy single-role installs. */
 export async function revokeRuntimeMigrations(client: Client, role: string): Promise<void> {
-  const found = await client.query<{ is_current_user: boolean; owns_migrations: boolean; revoke_actions: boolean; revoke_secret_events: boolean }>(`
+  const found = await client.query<{ is_current_user: boolean; owns_migrations: boolean; revoke_actions: boolean; revoke_secret_events: boolean; revoke_root_check: boolean }>(`
     SELECT r.rolname = current_user AS is_current_user,
       EXISTS (SELECT 1 FROM pg_class c
         WHERE c.oid = to_regclass('public._prisma_migrations') AND c.relowner = r.oid) AS owns_migrations,
@@ -24,7 +24,11 @@ export async function revokeRuntimeMigrations(client: Client, role: string): Pro
       -- #3997: the same for the append-only audit table.
       EXISTS (SELECT 1 FROM pg_class c
         WHERE c.oid = to_regclass('public.secret_events') AND c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
-          AND c.relowner <> r.oid) AS revoke_secret_events
+          AND c.relowner <> r.oid) AS revoke_secret_events,
+      -- #4573: the same for the recorded root check.
+      EXISTS (SELECT 1 FROM pg_class c
+        WHERE c.oid = to_regclass('public.secret_root_check') AND c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+          AND c.relowner <> r.oid) AS revoke_root_check
     FROM pg_roles r WHERE r.rolname = $1`, [role]);
   const target = found.rows[0];
   // Legacy/self-hosted installs may use the configured serve name as OWNER.
@@ -45,6 +49,11 @@ export async function revokeRuntimeMigrations(client: Client, role: string): Pro
   // role; the guard trigger refuses every other delete) and loses UPDATE and TRUNCATE, which the default ACLs grant to a new table.
   if (target && !target.is_current_user && target.revoke_secret_events) {
     await client.query(`REVOKE UPDATE, TRUNCATE ON TABLE public.secret_events FROM ${escapeIdentifier(role)}`);
+  }
+  // #4573: only the owner's re-wrap moves `secret_root_check`. The serve role keeps SELECT and INSERT (the first mint records the
+  // check) and loses UPDATE and DELETE, with which it could put an earlier root's check value back.
+  if (target && !target.is_current_user && target.revoke_root_check) {
+    await client.query(`REVOKE UPDATE, DELETE, TRUNCATE ON TABLE public.secret_root_check FROM ${escapeIdentifier(role)}`);
   }
 }
 

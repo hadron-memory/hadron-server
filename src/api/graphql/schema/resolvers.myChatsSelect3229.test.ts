@@ -95,25 +95,55 @@ beforeEach(async () => {
   });
 });
 
+const SIX_COLUMNS = ['createdAt', 'createdBy', 'data', 'id', 'loc', 'memoryId'];
+
+/** A chat-root fetch is a `node.findMany` whose `where` is the `myChatsScope` shape (`loc` starts with `chats:`). */
+const isChatRootFetch = (call: any[]) => call[0]?.where?.loc?.startsWith === 'chats:';
+
+/** Select the chat-root fetches by shape (#4762), require exactly `expected` of them, and check each select. */
+function expectChatRootSelects(calls: any[][], expected: number) {
+  const matched = calls.filter(isChatRootFetch);
+  // Non-vacuous: a shape change that matches nothing must fail here, not pass with nothing checked.
+  expect(matched).toHaveLength(expected);
+  for (const call of matched) {
+    expect(Object.keys(call[0]?.select ?? {}).sort()).toEqual(SIX_COLUMNS);
+  }
+}
+
+async function spyFindMany(run: () => Promise<unknown>, decoy = false): Promise<any[][]> {
+  const spy = vi.spyOn(db.node, 'findMany');
+  // Snapshot before mockRestore(): vitest's restore clears mock.calls.
+  try {
+    // loc-scope-ok: a deliberate decoy query that matches no row; the pin must ignore it.
+    if (decoy) await db.node.findMany({ where: { loc: 'decoy-not-a-chat-root' } });
+    await run();
+    return [...spy.mock.calls];
+  } finally {
+    spy.mockRestore();
+  }
+}
+
 describe('#3229 myChats/myChatsPage select exactly the toChatRows columns', () => {
-  it('both fetches carry the six-column select (red on main: no select at all)', async () => {
-    const spy = vi.spyOn(db.node, 'findMany');
-    // Snapshot before mockRestore(): vitest's restore clears mock.calls.
-    let calls: any[][] = [];
-    try {
+  it('each surface runs one chat-root fetch with the six-column select (red on main: no select at all)', async () => {
+    expectChatRootSelects(await spyFindMany(() => Q.myChats({}, { agentRef: agent.id }, ctx(owner.id))), 1);
+    expectChatRootSelects(await spyFindMany(() => Q.myChatsPage({}, { agentRef: agent.id }, ctx(owner.id))), 1);
+  });
+
+  it('an unrelated node.findMany does not disturb the pin (#4762 F1: the old count-of-2 pin failed here)', async () => {
+    const calls = await spyFindMany(async () => {
       await Q.myChats({}, { agentRef: agent.id }, ctx(owner.id));
       await Q.myChatsPage({}, { agentRef: agent.id }, ctx(owner.id));
-      calls = [...spy.mock.calls];
-    } finally {
-      spy.mockRestore();
-    }
-    // myChats and myChatsPage each run exactly one node.findMany (the chat-root fetch);
-    // everything else in the path is findFirst or another model.
-    expect(calls).toHaveLength(2);
-    for (const call of calls) {
-      expect(Object.keys(call[0]?.select ?? {}).sort())
-        .toEqual(['createdAt', 'createdBy', 'data', 'id', 'loc', 'memoryId']);
-    }
+    }, true);
+    expect(calls).toHaveLength(3);
+    expectChatRootSelects(calls, 2);
+  });
+
+  it('a chat-root fetch with a column dropped fails the pin, and a vanished shape fails the count', () => {
+    const where = { loc: { startsWith: 'chats:' } };
+    const dropped = { id: true, loc: true, memoryId: true, data: true, createdAt: true };
+    expect(() => expectChatRootSelects([[{ where, select: dropped }]], 1)).toThrow();
+    // loc-scope-ok: a fake call record handed to the pin helper, not a query.
+    expect(() => expectChatRootSelects([[{ where: { loc: 'x' }, select: dropped }]], 1)).toThrow();
   });
 });
 

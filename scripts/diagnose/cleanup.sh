@@ -129,10 +129,14 @@ explain_stack_ownership_failure() {
     else
       echo "$prefix: $lost, and no stack state found at $state; capture and teardown skipped (manual check required)" >&2
     fi
+  elif [ -L "$state" ] && ! [ -e "$state" ]; then
+    # #4670 (#4638 BLIND delta): with a valid reservation a dangling state symlink must not reach the marker branch below,
+    # which would send the operator to inspect a target that does not exist.
+    echo "$prefix: the stack state path $state is a dangling symlink; capture and teardown skipped (manual check required)" >&2
   elif ! [ -e "$state" ] && ! [ -L "$state" ]; then
     echo "$prefix: no stack state found at $state, so ownership cannot be verified; capture and teardown skipped (if an Incus instance named $name exists, check it by hand)" >&2
   elif [ "$(cat "$state/diagnose-owner" 2>/dev/null)" != "${DIAG_RUN_TOKEN:-}" ]; then
-    echo "$prefix; inspect private state: $state (it does not carry this run's owner marker: created outside this run or by another holder; manual ownership check required)" >&2
+    echo "$prefix; inspect private state: $state (the owner marker at $state/diagnose-owner is missing, unreadable or not this run's token, which does not show who created this state; manual ownership check required)" >&2
   else
     echo "$prefix; inspect private state: $state (this run's state, but the Incus instance $name is missing, unreadable or not marked by this run; manual ownership check required)" >&2
   fi

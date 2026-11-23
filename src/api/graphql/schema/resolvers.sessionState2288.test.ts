@@ -5,7 +5,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { isSessionDormant, DEFAULT_SESSION_IDLE_WINDOW_MS, dormancyThresholdMs } from '../../../lib/sessionActivity.js';
-import { lapsedResumeVerdict } from '../../../lib/teamAttention.js';
+import { lapsedResumeVerdict } from '../../../lib/ownWorkerSessions.js';
 import { validateSessionBinding } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';

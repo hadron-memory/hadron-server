@@ -221,6 +221,58 @@ test('a failed load record check (no usable host node) is reported as a check fa
   } finally { f.clean(); }
 });
 
+// #4650: on a host Node without import.meta.main, load.mjs's guard throws UNSUPPORTED_NODE when the record check imports it.
+// run.sh used to discard that error (exit 3, no runtime named); the operator must be told which Node is needed. Real run.sh,
+// real load.mjs: the host node is a wrapper that runs the check against a scratch copy of load.mjs (and its sampler import)
+// where import.meta.main reads undefined (exactly what an unsupported runtime does), or whose import cannot resolve.
+// The scratch path reaches the wrapper through the environment, never interpolated into the script.
+function checkAgainst(f, loadSource, extraFiles = {}) {
+  const copy = join(f.dir, 'copy'); mkdirSync(copy);
+  writeFileSync(join(copy, 'sampler.mjs'), readFileSync(join(here, 'sampler.mjs'), 'utf8'));
+  for (const [name, body] of Object.entries(extraFiles)) writeFileSync(join(copy, name), body);
+  writeFileSync(join(copy, 'load.mjs'), loadSource);
+  writeFileSync(join(f.dir, 'bin', 'node'),
+    '#!/bin/bash\nif [ "${1:-}" = --input-type=module ]; then n=$#; args=("$@"); args[$((n-1))]="$COPY/load.mjs"; exec "$REALNODE" "${args[@]}"; fi\nexec "$REALNODE" "$@"\n',
+    { mode: 0o755 });
+  Object.assign(f.env, { COPY: copy, REALNODE: process.execPath });
+  return f.run();
+}
+const settleSleeps = (f) => {
+  expect(existsSync(join(f.dir, 'sleeps'))).toBe(true);
+  return readFileSync(join(f.dir, 'sleeps'), 'utf8').split('\n').filter(Boolean).length;
+};
+
+test('a host Node without import.meta.main: the refusal names the Node requirement, exits 7 and captures nothing (#4650)', async () => {
+  const { UNSUPPORTED_NODE } = await import('./load.mjs');
+  const f = fixture('cap');
+  try {
+    const src = readFileSync(join(here, 'load.mjs'), 'utf8');
+    expect(src.split('(import.meta.main)').length - 1).toBe(2);   // the guard call and the entry check, as in entry2627
+    const r = checkAgainst(f, src.split('(import.meta.main)').join('(undefined)'));
+    expect(r.status).toBe(7);
+    // The message, whole and first: it precedes the check-failed line, and only the message is printed (no stack frames).
+    const lines = r.stderr.split('\n');
+    const at = lines.indexOf(UNSUPPORTED_NODE);
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(lines[at + 1]).toContain('could not run the load record check on this host (node exit 3)');
+    expect(r.stderr).not.toMatch(/\n\s+at /);
+    expect(r.stderr).not.toContain('printed no valid load record');
+    expect(settleSleeps(f)).toBe(1);   // only the settle sleep ran: no idle tail, no snapshot after the refusal
+  } finally { f.clean(); }
+});
+
+test('any import error of the record check is named, message only (a load.mjs that cannot resolve a module) (#4650)', () => {
+  const f = fixture('cap');
+  try {
+    const r = checkAgainst(f, "import './nope-4650.mjs';\nexport const loadRecordOk = () => true;\n");
+    expect(r.status).toBe(7);
+    expect(r.stderr).toContain('nope-4650.mjs');
+    expect(r.stderr).toContain('could not run the load record check on this host (node exit 3)');
+    expect(r.stderr).not.toMatch(/\n\s+at /);
+    expect(settleSleeps(f)).toBe(1);
+  } finally { f.clean(); }
+});
+
 // #2624: the freshness slack is two periods of the interval the preload RECORDED, not a fixed 2000 ms. A last sample
 // 3 s old passes at a recorded 2500 ms (slack 5 s) and is stale at the 1000 ms default (slack 2 s); 6 s old is stale
 // even at 2500 ms (the control); a run whose samples record no supported interval is refused.

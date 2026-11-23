@@ -728,6 +728,7 @@ model Organization {
   exchangeConnections    ExchangeConnection[]
   connectionFlows        ConnectionFlow[]
   slackConnections       SlackConnection[]
+  telegramConnections    TelegramConnection[]
   mcpServers             McpServer[]
   homeAssistantInstances HomeAssistantInstance[]
   resendSender           ResendSender?
@@ -3582,6 +3583,104 @@ model SlackEventReceipt {
   @@map("slack_event_receipts")
 }
 
+/// One Telegram bot registered for a Hadron App (#597, Telegram phase 2). The bot token is held ENCRYPTED IN THE
+/// TELEGRAM TOOL (hadrontool-telegram), never in core: createTelegramConnection forwards it once and this row keeps
+/// only the identity the tool derived.
+///
+/// Relationships: `organization` is the App's owning organization (an App with no organization, a user-owned App,
+/// cannot have one); `app` is the App the bot belongs to. The tool's own connection id is `toolConnectionId`.
+///
+/// Behaviour:
+/// - Owner: the App, not the organization or a user (one bot per App, so the bot a person messages names the App).
+/// - One active connection per App: the partial unique index `telegram_connections_app_active_uniq` (raw SQL, in the
+///   migration and prisma/post-push.sql); a soft-deleted row never blocks a new one.
+/// - Routing: `toolConnectionId` is unique, so an inbound event resolves to exactly one connection.
+/// - Writes need an ADMIN or OWNER of the App's organization; reads need membership of it.
+///
+/// Decision record: hrn:node:hadronmemory.com:hadron-server:reference:hadrontool-telegram (decision 2).
+model TelegramConnection {
+  id               String    @id @default(cuid())
+  organizationId   String    @map("organization_id")
+  appId            String    @map("app_id")
+  /// The telegramClient dispatch key ('telegram' today).
+  provider         String    @default("telegram")
+  /// The provider tool's connection id: the ops-call handle and the events-ingress routing key.
+  toolConnectionId String    @map("tool_connection_id")
+  /// The bot's Telegram user id, as the tool reports it (a decimal string).
+  botId            String    @map("bot_id")
+  /// The bot's @username without the at sign.
+  botUsername      String    @map("bot_username")
+  displayName      String    @map("display_name")
+  /// 'ACTIVE' | 'ERROR', the tool's connection-status vocabulary.
+  status           String    @default("ACTIVE")
+  /// Error message from the last permanent provider failure.
+  lastError        String?   @map("last_error")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  createdBy        String?   @map("created_by")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  deletedAt        DateTime? @map("deleted_at")
+  deletedBy        String?   @map("deleted_by")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  app          App          @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([toolConnectionId])
+  @@index([organizationId])
+  @@index([appId])
+  @@map("telegram_connections")
+}
+
+/// The record that one incoming Telegram event has been taken for processing, kept so the same event is not
+/// processed twice (the tool delivers at least once).
+///
+/// Relationships: none by foreign key. `connectionId` is the tool's connection id
+/// (`TelegramConnection.toolConnectionId`); `eventId` is the tool's event id (Telegram's update id for a bot).
+///
+/// Behaviour: the dispatcher inserts a row for (connection, event) first and drops the delivery when that insert
+/// meets the unique key; a consumer that throws deletes its row so the retry runs again. Old rows are swept.
+model TelegramEventReceipt {
+  id           String   @id @default(cuid())
+  connectionId String   @map("connection_id")
+  eventId      String   @map("event_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([connectionId, eventId])
+  @@index([createdAt])
+  @@map("telegram_event_receipts")
+}
+
+/// A durable request to drop one chat tool's side of a connection (Telegram or Slack) once core has deleted its row
+/// (#4847; hrn:node:hadronmemory.com:specs:cor:int:030:03). Recorded in the deleting transaction, attempted after the commit,
+/// retried by a sweep until the tool CONFIRMS, capped after ten attempts with one alarm.
+///
+/// Relationships: none by foreign key, on purpose. A URN reclaim hard-deletes an App and the connection rows cascade away with it;
+/// the intent must outlive them. `connectionId` is the core row it was recorded for (informational only); `toolConnectionId` is the
+/// tool's own handle for the registration, the only thing the tool call needs.
+///
+/// Behaviour: `state` PENDING until the tool answers a success (CONFIRMED) or the tenth attempt fails (CAPPED: one alarm, no more
+/// retries, an operator requeues it). `attempts` counts claims; the wait after attempt n is 5 minutes doubling to at most 6 hours.
+/// A row exists only for a deletion that happened after this table did: older orphans have no intent and are out of scope.
+model ChatToolTeardownIntent {
+  id               String    @id @default(cuid())
+  /// 'telegram' | 'slack'.
+  kind             String
+  /// The client's dispatch key ('telegram' | 'slack' today).
+  provider         String
+  toolConnectionId String    @map("tool_connection_id")
+  connectionId     String?   @map("connection_id")
+  /// 'PENDING' | 'CONFIRMED' | 'CAPPED' (chk_chat_tool_teardown_state, #4945: Prisma cannot model it; post-push.sql and the migration carry it).
+  state            String    @default("PENDING")
+  attempts         Int       @default(0)
+  lastAttemptAt    DateTime? @map("last_attempt_at")
+  confirmedAt      DateTime? @map("confirmed_at")
+  cappedAt         DateTime? @map("capped_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@unique([kind, toolConnectionId])
+  @@index([state, lastAttemptAt])
+  @@map("chat_tool_teardown_intents")
+}
+
 /// The server's record of one web-polling job that a headless run started: which run, App, agent and user the
 /// job belongs to, and under which policy. When the polling tool later reports a change, this row decides which
 /// run principal that event may wake.
@@ -3693,7 +3792,7 @@ model McpServer {
   @@map("mcp_servers")
 }
 
-/// One named secret in the platform's secret store, owned by a user, an organization, an App or a memory. A run
+/// One named secret in the platform's secret store, owned by a user, an organization or an App. A run
 /// or a tool that needs a credential names the secret, and the server resolves and decrypts it for that use.
 ///
 /// Relationships: the owner is (`ownerType`, `ownerId`), deliberately without a foreign key. Whether a caller
@@ -3701,13 +3800,14 @@ model McpServer {
 /// App-owned secret keeps its value in SecretVersion rows.
 ///
 /// Behaviour:
-/// - Resolution: a bare name is looked up from the most specific owner to the least: memory, then App, then
-///   user, then organization. The name is unique per owner.
+/// - Resolution: a bare name is looked up from the most specific owner to the least: user, then organization.
+///   App secrets are outside that cascade (hrn:node:hadronmemory.com:specs:cor:sec:020:01). The name is unique
+///   per owner.
 /// - `kind` says what the secret is: `generic` is opaque; `webfetch-auth` is typed, with `metadata`
 ///   `{ type, urlPrefix }`, and is used only for requests under that URL prefix.
 /// - `metadata` is the part that is not secret and may be shown: a reader can see that a secret exists and where
 ///   it applies. `valueEncrypted` is never selected into a read.
-/// - For a user, organization or memory secret the value is in `valueEncrypted`, and a rotation overwrites it.
+/// - For a user or organization secret the value is in `valueEncrypted`, and a rotation overwrites it.
 ///   For an App secret that column is null and the value is the newest SecretVersion (`chk_secret_app_value`).
 ///   `protected` has a meaning only for App secrets.
 /// - Deleting is a hard delete; a run that still names the secret fails visibly.
@@ -3715,7 +3815,7 @@ model McpServer {
 /// Background: #677, #3997.
 model Secret {
   id             String   @id @default(cuid())
-  ownerType      String   @map("owner_type") // 'user' | 'org' | 'app' | 'memory'
+  ownerType      String   @map("owner_type") // 'user' | 'org' | 'app'
   ownerId        String   @map("owner_id")
   /// Cascade-resolution key; unique per owner; lowercase [a-z0-9-], max 64.
   name           String
@@ -3804,8 +3904,8 @@ model HomeAssistantInstance {
 /// Relationships: at most one per Organization, deleted with it.
 ///
 /// Behaviour: the server stores the API key encrypted and write-only. The stateless Resend capability tool
-/// receives the key only for a send that has already been authorized. One sender per organization means the
-/// credential used is never chosen by a model.
+/// receives the key only for a send, or for the read-only domain-status lookup (#4865), each after it has
+/// been authorized. One sender per organization means the credential used is never chosen by a model.
 model ResendSender {
   id              String   @id @default(cuid())
   organizationId  String   @unique(map: "resend_senders_organization_id_uniq") @map("organization_id")
@@ -4056,12 +4156,13 @@ model App {
   wakeReservations        AppWakeReservation[]
   agentTeamEvents         AgentTeamEvent[]
   darkWorkerEpisodes      DarkWorkerEpisode[]
-  cadenceEpisodes         CoordinatorCadenceEpisode[]
-  cadenceClocks           CoordinatorCadenceClock[]
+  cadenceEpisodes         LeadCadenceEpisode[]
+  cadenceClocks           LeadCadenceClock[]
   postLimitEpisodes       PostLimitEpisode[]
   startFailingEpisodes    StartFailingEpisode[]
   hostSweepRuns           HostSweepRun[]
   hostSweepEpisodes       HostSweepEpisode[]
+  saturationEpisodes      SaturationEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
   memoryWriteGrants       AppMemoryWriteGrant[]
@@ -4125,6 +4226,7 @@ model App {
   automationVersions      AutomationVersion[]
   connectionGrants        ConnectionGrant[]         @relation("AppConnectionGrants")
   slackConnections        SlackConnection[]
+  telegramConnections     TelegramConnection[]
   memoryConfigTemplates   MemoryConfigTemplate[]
 
   @@index([organizationId])
@@ -4136,6 +4238,15 @@ model App {
   @@index([urn])
   @@index([ownerUserId])
   @@index([legacyUrn])
+  /// #4937 (hrn:node:hadronmemory.com:specs:cor:agt:050:31): the App's latest report of whether work exists OUTSIDE Hadron
+  /// (GitHub issues and the like), made by an App manager through `reportExternalTasks`. NULL = never reported, and the
+  /// lead cadence alarm does not exist for such an App. The platform never learns what the external tasks are, and there
+  /// is no staleness rule: the latest report counts however old it is.
+  externalTasksExist                Boolean?             @map("external_tasks_exist")
+  /// When the latest report that CHANGED the answer was made (database clock). NULL until the first report.
+  externalTasksReportedAt           DateTime?            @map("external_tasks_reported_at")
+  /// The user who made that report (a bare id, no relation: the report is a fact, not a membership).
+  externalTasksReportedBy           String?              @map("external_tasks_reported_by")
   @@index([chatbotAiConfigId])
   @@map("apps")
 }
@@ -4530,8 +4641,8 @@ model AppAgent {
 model Worker {
   id                String    @id @default(cuid())
   darkWorkerEpisodes DarkWorkerEpisode[]
-  cadenceEpisodes    CoordinatorCadenceEpisode[]
-  cadenceClock       CoordinatorCadenceClock?
+  cadenceEpisodes    LeadCadenceEpisode[]
+  cadenceClock       LeadCadenceClock?
   postLimitEpisodes PostLimitEpisode[]
   startFailingEpisodes StartFailingEpisode[]
   appId             String    @map("app_id")
@@ -4622,8 +4733,9 @@ model Worker {
   explicitNoTeam Boolean @default(false) @map("explicit_no_team")
   /// #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — the latest terminal report a HOST made for this worker, built by the server
   /// (`src/lib/workerTerminal.ts`): host {id,label}, status, prompt, reason (a closed code), lastTurnAt, checkedAt,
-  /// reportedAt. Null until a host first reports. A stored report that DECIDES NOTHING: it feeds no `checkStatus`,
-  /// availability, matcher, stall rule or alarm. No screen text is ever stored; `chk_workers_terminal_shape` (in
+  /// reportedAt. Null until a host first reports. A stored report that decides ONE thing (#4933): the platform issues no
+  /// desired-running start for a worker whose agent this host already runs (`src/lib/desiredState/desiredStart.ts`); it feeds no `checkStatus`,
+  /// availability, stall rule or alarm. No screen text is ever stored; `chk_workers_terminal_shape` (in
   /// prisma/host-operation-invariants.sql) allows exactly the keys above, so a write that bypasses the resolver still
   /// cannot store more. Read behind `maySeeWorkerInternals` (hrn:node:hadronmemory.com:specs:cor:dmo:050:11).
   /// #4225 S4a — the object also carries `contextTokens` and `contextMeasuredAt` (the worker's context size as its
@@ -5659,6 +5771,10 @@ model SecretEvent {
   sessionId   String?  @map("session_id")
   runId       String?  @map("run_id")
   at          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)"))
+  /// #4875: the tiebreak when `at` ties (`at` is timestamp(3), so rows of one transaction can share a millisecond, and a UUIDv7 `id` is random
+  /// inside one millisecond, so it is no insertion order). A bigserial the DDL fills; reads order `(at, seq)`, `at` first. Rows that predate the
+  /// column got arbitrary values among their ties, so nothing reads `seq` as the order of history before #4875.
+  seq         BigInt   @default(autoincrement())
 
   @@index([ownerType, ownerId, at], map: "secret_events_owner_at_idx")
   @@index([secretId, at], map: "secret_events_secret_at_idx")
@@ -5869,7 +5985,7 @@ enum AppRunTriggerKind {
 /// webhook, a manual request, an integration event or another run. The row is the run's durable record, and it is
 /// also what allows the run to go on: every action inside the run checks the row again.
 ///
-/// Relationships: one foreign key to an owner, `agentId` to Agent (#3689): every run names an existing Agent, and
+/// Relationships: one foreign key to an owner, `agentId` to Agent (#3689): once the `app_run_agent_required` migration has applied, every run names an existing Agent, and
 /// deleting an Agent row deletes its runs. `organizationId`, `appId`, `userId`, `triggerId` and `parentRunId` are plain
 /// ids, so the database deletes nothing with them. ManualAutomationPin, WebFetchPollBinding and WebFetchEventReceipt
 /// rows point at a run, and so does the record of the prompt a run was served (a foreign key in
@@ -7230,12 +7346,17 @@ model AppAutomationReadGrantEvent {
 ///   node's current file. A REMOVE row is an old path that a move left behind, named by `removeLoc`
 ///   (`removeLoc` is empty for WRITE). `branch` is the branch the attempt resolved to, empty only for older
 ///   rows written before the branch was recorded.
-/// - A row exists only while the last settled attempt failed. A success deletes it, and so does an ordinary
-///   write to a memory that is not mirrored (src/integrations/github/mirrorObligations.ts, the only writer).
+/// - A row exists while the debt is unapplied. A success deletes it, and so does an ordinary
+///   write to a memory that is not mirrored. FAILED/NOT_CLONED/EXHAUSTED rows are written by
+///   src/integrations/github/mirrorObligations.ts after a settled attempt; a PENDING row is born
+///   from the #425 nodes trigger the moment a delete removes the node's file from what the mirror
+///   owes, before any attempt has run (prisma/git-mirror-obligation-invariants.sql).
 /// - `attemptSeq` comes from the sequence `git_mirror_attempt_seq`, taken inside the per-memory checkout lock
 ///   and settled before the lock is released. A settle only applies over a lower `attemptSeq`, so a late
-///   settle never overwrites a newer one.
-/// - `state`: FAILED can be retried, NOT_CLONED means there is no local clone, EXHAUSTED means the retry sweep
+///   settle never overwrites a newer one. The #425 trigger takes a sequence value at capture, so its row
+///   is fenced against exactly like any older attempt.
+/// - `state`: PENDING is a captured, never-attempted delete debt due on the next sweep pass; FAILED can be
+///   retried, NOT_CLONED means there is no local clone, EXHAUSTED means the retry sweep
 ///   reached its attempt cap (an ordinary write can still settle the row).
 /// - `errorClass` is one of a fixed set of words (CHECK in prisma/git-mirror-obligation-invariants.sql). No
 ///   exception text, URL or token is ever stored.
@@ -7273,9 +7394,12 @@ enum GitMirrorObligationKind {
   @@map("git_mirror_obligation_kind")
 }
 
+/// PENDING = a delete debt the nodes trigger captured, no attempt run yet (#425, due on the next sweep pass);
 /// FAILED = retryable failure; NOT_CLONED = no local clone; EXHAUSTED = sweep cap reached (ordinary writes still
 /// settle).
 enum GitMirrorObligationState {
+  /// #425: the nodes trigger captured the debt; no attempt has run yet. Due on the next sweep pass.
+  PENDING
   FAILED
   NOT_CLONED
   EXHAUSTED
@@ -7583,7 +7707,7 @@ model AgentTaskCounter {
 ///   sealed record of who acted and what it concerned, and a foreign-key action would have to update the row.
 /// - An alarm has AgentTeamAlarmSchedule rows (who it wakes, and when) and at most one AlarmEscalationEnd.
 /// - An alarm that is about no task has one episode row that points at it: DarkWorkerEpisode,
-///   CoordinatorCadenceEpisode, PostLimitEpisode, StartFailingEpisode or HostSweepEpisode.
+///   LeadCadenceEpisode, PostLimitEpisode, StartFailingEpisode, HostSweepEpisode or SaturationEpisode.
 /// - WorkerDeliveryTaskEvent rows record the delivery of an event to a worker.
 ///
 /// Behaviour:
@@ -7597,7 +7721,7 @@ model AgentTaskCounter {
 ///   alarm with no task, which is why those have episode tables.
 /// - `txId` is the id of the writing transaction, set by the database, so a reader can page in commit order.
 /// - Most events are written by src/lib/agentTasks/events.ts. The modules that raise an alarm about no task
-///   insert their own alarm rows (darkWorker.ts, coordinatorCadence.ts, postLimit.ts and sweepRuns.ts in
+///   insert their own alarm rows (darkWorker.ts, leadCadence.ts, postLimit.ts and sweepRuns.ts in
 ///   src/lib/agentTasks, and src/lib/desiredState/desiredStart.ts), and src/lib/stopSignals/notices.ts,
 ///   src/lib/hostOperations/sessionEnd.ts and src/lib/contextReset/contextReset.ts write events of their own.
 ///
@@ -7654,14 +7778,18 @@ model AgentTeamEvent {
   wakes      AgentTeamAlarmSchedule[]
   deliveries WorkerDeliveryTaskEvent[]
   darkEpisode DarkWorkerEpisode?
-  cadenceEpisode CoordinatorCadenceEpisode?
+  cadenceEpisode LeadCadenceEpisode?
   postLimitEpisode PostLimitEpisode?
   startFailingEpisode StartFailingEpisode?
   hostSweepEpisode HostSweepEpisode?
+  saturationEpisode SaturationEpisode?
   /// #3934 (V77): the recorded end of this alarm's escalation, written once by the evaluator pass or the acknowledgement.
   escalationEnd AlarmEscalationEnd?
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
+  /// #4344 (ruling A): the App joins the key. The three-column index above is kept until the contract migration drops it
+  /// (an image still writing the three-column ON CONFLICT target would raise 42P10 without it).
+  @@unique([appId, taskId, type, episodeStart], map: "agent_team_events_episode_app_uniq")
   @@index([appId, createdAt])
   /// #4084: the changed-since read's commit-safe order (agentTaskExternalIdChanges).
   @@index([appId, txId, createdAt, id])
@@ -7800,44 +7928,47 @@ model DarkWorkerEpisode {
   @@map("dark_worker_episodes")
 }
 
-/// One period during which a worker that is expected to hand out tasks was late doing so: it assigned no task
-/// for 60 minutes while a worker it could have given work to was free. The row opens with the alarm raised
-/// about the worker and is closed when the worker next assigns a task.
+/// One period during which a lead was late handing out work: it assigned no task for 60 minutes while a worker
+/// under it was free for work. The row opens with the alarm raised about the lead and is closed when the lead
+/// next assigns a task.
 ///
-/// Which workers: a Worker whose `role` is the text `coordinator` (compared without regard to case) and that
-/// is not retired. `role` is free text on Worker; this one value is what the platform reads to find the
-/// workers whose assigning it times. The name of the model is historical and under review in #4375.
+/// Which workers: every LEAD, a worker that at least one worker reports to (the reporting line, hrn:node:hadronmemory.com:specs:cor:agt:020:12),
+/// that is not retired. No `role` takes part: a worker in any role is watched when it leads, and a worker that
+/// nobody reports to is not watched. The one definition of a lead is src/lib/agentTasks/leads.ts. A worker that
+/// stops being a lead while its episode is open has the episode ended by the next pass (`endedAt` is that pass's
+/// time): the alarm says a lead stopped assigning, and ending it stops the escalation up the reporting line.
 ///
 /// Episode pattern: an alarm is an AgentTeamEvent, which is append-only, and an alarm about no task cannot be
 /// de-duplicated by that table's unique index. So each period during which the condition holds is one row
-/// here, with at most one open row per worker, inserted in the same transaction as the alarm. That makes it
+/// here, with at most one open row per lead, inserted in the same transaction as the alarm. That makes it
 /// one alarm per episode, and gives the alarm an end.
 ///
 /// Relationships: belongs to an App and to the Worker it is about, and is deleted with either. `event` is the
-/// alarm raised with the episode (an AgentTeamEvent of type `alarm.coordinator-cadence`, with no task), one to
-/// one.
+/// alarm raised with the episode (an AgentTeamEvent of type `alarm.lead-cadence`, with no task; episodes raised
+/// before #4375 carry `alarm.coordinator-cadence`, which is history and is read the same way), one to one.
 ///
 /// Behaviour:
-/// - The stall evaluator's pass (`evaluateCoordinatorCadence`, src/lib/agentTasks/coordinatorCadence.ts, every
-///   minute) opens an episode when such a worker has made no assignment of its own for 60 minutes and at least
-///   one worker in its lane is free for work. Its lane is the workers whose reporting line leads to it, and
-///   the workers that report to no one. Another such worker, and a worker under a stop signal, never count as
-///   free.
-/// - Only a task the worker itself assigns or reassigns counts (an AgentTeamEvent of type `task.assigned` or
-///   `task.reassigned` with the worker as actor). Assignments made by the matcher do not.
-/// - The 60 minutes run from the latest of the worker's last own assignment, the start of its first session,
-///   and the moment in CoordinatorCadenceClock.
-/// - A worker is not judged late while its team is paused, it is paused itself, or it is under a stop signal.
+/// - The stall evaluator's pass (`evaluateLeadCadence`, src/lib/agentTasks/leadCadence.ts, every minute)
+///   opens an episode when a lead has made no assignment of its own for 60 minutes and at least one worker
+///   under it is free for work. The workers under a lead are those whose reporting line leads to it, and the
+///   workers that report to no one. A lead, a sub-lead included, and a worker under a stop signal never count
+///   as free.
+/// - Only a task the lead itself assigns or reassigns counts (an AgentTeamEvent of type `task.assigned` or
+///   `task.reassigned` with the lead as actor). Assignments made by the matcher do not.
+/// - The 60 minutes run from the latest of the lead's last own assignment, the start of its first session,
+///   and the moment in LeadCadenceClock.
+/// - A lead is not judged late while its team is paused, it is paused itself, or it is under a stop signal.
 ///   Having no live session is not an exemption.
-/// - At most one open row per worker (partial unique index in prisma/coordinator-cadence-invariants.sql). The
-///   episode ends only at the worker's next own assignment, and `endedAt` is that assignment's time. A lane
-///   worker turning busy, or the worker being paused, does not end it, so neither raises a second alarm.
-/// - While the worker is exempt the 60 minutes keep running; only the judgment is skipped. A worker that comes
+/// - At most one open row per lead (partial unique index in prisma/lead-cadence-invariants.sql). The episode
+///   ends only at the lead's next own assignment, and `endedAt` is that assignment's time. A worker under the
+///   lead turning busy, or the lead being paused, does not end it, so neither raises a second alarm.
+/// - While the lead is exempt the 60 minutes keep running; only the judgment is skipped. A lead that comes
 ///   back after a long pause without having assigned anything can be judged late at once.
 /// - AlarmEscalationEnd and the wake schedule read `endedAt` to stop the alarm's escalation.
 ///
-/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31. Background: #2763.
-model CoordinatorCadenceEpisode {
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31 (Decided in part, including the 60-minute trigger).
+/// Background: #2763, renamed and re-pointed by #4375.
+model LeadCadenceEpisode {
   id       String    @id @default(cuid())
   appId    String    @map("app_id")
   workerId String    @map("worker_id")
@@ -7850,44 +7981,37 @@ model CoordinatorCadenceEpisode {
   event  AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
   @@index([appId, endedAt])
-  @@map("coordinator_cadence_episodes")
+  @@map("lead_cadence_episodes")
 }
 
-/// The moment the platform first saw a worker as one whose task assigning it times. One row per such worker.
-/// It gives the worker a starting point for its 60-minute window, so that a worker the platform has only just
-/// begun to watch is not reported late at once.
+/// The moment the cadence evaluator first saw this worker as a lead. A lead that has never assigned a task is not
+/// late until 60 minutes after this time (or after its first live session, if later); see
+/// hrn:node:hadronmemory.com:specs:cor:agt:050:31. One row per lead, written once and never updated. Its sibling
+/// LeadCadenceEpisode records the open alarm.
 ///
-/// Which workers: a Worker whose `role` is the text `coordinator` (compared without regard to case) and that
-/// is not retired. `role` is free text on Worker; this one value is what the platform reads to find the
-/// workers that are expected to hand out tasks to others. The name of the model is historical and under review
-/// in #4375.
+/// Why the evaluator needs the row: the other moments that start a lead's 60 minutes (its last own assignment
+/// and the start of its first session) can be missing or old. A worker that never assigned a task and never had
+/// a session has neither, and a lead that existed before the evaluator first ran can have both far in the past.
+/// Without a recorded first sighting, such a lead would be late on the very first pass. With it, the lead is
+/// not late until 60 minutes after the platform first saw it as a lead. A worker that becomes a lead later gets
+/// its row at the first pass that sees it as one.
 ///
-/// What is timed: how long such a worker has gone without assigning or reassigning a task itself. When that
-/// reaches 60 minutes while a worker it could give work to is free, the platform raises one alarm about it
-/// and opens a CoordinatorCadenceEpisode. The 60 minutes run from the latest of three moments: the worker's
-/// last own assignment, the start of its first session, and `observedAt` in this row.
-///
-/// A worker is not judged late while its team is paused, it is paused itself, or it is under a stop signal.
-/// Having no live session is not an exemption. While the worker is exempt the 60 minutes keep running; only the
-/// judgment is skipped.
-///
-/// Why the evaluator needs the row: the first two moments can be missing or old. A worker that never assigned
-/// a task and never had a session has neither, and a worker that existed before the evaluator first ran can
-/// have both far in the past. Without a recorded first sighting, such a worker would be late on the very first
-/// pass. With it, the worker is not late until 60 minutes after the platform first saw it.
+/// Which workers: the leads (a worker that at least one worker reports to, hrn:node:hadronmemory.com:specs:cor:agt:020:12; no `role` takes part;
+/// the one definition is src/lib/agentTasks/leads.ts). A lead that is judged late has an open LeadCadenceEpisode.
 ///
 /// Relationships: belongs to the Worker it is about (`workerId` is the primary key) and to that worker's App,
 /// and is deleted with either.
 ///
-/// Behaviour: inserted by `observe` in src/lib/agentTasks/coordinatorCadence.ts, which the stall evaluator's
-/// pass (src/jobs/taskStallEvaluator.ts, every minute) runs for each such worker when it decides whether the
-/// worker is late, and again inside the transaction that raises the alarm. The insert is
-/// `ON CONFLICT DO NOTHING`, so the first pass to see a worker sets `observedAt` and concurrent passes agree
-/// on it. No code updates or deletes a row: a worker that stops being watched and is watched again later
-/// keeps its first `observedAt`.
+/// Behaviour: inserted by `observe` in src/lib/agentTasks/leadCadence.ts, which the stall evaluator's pass
+/// (src/jobs/taskStallEvaluator.ts, every minute) runs for each lead when it decides whether the lead is late,
+/// and again inside the transaction that raises the alarm. The insert is `ON CONFLICT DO NOTHING`, so the first
+/// pass to see a lead sets `observedAt` and concurrent passes agree on it. No code updates a row. The row belongs to
+/// the lead's current stint: each pass deletes the rows of the App's workers that are not leads, so a worker that
+/// stops leading and leads again, or one that kept a row from before the rename, gets a fresh `observedAt` at the
+/// first pass that sees it as a lead.
 ///
-/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31. Background: #2763.
-model CoordinatorCadenceClock {
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31. Background: #2763, renamed and re-pointed by #4375.
+model LeadCadenceClock {
   workerId   String   @id @map("worker_id")
   appId      String   @map("app_id")
   observedAt DateTime @map("observed_at")
@@ -7895,7 +8019,7 @@ model CoordinatorCadenceClock {
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
-  @@map("coordinator_cadence_clocks")
+  @@map("lead_cadence_clocks")
 }
 
 /// One period, at most an hour long, during which the platform's attempts to start a worker kept failing. The
@@ -8065,6 +8189,49 @@ model HostSweepEpisode {
   @@map("host_sweep_episodes")
 }
 
+/// One period during which a family/tier/role combination of an App is saturated: the platform could not
+/// give work of that combination to anyone. #3819 slice 1.
+///
+/// Episode pattern: an alarm is an AgentTeamEvent, which is append-only, and an alarm about no task cannot be
+/// de-duplicated by that table's unique index. So each period during which the condition holds is one row
+/// here, with at most one open row per (App, family, tier, role), inserted in the same transaction as the
+/// alarm. That makes it one alarm per episode across passes and instances, and gives the alarm an end.
+///
+/// Relationships: belongs to an App and is deleted with it. `event` is the alarm raised with the episode (an
+/// AgentTeamEvent of type `alarm.saturation`, with no task, no subject worker and an empty chain), one to one.
+/// `family`, `tier` and `role` are the combination as AgentMatchOutcome keys it: a dimension a task left open
+/// is the empty string (so the composite key has no NULL), and the role is lower case.
+///
+/// Behaviour:
+/// - The stall evaluator's pass (`evaluateSaturation`, src/lib/agentTasks/saturation.ts, every minute) opens an
+///   episode for a combination that is saturated and has none open (partial unique index in
+///   prisma/saturation-invariants.sql). Saturated, windowless: the combination's latest match outcome is no
+///   worker and under 168 hours old (by its decision time, on the database clock), or it has at least one
+///   worker that is not retired and none eligible (a paused family, every worker unavailable).
+/// - The same pass ends it when neither holds: a match recorded against the combination, an eligible worker
+///   gained while the latest outcome is not no worker, the no-worker outcome reaching 168 hours (whether or not
+///   the matcher purged its row), or its last worker retired. Also when the App is deleted or uninstalled.
+/// - Acknowledging the alarm does not end the episode (hrn:node:hadronmemory.com:specs:cor:agt:060:16). The alarm has no chain, so it wakes
+///   nobody and no AlarmEscalationEnd is recorded for it.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:060:15. Background: #3819.
+model SaturationEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  family   String
+  tier     String
+  role     String
+  eventId  String    @unique @map("event_id")
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app   App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  event AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("saturation_episodes")
+}
+
 /// Whether one worker is available for work, and if not, why and until when. It is one of the inputs to
 /// whether the matcher may give the worker a task. A worker with no row is available.
 ///
@@ -8229,6 +8396,20 @@ model AgentTaskStallSchedule {
   /// operation it collected before the platform fails it: 5 to 1440; null is
   /// the default, 60.
   hostReportTimeoutMinutes Int?     @map("host_report_timeout_minutes")
+  /// #4777 (hrn:node:hadronmemory.com:specs:cor:agt:060:16) — the roles a saturation alarm wakes: whoever manages the App
+  /// sets it (setSaturationAlarmWakeRoles). Empty by default, and the platform names no role of its own. Stored trimmed,
+  /// lower-cased, de-duplicated and sorted (at most 32 names of 1 to 64 characters, no ':' or whitespace); a worker's role
+  /// matches regardless of case. Read once, in the transaction that raises the alarm: a later change wakes nobody for it.
+  saturationWakeRoles      String[] @default([]) @map("saturation_wake_roles")
+  /// #4921 slice A (hrn:node:hadronmemory.com:specs:cor:agt:060:16 is the precedent) — the roles the App lists for three
+  /// purposes: whoever may link a defect to a pull request, the role route of the register pick, and whoever may withdraw
+  /// a negative review verdict besides its recorder. Whoever manages the App sets each (setAppRoleList). Empty by default,
+  /// and the platform names no role of its own. Same stored form as `saturationWakeRoles`: trimmed, lower-cased,
+  /// de-duplicated and sorted, at most 32 names of 1 to 64 characters, no ':' or whitespace; matched regardless of case.
+  /// Slice A stores them; no door reads them until slice B.
+  defectLinkRoles          String[] @default([]) @map("defect_link_roles")
+  registerPickRoles        String[] @default([]) @map("register_pick_roles")
+  reviewWithdrawRoles      String[] @default([]) @map("review_withdraw_roles")
   updatedAt                DateTime @updatedAt @map("updated_at")
   updatedBy                String?  @map("updated_by")
 
@@ -10170,6 +10351,8 @@ model Grant {
   /// activates one grant, so the column is unique.
   signatureId           String?   @unique @map("signature_id")
   revokedAt             DateTime? @map("revoked_at")
+  /// The person who ended it. #4767 (Grants R6): an agent's own withdrawal through a run records no person —
+  /// null with `withdrawnAt` set (the end's other half, the shape CHECK's rule).
   revokedBy             String?   @map("revoked_by")
   /// #4173 (hrn:node:hadronmemory.com:specs:cor:acl:140:03): the withdrawal marker, a FACT like `revokedAt` and never a state column. Equal to `revokedAt`, set once with
   /// the revoke stamp, on a never-activated row only. Rows withdrawn before #4173 have none and read as revoked.
@@ -10354,7 +10537,8 @@ model GrantSignature {
 ///   prisma/grant-invariants.sql).
 /// - `ACTIVATE` is written when a person's signature activates the grant and names the signer. `REVOKE` and
 ///   `WITHDRAW` are written when a person ends the grant and name that person and, when the act came through a
-///   worker's session, the worker and session. `USE` is written each time the grant is used and names the
+///   worker's session, the worker and session. A `WITHDRAW` may instead be an agent's own act through a run
+///   (#4767): it names no person and carries `runId` alone. `USE` is written each time the grant is used and names the
 ///   worker and session that used it. Each is written in the transaction of the act it records.
 /// - No code writes a `CREATE` event today, and a grant that ends because its holder went gets no event.
 /// - `at` is the database clock.
@@ -10367,7 +10551,7 @@ model GrantEvent {
   id           String   @id @default(cuid())
   grantId      String   @map("grant_id")
   appId        String   @map("app_id")
-  /// CREATE | ACTIVATE | REVOKE | USE (CHECK in grant-invariants.sql).
+  /// CREATE | ACTIVATE | REVOKE | WITHDRAW | USE (CHECK in grant-invariants.sql).
   action       String
   at           DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @db.Timestamp(3)
   actorUserId  String?  @map("actor_user_id")
