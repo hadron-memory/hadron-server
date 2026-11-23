@@ -562,7 +562,7 @@ export const hostOperationMutations = {
    * The server builds what it stores (`buildWorkerTerminal`): `host` is the key's host and its registration's label,
    * `reportedAt` is the server's clock. #4225 S4a: a report may carry the worker's context size (`contextTokens` with
    * `contextMeasuredAt`, or neither); a malformed size refuses the batch like any other malformed field, and a worker
-   * this host does not run is refused for its row as before, so its size is never stored. The report decides nothing. The alarm verdict is computed from the stored
+   * this host does not run is refused for its row as before, so its size is never stored. The report decides one thing (#4933): no desired-running start for a worker whose agent this host already runs; nothing else. The alarm verdict is computed from the stored
    * rows after the write and returned, never stored, and names only coordinators THIS host registers.
    */
   setHostWorkerTerminals: async (
