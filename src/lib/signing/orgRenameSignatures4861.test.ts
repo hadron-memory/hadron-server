@@ -1,7 +1,9 @@
 /**
  * #4861 (part of #4534; cor:urn:010:01 "whether any signature covers the URN text", cor:urn:030:01/:02): the platform's own
  * org is renamed (hadronmemory.com -> amalit.ai) and the old name is kept as an alias. This pins the audit's answer for the
- * two passkey-signed artifact kinds, through the REAL completion path and the REAL cascade (`propagateOrgUrnRename`):
+ * two passkey-signed artifact kinds. The NODE is signed through the real completion path; the GRANT record is built to the
+ * production row shape (the same fixture as signerOwnerBinding3827.test.ts; the real ceremony needs a browser nonce) and read back
+ * through the real read path. The rename is the production `updateOrganization` resolver, alias row included:
  *
  *   - a signed NODE (`hadron-signature-v3`: node id, approval hash over title/abstract/content, request id) still reads
  *     CURRENT after the org's memories are rewritten, even when its own content quotes the old URN text (the cascade
@@ -18,7 +20,9 @@ import { cleanDb, createDbNode, createDbOrgAndGraph } from '../../test/helpers.j
 import { insertSoftPasskey, softPasskey } from '../../test/softPasskey.js';
 import { DB_NOW, dropTestActions, insertGrant, seedWorld } from '../grants/grantFixtures3668.js';
 import { grantTermsFromRow, grantTermsHash } from '../grants/terms.js';
-import { propagateOrgUrnRename } from '../org/propagateOrgUrnRename.js';
+import { generateId } from '../id.js';
+import { computeApprovalHash } from '../approvalHash.js';
+import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { grantSignaturePayloadBytes, GRANT_SIGNATURE_PAYLOAD_V1 } from './grantPayload.js';
 import { loadGrantSignatureStatuses } from './grantStatus.js';
 import { signaturePayloadBytes, SIGNATURE_PAYLOAD_V3 } from './payload.js';
@@ -31,17 +35,24 @@ const RP = 'example.test';
 const NEW_ORG = 'renamed4861.example';
 const exec = (sql: string, ...params: unknown[]) => db.$executeRawUnsafe(sql, ...params);
 
-/** What the rename does to the data: the org row takes the new name and the cascade rewrites its children, in one transaction. */
+/**
+ * The PRODUCTION rename: the `updateOrganization` resolver (resolvers.mutation.org.ts), which mints the new root principal,
+ * records the org's own alias (#1079) and runs `propagateOrgUrnRename` in one transaction. Calling it, not re-implementing
+ * it, so the alias row and any other table it touches are part of what the signatures are re-read against.
+ */
 async function renameOrg(organizationId: string): Promise<string> {
-  const org = await db.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { urn: true } });
-  await db.$transaction(async (tx) => {
-    await tx.organization.update({ where: { id: organizationId }, data: { urn: NEW_ORG } });
-    await propagateOrgUrnRename(tx, organizationId, org.urn, NEW_ORG);
-  });
+  const before = (await db.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { urn: true } })).urn;
+  const admin = await db.user.create({ data: { githubId: 4861900 + Math.floor(Math.random() * 90000), githubUsername: `rename-admin-${generateId()}`, roles: ['ADMIN'] } });
+  await resolvers.Mutation.updateOrganization({}, { ref: organizationId, urn: NEW_ORG }, { db, userId: admin.id, roles: ['ADMIN'] } as unknown as Context);
+  expect((await db.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { urn: true } })).urn).toBe(NEW_ORG);
+  // The old name is kept as an alias (cor:urn:030:01): the audit's claim holds with the alias in place, not only without it.
+  expect(await db.urnAlias.count({ where: { entityType: 'ORGANIZATION', entityId: organizationId, urn: before } })).toBeGreaterThan(0);
   clearSignatureVerifyCache(); // never let a cached verdict stand in for re-verification
-  return org.urn;
+  return before;
 }
 
+const saved = { origins: process.env.SIGNING_CEREMONY_ORIGINS, rp: process.env.PASSKEY_RP_ID };
+const restore = (k: 'SIGNING_CEREMONY_ORIGINS' | 'PASSKEY_RP_ID', v: string | undefined) => { if (v === undefined) delete process.env[k]; else process.env[k] = v; };
 beforeEach(async () => {
   await cleanDb(db);
   clearSignatureVerifyCache();
@@ -49,15 +60,15 @@ beforeEach(async () => {
   process.env.PASSKEY_RP_ID = RP;
 });
 afterEach(() => {
-  delete process.env.SIGNING_CEREMONY_ORIGINS;
-  delete process.env.PASSKEY_RP_ID;
+  restore('SIGNING_CEREMONY_ORIGINS', saved.origins);
+  restore('PASSKEY_RP_ID', saved.rp);
 });
 afterAll(async () => { await cleanDb(db); await dropTestActions(); });
 
 describe('#4861 a signed node survives the org rename', () => {
   it('reads CURRENT before and after, with its own content quoting the old URN text', async () => {
-    const requester = (await db.user.create({ data: { githubId: 4861101, githubUsername: 'rename-req', roles: [] } })).id;
-    const signerId = (await db.user.create({ data: { githubId: 4861102, githubUsername: 'rename-signer', roles: [] } })).id;
+    const requester = (await db.user.create({ data: { githubId: 4861100 + Math.floor(Math.random() * 9000), githubUsername: `rename-req-${generateId()}`, roles: [] } })).id;
+    const signerId = (await db.user.create({ data: { githubId: 4862100 + Math.floor(Math.random() * 9000), githubUsername: `rename-signer-${generateId()}`, roles: [] } })).id;
     const { org, graph } = await createDbOrgAndGraph(db, { orgName: 'rename-org-4861', graphName: 'rename-4861' });
     const oldOrgUrn = (await db.organization.findUniqueOrThrow({ where: { id: org.id }, select: { urn: true } })).urn;
     const memoryId = graph.id;
@@ -77,12 +88,19 @@ describe('#4861 a signed node survives the org rename', () => {
       memoryId, signerId, credentialId: key.credentialId, assertion, mayWrite: async () => true,
     }));
     const read = async () => (await loadSignatureStatuses(db, [nodeId])).get(nodeId)!;
+    const nodeHash = async () => {
+      const n = await db.node.findUniqueOrThrow({ where: { id: nodeId }, select: { name: true, abstract: true, content: true } });
+      return computeApprovalHash({ title: n.name, abstract: n.abstract, content: n.content });
+    };
+    const hashBefore = await nodeHash();
+    expect(hashBefore).toBe(req.approvalHash); // the hash the person signed is the node's own
     expect(await read()).toMatchObject({ state: 'CURRENT', integrityProblems: 0 });
 
     await renameOrg(org.id);
 
     expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn.startsWith(`${NEW_ORG}:`)).toBe(true);
     expect((await db.node.findUniqueOrThrow({ where: { id: nodeId }, select: { content: true } })).content).toContain(`hrn:node:${oldOrgUrn}:`);
+    expect(await nodeHash()).toBe(hashBefore); // the cascade never touched the signed text
     const after = await read();
     expect(after).toMatchObject({ state: 'CURRENT', integrityProblems: 0 });
     expect(after.signatures).toHaveLength(1);
@@ -120,6 +138,14 @@ describe('#4861 a signed grant survives the org rename', () => {
     await renameOrg(app.organizationId!);
 
     expect((await db.app.findUniqueOrThrow({ where: { id: row.appId }, select: { urn: true } })).urn).not.toBe(oldAppUrn);
+    const orgId = app.organizationId!;
+    const urns = [
+      ...(await db.app.findMany({ where: { organizationId: orgId }, select: { urn: true } })),
+      ...(await db.agent.findMany({ where: { organizationId: orgId }, select: { urn: true } })),
+      ...(await db.memory.findMany({ where: { organizationId: orgId }, select: { urn: true } })),
+    ].map((x) => x.urn);
+    expect(urns.length).toBeGreaterThan(0);
+    expect(urns.every((u) => u.startsWith(`${NEW_ORG}:`))).toBe(true); // Apps, Agents and Memories alike
     expect(await read()).toMatchObject({ state: 'CURRENT', integrityProblems: 0 });
   });
 });
