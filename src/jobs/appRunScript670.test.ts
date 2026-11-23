@@ -265,7 +265,6 @@ describe('script node (#670, cor:agt:010:04)', () => {
     });
   });
 
-  // Gizelle P3: the loader's exclusion follows the import format: present, even empty, counts.
   // #4775 acceptance 1 (cor:sec:030:01): the echo redaction, through the flow runtime rather than at the tool dispatcher.
   it('a web_request script node whose remote echoes the injected credential leaves none of it in the run or the output node', async () => {
     const CANARY = 'canary-4775-flow-VALUE';
@@ -286,15 +285,15 @@ describe('script node (#670, cor:agt:010:04)', () => {
       });
       await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
       const url = 'https://api.example.test/v1/orders';
-      vi.mocked(httpRequest).mockImplementation(async (input) => {
+      vi.mocked(httpRequest).mockImplementationOnce(async (input) => {
         const token = (input as { auth?: { token?: string } }).auth?.token; // echo what was really sent, never a fixture string
         return { method: 'GET', finalUrl: url, status: 200, headers: { 'x-echo': `Bearer ${token}` }, contentType: 'application/json',
-          body: { echoed: `Bearer ${token}`, marker: 'echo-body-4775' }, truncated: false } as never;
+          body: { echoed: `Bearer ${token}`, encoded: Buffer.from(String(token)).toString('base64'), marker: 'echo-body-4775' }, truncated: false } as never;
       });
       await makeNode('flow:s', script({ method: 'GET', url, secretClientId: clientId }, 'web_request'));
       const run = await mint();
       expect(await executeAppRun(db, run.id, deps().d)).toBe('completed');
-      expect(vi.mocked(httpRequest).mock.calls).toMatchObject([[{ auth: { type: 'bearer', token: CANARY } }]]);
+      expect(vi.mocked(httpRequest).mock.calls).toMatchObject([[{ method: 'GET', url, redirects: 'none', auth: { type: 'bearer', token: CANARY } }]]);
 
       // The output node holds the echo, redacted: proof the result reached it, so the absence below is not an empty write.
       const nodes = await db.node.findMany({ where: { memoryId } });
@@ -302,11 +301,13 @@ describe('script node (#670, cor:agt:010:04)', () => {
       expect(output).toHaveLength(1);
       expect(JSON.stringify(output[0])).toContain('[REDACTED]');
       expect(JSON.stringify(nodes)).not.toContain(CANARY);
+      expect(JSON.stringify(nodes)).not.toContain(Buffer.from(CANARY).toString('base64'));
       const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
       expect(JSON.stringify(after, (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v))).not.toContain(CANARY);
     } finally { vi.unstubAllEnvs(); }
   });
 
+  // Gizelle P3: the loader's exclusion follows the import format: present, even empty, counts.
   it('script together with an empty tools or extractionSpec array is also refused at load (as the import format does)', async () => {
     for (const extra of [{ tools: [] }, { extractionSpec: [] }]) {
       await db.node.deleteMany({ where: { memoryId, loc: 'flow:s' } });

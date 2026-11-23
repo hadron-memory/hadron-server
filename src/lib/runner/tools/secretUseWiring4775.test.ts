@@ -180,6 +180,19 @@ describe('#4775 cap counts refusals only, and delete-at-last-use works through w
   });
 });
 
+describe('#4775 a use is not refunded (prepareSecretUse JSDoc)', () => {
+  it('a network failure after the use leaves the ticket, the run action and the grant use spent', async () => {
+    await tickets(1);
+    const before = await budget();
+    vi.mocked(httpRequest).mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+    await expect(call()).rejects.toThrow('ECONNREFUSED');
+    expect(httpRequest).toHaveBeenCalledTimes(1);
+    expect(await budget()).toBe(before! - 1);
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(1);
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, action: 'secret.use', consumedByRunId: ctx.run.id } })).toBe(1);
+  });
+});
+
 describe('#4775 a signed delete-marked secret.use grant deletes its secret when its window ends (item 3, cor:sec:060:03)', () => {
   const HOUR = 3_600_000;
   /** Set terms the grant guard forbids changing after issue; replica mode applies to this transaction only. */
@@ -213,7 +226,8 @@ describe('#4775 a signed delete-marked secret.use grant deletes its secret when 
     expect(await db.grant.findUniqueOrThrow({ where: { id: grantId } })).toEqual(grantBefore);
     expect(await db.grantEvent.findMany({ where: { grantId, action: 'USE' } })).toEqual(grantUses);
     expect(await db.secretEvent.findMany({ where: { clientId, kind: 'USE' } })).toEqual(secretUses);
-    // No other App's secret is touched: the second fixture secret survives.
+    // A second sweep finds nothing, and no other App's secret is touched: the second fixture secret survives.
+    expect(await sweepSecretAutoDelete(db)).toBe(0);
     expect(await db.secret.count()).toBe(1);
   });
 
