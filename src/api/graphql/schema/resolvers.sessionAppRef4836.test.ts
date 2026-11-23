@@ -25,9 +25,11 @@
  * Red-first note (#4844 fold, LOCAL F2): these pins and the implementation
  * landed in one commit (78af34826), so history cannot show the pins red. The
  * rerun: with this file held and the production change reverted
- * (`git show 78af34826^:…resolvers.mutation.session.ts`), 21 of 28 pins fail
- * (measured 2026-11-22); the 7 that pass are the member regression pins,
- * which are green on main by design.
+ * (reverse-apply the production hunks of aac9cd966 and 78af34826 to
+ * resolvers.mutation.session.ts), 24 of 31 pins fail (re-measured 2026-11-23,
+ * #4853; the 21 of 28 recorded before it was exact for the 28 `it` blocks
+ * on main then, and #4853 added three member-side pins, all red); the 7 that
+ * pass are the member regression pins, which are green on main by design.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError, buildSchema, defaultFieldResolver, graphql } from 'graphql';
@@ -232,15 +234,17 @@ describe('#4836 — a pure App key naming any other App gets the same unknown-Ap
     const gone = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'Gone Key App', urn: `${org.urn}:gone-key`, uninstalledAt: new Date() },
     });
-    try {
-      await startSession(ctx(undefined, gone.id), { appRef: gone.id });
-      expect.fail('expected APP_UNINSTALLED');
-    } catch (e) {
-      const g = e as GraphQLError;
-      expect(g.extensions?.code).toBe('APP_UNINSTALLED');
-      expect(g.extensions?.appId).toBe(gone.id);
-      expect(g.message).toBe('Cannot start a session in an uninstalled App.');
-    }
+    // One call, one non-vacuous assertion: capture the rejection (the 1037 file's shape) so a resolved call
+    // fails with its own message instead of being swallowed by the catch.
+    const e = await startSession(ctx(undefined, gone.id), { appRef: gone.id }).then(
+      () => { throw new Error('expected APP_UNINSTALLED'); },
+      (x: unknown) => x,
+    );
+    const g = e as GraphQLError;
+    expect(g).toBeInstanceOf(GraphQLError);
+    expect(g.extensions?.code).toBe('APP_UNINSTALLED');
+    expect(g.extensions?.appId).toBe(gone.id);
+    expect(g.message).toBe('Cannot start a session in an uninstalled App.');
   });
 });
 
@@ -270,6 +274,30 @@ describe('#4836 — a caller WITH standing keeps the specific answers (regressio
       data: { id: generateId(), organizationId: org.id, name: 'Gone App', urn: `${org.urn}:gone2`, uninstalledAt: new Date() },
     });
     await concealedRefusal(startSession(ctx(admin.id), { appRef: `hrn:app:${gone.urn}` }), [gone.urn, gone.id]);
+  });
+});
+
+describe('#4836 — a MEMBER gets the concealed answer for malformed and ambiguous refs too (cor:dmo:070:05; the SDL says "to a member exactly as to an outsider")', () => {
+  // The fold runs before standing is judged, so these never reach the reach gate: a member is
+  // told nothing more than an outsider about a ref that does not resolve.
+  it('a member naming a malformed bare ref CARRYING A CANARY', async () => {
+    await concealedRefusal(startSession(ctx(appMember.id), { appRef: CANARY }), [CANARY]);
+  });
+
+  it('a member naming a canary inside an otherwise well-formed App URN', async () => {
+    const ref = `hrn:app:${org.urn}:${CANARY}`;
+    await concealedRefusal(startSession(ctx(appMember.id), { appRef: ref }), [ref, CANARY]);
+  });
+
+  it('a member naming an ambiguous legacy URN (two live rows claim it)', async () => {
+    const legacyUrn = `${org.urn}:legacy-dup-member`;
+    for (const slug of ['dup-ma', 'dup-mb']) {
+      await db.app.create({
+        data: { id: generateId(), organizationId: org.id, name: `Dup ${slug}`, urn: `${org.urn}:${slug}`, legacyUrn },
+      });
+    }
+    const ref = `hrn:app:${legacyUrn}`;
+    await concealedRefusal(startSession(ctx(appMember.id), { appRef: ref }), [ref, legacyUrn]);
   });
 });
 
@@ -343,21 +371,28 @@ describe('#4836 — the envelope through the real GraphQL schema (full execution
     });
 
   it('a missing App and an existing-but-inaccessible App answer the SAME bytes over the wire', async () => {
-    const missing = await exec(`hrn:app:${org.urn}:no-such-app`, ctx(outsider.id));
-    const existing = await exec(app.id, ctx(outsider.id));
+    // Each assertion below is tied to the value its call SENT (Braxton F5, #4853): the constants are what the
+    // calls send, so a renamed ref moves the call and the assertion together instead of leaving an
+    // absence check that can no longer fail.
+    const missingRef = `hrn:app:${org.urn}:no-such-app`;
+    const existingRef = app.id;
+    const missing = await exec(missingRef, ctx(outsider.id));
+    const existing = await exec(existingRef, ctx(outsider.id));
     for (const r of [missing, existing]) {
       expect(r.errors).toHaveLength(1);
       expect(r.errors![0]!.message).toBe('App not found.');
       expect(r.errors![0]!.extensions?.code).toBe('APP_NOT_FOUND');
     }
     expect(JSON.stringify(existing.errors![0]!.extensions)).toBe('{"code":"APP_NOT_FOUND"}');
-    // Meaningful absence (Braxton F3, #4844): each call's OWN inputs — the
-    // missing call's sent URN, the existing call's App PK — must not appear.
-    // (The old `not.toContain(CANARY)` here could never fail: the `missing`
-    // call never sent the canary.)
+    // Meaningful absence (Braxton F3, #4844): each call's OWN inputs — the missing call's sent URN (whole,
+    // and its slug and org parts), the existing call's App PK — must not appear. (The old
+    // `not.toContain(CANARY)` here could never fail: the `missing` call never sent the canary.)
+    expect(missingRef).toContain('no-such-app'); // the substrings below are parts of what was sent
+    expect(missingRef).toContain(org.urn);
+    expect(JSON.stringify(missing.errors)).not.toContain(missingRef);
     expect(JSON.stringify(missing.errors)).not.toContain('no-such-app');
     expect(JSON.stringify(missing.errors)).not.toContain(org.urn);
-    expect(JSON.stringify(existing.errors)).not.toContain(app.id);
+    expect(JSON.stringify(existing.errors)).not.toContain(existingRef);
   });
 
   it('a canary-bearing malformed ref over the wire: the canary appears nowhere', async () => {
@@ -376,12 +411,20 @@ describe('#4836 — the envelope through the real GraphQL schema (full execution
     // formatter masks it as INTERNAL_SERVER_ERROR (cor:api:260:01 — never
     // APP_NOT_FOUND), and no session row is written.
     const fault = new Error('sar4836: db fault inside the ref lookup');
-    const spy = vi.spyOn(db.app, 'findFirst').mockRejectedValue(fault);
+    // Seam (Braxton F2, #4853): the spy faults ONLY the ref lookup (the `where` carries this ref's URN) and
+    // passes every other `app.findFirst` through, and the pin asserts it fired on that exact `where`. A
+    // refactor that puts another `findFirst` ahead of the lookup, or moves the lookup off `app.findFirst`,
+    // fails here instead of silently leaving the narrow-catch mutant-kill measuring a different call.
+    const refUrn = `${org.urn}:no-such-app`;
+    const original = db.app.findFirst.bind(db.app) as (args: any) => Promise<unknown>;
+    const spy = vi.spyOn(db.app, 'findFirst').mockImplementation(((args: any) =>
+      args?.where?.urn === refUrn ? Promise.reject(fault) : original(args)) as any);
     try {
       await expect(
-        startSession(ctx(outsider.id), { appRef: `hrn:app:${org.urn}:no-such-app` }),
+        startSession(ctx(outsider.id), { appRef: `hrn:app:${refUrn}` }),
       ).rejects.toThrow('sar4836: db fault inside the ref lookup');
-      const r = await exec(`hrn:app:${org.urn}:no-such-app`, ctx(outsider.id));
+      expect(spy.mock.calls.some(([a]) => (a as any)?.where?.urn === refUrn), 'the fault pin never reached the ref lookup').toBe(true);
+      const r = await exec(`hrn:app:${refUrn}`, ctx(outsider.id));
       expect(r.errors).toHaveLength(1);
       expect(r.errors![0]!.message).not.toBe('App not found.');
       const e = r.errors![0]!;
