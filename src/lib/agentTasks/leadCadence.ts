@@ -6,6 +6,13 @@
  * (`darkAlarmChain`). The stall evaluator's pass calls `evaluateLeadCadence`. The email to people outside the team is
  * the follow-up, blocked on ruling 0116; nothing here sends one.
  *
+ * WHEN THE ALARM EXISTS (#4937, Holger 2026-11-22). Only for an App whose LATEST external-tasks report says tasks exist
+ * (`reportExternalTasks`, an App manager's call; `apps.external_tasks_exist`). An App that never reported (null) or whose
+ * latest report says none (false) raises no NEW alarm. There is no setting and no staleness rule: an old report is still the
+ * latest. A report of none does not end an open episode (an episode ends only as below). Clocks are kept for every lead
+ * either way, so the first report, or a flip to exists, alarms at once for a lead already idle for the window. Hadron tasks
+ * play no part: no clause reads queued tasks.
+ *
  * WHO. Every LEAD: a worker that at least one worker reports to, not retired (cor:agt:020:12), as defined once in
  * `./leads.ts`. No role name takes part: a worker in any role is watched when it leads, and a worker that nobody
  * reports to is not watched, whatever its role. The exemptions are the dark-worker alarm's, one source:
@@ -90,6 +97,12 @@ async function observe(db: PrismaClient, appId: string, workerIds: string[], now
   return new Map(rows.map((r) => [r.workerId, r.observedAt]));
 }
 
+/** True only when the App's latest report says external tasks exist; never reported (null) and none (false) are both off. */
+async function externalTasksExist(db: PrismaClient, appId: string): Promise<boolean> {
+  const row = await db.app.findUnique({ where: { id: appId }, select: { externalTasksExist: true } });
+  return row?.externalTasksExist === true;
+}
+
 type Late = { workerId: string; lastAssignedAt: Date | null; freeWorkerCount: number };
 
 /**
@@ -103,6 +116,10 @@ async function decide(db: PrismaClient, appId: string, workerId: string, now: Da
   const leads = await leadWorkerIds(db, appId);
   if (!leads.has(workerId)) return null;
   const observed = await observe(db, appId, [workerId], now);
+  // #4937 (cor:agt:050:31): the alarm exists only while the App's LATEST report says external tasks exist. Read here, after the
+  // clock is observed, so the raise transaction re-reads it on its own connection: a report of none that commits between the
+  // pass and the insert stops the new alarm. No staleness rule: an old report is still the latest.
+  if (!(await externalTasksExist(db, appId))) return null;
   const last = (await lastCountedAssignments(db, appId, [workerId])).get(workerId) ?? null;
   const first = (await firstSessionStarts(db, [workerId])).get(workerId);
   // The pending reason is read directly, not through the check status: NO_SESSION would hide it, and a lead with no live
