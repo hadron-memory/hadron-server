@@ -22,6 +22,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { mintUserApiKey } from '../middleware/auth.js';
 import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
+import type { AuthContext } from '../middleware/auth.js';
 
 let server: Server;
 let baseUrl: string;
@@ -41,6 +42,7 @@ let appA: { id: string; urn: string };
 let appB: { id: string; urn: string };
 let userA: { id: string };
 let userB: { id: string };
+let org: { id: string; urn: string };
 
 const mintKey = async (userId: string, issuedVia: string) =>
   (await mintUserApiKey(db, { userId, label: 'test', createdBy: userId, issuedVia })).rawKey;
@@ -48,7 +50,7 @@ const mintKey = async (userId: string, issuedVia: string) =>
 beforeEach(async () => {
   await cleanDb(db);
   const suffix = generateId().slice(-8);
-  const org = await db.organization.create({ data: { id: generateId(), name: 'oc-org', urn: `oc-${suffix}.com` } });
+  org = await db.organization.create({ data: { id: generateId(), name: 'oc-org', urn: `oc-${suffix}.com` } });
   appA = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'App A', urn: `${org.urn}:app-a` } });
   appB = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'App B', urn: `${org.urn}:app-b` } });
   // Two Apps each, so App scope is ambiguous without a selection and a restore is observable.
@@ -207,6 +209,40 @@ describe('#2605 — the per-user fallback, OAuth callers only', () => {
     expect(await scopeOnReconnect(phone)).toContain('no active App');
     // And another header-sending API-key client of the same user starts from nothing.
     expect(await scopeOnReconnect(agent, 'agent-2')).toContain('no active App');
+  });
+
+  it('a key MINTED BY an OAuth-issued key carries no OAuth client: not persisted, and neither reads nor feeds the per-user record', async () => {
+    // `hadron auth token create` from an OAuth login: the minted key inherits issuedVia, but it goes into some other
+    // client's config (an agent's), and agents on API keys must not follow one record (ruling 7).
+    const login = await mintUserApiKey(db, { userId: userA.id, label: 'login', createdBy: userA.id, issuedVia: 'oauth:dcr_cli' });
+    const derived = (await mintUserApiKey(db, {
+      userId: userA.id, label: 'agent', createdBy: userA.id, issuedVia: 'oauth:dcr_cli', mintedByKeyId: login.userApiKey.id,
+    })).rawKey;
+    await select(login.rawKey, appA);
+    expect(await scopeOnReconnect(derived)).toContain('no active App');
+    await select(derived, appB);
+    expect(await scopeOnReconnect(derived)).toContain('no active App');
+    const phone = await mintKey(userA.id, 'oauth:dcr_phone');
+    const text = await scopeOnReconnect(phone);
+    expect(text).toContain(appA.urn);
+    expect(text).not.toContain(appB.urn);
+  });
+
+  it("the per-user record is one client's WHOLE selection, never fields from two clients", async () => {
+    // Each save writes one field. Patching the per-user record field by field would leave it with the desktop's memory
+    // and the cursor's App: a starting point no client ever had.
+    const { saveActiveApp, saveActiveMemory, USER_DEFAULT_CLIENT_KEY } = await import('../lib/mcpSessionState.js');
+    const memory = await db.memory.create({
+      data: { id: generateId(), class: 'knowledge', name: 'docs', urn: `${org.urn}:docs`, organizationId: org.id, visibility: 'ORGANIZATION' },
+    });
+    const oauthAuth = (clientId: string) => ({ userId: userA.id, roles: ['READER'], oauthClientId: clientId }) as AuthContext;
+    await saveActiveApp(db, oauthAuth('dcr_desktop'), 'oauth:dcr_desktop', appA.id);
+    await saveActiveMemory(db, oauthAuth('dcr_desktop'), 'oauth:dcr_desktop', memory.id);
+    await saveActiveApp(db, oauthAuth('dcr_cursor'), 'oauth:dcr_cursor', appB.id);
+    const own = await db.mcpSessionState.findUniqueOrThrow({
+      where: { userId_clientKey: { userId: userA.id, clientKey: USER_DEFAULT_CLIENT_KEY } },
+    });
+    expect({ appId: own.appId, memoryId: own.memoryId }).toEqual({ appId: appB.id, memoryId: null });
   });
 
   it("another user's OAuth client never starts from this user's selection", async () => {
