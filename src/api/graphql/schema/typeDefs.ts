@@ -5996,8 +5996,8 @@ export const typeDefs = `#graphql
     """
     checkStatus: WorkerCheckStatus
     """
-    #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — the latest terminal report a host made for this worker. Stored; since #4933 a fresh report from the
-    registering host that shows an agent withholds the platform's desired-running start (hrn:node:hadronmemory.com:specs:cor:agt:070:08), and it decides nothing else;
+    #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — the latest terminal report a host made for this worker. Stored; since #4933 a fresh report from a host that
+    registers the worker and shows an agent withholds the platform's desired-running start on every host (hrn:node:hadronmemory.com:specs:cor:agt:070:08), and it decides nothing else;
     judge its age from checkedAt. Null until a host reports, and masked to null on the same read gate as checkStatus.
     """
     terminal: WorkerTerminal
