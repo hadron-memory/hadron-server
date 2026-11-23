@@ -433,30 +433,55 @@ export function isStatementTimeout(e: unknown, phase?: 'waiting' | 'running'): b
 }
 
 /**
- * #4779 (BLIND P2-1, Elena) — the early-stop test for one budgeted vector transaction. Besides {@link isStatementTimeout}:
- * a P2028 raised while still WAITING for a connection is the early stop, not a pool error, when the wait was cut short by
- * the request's deadline (`txMs` below the ordinary `VECTOR_TX_MAX_WAIT_MS`): the budget ran out while queued, which is
- * the work budget ending the search (cor:api:090:04), not the pool failing. A wait that had its full `maxWait` and still
- * timed out stays an error that reaches alerting.
- */
-/**
  * Clock slack for "the request deadline has passed" when Prisma reports the connection-wait timeout (BLIND F5): Prisma
  * fires that timeout on its own timer, which can run a few milliseconds ahead of ours, so a wait that ended AT the deadline
  * must not read as one that ended before it.
  */
 const DEADLINE_CLOCK_SLACK_MS = 25;
 
+/**
+ * #4779 (BLIND P2-1, Elena) — the early-stop test for one budgeted vector transaction. Besides {@link isStatementTimeout}:
+ * a P2028 raised while still WAITING for a connection is the early stop, not a pool error, when the wait was cut short by
+ * the request's deadline (`txMs` below the ordinary `VECTOR_TX_MAX_WAIT_MS`): the budget ran out while queued, which is
+ * the work budget ending the search (cor:api:090:04), not the pool failing. A wait that had its full `maxWait` and still
+ * timed out stays an error that reaches alerting.
+ */
 function isVectorEarlyStop(e: unknown, phase: 'waiting' | 'running', txMs: number, deadline: number, cappedByRequest: boolean): boolean {
   if (isStatementTimeout(e, phase)) return true;
   const err = e as { code?: string; message?: string; meta?: { message?: string } } | null;
   // BLIND N2 (Elena): only Prisma's connection-wait timeout (not any Transaction API error), only when the wait was
   // capped by the request's deadline (not the ordinary maxWait), and only when that deadline has in fact passed.
-  return err?.code === 'P2028' && phase === 'waiting'
+  const stop = err?.code === 'P2028'
+    // #4938: `phase === 'waiting'` is implied, not pinned: a P2028 in phase 'running' already returned true through
+    // isStatementTimeout(e, 'running') above, so this term changes no outcome (the gate's equivalence proof).
+    && phase === 'waiting'
     && /unable to start a transaction/i.test(`${err.message ?? ''} ${err.meta?.message ?? ''}`)
     // BLIND F6 (Elena): the REQUEST deadline (`deadlineAt`) must be what bound the wait, not merely a budget below the
     // ordinary maxWait (a small VECTOR_SEARCH_TIMEOUT_MS with no request deadline is still pool pressure).
     && cappedByRequest && txMs < VECTOR_TX_MAX_WAIT_MS && Date.now() >= deadline - DEADLINE_CLOCK_SLACK_MS;
+  if (stop) notePoolWaitEarlyStop();
+  return stop;
 }
+
+/**
+ * #4938 F5 (Elena, BLIND on #4928 at 5ad0665b) — a pool wait the request deadline cut short is the early stop, so it never
+ * reaches error alerting; when that happens on every request (a saturated pool, or a budget below `VECTOR_TX_MAX_WAIT_MS`)
+ * pool pressure would be silent. Count every such stop and log one fixed line, at most once a minute, carrying the count
+ * since the last line: visible to log alerting, never one line per request.
+ */
+let poolWaitEarlyStops = 0;
+let poolWaitLoggedAt = 0;
+export const POOL_WAIT_LOG_INTERVAL_MS = 60_000;
+function notePoolWaitEarlyStop(): void {
+  poolWaitEarlyStops++;
+  const now = Date.now();
+  if (now - poolWaitLoggedAt < POOL_WAIT_LOG_INTERVAL_MS) return;
+  poolWaitLoggedAt = now;
+  console.warn(`vector.pool_wait_early_stop count=${poolWaitEarlyStops} — vector searches stopped early while waiting for a pooled connection (the request deadline ended the wait)`);
+  poolWaitEarlyStops = 0;
+}
+/** Test seam: re-arm the once-a-minute line and zero its count. */
+export function resetPoolWaitEarlyStopLogForTests(): void { poolWaitEarlyStops = 0; poolWaitLoggedAt = 0; }
 
 /** Prisma options for one budgeted vector transaction: its clock runs past the budget so Postgres ends the statement first. */
 function vectorTxOptions(budgetMs: number): { timeout: number; maxWait: number } {
