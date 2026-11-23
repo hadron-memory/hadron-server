@@ -47,6 +47,13 @@ export interface SpliceOptions {
    * "unrestricted", and must not turn a foreign URN into a read.
    */
   foreign?: boolean;
+  /**
+   * #4689 — a per-target reader for a render whose `access` is not a real read filter (`{}`): a URN tag naming
+   * another memory is followed only when this answers true for that memory. It is the reader's own read
+   * decision (`foreignIncludeReader`), asked after the lookup was charged, so a missing, unreadable and
+   * readable target cost the same. Never set with `foreign`.
+   */
+  foreignReader?: (memoryId: string) => Promise<boolean>;
   memo?: IncludeReadMemo;
   /**
    * #2135 — when set, the `{{>` of every include tag written as code is replaced by this guard in the
@@ -283,7 +290,9 @@ async function expandTag(
       memo.targetIdentityByUrn.set(tag.target, identity);
     }
     const resolved = await identity;
-    if (!resolved || (resolved.memoryId !== includerMemoryId && !opts.foreign)) return unresolved(opts);
+    if (!resolved) return unresolved(opts);
+    if (resolved.memoryId !== includerMemoryId && !opts.foreign &&
+        !(opts.foreignReader && await opts.foreignReader(resolved.memoryId))) return unresolved(opts);
     memoryId = resolved.memoryId;
     loc = resolved.loc;
     targetId = resolved.id;

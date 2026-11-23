@@ -305,6 +305,7 @@ import { resolveNodeRef, isConcealedNodeRefAmbiguity } from '../lib/entityRef/no
 import { resolveChannelRefId } from '../lib/entityRef/channelRef.js';
 import { sortSiblings } from '../lib/siblingOrder.js';
 import { assembleRunNodePrompt } from '../lib/runNodeRender.js';
+import { foreignIncludeReader } from '../lib/includes/foreignIncludeReader.js';
 import { compileTemplate } from '../lib/template.js';
 import {
   NodeNotFoundError,
@@ -9245,10 +9246,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     // dependencies they pass: a Mustache compile over the node's memory, and no flow-routing edge inlined. A limit
     // refusal (#40) is thrown before anything is recorded and becomes the tool's named refusal in `runBundleResult`.
     const readCtx = scopeCtx();
+    // #4689: foreign URN includes resolve under the caller's own read access (cor:dmo:150:04).
+    const foreignReader = foreignIncludeReader(db, auth);
     const rendered = await assembleRunNodePrompt({ ...node, loc }, args, {
       memoryUrnOf: memoizedMemoryUrnLookup(),
       compileTemplate: (content, data, memoryId) =>
-        compileTemplate(content, data, memoryId, db, {}).then((text) => chargeRequestServed(readCtx, content, text)),
+        compileTemplate(content, data, memoryId, db, {}, undefined, { foreignReader }).then((text) => chargeRequestServed(readCtx, content, text)),
       // The run node's OWN memory was gated by loadNodeForRun; this gates each
       // dependency separately, because an edge can cross memories (#781).
       includeTarget: (target) => !!target && canRead(target.memoryId),
