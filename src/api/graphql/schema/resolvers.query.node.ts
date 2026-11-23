@@ -1081,7 +1081,7 @@ export const nodeQueries = {
         }
         case 'agenttask': {
           // #3878 (hrn:node:hadronmemory.com:specs:cor:urn:010:01; ruling 0278): hrn:agenttask:<root>:<app-slug>:<handle>,
-          // the URN AgentTask.urn emits (handle in lower case), read in either case. The leaf is the HANDLE only: the
+          // the URN AgentTask.urn emits (handle in lower case); the HANDLE is read in either case, the App part as written. The leaf is the HANDLE only: the
           // task-id leaf was never built and no qualified task-id URN resolves (cor:urn:010:01), so the wider task
           // reference form (targetHasKindForm) is not inherited. The App is resolved by reference, so a renamed App's
           // old spelling still resolves; then Query.agentTask's own gate decides (withReadableTask: a participant, the
