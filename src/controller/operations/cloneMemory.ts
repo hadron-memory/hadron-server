@@ -81,7 +81,9 @@ const SLUG_ATOM = 'A-Za-z0-9._-';
  * Rewrite every reference to `oldUrn` (stored legacy form) into `newUrn`
  * inside a text blob. Handles both the canonical (`org::slug`) and legacy
  * (`org:slug`) spellings, including `urn:<type>:`-prefixed and
- * node-loc-suffixed (`...::loc:part`) occurrences. Returns the input
+ * node-loc-suffixed (`...::loc:part`) occurrences. An `hrn:asset:<root>:<mem>:assets:<id>`
+ * URN is NOT rewritten (#3767, cor:api:150:01): assets are not copied, so the
+ * clone's text keeps pointing at the source's assets. Returns the input
  * unchanged (same reference) when nothing matches.
  */
 export function rewriteMemoryUrnRefs(
@@ -100,7 +102,7 @@ export function rewriteMemoryUrnRefs(
     [oldForms.legacy, newForms.legacy],
   ] as const) {
     const re = new RegExp(
-      `(?<![${LEFT_BOUNDARY}])${escapeRegExp(from)}(?![${RIGHT_BOUNDARY}])(?!\\.[${SLUG_ATOM}])`,
+      `(?<!(?:hrn|urn):asset:)(?<![${LEFT_BOUNDARY}])${escapeRegExp(from)}(?![${RIGHT_BOUNDARY}])(?!\\.[${SLUG_ATOM}])`,
       'g',
     );
     out = out.replace(re, to);

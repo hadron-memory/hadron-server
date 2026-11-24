@@ -12,9 +12,11 @@ name: URN renames are aliased
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
+# A queue entry (merge_group) has no PR number, so it gets its own group and is never cancelled; see CLAUDE.md, Merge notes (#4819).
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

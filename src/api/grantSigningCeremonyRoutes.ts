@@ -115,7 +115,7 @@ function render(out){
  const why=el('section');why.appendChild(el('h2','The requester\\'s reason'));
  why.appendChild(el('p','In their own words. Hadron did not write or check this text.'));
  why.appendChild(el('blockquote',v.requesterReason));
- why.appendChild(el('p','Written by '+(v.reasonAuthor.name||'a deleted user')+(v.reasonAuthor.via?' via '+v.reasonAuthor.via:'')+', who asked for this grant.'));view.appendChild(why);
+ why.appendChild(el('p',v.reasonAuthor.run?'Written by an automated run of this App, which asked for this grant.':'Written by '+(v.reasonAuthor.name||'a deleted user')+(v.reasonAuthor.via?' via '+v.reasonAuthor.via:'')+', who asked for this grant.'));view.appendChild(why);
  const meta=el('section');meta.appendChild(el('h2','This request'));
  meta.appendChild(el('p','Signature requested by '+v.requester.name+(v.requester.via?' via '+v.requester.via:'')+'.'));
  meta.appendChild(el('p','Expires '+stamp(new Date(v.requestExpiresAt))+'.'));

@@ -24,6 +24,7 @@ import { sessionKeyCache } from '../../lib/sessionKeyCache.js';
 import { generateDataKey } from '../../lib/crypto.js';
 import { encryptNodeFields, decryptNodeFields } from '../../lib/nodeCrypto.js';
 import { createTestableMcpServer } from '../../mcp/server.js';
+import { finishableParents, finishField } from '../../test/finishWarningCarrier.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -206,7 +207,7 @@ describe('encrypted merge and restore, and a section save', () => {
     await update('v3 plain');
     const revision = (revNo: number) => db.nodeRevision.findFirstOrThrow({ where: { nodeId: node.id, revNo } });
     const restore = (revisionId: string) =>
-      run('mutation($id:ID!){restoreNodeRevision(revisionId:$id){id content}}', { id: revisionId });
+      run('mutation($id:String!){restoreNodeRevision(nodeRevRef: $id){id content}}', { id: revisionId });
 
     const unpinned = await restore((await revision(1)).id);
     expect(unpinned.errors).toBeUndefined();
@@ -241,10 +242,12 @@ describe('the final response cap', () => {
   it('a mixed task + include response over the cap carries exactly the first MAX_WARNINGS_PER_RESPONSE, in order, with data and no errors', async () => {
     const TASKS = 15;
     const NODES = 15;
-    const task = (i: number) => `t${i}: createAgentTask(input: { appRef: "${appId}", title: "task ${i}" }) { id }`;
+    // #4793: a source-less create no longer warns; a finish with an open child is the task-side carrier.
+    const parents = await finishableParents(M, ctx(), appId, TASKS, { user: userId });
+    const finish = (i: number) => finishField(`t${i}`, parents[i]);
     const node = (i: number) => `n${i}: createNode(input: { memoryId: "${memoryId}", loc: "pinned-${i}", name: "pinned ${i}", content: "${pin()}" }) { id }`;
     const aliases = [
-      ...Array.from({ length: TASKS }, (_, i) => task(i)),
+      ...Array.from({ length: TASKS }, (_, i) => finish(i)),
       ...Array.from({ length: NODES }, (_, i) => node(i)),
     ];
     expect(TASKS + NODES).toBeGreaterThan(MAX_WARNINGS_PER_RESPONSE);
@@ -254,10 +257,10 @@ describe('the final response cap', () => {
     expect(Object.values(r.data as Record<string, { id: string }>).every((v) => !!v.id)).toBe(true);
     const warnings = r.extensions?.warnings as { path: string; code: string }[];
     expect(warnings.map((w) => `${w.path}:${w.code}`)).toEqual([
-      ...Array.from({ length: TASKS }, (_, i) => `t${i}:task.create.no-source`),
+      ...Array.from({ length: TASKS }, (_, i) => `t${i}:task.finish.open-children`),
       ...Array.from({ length: MAX_WARNINGS_PER_RESPONSE - TASKS }, (_, i) => `n${i}:${WARNING.code}`),
     ]);
     // Every write committed even where its advice was cut.
     expect(await db.node.count({ where: { memoryId, loc: { startsWith: 'pinned-' } } })).toBe(NODES);
-  });
+  }, 30_000); // #4793: the finishable parents are set up inside the test
 });

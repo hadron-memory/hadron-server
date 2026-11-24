@@ -9,6 +9,7 @@ import { GraphQLError } from 'graphql';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { createSlackToolConnection, deleteSlackToolConnection } from '../../../lib/slackClient.js';
+import { dispatchChatToolTeardown, recordChatToolTeardown } from '../../../lib/chatToolTeardown.js';
 import type { Context } from './resolvers.helpers.js';
 import { isOrgMemberOrAdmin, requireOrgRole } from './resolvers.helpers.js';
 
@@ -35,7 +36,7 @@ export const slackMutations = {
 
     // The tool validates both tokens live and derives the workspace + BOTH
     // bot ids; the tokens go no further than this call.
-    const identity = await createSlackToolConnection('slack', { botToken, appToken });
+    const identity = await createSlackToolConnection('slack', { botToken, appToken, appId: defaultAppId }); // appId: the App the connection serves; it is part of the registrationKey
 
     // EVERY failure past this point tears the tool row down — otherwise the
     // tool would hold encrypted tokens + a socket with no core row and no
@@ -64,7 +65,13 @@ export const slackMutations = {
         },
       });
     } catch (err) {
-      void deleteSlackToolConnection('slack', identity.id);
+      // #4829: with an idempotent registration the tool can hand back an id a LIVE core row already holds (a repeat or
+      // concurrent registration of the same install by the same App). Tear the tool row down only if no live core row
+      // holds it, or the winner's connection would point at a deleted tool row. A failed lookup skips the teardown.
+      const heldByCore = await ctx.db.slackConnection
+        .count({ where: { toolConnectionId: identity.id, deletedAt: null } })
+        .then((n) => n > 0, () => true);
+      if (!heldByCore) void deleteSlackToolConnection('slack', identity.id);
       // A concurrent duplicate hits the PARTIAL unique
       // (slack_connections_org_team_active_uniq) — same answer as the
       // pre-check, which only exists for the friendly common case.
@@ -88,11 +95,17 @@ export const slackMutations = {
       throw new GraphQLError('Slack connection not found.', { extensions: { code: 'NOT_FOUND' } });
     }
     await requireOrgRole(ctx, connection.organizationId, 'ADMIN');
-    await ctx.db.slackConnection.update({
-      where: { id: connection.id },
-      data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+    // The guarded soft delete and the teardown INTENT are one transaction (#4847): a concurrent double delete records and asks the tool
+    // once (before, both passed the lookup and both asked), and a call that fails or is lost is retried by the sweep.
+    const torn = await ctx.db.$transaction(async (tx) => {
+      const { count } = await tx.slackConnection.updateMany({
+        where: { id: connection.id, deletedAt: null },
+        data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+      });
+      if (count !== 1) return null;
+      return recordChatToolTeardown(tx, { kind: 'slack', id: connection.id, provider: connection.provider, toolConnectionId: connection.toolConnectionId });
     });
-    void deleteSlackToolConnection(connection.provider, connection.toolConnectionId);
+    if (torn) dispatchChatToolTeardown([torn]);
     return true;
   },
 };

@@ -1,4 +1,4 @@
-import { encryptChatEngineStateWithKey, engineStateIncomplete } from '../../../lib/chatRootEngineState.js';
+import { encryptChatEngineStateWithKey, buildEngineStateIncompleteError } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../../../integrations/github/syncNotAttempted.js';
@@ -157,8 +157,9 @@ import {
   isMemoryMemberOwner,
   memoryMemberForbidden,
   resolveMemoryRefForMemberGate,
+  resolveMemoryRefConcealed,
   resolveSelfUserRefForMemberGate,
-  resolveUserRefArg,
+  resolveRequiredUserRef,
   resolveRequiredOrgRef,
   resolveRequiredMemoryRef,
   getAccessibleMemoryIds,
@@ -227,25 +228,19 @@ function assertValidBranches(input: {
 }
 
 /**
- * #769 — resolve the grantee of a memory-share mutation to a definite user id.
- * Prefer the new `granteeRef` (id / email / handle / `hrn:user:` URN, resolved
- * server-side against the full user table so a cross-org personal share works),
- * falling back to the deprecated `granteeId` PK for existing callers. Exactly
- * one must be supplied. A ref that resolves to no user surfaces NOT_FOUND rather
- * than the caller-facing controller error.
+ * #769 / #4137 — resolve the grantee of a memory-share mutation to a definite
+ * user id from `granteeRef` (id / email / handle / `hrn:user:` URN, resolved
+ * server-side against the full user table so a cross-org personal share
+ * works). #4137 dropped the deprecated `granteeId` alias: the ref is the only
+ * way in. A ref that resolves to no user surfaces NOT_FOUND rather than the
+ * caller-facing controller error; callers run it only AFTER the principal gate
+ * (cor:api:140:02: no user-enumeration oracle before authorization).
  */
 async function resolveGranteeId(
   ctx: Context,
-  args: { granteeRef?: string | null; granteeId?: string | null },
+  args: { granteeRef?: string | null },
 ): Promise<string> {
   const ref = args.granteeRef?.trim();
-  // Mutually exclusive: passing both is a caller mistake, and silently
-  // preferring one contradicts the schema (PR #774 review).
-  if (ref && args.granteeId) {
-    throw new GraphQLError('Pass either granteeRef or granteeId, not both.', {
-      extensions: { code: 'BAD_USER_INPUT' },
-    });
-  }
   if (ref) {
     try {
       const { id } = await resolveUserRefOrEmail(ctx.db, ref);
@@ -265,11 +260,21 @@ async function resolveGranteeId(
       throw e;
     }
   }
-  if (args.granteeId) return args.granteeId;
-  throw new GraphQLError('A grantee is required: pass granteeRef (or the deprecated granteeId).', {
+  throw new GraphQLError('granteeRef is required.', {
     extensions: { code: 'BAD_USER_INPUT' },
   });
 }
+
+/**
+ * #4137 — resolve the `memoryRef` of createMemoryShare / updateMemoryShareRole
+ * through the shared concealing resolution: an unknown, soft-deleted or ambiguous
+ * (legacy-URN) memory is answered as the share surface's uniform FORBIDDEN, the
+ * same bytes a non-principal gets for a real memory, so the ref cannot probe which
+ * memories exist (cor:api:140:02). A blank ref or relative URN is shape-only and
+ * propagates before the gate (cor:api:140:01).
+ */
+const resolveShareMemoryRef = (ctx: Context, memoryRef: string): Promise<string> =>
+  resolveMemoryRefConcealed(ctx, memoryRef, memoryShareForbidden);
 
 /**
  * Lock the (memory, agent) pair an attachment depends on, then re-read both
@@ -1023,7 +1028,8 @@ export const memoryMutations = {
 
       // 033 US5 FR-026 — enabling the vector index on an encrypted memory
       // requires explicit acknowledgment of the embedding-inversion
-      // disclosure (stored vectors are plaintext + partially invertible —
+      // disclosure (stored vectors are plaintext + partially invertible, and
+      // with content passages their verbatim chunk text is stored unencrypted —
       // see FR_026_DISCLOSURE in src/lib/entityRef/errors.ts for the full
       // four-point text). The friendly typed error fires at the API
       // boundary; the chk_memory_vector_encrypted_ack CHECK is the DB-level
@@ -2409,15 +2415,15 @@ export const memoryMutations = {
           // refusal carries an exact count and the ids (ruling 0228); the throw rolls back every node, state, identity,
           // alias and expiry change in this transaction (progressCommitted:false). A root that moved out of this memory
           // is skipped after the locked membership recheck.
-          const blockedRoots: string[] = [];
+          const blockedRoots = new Set<string>();
           for (const engine of engineRoots) {
             await tx.$queryRaw`SELECT id FROM nodes WHERE id=${engine.chatRootNodeId} FOR UPDATE`;
             const owner = await tx.node.findUnique({ where: { id: engine.chatRootNodeId }, select: { memoryId: true } });
             if (!owner || owner.memoryId !== resolvedMemoryId) continue;
-            if ((await encryptChatEngineStateWithKey(tx, engine.chatRootNodeId, key)) === 'blocked') blockedRoots.push(engine.chatRootNodeId);
+            if ((await encryptChatEngineStateWithKey(tx, engine.chatRootNodeId, key)) === 'blocked') blockedRoots.add(engine.chatRootNodeId);
           }
-          if (blockedRoots.length) {
-            throw engineStateIncomplete({
+          if (blockedRoots.size) {
+            throw buildEngineStateIncompleteError({
               memoryId: resolvedMemoryId, operation: 'PROMOTE_ANONYMOUS_MEMORY', blockedRootIds: blockedRoots,
               scanFinished: true, progressCommitted: false,
             });
@@ -2720,6 +2726,8 @@ export const memoryMutations = {
       // #3575 (ruling 0225): a chat-engine row whose envelope fails authentication is preserved and REPORTED, never repaired,
       // and it never stops the conversion of healthy rows (including the blocked root's own node fields). `blockedRoots` is
       // the last traversed pass's set; the count is exact only when a pass converted nothing (a clean traversal).
+      // Invariant: a blocked row never stops being blocked under this key, and every pass rescans the WHOLE memory, so the last
+      // pass's set is the full set. A future early exit or partial rescan must revisit this (replace it with a union).
       let blockedRoots = new Set<string>();
       let engineScanFinished = false;
       let conversionProgress = false;
@@ -2921,7 +2929,7 @@ export const memoryMutations = {
       // completion (and the approvals it ends) waits for a state with no unauthenticated envelope. Existing errors
       // (authority, wrong key, database, history convergence) keep their own precedence: they are thrown above.
       if (blockedRoots.size > 0) {
-        throw engineStateIncomplete({
+        throw buildEngineStateIncompleteError({
           memoryId: resolvedMemoryId, operation: 'ENCRYPT_MEMORY', blockedRootIds: blockedRoots,
           scanFinished: engineScanFinished, progressCommitted: conversionProgress,
         });
@@ -2940,11 +2948,10 @@ export const memoryMutations = {
     createMemoryShare: async (
       _: unknown,
       {
-        memoryId,
+        memoryRef,
         granteeRef,
-        granteeId,
         role,
-      }: { memoryId: string; granteeRef?: string | null; granteeId?: string | null; role: MemoryShareRoleType },
+      }: { memoryRef: string; granteeRef: string; role: MemoryShareRoleType },
       ctx: Context,
     ) => {
       if (!ctx.userId) {
@@ -2952,11 +2959,13 @@ export const memoryMutations = {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
-      // Caller-authority gate FIRST, then grantee resolution — so an unauthorized
-      // caller always gets FORBIDDEN and can't use the NOT_FOUND-vs-FORBIDDEN
-      // difference as a user-enumeration oracle (mirrors createPrincipalGrant).
+      // #4137 order (cor:api:140:02): memory resolved (a miss is FORBIDDEN) →
+      // caller-authority gate → grantee resolved. An unauthorized caller always
+      // gets FORBIDDEN and can't use the NOT_FOUND-vs-FORBIDDEN difference as a
+      // memory- or user-enumeration oracle (mirrors createPrincipalGrant).
+      const memoryId = await resolveShareMemoryRef(ctx, memoryRef);
       await requireMemorySharePrincipal(ctx, memoryId);
-      const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
+      const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef });
       try {
         const memoryShare = await withAuthorizedMemoryTx(
           ctx,
@@ -3005,8 +3014,7 @@ export const memoryMutations = {
       {
         memoryRef,
         granteeRef,
-        granteeId,
-      }: { memoryRef: string; granteeRef?: string | null; granteeId?: string | null },
+      }: { memoryRef: string; granteeRef?: string | null },
       ctx: Context,
     ) => {
       if (!ctx.userId) {
@@ -3025,28 +3033,24 @@ export const memoryMutations = {
       // reasoning leaveApp applies to a dead App). It does NOT widen the
       // principal path: isMemorySharePrincipal still reports false for a
       // soft-deleted memory, so the owner-side FORBIDDEN is unchanged.
-      let resolvedMemoryId: string | null = null;
-      try {
-        resolvedMemoryId = (
-          await resolveMemoryRef(ctx.db, memoryRef, { includeDeleted: true })
-        ).id;
-      } catch (e) {
-        if (!(e instanceof MemoryNotFoundError)) throw e;
-      }
-      if (resolvedMemoryId === null) throw memoryShareForbidden();
+      // #4137 (Celine QA): through the shared concealing resolution, so an ambiguous
+      // legacy URN folds like an unknown ref instead of escaping as its own error.
+      const resolvedMemoryId = await resolveMemoryRefConcealed(
+        ctx, memoryRef, memoryShareForbidden, { includeDeleted: true },
+      );
       // The authority answer is needed BEFORE the grantee is resolved, because
       // a non-principal must fail identically whether or not the named grantee
       // exists — otherwise the NOT_FOUND-vs-FORBIDDEN difference becomes a
       // user-enumeration oracle (the ordering rule createMemoryShare states).
       const isPrincipal = await isMemorySharePrincipal(ctx, resolvedMemoryId);
       // No grantee named ⇒ the caller means their own share ("leave").
-      const wantsSelf = !granteeRef?.trim() && !granteeId;
+      const wantsSelf = !granteeRef?.trim();
       let resolvedGranteeId: string;
       if (wantsSelf) {
         resolvedGranteeId = ctx.userId;
       } else {
         try {
-          resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
+          resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef });
         } catch (e) {
           if (!isPrincipal) throw memoryShareForbidden();
           throw e;
@@ -3104,11 +3108,10 @@ export const memoryMutations = {
     updateMemoryShareRole: async (
       _: unknown,
       {
-        memoryId,
+        memoryRef,
         granteeRef,
-        granteeId,
         role,
-      }: { memoryId: string; granteeRef?: string | null; granteeId?: string | null; role: MemoryShareRoleType },
+      }: { memoryRef: string; granteeRef: string; role: MemoryShareRoleType },
       ctx: Context,
     ) => {
       if (!ctx.userId) {
@@ -3116,8 +3119,11 @@ export const memoryMutations = {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
+      // #4137: same order as createMemoryShare — memory (miss = FORBIDDEN),
+      // principal gate, then the grantee.
+      const memoryId = await resolveShareMemoryRef(ctx, memoryRef);
       await requireMemorySharePrincipal(ctx, memoryId);
-      const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef, granteeId });
+      const resolvedGranteeId = await resolveGranteeId(ctx, { granteeRef });
       try {
         const memoryShare = await withAuthorizedMemoryTx(
           ctx,
@@ -3156,15 +3162,11 @@ export const memoryMutations = {
       _: unknown,
       {
         memoryRef,
-        memoryId,
         userRef,
-        userId,
         role,
       }: {
-        memoryRef?: string | null;
-        memoryId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
+        memoryRef: string;
+        userRef: string;
         role: MemoryMemberRoleType;
       },
       ctx: Context,
@@ -3174,9 +3176,9 @@ export const memoryMutations = {
       // run the owner gate FIRST, then resolve the user — so an unauthorized
       // caller gets FORBIDDEN and can't use NOT_FOUND to enumerate memories or
       // users (mirrors createMemoryShare; #816 review).
-      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, { ref: memoryRef, id: memoryId });
+      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, memoryRef);
       await requireMemoryMemberOwner(ctx, resolvedMemoryId);
-      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      const resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
       try {
         const memoryMember = await retryOnSerializationFailure(() => withAuthorizedMemoryTx(
           ctx, resolvedMemoryId, [{ kind: 'user', id: resolvedUserId }],
@@ -3223,15 +3225,11 @@ export const memoryMutations = {
       _: unknown,
       {
         memoryRef,
-        memoryId,
         userRef,
-        userId,
         role,
       }: {
-        memoryRef?: string | null;
-        memoryId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
+        memoryRef: string;
+        userRef: string;
         role: MemoryMemberRoleType;
       },
       ctx: Context,
@@ -3239,9 +3237,9 @@ export const memoryMutations = {
       // #764: resolve memory (miss → uniform member FORBIDDEN, no existence
       // oracle) + owner-gate FIRST, then resolve the user (auth before
       // revealing user existence — #816 review).
-      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, { ref: memoryRef, id: memoryId });
+      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, memoryRef);
       await requireMemoryMemberOwner(ctx, resolvedMemoryId);
-      const resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+      const resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
       try {
         const memoryMember = await retryOnSerializationFailure(() => withAuthorizedMemoryTx(
           ctx, resolvedMemoryId, [{ kind: 'user', id: resolvedUserId }],
@@ -3288,14 +3286,10 @@ export const memoryMutations = {
       _: unknown,
       {
         memoryRef,
-        memoryId,
         userRef,
-        userId,
       }: {
-        memoryRef?: string | null;
-        memoryId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
+        memoryRef: string;
+        userRef: string;
       },
       ctx: Context,
     ) => {
@@ -3305,12 +3299,12 @@ export const memoryMutations = {
       // their target resolution maps any miss to the same FORBIDDEN and the
       // resolved id must equal the caller — an unknown handle/email is then
       // indistinguishable from a real user they can't act on.
-      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, { ref: memoryRef, id: memoryId });
+      const resolvedMemoryId = await resolveMemoryRefForMemberGate(ctx, memoryRef);
       let resolvedUserId: string;
       if (await isMemoryMemberOwner(ctx, resolvedMemoryId)) {
-        resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+        resolvedUserId = await resolveRequiredUserRef(ctx.db, userRef);
       } else {
-        resolvedUserId = await resolveSelfUserRefForMemberGate(ctx, { ref: userRef, id: userId });
+        resolvedUserId = await resolveSelfUserRefForMemberGate(ctx, userRef);
         if (resolvedUserId !== ctx.userId) throw memoryMemberForbidden();
       }
       await requireMemoryMemberOwnerOrSelf(ctx, resolvedMemoryId, resolvedUserId);

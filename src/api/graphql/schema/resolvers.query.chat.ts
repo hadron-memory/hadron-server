@@ -151,7 +151,15 @@ async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.Node
 }
 
 /** #3223: the `Chat` rows for one page of chat-root nodes, shared by `myChats` and `myChatsPage`. */
-type ChatRootRow = { id: string; loc: string; memoryId: string; data: unknown; createdAt: Date; createdBy: string | null };
+
+/**
+ * #3229: exactly the `ChatRootRow` columns — the narrow `select` both chat-root fetches share, so neither ships full
+ * `Node` rows (content, abstract, properties) that `toChatRows` never reads. If `toChatRows` ever needs a seventh
+ * column it lands here only: `ChatRootRow` follows `CHAT_ROOT_SELECT`, and the #3229 select pin fails a dropped column.
+ */
+const CHAT_ROOT_SELECT = { id: true, loc: true, memoryId: true, data: true, createdAt: true, createdBy: true } as const satisfies Prisma.NodeSelect;
+
+type ChatRootRow = Prisma.NodeGetPayload<{ select: typeof CHAT_ROOT_SELECT }>;
 
 async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
   const counters = await readChatCounters(ctx.db,tops,ctx.sessionId);
@@ -227,6 +235,7 @@ export const chatQueries = {
         orderBy: { updatedAt: 'desc' as const },
         take: limit ?? 20,
         skip: offset ?? 0,
+        select: CHAT_ROOT_SELECT,
       });
       if (tops.length === 0) return [];
       return toChatRows(ctx, tops);
@@ -248,7 +257,7 @@ export const chatQueries = {
       if (!where) return { items: [], total: 0, hasMore: false };
       const [total, tops] = await ctx.db.$transaction([
         ctx.db.node.count({ where }),
-        ctx.db.node.findMany({ where, orderBy: [{ updatedAt: 'desc' as const }, { id: 'desc' as const }], take, skip }),
+        ctx.db.node.findMany({ where, orderBy: [{ updatedAt: 'desc' as const }, { id: 'desc' as const }], take, skip, select: CHAT_ROOT_SELECT }),
       ]);
       return pageEnvelope(tops.length === 0 ? [] : await toChatRows(ctx, tops), total, skip);
     },

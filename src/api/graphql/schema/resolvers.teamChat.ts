@@ -90,7 +90,7 @@ import {
   resumeOwnLapsedSessionInTx,
   mayStillDriveWorkerApp,
   channelIncarnationChanged,
-} from '../../../lib/teamAttention.js';
+} from '../../../lib/ownWorkerSessions.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
 // listing and the shared chat-loc gate both have to exclude `chats:team`, and
@@ -271,6 +271,18 @@ export async function locateTeamChatChannel(
     select: { id: true, lastSeq: true },
   });
   return channel ? { rootId: root.id, channelId: channel.id, lastSeq: channel.lastSeq } : null;
+}
+
+/**
+ * {@link locateTeamChatChannel} for a caller with no request: the platform's own evaluator and read (#4531). The locator
+ * reads only `ctx.db` and `ctx.impersonation`, so the one place a context is faked is here, with `impersonation` absent
+ * (never impersonating), and a caller outside the resolvers has a typed entry instead of building a `Context` itself.
+ */
+export async function locateTeamChatChannelOfApp(
+  db: Context['db'],
+  appId: string,
+): Promise<{ rootId: string; channelId: string; lastSeq: number } | null> {
+  return locateTeamChatChannel({ db } as Context, appId);
 }
 
 /**

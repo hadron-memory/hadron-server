@@ -49,6 +49,7 @@ import { managesApp } from '../../../lib/auth/appManagement.js';
 import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { generateId } from '../../../lib/id.js';
 import { keyEverHeldHostOperate, keyHostId, recordHostKeyUse, recordHostKeyUseApart, type HostKey, type HostKeyAction } from '../../../lib/hostOperations/hostKey.js';
@@ -133,7 +134,10 @@ export async function hostKeyEntry(ctx: Context, appRef: string): Promise<{ app:
   try {
     const { id } = await resolveAppRef(ctx.db, appRef);
     app = id === key.appId ? await loadApp(ctx, id) : null;
-  } catch {
+  } catch (e) {
+    // #4893/#2975: only a name-resolution outcome takes the not-found path below; a
+    // database fault propagates (it is not "app not found").
+    if (!isAppRefResolutionFailure(e)) throw e;
     app = null;
   }
   if (!app || app.deletedAt || app.uninstalledAt) throw appNotFound(appRef);
@@ -562,7 +566,7 @@ export const hostOperationMutations = {
    * The server builds what it stores (`buildWorkerTerminal`): `host` is the key's host and its registration's label,
    * `reportedAt` is the server's clock. #4225 S4a: a report may carry the worker's context size (`contextTokens` with
    * `contextMeasuredAt`, or neither); a malformed size refuses the batch like any other malformed field, and a worker
-   * this host does not run is refused for its row as before, so its size is never stored. The report decides nothing. The alarm verdict is computed from the stored
+   * this host does not run is refused for its row as before, so its size is never stored. The report decides one thing (#4933): no desired-running start for a worker whose agent this host already runs; nothing else. The alarm verdict is computed from the stored
    * rows after the write and returned, never stored, and names only coordinators THIS host registers.
    */
   setHostWorkerTerminals: async (

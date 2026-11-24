@@ -9,6 +9,7 @@ import { getDeploymentInfo } from '../../../mcp/deploymentInfo.js';
 import { CEREMONY_NEXT_PAGES } from '../../freshSignInRoutes.js';
 import { serverInfoFieldPresence } from '../../../lib/signing/surface.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError, AmbiguousLegacyUrnError, UrnNotQualifiedError } from '../../../lib/entityRef/errors.js';
 import { readableNestedAgent } from './resolvers.types.js';
@@ -205,7 +206,9 @@ export const appQueries = {
       let resolvedId: string;
       try {
         ({ id: resolvedId } = await resolveAppRef(ctx.db, ref));
-      } catch {
+      } catch (e) {
+        // #4893/#2975: only a name-resolution outcome is the soft null; a database fault propagates.
+        if (!isAppRefResolutionFailure(e)) throw e;
         return null;
       }
       const app = await ctx.db.app.findUnique({ where: { id: resolvedId }, include: APP_INCLUDE });

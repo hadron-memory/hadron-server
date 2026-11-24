@@ -172,6 +172,15 @@ ALTER TABLE memories
 CREATE UNIQUE INDEX IF NOT EXISTS slack_connections_org_team_active_uniq
   ON slack_connections (organization_id, team_id) WHERE deleted_at IS NULL;
 
+-- ─── #597 telegram-connection ────────────────────────────────────────────
+-- One ACTIVE Telegram connection per App: PARTIAL unique so a soft-deleted row never blocks a new one (Prisma can't
+-- model the WHERE clause). Synced with the 20261122000000_telegram_connection migration.
+CREATE UNIQUE INDEX IF NOT EXISTS telegram_connections_app_active_uniq
+  ON telegram_connections (app_id) WHERE deleted_at IS NULL;
+-- One ACTIVE connection per bot (Telegram allows one update consumer per bot).
+CREATE UNIQUE INDEX IF NOT EXISTS telegram_connections_bot_active_uniq
+  ON telegram_connections (bot_id) WHERE deleted_at IS NULL;
+
 -- ─── 036-ai-service-config ──────────────────────────────────────────────
 -- A config belongs to exactly one owner (HadronServer / Organization /
 -- App / Agent). Synced with the 036 migration and src/test/globalSetup.ts.
@@ -479,6 +488,18 @@ ALTER TABLE nodes ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (
 ) STORED;
 
 CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
+
+-- #855: app_runs.duration_ms (appRuns sortBy duration). schema.prisma models it as a plain nullable BigInt (Prisma cannot
+-- express GENERATED), so `db push` leaves a PLAIN column and this makes it the STORED GENERATED one that the migration
+-- prisma/migrations/20261124020000_app_runs_duration_ms creates (keep the two expressions in lockstep). The plain column
+-- holds nothing (the database refuses a write to the generated one, and nothing writes the plain one), and dropping it
+-- drops its index, so both are re-created. Unconditional, because a conditional here would need a DO block the
+-- inventory refuses; prisma/app-run-duration-pre-push.sql drops a GENERATED column before the push so the push never
+-- sees one (it cannot ALTER it).
+ALTER TABLE app_runs DROP COLUMN IF EXISTS duration_ms;
+ALTER TABLE app_runs ADD COLUMN duration_ms BIGINT
+  GENERATED ALWAYS AS ((round(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000))::bigint) STORED;
+CREATE INDEX IF NOT EXISTS app_runs_organization_id_duration_ms_idx ON app_runs (organization_id, duration_ms);
 
 -- #2832: direct-children read (NodeFilter.childrenOf). Mirrors prisma/migrations/20261030100000_nodes_parent_loc_index
 -- (keep in lockstep). The expression is PARENT_LOC_SQL in src/lib/childLoc.ts; a filter must compare it unchanged.
@@ -949,8 +970,8 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- #2755: the dark-worker alarm's window, episodes and their worker fence (the fence function is #1162's, above).
 \ir dark-alarm-invariants.sql
 
--- #2763: the coordinator-cadence alarm's episodes and first-observed clocks (after the #1162 fence function).
-\ir coordinator-cadence-invariants.sql
+-- #2763, #4375: the lead-cadence alarm's episodes and first-observed clocks (after the #1162 fence function).
+\ir lead-cadence-invariants.sql
 
 -- #3934: the recorded end of an alarm's escalation is written once.
 \ir alarm-escalation-end-invariants.sql
@@ -962,6 +983,12 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 
 -- #4233: the sweep run record and the stale-sweep episodes.
 \ir host-sweep-invariants.sql
+
+-- #3819 slice 1: the saturation episodes.
+\ir saturation-invariants.sql
+
+-- #4531: the dark-team episodes.
+\ir team-dark-invariants.sql
 
 -- #3997 (S2 of #3991): App-owned secrets, versions, events, tombstones. One source, shared verbatim with migration
 -- 20261114120000_app_secret_versions. After worker-reference-invariants.sql: it puts the #1162 fence on its three tables.
@@ -998,70 +1025,8 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
 -- verbatim with migration 20261109200000_grant_signing (after grant-invariants.sql: the tables it guards reference grants).
 \ir grant-signing-invariants.sql
 
--- #3999: staged values are request-bound; terminal requests retain no ciphertext.
-CREATE TABLE IF NOT EXISTS secret_change_requests (
- id text PRIMARY KEY,
- app_id text NOT NULL REFERENCES apps(id) ON DELETE CASCADE ON UPDATE CASCADE,
- secret_id text,
- secret_name text NOT NULL,
- secret_kind text NOT NULL,
- metadata jsonb NOT NULL,
- operation text NOT NULL,
- requester_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
- state text NOT NULL DEFAULT 'open',
- snapshot text NOT NULL,
- staged_value_encrypted text,
- key_version integer,
- size_bytes integer,
- protected_result boolean,
- write_version boolean NOT NULL DEFAULT true,
- created_at timestamp(3) NOT NULL DEFAULT (clock_timestamp() AT TIME ZONE 'UTC'),
- expires_at timestamp(3) NOT NULL,
- ended_at timestamp(3)
-);
-ALTER TABLE secret_change_requests DROP CONSTRAINT IF EXISTS chk_secret_change_shape;
-ALTER TABLE secret_change_requests ADD CONSTRAINT chk_secret_change_shape CHECK (
- operation IN ('STORE','DELETE','SET_PROTECTED','CLEAR_PROTECTED') AND
- state IN ('open','completed','declined','expired','withdrawn','stale') AND
- ((staged_value_encrypted IS NOT NULL) = (operation = 'STORE' AND write_version AND state = 'open')) AND
- ((staged_value_encrypted IS NULL) OR (key_version IS NOT NULL AND size_bytes IS NOT NULL)) AND
- ((state = 'open') = (ended_at IS NULL))
-);
-CREATE INDEX IF NOT EXISTS secret_change_requests_secret_open ON secret_change_requests(app_id,secret_name,state);
-CREATE INDEX IF NOT EXISTS secret_change_requests_expiry ON secret_change_requests(expires_at) WHERE state = 'open';
-CREATE OR REPLACE FUNCTION hadron_guard_secret_change_request() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
- IF TG_OP = 'UPDATE' THEN
-  IF OLD.state <> 'open' OR
-    (NEW.id,NEW.app_id,NEW.secret_id,NEW.secret_name,NEW.secret_kind,NEW.metadata,NEW.operation,NEW.requester_id,NEW.snapshot,NEW.created_at,NEW.expires_at,NEW.key_version,NEW.size_bytes,NEW.protected_result,NEW.write_version)
-    IS DISTINCT FROM
-    (OLD.id,OLD.app_id,OLD.secret_id,OLD.secret_name,OLD.secret_kind,OLD.metadata,OLD.operation,OLD.requester_id,OLD.snapshot,OLD.created_at,OLD.expires_at,OLD.key_version,OLD.size_bytes,OLD.protected_result,OLD.write_version)
-  THEN RAISE EXCEPTION 'secret change request immutable'; END IF;
-  IF NEW.state = 'open' AND NEW.staged_value_encrypted IS DISTINCT FROM OLD.staged_value_encrypted
-  THEN RAISE EXCEPTION 'secret change request immutable'; END IF;
- END IF;
- IF NEW.state <> 'open' THEN NEW.staged_value_encrypted := NULL; END IF;
- RETURN NEW;
-END $$;
-DROP TRIGGER IF EXISTS secret_change_requests_guard ON secret_change_requests;
-CREATE TRIGGER secret_change_requests_guard BEFORE INSERT OR UPDATE ON secret_change_requests
- FOR EACH ROW EXECUTE FUNCTION hadron_guard_secret_change_request();
--- External deletion (App deletion, auto-delete) must not leave staged copies behind.
-CREATE OR REPLACE FUNCTION hadron_end_deleted_secret_changes() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
- UPDATE secret_change_requests SET state='stale',ended_at=(clock_timestamp() AT TIME ZONE 'UTC')
- WHERE secret_id=OLD.id AND state='open';
- RETURN OLD;
-END $$;
-DROP TRIGGER IF EXISTS secret_changes_secret_deleted ON secrets;
-CREATE TRIGGER secret_changes_secret_deleted AFTER DELETE ON secrets FOR EACH ROW EXECUTE FUNCTION hadron_end_deleted_secret_changes();
-CREATE OR REPLACE FUNCTION hadron_clear_deleted_app_changes() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
- IF NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL THEN DELETE FROM secret_change_requests WHERE app_id=NEW.id; END IF;
- RETURN NEW;
-END $$;
-DROP TRIGGER IF EXISTS secret_changes_app_deleted ON apps;
-CREATE TRIGGER secret_changes_app_deleted AFTER UPDATE OF deleted_at ON apps FOR EACH ROW EXECUTE FUNCTION hadron_clear_deleted_app_changes();
+-- #3999: secret change requests. Verbatim with migration 20261120180000_secret_change_requests.
+\ir secret-change-requests-invariants.sql
 
 -- Any committed secret mutation invalidates earlier proposals, including same-millisecond changes.
 ALTER TABLE secrets ADD COLUMN IF NOT EXISTS change_revision integer NOT NULL DEFAULT 0;
@@ -1126,3 +1091,9 @@ ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
 \ir secret-read-client-own-worker.sql
 -- #4001: finite auto-delete terms, after the grants and read-client invariants.
 \ir secret-auto-delete-invariants.sql
+
+-- #4945 (cor:int:030:03 clause 4): a chat tool teardown intent's state is one of the three the code writes
+-- (Prisma cannot model the CHECK; the migration carries the same statements, behind an HDPRF preflight).
+ALTER TABLE chat_tool_teardown_intents DROP CONSTRAINT IF EXISTS chk_chat_tool_teardown_state;
+ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_state
+  CHECK (state IN ('PENDING', 'CONFIRMED', 'CAPPED'));

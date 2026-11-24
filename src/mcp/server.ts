@@ -110,7 +110,8 @@ import type { NodeWhere } from '../lib/retrieval/nodeWhere.js';
 import { NodeSchemaViolation } from '../lib/validateNodeAgainstSchema.js';
 import { normalizeObjectType, normalizeRole, validateNodeSchemaOnWrite } from '../lib/enforceNodeSchema.js';
 import { validateLoc, InvalidLocError } from '../lib/validateLoc.js';
-import { deriveEdgeLoc, isAuthoredLoc } from '../lib/edgeLoc.js';
+import { deriveEdgeLoc, isAuthoredLoc, normalizeAuthoredEdgeLoc } from '../lib/edgeLoc.js';
+import { validateLocOrThrow } from '../lib/validateLocOrThrow.js';
 import { retireSpecDoor } from '../api/graphql/schema/resolvers.mutation.retireSpec.js';
 import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../lib/tombstoneArchive.js';
 import { deletePendingEdgesTargetingNodes, promotePendingEdgeForTarget, reconcilePendingEdgeCounts } from '../lib/pendingEdgePromotion.js';
@@ -282,11 +283,13 @@ import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
 import { lockAgentDefinitionAuthority } from '../lib/auth/managedSystemMemory.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
 import { computeContentHash, isAbstractUnverified } from '../lib/contentHash.js';
+import { deriveAbstractOriginHash } from '../lib/abstractOriginHash.js';
 import { validateMemoryNodes, formatFindingLine, formatValidationProse } from '../lib/memoryValidation.js';
 import { assertRootAllocationAllowed, lockRootSiblings, nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding, pendingAtForRevival } from '../services/embedding/enqueue.js';
+import { joinAppendedContent } from '../lib/appendContent.js';
 import { sessionKeyCache, SessionKeyConflictError } from '../lib/sessionKeyCache.js';
 import {
   isSessionLive,
@@ -304,9 +307,11 @@ import { resolveNodeRef, isConcealedNodeRefAmbiguity } from '../lib/entityRef/no
 import { resolveChannelRefId } from '../lib/entityRef/channelRef.js';
 import { sortSiblings } from '../lib/siblingOrder.js';
 import { assembleRunNodePrompt } from '../lib/runNodeRender.js';
+import { foreignIncludeReader } from '../lib/includes/foreignIncludeReader.js';
 import { compileTemplate } from '../lib/template.js';
 import {
   NodeNotFoundError,
+  EdgeNotFoundError,
   AmbiguousLegacyUrnError,
   NodeAbstractTooLongError,
   InvalidContentScopeError,
@@ -314,6 +319,7 @@ import {
 import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
+import { resolveEdgeRef } from '../lib/entityRef/edgeRef.js';
 import { resolveAgentRef } from '../lib/entityRef/agentRef.js';
 import { resolveWorkerRef } from '../lib/entityRef/workerRef.js';
 import {
@@ -333,6 +339,8 @@ import {
 } from '../api/graphql/schema/resolvers.mutation.session.js';
 import { HADRON_SERVER_VERSION, MCP_SURFACE_CAPABILITIES, getDeploymentInfo } from './deploymentInfo.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { deleteEdgeInDoorTx, nodeDoorTxContext } from '../api/graphql/schema/resolvers.mutation.node.js';
+import { lockInstallAuthoritiesFirst } from '../api/graphql/schema/installMemory.js';
 import { validationTaskSetsForNodes } from '../api/graphql/schema/resolvers.validationTaskSet.js';
 import type { ValidationTaskSet } from '../lib/contentValidationReport.js';
 import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
@@ -415,7 +423,7 @@ import {
   markOwnTeamChatRead,
   maybeAdvanceOwnChannelRead,
   resumableOwnWorkerIds,
-} from '../lib/teamAttention.js';
+} from '../lib/ownWorkerSessions.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import { edgeDisplayOrder, edgeRunOrder } from '../lib/edgeOrder.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
@@ -616,7 +624,6 @@ export function mcpDoorCanReplay(
   return true;
 }
 
-
 /** Cap on any one JSON field hadron_get_run renders, so a large envelope or trail cannot blow the MCP result ceiling (#1041). */
 const RUN_FIELD_RENDER_CAP = 20_000;
 
@@ -786,10 +793,13 @@ export type ResolvedEdge = {
  * work uniformly.
  *
  * Pure read; writes nothing. Returns the resolved edges on success,
- * or `{ error: <user-facing string> }` when any ref doesn't resolve.
+ * or `{ error: <user-facing string> }` when any ref doesn't resolve or an
+ * authored loc is invalid (#4813: whitespace-only or padded locs are refused
+ * with the GraphQL door's own `validateLocOrThrow` message, so both doors
+ * refuse byte-identically before any write).
  * Callers run this BEFORE mutating the source node, so an unresolvable
- * target aborts the mutation cleanly without committing the source
- * upsert/update.
+ * target or an invalid loc aborts the mutation cleanly without committing
+ * the source upsert/update.
  *
  * Issue #107: prior inline logic in hadron_create_node / hadron_update_node used a
  * `targetId.includes(':')` heuristic plus `findFirst({loc})` (no
@@ -818,6 +828,20 @@ export async function resolveEdgeRefs(
 ): Promise<{ resolved: ResolvedEdge[] } | { error: string }> {
   const resolved: ResolvedEdge[] = [];
   for (const edge of edges) {
+    // #4813: the same coercion + validation the GraphQL inline-edge door applies, in the same
+    // order (loc validated before target resolution). A whitespace-only or padded loc ('  ',
+    // ' a', 'a ') is REFUSED here with the GraphQL door's own message text, BEFORE any write —
+    // previously this path stored all three as AUTHORED locs (the standalone hadron_create_edge
+    // already validated; the inline path did not). '' is no authored loc, it derives (#4738).
+    const loc = normalizeAuthoredEdgeLoc(edge.loc);
+    if (loc !== null) {
+      try {
+        validateLocOrThrow(loc, 'loc');
+      } catch (e) {
+        if (e instanceof GraphQLError && e.extensions.code === 'BAD_USER_INPUT') return { error: e.message };
+        throw e;
+      }
+    }
     try {
       const { id: targetNodeId } = await resolveNodeRefForAuth(edge.targetId, auth, sourceMemoryId);
       // Fetch the target's loc so the edge loc can be derived at write time.
@@ -833,7 +857,7 @@ export async function resolveEdgeRefs(
         targetLoc: tgt.loc,
         targetMemoryId: tgt.memoryId,
         name: edge.name ?? null,
-        loc: edge.loc ?? null,
+        loc, // #4738/#4813: '' is no authored loc, it derives
         description: edge.description ?? null,
         isRunnable: edge.isRunnable ?? null,
       });
@@ -1237,6 +1261,54 @@ async function replaceOutgoingEdgesInTransaction(
     }
   }
   return null;
+}
+
+/**
+ * #860: ADD outgoing edges to `sourceNodeId` without touching any other edge, in the caller's transaction. Each item is
+ * exactly what the replace path writes per edge (same locs, same authored flag), and re-adding an edge that already
+ * exists is the idempotent case `addEdge` documents: the occupant of the loc must be the same live edge (same source,
+ * target and fields) to count as `unchanged`; any other occupant is an `edge_loc_conflict` and aborts the whole call.
+ * Caller has already validated targets via `resolveEdgeRefs`.
+ */
+async function addOutgoingEdgesInTransaction(
+  tx: Prisma.TransactionClient,
+  args: { sourceNodeId: string; sourceLoc: string; sourceMemoryId: string; resolved: ResolvedEdge[]; createdBy: string | null },
+): Promise<{ error: string } | { added: number; unchanged: number }> {
+  const source = { id: args.sourceNodeId, loc: args.sourceLoc, memoryId: args.sourceMemoryId };
+  const targets = args.resolved.map((edge) => ({ id: edge.targetNodeId, loc: edge.targetLoc, memoryId: edge.targetMemoryId }));
+  const live = await liveEdgeEndpointSet(tx, [source, ...targets]);
+  if (!live.has(source.id)) return { error: `Source node not found: "${source.id}".` };
+  const missing = args.resolved.find((edge) => !live.has(edge.targetNodeId));
+  if (missing) return { error: `Edge target not found: "${missing.targetNodeId}"` };
+  let added = 0;
+  let unchanged = 0;
+  for (const e of args.resolved) {
+    const loc = e.loc ?? deriveEdgeLoc(args.sourceLoc, e.name, e.targetLoc);
+    const { count } = await tx.edge.createMany({
+      data: [{
+        id: generateId(),
+        memoryId: args.sourceMemoryId,
+        sourceId: args.sourceNodeId,
+        targetId: e.targetNodeId,
+        loc,
+        locAuthored: isAuthoredLoc(e.loc), // #2947
+        name: e.name,
+        description: e.description,
+        isRunnable: e.isRunnable,
+        createdBy: args.createdBy,
+      }],
+      skipDuplicates: true,
+    });
+    if (count === 1) { added += 1; continue; }
+    const occupant = await tx.edge.findUnique({ where: { loc_memoryId: { loc, memoryId: args.sourceMemoryId } } });
+    if (!occupant || occupant.deletedAt || occupant.sourceId !== args.sourceNodeId || occupant.targetId !== e.targetNodeId ||
+        occupant.name !== e.name || occupant.description !== e.description || occupant.isRunnable !== e.isRunnable ||
+        occupant.condition !== null || occupant.priority !== 0 || occupant.data !== null) {
+      throw new EdgeLocConflictError('[edge_loc_conflict] An edge loc is already occupied; choose unique edge locs.');
+    }
+    unchanged += 1;
+  }
+  return { added, unchanged };
 }
 
 /**
@@ -4632,7 +4704,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_find_nodes',
-    'Relevance-ranked full-text search across nodes. Keyword mode (default) runs Postgres full-text search: terms are STEMMED (so "running" matches "run"), results are RANKED by field-weighted relevance (name/alias > loc/tags > description/abstract > body/data), and BODY + abstract ARE indexed. Boolean operators are supported — `(banana OR apple) AND shake`, quoted phrases, and `-term` / `NOT term` — operator words are UPPERCASE-ONLY (lowercase and/or/not are plain terms, so natural phrases search literally), and malformed boolean syntax degrades to a literal phrase search instead of erroring. A plain multi-word query ANDs its terms; if that matches nothing, the search auto-relaxes to OR (any term) and flags [degraded:and_relaxed_to_or] — so a single off-corpus word doesn\'t dead-end the query. Pass `query: "*"` (or `""`) to list every node (survey mode) — useful as a first pass before adding to a memory. mode:vector / mode:hybrid run semantic search over the memory\'s vector index; mode:regex matches a POSIX regular expression against node text. To browse the tree structure, use `hadron_list_nodes` instead. Scope with `parentRel` (a subtree), `memoryUrn` (one memory), or `memoryUrns` (a set); pass `allMemories: true` to search EVERY memory you can read — the stemmed, ranked org-wide "does anyone know about X?" probe (this is the right tool for cross-memory concept/content questions; hadron_search matches literal substrings only). Each scored hit shows its score as a percentage of the top hit; when many hits sit in a narrow band the result carries a [weak_results] note, meaning the ranking found nothing clearly relevant — treat that as "the answer is probably not here" rather than reading the whole list. Use `minScore` to drop weak hits and `limit` to widen the default 10-hit page. Soft-deleted nodes are excluded. Each hit in the default view carries a `URL:` line — the node\'s portal link; copy it verbatim when citing a source to a human rather than building a link from the URN (`brief: true` omits it, as it omits the abstract).',
+    'Relevance-ranked full-text search across nodes. Keyword mode (default) runs Postgres full-text search: terms are STEMMED (so "running" matches "run"), results are RANKED by field-weighted relevance (name/alias > loc/tags > description/abstract > body/data), and BODY + abstract ARE indexed. Boolean operators are supported — `(banana OR apple) AND shake`, quoted phrases, and `-term` / `NOT term` — operator words are UPPERCASE-ONLY (lowercase and/or/not are plain terms, so natural phrases search literally), and malformed boolean syntax degrades to a literal phrase search instead of erroring. A query is at most 512 characters (longer is refused, never truncated) and at most 64 terms, nested 8 deep (beyond that it runs as a literal phrase); a query that only excludes terms (`-foo`, `a OR -b`) is refused, so put at least one required term in every OR branch (`foo -bar`). A plain multi-word query ANDs its terms; if that matches nothing, the search auto-relaxes to OR (any term) and flags [degraded:and_relaxed_to_or] — so a single off-corpus word doesn\'t dead-end the query. Pass `query: "*"` (or `""`) to list every node (survey mode) — useful as a first pass before adding to a memory. mode:vector / mode:hybrid run semantic search over the memory\'s vector index; mode:regex matches a POSIX regular expression against node text. To browse the tree structure, use `hadron_list_nodes` instead. Scope with `parentRel` (a subtree), `memoryUrn` (one memory), or `memoryUrns` (a set); pass `allMemories: true` to search EVERY memory you can read — the stemmed, ranked org-wide "does anyone know about X?" probe (this is the right tool for cross-memory concept/content questions; hadron_search matches literal substrings only). Each scored hit shows its score as a percentage of the top hit; when many hits sit in a narrow band the result carries a [weak_results] note, meaning the ranking found nothing clearly relevant — treat that as "the answer is probably not here" rather than reading the whole list. Use `minScore` to drop weak hits and `limit` to widen the default 10-hit page. Soft-deleted nodes are excluded. Each hit in the default view carries a `URL:` line — the node\'s portal link; copy it verbatim when citing a source to a human rather than building a link from the URN (`brief: true` omits it, as it omits the abstract).',
     SHAPE_HADRON_FIND_NODES,
     async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, hasOpenThreads, role, objectType, nodeType, nodeTypes, nodeKind, childrenOf, brief, limit, minScore, expand, granularity, where, scope }) => {
       // #3113 — the shape of `nodeTypes` is judged first, before any scope work or
@@ -4939,6 +5011,13 @@ export function createMcpServerInstance(
           `${scopePrefix}Note: this memory has no vector index — enable it on the memory to use mode:vector. [no_vector_index]\n\nFound 0 node(s).`,
         );
       }
+      if (result.reason === 'stopped_early') {
+        // #2772 (cor:api:090:04): the vector work budget ended the search before it found a page; never a silent empty.
+        // #4779 adds two causes: an uncertified hybrid order (budget or keyword ceiling) and a page still short after one re-ranking.
+        return textResult(
+          `${scopePrefix}Note: the search stopped early (the vector work budget ran out, the offset+limit window passed 20000 rows, a hybrid ranking could not be certified inside the budget or the keyword ceiling, or a page stayed short after one re-ranking, before a page was found); narrow the filters or lower the offset. [stopped_early]\n\nFound 0 node(s).`,
+        );
+      }
       if (result.reason === 'embedding_unavailable') {
         // findNodes collapses "no endpoint configured" and "embed() failed" into
         // one code, so the note names both causes (the pre-delegation surface
@@ -4952,6 +5031,11 @@ export function createMcpServerInstance(
       // comparing the whole string.
       const degradedFlags = new Set((result.degraded ?? '').split(',').filter(Boolean));
       const noteLines: string[] = [];
+      if (degradedFlags.has('stopped_early')) {
+        noteLines.push(
+          'Note: the search stopped early (the vector work budget ran out, the offset+limit window was cut at 20000 rows, a hybrid ranking could not be certified inside the budget or the keyword ceiling, or a page stayed short after one re-ranking), so this page may be shorter than, or ordered differently from, the true page. [degraded:stopped_early]',
+        );
+      }
       if (degradedFlags.has('no_vector_index')) {
         noteLines.push(
           'Note: vector half unavailable (no vector index); showing keyword results only. [degraded:no_vector_index]',
@@ -7091,9 +7175,22 @@ export function createMcpServerInstance(
     'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     SHAPE_HADRON_UPDATE_NODE,
     async (mcpArgs) => {
-      const { urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install } = mcpArgs;
+      const { urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, appendContent, prependContent, separator, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, addEdges: rawAddEdges, removeEdges: rawRemoveEdges, reason, install } = mcpArgs;
+      // #4929 (item 4): an empty addEdges / removeEdges is absent, exactly as if omitted (no write, snapshot, event or receipt line). Not `edges`: `edges: []` still clears (cor:api:210:02).
+      const addEdges = rawAddEdges?.length ? rawAddEdges : undefined;
+      const removeEdges = rawRemoveEdges?.length ? rawRemoveEdges : undefined;
+      // #340: append/prepend join the body read under the row lock (inside the transaction below). The argument refusals need
+      // no read, so they come first and write nothing.
+      const appending = appendContent !== undefined || prependContent !== undefined;
+      if (content !== undefined && appending) {
+        return refusalResult('`content` cannot be combined with `appendContent` or `prependContent`: `content` replaces the whole body, the other two add to it. Send one or the other.');
+      }
+      if (separator !== undefined && !appending) {
+        return refusalResult('`separator` applies only with `appendContent` or `prependContent`.');
+      }
       if (install) {
-        if (edges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `isRunnable` or `abstractStillAccurate`.');
+        // #340: writeInstallNodeViaGraphql has no append, so the new arguments are refused here rather than dropped.
+        if (edges || addEdges || removeEdges || isRunnable || abstractStillAccurate || appending || separator !== undefined) return textResult('`install` does not support `edges`, `addEdges`, `removeEdges`, `isRunnable`, `abstractStillAccurate`, `appendContent`, `prependContent` or `separator`.');
         return writeInstallNodeViaGraphql('update', install, {
           authoredWith,
           loc: rawUrn, expectedRevision, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
@@ -7129,8 +7226,13 @@ export function createMcpServerInstance(
       if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
         return refusalResult(`Write access denied for this memory.${await explainWriteRefusal(db, auth, memory.id)}`);
       }
+      // #860: `edges` replaces the whole set; the additive pair is a different intent, so the two never combine.
+      // Judged after authorization (no oracle) and before any write or edge resolution.
+      if (edges !== undefined && (addEdges !== undefined || removeEdges !== undefined)) {
+        return refusalResult('`edges` replaces the whole outgoing set and cannot be combined with `addEdges` or `removeEdges`; use `addEdges` / `removeEdges` alone to change some edges and keep the rest.');
+      }
       // #4096: typed refusal for caller text carrying a NUL, after authorization and before any write.
-      const unstorableUpdate = unstorableTextRefusal({ name, description, abstract, content, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent, reason, properties, data: nodeData, ...edgeTextFields(edges) });
+      const unstorableUpdate = unstorableTextRefusal({ name, description, abstract, content, appendContent, prependContent, separator, tags, role: rawRole, nodeType, objectType, llmModel, aiAgent, reason, properties, data: nodeData, removeEdgeRefs: removeEdges, ...edgeTextFields(edges ?? addEdges) });
       if (unstorableUpdate) return unstorableUpdate;
       // #4039 (B4): the same save-time check as hadron_create_node, before any write.
       const entryRefusal = entryConditionRefusal(loc, nodeData);
@@ -7172,7 +7274,8 @@ export function createMcpServerInstance(
                 context: 'node-write',
                 surface: 'mcp',
                 canReplay: (kind) =>
-                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, expectedRevision }, kind, 'update'),
+                  // #340: appendContent/prependContent/separator are carried by no governed door, so a call with them never replays.
+                  mcpDoorCanReplay({ name, nodeType, objectType, isRunnable, role, description, abstract, content, appendContent, prependContent, separator, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, addEdges, removeEdges, reason, expectedRevision }, kind, 'update'),
               }
             : {},
         );
@@ -7225,6 +7328,60 @@ export function createMcpServerInstance(
         resolvedEdges = r.resolved;
       }
 
+      // #860: the additive pair. addEdges takes exactly what `edges` takes, through the same resolver; removeEdges names
+      // edges of THIS node by the identifier hadron_delete_edge takes. Both are resolved before any write.
+      let resolvedAdds: ResolvedEdge[] | null = null;
+      if (addEdges !== undefined) {
+        for (const edge of addEdges) {
+          try {
+            if (!isId(edge.targetUrn)) assertFullyQualifiedUrn(edge.targetUrn, 'node');
+          } catch (e) {
+            if (e instanceof UrnNotQualifiedError) return textResult(`Edge target: ${e.message}`);
+            throw e;
+          }
+        }
+        const r = await resolveEdgeRefs(
+          addEdges.map((e) => ({
+            targetId: e.targetUrn,
+            name: e.name ?? null,
+            loc: e.loc ?? null,
+            description: e.description ?? null,
+            isRunnable: e.isRunnable ?? null,
+          })),
+          existing.memoryId,
+          auth,
+        );
+        if ('error' in r) return refusalResult(r.error);
+        resolvedAdds = r.resolved;
+      }
+      let removeTargets: Array<{ edgeId: string; ref: string; memoryId: string }> | null = null;
+      if (removeEdges !== undefined) {
+        removeTargets = [];
+        const seen = new Set<string>();
+        for (const ref of removeEdges) {
+          // The one answer deleteEdge gives for an unknown, foreign or unreadable edge: no existence oracle.
+          const notFound = refusalResult(`Edge not found: "${ref}"`);
+          let edgeId: string;
+          try {
+            ({ id: edgeId } = await resolveEdgeRef(db, ref));
+          } catch (e) {
+            if (e instanceof EdgeNotFoundError) return notFound;
+            if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+            throw e;
+          }
+          const owned = await db.edge.findUnique({ where: { id: edgeId }, select: { sourceId: true, memoryId: true } });
+          // Scoped to this node's own outgoing edges: another node's edge, in any memory, is not found here.
+          if (!owned || owned.sourceId !== existing.id || owned.memoryId !== existing.memoryId) return notFound;
+          if (seen.has(edgeId)) continue;
+          seen.add(edgeId);
+          removeTargets.push({ edgeId, ref, memoryId: owned.memoryId });
+        }
+      }
+      const edgeWrite = resolvedEdges !== null || resolvedAdds !== null || removeTargets !== null;
+      // True only while the removal loop runs, so its refusal mappings never reformat an unrelated refusal on a combined call.
+      let removing = false;
+      const edgeReceipt = { removed: 0, added: 0, unchanged: 0 };
+
       // Spec 031 — length-cap + trim-then-check the abstract BEFORE the
       // revision snapshot, so an over-cap abstract aborts cleanly without
       // mutating either the row or the revision history.
@@ -7247,6 +7404,12 @@ export function createMcpServerInstance(
       const updKey = updMemEnc?.isEncrypted
         ? sessionKeyCache.getByMemoryId(existing.memoryId)
         : null;
+      // #340 (v1, Xavier's disposition): no append/prepend on an encrypted memory, locked or not. A wrong join of a
+      // decrypted body would corrupt the ciphertext silently; send the whole body as `content` instead. A memory that
+      // becomes encrypted while this write waits is refused by assertMemoryEncryptionStateForWrite under the lock.
+      if (appending && updMemEnc?.isEncrypted) {
+        return refusalResult('[append_unsupported_encrypted] `appendContent` and `prependContent` are not supported on an encrypted memory. Read the node and send the whole new body as `content`.');
+      }
       if (updMemEnc?.isEncrypted && !updKey) {
         return textResult(
           'This memory is encrypted and locked — call hadron_unlock_memory first (spec 041).',
@@ -7267,43 +7430,11 @@ export function createMcpServerInstance(
       // supplied (undefined = preserve, null = clear, string = set).
       // Hash always computed on plaintext per FR-009 (existing.* is
       // plaintext here — decrypted above for encrypted memories).
-      let nextAbstractOriginHash: string | null | undefined;
-      if (normalizedAbstract === undefined) {
-        // #1126 — the caller's assertion that the EXISTING abstract survives
-        // this edit. Row 2 (content updated, abstract absent) arms staleness
-        // on purpose, and that is right by default: the server cannot know
-        // whether an abstract written against the old content still describes
-        // the new one. `abstractStillAccurate` is the caller saying they
-        // checked — so this re-fingerprints the abstract already on the node
-        // against the content this call is writing, exactly as re-saving that
-        // identical text would (row 4). It writes no text of its own.
-        //
-        // Guarded on the node ACTUALLY having an abstract: FR-006/FR-007 hold
-        // that no abstract means no hash, and an unguarded assertion here
-        // would mint a ghost hash on an abstract-less node — a fingerprint
-        // for a thing that does not exist, which later reads would compare
-        // against and quietly trust.
-        const hasStoredAbstract =
-          typeof existing.abstract === 'string' && existing.abstract.trim() !== '';
-        if (abstractStillAccurate === true && hasStoredAbstract) {
-          const nextContent = content !== undefined ? content : existing.content;
-          // computeContentHash(null) is null, so clearing content through this
-          // path lands on FR-007's "abstract but no content ⇒ no hash" rather
-          // than needing its own branch.
-          nextAbstractOriginHash = computeContentHash(nextContent ?? null);
-        } else {
-          nextAbstractOriginHash = undefined;
-        }
-      } else if (normalizedAbstract === null) {
-        nextAbstractOriginHash = null;
-      } else {
-        // `abstract` supplied: this already re-fingerprints against the new
-        // content, so `abstractStillAccurate` is redundant here and ignored
-        // rather than rejected — both spellings mean the same thing and the
-        // outcome is identical either way.
-        const nextContent = content !== undefined ? content : existing.content;
-        nextAbstractOriginHash = computeContentHash(nextContent ?? null);
-      }
+      // #340: the same rule runs again under the lock on the joined body when this call appends or prepends.
+      const nextAbstractOriginHash = deriveAbstractOriginHash(
+        normalizedAbstract, abstractStillAccurate, existing.abstract,
+        content !== undefined ? content : existing.content,
+      );
 
       // The authoritative at-rest snapshot and its #620 diff are built under
       // the address lock below, after this plaintext-derived hash is known.
@@ -7352,16 +7483,29 @@ export function createMcpServerInstance(
 
       let includePinContentSaved = false;
       let includePinPriorContent: string | null = null;
-      if (Object.keys(data).length > 0 || resolvedEdges !== null || expectedRevision !== undefined) {
+      // #340: the joined body is only known under the lock, so an append always enters the transaction.
+      let appendedBody: string | null | undefined;
+      let appendWritten = false;
+      // #4929 (item 4): a call that supplies nothing to write (an empty addEdges / removeEdges is absent) enters no transaction and announces no write.
+      const writes = Object.keys(data).length > 0 || edgeWrite || expectedRevision !== undefined || appending;
+      if (writes) {
         // Spec 049 S4: the write holds the address lock and the gate runs
         // under it — the check above is the fast refusal, this the
         // authoritative one (Copilot on PR #1165).
         try {
           await db.$transaction(async (tx) => {
+            // #860: removeEdges is deleteEdge's door per item, so it takes deleteEdge's FIRST locks in deleteEdge's order: the
+            // install authority, or for an Agent's own system memory the Agent-definition authority (lockInstallAuthorityFirst takes
+            // it itself, so #2206's 'authority before any memory lock' holds), then the memory row FOR SHARE, before any node or
+            // loc lock. The call just below re-enters the Agent-definition authority already held in this transaction.
+            if (removeTargets !== null) {
+              await lockInstallAuthoritiesFirst(tx, objectCtx(), [existing.memoryId]);
+              await tx.$queryRaw`SELECT id FROM memories WHERE id = ${existing.memoryId} FOR SHARE`;
+            }
             // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
             await lockAgentDefinitionAuthority(tx, auth.userId ?? null, existing.memoryId);
-            if (resolvedEdges !== null) {
-              await lockOutgoingEdgeMemories(tx, existing.memoryId, resolvedEdges);
+            if (resolvedEdges !== null || resolvedAdds !== null) {
+              await lockOutgoingEdgeMemories(tx, existing.memoryId, [...(resolvedEdges ?? []), ...(resolvedAdds ?? [])]);
             }
             await lockLocForWrite(tx, memory.id, loc);
             // #1072/#1185/#1323 — read and snapshot only after the address
@@ -7431,16 +7575,32 @@ export function createMcpServerInstance(
               priorRunnable: current.isRunnable,
               nextRunnable: mergedGovernedState(current, { role, isRunnable }).isRunnable,
             });
+            // #340: join from the LOCKED row, after the move/delete, expectedRevision and role-writer re-checks, then
+            // feed the result to everything below exactly as if the caller had sent `content: <joined>` (diff,
+            // revision, includes, embedding). The abstract hash is re-derived from that body by the same rule.
+            if (appending) {
+              if (updKey) throw new Error('#340: append reached the write on an encrypted memory'); // refused above
+              appendedBody = joinAppendedContent(current.content, { prependContent, appendContent, separator });
+              data.content = appendedBody;
+              plaintextUpdates.content = appendedBody;
+              const lockedHash = deriveAbstractOriginHash(normalizedAbstract, abstractStillAccurate, current.abstract, appendedBody);
+              delete data.abstractOriginHash;
+              delete plaintextUpdates.abstractOriginHash;
+              if (lockedHash !== undefined) {
+                data.abstractOriginHash = lockedHash;
+                plaintextUpdates.abstractOriginHash = lockedHash;
+              }
+            }
             // A guard-only call is a useful no-op check and must not manufacture
             // a history row or advance the live revision.
-            if (Object.keys(data).length === 0 && resolvedEdges === null) return;
+            if (Object.keys(data).length === 0 && !edgeWrite) return;
             // Snapshot the ciphertext row, but compare the caller's plaintext
             // with a decrypted copy. An identical encrypted save is a no-op.
             const currentForDiff = updKey
               ? decryptNodeFieldsWithKey({ ...current }, updKey)
               : current;
             const changedFields = diffNodeChanges(currentForDiff, plaintextUpdates);
-            if (changedFields.length === 0 && resolvedEdges === null) return;
+            if (changedFields.length === 0 && !edgeWrite) return;
             // #1328 — parity with writeNodeCore, before the snapshot.
             const authoredChange = authoredContentChanged(changedFields);
             const authoredStamp = await assertAuthoring(tx, memory.id, {
@@ -7476,8 +7636,34 @@ export function createMcpServerInstance(
               });
               if (edgeError) throw new InlineEdgeEndpointError(edgeError);
             }
-            if (content !== undefined) {
-              await applyIncludesInTransaction(tx, updated, content, auth, (currentForDiff.content as string | null) ?? null);
+            // #860: removals first, then additions, in this one transaction; a refused item aborts all of it.
+            if (removeTargets !== null || resolvedAdds !== null) {
+              if (removeTargets !== null && removeTargets.length > 0) {
+                const txCtx = await nodeDoorTxContext(objectCtx(), tx, [updated.memoryId]);
+                removing = true;
+                for (const target of removeTargets) {
+                  await deleteEdgeInDoorTx(tx, txCtx, { edgeId: target.edgeId, edgeRef: target.ref, memoryId: target.memoryId, expectedSourceId: updated.id });
+                  edgeReceipt.removed += 1;
+                }
+                removing = false;
+              }
+              if (resolvedAdds !== null) {
+                const added = await addOutgoingEdgesInTransaction(tx, {
+                  sourceNodeId: updated.id,
+                  sourceLoc: updated.loc,
+                  sourceMemoryId: updated.memoryId,
+                  resolved: resolvedAdds,
+                  createdBy: auth.clientId ?? null,
+                });
+                if ('error' in added) throw new InlineEdgeEndpointError(added.error);
+                edgeReceipt.added = added.added;
+                edgeReceipt.unchanged = added.unchanged;
+              }
+            }
+            if (appending) appendWritten = true;
+            const savedBody = content !== undefined ? content : appendedBody;
+            if (savedBody !== undefined) {
+              await applyIncludesInTransaction(tx, updated, savedBody, auth, (currentForDiff.content as string | null) ?? null);
               includePinContentSaved = true;
               includePinPriorContent = (currentForDiff.content as string | null) ?? null;
             }
@@ -7500,6 +7686,12 @@ export function createMcpServerInstance(
           if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
           if (e instanceof InlineEdgeEndpointError) return refusalResult(e.message);
           if (e instanceof EdgeLocConflictError) return refusalResult(e.message);
+          // #860: removeEdges' per-item refusals are deleteEdge's own, with its own text.
+          if (removing && e instanceof GraphQLError && (e.extensions?.code === 'EDGE_NOT_FOUND' || e.extensions?.code === 'INCLUDE_EDGE_DERIVED')) return refusalResult(e.message);
+          if (removing && isCommentGovernedError(e)) return refusalResult((e as Error).message);
+          // #860: whatever else deleteEdge's checks refuse (a boot-prompt row, write access revoked since the preflight) reaches the
+          // caller as deleteEdge's own text, through the same boundary that tool uses; anything untrusted stays a fault.
+          if (removing && e instanceof GraphQLError) return toolErrorResult(e, () => e.message, 'hadron_update_node:removeEdges');
           if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
           const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
@@ -7521,16 +7713,19 @@ export function createMcpServerInstance(
 
       // Announce the write (event pivot): the git mirror subscriber re-reads
       // and mirrors (encrypted memories punt there — see hadron_create_node).
-      void publishNodeWritten({
-        nodeId: existing.id,
-        memoryId: existing.memoryId,
-        ownerRepo: '',
-        clientId: auth.clientId,
-      });
+      if (writes) {
+        void publishNodeWritten({
+          nodeId: existing.id,
+          memoryId: existing.memoryId,
+          ownerRepo: '',
+          clientId: auth.clientId,
+        });
+      }
 
       // 033 — re-embed when content or abstract changed (existing.* is plaintext
       // on the MCP path, #206). Other-field-only updates don't touch the index.
-      if (content !== undefined || normalizedAbstract !== undefined) {
+      // #340: existing.content is the body this write stored (set from the updated row inside the transaction).
+      if (content !== undefined || normalizedAbstract !== undefined || appendWritten) {
         void enqueueNodeEmbedding(db, {
           nodeId: existing.id,
           workToken: existing.embeddingWorkToken,
@@ -7544,7 +7739,10 @@ export function createMcpServerInstance(
 
       const updatedUrn = await nodeUrn(loc, existing.memoryId);
       // #322: surface the stable PK (immutable across move/rename).
-      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})${includePinContentSaved ? renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId: existing.memoryId }, content, includePinPriorContent)) : ''}${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), existing.id))}`);
+      const edgeDeltaText = removeTargets !== null || resolvedAdds !== null
+        ? ` — edges: ${edgeReceipt.added} added, ${edgeReceipt.unchanged} unchanged, ${edgeReceipt.removed} removed`
+        : '';
+      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})${edgeDeltaText}${includePinContentSaved ? renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId: existing.memoryId }, content !== undefined ? content : appendedBody, includePinPriorContent)) : ''}${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), existing.id))}`);
     },
   );
 
@@ -7617,6 +7815,22 @@ export function createMcpServerInstance(
     for (const key of Object.keys(shape)) {
       if (key !== 'urn' && key !== 'session' && key in rest) fields[key] = rest[key];
     }
+    // #4864: the tasks-index edge is the task CREATE door's own argument, not a field of the node input.
+    let taskIndex: { agent: string; trigger: string } | undefined;
+    let taskSkill: { name: string; description: string } | undefined;
+    if (kind === 'task' && mode === 'create') {
+      const { agent, trigger } = fields as { agent?: unknown; trigger?: unknown };
+      delete fields.agent;
+      delete fields.trigger;
+      taskSkill = fields.skill as { name: string; description: string } | undefined;
+      delete fields.skill;
+      if (agent !== undefined || trigger !== undefined) {
+        if (typeof agent !== 'string' || agent.trim() === '' || typeof trigger !== 'string' || trigger.trim() === '') {
+          return textResult('hadron_create_task: "agent" and "trigger" go together: name the Agent whose tasks index lists this task and the trigger label for it.');
+        }
+        taskIndex = { agent, trigger };
+      }
+    }
     // #1291: the merge option is the task door's own argument, not a field of the node input.
     const mergeExports = kind === 'task' && mode === 'update' && fields.mergeExports === true;
     delete fields.mergeExports;
@@ -7687,10 +7901,10 @@ export function createMcpServerInstance(
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
       )[doorName](
         {},
-        { input: { memoryId: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}) },
+        { input: { memoryId: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}), ...(taskIndex ? { index: taskIndex } : {}), ...(taskSkill ? { skill: taskSkill } : {}) },
         ctx,
       );
-      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
+      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${taskIndex ? ` · listed in the tasks index of ${taskIndex.agent} (trigger: ${taskIndex.trigger.trim()})` : ''}${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
     } catch (e) {
       return toolErrorResult(e, () => {
         const code = (e as { extensions?: { code?: string } }).extensions?.code;
@@ -7701,9 +7915,9 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_task',
-    'Create a RUNNABLE node — a task `hadron_run_task` can execute. This is the only way to author one: `hadron_create_node` refuses a write that would produce a runnable node, because authoring something the platform will EXECUTE is not the same act as writing prose. The runnable flag is set by this tool, so you do not pass it. Use it when you are deliberately writing a procedure for an agent to run; for ordinary notes, docs or findings use hadron_create_node.',
-    governedDoorArgs,
-    async (args) => callGovernedDoor('task', 'create', governedDoorArgs, args),
+    'Create a RUNNABLE node — a task `hadron_run_task` can execute. This is the only way to author one: `hadron_create_node` refuses a write that would produce a runnable node, because authoring something the platform will EXECUTE is not the same act as writing prose. The runnable flag is set by this tool, so you do not pass it. Use it when you are deliberately writing a procedure for an agent to run; for ordinary notes, docs or findings use hadron_create_node. To list the task on an Agent\'s task list in the same step, pass `agent` and `trigger` together: the node and one edge to the node the Agent\'s tasksIndexRef names are written in one transaction, so either both exist or neither does (the task must be created in that Agent\'s own system memory).',
+    taskCreateArgs,
+    async (args) => callGovernedDoor('task', 'create', taskCreateArgs, args),
   );
 
   server.tool(
@@ -9047,10 +9261,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     // dependencies they pass: a Mustache compile over the node's memory, and no flow-routing edge inlined. A limit
     // refusal (#40) is thrown before anything is recorded and becomes the tool's named refusal in `runBundleResult`.
     const readCtx = scopeCtx();
+    // #4689: foreign URN includes resolve under the caller's own read access (cor:dmo:150:04).
+    const foreignReader = foreignIncludeReader(db, auth);
     const rendered = await assembleRunNodePrompt({ ...node, loc }, args, {
       memoryUrnOf: memoizedMemoryUrnLookup(),
       compileTemplate: (content, data, memoryId) =>
-        compileTemplate(content, data, memoryId, db, {}).then((text) => chargeRequestServed(readCtx, content, text)),
+        compileTemplate(content, data, memoryId, db, {}, undefined, { foreignReader }).then((text) => chargeRequestServed(readCtx, content, text)),
       // The run node's OWN memory was gated by loadNodeForRun; this gates each
       // dependency separately, because an edge can cross memories (#781).
       includeTarget: (target) => !!target && canRead(target.memoryId),
@@ -13142,6 +13358,17 @@ const governedDoorArgs = {
   seq: z.number().optional().describe('Sort order among siblings (lower values first)'),
   properties: z.record(z.string(), z.unknown()).optional().describe('Structured key-value properties'),
   data: z.record(z.string(), z.unknown()).optional().describe('Runtime data bag'),
+};
+
+/** #4864: the CREATE door's own arguments, beside the shared ones. Absent from the update door: an edit never lists a task. */
+const taskCreateArgs = {
+  ...governedDoorArgs,
+  agent: z.string().optional().describe('The Agent (ID or URN) whose tasks index lists this task. Give it with `trigger`; the task must be created in that Agent\'s own system memory.'),
+  trigger: z.string().optional().describe('The trigger label of the tasks-index edge: what the Agent\'s task list shows for this task. One line of at most 200 characters. Give it with `agent`.'),
+  skill: z
+    .object({ name: z.string(), description: z.string() })
+    .optional()
+    .describe('Opt-in skill export: writes an enabled properties.exports.claudeSkill block with this name and description, checked by the skill lint (an error refuses the whole call). Omit it and no block is written.'),
 };
 
 /**

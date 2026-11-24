@@ -632,6 +632,29 @@ describe('the platform starts an assigned worker with no live session (cor:agt:0
     expect(await starts()).toBe(1);
   });
 
+  it('#4855: the assigner\'s open-session fact and the start\'s decision agree for every session state (one predicate, two readers)', async () => {
+    const { readAssigneeFacts } = await import('../../api/graphql/schema/resolvers.taskWarnings.js');
+    const { launchForAssignment } = await import('./launch.js');
+    const now = new Date(Date.now() - 60 * 86_400_000);
+    const states: Array<[string, (() => Promise<unknown>) | null]> = [
+      ['no session', null],
+      ['a quiet open session', () => db.session.create({ data: { id: generateId(), appId: app.id, workerId: kit.id, userId: holder.id, startedAt: now, updatedAt: now, family: 'claude' } })],
+      ['a live open session', () => db.session.create({ data: { id: generateId(), appId: app.id, workerId: kit.id, userId: holder.id, startedAt: new Date(), updatedAt: new Date(), family: 'claude' } })],
+      ['an ended session', () => db.session.create({ data: { id: generateId(), appId: app.id, workerId: kit.id, userId: holder.id, startedAt: now, updatedAt: now, endedAt: new Date(), family: 'claude' } })],
+      ['a soft-deleted open session', () => db.session.create({ data: { id: generateId(), appId: app.id, workerId: kit.id, userId: holder.id, startedAt: now, updatedAt: now, deletedAt: new Date(), family: 'claude' } })],
+    ];
+    for (const [label, make] of states) {
+      await db.hostOperation.updateMany({ where: { status: { in: ['issued', 'collected'] } }, data: { status: 'failed', finishedAt: new Date(), failureReason: 'next state' } });
+      await db.session.deleteMany({ where: { workerId: kit.id } });
+      if (make) await make();
+      const t = await db.agentTask.create({ data: { appId: app.id, title: 'Do it', ownerUserId: manager.id, assigneeWorkerId: kit.id, assignedAt: new Date(), closeSessionWhenDone: false }, select: { id: true } });
+      const facts = await readAssigneeFacts(db, { appId: app.id, workerId: kit.id, excludeTaskId: t.id, now: new Date() });
+      const issued = await launchForAssignment(db, { appId: app.id, taskId: t.id, workerId: kit.id });
+      expect(issued === null, `${label}: the start was ${issued === null ? 'refused' : 'issued'} but the fact said sessionOpen=${facts.sessionOpen}`).toBe(facts.sessionOpen);
+      await db.agentTask.delete({ where: { id: t.id } });
+    }
+  });
+
   it('#4237: a manager\'s own start (cor:agt:070:05) keeps the live test: it may start Kit over a quiet open session', async () => {
     await quietOpenSession();
     expect((await issueStart()).type).toBe('worker.start');

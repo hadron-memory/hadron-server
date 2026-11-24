@@ -443,7 +443,11 @@ async function loadLegacyNode(
     .map((e) => normalizeEdgeEntry(e));
 
   const abstract = normalizeImportedAbstract(meta.abstract);
-  const normalizedContent = content?.trim() ?? null;
+  // #2584 (cor:int:020:01): the legacy topic.md has no framing (saveNodeToFs
+  // writes content raw), so nothing is stripped. Empty or ASCII-whitespace-only
+  // is no body; a Unicode-space-only body is content.
+  const normalizedContent =
+    content === null || ASCII_WHITESPACE_ONLY.test(content) ? null : content;
   const abstractOriginHash = reconcileAbstractOriginHash(
     abstract,
     normalizedContent,

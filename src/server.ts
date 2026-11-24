@@ -1,4 +1,5 @@
 import { buildAuthRateAdmission } from './auth/authRate.js';
+import { AUTH_COOKIE_NAME } from './auth/cookieName.js';
 import { isSessionSupersededError, respondSessionSuperseded } from './lib/sessionSuperseded.js';
 import { assertRateReadiness, checkRateConfiguration, cleanupRateBuckets } from './lib/rateLimit/index.js';
 import { assertEventKeysLocal } from './lib/agentTasks/eventKeyRebase.js';
@@ -52,7 +53,7 @@ import {
   type LoginProvider,
   type NewPendingLogin,
 } from './auth/pendingLoginState.js';
-import { mintProviderNonce, nonceExpectation, recordNonceRefusal } from './auth/providerNonce.js';
+import { mintProviderNonce, nonceExpectation, refuseUnboundNonce } from './auth/providerNonce.js';
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
@@ -100,12 +101,14 @@ import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories
 import { startSecretChangeSweepLoop } from './jobs/sweepSecretChanges.js';
 import { startPasskeyCeremonySweepLoop } from './jobs/sweepPasskeyCeremonies.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
+import { startChatToolTeardownSweepLoop } from './jobs/sweepChatToolTeardown.js';
 import { secretSweepDisabledReason, startSecretSweepLoop } from './jobs/secretSweep.js';
 import { startGitMirrorObligationSweepLoop } from './jobs/sweepGitMirrorObligations.js';
 import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
 import { startGrantLapseSweepLoop } from './jobs/sweepGrantLapse.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
+import { checkPgvectorAtBoot } from './services/embedding/vectors.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
 import { startAssetBytesSweepLoop } from './jobs/sweepAssetBytes.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
@@ -139,6 +142,7 @@ import { mountCapabilitiesRoute } from './api/capabilities.js';
 import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
 import { mountSlackEventRoutes } from './api/slackEvents.js';
+import { mountTelegramEventRoutes } from './api/telegramEvents.js';
 import { mountWebFetchEventRoutes } from './api/webfetchEvents.js';
 import { buildMicrosoftAuthUrl, getMicrosoftRedirectUri } from './integrations/exchange/auth.js';
 import { buildGmailAuthUrl, getGmailRedirectUri, isGmailConnectConfigured } from './integrations/gmail/auth.js';
@@ -220,8 +224,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // configured keyring refuses boot without echoing secret values.
   readTeamRecordKeys();
   const app = express();
-  const authRate = buildAuthRateAdmission(db);
-  const userAuthRate = buildAuthRateAdmission(db, 'rest', 'bearer');
+  const authRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'none' });
+  const userAuthRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'bearer' });
 
   // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
   // which upstream proxies it can trust so `req.protocol` resolves to
@@ -561,7 +565,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       if (pending.returnTo) {
         const { exp } = decodeJwt(jwt);
         const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-        res.cookie('hadron_token', jwt, {
+        res.cookie(AUTH_COOKIE_NAME, jwt, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
@@ -659,11 +663,11 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     const pending = await claimStateOrFail(res, state, 'google');
     if (!pending) return;
 
-    // #2204: what the ID token's nonce must match. Null = a ceremony row with no nonce hash, refused before any
-    // exchange (the legacy skip never reaches passkey step-up).
+    // #2204: what the ID token's nonce must match. Null = a row with no nonce hash (ceremony or ordinary), refused before any
+    // exchange (#2282: no row is exempt).
     const nonceExpected = nonceExpectation(pending);
     if (!nonceExpected) {
-      recordNonceRefusal('google', 'ceremony_unbound');
+      refuseUnboundNonce('google', pending);
       failLoginCallback(res, 'google', 'verify_failed');
       return;
     }
@@ -715,7 +719,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       if (pending.returnTo) {
         const { exp } = decodeJwt(jwt);
         const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-        res.cookie('hadron_token', jwt, {
+        res.cookie(AUTH_COOKIE_NAME, jwt, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
@@ -826,11 +830,11 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     const pending = await claimStateOrFail(res, state, 'apple');
     if (!pending) return;
 
-    // #2204: what the ID token's nonce must match. Null = a ceremony row with no nonce hash, refused before any
-    // exchange (the legacy skip never reaches passkey step-up).
+    // #2204: what the ID token's nonce must match. Null = a row with no nonce hash (ceremony or ordinary), refused before any
+    // exchange (#2282: no row is exempt).
     const nonceExpected = nonceExpectation(pending);
     if (!nonceExpected) {
-      recordNonceRefusal('apple', 'ceremony_unbound');
+      refuseUnboundNonce('apple', pending);
       failLoginCallback(res, 'apple', 'verify_failed');
       return;
     }
@@ -882,7 +886,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       if (pending.returnTo) {
         const { exp } = decodeJwt(jwt);
         const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-        res.cookie('hadron_token', jwt, {
+        res.cookie(AUTH_COOKIE_NAME, jwt, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
@@ -1068,7 +1072,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
         });
         const { exp } = decodeJwt(jwt);
         const maxAge = exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000;
-        res.cookie('hadron_token', jwt, {
+        res.cookie(AUTH_COOKIE_NAME, jwt, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'lax',
@@ -1811,6 +1815,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // Fails safe until the mailbox GCP project's client is provisioned —
     // same posture as Google login (#583).
     isConfigured: isGmailConnectConfigured,
+    // #2948: a Google account shared across services — the start accepts an
+    // account hint (Google's login_hint) scoped to the caller's own Google
+    // connections in the org.
+    acceptsLoginHint: true,
   });
   // Google Calendar = hadrontool-google-cal — a CALENDAR connection on the
   // same rails (ExchangeConnection row, provider 'google-cal'). Separate
@@ -1826,6 +1834,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // The calendar tool has no folder-subscription surface (no event plane
     // in v1) — don't POST a doomed inbox subscription on every connect.
     subscribeInbox: false,
+    // #2948: same Google-account hint scope as the gmail start.
+    acceptsLoginHint: true,
   });
   // Google Drive = hadrontool-google-drive — a DRIVE connection on the same
   // rails (ExchangeConnection row, provider 'google-drive'). Its own OAuth
@@ -1841,6 +1851,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     isConfigured: isGoogleDriveConnectConfigured,
     // No folder-subscription surface (no event plane in v1).
     subscribeInbox: false,
+    // #2948: same Google-account hint scope as the gmail start.
+    acceptsLoginHint: true,
   });
 
   // ---------------------------------------------------------------------------
@@ -1858,6 +1870,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // (spec 043 Phase 2) — same CORE_EVENTS_TOKEN contract; dispatch dedupes
   // on (connectionId, envelopeId) because the tool's inbox is at-least-once.
   mountSlackEventRoutes(app);
+
+  // Normalized Telegram events (telegram.*) arrive here from hadrontool-telegram (#597, Telegram phase 2) — same
+  // CORE_EVENTS_TOKEN contract; dispatch claims (connectionId, eventId) because the tool's inbox is at-least-once.
+  mountTelegramEventRoutes(app);
 
   // Durable webfetch poll events (poll.triggered / expired / failed) arrive
   // from hadrontool-webfetch. The core validates the origin-run binding,
@@ -1936,6 +1952,11 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     startMergeConsentSweepLoop(db);
   }
 
+  // Background job (#4847, cor:int:030:03): reconcile, cap and retry the chat tool teardown intents (Telegram, Slack) every 5 minutes.
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_CHAT_TOOL_TEARDOWN_SWEEP !== 'true') {
+    startChatToolTeardownSweepLoop(db);
+  }
+
   // #4003 (S8 of #3991) — App secret retention: superseded versions past SECRET_VERSION_RETENTION_DAYS or the
   // kept-versions cap, and events a year after their App is gone. Hourly. A disabled sweep is logged (plan #3991).
   {
@@ -1999,6 +2020,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   ) {
     startOrphanObjectReaperLoop(db);
   }
+
+  // #2772: read the pgvector version once so the `vector.iterative_scan_unsupported` line (older than 0.8.0)
+  // appears at startup. It never throws and never refuses to start: an older version just uses the exact scan.
+  if (process.env.NODE_ENV !== 'test') void checkPgvectorAtBoot(db);
 
   // Background job (#1140): hourly bounded sweep for Asset rows whose bytes are
   // missing from object storage — the mirror of the orphan sweep. Read-only

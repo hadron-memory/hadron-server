@@ -37,6 +37,7 @@ import { tierOf, type ModelTier } from './family.js';
 import type { AvailabilityRecord, WorkerAvailabilityView } from './availability.js';
 import { loadWorkerWorkStates, type WorkerWorkState } from './matcher.js';
 import { alarmEpisodeKey, endedAlarmEpisodes, loadStallInputs, unreactedChildren } from './stall.js';
+import { SATURATION_EVENT_TYPE } from './saturation.js';
 import type { EffortLevel, WorkerRunRecord } from './runSettings.js';
 import { withSharedWorkerActivity } from '../../api/graphql/schema/resolvers.worker.js';
 
@@ -130,6 +131,9 @@ async function loadWokenAlarms(db: Db, appId: string, now: Date): Promise<Map<st
     JOIN agent_team_alarm_schedule s ON s.event_id = e.id
     WHERE e.app_id = ${appId} AND e.severity = 'alarm' AND e.acknowledged_at IS NULL
       AND s.woken_at IS NOT NULL
+      -- #4777 (cor:agt:060:16): a saturation alarm's wake is an offer to the listed workers, not a move they owe: only a
+      -- manager acknowledges it, so it would hold them YOUR_MOVE with nothing they could do to clear it.
+      AND e.type <> ${SATURATION_EVENT_TYPE}
       -- #4202: an alarm naming a task of another App is nobody's move here (a missing task is left as it was).
       AND NOT EXISTS (SELECT 1 FROM agent_tasks ft WHERE ft.id = e.task_id AND ft.app_id <> e.app_id)
     ORDER BY e.created_at, e.id`;

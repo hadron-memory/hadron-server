@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintenanceUrl } from '../../src/test/dbWorkers.js';
+import { revokeRuntimeMigrations } from './revoke-runtime-migrations.js';
 import { EXIT, main, redact, verifyRuntimeRole } from './verify-runtime-role.js';
 
 const GRANTS_SQL = fileURLToPath(new URL('../../prisma/runtime-role.sql', import.meta.url));
@@ -444,5 +445,70 @@ describe('the serve role and the actions table (#3668)', { timeout: 60_000 }, ()
     const v = await verify();
     expect(v.map((x) => x.rule)).toEqual(['forbidden-table-privilege']);
     expect(v[0].detail).toContain('public.actions (INSERT)');
+  });
+});
+
+// #4573 (#4553 §10 F2): the recorded root check is moved only by the owner-run re-wrap. The serve role reads it and records the first one;
+// with UPDATE or DELETE it could replay an earlier root's value and let an old-root instance mint again.
+describe('the serve role and secret_root_check (#4573)', { timeout: 60_000 }, () => {
+  const VALUE = 'a'.repeat(64);
+  const createTable = () => asOwner((c) => c.query(`CREATE TABLE secret_root_check (id int PRIMARY KEY, check_value text NOT NULL)`));
+  beforeAll(async () => {
+    await resetDb();
+    await migrate();
+    await createTable();
+    applyGrants();
+  });
+
+  it('runtime-role.sql leaves SELECT and the first-mint INSERT, refuses UPDATE, DELETE, TRUNCATE and the upsert, and the verifier is clean', async () => {
+    const c = new Client({ connectionString: urlFor(SERVE, DB) });
+    await c.connect();
+    try {
+      const record = `INSERT INTO secret_root_check (id, check_value) VALUES (1, '${VALUE}') ON CONFLICT (id) DO NOTHING`;
+      expect((await c.query(record)).rowCount).toBe(1);
+      expect((await c.query(record)).rowCount).toBe(0); // the losing first recorder: a no-op, not a refusal
+      expect((await c.query('SELECT check_value FROM secret_root_check WHERE id = 1')).rows).toEqual([{ check_value: VALUE }]);
+      for (const sql of [
+        `UPDATE secret_root_check SET check_value = '${'b'.repeat(64)}'`,
+        'DELETE FROM secret_root_check',
+        'TRUNCATE secret_root_check',
+        `INSERT INTO secret_root_check (id, check_value) VALUES (1, 'x') ON CONFLICT (id) DO UPDATE SET check_value = EXCLUDED.check_value`,
+      ]) {
+        await expect(c.query(sql), sql).rejects.toMatchObject({ code: '42501' });
+      }
+    } finally {
+      await c.end();
+    }
+    expect(await verify()).toEqual([]);
+  });
+
+  it('a table created AFTER the grants file is reported (default privileges grant it) until the grants file or the revoke step runs', async () => {
+    for (const fix of [applyGrants, () => asOwner((c) => revokeRuntimeMigrations(c, SERVE))]) {
+      await asOwner((c) => c.query('DROP TABLE secret_root_check'));
+      await createTable();
+      const v = await verify();
+      expect(v.map((x) => x.rule)).toEqual(['forbidden-table-privilege']);
+      expect(v[0].detail).toContain('public.secret_root_check (UPDATE/DELETE)');
+      await fix();
+      expect(await verify()).toEqual([]);
+    }
+  });
+
+  it.each(['UPDATE', 'DELETE', 'UPDATE (check_value)'])('reports %s', async (priv) => {
+    applyGrants();
+    await asOwner((c) => c.query(`GRANT ${priv} ON secret_root_check TO ${SERVE}`));
+    const v = await verify();
+    expect(v.map((x) => x.rule)).toEqual(['forbidden-table-privilege']);
+    expect(v[0].detail).toContain(`public.secret_root_check (${priv.split(' ')[0]})`);
+    applyGrants();
+  });
+
+  it.each(['SELECT', 'INSERT'])('still requires %s (a mint reads and records it)', async (priv) => {
+    applyGrants();
+    await asOwner((c) => c.query(`REVOKE ${priv} ON secret_root_check FROM ${SERVE}`));
+    const v = await verify();
+    expect(v.map((x) => x.rule)).toEqual(['missing-table-privilege']);
+    expect(v[0].detail).toContain('public.secret_root_check');
+    applyGrants();
   });
 });

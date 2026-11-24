@@ -3,7 +3,7 @@
  * tasks (`taskRef`); an answer or a take-back appends one `question.answered` / `question.answer-retracted` event on
  * that task, inside the answer's transaction, carrying ids, the code, the revision and the state only (cor:agt:050:11,
  * never the answer); `pendingTaskWakes` makes the task's CURRENT assignee due an ANSWERED wake for an answer, never for
- * a take-back, until delivered or the assignee acts on the task (Vera's draft cor:agt:050:34, modelled on :33).
+ * a take-back, until delivered or the assignee acts on the task (cor:agt:050:35, modelled on :33).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
@@ -332,7 +332,7 @@ describe('#4431 §3: the answer wakes the task\'s current assignee', () => {
   });
 
   it('a take-back wakes nobody and does not withdraw an answer wake still undelivered (it stands until delivered or acted on)', async () => {
-    // Beckett P3 on #4644. Vera's draft cor:agt:050:34: a take-back is recorded and wakes nobody; a wake stands until it
+    // Beckett P3 on #4644. cor:agt:050:35: a take-back is recorded and wakes nobody; a wake stands until it
     // is delivered or the assignee acts on the task. The nudge carries no answer, so the woken worker reads the
     // question and finds it OPEN again.
     const t = await mkTask();
@@ -363,7 +363,7 @@ describe('#4431 §3: the answer wakes the task\'s current assignee', () => {
       const page = (await exec(READ, { app: app.id, w: [asker.id] })).dueWakes;
       const wake = page.wakes.find((w: any) => w.worker.id === asker.id);
       const reason = wake?.reasons.find((r: any) => r.kind === 'TASK');
-      // Dara's P2 on #4644: the nudge names the question's code (draft cor:agt:050:34: "the task and the question's code").
+      // Dara's P2 on #4644: the nudge names the question's code (cor:agt:050:35: "the task and the question's code").
       expect(reason?.task).toEqual({ id: t.id, event: 'ANSWERED', handle: t.handle, questionCode: D.code(q, {}, as(holder.id)), ref: `TASK:${t.id}:answered` });
       await exec(`mutation($p: [String!]!) { acknowledgeWakes(proofs: $p) { __typename } }`, { p: [wake.proof] });
       const again = (await exec(READ, { app: app.id, w: [asker.id] })).dueWakes;

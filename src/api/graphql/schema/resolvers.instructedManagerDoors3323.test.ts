@@ -138,6 +138,24 @@ const doors: Record<string, Door> = {
     call: (instruction, c) => M.setAgentTaskStallSchedule({}, { appRef: f.app.id, input: { notStartedMinutes: 33 }, instruction }, c),
     took: async () => (await db.agentTaskStallSchedule.findUnique({ where: { appId: f.app.id } }))?.notStartedMinutes === 33,
   },
+  // #4777 (hrn:node:hadronmemory.com:specs:cor:agt:060:16): the saturation-alarm wake-roles list, the stall schedule's door shape.
+  setSaturationAlarmWakeRoles: {
+    act: 'app.saturation-wake-roles',
+    call: (instruction, c) => M.setSaturationAlarmWakeRoles({}, { appRef: f.app.id, roles: ['triager'], instruction }, c),
+    took: async () => (await db.agentTaskStallSchedule.findUnique({ where: { appId: f.app.id } }))?.saturationWakeRoles?.[0] === 'triager',
+  },
+  // #4937: the App's external-tasks report, the same door shape as the wake-roles list.
+  reportExternalTasks: {
+    act: 'app.external-tasks-report',
+    call: (instruction, c) => M.reportExternalTasks({}, { appRef: f.app.id, exist: true, instruction }, c),
+    took: async () => (await db.app.findUniqueOrThrow({ where: { id: f.app.id } })).externalTasksExist === true,
+  },
+  // #4921 slice A: the App role lists, the same door shape as the wake-roles list.
+  setAppRoleList: {
+    act: 'app.role-list',
+    call: (instruction, c) => M.setAppRoleList({}, { appRef: f.app.id, purpose: 'DEFECT_LINK', roles: ['triager'], instruction }, c),
+    took: async () => (await db.agentTaskStallSchedule.findUnique({ where: { appId: f.app.id } }))?.defectLinkRoles?.[0] === 'triager',
+  },
   setAppModelGroup: {
     act: 'app.model-group.set',
     call: (instruction, c) => M.setAppModelGroup({}, { appRef: f.app.id, name: 'fast', patterns: ['claude-*'], instruction }, c),

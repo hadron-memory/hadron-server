@@ -18,6 +18,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -48,6 +49,11 @@ beforeEach(async () => {
   await db.orgMember.create({
     data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
   });
+  // #3911: a trigger is created with an Agent, so the App has one installed.
+  const sys = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'adm-sys', urn: 'adm:sys', organizationId: org.id } });
+  const agent = await db.agent.create({ data: { id: generateId(), name: 'adm-agent', urn: 'adm:agent', organizationId: org.id, systemMemoryId: sys.id } });
+  await serveAgentBootPrompt(db, agent.id, 'You are adm-agent.');
+  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } as never });
 });
 
 // ───── one-shot schedules ───────────────────────────────────────────────────

@@ -78,7 +78,7 @@ describe('restoreNodeRevision — enforces the current schema (#737)', () => {
     const rev = await db.nodeRevision.findFirst({ where: { nodeId: n.id }, orderBy: { revNo: 'desc' } });
     // Tighten: competitor now also requires `stage` — the snapshot lacks it.
     await updateMemory({ ref: memId, schema: { objectTypes: { competitor: { fields: { name: { type: 'text', required: true }, stage: { type: 'text', required: true } } } } } });
-    await expect((resolvers.Mutation as any).restoreNodeRevision(null, { revisionId: rev!.id }, admin())).rejects.toMatchObject({
+    await expect((resolvers.Mutation as any).restoreNodeRevision(null, { nodeRevRef: rev!.id }, admin())).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },
     });
   });

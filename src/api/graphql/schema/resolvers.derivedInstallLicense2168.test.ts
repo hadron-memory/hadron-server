@@ -47,7 +47,7 @@ beforeEach(async () => {
   expect(await isAgentInstalledAndLicensed(db,app.id,target.id)).toBe(false);
 });
 const mint = () => mintAppRun(db,{organizationId:holder.id,appId:app.id,agentId:target.id,triggerKind:'MANUAL',entryNodeUrn:entry,publish:false});
-const session = () => M.startAgentSession({}, {agentId:target.id,externalUserId:'synthetic'}, {db,appId:app.id,organizationId:holder.id,roles:[]} as Context);
+const session = () => M.startAgentSession({}, {agentRef:target.id,externalUserId:'synthetic'}, {db,appId:app.id,organizationId:holder.id,roles:[]} as Context);
 it('mint refuses an unlicensed derived Agent before a run or served prompt is written',async()=>{
   const prompts = await db.servedPrompt.count();
   await expect(mint()).rejects.toMatchObject({code:'AGENT_NOT_INSTALLED'});

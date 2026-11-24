@@ -542,11 +542,13 @@ describe('#3934 — the kinds with no task: judged by their own episode', () => 
     expect(await events('alarmsInEffect: true')).toEqual([]);
   });
 
-  it('a coordinator-cadence alarm: the same', async () => {
-    const e = await taskless('alarm.coordinator-cadence');
-    const ep = await db.coordinatorCadenceEpisode.create({ data: { appId: app.id, workerId: rook.id, eventId: e.id, openedAt: at('10:00') } });
+  // #4375: the alarm is raised as alarm.lead-cadence now; rows raised before the rename keep alarm.coordinator-cadence (history,
+  // never rewritten), and both are judged by the same episode table.
+  it.each(['alarm.lead-cadence', 'alarm.coordinator-cadence'])('a lead-cadence alarm of type %s: the same', async (type) => {
+    const e = await taskless(type);
+    const ep = await db.leadCadenceEpisode.create({ data: { appId: app.id, workerId: rook.id, eventId: e.id, openedAt: at('10:00') } });
     expect(await events('alarmsInEffect: true')).toMatchObject([{ id: e.id, escalationEndedAt: null }]);
-    await db.coordinatorCadenceEpisode.update({ where: { id: ep.id }, data: { endedAt: at('10:45') } });
+    await db.leadCadenceEpisode.update({ where: { id: ep.id }, data: { endedAt: at('10:45') } });
     expect(await events()).toMatchObject([{ id: e.id, escalationEndedAt: iso('10:45') }]);
     expect(await events('alarmsInEffect: true')).toEqual([]);
   });

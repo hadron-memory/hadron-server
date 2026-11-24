@@ -15,6 +15,7 @@
  * The pinned-read-client row (a client pinned to a purged version refuses SUPERSEDED, never NOT_FOUND) needs S3's
  * `secret_read_clients` and is a follow-up under the epic (Bill, chat #104737).
  */
+import { bigintAsString } from '../../test/bigintJson.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -124,7 +125,7 @@ describe('purgeSupersededVersions: retention', () => {
     expect(events.map((e) => e.versionNo)).toEqual([1, 2]);
     expect(events.every((e) => e.outcome === 'OK' && e.ownerType === 'app' && e.ownerId === appId && e.secretName === 'evented')).toBe(true);
     expect(events.every((e) => e.actorUserId === null && e.workerId === null && e.sessionId === null)).toBe(true);
-    expect(JSON.stringify(events)).not.toContain('PURGE-CANARY');
+    expect(JSON.stringify(events, bigintAsString)).not.toContain('PURGE-CANARY');
   });
 
   it('touches only expired superseded rows of any App, and a second pass purges nothing', async () => {
@@ -149,6 +150,36 @@ describe('purgeSupersededVersions: retention', () => {
     expect(second).toEqual({ purged: 2, more: false });
     expect(await versionsOf(s.id)).toEqual([5]);
     expect(await purgeEvents(s.id)).toHaveLength(4);
+  });
+
+  it('`more` is true after a short batch that skipped a locked row, and false once nothing is left (#4573)', async () => {
+    const s = await create('locked', 'a');
+    for (const v of ['b', 'c', 'd']) await update(s.id, v);
+    for (const n of [1, 2, 3]) await supersededDaysAgo(s.id, n, 31);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedSignal = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM secret_versions WHERE secret_id = ${s.id} AND version_no = 2 FOR UPDATE`;
+      locked();
+      await held;
+    }, { timeout: 20_000 });
+    await lockedSignal;
+    try {
+      expect(await purgeSupersededVersions(db)).toEqual({ purged: 2, more: true });
+    } finally {
+      release();
+      await holder;
+    }
+    expect(await purgeSupersededVersions(db)).toEqual({ purged: 1, more: false });
+  });
+
+  it('`more` is false when the last full batch drained the backlog exactly (#4573)', async () => {
+    const s = await create('exact', 'a');
+    for (const v of ['b', 'c']) await update(s.id, v);
+    for (const n of [1, 2]) await supersededDaysAgo(s.id, n, 31);
+    expect(await purgeSupersededVersions(db, { batchSize: 2, maxBatches: 1 })).toEqual({ purged: 2, more: false });
   });
 });
 
@@ -177,6 +208,26 @@ describe('purgeSupersededVersions: the kept-versions cap', () => {
     const events = await purgeEvents(s.id);
     expect(events.map((e) => e.versionNo)).toEqual([1, 2]);
     expect(events.every((e) => e.actorUserId === memberId)).toBe(true);
+  });
+});
+
+describe('the cap is one rule in two places (#4573)', () => {
+  it('a store trims exactly the versions the pass would purge', async () => {
+    const total = MAX_SECRET_VERSIONS + 3;
+    const trimmed = await create('by-store', 'a');
+    for (let i = 2; i <= total; i++) await update(trimmed.id, `v${i}`);
+    const swept = await create('by-pass', 'a');
+    const v1 = await db.secretVersion.findFirstOrThrow({ where: { secretId: swept.id, versionNo: 1 }, omit: { valueEncrypted: false } });
+    for (let n = 2; n <= total; n++) {
+      await db.secretVersion.create({ data: { secretId: swept.id, versionNo: n, valueEncrypted: v1.valueEncrypted, appId, keyVersion: v1.keyVersion, sizeBytes: 3 } });
+    }
+    await db.$executeRaw`UPDATE secret_versions SET superseded_at = (clock_timestamp() AT TIME ZONE 'UTC') WHERE secret_id = ${swept.id} AND version_no < ${total}`;
+    await purgeSupersededVersions(db);
+    const kept = await versionsOf(swept.id);
+    expect(kept).toEqual(Array.from({ length: MAX_SECRET_VERSIONS }, (_x, i) => i + 4));
+    expect(await versionsOf(trimmed.id)).toEqual(kept);
+    const dropped = async (id: string) => (await purgeEvents(id)).map((e) => e.versionNo);
+    expect(await dropped(trimmed.id)).toEqual(await dropped(swept.id));
   });
 });
 

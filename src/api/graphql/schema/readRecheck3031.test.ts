@@ -100,7 +100,7 @@ async function installFixture() {
 describe('#3031 restore current and provenance readability independently', () => {
   it('allows a reader of both memories', async () => {
     const f = await installFixture();
-    await M.restoreNodeRevision({}, { revisionId: f.revision.id }, f.ctx);
+    await M.restoreNodeRevision({}, { nodeRevRef: f.revision.id }, f.ctx);
     expect((await db.node.findUniqueOrThrow({ where: { id: f.current.node.id } })).content).toBe('prior');
   });
   for (const side of ['current', 'provenance'] as const) {
@@ -112,7 +112,7 @@ describe('#3031 restore current and provenance readability independently', () =>
         let ctx = f.ctx; let crossed = () => false;
         if (interleave) { const seam = beforeTransaction(ctx, removeRead); ctx = seam.ctx; crossed = seam.crossed; }
         else await removeRead();
-        await expect(M.restoreNodeRevision({}, { revisionId: f.revision.id }, ctx)).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND', revisionId: f.revision.id } });
+        await expect(M.restoreNodeRevision({}, { nodeRevRef: f.revision.id }, ctx)).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND', nodeRevRef: f.revision.id } });
         expect(crossed()).toBe(interleave);
         expect(await state([f.current.node.memoryId, f.provenance.node.memoryId])).toEqual(before);
       });
@@ -135,7 +135,7 @@ it.each(['moveNode', 'searchReplaceInNodes', 'restoreNodeRevision', 'deleteNode'
   });
   if (door === 'moveNode') await M.moveNode({}, { sourceRef: f.current.node.id, targetUrn: `hrn:node:${(await db.memory.findUniqueOrThrow({ where: { id: f.current.node.memoryId } })).urn}:moved` }, f.ctx);
   else if (door === 'searchReplaceInNodes') await M.searchReplaceInNodes({}, { input: { nodeIds: [f.current.node.id], oldText: 'before', newText: 'after', fields: ['content'] } }, f.ctx);
-  else if (door === 'restoreNodeRevision') await M.restoreNodeRevision({}, { revisionId: f.revision.id }, f.ctx);
+  else if (door === 'restoreNodeRevision') await M.restoreNodeRevision({}, { nodeRevRef: f.revision.id }, f.ctx);
   else await M.deleteNode({}, { nodeRef: f.current.node.id }, f.ctx);
   expect(observed).toBe(true);
 });

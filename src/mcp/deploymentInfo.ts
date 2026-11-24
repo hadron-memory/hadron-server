@@ -57,7 +57,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 //   importedAgentId -> parentAgentRef, importedAgentRef).
 // 0.13.0: #891 — new query `assets(filter, orgId, limit, offset)`, the uniform
 // cross-memory asset list (spec cor:api:120), plus the `AssetFilter` input and
-// `AssetsPage` type. A caller-detectable addition: `memoryAssets(memoryId:)`
+// `AssetsPage` type. A caller-detectable addition: `memoryAssets(memoryRef:)`
 // remains, but "every asset I can reach" was previously unanswerable.
 // 0.14.0: #1009/#1006 — caller-detectable MCP surface additions. New optional
 // `session` argument on hadron_list_workers / hadron_cast_worker /
@@ -140,7 +140,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `replaceSubtree.memoryId` is DELIBERATELY unchanged (legacy `String!`): the
 // field exists only so legacy callers reach REPLACE_SUBTREE_RETIRED instead
 // of an unknown-argument error (#4219 blind P2-A).
-// (Chunk A, the memory reads, follows #4136.)
+// (Chunk A, the memory reads, is 0.32.0, below.)
 //
 // 0.24.0 — BREAKING (#2027 S11): the attention API is RETIRED. The GraphQL fields
 // `teamAttention` / `teamAttentionPage` / `teamAttentionPreviewPage` /
@@ -150,7 +150,92 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // wake path (`dueWakes` / the CLI's `hadron team wakes`); the explicit
 // `markOwnTeamChatRead` mark and every wake/mark/resume rule it shared a module
 // with are unchanged.
-export const HADRON_SERVER_VERSION = '0.24.0';
+//
+// 0.25.0 — #4836 (cor:dmo:070:05 Proposed; V58): startSession's `appRef` refusals are
+//      concealed and re-typed. A caller without standing for the named App — a non-member,
+//      an anonymous caller, a malformed/ambiguous ref, or a pure App key naming any other
+//      App — gets ONE answer: APP_NOT_FOUND · "App not found.", byte-identical for a
+//      missing, deleted, uninstalled and existing-but-inaccessible App, echoing no ref and
+//      carrying no appId. Was: BAD_USER_INPUT · "App not found: <ref>" (missing/deleted,
+//      echoing the value), FORBIDDEN (existing, non-member — an existence oracle), the
+//      URN parser's echoing typed errors (malformed), and SESSION_APP_MISMATCH (an App key
+//      naming another App — that code is GONE from this door). A caller with standing
+//      keeps APP_UNINSTALLED by PK, with the appId. `hadron_start_session` (MCP) never
+//      took an appRef, so the MCP tool surface is unchanged.
+//
+// 0.29.0 — #4838 (the other App-ref doors; same rule as 0.25.0): the teamRole write doors
+//      (`createTeamRole` / `updateTeamRole` / `deleteTeamRole`) and the `teamRoles` read
+//      conceal their `appRef` refusals the same way — reach first, state after. A caller
+//      without standing gets the one APP_NOT_FOUND · "App not found." answer for a missing,
+//      deleted, uninstalled (by PK) or existing-but-inaccessible App and for a malformed or
+//      ambiguous ref, echoing no ref and carrying no appId; a participant keeps
+//      APP_UNINSTALLED with the appId, and a member who reaches but may not edit keeps
+//      FORBIDDEN. Was: BAD_USER_INPUT · "App not found: <ref>" for a deleted App (echoing;
+//      reachable only in the resolve-then-read race), APP_UNINSTALLED with the appId
+//      BEFORE any reach decision for an uninstalled App named by PK (an existence and
+//      state oracle), FORBIDDEN for an existing App, and the URN parser's echoing typed
+//      errors for a malformed ref. `createConnectionGrant`'s grantee refusal keeps its
+//      code (BAD_USER_INPUT) and its deliberate existence oracle (a connection owner need
+//      not reach the grantee App) but no longer echoes the ref: "Grantee App not found."
+//      (was "Grantee App not found: '<ref>'."). The three local appNotFound copies
+//      (`agentTask` / `hostOperation` / `hostAssignment`) are untouched.
+//
+//      Why 0.29.0 and not 0.26.0: 0.26.0–0.28.0 are reserved numbers, taken by the
+//      concurrent surface renumbering recorded in team chat #138407 — this entry takes
+//      the next FREE number past them (blind review on #4871 asked).
+//
+// 0.30.0 — BREAKING, entity refs S5 (#4141, partial: `appRuns(parentRunId)` follows): two GraphQL
+// arguments renamed, no aliases. `cancelAppRun(id)` -> `cancelAppRun(ref)` and
+// `startAgentSession(agentId)` -> `startAgentSession(agentRef)`; each takes an id OR a URN (hrn:apprun /
+// hrn:agent). A client still sending the old name gets "Unknown argument" and the whole operation is
+// refused until it upgrades; `startAgentSession` is an App-key operation, so external integrators and SDK
+// callers are affected, not only the first-party clients. Refusals are unchanged: `cancelAppRun` keeps
+// NOT_FOUND "Run not found." and FORBIDDEN for a non-admin, with a ref that cannot name a run now
+// BAD_USER_INPUT; `startAgentSession` answers an unknown, deleted or uninstalled Agent with the one existing
+// FORBIDDEN, and a relative URN as URN_NOT_QUALIFIED.
+//
+// 0.31.0 — BREAKING, entity refs S5 (#4141, the third field; completes 0.30.0, which renamed `cancelAppRun` and
+// `startAgentSession`): the GraphQL argument `appRuns(parentRunId)` is renamed `appRuns(parentRunRef)`, no alias, and
+// takes a run id OR an hrn:apprun URN. A client still sending `parentRunId` gets "Unknown argument" and the whole
+// query is refused until it upgrades. The filter keeps its tri-state (omitted = no filter, null = top-level runs,
+// a ref = that run's children). A ref naming no run in scope (unknown, outside the org, ambiguous legacy) is the
+// exactly empty page, not an error; a ref that cannot name a run is BAD_USER_INPUT. The org READER gate still runs
+// first, so a non-member sees the App NOT_FOUND whatever the ref.
+//
+// 0.32.0 — BREAKING, entity refs S6 chunk A (#4142): the GraphQL memory READS take `<entity>Ref`, no alias.
+// `usageEvents` / `usageEventsPage` (`memoryId` → `memoryRef`, `nodeId` → `nodeRef`; both stay optional `ID`),
+// `memoryAssets` (`memoryId` → `memoryRef: ID!`) and `memoryLocSegments` (`memoryIds` → `memoryRefs: [ID!]!`).
+// A lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation. Nothing else
+// changes: every field already resolved an ID or URN and keeps its gate and its refusals byte-identical; the
+// usage "provide either nodeId or loc" refusal now names `nodeRef`.
+//
+// 0.33.0 — BREAKING, entity refs S2 (#4138): the node-revision operations take `nodeRevRef`, no alias.
+// `nodeRevision(revisionId)`, `restoreNodeRevision(revisionId)`, `updateNodeRevision(revisionId)` and the
+// delete-revision mutation (`revisionId` → `nodeRevRef: String!`, a revision URN or id). A lagging client's old name is an UNKNOWN
+// argument and GraphQL refuses the whole operation.
+//
+// 0.34.0 — BREAKING, entity refs (#4368): `setAgentAssetUploadEnabled(input.agentUrn)` → `input.agentRef`, no alias.
+// A lagging client's old name is an UNKNOWN input field and GraphQL refuses the whole operation. The gate, the
+// refusals and what the field accepts (an id or a URN) are unchanged. `beginAssetUpload` and `agentAssets`, the
+// deprecated v1 calls, keep `agentUrn` until they are retired.
+//
+// 0.35.0 — BREAKING, entity refs S1 (#4137): the six memory share/member mutations take refs and nothing else, no alias.
+// `createMemoryShare` / `updateMemoryShareRole` (`memoryId` -> `memoryRef: ID!`, `granteeRef: ID!`), `deleteMemoryShare`
+// (`granteeRef: String`, omitted = the caller's own share) and `addMemoryMember` / `updateMemoryMemberRole` /
+// `removeMemoryMember` (`memoryRef: ID!`, `userRef: ID!`). The deprecated `granteeId`, `memoryId` and `userId` arguments are
+// removed, and the surviving refs are now required `ID!` (were optional `String`). A lagging client's old name is an UNKNOWN
+// argument and GraphQL refuses the whole operation. The existence-hiding order is unchanged: memory resolved, principal gate,
+// counterparty resolved. (0.34.0 is #5046, #4368, merged first.)
+//
+// 0.36.0 — BREAKING, entity refs S7 (#4148): the agent-task family takes refs, no alias. The eleven own-task mutations
+// (`updateAgentTask`, `assignAgentTask`, `reassignAgentTask`, `startAgentTask`, `recordAgentTaskProgress`,
+// `finishAgentTask`, `cancelAgentTask`, `releaseAgentTaskExternalId`, `parkAgentTask`, `cloneAgentTask`,
+// `makeAgentTaskReady`) take `taskRef: ID!` (was `taskId`); `agentTask(id)` → `agentTask(ref)`; `agentTasks` /
+// `agentTasksPage(parentTaskId)` → `parentTaskRef`; `agentTeamEvents` / `agentTeamEventsPage(taskId)` → `taskRef`. A
+// lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation (ship order per precedent
+// 0274: notices, server, companions). Gates and refusals are unchanged; `agentTasks(externalId)` keeps its name (an
+// external-system label).
+export const HADRON_SERVER_VERSION = '0.36.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

@@ -74,6 +74,10 @@ import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { cancelLiveReset, holdForStopLease } from '../../../lib/contextReset/contextReset.js';
 import { effectiveWindows, STALL_WINDOW_DEFAULTS, type StallWindows } from '../../../lib/agentTasks/stall.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import { APP_ROLE_PURPOSES, isAppRolePurpose, normalizeRoleList, type AppRoleListsView } from '../../../lib/agentTasks/appRoleLists.js';
+import { TEAM_DARK_EVENT_TYPE, teamHealthView } from '../../../lib/agentTasks/teamDark.js';
+import { normalizeWakeRoles, SATURATION_EVENT_TYPE, SATURATION_WAKE_ROLE_MAX_LENGTH, SATURATION_WAKE_ROLES_MAX } from '../../../lib/agentTasks/saturation.js';
+import { withRosterAppRead } from './resolvers.agentTaskMatching.js';
 import {
   HOST_LAPSE_CHECK_INS_DEFAULT,
   HOST_LAPSE_CHECK_INS_MAX,
@@ -231,9 +235,16 @@ export const agentTaskAlarmMutations = {
       if (row.severity !== 'alarm') {
         throw taskError('NOT_AN_ALARM', 'This event is not an alarm; only an alarm is acknowledged.', { eventId: id });
       }
+      // #4531 (cor:agt:050:34): a team.dark alarm has no chain and nobody to escalate to; it ends only when the condition
+      // clears. Refused before the membership check, so no caller learns anything from which gate answered.
+      if (row.type === TEAM_DARK_EVENT_TYPE) {
+        throw taskError('ALARM_NOT_ACKNOWLEDGEABLE', 'A dark-team alarm is not acknowledged; it ends when the team is no longer dark (cor:agt:050:34).', { eventId: id });
+      }
       // Membership is checked against the chain ON THE LOCKED ROW (Rook P3-2).
       // cor:agt:050:24 (#1762): an owner in the chain, or whoever manages the App, for any alarm in it.
-      const ownerInChain = inChain(actor, row.chain);
+      // #4777 (cor:agt:060:16): a saturation alarm's chain lists the workers it WOKE, not owners: only whoever manages
+      // the App acknowledges it, so its chain grants no standing here.
+      const ownerInChain = row.type !== SATURATION_EVENT_TYPE && inChain(actor, row.chain);
       if (!ownerInChain && !(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError(
           'ALARM_NOT_IN_CHAIN',
@@ -485,7 +496,166 @@ export const agentTaskAlarmMutations = {
     });
     return stallWindowsView(ctx, app.id);
   },
+
+  /**
+   * #4777 (#3819 slice 2; hrn:node:hadronmemory.com:specs:cor:agt:060:16): set the App's saturation-alarm wake-roles list,
+   * the whole list at once. Whoever manages the App (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), through the
+   * stall schedule's door exactly: `resolveParticipatedApp` (a non-participant gets APP_NOT_FOUND, the missing App's
+   * answer), then `actorManagesApp` inside `inTaskWriteTx` (a participant who does not manage it gets
+   * APP_MANAGER_REQUIRED; an instructed worker is admitted only as #3323 admits it). Malformed input is refused before
+   * any of that. An existing row is read FOR UPDATE before the compare, so a second writer compares against the first
+   * one's committed list (not pinned: last write wins either way). Writing the stored list again writes nothing and
+   * records nothing (#3323's no-op rule). The record is the precedent's ids-only
+   * `app.manager-act` row, written only when the instructed-manager arm admitted the caller. The list is read when an
+   * alarm is raised, so a change here never adds or removes a wake for an alarm already raised.
+   */
+  setSaturationAlarmWakeRoles: async (
+    _: unknown,
+    { appRef, roles, instruction }: { appRef: string; roles: unknown; instruction?: ActInstruction | null },
+    ctx: Context,
+  ) => {
+    const next = normalizeWakeRoles(roles);
+    if (!next) {
+      throw badInput(
+        `roles is a list of at most ${SATURATION_WAKE_ROLES_MAX} role names, each 1 to ${SATURATION_WAKE_ROLE_MAX_LENGTH} characters ` +
+          'with no ":" or whitespace; the empty list clears it.',
+      );
+    }
+    const participated = await resolveParticipatedApp(ctx, appRef);
+    const { app } = participated;
+    const actor = withInstruction(participated.actor, instruction);
+    requireWritable(ctx, app);
+    await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
+      if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
+        throw taskError('APP_MANAGER_REQUIRED', 'Only whoever manages the App sets the roles its saturation alarms wake.');
+      }
+      const [row] = await tx.$queryRaw<{ roles: string[] }[]>`
+        SELECT saturation_wake_roles AS roles FROM agent_task_stall_schedule WHERE app_id = ${freshApp.id} FOR UPDATE`;
+      const current = row?.roles ?? [];
+      if (current.length === next.length && current.every((r, i) => r === next[i])) return; // #3323: a no-op writes nothing
+      await tx.agentTaskStallSchedule.upsert({
+        where: { appId: freshApp.id },
+        create: { appId: freshApp.id, saturationWakeRoles: next, updatedBy: ctx.userId ?? null },
+        update: { saturationWakeRoles: next, updatedBy: ctx.userId ?? null },
+      });
+      await recordInstructedManagerAct(tx, freshApp.id, actor, 'app.saturation-wake-roles');
+    });
+    return saturationWakeRolesView(ctx.db, app.id);
+  },
+
+  /**
+   * #4937 (hrn:node:hadronmemory.com:specs:cor:agt:050:31): report whether work exists OUTSIDE Hadron for the App (GitHub
+   * issues and the like). Until an App's first report the lead cadence alarm does not exist for it; once the latest report
+   * says `exist: true` it does. Whoever manages the App (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), through the
+   * stall schedule's door exactly: `resolveParticipatedApp` (a non-participant gets APP_NOT_FOUND, the missing App's
+   * answer), then `actorManagesApp` inside `inTaskWriteTx` (a participant who does not manage it gets
+   * APP_MANAGER_REQUIRED; an instructed worker is admitted only as #3323 admits it). A non-boolean `exist` is refused
+   * BAD_USER_INPUT first. The App row is locked FOR UPDATE, so a second report compares against the first one's commit.
+   * Reporting the stored answer again changes nothing and records nothing (#3323's no-op rule). A report of `false` only
+   * stops NEW alarms: an open episode stays open until its lead assigns.
+   */
+  reportExternalTasks: async (
+    _: unknown,
+    { appRef, exist, instruction }: { appRef: string; exist: unknown; instruction?: ActInstruction | null },
+    ctx: Context,
+  ) => {
+    if (typeof exist !== 'boolean') throw badInput('exist is true when work exists outside Hadron and false when none does.');
+    const participated = await resolveParticipatedApp(ctx, appRef);
+    const { app } = participated;
+    const actor = withInstruction(participated.actor, instruction);
+    requireWritable(ctx, app);
+    await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
+      if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
+        throw taskError('APP_MANAGER_REQUIRED', 'Only whoever manages the App reports whether it has external tasks.');
+      }
+      const [row] = await tx.$queryRaw<{ exist: boolean | null }[]>`
+        SELECT external_tasks_exist AS exist FROM apps WHERE id = ${freshApp.id} FOR UPDATE`;
+      if (row?.exist === exist) return; // #3323: a no-op writes nothing
+      // The time is the database's clock (now() is the transaction's start time, still the DB clock), never the caller's.
+      await tx.$executeRaw`
+        UPDATE apps SET external_tasks_exist = ${exist}, external_tasks_reported_at = now() AT TIME ZONE 'UTC',
+                        external_tasks_reported_by = ${ctx.userId ?? null}
+        WHERE id = ${freshApp.id}`;
+      await recordInstructedManagerAct(tx, freshApp.id, actor, 'app.external-tasks-report');
+    }, { lockMode: 'exclusive' }); // the writer UPDATEs the anchored App row itself: a shared hold cannot upgrade without deadlocking its peers
+    return externalTasksReportView(ctx.db, app.id);
+  },
+
+  /**
+   * #4921 slice A (the precedent is `setSaturationAlarmWakeRoles`; hrn:node:hadronmemory.com:specs:cor:agt:060:16): set ONE
+   * of the App's role lists, the whole list at once. Whoever manages the App (hrn:node:hadronmemory.com:specs:cor:dmo:050:12),
+   * through the precedent's door exactly: `resolveParticipatedApp` (a non-participant gets APP_NOT_FOUND, the missing
+   * App's answer), then `actorManagesApp` inside `inTaskWriteTx` (a participant who does not manage it gets
+   * APP_MANAGER_REQUIRED; an instructed worker is admitted only as #3323 admits it). Malformed input (an unknown purpose,
+   * a malformed list) is refused BAD_USER_INPUT before any of that. This list decides who may link a defect, hold the
+   * register pick and withdraw a verdict, so the manager-only gate is the contract, not a convenience. An existing row is
+   * read FOR UPDATE before the compare; writing the stored list again writes and records nothing (#3323's no-op rule).
+   * Slice A stores the list only: no door reads it yet.
+   */
+  setAppRoleList: async (
+    _: unknown,
+    { appRef, purpose, roles, instruction }: { appRef: string; purpose: unknown; roles: unknown; instruction?: ActInstruction | null },
+    ctx: Context,
+  ) => {
+    if (!isAppRolePurpose(purpose)) {
+      throw badInput(`purpose is one of ${Object.keys(APP_ROLE_PURPOSES).join(', ')}.`);
+    }
+    const next = normalizeRoleList(roles);
+    if (!next) {
+      throw badInput(
+        `roles is a list of at most ${SATURATION_WAKE_ROLES_MAX} role names, each 1 to ${SATURATION_WAKE_ROLE_MAX_LENGTH} characters ` +
+          'with no ":" or whitespace; the empty list clears it.',
+      );
+    }
+    const column = APP_ROLE_PURPOSES[purpose].column;
+    const participated = await resolveParticipatedApp(ctx, appRef);
+    const { app } = participated;
+    const actor = withInstruction(participated.actor, instruction);
+    requireWritable(ctx, app);
+    await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
+      if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
+        throw taskError('APP_MANAGER_REQUIRED', 'Only whoever manages the App sets its role lists.');
+      }
+      const [row] = await tx.$queryRaw<{ defectLinkRoles: string[]; registerPickRoles: string[]; reviewWithdrawRoles: string[] }[]>`
+        SELECT defect_link_roles AS "defectLinkRoles", register_pick_roles AS "registerPickRoles",
+               review_withdraw_roles AS "reviewWithdrawRoles"
+        FROM agent_task_stall_schedule WHERE app_id = ${freshApp.id} FOR UPDATE`;
+      const current = row?.[column] ?? [];
+      if (current.length === next.length && current.every((r, i) => r === next[i])) return; // #3323: a no-op writes nothing
+      await tx.agentTaskStallSchedule.upsert({
+        where: { appId: freshApp.id },
+        create: { appId: freshApp.id, [column]: next, updatedBy: ctx.userId ?? null },
+        update: { [column]: next, updatedBy: ctx.userId ?? null },
+      });
+      await recordInstructedManagerAct(tx, freshApp.id, actor, 'app.role-list');
+    });
+    const view = await appRoleListsView(ctx.db, app.id);
+    return { appId: app.id, purpose, roles: view[APP_ROLE_PURPOSES[purpose].field] };
+  },
 };
+
+async function appRoleListsView(db: Context['db'], appId: string): Promise<AppRoleListsView> {
+  const row = await db.agentTaskStallSchedule.findUnique({
+    where: { appId },
+    select: { defectLinkRoles: true, registerPickRoles: true, reviewWithdrawRoles: true },
+  });
+  return {
+    appId,
+    defectLink: row?.defectLinkRoles ?? [],
+    registerPick: row?.registerPickRoles ?? [],
+    reviewWithdraw: row?.reviewWithdrawRoles ?? [],
+  };
+}
+
+async function externalTasksReportView(db: Context['db'], appId: string) {
+  const row = await db.app.findUnique({ where: { id: appId }, select: { externalTasksExist: true, externalTasksReportedAt: true } });
+  return { appId, exist: row?.externalTasksExist ?? null, reportedAt: row?.externalTasksReportedAt ?? null };
+}
+
+async function saturationWakeRolesView(db: Context['db'], appId: string) {
+  const row = await db.agentTaskStallSchedule.findUnique({ where: { appId }, select: { saturationWakeRoles: true } });
+  return { appId, roles: row?.saturationWakeRoles ?? [] };
+}
 
 async function stallWindowsView(ctx: Context, appId: string) {
   const row = await ctx.db.agentTaskStallSchedule.findUnique({ where: { appId } });
@@ -507,6 +677,35 @@ export const agentTaskAlarmQueries = {
     const { app } = await resolveParticipatedApp(ctx, appRef);
     return stallWindowsView(ctx, app.id);
   },
+
+  /**
+   * #4777 (hrn:node:hadronmemory.com:specs:cor:agt:060:16): the App's saturation-alarm wake-roles list, for whoever may
+   * read its roster, through the roster's gate and its refusal byte for byte (cor:agt:050:21, :23).
+   */
+  saturationAlarmWakeRoles: (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
+    withRosterAppRead(ctx, appRef, (readCtx, app) => saturationWakeRolesView(readCtx.db, app.id)),
+
+  /**
+   * #4937: the App's latest external-tasks report, for whoever may read its roster, through the roster's gate and its
+   * refusal byte for byte (cor:agt:050:21, :23). `exist` is null while the App has never reported.
+   */
+  externalTasksReport: (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
+    withRosterAppRead(ctx, appRef, (readCtx, app) => externalTasksReportView(readCtx.db, app.id)),
+
+  /**
+   * #4921 slice A: the App's three role lists, for whoever may read its roster, through the roster's gate and its
+   * refusal byte for byte (cor:agt:050:21, :23), as `saturationAlarmWakeRoles` does.
+   */
+  appRoleLists: (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
+    withRosterAppRead(ctx, appRef, (readCtx, app) => appRoleListsView(readCtx.db, app.id)),
+
+  /**
+   * #4531 (hrn:node:hadronmemory.com:specs:cor:agt:050:34): whether the App's team is dark, the episode's start, and each
+   * worker's oldest unacknowledged wake age, for whoever may read the App's tasks and events, through the roster's gate and
+   * its refusal byte for byte (cor:agt:050:21, :23): anyone else is answered as for an App that does not exist.
+   */
+  teamHealth: (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
+    withRosterAppRead(ctx, appRef, (readCtx, app) => teamHealthView(readCtx.db as never, app)),
 
   /**
    * Every availability record in an App — its workers' and its model

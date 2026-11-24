@@ -7,6 +7,7 @@ import type { Prisma } from '../../generated/prisma/index.js';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import { insertHistoricalMark, withGrantsTriggerOff } from '../../test/secretAutoDeleteTrigger.js';
 import { generateId } from '../id.js';
 import { dbNowPlus, dropTestActions, insertGrant, seedWorld, TEST_ACTION, type World } from './grantFixtures3668.js';
 
@@ -91,35 +92,13 @@ describe.each(ACTIONS)('#4001 finite-end database invariant for %s', (action) =>
 // tests above reach the insert branch and the action_values change; these pin the other two against the raw
 // database, so removing either branch (a mutant) fails here and not only in the resolver suites.
 // Historical rows predate the guard, so the fixture disables it for one transaction, exactly as the S6 migration found them.
-async function historicalUnboundedMark(action: string): Promise<string> {
-  const id = generateId();
-  const { text, params } = rawGrantInsert(id, action);
-  await db.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER secret_auto_delete_limit');
-    await tx.$executeRawUnsafe(text, ...params);
-    await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER secret_auto_delete_limit');
-  });
-  return id;
-}
-function rawGrantInsert(id: string, action: string) {
-  return {
-    text: `INSERT INTO grants (id, app_id, user_id, action, action_values, reason, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5::jsonb, 'historical mark', clock_timestamp() AT TIME ZONE 'UTC', clock_timestamp() AT TIME ZONE 'UTC')`,
-    params: [id, w.appId, w.userId, action, JSON.stringify(values(action, 'delete'))],
-  };
-}
+const historicalUnboundedMark = (action: string) =>
+  insertHistoricalMark({ appId: w.appId, holder: { userId: w.userId }, action, values: values(action, 'delete') });
 
 // grants_guard (which fires first, by name) makes terms immutable and refuses the same SQLSTATE, so with it enabled the
 // update branches of this trigger are unreachable and mutants of them survive. These pins turn grants_guard off for one
 // transaction (rolled back with the refusal) so the secret_auto_delete_limit trigger alone decides.
-async function onlyAutoDeleteTrigger<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
-  return db.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER grants_guard');
-    const out = await fn(tx);
-    await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER grants_guard');
-    return out;
-  });
-}
+const onlyAutoDeleteTrigger = <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> => withGrantsTriggerOff('grants_guard', fn);
 
 describe.each(ACTIONS)('#4001 trigger update branches, isolated from grants_guard, for %s', (action) => {
   it('refuses activating a historical unbounded mark (the activation branch)', async () => {

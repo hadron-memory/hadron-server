@@ -250,8 +250,12 @@ describe('tasks and the team chat', () => {
   it('a member starts a plain session in the App (no worker name taken); a non-member cannot', async () => {
     const s = await M.startSession({}, { input: { id: generateId(), appRef: app.id } }, ctx(member.id));
     expect(s.id).toBeTruthy();
-    expect(await code(M.startSession({}, { input: { id: generateId(), appRef: app.id } }, ctx(outsider.id)))).toBe('FORBIDDEN');
-    expect(await code(M.startSession({}, { input: { id: generateId(), appRef: app.id } }, ctx(otherMember.id)))).toBe('FORBIDDEN');
+    // #4836: a caller with no standing on the App ref gets the one unknown-App
+    // answer — byte-identical to a missing App — not the old FORBIDDEN, which
+    // confirmed the App exists. The member above still succeeds; the concealment
+    // is for the non-members only.
+    expect(await code(M.startSession({}, { input: { id: generateId(), appRef: app.id } }, ctx(outsider.id)))).toBe('APP_NOT_FOUND');
+    expect(await code(M.startSession({}, { input: { id: generateId(), appRef: app.id } }, ctx(otherMember.id)))).toBe('APP_NOT_FOUND');
   });
 
   it('the team chat: a member reads and posts; a non-member is refused; impersonation never reaches it', async () => {
@@ -279,12 +283,16 @@ describe('taking a worker\'s name on a user-owned App (Rook P2, #8886; interim (
   });
 
   it('being a member does not make you a holder: a member cannot take the owner\'s unheld worker', async () => {
+    // The member HAS standing on the App, so the holder gate still names the
+    // refusal FORBIDDEN — #4836's concealment never reaches a participant.
     expect(await code(bind(member.id))).toBe('FORBIDDEN');
     expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).heldByUserId).toBeNull();
     expect(await db.session.count({ where: { workerId } })).toBe(0);
-    // ...nor a non-member, nor a member of another user's App.
-    expect(await code(bind(outsider.id))).toBe('FORBIDDEN');
-    expect(await code(bind(otherMember.id))).toBe('FORBIDDEN');
+    // ...nor a non-member, nor a member of another user's App. #4836: callers
+    // with NO standing get the one unknown-App answer, byte-identical to a
+    // missing App — the old FORBIDDEN confirmed the App exists.
+    expect(await code(bind(outsider.id))).toBe('APP_NOT_FOUND');
+    expect(await code(bind(otherMember.id))).toBe('APP_NOT_FOUND');
   });
 
   it('the owner takes it, and then it is held against the member (the existing gate)', async () => {

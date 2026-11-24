@@ -10,6 +10,7 @@ import { GraphQLError } from 'graphql';
 // Spec 049 Phase 3b — a trigger's scopeRef, gated and resolved in the App's context.
 import { resolveScopeForTrigger } from '../../../lib/scopes.js';
 import { generateId } from '../../../lib/id.js';
+import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import {
   mintAppRun,
   handleSpawnCompletion,
@@ -29,9 +30,12 @@ import {
   legacyMemoryUrnToCanonical,
 } from '../../../lib/urn.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveAppRunRef, composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { AppRunNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { assertAppRunRefShape } from '../../../lib/entityRef/appRunRefShape.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
@@ -43,7 +47,7 @@ import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 
 /** Orderable columns on the appRuns list (#833). Mirrors the SDL enum. */
-export type AppRunSortField = 'createdAt' | 'startedAt' | 'finishedAt' | 'status';
+export type AppRunSortField = 'createdAt' | 'startedAt' | 'finishedAt' | 'status' | 'duration';
 
 /**
  * #836 — the status filter, widened from one value to a disjunction.
@@ -103,6 +107,10 @@ export function buildAppRunOrderBy(
       return [{ finishedAt: { sort: dir, nulls: 'last' } }, tiebreak];
     case 'status':
       return [{ status: dir }, tiebreak];
+    case 'duration':
+      // #855: the stored generated app_runs.duration_ms (finished_at - started_at). NULL (unstarted or unfinished) last
+      // in both directions, like the timestamps; negative (clock skew) as stored.
+      return [{ durationMs: { sort: dir, nulls: 'last' } }, tiebreak];
     case 'createdAt':
     default:
       return [{ createdAt: dir }, tiebreak];
@@ -132,6 +140,20 @@ export interface CreateAgentScheduleInput extends TriggerRunBudgets {
   /** Spec 049 Phase 3b — the trigger's scope (id, or a name in the App's context); update: '' clears. */
   scopeRef?: string | null;
   enabled?: boolean | null;
+}
+
+/**
+ * #4893: resolve an App ref on an org-scoped door, or answer the door's bare unknown-App
+ * NOT_FOUND — missing, malformed and ambiguous all answer the same bytes (the door's stated
+ * non-disclosure posture, cor:api:120:01). A database fault propagates.
+ */
+async function resolveAppRefOrNotFound(ctx: Context, ref: string): Promise<string> {
+  try {
+    return (await resolveAppRef(ctx.db, ref)).id;
+  } catch (e) {
+    if (isAppRefResolutionFailure(e)) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+    throw e;
+  }
 }
 
 /** Resolve the App ref (PK or URN), require it live, and require org-ADMIN on its org. */
@@ -404,6 +426,21 @@ async function resolveManualRunAgent(
 }
 
 /**
+ * #3911 (V70, cor:agt:040:10): the Agent a schedule or webhook is created with, chosen exactly as a manual run chooses
+ * it, but with no fall-through: an App with no installed Agent is refused here (`BOOT_PROMPT_NOT_SET`, the refusal a
+ * run of it gets at mint) instead of storing a trigger that names none. Every refusal lands before any write.
+ */
+async function resolveTriggerAgent(
+  ctx: Context,
+  appId: string,
+  agentRef: string | null | undefined,
+): Promise<string> {
+  const agentId = await resolveManualRunAgent(ctx, appId, agentRef);
+  if (!agentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
+  return agentId;
+}
+
+/**
  * Mint a MANUAL AppRun for an entry (task) node under an App — the shared
  * execute path behind the `triggerAppRun` mutation, `runTask(appRef:)` (#529),
  * and `importNode(taskRef:)` (#528). Authorized by the interactive gate (#530).
@@ -516,7 +553,7 @@ export const appRunMutations = {
     const app = await requireScheduleAdmin(ctx, input.appRef);
     const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
-    const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
+    const agentId = await resolveTriggerAgent(ctx, app.id, input.agentRef);
     const timezone = input.timezone?.trim() || 'UTC';
     // Exactly one of cron (recurring) / runAt (one-shot) — mirrors
     // chk_agent_schedule_cron_xor_run_at so the constraint never surfaces
@@ -577,13 +614,15 @@ export const appRunMutations = {
       return withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: app.organizationId }, { kind: 'app', id: app.id },
-          ...(agentId ? [{ kind: 'agent' as const, id: agentId }] : [])],
+          { kind: 'agent' as const, id: agentId }],
         async (txCtx) => {
           const currentApp = await requireScheduleAdmin(txCtx, input.appRef);
           if (currentApp.id !== app.id || currentApp.organizationId !== app.organizationId) {
             throw new Error('App scope changed; retry schedule creation');
           }
-          if (agentId) await resolveInstalledAgent(txCtx, app.id, input.agentRef);
+          if (await resolveTriggerAgent(txCtx, app.id, input.agentRef) !== agentId) {
+            throw new Error('Agent changed; retry schedule creation');
+          }
           if (input.scopeRef?.trim()) await resolveScopeForTrigger(txCtx, app.id, input.scopeRef);
         },
         async (tx, txCtx) => {
@@ -650,10 +689,22 @@ export const appRunMutations = {
         if (input.entryNodeUrn != null) assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
         // agentRef semantics on update: undefined/'' = no change (''≡absent),
         // null = clear the agent, string = set (validated as installed).
-        const agentId =
+        let agentId =
           input.agentRef !== undefined && input.agentRef !== ''
             ? await resolveInstalledAgent(txCtx, existing.appId, input.agentRef)
             : undefined;
+        // #3911 (V71): a row the migration disabled for want of an Agent cannot be re-enabled until one is named. The
+        // edit is judged as a creation is (V70): the App's single installed Agent is recorded, else RUN_AGENT_REQUIRED
+        // (several) or BOOT_PROMPT_NOT_SET (none), before any write. A row that already names an Agent is untouched.
+        // The guard judges the row AS IT WILL BE: an edit that leaves an enabled schedule with no Agent is refused the
+        // same way, so `agentRef: null` (clear) on an enabled row, alone or with `enabled: true`, cannot recreate the state.
+        // Clearing the Agent together with `enabled: false` stays allowed (a disabled null-agent row is the V71 state).
+        // Only the two edits that can PRODUCE the state are judged (turning it on, or clearing the Agent); an unrelated edit
+        // (a rename) of a row already in that state is not refused.
+        if ((input.enabled ?? existing.enabled) && (input.enabled === true || input.agentRef === null)
+          && (agentId === undefined ? existing.agentId : agentId) == null) {
+          agentId = await resolveTriggerAgent(txCtx, existing.appId, null);
+        }
         if (input.policy != null && parsePolicyLink(input.policy) == null) {
           throw new GraphQLError('policy must be { allow: string[] }.', {
             extensions: { code: 'BAD_USER_INPUT' },
@@ -744,7 +795,18 @@ export const appRunMutations = {
   ) => triggerManualRun(ctx, input),
 
   /** The kill switch's manual handle (cor:agt:010:02). */
-  cancelAppRun: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+  cancelAppRun: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+    // #4141: PK or URN. The shape check is local to this door (a ref that cannot name a run is a caller error); a
+    // well-shaped miss, an ambiguous legacy ref and a run that does not exist all answer today's NOT_FOUND. Only a
+    // resolver miss is folded: a database fault propagates. The RESOLVED id feeds every statement below.
+    assertAppRunRefShape(ref);
+    let id: string;
+    try {
+      ({ id } = await resolveAppRunRef(ctx.db, ref));
+    } catch (error) {
+      if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+      throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
+    }
     const run = await ctx.db.appRun.findUnique({ where: { id } });
     if (!run) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
     await requireOrgRole(ctx, run.organizationId, 'ADMIN');
@@ -792,7 +854,7 @@ export const appRunMutations = {
     const app = await requireScheduleAdmin(ctx, input.appRef);
     const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
-    const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
+    const agentId = await resolveTriggerAgent(ctx, app.id, input.agentRef);
     const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(input.name)) {
       throw new GraphQLError('Webhook name must be lowercase alphanumeric/dash, 1-64 chars.', {
@@ -807,13 +869,15 @@ export const appRunMutations = {
     const webhook = await withAuthorizedTx(
       ctx,
       [{ kind: 'org', id: app.organizationId }, { kind: 'app', id: app.id },
-        ...(agentId ? [{ kind: 'agent' as const, id: agentId }] : [])],
+        { kind: 'agent' as const, id: agentId }],
       async (txCtx) => {
         const currentApp = await requireScheduleAdmin(txCtx, input.appRef);
         if (currentApp.id !== app.id || currentApp.organizationId !== app.organizationId) {
           throw new Error('App scope changed; retry webhook creation');
         }
-        if (agentId) await resolveInstalledAgent(txCtx, app.id, input.agentRef);
+        if (await resolveTriggerAgent(txCtx, app.id, input.agentRef) !== agentId) {
+          throw new Error('Agent changed; retry webhook creation');
+        }
         if (input.scopeRef?.trim()) await resolveScopeForTrigger(txCtx, app.id, input.scopeRef);
       },
       async (tx) => {
@@ -914,7 +978,7 @@ export const appRunMutations = {
   },
 
   /**
-   * Mint comm.outbound tickets into the org ledger (cor:acl:050:04 tier 2).
+   * Mint tickets into the org ledger (hrn:node:hadronmemory.com:specs:cor:acl:050:04).
    * Org-ADMIN only; `note` keeps the ledger legible ("where did they go?").
    */
   mintActionTickets: async (
@@ -934,7 +998,7 @@ export const appRunMutations = {
     // Gemini high + Copilot). ''≡absent per the platform convention.
     let appId: string | null = null;
     if (input.appRef && input.appRef.trim() !== '') {
-      const { id } = await resolveAppRef(ctx.db, input.appRef);
+      const id = await resolveAppRefOrNotFound(ctx, input.appRef);
       const app = await ctx.db.app.findFirst({
         where: { id, organizationId, deletedAt: null },
         select: { id: true },
@@ -945,8 +1009,8 @@ export const appRunMutations = {
       }
       appId = app.id;
     }
-    if (input.action !== 'comm.outbound') {
-      throw new GraphQLError('v1 tickets exist for the comm.outbound action class only (cor:acl:050:04).', {
+    if (input.action !== 'comm.outbound' && input.action !== 'secret.use') {
+      throw new GraphQLError('Unknown ticket action class.', {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
@@ -1011,7 +1075,7 @@ export const appRunMutations = {
     let scopeKind: 'app' | 'org' = 'org';
     let scopeId = organizationId;
     if (input.appRef && input.appRef.trim() !== '') {
-      const { id } = await resolveAppRef(ctx.db, input.appRef);
+      const id = await resolveAppRefOrNotFound(ctx, input.appRef);
       const app = await ctx.db.app.findFirst({
         where: { id, organizationId, deletedAt: null },
         select: { id: true },
@@ -1116,7 +1180,7 @@ export const appRunQueries = {
       orgRef,
       status,
       statuses,
-      parentRunId,
+      parentRunRef,
       sortBy,
       sortDir,
       limit,
@@ -1127,7 +1191,7 @@ export const appRunQueries = {
       /** @deprecated #836 — superseded by `statuses`; still accepted for one release. */
       status?: string | null;
       statuses?: string[] | null;
-      parentRunId?: string | null;
+      parentRunRef?: string | null;
       sortBy?: AppRunSortField | null;
       sortDir?: 'asc' | 'desc' | null;
       limit?: number | null;
@@ -1140,7 +1204,7 @@ export const appRunQueries = {
     if (orgRef) ({ id: organizationId } = await resolveOrgRef(ctx.db, orgRef));
     if (appRef) {
       // ref dispatch (was raw-PK-only — the refactor also makes URNs work here)
-      ({ id: appId } = await resolveAppRef(ctx.db, appRef));
+      appId = await resolveAppRefOrNotFound(ctx, appRef);
       const app = await ctx.db.app.findFirst({
         // When orgRef was ALSO given, scope the app to that org — a mismatch
         // is NOT_FOUND rather than orgRef being silently overridden by the
@@ -1162,14 +1226,27 @@ export const appRunQueries = {
         throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
       }
     }
+    // #4141: `parentRunRef` is a run PK or an hrn:apprun URN, resolved AFTER the org READER gate. Tri-state kept:
+    // omitted = no filter, null = top-level runs only, a ref = that run's children. A ref that cannot name a run is a
+    // shape error (BAD_USER_INPUT, pure and local: no run is looked up); a well-shaped ref that names no run, an
+    // ambiguous legacy ref and a run outside this scope all answer the SAME exactly-empty page. Only a resolver miss
+    // folds: a database fault propagates. The RESOLVED id feeds the filter, never the URN.
+    let parentRunId = parentRunRef; // undefined and null pass through; a ref is replaced by the id it resolves to
+    if (parentRunRef !== undefined && parentRunRef !== null) {
+      assertAppRunRefShape(parentRunRef);
+      try {
+        parentRunId = (await resolveAppRunRef(ctx.db, parentRunRef)).id;
+      } catch (error) {
+        if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+        return { items: [], total: 0 };
+      }
+    }
     const where = {
       organizationId,
       ...(appId ? { appId } : {}),
       ...buildStatusFilter(status, statuses),
       // Fan-out children of one parent (#548; index from PR-547). Rides the
       // same org/app authorization — the org scope already applies above.
-      // Explicit null = top-level runs only; omitted = no filter (PR-550
-      // review, Gemini).
       ...(parentRunId !== undefined ? { parentRunId } : {}),
     };
     const take = Math.min(Math.max(limit ?? 20, 1), 200);
@@ -1254,7 +1331,7 @@ export const appRunQueries = {
     { appRef, previous }: { appRef: string; previous?: boolean | null },
     ctx: Context,
   ) => {
-    const { id: appId } = await resolveAppRef(ctx.db, appRef);
+    const appId = await resolveAppRefOrNotFound(ctx, appRef);
     const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null } });
     if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
     if (!isPlatformAdmin(ctx)) {
@@ -1292,7 +1369,7 @@ export const appRunQueries = {
       { scopeKind: 'org', scopeId: organizationId },
     ];
     if (appRef && appRef.trim() !== '') {
-      const { id } = await resolveAppRef(ctx.db, appRef);
+      const id = await resolveAppRefOrNotFound(ctx, appRef);
       const app = await ctx.db.app.findFirst({
         where: { id, organizationId, deletedAt: null },
         select: { id: true },

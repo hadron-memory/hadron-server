@@ -1,4 +1,6 @@
-/** #1213 S2: signal attempts join the memory handshake; ordinary content-only writes do not. */
+/** #1213 S2: signal attempts join the memory handshake; ordinary content-only writes do not.
+ * #4725 hardening: the harness helpers assert their lock-key and first-transaction
+ * assumptions against pg_locks instead of assuming them. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
@@ -70,7 +72,21 @@ function latch<T = void>() {
   return { promise, resolve, reject };
 }
 
-/** A wait is attributed to THIS writer, THIS holder, database and physical one-argument memory key. */
+/** #4725 (Byron F6/Abigail F6): the memory key the harness re-derives must be the
+ * key production actually locks. Both sides are asserted against pg_locks — the
+ * WAITER waiting on this exact key, the HOLDER holding it granted — so a change
+ * to the key formula or namespace fails these pins loudly, not silently. */
+async function expectHoldsMemoryKey(client: Prisma.TransactionClient, pid: number, key: number, what: string) {
+  const [{ holds }] = await client.$queryRaw<Array<{ holds: boolean }>>`
+    SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted
+      AND pid = ${pid} AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+      AND classid = ${key < 0 ? 4294967295 : 0}::bigint::oid AND objid = ${key >>> 0}::bigint::oid AND objsubid = 1) AS holds`;
+  if (!holds) throw new Error(`${what} (pid ${pid}) does not hold the physical memory key ${key}: the harness observed the wrong transaction`);
+}
+
+/** A wait is attributed to THIS writer, THIS holder, database and physical one-argument memory key.
+ * #4725: the holder is now also proven to HOLD the key (granted), so the wait can
+ * never pass on a different advisory lock that happens to block the waiter. */
 async function waitForMemoryKey(waiter: number, holder: number, key: number) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
@@ -79,12 +95,19 @@ async function waitForMemoryKey(waiter: number, holder: number, key: number) {
         AND pid = ${waiter} AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
         AND classid = ${key < 0 ? 4294967295 : 0}::bigint::oid AND objid = ${key >>> 0}::bigint::oid AND objsubid = 1
         AND ${holder} = ANY(pg_blocking_pids(${waiter}::int))) AS waiting`;
-    if (waiting) return;
+    if (waiting) { await expectHoldsMemoryKey(db, holder, key, `holder ${holder}`); return; }
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   throw new Error(`writer ${waiter} never waited for holder ${holder} on memory key ${key}`);
 }
 
+/**
+ * #4725 (Byron F6/Abigail F6): resolves the PID of the FIRST `$transaction` only.
+ * Assumption, asserted not assumed: that first transaction is the deciding write —
+ * proven by waitForMemoryKey (its PID is the one waiting on the memory key). If
+ * the writer ever opens an earlier helper transaction, that pin goes red instead
+ * of the harness quietly targeting the wrong backend.
+ */
 function contextWithPid(pid: ReturnType<typeof latch<number>>): Context {
   const transact = db.$transaction.bind(db);
   const observed = new Proxy(db, { get(target, prop, receiver) {
@@ -139,8 +162,11 @@ it('real PG: ordinary same-memory content update completes while a signal update
   expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content).toBe('signal-finished');
 }, 20000);
 
-/** Hold the first real deciding transaction AFTER its work, BEFORE commit. Later transactions run normally. */
-function heldTransactionDb(ready: ReturnType<typeof latch<number>>, release: ReturnType<typeof latch<void>>) {
+/** Hold the first real deciding transaction AFTER its work, BEFORE commit. Later transactions run normally.
+ * #4725 (Byron F6): with `expectedKey`, the held transaction is PROVEN to be the one
+ * that acquired the memory key (it holds the key granted at hold time) — the held
+ * transaction is the deciding write, not merely the first one to open. */
+function heldTransactionDb(ready: ReturnType<typeof latch<number>>, release: ReturnType<typeof latch<void>>, expectedKey?: number) {
   let first = true;
   return new Proxy(db, { get(target, prop, receiver) {
     if (prop !== '$transaction') return Reflect.get(target, prop, receiver);
@@ -149,6 +175,10 @@ function heldTransactionDb(ready: ReturnType<typeof latch<number>>, release: Ret
       return db.$transaction(async tx => {
         const result = await work(tx);
         if (hold) {
+          if (expectedKey !== undefined) {
+            const pid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid;
+            await expectHoldsMemoryKey(tx, pid, expectedKey, 'the held first $transaction');
+          }
           ready.resolve((await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid);
           await release.promise;
         }
@@ -187,12 +217,12 @@ async function settledSuccess(results: PromiseSettledResult<unknown>[]) {
 it('real PG: a door committing first makes merge refuse the page, without relocating its source', async () => {
   const target = await destination();
   const held = latch<number>(); const release = latch(); const waiter = latch<number>();
-  const door = signalWrite({ ...ctx(), db: heldTransactionDb(held, release) });
+  const [{ key }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + memoryId}) AS key`;
+  const door = signalWrite({ ...ctx(), db: heldTransactionDb(held, release, key) });
   void door.catch(held.reject); const doorDone = Promise.allSettled([door]);
   let bulkDone: Promise<PromiseSettledResult<unknown>[]> | undefined;
   try {
     const holderPid = await held.promise;
-    const [{ key }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + memoryId}) AS key`;
     const bulk = mergeInto(contextWithPid(waiter).db, target.id);
     void bulk.catch(waiter.reject); bulkDone = Promise.allSettled([bulk]);
     await waitForMemoryKey(await waiter.promise, holderPid, key);
@@ -212,12 +242,12 @@ it('real PG: a door committing first makes merge refuse the page, without reloca
 it('real PG: merge committing first holds the door until relocation; the stale source door refuses', async () => {
   const target = await destination();
   const held = latch<number>(); const release = latch(); const waiter = latch<number>();
-  const bulk = mergeInto(heldTransactionDb(held, release), target.id);
+  const [{ key }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + memoryId}) AS key`;
+  const bulk = mergeInto(heldTransactionDb(held, release, key), target.id);
   void bulk.catch(held.reject); const bulkDone = Promise.allSettled([bulk]);
   let doorDone: Promise<PromiseSettledResult<unknown>[]> | undefined;
   try {
     const holderPid = await held.promise;
-    const [{ key }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + memoryId}) AS key`;
     const door = signalWrite(contextWithPid(waiter));
     void door.catch(waiter.reject); doorDone = Promise.allSettled([door]);
     await waitForMemoryKey(await waiter.promise, holderPid, key);
@@ -236,12 +266,12 @@ it.each([['promotion', null, 'review'], ['demotion', 'review', null]] as const)(
   'real PG: %s committing first is carried by extract unchanged', async (_label, initial, next) => {
     await db.node.update({ where: { id: nodeId }, data: { role: initial, revisionContentHash: 'refresh' } });
     const held = latch<number>(); const release = latch(); const waiter = latch<number>();
-    const door = signalWrite({ ...ctx(), db: heldTransactionDb(held, release) }, next);
+    const [{ key }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + memoryId}) AS key`;
+    const door = signalWrite({ ...ctx(), db: heldTransactionDb(held, release, key) }, next);
     void door.catch(held.reject); const doorDone = Promise.allSettled([door]);
     let copyDone: Promise<PromiseSettledResult<Awaited<ReturnType<typeof extract>>>[]> | undefined;
     try {
       const holderPid = await held.promise;
-      const [{ key }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + memoryId}) AS key`;
       const copy = extract(contextWithPid(waiter).db);
       void copy.catch(waiter.reject); copyDone = Promise.allSettled([copy]);
       await waitForMemoryKey(await waiter.promise, holderPid, key);
@@ -259,12 +289,12 @@ it.each([['promotion', null, 'review'], ['demotion', 'review', null]] as const)(
 
 it.each([false, true])('real PG: extract move=%s committing first keeps its copied signals stable; later door follows source liveness', async move => {
   const held = latch<number>(); const release = latch(); const waiter = latch<number>();
-  const copy = extract(heldTransactionDb(held, release), move);
+  const [{ key }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + memoryId}) AS key`;
+  const copy = extract(heldTransactionDb(held, release, key), move);
   void copy.catch(held.reject); const copyDone = Promise.allSettled([copy]);
   let doorDone: Promise<PromiseSettledResult<unknown>[]> | undefined;
   try {
     const holderPid = await held.promise;
-    const [{ key }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + memoryId}) AS key`;
     const door = signalWrite(contextWithPid(waiter));
     void door.catch(waiter.reject); doorDone = Promise.allSettled([door]);
     await waitForMemoryKey(await waiter.promise, holderPid, key);
@@ -376,7 +406,7 @@ it('real PG: revision restore joins even for an ordinary snapshot', async () => 
   const { resolvers } = await import('./resolvers.js');
   await writeNodeCore({ memoryId, loc: 'ordinary', content: 'second' }, ctx(), 'update', { authoring: { kind: 'carry' }, targetNodeId: nodeId });
   const revision = await db.nodeRevision.findFirstOrThrow({ where: { nodeId }, orderBy: { createdAt: 'asc' } });
-  await assertOperationJoins(context => resolvers.Mutation.restoreNodeRevision({}, { revisionId: revision.id }, context));
+  await assertOperationJoins(context => resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: revision.id }, context));
   expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content).toBe('before');
 }, 20000);
 

@@ -43,6 +43,8 @@ export const TASK_WARNING_CODES = [
   'task.assign.assignee-unavailable',
   'task.assign.assignee-busy',
   'task.assign.assignee-paused',
+  // #4855: the platform did not start the assignee because it has an open session (cor:agt:070:08 S4); the assignment reaches it there.
+  'task.assign.session-open',
   // #3267 (action register phase 3, S1): advice on start and progress. The first and last describe worker or
   // other-task state, so they sit behind the roster gate (GATED_CODES); parent-ended is about the task's own parent.
   'task.start.other-started',
@@ -62,6 +64,7 @@ export const TASK_WARNING_TEXT: Record<TaskWarningCode, string> = {
   'task.assign.assignee-unavailable': 'The assignee is marked unavailable for work, so the task may wait.',
   'task.assign.assignee-busy': 'The assignee already has an open task.',
   'task.assign.assignee-paused': 'The assignee has paused itself, so the task may wait.',
+  'task.assign.session-open': 'The assignee has an open session, so the platform does not start it over that session; the assignment reaches it through that session.',
   'task.start.other-started': 'You already have another task started; starting this one does not end it.',
   'task.start.parent-ended': "This task's parent has already ended.",
   'task.progress.children-ended': 'Every child of this task has ended, so it may be ready to finish.',
@@ -100,7 +103,7 @@ export const REGISTER_TOTAL_BUDGET_MS = 1000;
  * gate (`maySeeWorkerInternals`), and dropped, never degraded, for anyone else. #3267 adds the start/progress pair.
  */
 const GATED_CODES: readonly TaskWarningCode[] = [
-  'task.assign.assignee-unavailable', 'task.assign.assignee-busy', 'task.assign.assignee-paused',
+  'task.assign.assignee-unavailable', 'task.assign.assignee-busy', 'task.assign.assignee-paused', 'task.assign.session-open',
   'task.start.other-started', 'task.progress.children-ended',
 ];
 
@@ -131,8 +134,8 @@ function normalise(codes: readonly TaskWarningCode[]): TaskWarningCode[] {
 export async function readAssigneeFacts(
   tx: Prisma.TransactionClient,
   args: { appId: string; workerId: string; excludeTaskId: string | null; now: Date },
-): Promise<{ unavailable: boolean; busy: boolean; paused: boolean }> {
-  const [view, open, checks] = await Promise.all([
+): Promise<{ unavailable: boolean; busy: boolean; paused: boolean; sessionOpen: boolean }> {
+  const [view, open, checks, openSessions] = await Promise.all([
     loadAvailabilityByFamily(tx, [{ id: args.workerId, appId: args.appId, families: [] }], args.now),
     tx.agentTask.count({
       where: {
@@ -142,11 +145,16 @@ export async function readAssigneeFacts(
     }),
     // The roster's own derivation (PAUSED only for a worker with a live session), for this one worker, in this tx.
     loadWorkerCheckStatuses(tx, { appId: args.appId, teamChannelId: null, workerIds: [args.workerId], now: args.now }),
+    // #4855: an OPEN session, live or quiet, exactly as the platform's start for an assignment reads it (launch.ts `lockStartableWorker`:
+    // the roster's `bound`, any session of the worker with no end that is not deleted; cor:agt:070:08 V16, ruling 0265): then no start is issued
+    // over it. launch.test.ts pins that this fact and the start's decision agree for every session state.
+    tx.session.findFirst({ where: { workerId: args.workerId, endedAt: null, deletedAt: null }, select: { id: true } }),
   ]);
   return {
     unavailable: view.get(args.workerId)?.ownInEffect === true,
     busy: open > 0,
     paused: checks.get(args.workerId)?.pendingReason === 'PAUSED',
+    sessionOpen: openSessions !== null,
   };
 }
 

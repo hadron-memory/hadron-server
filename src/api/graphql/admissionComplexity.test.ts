@@ -133,6 +133,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.teamRoles",
   "Query.teamStopSignals",
   "Query.teamWorkItems",
+  "Query.telegramConnections", // #597: clampListTake default 20, cap 200 (as slackConnections).
   "Query.tickersPage",
   "Query.usageEvents",
   "Query.usageEventsPage",

@@ -313,7 +313,7 @@ describe('#1328 carrying paths', () => {
     await update('a', { content: 'second', authoredWith: claim() });
     const revision = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: first.id as string } });
     await db.node.update({ where: { id: taskId }, data: { revSeq: 9 } });
-    await M.restoreNodeRevision({}, { revisionId: revision.id }, ctx());
+    await M.restoreNodeRevision({}, { nodeRevRef: revision.id }, ctx());
     expect(await stored('a')).toMatchObject({ content: 'body', authoredByTask: taskId, authoredByRevision: 1 });
   });
 });

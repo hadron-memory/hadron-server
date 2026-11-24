@@ -20,7 +20,7 @@ import {
   createLocalJWKSet,
   type JWTVerifyGetKey,
 } from 'jose';
-import { mintProviderNonce } from './providerNonce.js';
+import { hashProviderNonce, mintProviderNonce } from './providerNonce.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import {
@@ -31,8 +31,9 @@ import {
   type GoogleIdentity,
 } from './google.js';
 
-// Pre-#2204 rows carry no nonce hash; the nonce paths have their own tests in providerNonce.test.ts.
-const LEGACY = { legacyUnbound: true } as const;
+// #2282: every token is checked against a bound nonce; the nonce paths have their own tests in providerNonce.test.ts.
+const NONCE = 'test-nonce-2282';
+const BOUND = { bound: hashProviderNonce(NONCE) } as const;
 
 const CLIENT_ID = 'test-client-id.apps.googleusercontent.com';
 
@@ -115,15 +116,18 @@ describe('verifyGoogleIdToken', () => {
       .sign(opts.key ?? signKey);
   }
 
+  const mintBound = (claims: Record<string, unknown>, opts: Parameters<typeof mintIdToken>[1] = {}) =>
+    mintIdToken({ nonce: NONCE, ...claims }, opts);
+
   it('returns the identity claims from a valid token', async () => {
-    const token = await mintIdToken({
+    const token = await mintBound({
       sub: '110248495921238986420',
       email: 'ada@example.com',
       email_verified: true,
       name: 'Ada Lovelace',
       picture: 'https://lh3.googleusercontent.com/a/pic',
     });
-    expect(await verifyGoogleIdToken(token, LEGACY, getKey)).toEqual({
+    expect(await verifyGoogleIdToken(token, BOUND, getKey)).toEqual({
       sub: '110248495921238986420',
       email: 'ada@example.com',
       emailVerified: true,
@@ -134,56 +138,56 @@ describe('verifyGoogleIdToken', () => {
   });
 
   it('#1631: reads auth_time, and ignores a non-numeric one', async () => {
-    expect((await verifyGoogleIdToken(await mintIdToken({ sub: '42', auth_time: 1_700_000_000 }), LEGACY, getKey)).authTime).toBe(1_700_000_000);
-    expect((await verifyGoogleIdToken(await mintIdToken({ sub: '42', auth_time: '1700000000' }), LEGACY, getKey)).authTime).toBeNull();
+    expect((await verifyGoogleIdToken(await mintBound({ sub: '42', auth_time: 1_700_000_000 }), BOUND, getKey)).authTime).toBe(1_700_000_000);
+    expect((await verifyGoogleIdToken(await mintBound({ sub: '42', auth_time: '1700000000' }), BOUND, getKey)).authTime).toBeNull();
   });
 
   it('accepts the bare accounts.google.com issuer form', async () => {
-    const token = await mintIdToken({ sub: '42' }, { issuer: 'accounts.google.com' });
-    expect((await verifyGoogleIdToken(token, LEGACY, getKey)).sub).toBe('42');
+    const token = await mintBound({ sub: '42' }, { issuer: 'accounts.google.com' });
+    expect((await verifyGoogleIdToken(token, BOUND, getKey)).sub).toBe('42');
   });
 
   it('rejects a token for a different audience (another OAuth client)', async () => {
-    const token = await mintIdToken({ sub: '42' }, { audience: 'other-client' });
-    await expect(verifyGoogleIdToken(token, LEGACY, getKey)).rejects.toThrow();
+    const token = await mintBound({ sub: '42' }, { audience: 'other-client' });
+    await expect(verifyGoogleIdToken(token, BOUND, getKey)).rejects.toThrow();
   });
 
   it('rejects a token from a different issuer', async () => {
-    const token = await mintIdToken({ sub: '42' }, { issuer: 'https://evil.example' });
-    await expect(verifyGoogleIdToken(token, LEGACY, getKey)).rejects.toThrow();
+    const token = await mintBound({ sub: '42' }, { issuer: 'https://evil.example' });
+    await expect(verifyGoogleIdToken(token, BOUND, getKey)).rejects.toThrow();
   });
 
   it('rejects a token signed by a different key', async () => {
-    const token = await mintIdToken({ sub: '42' }, { key: wrongKey });
-    await expect(verifyGoogleIdToken(token, LEGACY, getKey)).rejects.toThrow();
+    const token = await mintBound({ sub: '42' }, { key: wrongKey });
+    await expect(verifyGoogleIdToken(token, BOUND, getKey)).rejects.toThrow();
   });
 
   it('rejects a token without a sub claim', async () => {
-    const token = await mintIdToken({ email: 'ada@example.com' });
-    await expect(verifyGoogleIdToken(token, LEGACY, getKey)).rejects.toThrow(/sub/);
+    const token = await mintBound({ email: 'ada@example.com' });
+    await expect(verifyGoogleIdToken(token, BOUND, getKey)).rejects.toThrow(/sub/);
   });
 
   it('lowercases the email claim (parity with the magic-link flow)', async () => {
     // The magic-link flow stores email.toLowerCase(); a raw mixed-case Google
     // claim would miss that row on the case-sensitive unique and fork a
     // second account instead of linking (Codex/Copilot review on PR #582).
-    const token = await mintIdToken({
+    const token = await mintBound({
       sub: '42',
       email: 'Ada@Example.COM',
       email_verified: true,
     });
-    const identity = await verifyGoogleIdToken(token, LEGACY, getKey);
+    const identity = await verifyGoogleIdToken(token, BOUND, getKey);
     expect(identity.email).toBe('ada@example.com');
   });
 
   it('fails closed on a non-boolean email_verified', async () => {
     // A string "true" must NOT authorize account linking.
-    const token = await mintIdToken({
+    const token = await mintBound({
       sub: '42',
       email: 'ada@example.com',
       email_verified: 'true',
     });
-    const identity = await verifyGoogleIdToken(token, LEGACY, getKey);
+    const identity = await verifyGoogleIdToken(token, BOUND, getKey);
     expect(identity.emailVerified).toBe(false);
   });
 
