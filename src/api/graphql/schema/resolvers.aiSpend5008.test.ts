@@ -175,6 +175,42 @@ describe('#5008 aiSpend — who may call (pin 3)', () => {
   });
 });
 
+describe('#5008 aiSpend — a missing organization answers as a denied one (P2 of the LOCAL seat)', () => {
+  /** The refusal as the wire shows it: code, message and extension keys, never the caller's ref. */
+  const shape = (res: Awaited<ReturnType<typeof gql>>) => ({
+    code: res.errors?.[0]?.extensions?.code, message: res.errors?.[0]?.message, keys: Object.keys(res.errors?.[0]?.extensions ?? {}).sort(),
+  });
+  const strangerCtx = (): Partial<Context> => ({ userId: stranger, roles: ['READER'] });
+
+  it('a stranger gets byte-identical refusals for an existing organization and for a missing slug or id', async () => {
+    await threeEvents(orgA);
+    const existing = shape(await spend(strangerCtx()));
+    expect(existing.code).toBe('FORBIDDEN');
+    const missingSlug = shape(await spend(strangerCtx(), { orgRef: 'no-such-org-slug' }));
+    const missingId = shape(await spend(strangerCtx(), { orgRef: generateId() }));
+    expect(missingSlug).toEqual(existing);
+    expect(missingId).toEqual(existing);
+    expect(missingSlug.message).not.toContain('no-such-org-slug');
+  });
+
+  it('an org CONTRIBUTOR, an App key and an impersonated session get the same refusal for a missing organization', async () => {
+    const existing = shape(await spend(strangerCtx()));
+    for (const ctx of [
+      { userId: contributorA, roles: ['READER'] },
+      { roles: [] },
+      { userId: adminA, roles: ['READER'], impersonation: { orgId: orgB, sessionId: generateId(), actorUserId: platformAdmin, expiresAt: new Date(Date.now() + 60_000) } },
+    ] as Partial<Context>[]) {
+      expect(shape(await spend(ctx, { orgRef: 'no-such-org-slug' }))).toEqual(existing);
+    }
+  });
+
+  it('a platform admin, who passes the gate for every organization, still learns that the reference names nothing', async () => {
+    const res = await spend(platformCtx(), { orgRef: 'no-such-org-slug' });
+    expect(res.errors?.[0]?.extensions?.code).not.toBe('FORBIDDEN');
+    expect(res.errors?.[0]?.message).toContain('no-such-org-slug');
+  });
+});
+
 describe('#5008 aiSpend — input checks (pin 4)', () => {
   const bad = async (vars: Partial<{ from: string; to: string }>) => {
     const res = await spend(adminACtx(), vars);
@@ -386,6 +422,23 @@ describe('#5008 aiSpend — a real debit through the write path (pin 12)', () =>
     expect(row.costMicroCents).toBe(String(rec!.costMicroCents));
     expect(row.chargedMicroCents).toBe((-debitRow.amountMicroCents).toString());
     expect(BigInt(row.chargedMicroCents) > BigInt(row.costMicroCents)).toBe(true);
+  });
+});
+
+describe('#5008 aiSpend — the library does not trust its caller (blind and sec10 P3s)', () => {
+  it('a grouping that is an inherited object key is refused, not treated as a fragment', async () => {
+    for (const bad of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      await expect(aiSpendSummary(db, { organizationId: orgA, from: new Date(FROM), to: new Date(TO), groupBy: bad as never })).rejects.toThrow(/unknown grouping/);
+    }
+  });
+
+  it('the charge is the sum of each debit\'s magnitude: a positive-amount debit row adds, it does not net against a negative one', async () => {
+    const id = await ev();
+    await db.creditLedgerEntry.create({ data: { id: generateId(), organizationId: orgA, kind: 'debit', amountMicroCents: -100n, sourceType: 'usage-event', sourceId: id } });
+    // a second event's debit stored with the wrong sign must still count as a charge of its magnitude
+    const id2 = await ev();
+    await db.creditLedgerEntry.create({ data: { id: generateId(), organizationId: orgA, kind: 'debit', amountMicroCents: 50n, sourceType: 'usage-event', sourceId: id2 } });
+    expect(rowOf(summaryOf(await spend(adminACtx())), 'HADRON_SERVER').chargedMicroCents).toBe('150');
   });
 });
 
