@@ -672,10 +672,10 @@ describe('#1468 — race against a concurrent mint', () => {
     const racing = await memory('racing');
     const spec = await node(racing.id, 'pas:010', { tags: ['spec'] });
 
-    // Stand-in for the mint's fence + stamp (#5088 F7: kept as a stand-in, but at the product's lock fidelity): the
+    // Stand-in for the mint's fence + stamp (#5088 F7: kept as a stand-in, mirroring the product's lock ORDER): the
     // memory row FOR UPDATE, then every node row of the memory FOR UPDATE in id order (`fenceCorpusForMint`, so the
     // spec row is held as the real mint holds it), the mint record written (a node gains minted_at, #5063 re-key),
-    // and the transaction held open. What it still does NOT do: run the mint's checks or stamp the live nodes; this
+    // and the transaction held open. What it still does NOT do: run the mint's checks, stamp the live nodes, or set the fence's 500ms node-lock timeout (this test never waits on a node row, so the bound is never reached); this
     // test pins only the delete's ordering behind a mint in flight. The product mint is driven in specCorpusMint.test.ts.
     let release!: () => void;
     let flipped!: () => void;

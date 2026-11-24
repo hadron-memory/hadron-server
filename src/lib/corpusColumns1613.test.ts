@@ -162,7 +162,8 @@ describe('#5063 C2 — the first-spec-mark conflict probe keys on the node mint,
       // SUCCEEDS; only the re-keyed probe (a minted node exists) makes the
       // marking lose this race.
       await vi.waitFor(async () => {
-        // Blocked by the stand-in delete's backend, by pid (not by matching the SQL text of the waiter).
+        // Any backend blocked by the stand-in delete's backend, by pid (not by matching SQL text). The holder only
+        // touches the memory row, so what waits on it is the marking's memory FOR SHARE.
         const waits = await db.$queryRaw<Array<{ pid: number }>>`
           SELECT pid FROM pg_stat_activity
           WHERE datname = current_database() AND ${holderPid}::int = ANY(pg_blocking_pids(pid))`;
@@ -229,6 +230,8 @@ describe('#5063 C4–C6 — controls, green on main by construction', () => {
     await specNode(m.id, 'c6:010');
     await approveAll(m.id);
     // Backdate by a minute (an explicit updatedAt wins over @updatedAt), so the bump is visible with no sleeping.
+    // Assumes no DB trigger rewrites updated_at; the mint's bump is stamped by the app clock like this value, and a
+    // minute covers any ordinary skew between the two.
     await db.memory.update({ where: { id: m.id }, data: { updatedAt: new Date(Date.now() - 60_000) } });
     const before = (await db.memory.findUniqueOrThrow({ where: { id: m.id } })).updatedAt;
     await mint(m.id);

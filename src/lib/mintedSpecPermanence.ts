@@ -36,8 +36,8 @@
  *
  * Fencing invariant (F3): the unlocked EXISTS probe in
  * `lockMintedSpecUnmarks` is stable for the rows being written only because
- * the mint fences EVERY spec row in scope (`fenceCorpusForMint`, `FOR UPDATE`
- * on each), which waits on or times out behind this writer's own row locks.
+ * the mint fences EVERY node row of the memory, tombstones included
+ * (`fenceCorpusForMint`, `FOR UPDATE` on each, which covers every spec row in scope), which waits on or times out behind this writer's own row locks.
  * A mint path that fenced fewer rows would break that argument.
  *
  * Index (F5): the `EXISTS`/`MAX` reads over `(memory_id, minted_at)` have no
