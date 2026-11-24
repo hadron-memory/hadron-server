@@ -1,3 +1,4 @@
+import { assetLimitCaller, requireAssetBytesHeadroom } from '../../../lib/asset/ownerBytes.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type Memory } from '../../../generated/prisma/index.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
@@ -272,6 +273,19 @@ export const memoryTransferMutations = {
         if (plan.blockers.length > 0) throw refusal(plan.blockers[0].code, plan.blockers[0].message);
         if (input.expectedNewUrn != null && input.expectedNewUrn !== plan.newUrn) {
           throw refusal('STALE_TRANSFER_PREVIEW', 'The target URN changed since the preview; run a new dryRun.');
+        }
+        // #5017: the receiving owner takes the memory's live files with it, so their bytes must fit that owner's file-bytes cap. Before
+        // any change, so a refusal changes nothing. A7c's multi-key call (nodes, ...) joins this one when it lands.
+        {
+          const [{ n }] = await tx.$queryRaw<Array<{ n: bigint }>>`
+            SELECT COALESCE(sum(size_bytes), 0)::bigint AS n FROM assets
+            WHERE memory_id = ${id} AND deleted_at IS NULL AND scan_status <> 'BLOCKED'`;
+          await requireAssetBytesHeadroom(
+            tx,
+            currentDestination.kind === 'organization' ? { organizationId: currentDestination.id } : { userId: currentDestination.id },
+            n,
+            assetLimitCaller({ userId: ctx.userId, impersonation: ctx.impersonation }),
+          );
         }
         if (current.class === 'group' && input.resetGroupMembers === true) {
           await tx.memoryMember.deleteMany({ where: { memoryId: id } });

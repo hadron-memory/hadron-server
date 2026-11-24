@@ -29,6 +29,7 @@
  * deployments without a scanner.
  */
 
+import { assetLimitCaller, checkAssetBytesHeadroom, lockMemoryOwner, requireAssetBytesHeadroom } from '../../asset/ownerBytes.js';
 import { GraphQLError } from 'graphql';
 import { writeNodeCore } from '../../../api/graphql/schema/resolvers.mutation.node.js';
 import { runAuthoring } from '../runAuthoring.js';
@@ -181,24 +182,35 @@ export const hadronStoreFile: RunToolDef = {
       assetUrn = `${memory.urn}:assets:${assetId}`;
     }
 
+    // #5017: the owner's file-bytes cap, answered BEFORE any byte is written (no object, no row, no reference node). The final
+    // check runs under the owner-limit lock where the row is inserted, below. A run with no on-behalf-of user gets the unattended form.
+    const limitCaller = assetLimitCaller({ userId: ctx.principal.userId ?? null });
+    await checkAssetBytesHeadroom(ctx.db, memory.id, body.byteLength, limitCaller);
+
     await putObject({ key: storageKey, body, contentType: mimeType });
     try {
       const nodeName = args.name !== undefined ? String(args.name) : filename;
       const nodeDescription = args.description !== undefined ? String(args.description) : undefined;
-      await ctx.db.asset.create({
-        data: {
-          id: assetId,
-          memoryId: memory.id,
-          filename,
-          mimeType,
-          sizeBytes: body.byteLength,
-          storageKey,
-          // Server-authored content — see the scan-posture note in the
-          // file header.
-          scanStatus: 'CLEAN',
-          description: nodeDescription,
-          uploadedBy: ctx.principal.userId ?? null,
-        },
+      await ctx.db.$transaction(async (tx) => {
+        // #5017: the same cap again, under the lock, before the row: two stores at one file below the cap cannot both succeed.
+        const { found, owner } = await lockMemoryOwner(tx, memory.id);
+        if (!found) throw new Error(`Memory not writable for "${urn}" under the run principal.`);
+        await requireAssetBytesHeadroom(tx, owner, body.byteLength, limitCaller);
+        await tx.asset.create({
+          data: {
+            id: assetId,
+            memoryId: memory.id,
+            filename,
+            mimeType,
+            sizeBytes: body.byteLength,
+            storageKey,
+            // Server-authored content — see the scan-posture note in the
+            // file header.
+            scanStatus: 'CLEAN',
+            description: nodeDescription,
+            uploadedBy: ctx.principal.userId ?? null,
+          },
+        });
       });
       // The reference node (nodeType `reference`: external source, metadata
       // in `data`) — the graph-side handle for the stored file.

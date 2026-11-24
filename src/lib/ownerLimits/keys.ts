@@ -5,7 +5,7 @@
 import { Prisma } from '../../generated/prisma/index.js';
 import type { OwnerRef } from '../owner.js';
 
-export type OwnerLimitKey = 'nodes' | 'memories' | 'agents' | 'apps';
+export type OwnerLimitKey = 'nodes' | 'memories' | 'agents' | 'apps' | 'assetBytes';
 /** What a count needs: the plain client or a transaction. */
 export type OwnerCountDb = Pick<Prisma.TransactionClient, '$queryRaw'>;
 
@@ -56,6 +56,18 @@ export const OWNER_LIMIT_KEYS: Readonly<Record<OwnerLimitKey, OwnerLimitKeyDef>>
     unitNoun: { one: 'app', many: 'apps' },
     settable: true,
     count: (db, owner) => countOf(db, Prisma.sql`SELECT count(*) AS n FROM apps o WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL`),
+  },
+  /**
+   * #5017 (A10): the live bytes of the owner's files, as a 64-bit sum. A file counts while it is attached to a live memory of the owner
+   * and neither soft-deleted nor BLOCKED; a file still being scanned (PENDING) counts. The size is the declared one (capped by the per-file
+   * limit), so this is a cap and not an invoice figure. A staged file with no memory has no owner and counts for nobody.
+   */
+  assetBytes: {
+    unitNoun: { one: 'byte of files', many: 'bytes of files' },
+    settable: true,
+    count: (db, owner) => countOf(db, Prisma.sql`
+      SELECT COALESCE(sum(a.size_bytes), 0)::bigint AS n FROM assets a JOIN memories o ON o.id = a.memory_id
+      WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL AND a.deleted_at IS NULL AND a.scan_status <> 'BLOCKED'`),
   },
 };
 

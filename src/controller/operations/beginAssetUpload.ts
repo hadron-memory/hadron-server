@@ -8,6 +8,7 @@
  * before minting the presigned URL.
  */
 
+import { assetLimitCaller, checkAssetBytesHeadroom } from '../../lib/asset/ownerBytes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
 import { buildStorageKey, buildStagingKey } from '../../lib/asset/storageKey.js';
@@ -189,6 +190,10 @@ export async function beginAssetUpload(
     where: { id: memoryId },
     select: { urn: true },
   });
+
+  // #5017: the owner's file-bytes cap, answered before a presigned URL exists. An early answer, not a reservation: the completion
+  // checks again, because two uploads begun under the cap can complete past it.
+  await checkAssetBytesHeadroom(db, memoryId, input.sizeBytes, assetLimitCaller({ userId: caller.userId }));
 
   const assetId = generateId();
   const storageKey = buildStorageKey({
@@ -379,6 +384,9 @@ export async function beginAssetUploadV2(
       `mimeType "${input.mimeType}" not in the platform allowlist`,
     );
   }
+
+  // #5017: the owner's file-bytes cap, answered before any bytes are uploaded (an early answer, not a reservation).
+  await checkAssetBytesHeadroom(db, memoryId, input.sizeBytes, assetLimitCaller(caller));
 
   // 5. Build storage key + presign + record.
   const assetId = generateId();
