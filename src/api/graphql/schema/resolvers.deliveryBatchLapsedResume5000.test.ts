@@ -132,16 +132,41 @@ describe('#5000 a refused resume says which condition failed, and resumes nothin
   });
 
   it('another user\'s session is the same not-found as before, with no reason: the code is no existence oracle', async () => {
-    const outsider = await db.user.create({ data: { githubId: 82_999_001, githubUsername: 'lp-outsider', roles: ['ADMIN'] } });
+    const outsider = await db.user.create({ data: { githubId: 90_000_000 + Math.floor(Math.random() * 1_000_000), githubUsername: 'lp-outsider', roles: ['ADMIN'] } });
     for (const s of [await lapsed(43), await lapsed(43, { endedAt: new Date() }), await lapsed(24 * 100)]) {
       expect(await refusal(inbox(s, outsider.id))).toMatchObject({ code: 'SESSION_NOT_FOUND', reason: undefined });
     }
   });
 });
 
+describe('#5000 the resume commits with the read or not at all', () => {
+  it('a read that fails after the resume rolls the resume back: the session stays lapsed, nothing is logged', async () => {
+    const s = await lapsed(43);
+    const failing = new Proxy(db, { get(target, property) {
+      if (property === '$transaction') return (fn: any, ...rest: any[]) => target.$transaction(async tx => {
+        const proxy = new Proxy(tx, { get(t, p) {
+          if (p === 'appLogEntry') return new Proxy(t.appLogEntry, { get(model, method) {
+            if (method === 'create') return async () => { throw new Error('audit unavailable'); };
+            return Reflect.get(model, method);
+          } });
+          return Reflect.get(t, p);
+        } });
+        return fn(proxy);
+      }, ...rest);
+      const value = Reflect.get(target, property); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    await expect(Q.deliveryBatches({}, { appRef: app.id }, { ...ctx(holder.id), db: failing, appId: app.id, sessionId: s.id })).rejects.toThrow('audit unavailable');
+    expect((await row(s)).updatedAt).toEqual(s.updatedAt);
+    expect(await db.appLogEntry.count({ where: { sessionId: s.id } })).toBe(0);
+    // the same read, once the audit works, resumes it
+    expect((await inbox(s)).batches).toEqual([]);
+    expect((await row(s)).updatedAt!.getTime()).toBeGreaterThan(Date.now() - 60_000);
+  });
+});
+
 describe('#5000 the decision is judged on ownership first (no existence oracle)', () => {
   it('a caller who does not own the session gets NOT_OWNER whatever state it is in, and a missing one the same', async () => {
-    const outsider = await db.user.create({ data: { githubId: 82_999_002, githubUsername: 'lp-oracle', roles: ['ADMIN'] } });
+    const outsider = await db.user.create({ data: { githubId: 91_000_000 + Math.floor(Math.random() * 1_000_000), githubUsername: 'lp-oracle', roles: ['ADMIN'] } });
     const states = [await lapsed(43), await lapsed(43, { endedAt: new Date() }), await lapsed(43, { expiresAt: ago(H) }), await lapsed(24 * 100)];
     for (const s of [...states, { id: generateId() }]) {
       expect(await lapsedResumeDecision(ctx(outsider.id), s.id)).toEqual({ verdict: 'REFUSED', reason: 'NOT_OWNER' });

@@ -110,17 +110,19 @@ export async function ownBatchSession(ctx: Context, expectedAppId?: string, lock
   const initial = await ctx.db.session.findUnique({ where: { id: ctx.sessionId } });
   if (!initial || initial.deletedAt || !ownsSession(ctx, initial)) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
   if (expectedAppId && initial.appId !== expectedAppId) throw taskError('APP_NOT_FOUND', 'App not found.');
-  // 'in-tx' resumes BEFORE the shared locks below: the resume takes the Worker row FOR UPDATE, which must never be an
-  // upgrade of a SHARE this transaction already holds (the same order every bind and post-resume uses: App, Worker).
-  if (resume === 'in-tx' && !initial.endedAt) {
-    const before = await loadLastEventBySession(ctx.db as never, [initial.id]);
-    if (!isSessionLive(initial, before.get(initial.id), new Date())) {
-      const refused = await tryResumeOwnLapsedSessionInTx(ctx, ctx.db as unknown as Prisma.TransactionClient, initial.id);
-      if (refused) throw batchNotLive(refused);
-    }
-  }
+  // Lock order, one for every path here: authority anchors (withAuthorizedTx, before this runs), then the caller's
+  // app_members row, then the App (shared) and the Worker, then the Session. An 'in-tx' resume takes the Worker row
+  // FOR UPDATE, so it runs AFTER the app_members lock and BEFORE the Worker SHARE below: it must never be an upgrade of
+  // a SHARE this transaction already holds, and never put the Worker ahead of the authority row (#5000, blind P2).
   if (lock) {
     if (ctx.userId && initial.appId) await ctx.db.$queryRaw`SELECT user_id FROM app_members WHERE app_id = ${initial.appId} AND user_id = ${ctx.userId} FOR SHARE`;
+    if (resume === 'in-tx' && !initial.endedAt) {
+      const before = await loadLastEventBySession(ctx.db as never, [initial.id]);
+      if (!isSessionLive(initial, before.get(initial.id), new Date())) {
+        const refused = await tryResumeOwnLapsedSessionInTx(ctx, ctx.db as unknown as Prisma.TransactionClient, initial.id);
+        if (refused) throw batchNotLive(refused);
+      }
+    }
     // Existing session protocol: authority/App, then Worker, then Session. End/rebind that wins is re-read below.
     if (initial.workerId) await ctx.db.$queryRaw`SELECT id FROM workers WHERE id = ${initial.workerId} FOR SHARE`;
     await ctx.db.$queryRaw`SELECT id FROM sessions WHERE id = ${initial.id} FOR SHARE`;
