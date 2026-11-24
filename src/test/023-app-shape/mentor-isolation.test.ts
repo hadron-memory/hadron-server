@@ -183,7 +183,7 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
   it('createMemoryShare sets grantorId to the principal regardless of actor (FR-019)', async () => {
     const payload = await resolvers.Mutation.createMemoryShare(
       {},
-      { memoryId: fx.memWithAId, granteeId: fx.mentorAId, role: 'writer' },
+      { memoryRef: fx.memWithAId, granteeRef: fx.mentorAId, role: 'writer' },
       userCtx(fx.aliceId),
     );
     expect(payload.memoryShare.memoryId).toBe(fx.memWithAId);
@@ -198,7 +198,7 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
     // Grant A only on M_with_A.
     await resolvers.Mutation.createMemoryShare(
       {},
-      { memoryId: fx.memWithAId, granteeId: fx.mentorAId, role: 'writer' },
+      { memoryRef: fx.memWithAId, granteeRef: fx.mentorAId, role: 'writer' },
       userCtx(fx.aliceId),
     );
 
@@ -211,7 +211,7 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
   it('symmetric — Mentor B reads paired-with-B but is denied on solo + paired-with-A', async () => {
     await resolvers.Mutation.createMemoryShare(
       {},
-      { memoryId: fx.memWithBId, granteeId: fx.mentorBId, role: 'writer' },
+      { memoryRef: fx.memWithBId, granteeRef: fx.mentorBId, role: 'writer' },
       userCtx(fx.aliceId),
     );
 
@@ -229,13 +229,13 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
   it('deleteMemoryShare takes effect on the next read (FR-022)', async () => {
     await resolvers.Mutation.createMemoryShare(
       {},
-      { memoryId: fx.memWithAId, granteeId: fx.mentorAId, role: 'reader' },
+      { memoryRef: fx.memWithAId, granteeRef: fx.mentorAId, role: 'reader' },
       userCtx(fx.aliceId),
     );
     expect(await canRead(fx.memWithAId, fx.mentorAId)).toBe(true);
     await resolvers.Mutation.deleteMemoryShare(
       {},
-      { memoryRef: fx.memWithAId, granteeId: fx.mentorAId },
+      { memoryRef: fx.memWithAId, granteeRef: fx.mentorAId },
       userCtx(fx.aliceId),
     );
     // Next read denied — no cached share state.
@@ -245,12 +245,12 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
   it('updateMemoryShareRole upgrades reader → writer', async () => {
     await resolvers.Mutation.createMemoryShare(
       {},
-      { memoryId: fx.memWithAId, granteeId: fx.mentorAId, role: 'reader' },
+      { memoryRef: fx.memWithAId, granteeRef: fx.mentorAId, role: 'reader' },
       userCtx(fx.aliceId),
     );
     const updated = await resolvers.Mutation.updateMemoryShareRole(
       {},
-      { memoryId: fx.memWithAId, granteeId: fx.mentorAId, role: 'writer' },
+      { memoryRef: fx.memWithAId, granteeRef: fx.mentorAId, role: 'writer' },
       userCtx(fx.aliceId),
     );
     expect(updated.memoryShare.role).toBe('writer');
@@ -263,12 +263,12 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
   it('createMemoryShare is idempotent — re-call upserts the role', async () => {
     await resolvers.Mutation.createMemoryShare(
       {},
-      { memoryId: fx.memWithAId, granteeId: fx.mentorAId, role: 'reader' },
+      { memoryRef: fx.memWithAId, granteeRef: fx.mentorAId, role: 'reader' },
       userCtx(fx.aliceId),
     );
     const second = await resolvers.Mutation.createMemoryShare(
       {},
-      { memoryId: fx.memWithAId, granteeId: fx.mentorAId, role: 'writer' },
+      { memoryRef: fx.memWithAId, granteeRef: fx.mentorAId, role: 'writer' },
       userCtx(fx.aliceId),
     );
     expect(second.memoryShare.role).toBe('writer');
@@ -282,7 +282,7 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
     await expect(
       resolvers.Mutation.deleteMemoryShare(
         {},
-        { memoryRef: fx.memWithAId, granteeId: fx.mentorAId },
+        { memoryRef: fx.memWithAId, granteeRef: fx.mentorAId },
         userCtx(fx.aliceId),
       ),
     ).resolves.toMatchObject({
@@ -296,7 +296,7 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
     try {
       await resolvers.Mutation.updateMemoryShareRole(
         {},
-        { memoryId: fx.memWithAId, granteeId: fx.mentorAId, role: 'writer' },
+        { memoryRef: fx.memWithAId, granteeRef: fx.mentorAId, role: 'writer' },
         userCtx(fx.aliceId),
       );
     } catch (err) {
@@ -321,7 +321,7 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
     try {
       await resolvers.Mutation.createMemoryShare(
         {},
-        { memoryId: knowledgeMem.id, granteeId: fx.mentorAId, role: 'reader' },
+        { memoryRef: knowledgeMem.id, granteeRef: fx.mentorAId, role: 'reader' },
         userCtx(fx.aliceId),
       );
     } catch (err) {
@@ -364,7 +364,7 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
     try {
       await resolvers.Mutation.createMemoryShare(
         {},
-        { memoryId: privateMem.id, granteeId: fx.mentorAId, role: 'reader' },
+        { memoryRef: privateMem.id, granteeRef: fx.mentorAId, role: 'reader' },
         userCtx(fx.aliceId),
       );
     } catch (err) {
@@ -379,7 +379,7 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
     try {
       await resolvers.Mutation.createMemoryShare(
         {},
-        { memoryId: fx.memWithAId, granteeId: fx.mentorBId, role: 'reader' },
+        { memoryRef: fx.memWithAId, granteeRef: fx.mentorBId, role: 'reader' },
         userCtx(fx.mentorAId), // Mentor A is NOT the principal of fx.memWithA
       );
     } catch (err) {
@@ -393,13 +393,13 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
     // reader on A
     await resolvers.Mutation.createMemoryShare(
       {},
-      { memoryId: fx.memWithAId, granteeId: fx.mentorAId, role: 'reader' },
+      { memoryRef: fx.memWithAId, granteeRef: fx.mentorAId, role: 'reader' },
       userCtx(fx.aliceId),
     );
     // writer on B
     await resolvers.Mutation.createMemoryShare(
       {},
-      { memoryId: fx.memWithBId, granteeId: fx.mentorBId, role: 'writer' },
+      { memoryRef: fx.memWithBId, granteeRef: fx.mentorBId, role: 'writer' },
       userCtx(fx.aliceId),
     );
 
@@ -425,7 +425,7 @@ describe('US3: per-pairing mentor isolation via MemoryShare', () => {
   it('Memory.shares field returns the rows for the principal; empty for non-principals', async () => {
     await resolvers.Mutation.createMemoryShare(
       {},
-      { memoryId: fx.memWithAId, granteeId: fx.mentorAId, role: 'writer' },
+      { memoryRef: fx.memWithAId, granteeRef: fx.mentorAId, role: 'writer' },
       userCtx(fx.aliceId),
     );
     const mem = await db.memory.findUniqueOrThrow({ where: { id: fx.memWithAId } });

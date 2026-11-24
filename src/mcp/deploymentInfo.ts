@@ -219,12 +219,21 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // refusals and what the field accepts (an id or a URN) are unchanged. `beginAssetUpload` and `agentAssets`, the
 // deprecated v1 calls, keep `agentUrn` until they are retired.
 //
-// 0.35.0 — Billing A1 (#5007): new mutation `adjustCredits(input: AdjustCreditsInput!)` (a signed ledger
-// correction, platform admin only). Semantics change on `grantCredits`: the source pair (`sourceType`, `sourceId`)
-// is now required when the mutation runs (BAD_USER_INPUT without it; the SDL field types are unchanged, so a
-// lagging client still parses), the server-written source types are refused, and a mismatched replay answers one
-// fixed IDEMPOTENCY_CONFLICT sentence instead of naming the stored entry.
-export const HADRON_SERVER_VERSION = '0.35.0';
+// 0.35.0 — BREAKING, entity refs S1 (#4137): the six memory share/member mutations take refs and nothing else, no alias.
+// `createMemoryShare` / `updateMemoryShareRole` (`memoryId` -> `memoryRef: ID!`, `granteeRef: ID!`), `deleteMemoryShare`
+// (`granteeRef: String`, omitted = the caller's own share) and `addMemoryMember` / `updateMemoryMemberRole` /
+// `removeMemoryMember` (`memoryRef: ID!`, `userRef: ID!`). The deprecated `granteeId`, `memoryId` and `userId` arguments are
+// removed, and the surviving refs are now required `ID!` (were optional `String`). A lagging client's old name is an UNKNOWN
+// argument and GraphQL refuses the whole operation. The existence-hiding order is unchanged: memory resolved, principal gate,
+// counterparty resolved. (0.34.0 is #5046, #4368, merged first.)
+//
+// 0.36.0 — SEMANTICS BREAK, Billing A1 (#5007): new mutation `adjustCredits(input: AdjustCreditsInput!)` (a signed
+// ledger correction, platform admin only). `grantCredits` changes behaviour: a grant without a source pair
+// (`sourceType`, `sourceId`) is now refused with BAD_USER_INPUT when the mutation runs, so a lagging client that
+// granted without one fails at run time (its document still validates, because the SDL field types are unchanged).
+// The server-written source types are refused, and a mismatched replay answers one fixed IDEMPOTENCY_CONFLICT sentence
+// instead of naming the stored entry. (0.35.0 is #4761, #4137, merged first.)
+export const HADRON_SERVER_VERSION = '0.36.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
