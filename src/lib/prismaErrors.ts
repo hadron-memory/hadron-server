@@ -75,14 +75,18 @@ export function isChatSeqUniqueViolation(err: unknown): boolean {
       return target.length === CHAT_SEQ_UNIQUE_TARGET.length
         && CHAT_SEQ_UNIQUE_TARGET.every((c, i) => target[i] === c);
     }
-    return JSON.stringify(target ?? {}).includes(CHAT_SEQ_UNIQUE_NAME);
+    // #2634: any other target (a longer name, an object, a different array) is not this index. No substring match.
+    return false;
   }
-  // Raw PostgreSQL fallback (an error that lost its Prisma class): the name
-  // alone is not enough — it must also read as a unique violation, so an
-  // unrelated failure that merely MENTIONS the index does not match.
+  // Raw PostgreSQL fallback (an error that lost its Prisma class): message text is
+  // never evidence of a unique violation (#2634). It needs the SQLSTATE 23505 the
+  // driver carries on `code`, AND the index name, so a unique violation on some
+  // other index, a different SQLSTATE, or a message that merely MENTIONS the index
+  // does not match. A Prisma error carries its own `Pnnnn` code, never 23505, so it
+  // cannot match here.
   return err instanceof Error
-    && err.message.includes(CHAT_SEQ_UNIQUE_NAME)
-    && /duplicate key value|unique constraint/i.test(err.message);
+    && (err as { code?: unknown }).code === '23505'
+    && err.message.includes(CHAT_SEQ_UNIQUE_NAME);
 }
 
 /**
