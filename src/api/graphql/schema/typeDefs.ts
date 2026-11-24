@@ -2215,6 +2215,48 @@ export const typeDefs = `#graphql
     balanceMicroCents: String!
   }
 
+  """How aiSpend groups units. Each row's key is the group's value; a unit with no value for the grouping is the row with the empty key."""
+  enum AiSpendGroup {
+    "The UTC date of the unit, YYYY-MM-DD."
+    DAY
+    "The id of the App that spent it. An id only, never an App."
+    APP
+    "provider/model, either half empty when it is not recorded."
+    MODEL
+    "Who held the key that served the call, for example HADRON_SERVER (the platform key) or ORGANIZATION (its own key)."
+    KEY_OWNER
+  }
+
+  """
+  One group of aiSpend. costMicroCents and chargedMicroCents are two figures, never one (hrn:node:hadronmemory.com:specs:cor:dmo:170:04): cost is what the units cost and charge is what was debited for them, so a unit on the organization's own key has a cost and no charge. costMicroCents sums the PRICED units only and unpricedEvents counts the rest, so a group with unpriced units is never read as complete and a group of unpriced units is not a cost of zero.
+  """
+  type AiSpendRow {
+    key: String!
+    "Units in the group, priced or not."
+    events: Int!
+    tokensIn: String!
+    tokensOut: String!
+    "Sum of the cost of the priced units, in micro-cents. Units with no price are not in it; see unpricedEvents."
+    costMicroCents: String!
+    "Units with no recorded price: shown as unpriced, never as a zero cost."
+    unpricedEvents: Int!
+    "The absolute sum of the debits of the units, in micro-cents. A separate figure from cost."
+    chargedMicroCents: String!
+  }
+
+  type AiSpendSummary {
+    "The range start as read, ISO 8601 UTC, inclusive."
+    from: String!
+    "The range end as read, ISO 8601 UTC, exclusive."
+    to: String!
+    "At most 500 groups, largest charge first, then cost, events and key."
+    rows: [AiSpendRow!]!
+    "True when more groups exist than rows returned."
+    truncated: Boolean!
+    "The exact number of groups, so a short list is never read as the whole one."
+    totalGroups: Int!
+  }
+
   input SetAiModelPriceInput {
     provider: String!
     model: String!
@@ -9605,7 +9647,7 @@ export const typeDefs = `#graphql
     since: DateTime!
     until: DateTime!
   }
-  "A project in a metrics report: a top-level task other than AT0 (hrn:node:hadronmemory.com:specs:cor:agt:050:01), or the visible No project bucket, AT0 (noProject true; taskId and title null when the App has no AT0 row)."
+  "A project in a metrics report: a task carrying the project marker, at any depth (isProject; hrn:node:hadronmemory.com:specs:cor:agt:050:01, hrn:node:hadronmemory.com:specs:cor:agt:150), or the visible No project bucket, AT0, for tasks with no marked ancestor (noProject true; taskId and title null when the App has no AT0 row)."
   type TeamMetricsProject {
     handle: String!
     taskId: ID
@@ -9622,7 +9664,7 @@ export const typeDefs = `#graphql
     "The owner as the sanitized task party projection, never the Worker or User object."
     owner: AgentTaskParty
     tasks: TeamMetricsCount!
-    "The owner's tasks by project, the No project bucket (AT0) included, at most ${METRICS_GROUP_CAP} projects."
+    "The owner's tasks by project (each task under its nearest marked ancestor, counted once), the No project bucket (AT0) included, at most ${METRICS_GROUP_CAP} projects."
     byProject: [TeamMetricsProjectGroup!]!
     projectsTruncated: Boolean!
   }
@@ -9636,17 +9678,17 @@ export const typeDefs = `#graphql
     byOwner: [TeamMetricsOwnerGroup!]!
     ownersTruncated: Boolean!
   }
-  "One project's direct child tasks of one status."
+  "One project's tasks of one status: the tasks it is the nearest marked ancestor of, at any depth."
   type TeamMetricsChildStatus {
     status: AgentTaskStatus!
     tasks: TeamMetricsCount!
   }
-  "One started project with its direct children counted by every status."
+  "One started project with the tasks counted under it (nearest marked ancestor, at any depth, each once) by every status."
   type TeamMetricsProjectRow {
     project: TeamMetricsProject!
     children: [TeamMetricsChildStatus!]!
   }
-  "Report 2: started projects (a top-level task other than AT0, status STARTED) with child counts by status; at most ${METRICS_GROUP_CAP} projects, truncated says when there were more. A snapshot at read time."
+  "Report 2: started projects (tasks carrying the project marker, status STARTED, by creation) with the counts of the tasks under each by status; at most ${METRICS_GROUP_CAP} projects, truncated says when there were more. A snapshot at read time."
   type TeamMetricsProjects {
     items: [TeamMetricsProjectRow!]!
     truncated: Boolean!
@@ -12374,6 +12416,10 @@ export const typeDefs = `#graphql
     creditLedgerEntries(orgRef: String!, limit: Int, offset: Int): CreditLedgerEntryList!
     "One org's credit balance - SUM over the append-only ledger (spec 046). Org-ADMIN."
     creditBalance(orgRef: String!): CreditBalance!
+    """
+    One organization's AI spend for [from, to), grouped one way (#5008, hrn:node:hadronmemory.com:specs:cor:dmo:170:04). Org-ADMIN, the gate of creditBalance, answered before the range is read. from is inclusive and to exclusive; both are ISO 8601 dates or date-times, a value with no offset is UTC and a date alone is midnight UTC. The range is at most 366 days. At most 500 rows are returned, largest charge first; truncated says more groups exist and totalGroups is the exact number of groups. Only token-bearing units of the organization count, soft-deleted ones are left out.
+    """
+    aiSpend(orgRef: String!, from: String!, to: String!, groupBy: AiSpendGroup!): AiSpendSummary!
   }
 
   """
@@ -18017,6 +18063,11 @@ export const typeDefs = `#graphql
     CANCELLED, and "cloned from" otherwise.
     """
     clonedFrom: AgentTask
+    """
+    #4997 (hrn:node:hadronmemory.com:specs:cor:agt:050:01 Project marker): whether this task is a project for the team metrics
+    (hrn:node:hadronmemory.com:specs:cor:agt:150). Set only when the task is created and never changed; AT0 is never one.
+    """
+    isProject: Boolean!
     "#2646: the clones made from this task, in its own App, paged (hrn:node:hadronmemory.com:specs:cor:agt:050:02); a clone you cannot read is left out."
     clones(limit: Int = 20, offset: Int = 0): AgentTaskDependencyPage!
     id: ID!
@@ -19609,7 +19660,10 @@ export const typeDefs = `#graphql
     requirements: AgentTaskRequirementsInput
     "Another parent in the same App, or null for none (a root under AT0, or a project with project: true)."
     parentTaskId: ID
+    "#4997: true makes the clone a top-level task and a project; false places it under AT0 and unmarked unless isProject says otherwise."
     project: Boolean
+    "#4997 (hrn:node:hadronmemory.com:specs:cor:agt:050:02): the clone's project marker; left out, the clone keeps the source's. false with project: true is refused."
+    isProject: Boolean
     owner: AgentTaskPartyInput
     assignee: AgentTaskPartyInput
     status: AgentTaskCreateStatus
@@ -19631,8 +19685,14 @@ export const typeDefs = `#graphql
     "The team App (id or URN). Required for a root task; for a child task it is taken from the parent and, if given, must match."
     appRef: ID
     parentTaskId: ID
-    "Make a top-level PROJECT (AT1, AT2, ...) instead of a task under the reserved project AT0. Not with parentTaskId."
+    "Make a top-level PROJECT (AT1, AT2, ...) instead of a task under the reserved project AT0, carrying the project marker (#4997). Not with parentTaskId."
     project: Boolean
+    """
+    #4997 (hrn:node:hadronmemory.com:specs:cor:agt:050:01 Project marker): mark this task as a project for the team metrics, wherever it sits
+    (under a parent or with no project). Set only here, never changed afterwards. false together with project: true is
+    refused, and nothing is created.
+    """
+    isProject: Boolean
     title: String!
     description: String
     source: String
