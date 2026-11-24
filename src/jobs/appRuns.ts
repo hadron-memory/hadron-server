@@ -58,6 +58,7 @@ import { agentPlatformValues } from '../lib/bootPrompt/variables.js';
 import { bootPromptRefusal } from '../lib/bootPrompt/refusal.js';
 import { applyPlatformVariables, applyRecordedVariables } from '../lib/personaDescription.js';
 import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
+import type { OwnerRef } from '../lib/owner.js';
 import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
 
 export const RUN_REQUESTED_SUBJECT = 'run.requested.v1';
@@ -80,6 +81,11 @@ const QUOTA_SMS_PER_DAY_ORG = intEnv('QUOTA_SMS_PER_DAY_ORG', 200);
 // Agent email is deliberately a notification channel, not a campaign plane.
 const QUOTA_EMAILS_PER_DAY_APP = intEnv('QUOTA_EMAILS_PER_DAY_APP', 25);
 const QUOTA_EMAILS_PER_DAY_ORG = intEnv('QUOTA_EMAILS_PER_DAY_ORG', 100);
+// A person's counters (#5074): the host-configurable seed, code defaults equal to the organization's.
+const QUOTA_RUNS_PER_DAY_USER = intEnv('QUOTA_RUNS_PER_DAY_USER', 1_000);
+const QUOTA_TOKENS_PER_DAY_USER = intEnv('QUOTA_TOKENS_PER_DAY_USER', 10_000_000);
+const QUOTA_SMS_PER_DAY_USER = intEnv('QUOTA_SMS_PER_DAY_USER', 200);
+const QUOTA_EMAILS_PER_DAY_USER = intEnv('QUOTA_EMAILS_PER_DAY_USER', 100);
 
 /** Parse a positive-integer env var, falling back when unset/invalid. */
 function intEnv(name: string, fallback: number): number {
@@ -118,6 +124,9 @@ function nextUtcMidnight(): Date {
   return d;
 }
 
+/** The scope a daily counter is kept for (cor:acl:050:04): an App, an organization, or a person. */
+export type QuotaScopeKind = 'app' | 'org' | 'user';
+
 const QUOTA_WINDOW = 'day';
 
 /**
@@ -128,7 +137,7 @@ const QUOTA_WINDOW = 'day';
  */
 async function ensureQuotaRow(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   defaultLimit: number,
@@ -155,20 +164,82 @@ async function ensureQuotaRow(
 }
 
 /** Platform-default (env-seeded) limit for a scope × action (#510 admin surface). */
-export function defaultQuotaLimit(
-  scopeKind: 'app' | 'org',
-  action: QuotaAction,
-): number {
-  if (action === 'run.execute') {
-    return scopeKind === 'app' ? QUOTA_RUNS_PER_DAY_APP : QUOTA_RUNS_PER_DAY_ORG;
+export function defaultQuotaLimit(scopeKind: QuotaScopeKind, action: QuotaAction): number {
+  const seeds: Record<QuotaScopeKind, Record<QuotaAction, number>> = {
+    app: {
+      'run.execute': QUOTA_RUNS_PER_DAY_APP,
+      'sms.send': QUOTA_SMS_PER_DAY_APP,
+      'email.send': QUOTA_EMAILS_PER_DAY_APP,
+      'llm.tokens': QUOTA_TOKENS_PER_DAY_APP,
+    },
+    org: {
+      'run.execute': QUOTA_RUNS_PER_DAY_ORG,
+      'sms.send': QUOTA_SMS_PER_DAY_ORG,
+      'email.send': QUOTA_EMAILS_PER_DAY_ORG,
+      'llm.tokens': QUOTA_TOKENS_PER_DAY_ORG,
+    },
+    user: {
+      'run.execute': QUOTA_RUNS_PER_DAY_USER,
+      'sms.send': QUOTA_SMS_PER_DAY_USER,
+      'email.send': QUOTA_EMAILS_PER_DAY_USER,
+      'llm.tokens': QUOTA_TOKENS_PER_DAY_USER,
+    },
+  };
+  return seeds[scopeKind][action];
+}
+
+/** The counter scope of an App's owner: an organization's `org` rows or a person's `user` rows. */
+export function quotaScopeOf(owner: OwnerRef): { scopeKind: 'org' | 'user'; scopeId: string } {
+  return 'organizationId' in owner
+    ? { scopeKind: 'org', scopeId: owner.organizationId }
+    : { scopeKind: 'user', scopeId: owner.userId };
+}
+
+/**
+ * Quota tier 1 of the launch gate (cor:acl:050:01): runs/day per App AND per owner (both must pass: the App first, its
+ * unit given back when the owner refuses), then the token look-ahead for both. Throws `QUOTA_EXCEEDED`.
+ */
+export async function consumeRunLaunchQuota(
+  db: PrismaClient,
+  args: { appId: string; owner: OwnerRef },
+): Promise<void> {
+  const { scopeKind, scopeId } = quotaScopeOf(args.owner);
+  const org = scopeKind === 'org';
+  if (!(await consumeQuota(db, 'app', args.appId, 'run.execute', defaultQuotaLimit('app', 'run.execute')))) {
+    throw new RunLaunchDeniedError('App run quota exhausted for today.', 'QUOTA_EXCEEDED');
   }
-  if (action === 'sms.send') {
-    return scopeKind === 'app' ? QUOTA_SMS_PER_DAY_APP : QUOTA_SMS_PER_DAY_ORG;
+  if (!(await consumeQuota(db, scopeKind, scopeId, 'run.execute', defaultQuotaLimit(scopeKind, 'run.execute')))) {
+    await db.quotaCounter.updateMany({
+      where: { scopeKind: 'app', scopeId: args.appId, action: 'run.execute', window: 'day', used: { gt: 0 } },
+      data: { used: { decrement: 1 } },
+    });
+    throw new RunLaunchDeniedError(
+      org ? 'Organization run quota exhausted for today.' : "The App owner's run quota is exhausted for today.",
+      'QUOTA_EXCEEDED',
+    );
   }
-  if (action === 'email.send') {
-    return scopeKind === 'app' ? QUOTA_EMAILS_PER_DAY_APP : QUOTA_EMAILS_PER_DAY_ORG;
+  // Token look-ahead: deny NEW launches while the daily token ledger is at or over its stored limit (the enforcement
+  // point for post-hoc token spend, see recordQuotaUsage).
+  if (!(await hasQuotaHeadroom(db, 'app', args.appId, 'llm.tokens', defaultQuotaLimit('app', 'llm.tokens')))) {
+    throw new RunLaunchDeniedError('App token quota exhausted for today.', 'QUOTA_EXCEEDED');
   }
-  return scopeKind === 'app' ? QUOTA_TOKENS_PER_DAY_APP : QUOTA_TOKENS_PER_DAY_ORG;
+  if (!(await hasQuotaHeadroom(db, scopeKind, scopeId, 'llm.tokens', defaultQuotaLimit(scopeKind, 'llm.tokens')))) {
+    throw new RunLaunchDeniedError(
+      org ? 'Organization token quota exhausted for today.' : "The App owner's token quota is exhausted for today.",
+      'QUOTA_EXCEEDED',
+    );
+  }
+}
+
+/** One model hop's token spend, recorded to the App's and the owner's `llm.tokens` rows (unconditionally: the honest ledger). */
+export async function recordRunTokenUsage(
+  db: PrismaClient,
+  args: { appId: string; owner: OwnerRef },
+  spent: number,
+): Promise<void> {
+  const { scopeKind, scopeId } = quotaScopeOf(args.owner);
+  await recordQuotaUsage(db, 'app', args.appId, 'llm.tokens', defaultQuotaLimit('app', 'llm.tokens'), spent);
+  await recordQuotaUsage(db, scopeKind, scopeId, 'llm.tokens', defaultQuotaLimit(scopeKind, 'llm.tokens'), spent);
 }
 
 /**
@@ -179,7 +250,7 @@ export function defaultQuotaLimit(
  */
 export async function ensureQuotaRowsForScope(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
 ): Promise<void> {
   for (const action of ['run.execute', 'llm.tokens', 'sms.send', 'email.send'] as const) {
@@ -195,7 +266,7 @@ export async function ensureQuotaRowsForScope(
  */
 export async function setQuotaLimit(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   limit: number,
@@ -214,7 +285,7 @@ export async function setQuotaLimit(
  */
 export async function consumeQuota(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   defaultLimit: number,
@@ -237,7 +308,7 @@ export async function consumeQuota(
  */
 export async function reserveQuota(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   defaultLimit: number,
@@ -287,7 +358,7 @@ export async function reserveQuota(
  */
 export async function settleReservation(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   delta: number,
@@ -304,7 +375,7 @@ export async function settleReservation(
 /** Stored-limit headroom check WITHOUT consuming (the launch gate's token look-ahead). */
 export async function hasQuotaHeadroom(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   defaultLimit: number,
@@ -326,7 +397,7 @@ export async function hasQuotaHeadroom(
  */
 export async function recordQuotaUsage(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   defaultLimit: number,
@@ -551,27 +622,8 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   }
   const budgets = effectiveRunBudgets(requestedBudgets ?? {});
 
-  // Quota tier 1: runs/day per App AND per org (both must pass — consume
-  // app first, refund on org denial to keep the counters truthful).
-  if (!(await consumeQuota(db, 'app', args.appId, 'run.execute', QUOTA_RUNS_PER_DAY_APP))) {
-    throw new RunLaunchDeniedError('App run quota exhausted for today.', 'QUOTA_EXCEEDED');
-  }
-  if (!(await consumeQuota(db, 'org', args.organizationId, 'run.execute', QUOTA_RUNS_PER_DAY_ORG))) {
-    await db.quotaCounter.updateMany({
-      where: { scopeKind: 'app', scopeId: args.appId, action: 'run.execute', window: 'day', used: { gt: 0 } },
-      data: { used: { decrement: 1 } },
-    });
-    throw new RunLaunchDeniedError('Organization run quota exhausted for today.', 'QUOTA_EXCEEDED');
-  }
-  // Token look-ahead: deny NEW launches while the daily token ledger is at
-  // or over its stored limit (the enforcement point for post-hoc token
-  // spend — see recordQuotaUsage).
-  if (!(await hasQuotaHeadroom(db, 'app', args.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP))) {
-    throw new RunLaunchDeniedError('App token quota exhausted for today.', 'QUOTA_EXCEEDED');
-  }
-  if (!(await hasQuotaHeadroom(db, 'org', args.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG))) {
-    throw new RunLaunchDeniedError('Organization token quota exhausted for today.', 'QUOTA_EXCEEDED');
-  }
+  // Quota tier 1: runs/day per App AND per owner, then the token look-ahead.
+  await consumeRunLaunchQuota(db, { appId: args.appId, owner: { organizationId: args.organizationId } });
 
   // 2. MINT the activation (AppRun row) + publish the wake-up.
   // Spec 049 Phase 3b: the scope travels as a SNAPSHOT (like `policy`), so an
@@ -1029,8 +1081,7 @@ async function executeAppRunInner(
         });
         // Recorded even into overage — tokens are already spent at the provider;
         // the NEXT launch gate is the enforcement point (PR-493 Codex P2).
-        await recordQuotaUsage(db, 'app', run.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP, spent);
-        await recordQuotaUsage(db, 'org', run.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG, spent);
+        await recordRunTokenUsage(db, { appId: run.appId, owner: { organizationId: run.organizationId } }, spent);
         // One usage event per hop — a failed flow still shows what it spent.
         // Spec 046: recordLlmUsage enriches with attribution (user + org),
         // the cost snapshot, and BYOK classification; it is throw-safe.

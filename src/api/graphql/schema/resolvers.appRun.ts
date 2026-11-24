@@ -17,6 +17,7 @@ import {
   RunLaunchDeniedError,
   setQuotaLimit as setQuotaLimitKernel,
   ensureQuotaRowsForScope,
+  type QuotaScopeKind,
 } from '../../../jobs/appRuns.js';
 import { mintWebhookPlatformToken, generateWebhookSecret } from '../../webhooks.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -44,6 +45,8 @@ import { admitWorkerTrigger, workerBoundActor, workerTriggerGrantEnforced, worke
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
+import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 
 /** Orderable columns on the appRuns list (#833). Mirrors the SDL enum. */
@@ -154,6 +157,87 @@ async function resolveAppRefOrNotFound(ctx: Context, ref: string): Promise<strin
     if (isAppRefResolutionFailure(e)) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
     throw e;
   }
+}
+
+type QuotaScopeRef = { scopeKind: QuotaScopeKind; scopeId: string };
+
+/**
+ * #5074: the counter scopes a quota door reads or sets, after its access gate (cor:acl:050:04, cor:dmo:050:12).
+ *  - `orgRef` (with or without `appRef`): the organization's ADMIN gate, unchanged.
+ *  - `appRef` alone: an organization's App takes the same callers as the `orgRef` form; a person's App takes the owner,
+ *    owner-role members and a platform admin. Every denial (and a refused principal on a person's App) answers the
+ *    bytes of an unknown ref, so the door does not tell a caller which Apps exist (cor:api:120:01).
+ *  - `userRef` alone: that person as themself, or a platform admin; a refused principal is FORBIDDEN.
+ * `target` is the one scope a limit is set for; `scopes` is every scope a read shows.
+ */
+async function resolveQuotaScopes(
+  ctx: Context,
+  refs: { orgRef?: string | null; appRef?: string | null; userRef?: string | null },
+): Promise<{ scopes: QuotaScopeRef[]; target: QuotaScopeRef }> {
+  const has = (v?: string | null) => v != null && v.trim() !== '';
+  const orgRef = has(refs.orgRef) ? refs.orgRef! : null;
+  const appRef = has(refs.appRef) ? refs.appRef! : null;
+  const userRef = has(refs.userRef) ? refs.userRef! : null;
+  if ((!orgRef && !appRef && !userRef) || (userRef && (orgRef || appRef))) {
+    throw new GraphQLError('Give orgRef, orgRef with appRef, appRef alone, or userRef alone.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  const notFound = () => new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+
+  if (userRef) {
+    if (isRefusedPrincipal(ctx)) throw authorizationDenied();
+    const self = ctx.userId === userRef;
+    if (!self && !isPlatformAdmin(ctx)) throw authorizationDenied();
+    if (!self) {
+      const live = await ctx.db.user.findFirst({ where: { id: userRef, deletedAt: null }, select: { id: true } });
+      if (!live) throw new GraphQLError('User not found.', { extensions: { code: 'NOT_FOUND' } });
+    }
+    const t: QuotaScopeRef = { scopeKind: 'user', scopeId: userRef };
+    return { scopes: [t], target: t };
+  }
+
+  if (orgRef) {
+    const { id: organizationId } = await resolveOrgRef(ctx.db, orgRef);
+    await requireOrgRole(ctx, organizationId, 'ADMIN');
+    const org: QuotaScopeRef = { scopeKind: 'org', scopeId: organizationId };
+    if (!appRef) return { scopes: [org], target: org };
+    const id = await resolveAppRefOrNotFound(ctx, appRef);
+    const app = await ctx.db.app.findFirst({ where: { id, organizationId, deletedAt: null }, select: { id: true } });
+    if (!app) throw notFound();
+    const a: QuotaScopeRef = { scopeKind: 'app', scopeId: app.id };
+    return { scopes: [org, a], target: a };
+  }
+
+  // appRef alone.
+  const id = await resolveAppRefOrNotFound(ctx, appRef!);
+  const app = await ctx.db.app.findFirst({
+    where: { id, deletedAt: null },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  if (!app) throw notFound();
+  const a: QuotaScopeRef = { scopeKind: 'app', scopeId: app.id };
+  if (app.ownerUserId === null && app.organizationId !== null) {
+    try {
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+    } catch (e) {
+      if (e instanceof GraphQLError) throw notFound();
+      throw e;
+    }
+    const org: QuotaScopeRef = { scopeKind: 'org', scopeId: app.organizationId };
+    return { scopes: [org, a], target: a };
+  }
+  if (app.ownerUserId === null) throw notFound();
+  // A person's App: never an App key, an impersonated session or a run.
+  if (isRefusedPrincipal(ctx)) throw notFound();
+  const admin = isPlatformAdmin(ctx);
+  if (!admin && !(await managesApp(ctx, app))) throw notFound();
+  // The owner's own account counters are the owner's (or a platform admin's), not the App manager's.
+  const ownerRows = admin || ctx.userId === app.ownerUserId;
+  return {
+    scopes: ownerRows ? [a, { scopeKind: 'user', scopeId: app.ownerUserId }] : [a],
+    target: a,
+  };
 }
 
 /** Resolve the App ref (PK or URN), require it live, and require org-ADMIN on its org. */
@@ -1049,12 +1133,11 @@ export const appRunMutations = {
     {
       input,
     }: {
-      input: { orgRef: string; appRef?: string | null; action: string; limit: number };
+      input: { orgRef?: string | null; appRef?: string | null; userRef?: string | null; action: string; limit: number };
     },
     ctx: Context,
   ) => {
-    const { id: organizationId } = await resolveOrgRef(ctx.db, input.orgRef);
-    await requireOrgRole(ctx, organizationId, 'ADMIN');
+    const { target } = await resolveQuotaScopes(ctx, input);
     if (
       input.action !== 'run.execute' &&
       input.action !== 'llm.tokens' &&
@@ -1072,19 +1155,24 @@ export const appRunMutations = {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
-    let scopeKind: 'app' | 'org' = 'org';
-    let scopeId = organizationId;
-    if (input.appRef && input.appRef.trim() !== '') {
-      const id = await resolveAppRefOrNotFound(ctx, input.appRef);
-      const app = await ctx.db.app.findFirst({
-        where: { id, organizationId, deletedAt: null },
-        select: { id: true },
-      });
-      if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
-      scopeKind = 'app';
-      scopeId = app.id;
-    }
+    const { scopeKind, scopeId } = target;
+    const before = await ctx.db.quotaCounter.findFirst({
+      where: { scopeKind, scopeId, action: input.action, window: 'day' },
+      select: { limit: true },
+    });
     await setQuotaLimitKernel(ctx.db, scopeKind, scopeId, input.action, input.limit);
+    // Ids and numbers only.
+    console.info(
+      JSON.stringify({
+        event: 'quota.limit.changed',
+        actor: ctx.userId ?? null,
+        scopeKind,
+        scopeId,
+        action: input.action,
+        oldLimit: before?.limit ?? null,
+        newLimit: input.limit,
+      }),
+    );
     return ctx.db.quotaCounter.findFirstOrThrow({
       where: { scopeKind, scopeId, action: input.action, window: 'day' },
     });
@@ -1360,23 +1448,10 @@ export const appRunQueries = {
    */
   quotaCounters: async (
     _: unknown,
-    { orgRef, appRef }: { orgRef: string; appRef?: string | null },
+    { orgRef, appRef, userRef }: { orgRef?: string | null; appRef?: string | null; userRef?: string | null },
     ctx: Context,
   ) => {
-    const { id: organizationId } = await resolveOrgRef(ctx.db, orgRef);
-    await requireOrgRole(ctx, organizationId, 'ADMIN');
-    const scopes: Array<{ scopeKind: 'app' | 'org'; scopeId: string }> = [
-      { scopeKind: 'org', scopeId: organizationId },
-    ];
-    if (appRef && appRef.trim() !== '') {
-      const id = await resolveAppRefOrNotFound(ctx, appRef);
-      const app = await ctx.db.app.findFirst({
-        where: { id, organizationId, deletedAt: null },
-        select: { id: true },
-      });
-      if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
-      scopes.push({ scopeKind: 'app', scopeId: app.id });
-    }
+    const { scopes } = await resolveQuotaScopes(ctx, { orgRef, appRef, userRef });
     await Promise.all(scopes.map((s) => ensureQuotaRowsForScope(ctx.db, s.scopeKind, s.scopeId)));
     return ctx.db.quotaCounter.findMany({
       where: { OR: scopes.map((s) => ({ scopeKind: s.scopeKind, scopeId: s.scopeId })) },

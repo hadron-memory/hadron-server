@@ -6223,10 +6223,10 @@ model AgentSchedule {
   @@map("agent_schedules")
 }
 
-/// A usage counter for one App or one organization: how much of one metered action has been used in the current day,
+/// A usage counter for one App, one organization or one person: how much of one metered action has been used in the current day,
 /// and the limit. It is the first of the two quota tiers, the continuous one.
 ///
-/// Relationships: none by foreign key. `scopeKind` (`app` or `org`) and `scopeId` name the owner as plain values. One
+/// Relationships: none by foreign key. `scopeKind` (`app`, `org` or `user`) and `scopeId` name the owner as plain values. One
 /// row per owner, action and window.
 ///
 /// Behaviour:
