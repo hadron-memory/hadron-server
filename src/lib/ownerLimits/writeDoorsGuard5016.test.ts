@@ -23,6 +23,17 @@ const SITES: Record<string, Verdict> = {
   'src/api/graphql/schema/resolvers.mutation.session.ts': { n: 2, kind: 'free', because: 'startAgentSession memories carry app_id (class app/personal inside an App) and are never refused' },
   'src/api/graphql/schema/resolvers.mutation.chat.ts': { n: 1, kind: 'counts-not-refused', because: 'startChat with no matching App creates a counted knowledge memory for the Agent\'s organization; chat is never refused (gate ruling 2)' },
 };
+/**
+ * Writes that change what an owner holds WITHOUT an insert (a restore, a class change, an owner move, a re-parent). Each names the file
+ * and a marker, and says whether it asks. No restore of a deleted memory, Agent or App exists (cor:dmo:050:21: no undelete).
+ */
+const MOVES: Array<{ file: string; marker: string; kind: 'refuses' | 'free' | 'counts-not-refused'; because: string }> = [
+  { file: 'src/api/graphql/schema/resolvers.mutation.memoryTransfer.ts', marker: 'requireOwnerHeadroomMany', kind: 'refuses', because: 'transferMemoryOwnership: the receiving owner takes the memory and its live nodes' },
+  { file: 'src/api/graphql/schema/resolvers.mutation.agent.ts', marker: "class: 'system'", kind: 'free', because: 'promoting a memory to an Agent\'s system memory takes it out of the counted set' },
+  { file: 'src/lib/mergeOwnerNamespacedUrns.ts', marker: 'ownerUserId: targetUserId', kind: 'counts-not-refused', because: 'an account merge re-owns everything; the survivor may end over a cap (decision r)' },
+  { file: 'src/controller/operations/detachAppOwnerMemories.ts', marker: 'appId', kind: 'counts-not-refused', because: 'hard-deleting an App detaches its personal/private memories (app_id to null), which then count as free-standing; a deletion side effect, never refused' },
+  { file: 'src/api/graphql/schema/appInstallState.ts', marker: 'uninstalledAt', kind: 'free', because: 'an uninstalled App keeps counting and reinstalling it adds nothing' },
+];
 const WRITE = /\.(memory|agent|app)\.(create|createMany|createManyAndReturn|upsert)\(/g;
 const walk = (dir: string): string[] => readdirSync(dir).flatMap((f) => {
   const p = join(dir, f);
@@ -50,6 +61,15 @@ describe('#5016 every memory, Agent and App creation site under src is classifie
       const src = readFileSync(p, 'utf8');
       expect(src, p).toMatch(/requireOwnerHeadroom/);
       expect(src, p).toContain(`'${v.asks}'`);
+    }
+  });
+
+  it('every non-insert move is classified, exists in its file, and a refusing one asks', () => {
+    for (const m of MOVES) {
+      const src = readFileSync(m.file, 'utf8');
+      expect(src, m.file).toContain(m.marker);
+      if (m.kind === 'refuses') expect(src, m.file).toMatch(/requireOwnerHeadroom/);
+      expect(m.because.length, m.file).toBeGreaterThan(15);
     }
   });
 

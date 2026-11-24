@@ -215,13 +215,19 @@ describe('#5016 the counts-as-a-memory predicate agrees with the SQL count', () 
       }
     }
     let expected = 0n;
+    let refused = 0;
     for (const s of shapes) {
       try {
         await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `door-org:s${++seq}`, name: 's', ...s.data } as never });
         if (memoryCountsAgainstOwner(s.row)) expected++;
-      } catch { /* a shape the database's own constraints refuse is not a row */ }
+      } catch (e) {
+        // Only a shape the database's own CHECK constraints refuse is skipped; anything else is a broken test.
+        if (!/check constraint|chk_/i.test(String((e as Error).message))) throw e;
+        refused++;
+      }
     }
-    expect(expected).toBeGreaterThan(0n);
+    expect(refused).toBeLessThan(shapes.length);
+    expect(expected).toBeGreaterThan(2n);
     expect(await OWNER_LIMIT_KEYS.memories.count(db, { organizationId: org.id })).toBe(expected);
   });
 });

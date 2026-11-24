@@ -362,6 +362,14 @@ async function removeAppMemberWithAdmission(
   return true;
 }
 
+/** The App a cascade reuses for a dependency Agent in an organization (one per pair). The headroom pre-count (#5016) and the install loop read it through here, so the two cannot drift. */
+async function findExistingDependencyApp(db: Context['db'], organizationId: string, agentId: string) {
+  return db.app.findFirst({
+    where: { organizationId, appAgents: { some: { agentId } }, deletedAt: null },
+    select: { id: true },
+  });
+}
+
 export const appMutations = {
     regenerateAppKey: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
@@ -661,7 +669,7 @@ export const appMutations = {
       // transaction asks for its one App again, so a call racing in between cannot overshoot.
       const newDependencyApps = resolvedOrgId
         ? await Promise.all([...new Set(selectedImports.map((imp) => imp.importedAgentId))].map(async (agentId) =>
-          (await ctx.db.app.findFirst({ where: { organizationId: resolvedOrgId, appAgents: { some: { agentId } }, deletedAt: null }, select: { id: true } })) ? 0n : 1n,
+          (await findExistingDependencyApp(ctx.db, resolvedOrgId, agentId)) ? 0n : 1n,
         )).then((xs) => xs.reduce<bigint>((a, b) => a + b, 0n))
         : 0n;
       const createdApp = await withAuthorizedTx(
@@ -804,14 +812,7 @@ export const appMutations = {
           // Reuse an existing App for the same (org, dep agent) — one App per
           // (org, Agent) pair (v1 doesn't support per-bundle namespacing of
           // dep installations, per spec User Story 3 acceptance scenario 4).
-          const existingDepApp = await ctx.db.app.findFirst({
-            where: {
-              organizationId: resolvedOrgId,
-              appAgents: { some: { agentId: imp.importedAgentId } },
-              deletedAt: null,
-            },
-            select: { id: true },
-          });
+          const existingDepApp = await findExistingDependencyApp(ctx.db, resolvedOrgId, imp.importedAgentId);
           if (existingDepApp) continue;
 
           // Derive a sensible URN for the dep's App. Use the imported
