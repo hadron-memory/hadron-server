@@ -71,7 +71,7 @@ describe('#5015 owner-limit races at the node write', { timeout: 20_000 }, () =>
     const limit = Number(await OWNER_LIMIT_KEYS.nodes.count(db, owner)) + 1;
     await limitRow(owner, limit);
     const h = await holder((tx) => lockOwnerLimitKeys(tx, owner, ['nodes']));
-    const racers = [create(mO, 'x', 10), create(mO2, 'y', 11)].map((p) => p.then(() => 'ok', (e) => e?.extensions?.code ?? String(e)));
+    const racers = [create(mO, 'x', 10), create(mO2, 'y', 11)].map((p) => p.then(() => 'ok', (e: { extensions?: { code?: string } }) => e?.extensions?.code ?? String(e)));
     try {
       await waitForLockWaitersBlockedBy(db, h.pid, 2);
     } finally {
@@ -89,7 +89,7 @@ describe('#5015 owner-limit races at the node write', { timeout: 20_000 }, () =>
     // The org has room: judged against the owner read before the transfer, the create would commit.
     await limitRow({ organizationId: orgId }, 1_000);
     const h = await holder((tx) => acquireLockSet(tx, [{ memoryId: mO, loc: 'x' }]));
-    const parked = create(mO, 'x', 10).then(() => 'ok', (e) => e?.extensions?.code ?? String(e));
+    const parked = create(mO, 'x', 10).then(() => 'ok', (e: { extensions?: { code?: string } }) => e?.extensions?.code ?? String(e));
     try {
       await waitForLockWaitersBlockedBy(db, h.pid, 1);
       await resolvers.Mutation.transferMemoryOwnership(null, { memoryRef: mO, userRef: u, targetClass: 'private' } as never, ctx(u));
