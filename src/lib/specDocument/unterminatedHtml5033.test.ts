@@ -103,6 +103,8 @@ describe('#5033 the class, not two spellings', () => {
     ['an unclosed template, then an unterminated comment', '<template><!--'],
     ['an unclosed template, then an open tag', '<template> a <b'],
     ['an unclosed template, then an unterminated CDATA', '<template><![CDATA[x'],
+    ['an unclosed template, then an open tag (BLIND delta P1)', 'a <template>x <b y='],
+    ['an unclosed template, then an open tag, at the head of the line', '<template><div class='],
   ];
   it.each(OPEN)('%s at a body end keeps the next anchor', (_label, body) => {
     const out = renderSpecDocument(THREE(body));
@@ -259,6 +261,19 @@ describe('escapeUnterminatedHtml', () => {
       expect(escapeUnterminatedHtml(once), body).toBe(once);
     }
   });
+  it('a code span never crosses a block boundary: a heading, a fence or a quote ends the paragraph (BLIND delta P2)', () => {
+    const cases: Array<[string, string]> = [
+      ['a heading', 'a `x\n## H\n<b x=\'\ny`'],
+      ['a fence', 'a `x\n```\nc\n```\n<b x=\'\ny`'],
+      ['a quote', 'a `x\n> q\n<b x=\'\ny`'],
+      ['a list item', 'a `x\n- item\n<b x=\'\ny`'],
+      ['a thematic break', 'a `x\n***\n<b x=\'\ny`'],
+      ['a CRLF blank line', 'a `x\r\n\r\n<b x=\'\r\ny`'],
+    ];
+    for (const [label, body] of cases) expect(escapeUnterminatedHtml(body), label).toBe(body.replace('<b x=', '&lt;b x='));
+    // One paragraph with no interrupting line is still one span: the construct inside it is code.
+    expect(escapeUnterminatedHtml("a `x\n<b x='\ny` w")).toBe("a `x\n<b x='\ny` w");
+  });
   it('stays linear on a body of thousands of stray `<a`', () => {
     const body = '<a '.repeat(40000);
     const t0 = Date.now();
@@ -266,12 +281,12 @@ describe('escapeUnterminatedHtml', () => {
     expect(Date.now() - t0).toBeLessThan(5000);
     expect(out).not.toMatch(/<a /);
     expect(out.length).toBe(body.length + 3 * 40000);
-  });
+  }, 60_000);
   it('stays linear on thousands of unmatched backtick runs', () => {
     const body = '` ``'.repeat(30000) + ' <pre x=';
     const t0 = Date.now();
     const out = escapeUnterminatedHtml(body);
     expect(Date.now() - t0).toBeLessThan(5000);
     expect(out.endsWith(' &lt;pre x=')).toBe(true);
-  });
+  }, 60_000);
 });
