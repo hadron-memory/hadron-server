@@ -16,7 +16,9 @@ it('no unterminated construct survives an HTML5 parse of body + server block', (
     const len = 1 + Math.floor(rnd() * 8);
     let body = '';
     for (let k = 0; k < len; k += 1) body += FR[Math.floor(rnd() * FR.length)];
-    const out = `${escapeUnterminatedHtml(body)}\n\n<a id="srv-a"></a>\n\n## Heading Z\nstate`;
+    const esc = escapeUnterminatedHtml(body);
+    if (escapeUnterminatedHtml(esc) !== esc) { bad += 1; if (samples.length < 12) samples.push(`not idempotent: ${JSON.stringify(body)}`); continue; }
+    const out = `${esc}\n\n<a id="srv-a"></a>\n\n## Heading Z\nstate`;
     const { document } = parseHTML(`<!doctype html><html><body>${out}</body></html>`);
     const el = document.getElementById('srv-a');
     const ok = el && el.tagName === 'A' && [...el.attributes].length === 1 && (document.body.textContent ?? '').includes('Heading Z');

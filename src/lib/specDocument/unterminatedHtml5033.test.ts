@@ -98,6 +98,11 @@ describe('#5033 the class, not two spellings', () => {
     ['`</` and a question mark', 'a </? b'],
     // LOCAL P3-2: an unclosed template holds the anchor in its inert content.
     ['an unclosed template', 'a <template>'],
+    // LOCAL delta P2-2: an unclosed template that comes BEFORE another escaped construct must not be forgotten by the restart.
+    ['an unclosed template, then an unterminated PI', '<template><?x>'],
+    ['an unclosed template, then an unterminated comment', '<template><!--'],
+    ['an unclosed template, then an open tag', '<template> a <b'],
+    ['an unclosed template, then an unterminated CDATA', '<template><![CDATA[x'],
   ];
   it.each(OPEN)('%s at a body end keeps the next anchor', (_label, body) => {
     const out = renderSpecDocument(THREE(body));
@@ -246,6 +251,13 @@ describe('escapeUnterminatedHtml', () => {
   it('an end tag is `</name` and a blank or `>`: `</name/` closes nothing', () => {
     expect(escapeUnterminatedHtml('a <textarea>x</textarea/>')).toBe('a &lt;textarea>x</textarea/>');
     expect(escapeUnterminatedHtml('a <textarea>x</textarea >')).toBe('a <textarea>x</textarea >');
+  });
+  it('an unclosed template before another escaped construct is escaped too, and the result is a fixed point', () => {
+    for (const body of ['<template><?x>', '<template><!--', '<template> a <b', '<template><![CDATA[x']) {
+      const once = escapeUnterminatedHtml(body);
+      expect(once, body).toMatch(/^&lt;template>/);
+      expect(escapeUnterminatedHtml(once), body).toBe(once);
+    }
   });
   it('stays linear on a body of thousands of stray `<a`', () => {
     const body = '<a '.repeat(40000);
