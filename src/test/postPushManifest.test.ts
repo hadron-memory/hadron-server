@@ -823,6 +823,9 @@ describe('#4704: a catalog-resolved DROP creates no object; every CREATE-shaped 
       "EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT IF EXISTS %I', rel::regclass, cname);",
       "EXECUTE\n  pg_catalog.format('DROP SEQUENCE %s',\n    owned_seq::regclass)\n;",
       "EXECUTE pg_catalog.format('ALTER FUNCTION %s SET search_path = public, pg_temp', f.oid::regprocedure);", // #5096
+      "EXECUTE pg_catalog.format('ALTER FUNCTION %s SET search_path = public, pg_temp', f.fn_oid::pg_catalog.regprocedure);",
+      "EXECUTE pg_catalog.format('alter function %s set search_path = public, pg_temp', fn::regprocedure);",
+      "EXECUTE\n  pg_catalog.format('ALTER FUNCTION %s SET search_path = public, pg_temp',\n    f.fn_oid::regprocedure)\n;",
     ]) {
       expect(run(wrap(stmt)), stmt).toEqual([]);
     }
@@ -852,6 +855,7 @@ describe('#4704: a catalog-resolved DROP creates no object; every CREATE-shaped 
       "EXECUTE pg_catalog.format('ALTER FUNCTION %s SET search_path = public, pg_temp', f.sig);", // #5096: not cast to regprocedure
       "EXECUTE pg_catalog.format('ALTER FUNCTION %s SET search_path = public, pg_temp', f.sig::text::regprocedure);",
       "EXECUTE pg_catalog.format('ALTER FUNCTION %s SET search_path = public, pg_temp', g(f)::regprocedure);",
+      "EXECUTE pg_catalog.format('ALTER FUNCTION %s SET search_path = public, pg_temp', f . fn_oid :: regprocedure);", // a spaced dotted name stays outside the narrow shape, like the regclass one
       "EXECUTE pg_catalog.format('ALTER TABLE %s DROP CONSTRAINT %I', rel_text, cname);",
     ]) {
       expect(refuses(wrap(stmt)).length, stmt).toBeGreaterThan(0);
