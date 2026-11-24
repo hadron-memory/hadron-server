@@ -1484,7 +1484,7 @@ async function insertTask(
       status: a.status ?? 'pending',
       parentTaskId: parentId,
       clonedFromId: a.clonedFromId ?? null,
-      isProject: a.isProject ?? false,
+      isProject: a.isProject ?? a.project === true,
       requirements: a.requirements ?? Prisma.DbNull,
       runFamily: a.runSettings?.family ?? null, runModel: a.runSettings?.model ?? null,
       runTier: a.runSettings?.tier ?? null, runEffort: a.runSettings?.effort ?? null,
@@ -1692,6 +1692,9 @@ async function prepareTaskCreate(
   if (input.project && parentRef) throw badInput('A project is a top-level task: it takes no parentTaskId.');
   // #4997: judged from the input alone, before any read, so a contradiction writes nothing and reveals nothing.
   const isProject = opts ? opts.isProject : resolveProjectMarker(input.project, input.isProject);
+  // A top-level task is a project (ruling A), so a clone that would make an unmarked one is the same contradiction;
+  // the database marks every top-level task other than AT0 (prisma/agent-task-project-marker-invariants.sql).
+  if (input.project === true && !isProject) throw badInput('project: true makes a project, so it cannot be combined with isProject: false.');
   // #2553: the parent's canonical id once it resolves (a handle is an alias); `parentRef` stays the caller's spelling for echoes.
   let parentTaskId: string | null = null;
   let app: TaskApp;

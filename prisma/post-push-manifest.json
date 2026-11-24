@@ -1096,6 +1096,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "agent_tasks_project_marker_top_level",
+      "kind": "function",
+      "file": "agent-task-project-marker-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "app_grant_grantee_same_app",
       "kind": "function",
       "file": "ticker-invariants.sql",
@@ -2201,6 +2207,12 @@
     },
     {
       "name": "agent_tasks.trg_agent_tasks_project_marker_immutable",
+      "kind": "trigger",
+      "file": "agent-task-project-marker-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks.trg_agent_tasks_project_marker_top_level",
       "kind": "trigger",
       "file": "agent-task-project-marker-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."

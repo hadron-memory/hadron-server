@@ -71,12 +71,14 @@ const PROJECT_ZERO = 'AT0';
 
 /**
  * #4997 (cor:agt:150, What a project counts; R4 "count once, nearest marked ancestor"): a LATERAL subquery yielding the
- * handle and id of the nearest marked PROPER ancestor of the row aliased `t`, or no row when it has none. A handle is the
- * dotted path of its ancestors (fixed at creation, at most 16 levels), so each proper prefix of `t.handle` is exactly one
- * ancestor; each is an index lookup on the (app_id, handle) unique, deepest first. A task is never its own project.
+ * handle and id of the nearest marked ancestor of the row aliased `t`, or no row when it has none. A handle is the dotted
+ * path of its ancestors (fixed at creation, at most 16 levels), so each prefix of `t.handle` is exactly one ancestor; each
+ * is an index lookup on the (app_id, handle) unique, deepest first, in `t`'s own App. `self` says whether `t` itself counts:
+ * report 1 asks which project a task belongs to, and a project belongs to itself (as S1 placed a top-level project under its
+ * own row); report 2 counts the tasks under a project, and a project is never counted under itself.
  */
-const nearestProjectSql = Prisma.sql`LATERAL (
-  SELECT m.id, m.handle FROM generate_series(cardinality(string_to_array(t.handle, '.')) - 1, 1, -1) AS d(n)
+const nearestProjectSql = (self: boolean) => Prisma.sql`LATERAL (
+  SELECT m.id, m.handle FROM generate_series(cardinality(string_to_array(t.handle, '.')) - ${self ? 0 : 1}::int, 1, -1) AS d(n)
   JOIN agent_tasks m ON m.app_id = t.app_id AND m.is_project AND m.handle = array_to_string((string_to_array(t.handle, '.'))[1:d.n], '.')
   ORDER BY d.n DESC LIMIT 1
 ) np ON true`;
@@ -84,19 +86,19 @@ const nearestProjectSql = Prisma.sql`LATERAL (
 /**
  * Report 1 (cor:agt:150:01): STARTED owned tasks, grouped by the task's OWNER (never its assignee; the owner's role is
  * not consulted) and by project. An owned task names an issue reference or source, so a STARTED task that tracks no
- * external work is not counted. A task's project is its nearest marked ancestor (#4997); with none it is in `AT0`, the
- * visible "No project".
+ * external work is not counted. A task's project is the nearest marked task among itself and its ancestors (#4997); with
+ * none it is in `AT0`, the visible "No project".
  */
 export async function loadStartedOwned(db: Db, appId: string): Promise<MetricsStartedOwned> {
-  const owned = Prisma.sql`app_id = ${appId} AND status = 'started' AND (COALESCE(btrim(source), '') <> '' OR external_id IS NOT NULL)`;
+  const owned = Prisma.sql`t.app_id = ${appId} AND t.status = 'started' AND (COALESCE(btrim(t.source), '') <> '' OR t.external_id IS NOT NULL)`;
   const cap = METRICS_IDS_CAP;
   const [all, owners, cells] = await Promise.all([
     db.$queryRaw<{ total: number; ids: string[] | null }[]>(Prisma.sql`
-      SELECT count(*)::int AS total, (array_agg(id ORDER BY created_at, id))[1:${cap}] AS ids FROM agent_tasks WHERE ${owned}`),
+      SELECT count(*)::int AS total, (array_agg(t.id ORDER BY t.created_at, t.id))[1:${cap}] AS ids FROM agent_tasks t WHERE ${owned}`),
     db.$queryRaw<{ workerId: string | null; userId: string | null; total: number; ids: string[] }[]>(Prisma.sql`
-      SELECT owner_worker_id AS "workerId", owner_user_id AS "userId", count(*)::int AS total,
-             (array_agg(id ORDER BY created_at, id))[1:${cap}] AS ids
-      FROM agent_tasks WHERE ${owned} GROUP BY owner_worker_id, owner_user_id
+      SELECT t.owner_worker_id AS "workerId", t.owner_user_id AS "userId", count(*)::int AS total,
+             (array_agg(t.id ORDER BY t.created_at, t.id))[1:${cap}] AS ids
+      FROM agent_tasks t WHERE ${owned} GROUP BY t.owner_worker_id, t.owner_user_id
       ORDER BY total DESC, owner_worker_id NULLS LAST, owner_user_id NULLS LAST LIMIT ${METRICS_GROUP_CAP + 1}`),
     db.$queryRaw<{ workerId: string | null; userId: string | null; project: string; total: number; ids: string[] }[]>(Prisma.sql`
       SELECT "workerId", "userId", project, total, ids FROM (
@@ -105,7 +107,7 @@ export async function loadStartedOwned(db: Db, appId: string): Promise<MetricsSt
                row_number() OVER (PARTITION BY "workerId", "userId" ORDER BY count(*) DESC, project) AS rn
         FROM (
           SELECT t.id, t.created_at, t.owner_worker_id AS "workerId", t.owner_user_id AS "userId", COALESCE(np.handle, ${PROJECT_ZERO}) AS project
-          FROM agent_tasks t LEFT JOIN ${nearestProjectSql} WHERE ${owned}
+          FROM agent_tasks t LEFT JOIN ${nearestProjectSql(true)} WHERE ${owned}
         ) placed GROUP BY "workerId", "userId", project
       ) g WHERE rn <= ${METRICS_GROUP_CAP + 1} ORDER BY "workerId" NULLS LAST, "userId" NULLS LAST, rn`),
   ]);
@@ -161,7 +163,7 @@ export async function loadStartedProjects(db: Db, appId: string): Promise<Metric
   const children = shown.length
     ? await db.$queryRaw<{ parentId: string; status: string; total: number; ids: string[] }[]>(Prisma.sql`
         SELECT np.id AS "parentId", t.status, count(*)::int AS total, (array_agg(t.id ORDER BY t.created_at, t.id))[1:${METRICS_IDS_CAP}] AS ids
-        FROM agent_tasks t JOIN ${nearestProjectSql}
+        FROM agent_tasks t JOIN ${nearestProjectSql(false)}
         WHERE t.app_id = ${appId} AND t.handle LIKE ANY(${shown.map((p) => `${p.handle as string}.%`)}::text[])
           AND np.id = ANY(${shown.map((p) => p.id)}::text[])
         GROUP BY np.id, t.status`)
