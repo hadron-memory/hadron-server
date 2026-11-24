@@ -42,6 +42,7 @@ import { generateId } from '../../id.js';
 import { splitNodeUrn } from '../../urn.js';
 import { emitAssetUrnV2 } from '../../urnEmit.js';
 import { resolveFlowMemory } from '../loadFlowNode.js';
+import { ownerLimitToolError } from '../../ownerLimits/errors.js';
 import type { RunToolDef, RunToolContext } from './types.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 
@@ -97,7 +98,8 @@ export const hadronStoreFile: RunToolDef = {
     'node at the given URN pointing to it. The file becomes an Asset in the URN\'s ' +
     'memory; the tool returns the asset id/URN and metadata — never the bytes. ' +
     'Use for durable artifacts (reports, extracts, CSV/JSON data) that later steps ' +
-    'or other tools will consume by reference.',
+    'or other tools will consume by reference. When the memory\'s owner has reached its node limit, nothing is stored ' +
+    'and the result is stored: false with an error whose code is OWNER_LIMIT_REACHED.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -228,6 +230,9 @@ export const hadronStoreFile: RunToolDef = {
       // original error is what the author needs to see.
       await ctx.db.asset.delete({ where: { id: assetId } }).catch(() => {});
       await deleteObject(storageKey).catch(() => {});
+      // #5015: the owner's `nodes` limit is the model's to react to, not the end of the run (nothing is left behind).
+      const refused = ownerLimitToolError(err);
+      if (refused) return { stored: false, nodeUrn: urn, ...refused };
       if (err instanceof GraphQLError && err.extensions?.code === 'NodeLocConflictError') {
         throw new Error(
           `Node already exists at "${urn}" — pick a fresh loc for the reference node.`,

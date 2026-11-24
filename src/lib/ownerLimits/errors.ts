@@ -32,3 +32,13 @@ export class OwnerLimitReachedError extends GraphQLError {
     this.name = 'OwnerLimitReachedError';
   }
 }
+
+/**
+ * #5015 (cor:agt:010:03, issue step 12): a run tool that creates a node hands an owner-limit refusal to the model as the
+ * tool's own error and the run goes on. A handler throw is terminal (`TOOL_FAILED`, D-TL-6), so the tools return this
+ * result instead of throwing. The fields are the refusal's own, already in the form for the run's caller.
+ */
+export function ownerLimitToolError(err: unknown): { error: Record<string, unknown> } | null {
+  if (!(err instanceof OwnerLimitReachedError)) return null;
+  return { error: { ...err.extensions, message: err.message } };
+}

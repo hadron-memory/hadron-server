@@ -18,6 +18,7 @@ import { runAuthoring, runReadsNode } from '../runAuthoring.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 import { splitNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../../urn.js';
 import { resolveFlowMemory, loadFlowNode } from '../loadFlowNode.js';
+import { ownerLimitToolError } from '../../ownerLimits/errors.js';
 import type { RunToolDef, RunToolContext } from './types.js';
 
 /** Shared arg schema for the write tools (full NodeInput parity, minus edges — v1). */
@@ -133,7 +134,8 @@ export const hadronCreateNode: RunToolDef = {
   description:
     'Create a new Hadron node at the given fully-qualified URN (hrn:node:<root>:<memory>:<loc>). ' +
     'Fails if a node already exists there — use hadron_update_node to change one. ' +
-    'Set seq when appending ordered items of an ordinary node type. The default nodeType is record, and a record (or chat-message) outside a Channel refuses an explicit seq (SEQ_PROTECTED): seq is protected conversation order.',
+    'Set seq when appending ordered items of an ordinary node type. The default nodeType is record, and a record (or chat-message) outside a Channel refuses an explicit seq (SEQ_PROTECTED): seq is protected conversation order. ' +
+    'When the memory\'s owner has reached its node limit, nothing is written and the result is created: false with an error whose code is OWNER_LIMIT_REACHED.',
   inputSchema: {
     type: 'object',
     properties: WRITE_ARG_PROPERTIES,
@@ -163,6 +165,9 @@ export const hadronCreateNode: RunToolDef = {
       );
       return { created: true, urn, id: written.id };
     } catch (err) {
+      // #5015: the owner's `nodes` limit is the model's to react to, not the end of the run.
+      const refused = ownerLimitToolError(err);
+      if (refused) return { created: false, urn, ...refused };
       const code = (err as { extensions?: { code?: string } }).extensions?.code;
       if (code === 'NodeLocConflictError') {
         throw new Error(`Node already exists at "${urn}" — use hadron_update_node.`);
