@@ -28,6 +28,7 @@ import { hadronCreateNode } from './nodeTools.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from './types.js';
 import { testRunAgentId } from '../../../test/runAgent.js';
+import { resolvers, type Context } from '../../../api/graphql/schema/resolvers.js';
 
 const ORG_URN = 'ol5015-run-org';
 const MEM_URN = `${ORG_URN}:runmem`;
@@ -90,13 +91,16 @@ describe('#5015 run tools at the owner\'s nodes limit', () => {
   });
 
   it('hadron_create_node in a run with no on-behalf-of user returns the form with no owner and no number', async () => {
+    // A run with no user writes through an App memory write grant (the #3278 path); an agent's item alone does not admit it.
+    await resolvers.Mutation.setAppMemoryWriteGrant({}, { appRef: appId, memoryRef: memoryId, prefix: 'docs', registerNodeUrn: 'hrn:node:example.com:register:authority' },
+      { db, userId: ownerId, roles: ['READER'] } as Context);
     reloadOwnerDefaultLimitsForTests({ OWNER_DEFAULT_LIMITS: JSON.stringify({ organization: { nodes: 1 } }) });
-    const out = await call(hadronCreateNode, await mintRun(null), { urn: `hrn:node:${ORG_URN}:runmem:fresh`, name: 'fresh' });
+    const out = await call(hadronCreateNode, await mintRun(null), { urn: `hrn:node:${ORG_URN}:runmem:docs:fresh`, name: 'fresh' });
     expect(out.error).toEqual({
       code: 'OWNER_LIMIT_REACHED', limitKey: 'nodes', ownerType: 'organization', callerCanManageOwner: false,
       message: OWNER_LIMIT_NO_NUMBER_MESSAGE,
     });
-    expect(await db.node.count({ where: { memoryId, loc: 'fresh' } })).toBe(0);
+    expect(await db.node.count({ where: { memoryId, loc: 'docs:fresh' } })).toBe(0);
   });
 
   it('hadron_create_node still creates below the limit', async () => {

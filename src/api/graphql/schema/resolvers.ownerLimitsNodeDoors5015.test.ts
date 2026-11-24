@@ -139,15 +139,20 @@ describe('#5015 createNode at the owner\'s nodes limit', () => {
 });
 
 describe('#5015 the refusal under impersonation', () => {
-  it('names no owner and no number when a platform admin acts as the limited person (A7a: the caller is null)', async () => {
-    defaults({ user: { nodes: 2 } });
-    const imp = { sessionId: generateId(), actorUserId: w, orgId: null, expiresAt: new Date(Date.now() + 3_600_000) };
-    const r = await gql(CREATE, { ...asU(), impersonation: imp } as Partial<Context>, { input: { memoryId: mU1, loc: 'c', name: 'c' } });
+  it('names no owner and no number when a platform admin acts as the organization\'s OWNER (A7a: the caller is null)', async () => {
+    // An impersonation session is organization-scoped (a private memory is hidden under it), so the limited owner is the
+    // organization, and the acted-as person is its OWNER: without impersonation the same create gets the managing form.
+    await node(mO, 'x');
+    defaults({ organization: { nodes: 1 } });
+    const plain = await gql(CREATE, asU(), { input: { memoryId: mO, loc: 'y', name: 'y' } });
+    expect(err(plain)?.extensions).toMatchObject({ code: 'OWNER_LIMIT_REACHED', callerCanManageOwner: true, ownerId: orgId });
+    const imp = { sessionId: generateId(), actorUserId: w, orgId, expiresAt: new Date(Date.now() + 3_600_000) };
+    const r = await gql(CREATE, { ...asU(), impersonation: imp } as Partial<Context>, { input: { memoryId: mO, loc: 'y', name: 'y' } });
     expect(code(r)).toBe('OWNER_LIMIT_REACHED');
     expect(err(r)?.extensions).toMatchObject({ callerCanManageOwner: false });
     expect(err(r)?.extensions).not.toHaveProperty('ownerId');
     expect(err(r)?.extensions).not.toHaveProperty('limit');
-    expect(await db.node.count({ where: { memoryId: mU1, loc: 'c' } })).toBe(0);
+    expect(await db.node.count({ where: { memoryId: mO, loc: 'y' } })).toBe(0);
   });
 });
 
@@ -183,9 +188,14 @@ describe('#5015 moveNode and cloneNode', () => {
     const x = await node(mO, 'x');
     await node(mO, 'x:child');
     await M.createComment({}, { targetRef: x.id, body: 'a thread carried with the move' }, { db, userId: u, roles: ['READER'] } as Context);
+    // The destination must hold comments (a private memory refuses the move with COMMENT_MOVE_UNCOMMENTABLE first):
+    // a free-standing knowledge memory the person owns.
+    const mK = (await db.memory.create({
+      data: { id: generateId(), name: 'k', urn: 'nd5015-k:knowledge', class: 'knowledge', ownerUserId: u, vectorIndexEnabled: false },
+    })).id;
     const at = await capAtCurrent({ userId: u });
     await db.ownerLimit.updateMany({ where: { ownerUserId: u, key: 'nodes' }, data: { limitValue: at + 2n } });
-    const r = await gql(MOVE, asU(), { src: x.id, to: mU1 });
+    const r = await gql(MOVE, asU(), { src: x.id, to: mK });
     expect(code(r)).toBe('OWNER_LIMIT_REACHED');
     expect(await db.node.count({ where: { memoryId: mO, loc: { in: ['x', 'x:child'] }, deletedAt: null } })).toBe(2);
   });
