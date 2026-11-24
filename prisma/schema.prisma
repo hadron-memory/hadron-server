@@ -7532,6 +7532,10 @@ model AgentTask {
   /// #2646 (hrn:node:hadronmemory.com:specs:cor:agt:050:02, What a clone does): the task this one was cloned from, set once at creation and never
   /// changed. Always in the same App (the clone is made in the source's App). Null for every task not made by a clone.
   clonedFromId         String?   @map("cloned_from_id")
+  /// #4997 (hrn:node:hadronmemory.com:specs:cor:agt:050:01 Project marker; hrn:node:hadronmemory.com:specs:cor:agt:150 A project): the
+  /// project marker. Set only at creation and never changed (trg_agent_tasks_project_marker_immutable refuses a change);
+  /// AT0 is never marked (chk_agent_tasks_at0_unmarked). Both in raw SQL, agent-task-project-marker-invariants.sql.
+  isProject            Boolean   @default(false) @map("is_project")
   ownerWorkerId        String?   @map("owner_worker_id")
   ownerUserId          String?   @map("owner_user_id")
   /// Both null ⇒ queued while pending (hrn:node:hadronmemory.com:specs:cor:agt:050:03).
