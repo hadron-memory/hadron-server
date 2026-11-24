@@ -224,4 +224,28 @@ describe('#4997 the metrics read the marker (cor:agt:150 A project, R4: count on
     const midGroup = groups.find((g) => g.project.taskId === t.mid.id);
     expect(midGroup?.project.title, 'a nested project resolves its own row').toBe('Mid');
   });
+
+  it("the nearest-project lookup stays in the task's own App: another App's marked task with the same handle is never its project", async () => {
+    const org = await db.app.findUniqueOrThrow({ where: { id: app.id }, select: { organizationId: true, urn: true } });
+    const other = await db.app.create({ data: { id: generateId(), organizationId: org.organizationId, name: 'Q', urn: `${org.urn}-q` }, select: { id: true } });
+    await db.appMember.create({ data: { appId: other.id, userId: alice.id, role: 'member' } });
+    // Same creation order in both Apps, so the top-level tasks share a handle: marked in the other App, unmarked here.
+    const theirs = await M.createAgentTask({}, { input: { appRef: other.id, assignee: { user: alice.id }, title: 'Theirs', project: true } }, as(alice));
+    const theirChild = await M.createAgentTask({}, { input: { appRef: other.id, assignee: { user: alice.id }, title: 'TheirChild', parentTaskId: theirs.id, source: SRC } }, as(alice));
+    const loose = await db.agentTask.create({ data: { appId: app.id, title: 'Ours', ownerUserId: alice.id, assigneeUserId: alice.id, assignedAt: new Date(), status: 'started', startedAt: new Date() } });
+    const stray = await db.agentTask.create({ data: { appId: app.id, title: 'OurChild', ownerUserId: alice.id, assigneeUserId: alice.id, assignedAt: new Date(), parentTaskId: loose.id, status: 'started', startedAt: new Date(), source: SRC } });
+    await db.agentTask.updateMany({ where: { appId: { in: [app.id, other.id] }, handle: { not: 'AT0' } }, data: { status: 'started', startedAt: new Date() } });
+    const handle = async (id: string) => (await db.agentTask.findUniqueOrThrow({ where: { id }, select: { handle: true } })).handle!;
+    expect(await handle(loose.id), 'precondition: the two top-level tasks share a handle').toBe(await handle(theirs.id));
+    expect(await marked(theirs.id)).toBe(true);
+    expect(await marked(loose.id)).toBe(false);
+
+    const groups = (await loadStartedOwned(db, app.id)).byOwner.flatMap((o) => o.byProject);
+    expect([...(groups.find((g) => g.project.handle === 'AT0')?.tasks.ids ?? [])]).toEqual([stray.id]);
+    expect(groups.map((g) => g.project.handle)).not.toContain(await handle(loose.id));
+    expect(groups.map((g) => g.project.taskId)).not.toContain(theirs.id);
+    expect((await loadStartedProjects(db, app.id)).items).toEqual([]);
+    const theirGroups = (await loadStartedOwned(db, other.id)).byOwner.flatMap((o) => o.byProject);
+    expect([...(theirGroups.find((g) => g.project.taskId === theirs.id)?.tasks.ids ?? [])]).toEqual([theirChild.id]);
+  });
 });
