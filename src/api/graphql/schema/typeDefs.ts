@@ -10336,7 +10336,15 @@ export const typeDefs = `#graphql
       "hadron node import". Requires MD or JSON; sections is ignored.
     full: false returns a PRESENTATION render of the selected sections
       (default: all); not guaranteed round-trippable.
-    Auth: same node-read gate as node(ref:). (HTML/PDF + asUrl delivery land
+    format: PDF is always a presentation render and \`full\` does not apply
+      (hrn:node:hadronmemory.com:specs:cor:int:020:02, #395). The node's content
+      is always printed; the sections you name are ADDED after it (naming
+      CONTENT changes nothing), in the fixed order Abstract, Data, Properties,
+      Edges, Metadata whatever order you gave: Data and Properties as two-column
+      tables, Edges as a list, Metadata as a list, a section with nothing in it
+      left out. No sections named prints the content only. Comments is not a
+      section yet.
+    Auth: same node-read gate as node(ref:). (HTML + asUrl delivery land
     later; the result shape is forward-compatible.)
     """
     nodeExport(

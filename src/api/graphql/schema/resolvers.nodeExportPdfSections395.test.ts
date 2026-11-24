@@ -165,6 +165,13 @@ describe('#395 an empty section is left out; the title fallback is intact', () =
     expect(printed()).toBe('# Empty one\n\n## Abstract\n\nOnly an abstract.');
   });
 
+  it('a Data value that is not an object prints as a fenced JSON block; an empty array is left out', async () => {
+    await db.node.update({ where: { id: nodeId }, data: { data: [1, 2], properties: [] } });
+    await exportPdf({ sections: ['DATA', 'PROPERTIES'] });
+    expect(printed()).toContain('## Data\n\n```json\n[\n  1,\n  2\n]\n```');
+    expect(printed()).not.toContain('## Properties');
+  });
+
   it('a cell with a pipe or a newline cannot break the table', async () => {
     await db.node.update({ where: { id: nodeId }, data: { data: { note: 'a|b\nc' } } });
     await exportPdf({ sections: ['DATA'] });
