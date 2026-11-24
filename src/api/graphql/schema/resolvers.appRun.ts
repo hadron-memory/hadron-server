@@ -45,6 +45,7 @@ import { admitWorkerTrigger, workerBoundActor, workerTriggerGrantEnforced, worke
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
+import { refHasUnstorableChars } from '../../../lib/entityRef/refNamesNothing.js';
 import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
@@ -190,6 +191,8 @@ async function resolveQuotaScopes(
     const self = ctx.userId === userRef;
     if (!self && !isPlatformAdmin(ctx)) throw authorizationDenied();
     if (!self) {
+      // A ref no row can hold names nothing (a NUL or lone surrogate would fail in the driver, not as NOT_FOUND).
+      if (refHasUnstorableChars(userRef)) throw new GraphQLError('User not found.', { extensions: { code: 'NOT_FOUND' } });
       const live = await ctx.db.user.findFirst({ where: { id: userRef, deletedAt: null }, select: { id: true } });
       if (!live) throw new GraphQLError('User not found.', { extensions: { code: 'NOT_FOUND' } });
     }
@@ -221,9 +224,13 @@ async function resolveQuotaScopes(
     try {
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
     } catch (e) {
+      // Every refusal this gate can raise folds into the unknown-ref answer (cor:api:120:01), whatever its code.
       if (e instanceof GraphQLError) throw notFound();
       throw e;
     }
+    // An App of a deleted organization answers as the orgRef form does not (it refuses the organization): not found.
+    const liveOrg = await ctx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } });
+    if (!liveOrg) throw notFound();
     const org: QuotaScopeRef = { scopeKind: 'org', scopeId: app.organizationId };
     return { scopes: [org, a], target: a };
   }

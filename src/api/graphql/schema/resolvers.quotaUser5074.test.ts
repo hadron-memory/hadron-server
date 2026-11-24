@@ -156,6 +156,80 @@ describe('the userRef door', () => {
   });
 });
 
+describe('review pins (#5074 LOCAL F1-F3, BLIND P2-2)', () => {
+  const orgAdmin = async () => {
+    const u = await db.user.create({ data: { handle: `q5074-oa-${generateId().slice(-5)}`, roles: [] as never } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: u.id, role: 'ADMIN' } });
+    return u;
+  };
+
+  it('the four organization denial texts, compared as strings', async () => {
+    const msg = (p: Promise<unknown>) => p.then(() => null, (e: Error) => e.message);
+    await setLimit(db, 'org', org.id, 'llm.tokens', 0);
+    expect(await msg(consumeRunLaunchQuota(db, { appId: orgApp.id, owner: { organizationId: org.id } }))).toBe('Organization token quota exhausted for today.');
+    await setLimit(db, 'org', org.id, 'llm.tokens', 100);
+    await setLimit(db, 'app', orgApp.id, 'llm.tokens', 0);
+    expect(await msg(consumeRunLaunchQuota(db, { appId: orgApp.id, owner: { organizationId: org.id } }))).toBe('App token quota exhausted for today.');
+  });
+
+  it('a plain organization ADMIN reads the App and its organization rows through appRef alone, and the set lands on the App, not the organization', async () => {
+    const oa = await orgAdmin();
+    const r = await rows(ctxOf(oa), { appRef: orgApp.id });
+    expect(r).toHaveLength(8);
+    const s = await set(ctxOf(oa), { appRef: orgApp.id, action: 'run.execute', limit: 11 });
+    expect(s).toMatchObject({ scopeKind: 'app', scopeId: orgApp.id, limit: 11 });
+    const orgRow = await db.quotaCounter.findFirstOrThrow({ where: { scopeKind: 'org', scopeId: org.id, action: 'run.execute' } });
+    expect(orgRow.limit).toBe(1000);
+  });
+
+  it('an App-member owner who is not an organization ADMIN gets the unknown-ref bytes on an organization App', async () => {
+    await db.appMember.create({ data: { appId: orgApp.id, userId: member.id, role: 'owner' } });
+    const want = await caught(rows(ctxOf(stranger), { appRef: generateId() }));
+    expect(await caught(rows(ctxOf(member), { appRef: orgApp.id }))).toEqual(want);
+  });
+
+  it('an impersonated session keeps the orgRef answers: inside its organization it reads as main does, outside it is refused', async () => {
+    const oa = await orgAdmin();
+    const inside = ctxOf(oa, { impersonation: { sessionId: 's', actorUserId: admin.id, orgId: org.id, expiresAt: new Date(Date.now() + 60_000) } } as never);
+    const other = await db.organization.create({ data: { id: generateId(), name: 'q5074-other', urn: `q5074-other-${generateId().slice(-5)}` } });
+    const outside = ctxOf(oa, { impersonation: { sessionId: 's', actorUserId: admin.id, orgId: other.id, expiresAt: new Date(Date.now() + 60_000) } } as never);
+    const a = await caught(rows(inside, { orgRef: org.id }));
+    const b = await caught(rows(outside, { orgRef: org.id }));
+    expect(b).not.toBeNull();
+    expect(a === null || a.code === 'FORBIDDEN').toBe(true);
+    // The App-alone door gives the same answer as the orgRef form, folded to the unknown-ref bytes when refused.
+    const wantUnknown = await caught(rows(ctxOf(stranger), { appRef: generateId() }));
+    expect((await caught(rows(outside, { appRef: orgApp.id })))).toEqual(wantUnknown);
+  });
+
+  it('an unstorable userRef (NUL, lone surrogate) from a platform admin is User not found, not a driver error', async () => {
+    const a = ctxOf(admin, { roles: ['ADMIN'] });
+    for (const ref of ['a\u0000b', 'x\uD800y']) {
+      expect(await caught(rows(a, { userRef: ref }))).toEqual({ message: 'User not found.', code: 'NOT_FOUND' });
+    }
+  });
+
+  it('an App of a soft-deleted organization is not found for a platform admin, as the orgRef form refuses it', async () => {
+    await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
+    const want = await caught(rows(ctxOf(stranger), { appRef: generateId() }));
+    expect(await caught(rows(ctxOf(admin, { roles: ['ADMIN'] }), { appRef: orgApp.id }))).toEqual(want);
+    expect(await count('org')).toBe(0);
+  });
+
+  it('one quota.limit.changed line per set, ids and numbers only', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      await set(ctxOf(owner), { appRef: personApp.id, action: 'run.execute', limit: 5 });
+      await set(ctxOf(owner), { appRef: personApp.id, action: 'run.execute', limit: 6 });
+      const lines = info.mock.calls.map((c) => JSON.parse(String(c[0]))).filter((l) => l.event === 'quota.limit.changed');
+      expect(lines).toHaveLength(2);
+      expect(lines[1]).toEqual({ event: 'quota.limit.changed', actor: owner.id, scopeKind: 'app', scopeId: personApp.id, action: 'run.execute', oldLimit: 5, newLimit: 6 });
+    } finally {
+      info.mockRestore();
+    }
+  });
+});
+
 describe('the launch gate takes an owner', () => {
   it('a person limit of 1 passes once; a second App of the same person is refused with the owner message and its own counter is given back', async () => {
     const second = await db.app.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'pb', urn: `u-q5074::pb-${generateId().slice(-5)}` } as never });
