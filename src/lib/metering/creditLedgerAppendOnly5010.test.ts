@@ -12,6 +12,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { mergeUsers } from '../../test/mergeConsent.js';
 import { creditBalance, grantCredits } from './index.js';
 
 let pg: Client;
@@ -27,8 +28,10 @@ let userS: string;
 let userT: string;
 let admin: string;
 
+let lastMessage = '';
 async function code(sql: string, params: unknown[] = []): Promise<string | null> {
-  try { await pg.query(sql, params); return null; } catch (e) { return (e as { code?: string }).code ?? 'unknown'; }
+  lastMessage = '';
+  try { await pg.query(sql, params); return null; } catch (e) { lastMessage = (e as { message?: string }).message ?? ''; return (e as { code?: string }).code ?? 'unknown'; }
 }
 async function entryRow() {
   return (await pg.query('SELECT * FROM credit_ledger_entries WHERE id = $1', [entryId])).rows[0];
@@ -86,6 +89,7 @@ describe('#5010 the trigger refuses every edit and delete', () => {
   it.each(changes)('pin 2: UPDATE of %s is refused with 23514 and the row is unchanged', async (_c, set, value) => {
     const before = await entryRow();
     expect(await code(`UPDATE credit_ledger_entries SET ${set} WHERE id = $1`, [entryId, value])).toBe('23514');
+    expect(lastMessage).toMatch(/append-only/); // the trigger fired, not the CHECK
     expect(await entryRow()).toEqual(before);
   });
 
@@ -109,6 +113,7 @@ describe('#5010 the trigger refuses every edit and delete', () => {
       `INSERT INTO credit_ledger_entries (id, organization_id, kind, amount_micro_cents, deleted_at) VALUES ($1, $2, 'grant', 1, now())`,
       [generateId(), orgId],
     )).toBe('23514');
+    expect(lastMessage).toMatch(/chk_credit_ledger_not_soft_deleted/); // the CHECK fired, not the trigger
   });
 });
 
@@ -131,6 +136,46 @@ describe('#5010 audit user ids move only along a recorded merge', () => {
   it('pin 5b: a merge recorded the other way round does not authorise it', async () => {
     await db.userMerge.create({ data: { sourceUserId: userT, targetUserId: userS, mergedBy: userS } });
     expect(await code('UPDATE credit_ledger_entries SET created_by = $2 WHERE id = $1', [entryId, userT])).toBe('23514');
+  });
+});
+
+describe('#5010 the other audit columns, a mixed edit, and the real merge path', () => {
+  it('pin 5c: updated_by and deleted_by are refused without a merge', async () => {
+    expect(await code('UPDATE credit_ledger_entries SET updated_by = $2 WHERE id = $1', [entryId, userT])).toBe('23514');
+    expect(await code('UPDATE credit_ledger_entries SET deleted_by = $2 WHERE id = $1', [entryId, userT])).toBe('23514');
+  });
+
+  it('pin 4b: deleted_by may follow a recorded merge too (a row that carries one)', async () => {
+    // seeded outside the trigger: deleted_by on a live row is what a hand-cleared mark can leave behind
+    await pg.query('ALTER TABLE credit_ledger_entries DISABLE TRIGGER credit_ledger_entries_append_only');
+    await pg.query('UPDATE credit_ledger_entries SET deleted_by = $2 WHERE id = $1', [entryId, userS]);
+    await pg.query('ALTER TABLE credit_ledger_entries ENABLE TRIGGER credit_ledger_entries_append_only');
+    await db.userMerge.create({ data: { sourceUserId: userS, targetUserId: userT, mergedBy: userT } });
+    expect(await code('UPDATE credit_ledger_entries SET deleted_by = $2 WHERE id = $1', [entryId, userT])).toBeNull();
+  });
+
+  it('pin 5d: an audit id along a recorded merge AND another column in one UPDATE is refused', async () => {
+    await db.userMerge.create({ data: { sourceUserId: userS, targetUserId: userT, mergedBy: userT } });
+    expect(await code("UPDATE credit_ledger_entries SET created_by = $2, note = 'x' WHERE id = $1", [entryId, userT])).toBe('23514');
+    expect((await entryRow()).created_by).toBe(userS);
+  });
+
+  it('pin 14: the real mergeUsers path succeeds for an owner of entries, and a chained merge A->B->C follows', async () => {
+    const userU = (await db.user.create({ data: { id: generateId(), githubId: 50104, githubUsername: 'ledger-u' } })).id;
+    await mergeUsers(db, { sourceUserId: userS, targetUserId: userT, actorUserId: admin });
+    let row = await entryRow();
+    expect([row.created_by, row.updated_by, row.note, row.amount_micro_cents]).toEqual([userT, userT, 'seed', '5000000']);
+    await mergeUsers(db, { sourceUserId: userT, targetUserId: userU, actorUserId: admin });
+    row = await entryRow();
+    expect([row.created_by, row.updated_by]).toEqual([userU, userU]);
+  });
+
+  it('pin 15 (guard): a repeated grantCredits with the same source is one row and no error (webhook replay)', async () => {
+    const args = { organizationId: orgId, amountMicroCents: 7n, sourceType: 'stripe-checkout', sourceId: 'cs_5010' };
+    const first = await grantCredits(db, args);
+    const second = await grantCredits(db, args);
+    expect(second.id).toBe(first.id);
+    expect((await pg.query("SELECT count(*)::int AS n FROM credit_ledger_entries WHERE source_id = 'cs_5010'")).rows[0].n).toBe(1);
   });
 });
 

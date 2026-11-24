@@ -280,7 +280,7 @@ describe('#5008 aiSpend — what is left out (pins 5, 6, 11 and the ledger rulin
   it('a soft-deleted debit is not charged (the balance leaves it out too)', async () => {
     // #5010: the database now refuses a soft-deleted entry (CHECK chk_credit_ledger_not_soft_deleted). This pin keeps the
     // filter honest for a deployment whose migration refused (HDPRF) and still holds one, so it lifts the CHECK for its
-    // own duration and puts it back (a per-worker database; the table is truncated first so the CHECK validates).
+    // own duration and puts it back (a per-worker database, dropped at teardown; the table is truncated before the CHECK is re-added so it validates).
     const id = await ev();
     await db.$executeRawUnsafe('ALTER TABLE credit_ledger_entries DROP CONSTRAINT chk_credit_ledger_not_soft_deleted');
     try {

@@ -10,7 +10,7 @@
 --     reading is built here.)
 --   * created_by, updated_by, deleted_by: may move only from a user to the user it was merged into, along a user_merges row
 --     (mergeUsers writes it before it re-points).
--- Every other column (id, kind, amount, expiry, source, note, created_at, updated_at, deleted_at, deleted_by...) is frozen, and so is any
+-- Every other column (id, kind, amount, expiry, source, note, created_at, updated_at, deleted_at...) is frozen, and so is any
 -- column a later slice adds until that slice exempts it on purpose (A6's owner_user_id).
 -- Soft delete is retired for this table: a CHECK refuses an entry that carries deleted_at.
 -- TRUNCATE fires no row trigger; it is the TEST-ONLY cleanup path (src/test/helpers.ts cleanDb).

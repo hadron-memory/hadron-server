@@ -23,7 +23,13 @@ beforeEach(async () => {
 async function preMigrationShape() {
   await pg.query('DROP TRIGGER IF EXISTS credit_ledger_entries_append_only ON credit_ledger_entries');
   await pg.query('ALTER TABLE credit_ledger_entries DROP CONSTRAINT IF EXISTS chk_credit_ledger_not_soft_deleted');
+  await pg.query('ALTER TABLE credit_ledger_entries DROP CONSTRAINT credit_ledger_entries_organization_id_fkey');
+  await pg.query(`ALTER TABLE credit_ledger_entries ADD CONSTRAINT credit_ledger_entries_organization_id_fkey
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE ON UPDATE CASCADE`);
 }
+const fkAction = async () => (await pg.query(`SELECT confdeltype, confupdtype FROM pg_constraint WHERE conname = 'credit_ledger_entries_organization_id_fkey'`)).rows;
+const hasTrigger = async () => (await pg.query(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname = 'credit_ledger_entries_append_only'`)).rows[0].n;
+const hasCheck = async () => (await pg.query(`SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'chk_credit_ledger_not_soft_deleted'`)).rows[0].n;
 
 describe('#5010 migration', () => {
   it('pin 9: a soft-deleted entry stops it with SQLSTATE HDPRF and changes nothing', async () => {
@@ -37,6 +43,10 @@ describe('#5010 migration', () => {
       expect(err?.code).toBe('HDPRF');
       expect(err?.detail).toBe('count of rows with deleted_at set: 1');
       expect(err?.message).not.toContain(orgId);
+      await pg.query('ROLLBACK TO SAVEPOINT before_migration');
+      // changes nothing: still the pre-migration shape (cascade FK, no trigger, no CHECK)
+      expect(await fkAction()).toEqual([{ confdeltype: 'c', confupdtype: 'c' }]);
+      expect([await hasTrigger(), await hasCheck()]).toEqual([0, 0]);
     } finally {
       await pg.query('ROLLBACK');
     }
@@ -47,9 +57,10 @@ describe('#5010 migration', () => {
     try {
       await preMigrationShape();
       await pg.query(`INSERT INTO credit_ledger_entries (id, organization_id, kind, amount_micro_cents) VALUES ($1, $2, 'grant', 1)`, [generateId(), orgId]);
+      expect(await fkAction()).toEqual([{ confdeltype: 'c', confupdtype: 'c' }]);
       await pg.query(MIGRATION);
-      const fk = await pg.query(`SELECT confdeltype, confupdtype FROM pg_constraint WHERE conname = 'credit_ledger_entries_organization_id_fkey'`);
-      expect(fk.rows).toEqual([{ confdeltype: 'r', confupdtype: 'r' }]);
+      expect(await fkAction()).toEqual([{ confdeltype: 'r', confupdtype: 'r' }]);
+      expect([await hasTrigger(), await hasCheck()]).toEqual([1, 1]);
       await pg.query('SAVEPOINT s');
       await expect(pg.query('DELETE FROM organizations WHERE id = $1', [orgId])).rejects.toMatchObject({ code: '23503' });
     } finally {
