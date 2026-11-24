@@ -1,0 +1,31 @@
+/**
+ * "An organization or a person": the one owner value the limit, ledger and billing code passes (#5006). Never a nullable
+ * organization id. An App, Agent or Memory stores the same choice as `organizationId` XOR `ownerUserId`.
+ */
+export type OwnerRef = { organizationId: string } | { userId: string };
+export type OwnerType = 'organization' | 'user';
+
+export const ownerType = (owner: OwnerRef): OwnerType => ('organizationId' in owner ? 'organization' : 'user');
+export const ownerId = (owner: OwnerRef): string => ('organizationId' in owner ? owner.organizationId : owner.userId);
+
+/** The two owner columns of an App, Agent or Memory row. */
+export type OwnedRow = { organizationId: string | null; ownerUserId: string | null };
+
+/**
+ * #5075: the owner a row names. Branches on `ownerUserId` first, as `requireOwnerOrOrgRole` does, and answers null for a
+ * row with neither column set: two ownerless rows are never "the same owner".
+ */
+export function ownerRefOf(row: OwnedRow | null | undefined): OwnerRef | null {
+  if (!row) return null;
+  if (row.ownerUserId !== null) return { userId: row.ownerUserId };
+  if (row.organizationId !== null) return { organizationId: row.organizationId };
+  return null;
+}
+
+/**
+ * cor:dmo:170:05 (the owner of the work is the owner of the App the work ran in): the App's owner when there is an App,
+ * else the Agent's. An App row with no owner at all answers null rather than falling through to the Agent.
+ */
+export function ownerOfWork(app: OwnedRow | null | undefined, agent: OwnedRow | null | undefined): OwnerRef | null {
+  return app ? ownerRefOf(app) : ownerRefOf(agent);
+}

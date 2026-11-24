@@ -95,15 +95,15 @@ describe('configuration resolution access', () => {
     expect(answer.data?.resolveAIConfig).toMatchObject({ configId: config.id, ownerType: 'AGENT', apiKey: null });
   });
 
-  it('an outer organization source follows its own credential authority', async () => {
+  it('#5075: an organization source does not answer in a person\'s App (the publisher\'s organization level is closed)', async () => {
     await db.app.update({ where: { id: app.id }, data: { organizationId: null, ownerUserId: admin.id } });
     await db.orgMember.create({ data: { organizationId: vendor.id, userId: admin.id, role: 'READER' } });
     await db.agentSubscription.create({ data: { agentId: agent.id, userId: admin.id, activatedAt: new Date() } });
     await db.aiServiceConfig.delete({ where: { id: config.id } });
-    const outer = await db.aiServiceConfig.create({ data: { organizationId: vendor.id, name: 'default', provider: 'openai', model: 'outer-model', apiKeyEncrypted: encryptToken(KEY), enabled: true } });
+    await db.aiServiceConfig.create({ data: { organizationId: vendor.id, name: 'default', provider: 'openai', model: 'outer-model', apiKeyEncrypted: encryptToken(KEY), enabled: true } });
     const answer = await ask();
-    expect(answer.errors).toBeUndefined();
-    expect(answer.data?.resolveAIConfig).toMatchObject({ configId: outer.id, ownerType: 'ORGANIZATION', model: 'outer-model', apiKey: null });
+    expect(answer.errors?.[0]?.extensions?.code).toBe('NoAiConfigAvailableError');
+    expect(answer.data?.resolveAIConfig ?? null).toBeNull();
   });
 
   it('a platform source retains identity for an authorized context without its credential', async () => {
@@ -130,23 +130,10 @@ describe('configuration resolution access', () => {
     expect(ownerLookups).toBe(1);
   });
 
-  it('an organization source authority fault propagates instead of returning identity', async () => {
-    await db.app.update({ where: { id: app.id }, data: { organizationId: null, ownerUserId: admin.id } });
-    await db.orgMember.create({ data: { organizationId: vendor.id, userId: admin.id, role: 'READER' } });
-    await db.agentSubscription.create({ data: { agentId: agent.id, userId: admin.id, activatedAt: new Date() } });
-    await db.aiServiceConfig.delete({ where: { id: config.id } });
-    await db.aiServiceConfig.create({ data: { organizationId: vendor.id, name: 'default', provider: 'openai', model: 'outer-model', apiKeyEncrypted: encryptToken(KEY), enabled: true } });
-    let ownerLookups = 0;
-    const faulty = db.$extends({ query: { organization: { findFirst({ args, query }) {
-      if (args.where?.id === vendor.id) {
-        ownerLookups++;
-        throw new Error('fixture-org-source-fault');
-      }
-      return query(args);
-    } } } });
-    await expect(resolvers.Query.resolveAIConfig({}, { appRef: app.id, agentRef: agent.id }, { ...ctx(), db: faulty as unknown as Context['db'] })).rejects.toThrow('fixture-org-source-fault');
-    expect(ownerLookups).toBe(1);
-  });
+  // #5075: the former "an organization source authority fault propagates" case is gone with the path it guarded. The
+  // only organization source that can answer is now the App's own organization, and the caller who passes the App's
+  // ADMIN gate is that organization's ADMIN, who manages it, so no authority lookup on a non-manager remains.
+  // The fault guard for the Agent source stays above (agent.findFirst).
 
   it('an identity-only result does not disclose configured params', async () => {
     await db.aiServiceConfig.update({ where: { id: config.id }, data: { params: { secret: 'fixture-param-sentinel' } } });
@@ -247,10 +234,8 @@ describe('configuration resolution access', () => {
 
   it.each([false, true])('the non-manager picker withholds selected-source params and preview (outer=%s)', async outer => {
     if (outer) {
-      await db.app.update({ where: { id: app.id }, data: { organizationId: null, ownerUserId: admin.id } });
-      await db.orgMember.create({ data: { organizationId: vendor.id, userId: admin.id, role: 'READER' } });
-      await db.agentSubscription.create({ data: { agentId: agent.id, userId: admin.id, activatedAt: new Date() } });
-      await db.aiServiceConfig.update({ where: { id: config.id }, data: { agentId: null, organizationId: vendor.id } });
+      // #5075: the outer source is the App's own organization (a person's App has no organization level).
+      await db.aiServiceConfig.update({ where: { id: config.id }, data: { agentId: null, organizationId: customer.id } });
     }
     await db.aiServiceConfig.update({ where: { id: config.id }, data: { params: { secret: 'picker-param-sentinel' } } });
     const answer = await ask(agent.id, member.id, true);

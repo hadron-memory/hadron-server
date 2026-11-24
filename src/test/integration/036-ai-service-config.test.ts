@@ -1625,6 +1625,15 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
     expect(await resolveAiConfigs(db, { appId: personApp.id, agentId: orgAgent.id })).toEqual([]);
   });
 
+  it('step 1 of the tenant rule: an explicit organization never overrides a person\'s App', async () => {
+    await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org-5075' });
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-5075' });
+    expect(await resolveAiConfig(db, 'default', { appId: personApp.id, organizationId: org.id })).toBeNull();
+    expect(await resolveAiConfigs(db, { appId: personApp.id, organizationId: org.id })).toEqual([]);
+    // Control: the same explicit organization with no App is the organization's tenant, as before.
+    expect((await resolveAiConfig(db, 'default', { organizationId: org.id }))?.ownerType).toBe('ORGANIZATION');
+  });
+
   it('P3 on the run path: the same answers through makeProdRunDeps(db).resolveConfig', async () => {
     await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org-5075' });
     await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-5075' });
