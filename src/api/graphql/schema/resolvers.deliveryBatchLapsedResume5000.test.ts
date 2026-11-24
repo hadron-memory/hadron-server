@@ -64,7 +64,7 @@ describe('#5000 the holder\'s own inbox read resumes a lapsed session', () => {
     const after = await row(s);
     expect(after.id).toBe(s.id);
     expect(after.endedAt).toBeNull();
-    expect(after.updatedAt.getTime()).toBeGreaterThan(Date.now() - 60_000); // resumed: driven just now
+    expect(after.updatedAt!.getTime()).toBeGreaterThan(Date.now() - 60_000); // resumed: driven just now
     expect(await db.appLogEntry.count({ where: { sessionId: s.id, message: 'delivery.batch.read' } })).toBe(1);
     // and it is live from here on: a second read needs no resume
     expect((await inbox(s)).batches).toEqual([]);
@@ -73,12 +73,12 @@ describe('#5000 the holder\'s own inbox read resumes a lapsed session', () => {
   it('a session idle for weeks (still inside the 90-day default dormancy) is resumed too', async () => {
     const s = await lapsed(24 * 20);
     expect((await inbox(s)).batches).toEqual([]);
-    expect((await row(s)).updatedAt.getTime()).toBeGreaterThan(Date.now() - 60_000);
+    expect((await row(s)).updatedAt!.getTime()).toBeGreaterThan(Date.now() - 60_000);
   });
 });
 
 describe('#5000 a refused resume says which condition failed, and resumes nothing', () => {
-  const untouched = async (s: { id: string; updatedAt: Date }) => {
+  const untouched = async (s: { id: string; updatedAt: Date | null }) => {
     expect((await row(s)).updatedAt).toEqual(s.updatedAt);
     expect(await db.appLogEntry.count({ where: { sessionId: s.id } })).toBe(0);
   };
