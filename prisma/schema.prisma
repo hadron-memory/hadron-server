@@ -85,6 +85,10 @@ enum Role {
   ADMIN
   CONTRIBUTOR
   READER
+  /// A platform role only (#5012, Billing A5): a payment service's user, which may write credit grants and
+  /// adjustments (`grantCredits`, `adjustCredits`) and nothing else. Refused as an organization member's,
+  /// a memory subscription's and an invitation's role, and never combined with another role on one user.
+  BILLING
 }
 
 /// Per-App default role assigned to new members when no Agent
