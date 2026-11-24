@@ -12443,10 +12443,14 @@ export const typeDefs = `#graphql
 
     sortBy / sortDir (#833) order the whole result set server-side, so a client
     table is no longer limited to sorting the page it happens to hold.
+
+    appRef, orgRef and parentRunRef share one scalar, ID (#5050,
+    hrn:node:hadronmemory.com:specs:cor:api:140:01). appRef and orgRef were String until #5050, so a
+    document that declares either variable as String no longer validates; declare it ID.
     """
     appRuns(
-      appRef: String
-      orgRef: String
+      appRef: ID
+      orgRef: ID
       status: AppRunStatus @deprecated(reason: "Use statuses (#836) - a single value cannot express PENDING-or-RUNNING.")
       statuses: [AppRunStatus!]
       parentRunRef: ID

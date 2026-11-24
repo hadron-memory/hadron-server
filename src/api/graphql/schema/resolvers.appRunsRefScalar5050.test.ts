@@ -32,6 +32,11 @@ async function exec(query: string, variables: Record<string, unknown>, ctx: Part
 }
 const ids = (r: { data?: unknown }) => ((r.data as any).appRuns.items as { id: string }[]).map((i) => i.id).sort();
 const code = (r: { errors?: readonly { extensions?: Record<string, unknown> }[] }) => r.errors?.[0]?.extensions?.code;
+/** The answer without error `locations`: a variable and a literal sit at different columns of their documents. */
+const answer = (r: { data?: unknown; errors?: readonly { locations?: unknown }[] }) => ({
+  data: r.data,
+  errors: r.errors?.map(({ locations: _locations, ...rest }) => rest),
+});
 
 /** hadron-cli `internal/api/queries/runs.graphql` `AppRuns`, variable block as shipped before hadron-cli#3107. */
 const CLI_BEFORE = `query AppRuns($appRef: String, $orgRef: String, $status: AppRunStatus, $statuses: [AppRunStatus!], $parentRunId: ID,
@@ -129,11 +134,12 @@ describe('#5050 appRuns ref arguments share the ID scalar', () => {
     // An unknown App ref answers as it did under String (the resolver sees the same string either way).
     const unknown = await exec(q, { a: 'rs5050:nope' });
     const unknownLiteral = await exec('{ appRuns(appRef: "rs5050:nope") { total items { id } } }', {});
-    expect(unknown).toEqual(unknownLiteral);
+    expect(answer(unknown)).toEqual(answer(unknownLiteral));
+    expect(code(unknown)).toBe('NOT_FOUND');
     // ID accepts an Int input and hands the resolver its string form; a number names no App, as the string "5050" does.
     const intLiteral = await exec('{ appRuns(appRef: 5050) { total items { id } } }', {});
     const stringOfInt = await exec(q, { a: '5050' });
-    expect(intLiteral).toEqual(stringOfInt);
+    expect(answer(intLiteral)).toEqual(answer(stringOfInt));
   });
 
   it('a reader outside the org is refused exactly as before', async () => {
@@ -142,6 +148,6 @@ describe('#5050 appRuns ref arguments share the ID scalar', () => {
     const viaId = await exec('query($a: ID) { appRuns(appRef: $a) { total } }', { a: appUrn }, ctx);
     const viaLiteral = await exec(`{ appRuns(appRef: "${appUrn}") { total } }`, {}, ctx);
     expect(viaId.errors?.length).toBeGreaterThan(0);
-    expect(viaId).toEqual(viaLiteral);
+    expect(answer(viaId)).toEqual(answer(viaLiteral));
   });
 });
