@@ -537,7 +537,7 @@ export async function writeSessionHandoff(
         },
         writerCtx,
         'create',
-        { authoring: { kind: 'platform', record: 'session-handoff' } },
+        { ownerLimit: 'count-only', authoring: { kind: 'platform', record: 'session-handoff' } },
       );
     }
 
@@ -557,7 +557,7 @@ export async function writeSessionHandoff(
       },
       writerCtx,
       'create',
-      { authoring: { kind: 'platform', record: 'session-handoff' } },
+      { ownerLimit: 'count-only', authoring: { kind: 'platform', record: 'session-handoff' } },
     );
   } catch (e) {
     throw new GraphQLError(

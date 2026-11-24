@@ -80,6 +80,7 @@ describe('moveNode (#564)', () => {
     }, { timeout: 20_000 });
     await held;
     const moving = db.$transaction(async (tx) => moveNodeSubtree(tx, {
+      ownerLimitCaller: null,
       source: root, destLoc: 'renamed', editor: { userId: user.id },
     }), { timeout: 20_000 });
     try {
@@ -133,6 +134,7 @@ describe('moveNode (#564)', () => {
           return rows;
         }) as unknown as typeof tx.node.findMany);
         await moveNodeSubtree(tx, {
+          ownerLimitCaller: null,
           source: alpha, destLoc: 'alpha-renamed', editor: { userId: user.id },
         });
       }, { timeout: 15_000 });
@@ -177,6 +179,7 @@ describe('moveNode (#564)', () => {
           return row;
         }) as unknown as typeof tx.memory.findUnique);
         await moveNodeSubtree(tx, {
+          ownerLimitCaller: null,
           source: alpha, destLoc: 'alpha', destMemoryId: dest.id, editor: { userId: user.id },
         });
       }, { timeout: 15_000 });

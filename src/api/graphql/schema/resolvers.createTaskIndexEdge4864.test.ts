@@ -284,7 +284,7 @@ describe('an App write grant never reaches the index edge (#4864)', () => {
     const run = () => ({ db, ...runAuthContext({ id: generateId(), appId: app.id, userId: null, organizationId: org.id }) }) as never;
     const door = (loc: string, taskIndex?: { agent: string; trigger: string }) =>
       writeNodeCore({ memoryId: otherMem.id, loc, name: loc, isRunnable: true, content: 'x' } as never, run(), 'create',
-        { authoring: attestedAuthoring(null), ownsKind: 'task', governedContext: 'node-write', ...(taskIndex ? { taskIndex } : {}) });
+        { ownerLimit: 'refuse', authoring: attestedAuthoring(null), ownsKind: 'task', governedContext: 'node-write', ...(taskIndex ? { taskIndex } : {}) });
     expect(await code(door('tasks:control'))).toEqual({ code: 'OK', message: '' });
     const before = await totals();
     expect((await code(door('tasks:deploy', INDEX()))).code).toBe('FORBIDDEN');

@@ -486,6 +486,7 @@ describe('node move URN aliases', () => {
     const child = await createNode(source.id, 'old:child');
     await expect(db.$transaction(async (tx) => {
       await moveNodeSubtree(tx, {
+        ownerLimitCaller: null,
         source: root, destLoc: 'new', editor: { userId: mover.id },
       });
       throw new Error('abort after alias insertion and rebase');

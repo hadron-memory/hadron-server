@@ -569,7 +569,7 @@ async function writeNodeCoreUpsert(patch: Record<string, unknown>, loc = node.lo
     { memoryId: memory.id, loc, name: 'Upsert', content: 'upserted body', ...patch } as never,
     { db, roles: ['READER'], userId: owner, clientId: `user:${owner}` } as never,
     'upsert',
-    { authoring: attestedAuthoring(null) },
+    { ownerLimit: 'refuse', authoring: attestedAuthoring(null) },
   );
 }
 

@@ -121,6 +121,7 @@ describe('server-authored move reference fallback', () => {
     const visible = await createDbNode(db, { memoryId: destinationId, loc: 'two' });
     for (const node of [hidden, visible]) await db.urnAlias.create({ data: { entityType: 'NODE', entityId: node.id, urn: target, reason: 'RENAME' } });
     const result = await db.$transaction(tx => moveNodeSubtree(tx, {
+      ownerLimitCaller: null,
       source: root, destLoc: 'moving', destMemoryId: destinationId, editor: { info: 'server' },
     }));
     expect(result.linkWarnings).toMatchObject([{ target, status: 'AMBIGUOUS' }]);
@@ -134,6 +135,7 @@ describe('server-authored move reference fallback', () => {
       await db.urnAlias.create({ data: { entityType: 'NODE', entityId: node.id, urn: target, reason: 'RENAME' } });
     }
     const result = await db.$transaction(tx => moveNodeSubtree(tx, {
+      ownerLimitCaller: null,
       source: root, destLoc: 'moving', destMemoryId: destinationId, editor: { info: 'server' },
     }));
     expect(result.linkWarnings).toMatchObject([{ target, status: 'MISSING' }]);

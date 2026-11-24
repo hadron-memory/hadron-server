@@ -428,6 +428,7 @@ import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import { edgeDisplayOrder, edgeRunOrder } from '../lib/edgeOrder.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
 import { memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
+import { ownerLimitCaller, requireNodeHeadroom } from '../lib/ownerLimits/nodes.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -8906,6 +8907,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, attemptAuth, memoryId),
                 principal: attemptAuth,
                 canReadMemoryId: memoryId => canReadMemory(tx as typeof db, attemptAuth, memoryId, EXPLICIT_REF),
+                ownerLimitCaller: ownerLimitCaller(auth),
               });
               relocated = subtreeResult.moved;
               linkWarnings = subtreeResult.linkWarnings;

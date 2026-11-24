@@ -159,7 +159,7 @@ export const hadronCreateNode: RunToolDef = {
         } as never,
         ctx.principal,
         'create',
-        { authoring: runToolAuthoring(ctx, args) },
+        { ownerLimit: 'refuse', authoring: runToolAuthoring(ctx, args) },
       );
       return { created: true, urn, id: written.id };
     } catch (err) {
@@ -210,7 +210,7 @@ export const hadronUpdateNode: RunToolDef = {
       } as never,
       ctx.principal,
       'update',
-      { authoring: runToolAuthoring(ctx, args), targetNodeId: node.id },
+      { ownerLimit: 'count-only', authoring: runToolAuthoring(ctx, args), targetNodeId: node.id },
     );
     return { updated: true, urn, id: written.id };
   },

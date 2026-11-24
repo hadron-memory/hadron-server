@@ -242,6 +242,7 @@ describe('syncGraphFromGithub', () => {
       signalPathHeld();
       await mayMove;
       return moveNodeSubtree(tx, {
+        ownerLimitCaller: null,
         source, destLoc: 'moved', editor: { info: 'git-sync-lock-order-test' },
       });
     }, { timeout: 20_000 });
@@ -1644,6 +1645,7 @@ describe('Channel-protected mirror cleanup (#1226)', () => {
         ]);
         await lockAncestorsForCreate(tx, movedMemory.id, 'moved:source');
         return moveNodeSubtree(tx, {
+          ownerLimitCaller: null,
           source,
           destMemoryId: movedMemory.id,
           destLoc: 'moved:source',

@@ -339,7 +339,7 @@ it('11: a plaintext cross-memory chat move still refuses, and merge relocation r
   const own = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
   const target = await db.memory.create({ data: { id: generateId(), organizationId: own.organizationId, name: 'target', urn: `engine3501:target-${generateId()}`, class: 'knowledge' } });
   const source = await raw();
-  await expect(db.$transaction(tx => moveNodeSubtree(tx, { source, destLoc: 'chats:moved', destMemoryId: target.id, editor: { userId } }))).rejects.toThrow('chat');
+  await expect(db.$transaction(tx => moveNodeSubtree(tx, { ownerLimitCaller: null, source, destLoc: 'chats:moved', destMemoryId: target.id, editor: { userId } }))).rejects.toThrow('chat');
   await mergeMemoryGraph(db, { sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(), deleteSourceMem: false, editor: { userId } });
   expect((await raw()).memoryId).toBe(target.id);
   expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).state).toHaveProperty('stageName', 'live-stage');
