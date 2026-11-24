@@ -1,10 +1,13 @@
 -- #5089: schema-qualify the proof/audit table reads in secret-versions-invariants.sql so a session temp table of the same name cannot shadow them.
--- Expand-safe: the previous image runs against this schema (CREATE OR REPLACE of guard functions that read the same rows). No data is read or refused.
+-- Expand-safe: the previous image runs against this schema (the same guard functions, reading the same rows). No row is refused or changed.
+-- What it does run: this file re-applies the whole shared source (as every carrier of it has), so the CHECK constraints it declares are
+-- dropped and re-added (re-validated against the current rows) and its triggers re-created, each taking a brief ACCESS EXCLUSIVE lock
+-- on the guarded table. The data it re-validates already satisfied the same constraints.
 -- One source, shared verbatim with prisma/secret-versions-invariants.sql.
 
 -- #3997 (S2 of #3991) — App-owned secrets: the widened owner CHECK, the value/owner pairing, versions bound to their
 -- App, the append-only event trail with its one-year purge rule, the tombstone, and "no secret outlives its App".
--- Prisma cannot model any of these. One source, shared verbatim with migration 20261114120000_app_secret_versions.
+-- Prisma cannot model any of these. One source; the newest migration to carry it (today 20261124180200_qualify_secret_guard_reads) ends with it verbatim (pinned by src/api/graphql/schema/resolvers.appSecrets3997.test.ts).
 
 -- The owner types: user, org, app. (#696 narrowed to user/org; D-2026-11-12-001 made an App an owner again.)
 ALTER TABLE secrets DROP CONSTRAINT IF EXISTS chk_secret_owner_type;

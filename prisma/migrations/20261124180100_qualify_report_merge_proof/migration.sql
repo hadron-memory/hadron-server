@@ -1,5 +1,8 @@
 -- #5089: schema-qualify the proof/audit table reads in content-validation-report-invariants.sql so a session temp table of the same name cannot shadow them.
--- Expand-safe: the previous image runs against this schema (CREATE OR REPLACE of guard functions that read the same rows). No data is read or refused.
+-- Expand-safe: the previous image runs against this schema (the same guard functions, reading the same rows). No row is refused or changed.
+-- What it does run: this file re-applies the whole shared source (as every carrier of it has), so the CHECK constraints it declares are
+-- dropped and re-added (re-validated against the current rows) and its triggers re-created, each taking a brief ACCESS EXCLUSIVE lock
+-- on the guarded table. The data it re-validates already satisfied the same constraints.
 -- One source, shared verbatim with prisma/content-validation-report-invariants.sql.
 
 -- #1332 (cor:dmo:160:01): a content-validation report's author check and its

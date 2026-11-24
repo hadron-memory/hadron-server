@@ -10,7 +10,10 @@ export async function inFreshRolledBackSession<T>(body: (c: Client) => Promise<T
   await c.connect();
   try {
     await c.query('BEGIN');
-    try { return await body(c); } finally { await c.query('ROLLBACK'); }
+    // A pin must fail fast, not hang on a lock: the session carries its own bounds.
+    await c.query("SET LOCAL lock_timeout = '5s'");
+    await c.query("SET LOCAL statement_timeout = '30s'");
+    try { return await body(c); } finally { await c.query('ROLLBACK').catch(() => undefined); } // never mask the body's error
   } finally {
     await c.end();
   }

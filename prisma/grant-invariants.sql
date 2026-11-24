@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (today 20261121200000_grant_agent_withdrawal) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (today 20261124180000_qualify_grant_merge_proof) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because

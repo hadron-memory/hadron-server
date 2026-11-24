@@ -1,9 +1,12 @@
 -- #5089: schema-qualify the proof/audit table reads in grant-invariants.sql so a session temp table of the same name cannot shadow them.
--- Expand-safe: the previous image runs against this schema (CREATE OR REPLACE of guard functions that read the same rows). No data is read or refused.
+-- Expand-safe: the previous image runs against this schema (the same guard functions, reading the same rows). No row is refused or changed.
+-- What it does run: this file re-applies the whole shared source (as every carrier of it has), so the CHECK constraints it declares are
+-- dropped and re-added (re-validated against the current rows) and its triggers re-created, each taking a brief ACCESS EXCLUSIVE lock
+-- on the guarded table. The data it re-validates already satisfied the same constraints.
 -- One source, shared verbatim with prisma/grant-invariants.sql.
 
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (today 20261121200000_grant_agent_withdrawal) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (today 20261124180000_qualify_grant_merge_proof) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because

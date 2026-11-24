@@ -1,6 +1,6 @@
 -- #3997 (S2 of #3991) — App-owned secrets: the widened owner CHECK, the value/owner pairing, versions bound to their
 -- App, the append-only event trail with its one-year purge rule, the tombstone, and "no secret outlives its App".
--- Prisma cannot model any of these. One source, shared verbatim with migration 20261114120000_app_secret_versions.
+-- Prisma cannot model any of these. One source; the newest migration to carry it (today 20261124180200_qualify_secret_guard_reads) ends with it verbatim (pinned by src/api/graphql/schema/resolvers.appSecrets3997.test.ts).
 
 -- The owner types: user, org, app. (#696 narrowed to user/org; D-2026-11-12-001 made an App an owner again.)
 ALTER TABLE secrets DROP CONSTRAINT IF EXISTS chk_secret_owner_type;

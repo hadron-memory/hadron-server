@@ -435,7 +435,7 @@ describe('App secrets S2 public acceptance', () => {
       await shadowTable(c, 'secret_owner_tombstones');
       await c.query(`INSERT INTO pg_temp.secret_owner_tombstones (owner_type, owner_id, deleted_at) VALUES ('app', $1, now() - interval '400 days')`, [owner]);
       await c.query('DELETE FROM secret_events WHERE id = $1', [ev.id]);
-    })).rejects.toBeTruthy();
+    })).rejects.toThrow(/Secret events are append-only/);
     expect(await db.secretEvent.count({ where: { id: ev.id } })).toBe(1);
   });
 
@@ -446,7 +446,7 @@ describe('App secrets S2 public acceptance', () => {
     await expect(inFreshRolledBackSession(async (c) => {
       await shadowTable(c, 'secret_events');
       await c.query(`DELETE FROM secret_owner_tombstones WHERE owner_type = 'app' AND owner_id = $1`, [owner]);
-    })).rejects.toBeTruthy();
+    })).rejects.toThrow(/owner tombstone is written once/);
     expect(await db.secretOwnerTombstone.count({ where: { ownerId: owner } })).toBe(1);
   });
 

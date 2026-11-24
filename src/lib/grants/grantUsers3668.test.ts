@@ -50,7 +50,7 @@ describe('mergeUsers', () => {
         await shadowTable(c, 'user_merges');
         await c.query('INSERT INTO pg_temp.user_merges (source_user_id, target_user_id) VALUES ($1, $2)', [w.userId, w.user2Id]);
         await c.query(`UPDATE grants SET ${col} = $2 WHERE id = $1`, [g, w.user2Id]);
-      }), col).rejects.toThrow();
+      }), col).rejects.toThrow(/grants are append-only/);
     }
     expect(await read(g)).toMatchObject({ user_id: w.userId, issuer_user_id: w.userId, requested_by_user_id: w.userId, revoked_by: w.userId, verified_by: w.userId });
   });
