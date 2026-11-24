@@ -1,5 +1,6 @@
 -- #855: appRuns(sortBy: duration). The elapsed time of a run is a STORED GENERATED column so the list orders the
--- whole set through the same findMany/count pair, and an index can serve it.
+-- whole set through the same findMany/count pair, and an index can serve it (ascending order; descending, the slowest-first sort, is served by the (organization_id)
+-- prefix plus a sort, not in index order).
 --
 --   duration_ms = round((finished_at - started_at) in milliseconds), NULL when either timestamp is NULL.
 --

@@ -10,7 +10,9 @@
  *   - a negative duration (clock skew) sorts as stored, never clamped;
  *   - BIGINT: a run longer than the 24.8 days an INTEGER of milliseconds holds is stored and ordered;
  *   - no access change: the same rows are visible as under a createdAt sort.
- * The schema-sync pins (the column is GENERATED, and one `db push` reports no drift for it) read the catalog.
+ * The schema-sync pins (the column is GENERATED on a database built by push + post-push) read the catalog; the repeat-sync pin lives in
+ * src/test/integration/855-apprun-duration-resync.test.ts (a bare `db push` on the generated column fails, so the sync is
+ * pre-push + push + post-push).
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
