@@ -1102,5 +1102,8 @@ ALTER TABLE chat_tool_teardown_intents DROP CONSTRAINT IF EXISTS chk_chat_tool_t
 ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_state
   CHECK (state IN ('PENDING', 'CONFIRMED', 'CAPPED'));
 
+-- #5009 (Billing A7a): the owner-limit rows.
+\ir owner-limit-invariants.sql
+
 -- #5096: pin every guard function's search path; LAST, after every file above that (re)creates a function.
 \ir guard-search-path-invariants.sql
