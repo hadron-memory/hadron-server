@@ -218,7 +218,13 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // A lagging client's old name is an UNKNOWN input field and GraphQL refuses the whole operation. The gate, the
 // refusals and what the field accepts (an id or a URN) are unchanged. `beginAssetUpload` and `agentAssets`, the
 // deprecated v1 calls, keep `agentUrn` until they are retired.
-export const HADRON_SERVER_VERSION = '0.34.0';
+//
+// 0.35.0 — Billing A1 (#5007): new mutation `adjustCredits(input: AdjustCreditsInput!)` (a signed ledger
+// correction, platform admin only). Semantics change on `grantCredits`: the source pair (`sourceType`, `sourceId`)
+// is now required when the mutation runs (BAD_USER_INPUT without it; the SDL field types are unchanged, so a
+// lagging client still parses), the server-written source types are refused, and a mismatched replay answers one
+// fixed IDEMPOTENCY_CONFLICT sentence instead of naming the stored entry.
+export const HADRON_SERVER_VERSION = '0.35.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
