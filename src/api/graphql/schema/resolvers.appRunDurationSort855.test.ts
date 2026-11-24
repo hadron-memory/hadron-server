@@ -197,7 +197,7 @@ describe('durationMs stays out of default reads (#855)', () => {
     const row = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
     expect('durationMs' in row).toBe(false);
     expect(() => JSON.stringify(row)).not.toThrow();
-    await expect(db.appRun.update({ where: { id: run.id }, data: { ...row } })).resolves.toBeTruthy();
+    await expect(db.appRun.update({ where: { id: run.id }, data: { ...row } as Parameters<typeof db.appRun.update>[0]['data'] })).resolves.toBeTruthy();
     const picked = await db.appRun.findUniqueOrThrow({ where: { id: run.id }, select: { durationMs: true } });
     expect(picked.durationMs).toBe(1000n);
   });
