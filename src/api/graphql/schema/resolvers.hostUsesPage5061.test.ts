@@ -95,7 +95,7 @@ beforeAll(async () => {
   const rows = Array.from({ length: ROWS - TIES }, (_, i) => ({ id: generateId(), appKeyId: orca1.id, appId: app.id, hostId: 'orca1', action: 'collect', count: i, usedAt: new Date(t0 + i * 1000) }));
   const tieAt = new Date(t0 + 50_500);
   // Five rows tie on usedAt, inserted in an order that is neither id-ascending nor id-descending, so only the
-  // explicit id tie-break (not insertion or physical order) can put them in id desc order (Betty's LOCAL P2).
+  // explicit id tie-break (not insertion or physical order) can put them in id desc order.
   const sortedTieIds = Array.from({ length: TIES }, () => generateId()).sort();
   const ties = [2, 0, 4, 1, 3].map((i) => ({ id: sortedTieIds[i]!, appKeyId: orca1.id, appId: app.id, hostId: 'orca1', action: 'read', count: null, usedAt: tieAt }));
   await db.hostKeyUse.createMany({ data: rows });
@@ -144,7 +144,7 @@ describe('P1: hostUsesPage pages every use once, newest first, with total and ha
     }
     expect(hasMore).toEqual([true, true, true, true, false]);
     expect(seen).toEqual(ids);
-    // The two rows that tie on usedAt come out by id desc, adjacent.
+    // The five rows that tie on usedAt come out by id desc, adjacent.
     const at = seen.indexOf(tieIds[0]);
     expect(seen.slice(at, at + TIES)).toEqual(tieIds);
   });
@@ -196,14 +196,19 @@ describe('P3: over HTTP, total discloses nothing the old field does not', () => 
 describe('P4: the size is clamped through pageArgs', () => {
   it('runs count and page in one RepeatableRead batch with database take/skip', async () => {
     const find = vi.spyOn(db.hostKeyUse, 'findMany');
+    const count = vi.spyOn(db.hostKeyUse, 'count');
     const tx = vi.spyOn(db, '$transaction');
     try {
       await F.AppKey.hostUsesPage(keyArg(), { limit: 10, offset: 5 }, ctx(manager.id));
       expect(find).toHaveBeenCalledWith(expect.objectContaining({ take: 10, skip: 5 }));
+      expect(count).toHaveBeenCalledTimes(1);
+      // One batch holding both the count and the page, so total and hasMore come from the rows' own snapshot.
       expect(tx).toHaveBeenCalledTimes(1);
       expect(tx).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ isolationLevel: 'RepeatableRead' }));
+      expect((tx.mock.calls[0]![0] as unknown[]).length).toBe(2);
     } finally {
       find.mockRestore();
+      count.mockRestore();
       tx.mockRestore();
     }
   });
