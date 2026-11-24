@@ -46,7 +46,6 @@ import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
 import { composeAiConfigUrn, type AiConfigUrnOwner } from '../../../lib/entityRef/aiConfigRef.js';
 import { loadAiConfigOwners, aiConfigOwnerKey, type AiConfigOwnerInfo, type AiConfigOwnerRef } from '../../../lib/aiConfigOwner.js';
-import { tickBatch } from './tickBatch.js';
 import { currentHadronServerId } from '../../../lib/hadronServer.js';
 import { servedEndpointInEffect, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { nodeContentValidationState } from '../../../lib/nodeContentValidation.js';
@@ -119,6 +118,7 @@ import {
   pageEnvelope,
 } from './resolvers.helpers.js';
 import { loadValidationTaskSet } from './resolvers.validationTaskSet.js';
+import { tickBatch } from './tickBatch.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef, publicOrgMemoryScope, publicOrgAgentScope } from './publicRefs.js';
@@ -1138,6 +1138,24 @@ function truncatedChunksBatched(ctx: Context, nodeId: string): Promise<number | 
 }
 
 /**
+ * #5018 (hrn:node:hadronmemory.com:specs:cor:dmo:060:18) — a node's recorded size, for `Node.storedBytes` (when the parent's projection
+ * omits it) and `Node.revisionBytes` (which the client leaves out of every default select): every node raised in the same tick shares ONE
+ * query, which also returns the memories its revisions were taken in. The read is by the parent's own id, after the node read gate.
+ */
+const nodeBytesOf = tickBatch<string, { stored: number | null; revision: bigint | null; memoryIds: string[] } | null>(async (ctx, ids) => {
+  const rows = await ctx.db.$queryRaw<Array<{
+    id: string; stored: number | null; revision: bigint | null; current: string; memory_ids: string[]; legacy: boolean;
+  }>>`
+    SELECT n.id, n.stored_bytes AS stored, n.revision_bytes AS revision, n.memory_id AS current,
+           COALESCE(array_agg(DISTINCT r.memory_id) FILTER (WHERE r.memory_id IS NOT NULL), ARRAY[]::text[]) AS memory_ids,
+           COALESCE(bool_or(r.id IS NOT NULL AND r.memory_id IS NULL), false) AS legacy
+    FROM nodes n LEFT JOIN node_revisions r ON r.node_id = n.id
+    WHERE n.id = ANY(${ids}::text[]) GROUP BY n.id`;
+  // The node's current memory always counts (a legacy revision with no memory is read as it, as nodeRevisions does).
+  return new Map(rows.map((r) => [r.id, { stored: r.stored, revision: r.revision, memoryIds: [...new Set([r.current, ...r.memory_ids])] }]));
+}, null);
+
+/**
  * #3932: `AiServiceConfig.urn` owner lookups raised in the same tick share one query per owner kind
  * ({@link loadAiConfigOwners}); keyed by the request Context, so nothing is kept past the tick. The batch is keyed by
  * the string {@link aiConfigOwnerKey}; the ref behind each key is kept beside it, so the key is never parsed back (#3958).
@@ -1281,6 +1299,23 @@ export const typeResolvers = {
       lintWarningPageForNodeId(ctx, r.nodeId, args),
   },
   Node: {
+    /** #5018 — the bytes this node takes as stored (content, description, data, properties); null = not measured yet. Any reader of the node. */
+    storedBytes: async (n: { id: string; storedBytes?: number | null }, _: unknown, ctx: Context) =>
+      n.storedBytes !== undefined ? n.storedBytes : ((await nodeBytesOf(ctx, n.id))?.stored ?? null),
+    /**
+     * #5018 — the same figure over this node's earlier revisions, as a base-10 string; null = not measured yet. A revision keeps the memory
+     * it was taken in (a node moved from a private memory into a shared one carries snapshots from both), so the figure is shown only to a
+     * reader who may read EVERY memory a counted revision was taken in (the `nodeRevisions` gate, #602) and for a node whose history is not
+     * concealed (#1663); otherwise null, which discloses nothing about a memory the reader cannot read.
+     */
+    revisionBytes: async (n: { id: string }, _: unknown, ctx: Context) => {
+      const row = await nodeBytesOf(ctx, n.id);
+      if (!row || row.revision === null) return null;
+      for (const memoryId of row.memoryIds) if (!(await isMemoryReadableCached(ctx, memoryId))) return null;
+      const { isConcealedCommentHistory } = await import('./resolvers.comments.js');
+      if (await isConcealedCommentHistory(ctx, n.id)) return null;
+      return row.revision.toString();
+    },
     indexTruncated: async (n: { id: string; embeddingTruncatedChunks?: number | null }, _: unknown, ctx: Context) => {
       const count = n.embeddingTruncatedChunks !== undefined ? n.embeddingTruncatedChunks
         : await truncatedChunksBatched(ctx, n.id);

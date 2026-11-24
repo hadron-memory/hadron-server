@@ -228,6 +228,12 @@ PROD_DATABASE_URL='postgresql://…prod…' pnpm db:dev-from-prod
 # printed once. After this, `hadron auth token create` (hadron-cli#68) covers
 # the rest. Core logic: src/admin/mint-bootstrap-token.ts.
 pnpm admin:mint-token --email you@example.com
+
+# Fill nodes.stored_bytes / nodes.revision_bytes (a node's recorded size, #5018) on rows written before the
+# triggers existed: dry run by default, bounded (--batch default 1000, --limit), resumable (--after <node id>
+# from the partial report), idempotent, writes only those two columns. Hand-run, never part of a migration;
+# production needs its own register grant (ops step O2a (5)).
+pnpm tsx src/jobs/backfillNodeBytes.ts [--apply] [--batch N] [--limit N] [--after <node id>]
 ```
 
 ## Common environment variables

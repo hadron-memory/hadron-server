@@ -41,7 +41,9 @@ const snapshot = async (nodeId: string) => {
   const n = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
   await createNodeRevision(db, {
     nodeId, memoryId: n.memoryId, loc: n.loc, name: n.name, description: n.description, content: n.content,
-    data: n.data as never, properties: n.properties as never, nodeType: n.nodeType, tags: [],
+    // A missing data/properties is left out, not stored as the JSON text `null` (which would count 4 bytes).
+    ...(n.data === null ? {} : { data: n.data as never }), ...(n.properties === null ? {} : { properties: n.properties as never }),
+    nodeType: n.nodeType, tags: [],
   } as never);
 };
 const adminCtx = (): Context => ({ db, userId: ownerId, roles: ['ADMIN'] });
@@ -148,6 +150,26 @@ describe('#5018 revision_bytes follows the node_revisions rows', () => {
     await db.$executeRaw`UPDATE nodes SET revision_bytes = NULL WHERE id = ${n.id}`;
     await snapshot(n.id);
     expect((await bytes(n.id)).revision).toBeNull();
+  });
+
+  it('a node that is not measured yet stays not measured when a revision is deleted or rewritten (never 0)', async () => {
+    const n = await mkNode({ content: 'abc' });
+    await snapshot(n.id);
+    await snapshot(n.id);
+    await db.$executeRaw`UPDATE nodes SET revision_bytes = NULL WHERE id = ${n.id}`;
+    await db.$executeRaw`UPDATE node_revisions SET content = 'abcdef' WHERE node_id = ${n.id} AND rev_no = (SELECT min(rev_no) FROM node_revisions WHERE node_id = ${n.id})`;
+    expect((await bytes(n.id)).revision).toBeNull();
+    await db.$executeRaw`DELETE FROM node_revisions WHERE node_id = ${n.id}`;
+    expect((await bytes(n.id)).revision).toBeNull();
+  });
+
+  it('a revision edit that touches none of the measured fields does not even update the node row', async () => {
+    const n = await mkNode({ content: 'abc' });
+    await snapshot(n.id);
+    const xmin = async () => (await db.$queryRaw<Array<{ x: string }>>`SELECT xmin::text AS x FROM nodes WHERE id = ${n.id}`)[0]!.x;
+    const before = await xmin();
+    await db.$executeRaw`UPDATE node_revisions SET rev_label = 'a label' WHERE node_id = ${n.id}`;
+    expect(await xmin()).toBe(before);
   });
 
   it('a moved node keeps its revision_bytes, which then counts for the new memory', async () => {

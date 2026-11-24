@@ -5,7 +5,7 @@
 import { Prisma } from '../../generated/prisma/index.js';
 import type { OwnerRef } from '../owner.js';
 
-export type OwnerLimitKey = 'nodes' | 'memories' | 'agents' | 'apps';
+export type OwnerLimitKey = 'nodes' | 'memories' | 'agents' | 'apps' | 'nodeBytes';
 /** What a count needs: the plain client or a transaction. */
 export type OwnerCountDb = Pick<Prisma.TransactionClient, '$queryRaw'>;
 
@@ -56,6 +56,19 @@ export const OWNER_LIMIT_KEYS: Readonly<Record<OwnerLimitKey, OwnerLimitKeyDef>>
     unitNoun: { one: 'app', many: 'apps' },
     settable: true,
     count: (db, owner) => countOf(db, Prisma.sql`SELECT count(*) AS n FROM apps o WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL`),
+  },
+  /**
+   * #5018 (Billing A14, hrn:node:hadronmemory.com:specs:cor:dmo:060:18): the recorded size of the owner's nodes, each node's stored bytes
+   * plus its revisions' (a node not measured yet counts zero), over live nodes in live memories, the join `nodes` uses. REPORT-ONLY: nothing
+   * may limit it until the plan's section 13, item 6 is ruled, so no row and no deployment default may name it and nothing is refused.
+   */
+  nodeBytes: {
+    unitNoun: { one: 'byte of node data', many: 'bytes of node data' },
+    settable: false,
+    count: (db, owner) => countOf(db, Prisma.sql`
+      SELECT COALESCE(SUM(COALESCE(n.stored_bytes, 0)::bigint + COALESCE(n.revision_bytes, 0)), 0)::bigint AS n
+      FROM nodes n JOIN memories o ON o.id = n.memory_id
+      WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL AND n.deleted_at IS NULL`),
   },
 };
 

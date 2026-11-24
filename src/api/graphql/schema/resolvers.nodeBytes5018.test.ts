@@ -49,6 +49,7 @@ beforeEach(async () => {
   orgId = (await db.organization.create({ data: { id: generateId(), name: 'nb18', urn: 'nb18-org' } })).id;
   await db.orgMember.create({ data: { organizationId: orgId, userId: orgAdmin, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: orgId, userId: reader, role: 'READER' } });
+  await db.orgMember.create({ data: { organizationId: orgId, userId: ownerU, role: 'READER' } });
 });
 afterEach(() => reloadOwnerDefaultLimitsForTests({ OWNER_DEFAULT_LIMITS: '' }));
 
@@ -114,9 +115,9 @@ describe('#5018 Node.storedBytes and Node.revisionBytes', () => {
     const one = await gql(ONE, ctxOf(reader), { ref: n.id });
     expect(one.errors).toBeUndefined();
     expect(one.data!.node.storedBytes).toBe(3);
-    const list = await gql(`query($m: ID!) { findNodes(query: "*", memoryRef: $m) { id storedBytes } }`, ctxOf(reader), { m: m.id });
+    const list = await gql(`query($m: ID!) { findNodes(filter: { memoryIds: [$m] }) { hits { node { id storedBytes } } } }`, ctxOf(reader), { m: m.id });
     expect(list.errors).toBeUndefined();
-    expect(list.data!.findNodes.find((x: { id: string }) => x.id === n.id).storedBytes).toBe(3);
+    expect(list.data!.findNodes.hits.find((h: { node: { id: string } }) => h.node.id === n.id).node.storedBytes).toBe(3);
   });
 
   it('revisionBytes is a string of the sum for a reader of every memory a counted revision was taken in', async () => {
@@ -137,8 +138,11 @@ describe('#5018 Node.storedBytes and Node.revisionBytes', () => {
     expect(asReader.errors).toBeUndefined();
     expect(asReader.data!.node.storedBytes).toBe(3);
     expect(asReader.data!.node.revisionBytes).toBeNull();
+    // A read may take a server-authored revision (the lazy reconcile, #1323), so the owner's figure is checked against the rows, not a constant.
     const asOwner = await gql(ONE, ctxOf(ownerU), { ref: n.id });
-    expect(asOwner.data!.node.revisionBytes).toBe('3');
+    const [{ total }] = await db.$queryRaw<Array<{ total: bigint }>>`SELECT COALESCE(sum(octet_length(content)), 0)::bigint AS total FROM node_revisions WHERE node_id = ${n.id}`;
+    expect(asOwner.data!.node.revisionBytes).toBe(total.toString());
+    expect(Number(total)).toBeGreaterThanOrEqual(3);
     expect(strangerU).toBeTruthy();
   });
 

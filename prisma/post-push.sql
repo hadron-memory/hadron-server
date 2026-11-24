@@ -1104,3 +1104,6 @@ ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_sta
 
 -- #5009 (Billing A7a): the owner-limit rows.
 \ir owner-limit-invariants.sql
+
+-- #5018 (Billing A14): a node's recorded size, kept by triggers on nodes and node_revisions.
+\ir node-bytes-invariants.sql
