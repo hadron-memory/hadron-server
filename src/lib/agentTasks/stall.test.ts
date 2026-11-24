@@ -582,7 +582,7 @@ describe('cor:agt:050:13 — exactly one alarm per stall episode', () => {
       chain: [{ workerId: ada.id }, manager()], episodeStart: at('10:00'),
     };
     await db.agentTeamEvent.create({ data: row });
-    await expect(db.agentTeamEvent.create({ data: row })).rejects.toThrow(/agent_team_events_episode_app_uniq|Unique constraint/);
+    await expect(db.agentTeamEvent.create({ data: row })).rejects.toThrow(/Unique constraint failed on the fields: \(`app_id`,`task_id`,`type`,`episode_start`\)|agent_team_events_episode_app_uniq/);
   });
 });
 
