@@ -248,13 +248,18 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // 0274: notices, server, companions). Gates and refusals are unchanged; `agentTasks(externalId)` keeps its name (an
 // external-system label). (0.36.0 is #5066, #1796, and 0.37.0 is #5064, Billing A1, both merged first.)
 //
-// 0.39.0 — SEMANTICS BREAK, Billing A4 (#5011): free credit now expires. `creditBalance` settles the owner's expired
+// 0.39.0 — BREAKING, entity refs S3 (#4139): `nodeExport(id)` → `nodeExport(ref)` (the node's PK or URN), no alias.
+// A lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation (ship order per precedent
+// 0274: notices, server, companions). The export's contents, gating and refusals are unchanged; only the argument that
+// names the node changed. (0.38.0 is #4782, entity refs S7, merged first.)
+//
+// 0.40.0 — SEMANTICS BREAK, Billing A4 (#5011): free credit now expires. `creditBalance` settles the owner's expired
 // grants (one `adjustment` entry each, source pair ('grant-expiry', <grant id>)) before it sums, and never answers a
 // balance holding credit whose expiry has passed, so a balance drops at an expiry with no write by the client. New
 // field `CreditBalance.expiring: [ExpiringCredit!]!` (what is left of each unexpired grant, soonest first) and type
 // `ExpiringCredit`. `grantCredits` refuses an `expiresAt` not later than now with BAD_USER_INPUT (it was accepted).
-// Additive SDL; a lagging client still validates. (0.38.0 is #4782, #4148 S7, merged first.)
-export const HADRON_SERVER_VERSION = '0.39.0';
+// Additive SDL; a lagging client still validates. (0.39.0 is #4763, #4139 S3, merged first.)
+export const HADRON_SERVER_VERSION = '0.40.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

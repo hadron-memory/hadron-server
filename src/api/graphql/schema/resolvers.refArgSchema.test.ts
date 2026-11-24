@@ -141,6 +141,8 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   nodeRevisions: ['nodeRef'],
   nodeRevision: ['nodeRevRef'], // #4138 (S2)
   appRuns: ['appRef', 'orgRef', 'parentRunRef'],
+  // #4139 (S3): nodeExport takes the node's ref (PK or URN).
+  nodeExport: ['ref'],
   // #4142 (S6 chunk A): the memory reads.
   usageEvents: ['memoryRef', 'nodeRef'],
   usageEventsPage: ['memoryRef', 'nodeRef'],
