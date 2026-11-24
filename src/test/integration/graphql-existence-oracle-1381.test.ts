@@ -319,7 +319,8 @@ const PROBES: Probe[] = [
   },
   {
     name: 'encryptMemory',
-    query: `mutation($r: ID!) { encryptMemory(memoryRef: $r, passphrase: "correct horse battery staple") { id } }`,
+    // #1796 step 2: no secret argument. The owner gate refuses before any secret is read, so the probe needs none.
+    query: `mutation($r: ID!) { encryptMemory(memoryRef: $r) { id } }`,
     on: 'memUrn', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND',
   },
   {

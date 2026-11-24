@@ -22,6 +22,7 @@ import { sessionKeyCache } from '../lib/sessionKeyCache.js';
 import { revisionStateHashRefreshMarker } from '../lib/nodeRevisionSnapshot.js';
 import { writeNodeCore } from '../api/graphql/schema/resolvers.mutation.node.js';
 import { computeContentHash } from '../lib/contentHash.js';
+import { encryptWithSecret } from '../test/encryptMemoryWithSecret.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -88,7 +89,7 @@ beforeEach(async () => {
   });
   // Encrypt via the real conversion path (PR-1) so KDF salt/params/verifier
   // are exactly what production writes.
-  await resolvers.Mutation.encryptMemory(
+  await encryptWithSecret(
     {},
     { memoryRef: memoryId, passphrase: PASS },
     { db, roles: ['ADMIN'], userId: owner.id } as Context,
@@ -275,7 +276,7 @@ describe('locked vs unlocked writes', () => {
           content: 'late plaintext write',
         });
         await atOldFlag;
-        await resolvers.Mutation.encryptMemory(
+        await encryptWithSecret(
           {}, { memoryRef: plainMemory.id, passphrase: PASS },
           { db, roles: ['ADMIN'], userId: owner.id } as Context,
         );
@@ -320,7 +321,7 @@ describe('locked vs unlocked writes', () => {
         urn: 'mcp41-org::plain-section::section', name: 'Section', description: 'late plaintext',
       });
       await atOldFlag;
-      await resolvers.Mutation.encryptMemory(
+      await encryptWithSecret(
         {}, { memoryRef: plainMemory.id, passphrase: PASS },
         { db, roles: ['ADMIN'], userId: owner.id } as Context,
       );

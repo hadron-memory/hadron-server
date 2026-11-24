@@ -54,7 +54,7 @@ interface Fake {
   retryReply: (() => string) | null;
   /** The worker's checkStatus.lastCheckedAt as the server reports it; null = never checked. */
   lastCheckedAt: string | null;
-  /** agentTask(id) replies, by task id. */
+  /** agentTask(ref) replies, by task id. */
   tasks: Record<string, unknown>;
   evidenceQueries: string[];
   /** When set, the worker check-status read answers this GraphQL error. */

@@ -227,15 +227,20 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // argument and GraphQL refuses the whole operation. The existence-hiding order is unchanged: memory resolved, principal gate,
 // counterparty resolved. (0.34.0 is #5046, #4368, merged first.)
 //
-// 0.36.0 — BREAKING, entity refs S7 (#4148): the agent-task family takes refs, no alias. The eleven own-task mutations
+// 0.36.0 — BREAKING, #1796 step 2: `encryptMemory(memoryRef)` no longer accepts `dataKey` or `passphrase`, no alias.
+// A document naming either is refused as an unknown argument before any resolver runs. The secret travels only in
+// `x-hadron-memory-keys` (strict owner) or `x-hadron-operation-key` (owning App completion). CLI floor: hadron-cli
+// v0.56.0.
+//
+// 0.37.0 — BREAKING, entity refs S7 (#4148): the agent-task family takes refs, no alias. The eleven own-task mutations
 // (`updateAgentTask`, `assignAgentTask`, `reassignAgentTask`, `startAgentTask`, `recordAgentTaskProgress`,
 // `finishAgentTask`, `cancelAgentTask`, `releaseAgentTaskExternalId`, `parkAgentTask`, `cloneAgentTask`,
 // `makeAgentTaskReady`) take `taskRef: ID!` (was `taskId`); `agentTask(id)` → `agentTask(ref)`; `agentTasks` /
 // `agentTasksPage(parentTaskId)` → `parentTaskRef`; `agentTeamEvents` / `agentTeamEventsPage(taskId)` → `taskRef`. A
 // lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation (ship order per precedent
 // 0274: notices, server, companions). Gates and refusals are unchanged; `agentTasks(externalId)` keeps its name (an
-// external-system label).
-export const HADRON_SERVER_VERSION = '0.36.0';
+// external-system label). (0.36.0 is #5066, #1796, merged first.)
+export const HADRON_SERVER_VERSION = '0.37.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
