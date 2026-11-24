@@ -7715,20 +7715,21 @@ export const typeDefs = `#graphql
   SortDirection enum. Default createdAt desc — existing callers depend on
   newest-first.
 
-  startedAt / finishedAt are NULLABLE (a PENDING run has neither); nulls sort
-  LAST in both directions, so unstarted runs never crowd out the rows an
-  operator asked to see. Every sort carries an id tiebreak so offset paging is
-  deterministic.
+  startedAt / finishedAt / duration are NULLABLE (a PENDING run has neither
+  timestamp, and a RUNNING one has no finishedAt): nulls sort LAST in both
+  directions, so unstarted runs never crowd out the rows an operator asked to
+  see. Every sort carries an id tiebreak so offset paging is deterministic.
 
-  Duration (finishedAt - startedAt) is deliberately absent: it has no stored
-  column and Prisma cannot order by a computed expression, so it needs a
-  generated column of its own - tracked separately rather than half-shipped.
+  duration is finishedAt - startedAt in whole milliseconds (#855), from a stored
+  generated column; a run missing either timestamp has no duration. A negative
+  value (clock skew) sorts as stored, without clamping.
   """
   enum AppRunSortField {
     createdAt
     startedAt
     finishedAt
     status
+    duration
   }
 
   "Recurring trigger (cor:agt:010, D-2026-07-04-E)."

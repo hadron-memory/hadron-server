@@ -47,7 +47,7 @@ import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 
 /** Orderable columns on the appRuns list (#833). Mirrors the SDL enum. */
-export type AppRunSortField = 'createdAt' | 'startedAt' | 'finishedAt' | 'status';
+export type AppRunSortField = 'createdAt' | 'startedAt' | 'finishedAt' | 'status' | 'duration';
 
 /**
  * #836 — the status filter, widened from one value to a disjunction.
@@ -107,6 +107,10 @@ export function buildAppRunOrderBy(
       return [{ finishedAt: { sort: dir, nulls: 'last' } }, tiebreak];
     case 'status':
       return [{ status: dir }, tiebreak];
+    case 'duration':
+      // #855: the stored generated app_runs.duration_ms (finished_at - started_at). NULL (unstarted or unfinished) last
+      // in both directions, like the timestamps; negative (clock skew) as stored.
+      return [{ durationMs: { sort: dir, nulls: 'last' } }, tiebreak];
     case 'createdAt':
     default:
       return [{ createdAt: dir }, tiebreak];
