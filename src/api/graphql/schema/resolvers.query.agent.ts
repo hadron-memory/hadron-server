@@ -131,9 +131,11 @@ export const agentQueries = {
       const agent = await resolveReadableAgentRef(ctx, agentRef);
       await requireAgentAccess(ctx, agent, 'ADMIN');
       // #4634 F2: the pin and the rows are ONE snapshot, read after the gate; the gate's own read is not served.
-      const list = await readAgentRevisionList(ctx.db, agent.id);
-      if (!list) throw new Error('Agent has no system memory');
-      return list;
+      const read = await readAgentRevisionList(ctx.db, agent.id);
+      // #5039: deleted after the gate answers exactly as the gate answers an unreadable Agent (no existence oracle).
+      if (read.kind === 'absent') throw new AgentNotFoundError(agentRef);
+      if (read.kind === 'no-system-memory') throw new Error('Agent has no system memory');
+      return read.list;
     },
 
     /**
