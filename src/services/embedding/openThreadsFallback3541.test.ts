@@ -77,7 +77,10 @@ function probe(shortfall: boolean) {
       const v = Reflect.get(t, prop);
       if (prop !== '$queryRaw') return typeof v === 'function' ? v.bind(t) : v;
       return async (strings: TemplateStringsArray, ...vals: unknown[]) => {
-        const sql = Array.isArray(strings) ? strings.join('?') : '';
+        // A tagged template arrives as its strings array; a prebuilt Prisma.Sql (the version probe's) as an object with `.sql`.
+        const sql = Array.isArray(strings) ? strings.join('?') : String((strings as unknown as { sql?: string })?.sql ?? '');
+        // #4938 N2: a cold pgvector-version probe runs inside the budgeted transaction too (first, before any SET LOCAL).
+        if (sql.includes('FROM pg_extension')) return (v as any).call(t, strings, ...vals);
         // #2772: every vector statement runs in the budgeted transaction (vectors.ts withVectorBudget): the iterative
         // ANN scan (ORDER BY the distance), the independent eligible count and the MATERIALIZED exact scan. Only the
         // ANN statement is intercepted; anything else unrecognised fails loudly before it runs.

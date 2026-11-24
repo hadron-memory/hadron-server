@@ -8,7 +8,7 @@
  * - Riana P3-5 (#4665): the ANN widening ceiling's numeric boundary (k == ceiling is still walked).
  * - Byron round 4 (#4665): a deep page whose exact statement times out is an empty, flagged page.
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 import { cleanDb, createDbOrgAndGraph } from '../../test/helpers.js';
@@ -16,7 +16,7 @@ import { generateId } from '../../lib/id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { getRetrievalProvider } from '../../lib/retrieval/postgres.js';
 import {
-  isStatementTimeout, setIterativeScanSupportForTests, setVectorAnnMaxKForTests, setVectorSmallScopeRowsForTests,
+  VECTOR_TX_MAX_WAIT_MS, isStatementTimeout, resetPoolWaitEarlyStopLogForTests, setIterativeScanSupportForTests, setVectorAnnMaxKForTests, setVectorSmallScopeRowsForTests,
   setVectorWindowRowsMaxForTests, vectorSearchChunks, vectorSearchNodes,
 } from './vectors.js';
 
@@ -198,10 +198,22 @@ describe('#4779 P2-2: one interactive transaction per search', () => {
     await expect(vectorSearchNodes(fake, { memoryIds: [winMem], queryEmbedding: q, limit: 3 })).rejects.toMatchObject({ code: 'P2028' });
     // SEC10 P3-1 (Rook) / BLIND F6 (Elena): each further term is pinned to throw on its own.
     // A small env budget with NO request deadline: maxWait is below the ordinary cap, but the request did not bind it.
+    // #4938 (Elena F2): the precondition is asserted (the wait's maxWait was below the ordinary cap, so only the
+    // cappedByRequest term can make this throw), and the env value is restored, not deleted.
+    const savedBudget = process.env.VECTOR_SEARCH_TIMEOUT_MS;
     process.env.VECTOR_SEARCH_TIMEOUT_MS = '300';
     try {
-      await expect(vectorSearchNodes(fake, { memoryIds: [winMem], queryEmbedding: q, limit: 3 })).rejects.toMatchObject({ code: 'P2028' });
-    } finally { delete process.env.VECTOR_SEARCH_TIMEOUT_MS; }
+      const waits: number[] = [];
+      const seen = new Proxy(fake, { get(t, p) {
+        if (p === '$transaction') return (fn: unknown, o: { maxWait: number }) => { waits.push(o.maxWait); return (t.$transaction as any)(fn, o); };
+        return Reflect.get(t, p);
+      } }) as typeof db;
+      await expect(vectorSearchNodes(seen, { memoryIds: [winMem], queryEmbedding: q, limit: 3 })).rejects.toMatchObject({ code: 'P2028' });
+      expect(waits).toHaveLength(1);
+      expect(waits[0]).toBeLessThan(VECTOR_TX_MAX_WAIT_MS);
+    } finally {
+      if (savedBudget === undefined) delete process.env.VECTOR_SEARCH_TIMEOUT_MS; else process.env.VECTOR_SEARCH_TIMEOUT_MS = savedBudget;
+    }
     // Another Transaction API error message while waiting, deadline-capped: not the connection-wait timeout.
     const other = new Proxy(db, { get(t, p) {
       if (p === '$transaction') return (_fn: unknown, o: { maxWait: number }) => new Promise((_res, rej) => setTimeout(
@@ -218,6 +230,74 @@ describe('#4779 P2-2: one interactive transaction per search', () => {
     } }) as typeof db;
     await expect(vectorSearchNodes(early, { memoryIds: [winMem], queryEmbedding: q, limit: 3, deadlineAt: Date.now() + 300 })).rejects.toMatchObject({ code: 'P2028' });
   }, 30_000);
+
+  it('#4938 (Celine N1): a connection-wait timeout that fires just BEFORE the deadline (inside the clock slack) is the early stop', async () => {
+    setIterativeScanSupportForTests(true);
+    // Prisma's own timer can run a few ms ahead of ours: the wait fails 15 ms before the deadline by our clock.
+    const ahead = new Proxy(db, { get(t, p) {
+      if (p === '$transaction') return (_fn: unknown, o: { maxWait: number }) => new Promise((_res, rej) => setTimeout(
+        () => rej(Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' })), o.maxWait - 15));
+      const v = Reflect.get(t, p);
+      return typeof v === 'function' ? v.bind(t) : v;
+    } }) as typeof db;
+    const windows: any[] = [];
+    expect(await vectorSearchNodes(ahead, { memoryIds: [winMem], queryEmbedding: q, limit: 3, deadlineAt: Date.now() + 300, onWindow: (w) => windows.push(w) })).toEqual([]);
+    expect(windows.at(-1)).toMatchObject({ stoppedEarly: true });
+  });
+
+  it('#4938 (Abigail, any-deadline mutant): a request deadline LATER than the budget did not bind the wait: still pool pressure', async () => {
+    setIterativeScanSupportForTests(true);
+    const fake = new Proxy(db, { get(t, p) {
+      if (p === '$transaction') return (_fn: unknown, o: { maxWait: number }) => new Promise((_res, rej) => setTimeout(
+        () => rej(Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' })), o.maxWait));
+      const v = Reflect.get(t, p);
+      return typeof v === 'function' ? v.bind(t) : v;
+    } }) as typeof db;
+    const savedBudget = process.env.VECTOR_SEARCH_TIMEOUT_MS;
+    process.env.VECTOR_SEARCH_TIMEOUT_MS = '300'; // the search's own budget binds (300 ms), not the request's 5 s deadline
+    try {
+      await expect(vectorSearchNodes(fake, { memoryIds: [winMem], queryEmbedding: q, limit: 3, deadlineAt: Date.now() + 5000 }))
+        .rejects.toMatchObject({ code: 'P2028' });
+    } finally {
+      if (savedBudget === undefined) delete process.env.VECTOR_SEARCH_TIMEOUT_MS; else process.env.VECTOR_SEARCH_TIMEOUT_MS = savedBudget;
+    }
+  });
+
+  it('#4938 (gate addendum): a wait that had its FULL maxWait is pool pressure even when it ends inside the clock slack', async () => {
+    setIterativeScanSupportForTests(true);
+    const fake = new Proxy(db, { get(t, p) {
+      if (p === '$transaction') return (_fn: unknown, o: { maxWait: number }) => new Promise((_res, rej) => setTimeout(
+        () => rej(Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' })), o.maxWait));
+      const v = Reflect.get(t, p);
+      return typeof v === 'function' ? v.bind(t) : v;
+    } }) as typeof db;
+    // The request's deadline (2010 ms) binds, but is past the ordinary cap: the wait gets the full 2000 ms, fails at it, and
+    // by then sits inside the 25 ms slack of the deadline. Only `txMs < VECTOR_TX_MAX_WAIT_MS` tells it from a cut wait.
+    await expect(vectorSearchNodes(fake, { memoryIds: [winMem], queryEmbedding: q, limit: 3, deadlineAt: Date.now() + VECTOR_TX_MAX_WAIT_MS + 10 }))
+      .rejects.toMatchObject({ code: 'P2028' });
+  }, 15_000);
+
+  it('#4938 F5 (Elena): a pool wait the deadline cut short is counted and logged, at most once a minute (never silent)', async () => {
+    setIterativeScanSupportForTests(true);
+    resetPoolWaitEarlyStopLogForTests();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fake = new Proxy(db, { get(t, p) {
+      if (p === '$transaction') return (_fn: unknown, o: { maxWait: number }) => new Promise((_res, rej) => setTimeout(
+        () => rej(Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' })), o.maxWait));
+      const v = Reflect.get(t, p);
+      return typeof v === 'function' ? v.bind(t) : v;
+    } }) as typeof db;
+    try {
+      for (let i = 0; i < 3; i++) {
+        expect(await vectorSearchNodes(fake, { memoryIds: [winMem], queryEmbedding: q, limit: 3, deadlineAt: Date.now() + 50 })).toEqual([]);
+      }
+      const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith('vector.pool_wait_early_stop'));
+      expect(lines).toEqual(['vector.pool_wait_early_stop count=1 — vector searches stopped early while waiting for a pooled connection (the request deadline ended the wait)']);
+    } finally {
+      warn.mockRestore();
+      resetPoolWaitEarlyStopLogForTests();
+    }
+  });
 
   it('load: concurrent shallow and deep searches on a 2-connection pool all complete (no P2028)', async () => {
     setIterativeScanSupportForTests(true);

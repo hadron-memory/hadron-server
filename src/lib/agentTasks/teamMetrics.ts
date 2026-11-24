@@ -23,10 +23,13 @@ import { METRICS_DEFAULT_WINDOW_MS, METRICS_GROUP_CAP, METRICS_IDS_CAP, METRICS_
 /** Operational dials (Holger, 2026-11-18, R2: A), in one import-free module so the SDL states the same numbers (#4850). */
 export { METRICS_DEFAULT_WINDOW_MS, METRICS_GROUP_CAP, METRICS_IDS_CAP, METRICS_MAX_WINDOW_MS } from './teamMetricsCaps.js';
 
-export type MetricsCount = { total: number; ids: string[]; truncated: boolean };
+/** An id with its name; `name` is null until {@link attachMetricNames} reads one, and stays null when none is readable (#4992). */
+export type MetricsNamedId = { id: string; name: string | null };
+export type MetricsCount = { total: number; ids: string[]; truncated: boolean; named: MetricsNamedId[] };
+/** `named` starts with every name null, so a count that is never named leaks nothing: a name is only ever ADDED by {@link attachMetricNames}. */
 const count = (total: number, ids: string[] | null): MetricsCount => {
   const kept = (ids ?? []).slice(0, METRICS_IDS_CAP);
-  return { total, ids: kept, truncated: total > kept.length };
+  return { total, ids: kept, truncated: total > kept.length, named: kept.map((id) => ({ id, name: null })) };
 };
 
 export class MetricsWindowError extends Error {}
@@ -195,4 +198,45 @@ export async function loadFlow(db: Db, appId: string, since: Date, until: Date):
   };
   const [completed, started] = await Promise.all([read(bound('finishedAt', { status: 'finished' })), read(bound('startedAt', {}))]);
   return { completed, started };
+}
+
+/** Every count in a metrics report, wherever it sits (the report shapes above). */
+function* countsOf(v: unknown): Generator<MetricsCount> {
+  if (!v || typeof v !== 'object') return;
+  if (Array.isArray(v)) { for (const x of v) yield* countsOf(x); return; }
+  const o = v as Record<string, unknown>;
+  if (Array.isArray(o.ids) && Array.isArray(o.named) && 'total' in o) { yield o as unknown as MetricsCount; return; }
+  for (const x of Object.values(o)) yield* countsOf(x);
+}
+
+/**
+ * #4992 (Refs hadron-portal#2535 item 3): names every id the counts hold, so a client drills down with no read per id.
+ * ONE batch for the whole response: at most one statement for the distinct task ids (their titles) and one for the
+ * distinct worker ids (their names), however many counts, owners or ids there are; a response holds at most
+ * {@link METRICS_IDS_CAP} ids per count, so the batch is bounded the same way.
+ *
+ * GATE: a name rides the gate of the count it sits in. The caller passes only the reports the reader may see: the task
+ * reports (1, 2, 4) only when the reader may read the App's tasks (cor:agt:050:21), the worker report on the roster audience.
+ * A report that is not passed is null and is never read. Both statements are bound to `appId`, so an id of another App
+ * reads as a missing one: its name stays null. The name is the task title or the worker name and nothing else.
+ */
+export async function attachMetricNames(db: Db, appId: string, reports: { tasks?: unknown[]; workers?: unknown[] }): Promise<void> {
+  const taskCounts = [...countsOf(reports.tasks ?? [])];
+  const workerCounts = [...countsOf(reports.workers ?? [])];
+  const distinct = (cs: MetricsCount[]) => [...new Set(cs.flatMap((c) => c.ids))];
+  const taskIds = distinct(taskCounts);
+  const workerIds = distinct(workerCounts);
+  const [titles, names] = await Promise.all([
+    taskIds.length
+      ? db.$queryRaw<{ id: string; title: string }[]>(Prisma.sql`SELECT id, title FROM agent_tasks WHERE app_id = ${appId} AND id = ANY(${taskIds}::text[])`)
+      : [],
+    workerIds.length
+      ? db.$queryRaw<{ id: string; name: string }[]>(Prisma.sql`SELECT id, name FROM workers WHERE app_id = ${appId} AND id = ANY(${workerIds}::text[])`)
+      : [],
+  ]);
+  const fill = (cs: MetricsCount[], by: Map<string, string>) => {
+    for (const c of cs) for (const n of c.named) n.name = by.get(n.id) ?? null;
+  };
+  fill(taskCounts, new Map(titles.map((r) => [r.id, r.title])));
+  fill(workerCounts, new Map(names.map((r) => [r.id, r.name])));
 }

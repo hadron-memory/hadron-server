@@ -274,6 +274,18 @@ export async function locateTeamChatChannel(
 }
 
 /**
+ * {@link locateTeamChatChannel} for a caller with no request: the platform's own evaluator and read (#4531). The locator
+ * reads only `ctx.db` and `ctx.impersonation`, so the one place a context is faked is here, with `impersonation` absent
+ * (never impersonating), and a caller outside the resolvers has a typed entry instead of building a `Context` itself.
+ */
+export async function locateTeamChatChannelOfApp(
+  db: Context['db'],
+  appId: string,
+): Promise<{ rootId: string; channelId: string; lastSeq: number } | null> {
+  return locateTeamChatChannel({ db } as Context, appId);
+}
+
+/**
  * First-post bootstrap: provision the Team Agent's shared app-class memory
  * (idempotent, race-safe) and create the `chats` parent, the chat root, and
  * the `chats:team:messages` container in it. Race-safe: a concurrent first

@@ -70,7 +70,7 @@ export const memoryQueries = {
      * reading their own activity discloses nothing. With `memoryRefs`: every
      * user's events attributed to ANY of those memories, each ref gated on
      * MEMORY READ ACCESS — the same gate `memoryUsageSummary` and
-     * `usageEvents(memoryId:)` use, so the three memory-scoped usage surfaces
+     * `usageEvents(memoryRef:)` use, so the three memory-scoped usage surfaces
      * stay in parity. That reveals other users' activity VOLUMES to any reader
      * of the memory — a deliberate call (Holger, #796), and strictly less than
      * the per-node counts `memoryUsageSummary` already exposes to the same

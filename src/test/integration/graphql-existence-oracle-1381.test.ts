@@ -253,13 +253,13 @@ type Probe = {
 
 const PROBES: Probe[] = [
   {
-    name: 'usageEvents(memoryId:)',
-    query: `query($r: ID!) { usageEvents(memoryId: $r) { id } }`,
+    name: 'usageEvents(memoryRef:)',
+    query: `query($r: ID!) { usageEvents(memoryRef: $r) { id } }`,
     on: 'memUrn', vars: (r) => ({ r }), missingCode: 'MEMORY_NOT_FOUND', readerDenied: false,
   },
   {
     name: 'memoryAssets',
-    query: `query($r: ID!) { memoryAssets(memoryId: $r) { total } }`,
+    query: `query($r: ID!) { memoryAssets(memoryRef: $r) { total } }`,
     on: 'memUrn', vars: (r) => ({ r }), missingCode: 'NOT_FOUND', readerDenied: false,
   },
   {

@@ -105,6 +105,11 @@ that drift is what the deprecated `hadron_dev` row above warns about).
 > HNSW index) to sync schema without wiping, or **`pnpm db:dev-reset`** for a
 > clean wipe + reseed. Both follow `.env`.
 >
+> A bare `prisma db push` also **fails** on a database where `app_runs.duration_ms` is already the generated column
+> (#855): Prisma reads the generation expression as a default and Postgres refuses to drop it. `pnpm db:dev-setup`
+> handles it (`prisma/app-run-duration-pre-push.sql` drops the generated column before the push, `post-push.sql`
+> re-creates it), so use that, never a bare push.
+>
 > **Test databases are built from empty, per schema (#1922).** Pushing one
 > checkout's schema over a database another checkout built mixes two versions:
 > an older push silently drops newer columns, and no push removes the newer

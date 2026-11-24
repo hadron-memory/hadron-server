@@ -30,6 +30,10 @@ const snapshot = async () => ({
 });
 const SESSIONS = 60;
 const NODES = 40_000;
+// #5040: cleanDb here also removes the previous test's seedLargeApp() fixture (40k JSON nodes, 60 sessions). Measured at
+// ~2.5 s on an idle 32-core host (~0.1 s without the fixture), and it timed out at vitest's 10 s hook default on a loaded
+// merge-group runner. The hook gets the same budget as the large-App tests it cleans up after.
+const HOOK_TIMEOUT_MS = 120_000;
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -44,7 +48,7 @@ beforeEach(async () => {
   const target = await M.castWorker({}, { appRef: app.id, agentRef: agent.id, name: 'Miscast' }, ctx());
   const memory = await db.memory.create({ data: { class: 'knowledge', appId: app.id, organizationId: org.id, name: 'Other', urn: 'census4809.test:other' } });
   f = { ...f, agent, caller, target, memory };
-});
+}, HOOK_TIMEOUT_MS);
 afterEach(() => { sessionKeyCache.clear(); delete process.env.WORKER_CENSUS_TIMEOUT_MS; });
 
 /** Many ended, empty bindings (each adds an identity to the JSON scans) and many nodes carrying JSON. */

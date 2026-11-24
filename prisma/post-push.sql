@@ -489,6 +489,18 @@ ALTER TABLE nodes ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (
 
 CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
 
+-- #855: app_runs.duration_ms (appRuns sortBy duration). schema.prisma models it as a plain nullable BigInt (Prisma cannot
+-- express GENERATED), so `db push` leaves a PLAIN column and this makes it the STORED GENERATED one that the migration
+-- prisma/migrations/20261124020000_app_runs_duration_ms creates (keep the two expressions in lockstep). The plain column
+-- holds nothing (the database refuses a write to the generated one, and nothing writes the plain one), and dropping it
+-- drops its index, so both are re-created. Unconditional, because a conditional here would need a DO block the
+-- inventory refuses; prisma/app-run-duration-pre-push.sql drops a GENERATED column before the push so the push never
+-- sees one (it cannot ALTER it).
+ALTER TABLE app_runs DROP COLUMN IF EXISTS duration_ms;
+ALTER TABLE app_runs ADD COLUMN duration_ms BIGINT
+  GENERATED ALWAYS AS ((round(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000))::bigint) STORED;
+CREATE INDEX IF NOT EXISTS app_runs_organization_id_duration_ms_idx ON app_runs (organization_id, duration_ms);
+
 -- #2832: direct-children read (NodeFilter.childrenOf). Mirrors prisma/migrations/20261030100000_nodes_parent_loc_index
 -- (keep in lockstep). The expression is PARENT_LOC_SQL in src/lib/childLoc.ts; a filter must compare it unchanged.
 CREATE INDEX IF NOT EXISTS nodes_memory_parent_loc_idx
@@ -974,6 +986,9 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 
 -- #3819 slice 1: the saturation episodes.
 \ir saturation-invariants.sql
+
+-- #4531: the dark-team episodes.
+\ir team-dark-invariants.sql
 
 -- #3997 (S2 of #3991): App-owned secrets, versions, events, tombstones. One source, shared verbatim with migration
 -- 20261114120000_app_secret_versions. After worker-reference-invariants.sql: it puts the #1162 fence on its three tables.
