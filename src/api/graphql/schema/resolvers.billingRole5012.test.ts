@@ -186,6 +186,14 @@ describe('grantCredits refuses a forbidden caller before resolving the organizat
   });
 });
 
+describe('adjustCredits refuses a forbidden caller before resolving the organization (#5090 LOCAL P3-1)', () => {
+  it('an org ADMIN naming an organization that does not exist gets FORBIDDEN / Forbidden', async () => {
+    const res = await gql(ADJUST, orgAdminCtx(), { input: adjustInput({ orgRef: 'no-such-org' }) });
+    expect(code(res)).toBe('FORBIDDEN');
+    expect(res.errors?.[0]?.message).toBe('Forbidden');
+  });
+});
+
 // ── R5 / R6: BILLING as a member, subscription or invitation role ──────────
 
 const ADD_MEMBER = `mutation($o: ID!, $u: ID!, $r: Role!) { addOrgMember(orgRef: $o, userRef: $u, role: $r) { role } }`;

@@ -13,6 +13,8 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { Role } from '../generated/prisma/index.js';
 import * as auth from './auth.js';
+import { orgRoleAtLeast } from '../lib/auth/orgRole.js';
+import { canSeeUserPersonalFields } from '../lib/auth/userVisibility.js';
 
 const makeReq = (authorization: string) => ({ headers: { authorization } }) as unknown as Request;
 
@@ -58,5 +60,22 @@ describe('R3: the middleware carries BILLING', () => {
     const allowed = (auth as unknown as { ALLOWED_ROLES?: ReadonlySet<string> }).ALLOWED_ROLES;
     expect(allowed, 'ALLOWED_ROLES is exported').toBeDefined();
     expect([...allowed!].sort()).toEqual(Object.values(Role).sort());
+  });
+});
+
+// #5090 SECOND P3-2: the platform-role consumers outside the ledger gate treat BILLING as no role at all.
+describe('R3b: BILLING satisfies no threshold and elevates no other consumer', () => {
+  it('orgRoleAtLeast ranks BILLING below every threshold', () => {
+    for (const required of ['READER', 'CONTRIBUTOR', 'ADMIN', 'OWNER'] as const) {
+      expect(orgRoleAtLeast('BILLING', required), required).toBe(false);
+    }
+  });
+
+  it("userVisibility: a BILLING viewer does not see an unrelated user's personal fields", async () => {
+    const other = (await db.user.create({
+      data: { id: generateId(), githubId: 50_130, githubUsername: 'r3-other', handle: 'r3-other', email: 'o@example.com' },
+    })).id;
+    expect(await canSeeUserPersonalFields({ db, userId: billingUser, roles: ['BILLING'] }, other)).toBe(false);
+    expect(await canSeeUserPersonalFields({ db, userId: billingUser, roles: ['ADMIN'] }, other)).toBe(true);
   });
 });
