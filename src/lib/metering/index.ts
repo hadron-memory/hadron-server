@@ -297,16 +297,114 @@ export class InvalidLedgerAmountError extends Error {
 }
 
 /**
- * A (sourceType, sourceId) replay whose org or amount DISAGREES with the
- * stored grant. This is never normal webhook redelivery (a Stripe session's
- * metadata is immutable) — it signals a caller bug or tampering, so it must
- * surface loudly instead of silently returning the mismatched row
- * (PR-624 review, Gemini high).
+ * The one sentence every ledger replay conflict answers (#5007 ruling 4). It
+ * names the condition and nothing else: never the stored entry's id, account or
+ * amount, nor the caller's (with a billing role and personal ledgers those
+ * would disclose another owner's ledger). The CLI prints it verbatim.
+ */
+export const LEDGER_SOURCE_CONFLICT_MESSAGE =
+  'This source is already recorded on the ledger with a different account, amount or kind.';
+
+/**
+ * A (sourceType, sourceId) replay whose account, amount or kind DISAGREES with
+ * the stored entry. This is never normal webhook redelivery (a Stripe session's
+ * metadata is immutable): it signals a caller bug or tampering, so it must
+ * surface loudly instead of silently returning the mismatched row (PR-624
+ * review, Gemini high). It carries only {@link LEDGER_SOURCE_CONFLICT_MESSAGE}.
  */
 export class IdempotencyConflictError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor() {
+    super(LEDGER_SOURCE_CONFLICT_MESSAGE);
     this.name = 'IdempotencyConflictError';
+  }
+}
+
+/**
+ * The source types the server writes itself (#5007 ruling 3): `usage-event`
+ * (debitCredits, from recordLlmUsage), `grant-expiry` (A4's settlement),
+ * `period-grant` (A9's monthly grant) and `cost-correction` (A15). The
+ * grantCredits and adjustCredits MUTATIONS refuse them, so a hand-typed entry
+ * can never pose as one of the server's own (an adjustment typed `grant-expiry`
+ * would empty a bucket in A4's replay while the sum says otherwise). The library
+ * does NOT refuse them: its server-side callers write these types. Listed in the
+ * SDL descriptions of both inputs (checked by `pnpm check:sdl-enums`).
+ */
+export const SERVER_WRITTEN_SOURCE_TYPES = [
+  'usage-event',
+  'grant-expiry',
+  'period-grant',
+  'cost-correction',
+] as const;
+
+const SERVER_WRITTEN_SOURCE_TYPE_SET: ReadonlySet<string> = new Set(SERVER_WRITTEN_SOURCE_TYPES);
+
+/** Matched trimmed and case-insensitively (#5007 ruling 3); values are stored as given. */
+export function isServerWrittenSourceType(sourceType: string): boolean {
+  return SERVER_WRITTEN_SOURCE_TYPE_SET.has(sourceType.trim().toLowerCase());
+}
+
+/** A blank or whitespace-only value counts as missing (#5007 ruling 3). */
+function isBlank(value: string | null | undefined): boolean {
+  return value == null || value.trim() === '';
+}
+
+/**
+ * hrn:node:hadronmemory.com:specs:cor:dmo:170:03: "each entry names its
+ * source, a kind of source and an id within it". Both halves are required and
+ * non-blank (#5007 ruling 1, library and mutation).
+ */
+function requireSource(sourceType: string | null | undefined, sourceId: string | null | undefined) {
+  if (isBlank(sourceType) || isBlank(sourceId)) {
+    throw new InvalidLedgerAmountError('sourceType and sourceId are both required and must not be blank.');
+  }
+}
+
+interface LedgerInsert {
+  organizationId: string;
+  kind: LedgerKind;
+  amountMicroCents: bigint;
+  expiresAt: Date | null;
+  sourceType: string;
+  sourceId: string;
+  note: string | null;
+  createdBy: string | null;
+}
+
+/**
+ * Whether a stored entry is a true replay of `params`: the same account, the
+ * same amount and the same kind (hrn:node:hadronmemory.com:specs:cor:dmo:170:03,
+ * plus kind, #5007). The pair is unique across the WHOLE ledger, so without the
+ * kind an adjustment reusing a grant's pair would get the grant back as a
+ * success. `expiresAt` is deliberately not compared (#5007 ruling 5, A4). A6
+ * adds the person owner here, null-safely, in this one place.
+ */
+function isSameLedgerEntry(
+  existing: { organizationId: string; amountMicroCents: bigint; kind: string },
+  params: Pick<LedgerInsert, 'organizationId' | 'amountMicroCents' | 'kind'>,
+): boolean {
+  return (
+    existing.organizationId === params.organizationId &&
+    existing.amountMicroCents === params.amountMicroCents &&
+    existing.kind === params.kind
+  );
+}
+
+/**
+ * Insert one sourced entry, or return the existing one on a true replay.
+ * Unique (sourceType, sourceId) hit ⇒ the entry already landed (webhook
+ * redelivery): idempotent success ONLY when {@link isSameLedgerEntry}; any
+ * disagreement is {@link IdempotencyConflictError}, never silently absorbed.
+ */
+async function insertOrReplay(db: PrismaClient, params: LedgerInsert) {
+  try {
+    return await db.creditLedgerEntry.create({ data: { id: generateId(), ...params } });
+  } catch (err) {
+    if ((err as { code?: string }).code !== 'P2002') throw err;
+    const existing = await db.creditLedgerEntry.findFirstOrThrow({
+      where: { sourceType: params.sourceType, sourceId: params.sourceId },
+    });
+    if (!isSameLedgerEntry(existing, params)) throw new IdempotencyConflictError();
+    return existing;
   }
 }
 
@@ -317,71 +415,81 @@ export interface GrantCreditsParams {
   /** Policy field only in Phase 0 (FR-005). */
   expiresAt?: Date | null;
   /**
-   * Idempotency + provenance pair: e.g. ('stripe-checkout', <session id>).
-   * (sourceType, sourceId) is UNIQUE across the ledger — re-granting the
-   * same pair returns the EXISTING row instead of double-crediting, which
-   * is what makes at-least-once payment webhooks safe (hadrontool-billing).
+   * Idempotency + provenance pair, required (#5007): e.g. ('stripe-checkout',
+   * <session id>). (sourceType, sourceId) is UNIQUE across the ledger;
+   * re-granting the same pair returns the EXISTING row instead of
+   * double-crediting, which is what makes at-least-once payment webhooks from a
+   * payment service safe.
    */
-  sourceType?: string | null;
-  sourceId?: string | null;
+  sourceType: string;
+  sourceId: string;
   note?: string | null;
   createdBy?: string | null;
 }
 
 /**
- * Append a positive `grant` row. Throws InvalidLedgerAmountError on <= 0
- * and on a half-provided source pair (an orphan sourceId would silently
- * lose the unique-constraint protection — PR-624 review, Gemini medium).
- * Idempotent on (sourceType, sourceId): a duplicate pair returns the
- * already-existing entry (never a second credit) — but ONLY when org and
- * amount agree; a disagreeing replay throws IdempotencyConflictError.
- * Rows without a source are unaffected (Postgres treats NULLs as distinct
- * in unique indexes).
+ * Append a positive `grant` row (hrn:node:hadronmemory.com:specs:cor:dmo:170:03).
+ * Throws InvalidLedgerAmountError on <= 0 and on a missing or blank source pair
+ * (#5007: every entry names its source). Idempotent on (sourceType, sourceId):
+ * a true replay (same account, amount and kind) returns the existing entry;
+ * anything else throws IdempotencyConflictError.
  */
 export async function grantCredits(db: PrismaClient, params: GrantCreditsParams) {
   if (params.amountMicroCents <= 0n) {
     throw new InvalidLedgerAmountError('grantCredits requires a positive amountMicroCents.');
   }
-  if (!!params.sourceType !== !!params.sourceId) {
-    throw new InvalidLedgerAmountError('sourceType and sourceId must be provided together.');
+  requireSource(params.sourceType, params.sourceId);
+  return insertOrReplay(db, {
+    organizationId: params.organizationId,
+    kind: 'grant',
+    amountMicroCents: params.amountMicroCents,
+    expiresAt: params.expiresAt ?? null,
+    sourceType: params.sourceType,
+    sourceId: params.sourceId,
+    note: params.note ?? null,
+    createdBy: params.createdBy ?? null,
+  });
+}
+
+export interface AdjustCreditsParams {
+  organizationId: string;
+  /** Signed, non-zero micro-cents (a refund is negative). */
+  amountMicroCents: bigint;
+  /** Required, non-blank: the idempotency + provenance pair. */
+  sourceType: string;
+  sourceId: string;
+  /** Required, non-blank. Kept for the life of the entry: codes and ids, never personal data. */
+  note: string;
+  createdBy?: string | null;
+}
+
+/**
+ * Append a signed `adjustment` row: a correction of either sign, such as a
+ * refund or the settlement of an expired grant
+ * (hrn:node:hadronmemory.com:specs:cor:dmo:170:03). A correction is a NEW entry,
+ * never an edit (hrn:node:hadronmemory.com:specs:cor:dmo:170:08). Throws
+ * InvalidLedgerAmountError on a zero amount or a missing or blank source pair or
+ * note; replays exactly as grantCredits does (kind included). It does not refuse
+ * the server-written source types: A4 and A15 call it with their own.
+ */
+export async function adjustCredits(db: PrismaClient, params: AdjustCreditsParams) {
+  if (params.amountMicroCents === 0n) {
+    throw new InvalidLedgerAmountError('adjustCredits requires a non-zero amountMicroCents.');
   }
-  try {
-    return await db.creditLedgerEntry.create({
-      data: {
-        id: generateId(),
-        organizationId: params.organizationId,
-        kind: 'grant',
-        amountMicroCents: params.amountMicroCents,
-        expiresAt: params.expiresAt ?? null,
-        sourceType: params.sourceType ?? null,
-        sourceId: params.sourceId ?? null,
-        note: params.note ?? null,
-        createdBy: params.createdBy ?? null,
-      },
-    });
-  } catch (err) {
-    // Unique (sourceType, sourceId) hit ⇒ this grant already landed
-    // (webhook redelivery). Idempotent success ONLY for a true replay —
-    // a mismatched org/amount is a conflict, never silently absorbed.
-    if ((err as { code?: string }).code === 'P2002' && params.sourceType && params.sourceId) {
-      const existing = await db.creditLedgerEntry.findFirstOrThrow({
-        where: { sourceType: params.sourceType, sourceId: params.sourceId },
-      });
-      if (
-        existing.organizationId !== params.organizationId ||
-        existing.amountMicroCents !== params.amountMicroCents
-      ) {
-        throw new IdempotencyConflictError(
-          `Grant (${params.sourceType}, ${params.sourceId}) already exists as ledger entry ` +
-            `${existing.id} with org ${existing.organizationId} / amount ` +
-            `${existing.amountMicroCents} — refusing the mismatched replay ` +
-            `(org ${params.organizationId} / amount ${params.amountMicroCents}).`,
-        );
-      }
-      return existing;
-    }
-    throw err;
+  requireSource(params.sourceType, params.sourceId);
+  if (isBlank(params.note)) {
+    throw new InvalidLedgerAmountError('note is required and must not be blank.');
   }
+  return insertOrReplay(db, {
+    organizationId: params.organizationId,
+    kind: 'adjustment',
+    amountMicroCents: params.amountMicroCents,
+    expiresAt: null,
+    sourceType: params.sourceType,
+    sourceId: params.sourceId,
+    note: params.note,
+    createdBy: params.createdBy ?? null,
+  });
 }
 
 export interface DebitCreditsParams {
