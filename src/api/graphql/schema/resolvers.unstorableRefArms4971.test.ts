@@ -1,7 +1,10 @@
 /**
  * #4971 — the NUL / lone-surrogate pre-reject (#2975, `refHasUnstorableChars`) on the ref arms #4893 narrowed
- * but did not guard: workerRef, `worker(ref:)` by name, taskRef, nodeRef and the write-grant register URN —
- * plus direct pins for the agentRef and userRef guards that already exist (Baylor local P3, Celine QA P3).
+ * but did not guard. Production guards: `worker(ref:)` by name (`resolveWorkerIdByName`), `resolveNodeRef` and the
+ * write grant's register URN. REGRESSION pins only, no production change behind them (the arm cannot reach a lookup
+ * with such a ref): the workerRef URN arm (`parseUrnV2` refuses first) and the taskRef arm (digits-only handle
+ * grammar; the App part rides the already-guarded `resolveAppRef`). Also direct pins for the agentRef and userRef
+ * guards that already exist (Baylor local P3, Celine QA P3).
  *
  * Contract per door: a ref no stored URN can contain answers EXACTLY like a well-formed ref naming nothing
  * (same value, or same message/code/extension keys), and is never a driver fault (`INTERNAL_SERVER_ERROR`).
@@ -19,6 +22,8 @@ import { formatGraphQLError as formatError } from '../formatError.js';
 import { resolvers, type Context } from './resolvers.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
+import { readableInstructionMessageApp } from './resolvers.teamChat.js';
 
 const M = resolvers.Mutation as any;
 const Q = resolvers.Query as any;
@@ -64,13 +69,22 @@ beforeEach(async () => {
   });
 });
 
-/** A db whose `target.findFirst/findUnique/findMany` fault: the control that proves a row reaches the lookup. */
-const faulting = (table: string): Context['db'] =>
-  new Proxy(db as any, {
-    get: (t, p) => p === table
-      ? new Proxy(t[p], { get: (tt, m) => (typeof m === 'string' && m.startsWith('find') ? () => { throw new Error('driver fault'); } : tt[m]) })
-      : t[p],
+/**
+ * A db whose `table.find*` (and, for a raw-SQL lookup, `$queryRaw`) fault: the control that proves a row reaches
+ * the lookup. `hits.n` counts the faults that actually fired, so a door that refuses earlier (argument
+ * validation, a gate, a parse) fails the control instead of passing it on a bare rejection.
+ */
+const faulting = (table: string, hits: { n: number }): Context['db'] => {
+  const boom = () => { hits.n++; throw new Error('driver fault'); };
+  return new Proxy(db as any, {
+    get: (t, p) => {
+      if (p === '$queryRaw' && table === 'worker') return boom;
+      return p === table
+        ? new Proxy(t[p], { get: (tt, m) => (typeof m === 'string' && m.startsWith('find') ? boom : tt[m]) })
+        : t[p];
+    },
   });
+};
 
 interface Row {
   door: string;
@@ -84,6 +98,8 @@ interface Row {
   table: string;
   /** KEEP door (typed boundary contract): the unstorable ref answers as an ordinary malformed ref, not as a miss. */
   keep?: { malformed: string };
+  /** A ref that PASSES the door's own parse, for a row whose miss ref is refused before any lookup: the door must accept it. */
+  accepted?: string;
 }
 const wUrn = (slug: string) => `hrn:worker:${org.urn}:team:${slug}`;
 const memberCtx = () => ctx(member.id);
@@ -106,13 +122,38 @@ const ROWS = (): Row[] => [
     keep: { malformed: 'hrn:node:nope' } },
   { door: 'setAppMemoryWriteGrant(registerNodeUrn) [register URN arm]',
     call: (r, c) => M.setAppMemoryWriteGrant({}, { appRef: app.urn, memoryRef: memory.urn, prefix: 'pin', registerNodeUrn: r }, c), who: adminCtx,
-    bad: (u) => `hrn:node:${memory.urn}:no${u}pe`, miss: 'not-a-node-urn', table: 'appMemoryWriteGrant' },
+    bad: (u) => `hrn:node:${memory.urn}:no${u}pe`, miss: 'not-a-node-urn', table: 'appMemoryWriteGrant',
+    // The miss is refused by parseRegisterUrn before any lookup, so the control is the converse: a well-formed node
+    // URN passes the parse and the door SUCCEEDS (the guard rejects only what the parse would otherwise admit).
+    accepted: `hrn:node:${memory.urn}:nope` },
   // Section 2: the guards that already exist on agentRef / userRef had no pin of their own.
   { door: 'attendeeRegister(agentRef, appRef) [agentRef guard]', call: (r, c) => Q.attendeeRegister({}, { agentRef: r, appRef: app.urn }, c), who: memberCtx,
     bad: (u) => `hrn:agent:${org.urn}:no${u}pe`, miss: `hrn:agent:${org.urn}:nope`, table: 'agent' },
   { door: 'secrets(user owner) [userRef guard]', call: (r, c) => Q.secrets({}, { ownerType: 'user', ownerRef: r }, c), who: memberCtx,
     bad: (u) => `hrn:user:no${u}pe`, miss: 'hrn:user:nope', table: 'user' },
 ];
+
+describe('#4971 resolveNodeRef: other callers get the typed refusal, never a driver fault', () => {
+  it('the bare resolver throws UrnNotQualifiedError, which refNamesNothing folds', async () => {
+    for (const u of BAD) {
+      const e = await resolveNodeRef(db, `hrn:node:${memory.urn}:no${u}pe`).catch((x: unknown) => x);
+      expect((e as Error).name).toBe('UrnNotQualifiedError');
+      expect(refNamesNothing(e)).toBe(true);
+    }
+  });
+  it('a caller that folds the typed refusal answers null (readableInstructionMessageApp), not a fault', async () => {
+    for (const u of BAD) {
+      await expect(readableInstructionMessageApp(ctx(member.id), `hrn:node:${memory.urn}:no${u}pe`)).resolves.toBeNull();
+    }
+  });
+  it('a context-relative loc is refused too (no lookup with the unstorable loc)', async () => {
+    for (const u of BAD) {
+      await expect(resolveNodeRef(db, `no${u}pe`, memory.id)).rejects.toMatchObject({ name: 'UrnNotQualifiedError' });
+    }
+  });
+});
+
+const ROWS_INDEX = [0, 1, 2, 3, 4, 5, 6]; // one index per ROWS() entry; the door name is in every failure message
 
 describe('#4971 unstorable ref arms: NUL and lone surrogates answer exactly like a ref naming nothing', () => {
   it('premise: the bare worker and node resolvers reach the database with an unstorable ref today', async () => {
@@ -121,7 +162,7 @@ describe('#4971 unstorable ref arms: NUL and lone surrogates answer exactly like
     await expect(resolveNodeRef(db, `${memory.urn}:nope`)).rejects.toMatchObject({ name: 'NodeNotFoundError' });
   });
 
-  for (const row of [0, 1, 2, 3, 4, 5, 6]) {
+  for (const row of ROWS_INDEX) {
     const name = () => ROWS()[row]!.door;
     for (const [i, u] of BAD.entries()) {
       it(`${['NUL', 'lone high surrogate', 'lone low surrogate'][i]}: row ${row}`, async () => {
@@ -138,11 +179,17 @@ describe('#4971 unstorable ref arms: NUL and lone surrogates answer exactly like
         }
       });
     }
-    it(`control: row ${row} reaches resolution (a lookup fault rejects the MISS ref)`, async () => {
+    it(`control: row ${row} reaches resolution`, async () => {
       const r = ROWS()[row]!;
-      const c = { ...r.who(), db: faulting(r.table) } as Context;
-      const a = await answer(r.call(r.miss, c));
-      expect(a.ok, `${r.door} must reach the ${r.table} lookup`).toBe(false);
+      if (r.accepted) {
+        const a = await answer(r.call(r.accepted, r.who()));
+        expect(a.ok, `${r.door} must accept a well-formed ref`).toBe(true);
+        return;
+      }
+      const hits = { n: 0 };
+      const a = await answer(r.call(r.miss, { ...r.who(), db: faulting(r.table, hits) } as Context));
+      expect(hits.n, `${r.door} must reach the ${r.table} lookup`).toBeGreaterThan(0);
+      expect(a.ok, `${r.door}: the fault must reject the door`).toBe(false);
     });
   }
 });
