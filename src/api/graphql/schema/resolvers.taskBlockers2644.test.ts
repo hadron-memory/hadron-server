@@ -31,18 +31,18 @@ describe('#2644 blockers and priority', () => {
     const t = await create({ blockedBy: [b.id], assignee: { user: ownerId } });
     expect(t).toMatchObject({ priority: 1, blocked: true, status: 'pending', assigneeUserId: ownerId });
     expect(await F.AgentTask.blockedBy(t, {}, ctx())).toMatchObject({ items: [expect.objectContaining({ id: b.id })], total: 1, hasMore: false });
-    expect(await code(() => M.startAgentTask(null, { taskId: t.id }, ctx()))).toBe('TASK_BLOCKED');
+    expect(await code(() => M.startAgentTask(null, { taskRef: t.id }, ctx()))).toBe('TASK_BLOCKED');
   });
   it('last blocker alone releases and records exactly once, preserving manual assignee', async () => {
     const a = await create(), b = await create();
     const t = await create({ blockedBy: [a.id, b.id], assignee: { user: ownerId } });
-    await M.cancelAgentTask(null, { taskId: a.id }, ctx());
+    await M.cancelAgentTask(null, { taskRef: a.id }, ctx());
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })) as any).toMatchObject({ blocked: true, releasedAt: null });
-    await M.cancelAgentTask(null, { taskId: b.id }, ctx());
+    await M.cancelAgentTask(null, { taskRef: b.id }, ctx());
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })) as any).toMatchObject({ blocked: false, releasedAt: expect.any(Date), assigneeUserId: ownerId });
     await remove(t.id, a.id);
     expect(await db.agentTeamEvent.count({ where: { taskId: t.id, type: 'task.released' } })).toBe(1);
-    await M.startAgentTask(null, { taskId: t.id }, ctx());
+    await M.startAgentTask(null, { taskRef: t.id }, ctx());
     expect(await code(() => add(t.id, a.id))).toBe('TASK_INVALID_TRANSITION');
   });
   it('edge removal and physical blocker deletion release and repeated blocks get new anchors', async () => {
@@ -151,11 +151,11 @@ describe('#2644 blockers and priority', () => {
   it('finishing the last blocker releases and explicit assignment/park/ready remain available', async () => {
     const b = await create({ assignee: { user: ownerId } });
     const t = await create({ blockedBy: [b.id], status: 'BACKLOG' });
-    await M.makeAgentTaskReady(null, { taskId: t.id }, ctx());
-    await M.parkAgentTask(null, { taskId: t.id }, ctx());
-    expect(await M.assignAgentTask(null, { taskId: t.id, assignee: { user: ownerId } }, ctx())).toMatchObject({ blocked: true, status: 'pending' });
-    await M.startAgentTask(null, { taskId: b.id }, ctx());
-    await M.finishAgentTask(null, { taskId: b.id, result: { outcome: 'succeeded' } }, ctx());
+    await M.makeAgentTaskReady(null, { taskRef: t.id }, ctx());
+    await M.parkAgentTask(null, { taskRef: t.id }, ctx());
+    expect(await M.assignAgentTask(null, { taskRef: t.id, assignee: { user: ownerId } }, ctx())).toMatchObject({ blocked: true, status: 'pending' });
+    await M.startAgentTask(null, { taskRef: b.id }, ctx());
+    await M.finishAgentTask(null, { taskRef: b.id, result: { outcome: 'succeeded' } }, ctx());
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).toMatchObject({ blocked: false, releasedAt: expect.any(Date), assigneeUserId: ownerId });
     expect(await db.agentTeamEvent.count({ where: { taskId: t.id, type: 'task.released' } })).toBe(1);
   });

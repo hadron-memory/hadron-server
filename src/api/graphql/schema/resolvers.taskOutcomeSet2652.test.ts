@@ -17,12 +17,12 @@ const code = (c: string) => ({ extensions: { code: c } });
 const putSet = (data: unknown, memoryId = systemMemory.id) =>
   db.node.create({ data: { id: generateId(), memoryId, loc: 'schema:task-outcomes', name: 'Task outcomes', data: data as any } });
 const finish = (outcome: string, taskId = task.id) =>
-  M.finishAgentTask({}, { taskId, result: { outcome, summary: 'S' } }, ctx(assignee.id));
+  M.finishAgentTask({}, { taskRef: taskId, result: { outcome, summary: 'S' } }, ctx(assignee.id));
 const stored = (id = task.id) => db.agentTask.findUniqueOrThrow({ where: { id } });
 const finishedEvents = (id = task.id) => db.agentTeamEvent.findMany({ where: { taskId: id, type: 'task.finished' } });
 async function startedTask(title = 'T') {
   const t = await M.createAgentTask({}, { input: { appRef: app.id, title, source: 's', assignee: { user: assignee.id } } }, ctx());
-  await M.startAgentTask({}, { taskId: t.id }, ctx(assignee.id));
+  await M.startAgentTask({}, { taskRef: t.id }, ctx(assignee.id));
   return t;
 }
 async function expectRefusedUnchanged(outcome: string, c: string) {
@@ -164,6 +164,6 @@ describe('#2652 — no set, and sets that cannot be used', () => {
 
   it('the assignee and transition checks come first: a non-assignee still gets TASK_NOT_ASSIGNEE', async () => {
     await putSet({ outcomes: ['approved'] });
-    await expect(M.finishAgentTask({}, { taskId: task.id, result: { outcome: 'done' } }, ctx(owner.id))).rejects.toMatchObject(code('TASK_NOT_ASSIGNEE'));
+    await expect(M.finishAgentTask({}, { taskRef: task.id, result: { outcome: 'done' } }, ctx(owner.id))).rejects.toMatchObject(code('TASK_NOT_ASSIGNEE'));
   });
 });

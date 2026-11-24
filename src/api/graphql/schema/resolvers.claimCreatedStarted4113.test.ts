@@ -48,7 +48,7 @@ describe('#4113 a caller-own claim is created STARTED', () => {
     expect(await events(claim.id)).toEqual(types('task.created', 'task.assigned', 'task.started'));
     // The reference shape: create then start, as the CLI does today.
     const manual = await create({ assignee: { user: me.id } });
-    await M.startAgentTask({}, { taskId: manual.id }, ctx());
+    await M.startAgentTask({}, { taskRef: manual.id }, ctx());
     expect(await events(manual.id)).toEqual(types('task.created', 'task.assigned', 'task.started'));
     const shape = async (id: string) => {
       const e = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: id, type: 'task.started' } });

@@ -36,6 +36,7 @@ import {
   consumeQuota,
   consumeActionTicket,
   defaultQuotaLimit,
+  type QuotaScopeKind,
 } from '../../../jobs/appRuns.js';
 import { isSmsConfigured, sendSms } from '../../smsClient.js';
 import type { RunToolDef } from './types.js';
@@ -59,7 +60,7 @@ export function maskPhoneNumber(to: string): string {
 }
 
 /** Undo one `sms.send` consumption (org-denied / no-ticket compensation). */
-async function refundSmsQuota(db: PrismaClient, scopeKind: 'app' | 'org', scopeId: string): Promise<void> {
+async function refundSmsQuota(db: PrismaClient, scopeKind: QuotaScopeKind, scopeId: string): Promise<void> {
   await db.quotaCounter.updateMany({
     where: { scopeKind, scopeId, action: 'sms.send', window: 'day', used: { gt: 0 } },
     data: { used: { decrement: 1 } },

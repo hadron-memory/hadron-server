@@ -54,6 +54,7 @@ import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { foreignIdentityScopedMemoryFilter } from '../../../lib/auth/memoryOwnership.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
+import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
   formatCanonicalUrn,
@@ -93,6 +94,7 @@ import {
   Prisma,
   type Agent,
   type PrismaClient,
+  type Role,
 } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
@@ -167,7 +169,7 @@ export interface Context {
   sessionId?: string;      // Session.id — set when operating inside an active session
   /** #1705 — a named X-Hadron-Session failed validation (see AuthContext.sessionBindingRefused). */
   sessionBindingRefused?: boolean;
-  roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
+  roles?: Role[];          // #5012: the generated enum (BILLING included); thresholds stay four-valued
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)
   signInId?: string;       // #1897: the factor-protected sign-in this credential descends from (JWT sid or key root)
@@ -1502,6 +1504,22 @@ export function isPlatformAdmin(ctx: Context): boolean {
 }
 
 /**
+ * May this caller write the credit ledger (`grantCredits`, `adjustCredits`)? A platform ADMIN or OWNER, or a user
+ * holding the BILLING platform role (#5012, Billing A5; hrn:node:hadronmemory.com:specs:cor:api:010:01, Proposed
+ * line). BILLING admits these two writes and nothing else: it is not in `ROLE_ORDER` (so it fails every
+ * `requireRole` / `requireOrgRole` threshold) and `isPlatformAdmin` does not name it.
+ *
+ * The BILLING branch needs an ordinary user principal: never an impersonated session (whose roles are the target's,
+ * and are `[]` by construction anyway) and never an App key (which carries no platform roles). Use it on those two
+ * mutations only; every other admin surface keeps `isPlatformAdmin`.
+ */
+export function mayWriteLedger(ctx: Context): boolean {
+  if (isPlatformAdmin(ctx)) return true;
+  if (!ctx.userId || ctx.impersonation || ctx.appId || ctx.appKeyId) return false;
+  return ctx.roles?.includes('BILLING') === true;
+}
+
+/**
  * Owner-or-org access gate for an entity that may be **user-owned** or
  * **org-owned** (spec 047: App / Agent / Memory carry
  * `organizationId`-XOR-`ownerUserId`). The keystone gate that replaces bare
@@ -2198,7 +2216,7 @@ export async function readAiServiceConfigByUrn(ctx: Context, ref: string) {
  * is scoped to ONE App's chat context, so for a non-admin caller all three of
  * these are required:
  *   1. an `appId` (the picker is meaningless without an installation),
- *   2. membership of that App, and
+ *   2. membership of that App, or (#5076) being the owner of a person's App acting as themself, and
  *   3. the named Agent (if any) must be installed and licensed in that App.
  *
  * All three matter because the walk returns the App's configs AND the named
@@ -2221,7 +2239,14 @@ export async function requireAiConfigPickerAccess(
   const member = await ctx.db.appMember.findUnique({
     where: { appId_userId: { appId, userId: ctx.userId } },
   });
-  if (!member) throw authorizationDenied();
+  if (!member) {
+    // #5076 (cor:dmo:050:10, cor:acl:010:01): the owner of a person's App is a participant even with no member row (the
+    // owner is added as a member only when the Agent offers an `owner` role). Narrow on purpose: the owner acting as
+    // themself, not an organization CONTRIBUTOR (`isAppParticipant`), an App key, an impersonated session or a run.
+    // `ownerUserId === null` (an organization App) never compares two nulls: `isStrictOwner` needs a non-empty userId.
+    const app = await ctx.db.app.findUnique({ where: { id: appId }, select: { ownerUserId: true } });
+    if (!app || isRefusedPrincipal(ctx) || !isStrictOwner(ctx, app.ownerUserId)) throw authorizationDenied();
+  }
   // The named Agent must be installed in this App, or the walk could be
   // pointed at an unrelated Agent's (masked) configs.
   if (agentId && !(await isAgentInstalledAndLicensed(ctx.db, appId, agentId))) {

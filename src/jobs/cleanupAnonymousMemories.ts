@@ -14,9 +14,9 @@ export async function cleanupAnonymousMemories(db: PrismaClient): Promise<number
     where: {
       anonymousExpiresAt: { lt: new Date() },
       userMemoryOfAgentId: { not: null },
-      // #1613 — no `corpusMintedAt` exclusion here: cor:dmo:120:09 says minting
-      // protects nothing at the memory level, and a stamp guard on a bulk
-      // delete is exactly what it warns against.
+      // #1613 — no minted-node exclusion here: cor:dmo:120:09 says minting
+      // protects nothing at the memory level, and a mint-record guard on a
+      // bulk delete is exactly what it warns against.
       // #1641 §3.2 — nor one holding a question or a question log (Q17).
       nodes: { none: QUESTION_FAMILY_WHERE },
     },

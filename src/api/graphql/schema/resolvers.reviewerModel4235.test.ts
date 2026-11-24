@@ -46,8 +46,8 @@ async function seat(slot: string, who: 'ada' | { user: string } = 'ada') {
   await M.assignReviewSeat!({}, { taskRef: t.id, slot, head: H }, ctx(author.id));
   if (who === 'ada') {
     await db.agentTask.update({ where: { id: t.id }, data: { assigneeUserId: null, assigneeWorkerId: ada.id } });
-    await asAda(() => M.startAgentTask!({}, { taskId: t.id }, ctx(holder.id)));
-  } else await M.startAgentTask!({}, { taskId: t.id }, ctx(person));
+    await asAda(() => M.startAgentTask!({}, { taskRef: t.id }, ctx(holder.id)));
+  } else await M.startAgentTask!({}, { taskRef: t.id }, ctx(person));
   return t;
 }
 const adaVerdict = (t: any, extra: Record<string, unknown> = {}, c: Record<string, unknown> = {}, verdict = 'APPROVE') =>
@@ -185,10 +185,10 @@ describe('readiness never reads them (cor:agt:130:03)', () => {
     await session();
     const local = await seat('local');
     await adaVerdict(local);
-    await asAda(() => M.finishAgentTask!({}, { taskId: local.id, result: { outcome: 'approved' } }, ctx(holder.id)));
+    await asAda(() => M.finishAgentTask!({}, { taskRef: local.id, result: { outcome: 'approved' } }, ctx(holder.id)));
     const blind = await seat('blind', { user: owner.id });
     await M.recordReviewVerdict!({}, { taskRef: blind.id, head: H, verdict: 'PASS' }, ctx(owner.id));
-    await M.finishAgentTask!({}, { taskId: blind.id, result: { outcome: 'approved' } }, ctx(owner.id));
+    await M.finishAgentTask!({}, { taskRef: blind.id, result: { outcome: 'approved' } }, ctx(owner.id));
     expect((await only(local.id)).reviewerModel).toBe('model-m');
     expect((await only(blind.id)).reviewerModel).toBeNull();
     const answer = await Q.pullRequestReadiness!({}, { taskRef: build.id, head: H }, ctx(owner.id));

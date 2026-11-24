@@ -591,6 +591,22 @@ async function aiServiceConfigGrants(
 ): Promise<InternalGrant[]> {
   const grants: InternalGrant[] = [];
 
+  // #5076 (cor:dmo:050:12, cor:acl:010:02): a configuration on a PERSON's App or Agent is the owner's alone, and the
+  // enforced gate (`requireAiConfigOwnerAdmin` -> `requireOwnerOrOrgRole`) has no platform arm for it. Branch on the
+  // ownership class FIRST, as `appGrants` does: the owner gets one grant and nobody else gets any (a platform admin may
+  // only clear, which no grant here can express, so it reports nothing: the module's safe under-reporting direction).
+  if (!config.organizationId && (config.appId || config.agentId)) {
+    const owned = config.appId
+      ? await db.app.findUnique({ where: { id: config.appId }, select: { ownerUserId: true, urn: true } })
+      : await db.agent.findUnique({ where: { id: config.agentId! }, select: { ownerUserId: true, urn: true } });
+    if (owned?.ownerUserId != null) {
+      if (owned.ownerUserId === subject.id) {
+        grants.push({ source: 'AICONFIG_OWNER', role: 'owner', via: owned.urn ?? config.appId ?? config.agentId, caps: FULL });
+      }
+      return grants;
+    }
+  }
+
   if (isPlatformAdmin(subject.roles)) {
     grants.push({
       source: 'PLATFORM_ROLE',

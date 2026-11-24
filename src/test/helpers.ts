@@ -9,7 +9,7 @@ import { tmpdir } from 'os';
 import { stringify } from 'yaml';
 import { createHash, randomBytes } from 'crypto';
 import { APP_KEY_PREFIX } from '../middleware/auth.js';
-import type { PrismaClient } from '../generated/prisma/index.js';
+import type { PrismaClient, Role } from '../generated/prisma/index.js';
 import { drainNodeUsage } from '../lib/usageRecorder.js';
 
 /** Build a deterministic test App key with the canonical `hdr_app_` prefix. */
@@ -748,5 +748,5 @@ export async function createDbRunConsentPrincipal(db: PrismaClient, organization
   const id = generateId();
   const user = await db.user.create({ data: { id, handle: `consent-${id}`, githubUsername: `consent-${id}` } });
   await db.orgMember.create({ data: { organizationId, userId: user.id, role: 'READER' } });
-  return { userId: user.id, appId, organizationId, roles: [] as Array<'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER'> };
+  return { userId: user.id, appId, organizationId, roles: [] as Role[] };
 }

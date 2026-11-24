@@ -117,12 +117,12 @@ export async function setUpResetFixture(): Promise<ResetFixture> {
       },
       select: { id: true },
     });
-    await asWorker(who, () => M.startAgentTask({}, { taskId: t.id }, ctx(holder.id)));
+    await asWorker(who, () => M.startAgentTask({}, { taskRef: t.id }, ctx(holder.id)));
     return t;
   };
   const finish = (taskId: string, w: { id: string } = kit) =>
-    asWorker(w, () => M.finishAgentTask({}, { taskId, result: { outcome: 'succeeded' } }, ctx(holder.id)));
-  const cancel = (taskId: string) => M.cancelAgentTask({}, { taskId }, ctx(manager.id));
+    asWorker(w, () => M.finishAgentTask({}, { taskRef: taskId, result: { outcome: 'succeeded' } }, ctx(holder.id)));
+  const cancel = (taskId: string) => M.cancelAgentTask({}, { taskRef: taskId }, ctx(manager.id));
   const collectedReset = async () => {
     const t = await startedTask();
     await finish(t.id);

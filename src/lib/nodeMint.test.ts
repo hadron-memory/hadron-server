@@ -271,7 +271,7 @@ describe('minted-spec permanence is off (#1591 ruling)', () => {
     const n = await spec('pas:010');
     await approveAll();
     await mint();
-    expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).corpusMintedAt).not.toBeNull();
+    expect(await db.node.count({ where: { memoryId: memory.id, mintedAt: { not: null } } })).toBeGreaterThan(0);
     // Permanence is off, but the generic delete still follows the governed-node
     // rule: the spec role is cleared first (the kind's update door), then the
     // node deletes as an ordinary one.

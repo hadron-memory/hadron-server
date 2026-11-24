@@ -170,6 +170,7 @@ import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
 import { installDeleteAllowed, lockInstallAuthorityFirst } from './installMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { refuseBillingMemberRole } from '../../../lib/auth/billingRole.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 
@@ -561,7 +562,6 @@ export const memoryMutations = {
         vectorIndexEnabled,
         embeddingSource,
         maxRevCount,
-        draftCorpus,
       }: {
         // spec 047: OPTIONAL — omitted ⇒ user-owned (caller's `@handle` namespace).
         orgRef?: string | null; name: string;
@@ -576,7 +576,9 @@ export const memoryMutations = {
         embeddingSource?: 'abstract' | 'contentChunks' | 'both' | null;
         // #621 — per-node revision cap; omitted ⇒ column default (10).
         maxRevCount?: number | null;
-        // #1448 — the ONLY way a memory becomes a draft spec corpus.
+        // #1448 legacy arg, a no-op since #5063: corpus state is derived from
+        // per-node minting, so nothing writes it. Accepted (and ignored) so
+        // the GraphQL contract stays stable.
         draftCorpus?: boolean | null;
         // GraphQL passes the full MemoryClass enum; the resolver
         // allowlists the user-creatable values below. Spec 034 added
@@ -755,10 +757,6 @@ export const memoryMutations = {
             ownerUserId: userOwned ? ctx.userId : null,
             urn: memoryUrn,
             name,
-            // #1448 legacy flag. Since #1591 nothing reads it: corpus state
-            // is derived from per-node minting, and every new node starts
-            // unminted whether or not draft was asked for.
-            corpusDraft: draftCorpus === true,
             shortDescription,
             description,
             // Free-form metadata bag (no server-side semantics). Mirrors the
@@ -2075,6 +2073,8 @@ export const memoryMutations = {
           { extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' } },
         );
           }
+          // #5012: BILLING is a platform role, never a subscription's (after the gate, before the write).
+          refuseBillingMemberRole(role);
         },
         (tx) => tx.memorySubscription.create({
           data: { id: generateId(), memoryId: resolvedMemoryId, organizationId: resolvedOrgId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
@@ -2108,6 +2108,8 @@ export const memoryMutations = {
           const current = await txCtx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
           await requireMemoryManageAccess(txCtx, current);
           await requireMemorySubscription(txCtx, resolvedMemoryId, resolvedOrgId, memoryRef);
+          // #5012: BILLING is a platform role, never a subscription's (after the gate, before the write).
+          refuseBillingMemberRole(role);
         },
         (tx) => tx.memorySubscription.update({
           where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: resolvedOrgId } },

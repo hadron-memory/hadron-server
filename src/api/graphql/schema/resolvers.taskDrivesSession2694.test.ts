@@ -57,14 +57,14 @@ beforeEach(async () => {
 
 describe('#2694 a task mutation through the worker\'s own live session drives it', () => {
   it.each([
-    ['start', async (id: string, c: Context) => asWorker(anne, () => M.startAgentTask({}, { taskId: id }, c))],
+    ['start', async (id: string, c: Context) => asWorker(anne, () => M.startAgentTask({}, { taskRef: id }, c))],
     ['progress', async (id: string, c: Context) => {
-      await asWorker(anne, () => M.startAgentTask({}, { taskId: id }, ctxFor()));
-      return asWorker(anne, () => M.recordAgentTaskProgress({}, { taskId: id }, c));
+      await asWorker(anne, () => M.startAgentTask({}, { taskRef: id }, ctxFor()));
+      return asWorker(anne, () => M.recordAgentTaskProgress({}, { taskRef: id }, c));
     }],
     ['finish', async (id: string, c: Context) => {
-      await asWorker(anne, () => M.startAgentTask({}, { taskId: id }, ctxFor()));
-      return asWorker(anne, () => M.finishAgentTask({}, { taskId: id, result: { outcome: 'succeeded' } }, c));
+      await asWorker(anne, () => M.startAgentTask({}, { taskRef: id }, ctxFor()));
+      return asWorker(anne, () => M.finishAgentTask({}, { taskRef: id, result: { outcome: 'succeeded' } }, c));
     }],
   ] as const)('%s refreshes the heartbeat of a live session driven 20h ago', async (_n, act) => {
     const s = await session(anne, 20);
@@ -76,7 +76,7 @@ describe('#2694 a task mutation through the worker\'s own live session drives it
   it('Hugo\'s shape: a task-only worker driven ~24h ago by updatedAt reads live after a start', async () => {
     const s = await session(anne, 23.9); // 6 minutes from lapsing
     const id = await assigned(anne);
-    await asWorker(anne, () => M.startAgentTask({}, { taskId: id }, ctxFor(s.id)));
+    await asWorker(anne, () => M.startAgentTask({}, { taskRef: id }, ctxFor(s.id)));
     // 30 minutes later it would have lapsed; the refresh keeps it live.
     const later = new Date(Date.now() + 0.5 * HOUR);
     const statuses = await loadWorkerCheckStatuses(db as never, { appId: app.id, teamChannelId: null, workerIds: [anne.id], now: later });
@@ -85,7 +85,7 @@ describe('#2694 a task mutation through the worker\'s own live session drives it
 
   it('creating a child task refreshes the heartbeat of a live session (the one task write outside mutateTask)', async () => {
     const parent = await assigned(anne);
-    await asWorker(anne, () => M.startAgentTask({}, { taskId: parent }, ctxFor()));
+    await asWorker(anne, () => M.startAgentTask({}, { taskRef: parent }, ctxFor()));
     const s = await session(anne, 20);
     const before = await heartbeat(s.id);
     await asWorker(anne, () => M.createAgentTask({}, { input: { appRef: app.id, title: 'child', parentTaskId: parent } }, ctxFor(s.id)));
@@ -96,7 +96,7 @@ describe('#2694 a task mutation through the worker\'s own live session drives it
     const s = await session(anne, 30);
     const before = await heartbeat(s.id);
     const id = await assigned(anne);
-    await asWorker(anne, () => M.startAgentTask({}, { taskId: id }, ctxFor(s.id)));
+    await asWorker(anne, () => M.startAgentTask({}, { taskRef: id }, ctxFor(s.id)));
     expect(await heartbeat(s.id)).toBe(before);
     const statuses = await loadWorkerCheckStatuses(db as never, { appId: app.id, teamChannelId: null, workerIds: [anne.id], now: new Date() });
     expect(statuses.get(anne.id)!.status).toBe('NO_SESSION'); // control: truly lapsed stays NO_SESSION
@@ -106,7 +106,7 @@ describe('#2694 a task mutation through the worker\'s own live session drives it
     const other = await session(liam, 20);
     const before = await heartbeat(other.id);
     const id = await assigned(anne);
-    await asWorker(anne, () => M.startAgentTask({}, { taskId: id }, ctxFor(other.id)));
+    await asWorker(anne, () => M.startAgentTask({}, { taskRef: id }, ctxFor(other.id)));
     expect(await heartbeat(other.id)).toBe(before);
   });
 
@@ -114,7 +114,7 @@ describe('#2694 a task mutation through the worker\'s own live session drives it
     const s = await session(liam, 20);
     const before = await heartbeat(s.id);
     const id = await assigned(anne);
-    await expect(asWorker(liam, () => M.startAgentTask({}, { taskId: id }, ctxFor(s.id)))).rejects.toMatchObject({ extensions: { code: 'TASK_NOT_ASSIGNEE' } });
+    await expect(asWorker(liam, () => M.startAgentTask({}, { taskRef: id }, ctxFor(s.id)))).rejects.toMatchObject({ extensions: { code: 'TASK_NOT_ASSIGNEE' } });
     expect(await heartbeat(s.id)).toBe(before);
   });
 
@@ -122,7 +122,7 @@ describe('#2694 a task mutation through the worker\'s own live session drives it
     const s = await session(anne, 20);
     const before = await heartbeat(s.id);
     const id = await assigned(anne);
-    await M.cancelAgentTask({}, { taskId: id }, ctxFor(s.id));
+    await M.cancelAgentTask({}, { taskRef: id }, ctxFor(s.id));
     expect(await heartbeat(s.id)).toBe(before);
   });
 });

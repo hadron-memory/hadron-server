@@ -41,8 +41,8 @@ async function post(query: string, variables: Record<string, unknown>) {
 }
 const F = 'requirements { role modelGroupIn modelGroupNotIn }';
 const CREATE = `mutation($i: CreateAgentTaskInput!) { createAgentTask(input: $i) { id ${F} } }`;
-const UPDATE = `mutation($id: ID!, $i: UpdateAgentTaskInput!) { updateAgentTask(taskId: $id, input: $i) { id ${F} } }`;
-const READ = `query($id: ID!) { agentTask(id: $id) { ${F} } }`;
+const UPDATE = `mutation($id: ID!, $i: UpdateAgentTaskInput!) { updateAgentTask(taskRef: $id, input: $i) { id ${F} } }`;
+const READ = `query($id: ID!) { agentTask(ref: $id) { ${F} } }`;
 const eventCount = () => db.agentTeamEvent.count({ where: { appId } });
 const group = (name: string) => db.modelGroup.create({ data: { appId, name, patterns: ['*opus*'] } });
 

@@ -130,7 +130,14 @@ export const ACK = `mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowle
 /** The worker's own last team-channel check (#2138 §3.4; stamped only through its own session). */
 export const WORKER_CHECK = `query($w:ID!,$a:ID){worker(ref:$w,appRef:$a){id checkStatus{lastCheckedAt}}}`;
 /** A covered task's state and assignee. */
-export const TASK_STATE = `query($t:ID!){agentTask(id:$t){id status assignee{kind id}}}`;
+// #4148 (S7): these two queries use the renamed arguments (agentTask(ref:), agentTeamEvents(taskRef:)). Under version skew
+// with a server that still has the old names (or an older checkout of this script against the renamed server), both
+// reads fail GraphQL validation, and the script fails CLOSED: a failed TASK_STATE read is "a covered task is unreadable",
+// so the wake is not retyped and not acked (deliveryEvidence; "needs a person" after NEEDS_PERSON_AFTER_MS), and a failed
+// ALARM_EVENT page is "held (the alarm cannot be read)" for that pass and retried on the next (findAlarm never reads a
+// partial history as absent). So skew delays alarm wakes; it never repeats a wake or acks the wrong alarm. Update any host
+// running this script to main at the server deploy (hadron-server#4782 ship order, precedent 0274).
+export const TASK_STATE = `query($t:ID!){agentTask(ref:$t){id status assignee{kind id}}}`;
 /** #2138 (Hugo #26221): every live ticker of the App and its live subscribers, the first page of each. */
 export const SUBSCRIBERS = `query($a:String!){tickers(appRef:$a){id subscribers(first:200){items{worker{id name}} hasNextPage endCursor}}}`;
 /** The next page of one ticker's subscribers. */
@@ -177,7 +184,7 @@ export const ASSIGNMENT_EVENTS: ReadonlySet<string> = new Set(['ASSIGNED', 'REAS
  */
 export const DELIVERED_EVENTS: ReadonlySet<string> = new Set([...ASSIGNMENT_EVENTS, 'ALARM', 'CHILD_FINISHED']);
 /** An alarm's own record: its rule (the event type) and whether someone already acknowledged it (#1704). */
-export const ALARM_EVENT = `query($a:ID!,$t:ID!,$p:ID){agentTeamEvents(appRef:$a,taskId:$t,alarmsOnly:true,after:$p,limit:200){id type acknowledgedAt}}`;
+export const ALARM_EVENT = `query($a:ID!,$t:ID!,$p:ID){agentTeamEvents(appRef:$a,taskRef:$t,alarmsOnly:true,after:$p,limit:200){id type acknowledgedAt}}`;
 /** The alarm read's page size (the server's cap), and how many pages it walks before holding (George's #2160 P2). */
 const ALARM_PAGE = 200;
 const ALARM_MAX_PAGES = 50;
