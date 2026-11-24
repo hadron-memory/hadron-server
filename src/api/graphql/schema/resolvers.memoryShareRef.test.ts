@@ -2,7 +2,8 @@
  * #769 — the memory-share mutations accept a grantee REFERENCE (id / email /
  * handle / hrn:user URN) resolved server-side, so a personal memory can be
  * shared with someone OUTSIDE the caller's org (whom the caller can't otherwise
- * look up). The legacy `granteeId` PK still works.
+ * look up). A raw user PK is still a valid `granteeRef` value; the deprecated
+ * `granteeId` argument itself is gone (#4137).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -58,7 +59,7 @@ describe('createMemoryShare — granteeRef resolution (#769)', () => {
     const mem = await sharablePersonal();
     const { memoryShare } = await M.createMemoryShare(
       null,
-      { memoryId: mem.id, granteeRef: grantee.email.toUpperCase(), role: 'writer' },
+      { memoryRef: mem.id, granteeRef: grantee.email.toUpperCase(), role: 'writer' },
       asOwner(),
     );
     expect(memoryShare.granteeId).toBe(grantee.id);
@@ -68,7 +69,7 @@ describe('createMemoryShare — granteeRef resolution (#769)', () => {
     const m1 = await sharablePersonal('by-handle');
     const s1 = await M.createMemoryShare(
       null,
-      { memoryId: m1.id, granteeRef: grantee.handle, role: 'reader' },
+      { memoryRef: m1.id, granteeRef: grantee.handle, role: 'reader' },
       asOwner(),
     );
     expect(s1.memoryShare.granteeId).toBe(grantee.id);
@@ -76,17 +77,17 @@ describe('createMemoryShare — granteeRef resolution (#769)', () => {
     const m2 = await sharablePersonal('by-urn');
     const s2 = await M.createMemoryShare(
       null,
-      { memoryId: m2.id, granteeRef: `hrn:user:${grantee.handle}`, role: 'reader' },
+      { memoryRef: m2.id, granteeRef: `hrn:user:${grantee.handle}`, role: 'reader' },
       asOwner(),
     );
     expect(s2.memoryShare.granteeId).toBe(grantee.id);
   });
 
-  it('still accepts the legacy granteeId (PK)', async () => {
+  it('accepts a raw user PK as the granteeRef (the granteeId alias is gone, #4137)', async () => {
     const mem = await sharablePersonal('by-pk');
     const { memoryShare } = await M.createMemoryShare(
       null,
-      { memoryId: mem.id, granteeId: grantee.id, role: 'reader' },
+      { memoryRef: mem.id, granteeRef: grantee.id, role: 'reader' },
       asOwner(),
     );
     expect(memoryShare.granteeId).toBe(grantee.id);
@@ -97,7 +98,7 @@ describe('createMemoryShare — granteeRef resolution (#769)', () => {
     await expect(
       M.createMemoryShare(
         null,
-        { memoryId: mem.id, granteeRef: 'nobody@nowhere.example', role: 'reader' },
+        { memoryRef: mem.id, granteeRef: 'nobody@nowhere.example', role: 'reader' },
         asOwner(),
       ),
     ).rejects.toThrow(/No user matches granteeRef/);
@@ -106,15 +107,15 @@ describe('createMemoryShare — granteeRef resolution (#769)', () => {
   it('requires a grantee', async () => {
     const mem = await sharablePersonal('missing');
     await expect(
-      M.createMemoryShare(null, { memoryId: mem.id, role: 'reader' }, asOwner()),
-    ).rejects.toThrow(/grantee is required/i);
+      M.createMemoryShare(null, { memoryRef: mem.id, role: 'reader' }, asOwner()),
+    ).rejects.toThrow(/granteeRef is required/i);
   });
 });
 
 describe('revoke / update by granteeRef (#769)', () => {
   it('deleteMemoryShare resolves the ref and returns the resolved PK', async () => {
     const mem = await sharablePersonal('revoke');
-    await M.createMemoryShare(null, { memoryId: mem.id, granteeRef: grantee.email, role: 'reader' }, asOwner());
+    await M.createMemoryShare(null, { memoryRef: mem.id, granteeRef: grantee.email, role: 'reader' }, asOwner());
     const res = await M.deleteMemoryShare(null, { memoryRef: mem.id, granteeRef: grantee.handle }, asOwner());
     expect(res.granteeId).toBe(grantee.id);
     expect(await db.memoryShare.findFirst({ where: { memoryId: mem.id, granteeId: grantee.id } })).toBeNull();
@@ -122,10 +123,10 @@ describe('revoke / update by granteeRef (#769)', () => {
 
   it('updateMemoryShareRole resolves the ref', async () => {
     const mem = await sharablePersonal('update');
-    await M.createMemoryShare(null, { memoryId: mem.id, granteeRef: grantee.handle, role: 'reader' }, asOwner());
+    await M.createMemoryShare(null, { memoryRef: mem.id, granteeRef: grantee.handle, role: 'reader' }, asOwner());
     const { memoryShare } = await M.updateMemoryShareRole(
       null,
-      { memoryId: mem.id, granteeRef: grantee.email, role: 'writer' },
+      { memoryRef: mem.id, granteeRef: grantee.email, role: 'writer' },
       asOwner(),
     );
     expect(memoryShare.granteeId).toBe(grantee.id);
@@ -145,26 +146,26 @@ describe('granteeRef edge cases (#774 review)', () => {
     });
     // No exact-case row for the all-caps form → two insensitive matches → reject.
     await expect(
-      M.createMemoryShare(null, { memoryId: mem.id, granteeRef: 'AMB@example.com', role: 'reader' }, asOwner()),
+      M.createMemoryShare(null, { memoryRef: mem.id, granteeRef: 'AMB@example.com', role: 'reader' }, asOwner()),
     ).rejects.toThrow(/more than one account/);
     // The exact-case email disambiguates to that specific account.
     const { memoryShare } = await M.createMemoryShare(
       null,
-      { memoryId: mem.id, granteeRef: 'amb@example.com', role: 'reader' },
+      { memoryRef: mem.id, granteeRef: 'amb@example.com', role: 'reader' },
       asOwner(),
     );
     expect(memoryShare.granteeId).toBe(lower.id);
   });
 
-  it('rejects passing both granteeRef and granteeId', async () => {
-    const mem = await sharablePersonal('both');
+  // #4137: "rejects passing both granteeRef and granteeId" stated a rule about
+  // an alias that no longer exists (the "not both" arm is unconstructable; the
+  // unknown-argument pins in resolvers.memoryShareRefs4137.test.ts cover the
+  // removal). What remains to refuse is a blank ref, before any gate.
+  it('rejects a blank granteeRef with BAD_USER_INPUT', async () => {
+    const mem = await sharablePersonal('blank');
     await expect(
-      M.createMemoryShare(
-        null,
-        { memoryId: mem.id, granteeRef: grantee.handle, granteeId: grantee.id, role: 'reader' },
-        asOwner(),
-      ),
-    ).rejects.toThrow(/not both/);
+      M.createMemoryShare(null, { memoryRef: mem.id, granteeRef: '   ', role: 'reader' }, asOwner()),
+    ).rejects.toThrow(/granteeRef is required/);
   });
 });
 
@@ -206,7 +207,7 @@ describe('createMemoryShare non-personal error (#766)', () => {
       },
     });
     await expect(
-      M.createMemoryShare(null, { memoryId: priv.id, granteeRef: grantee.handle, role: 'reader' }, asOwner()),
+      M.createMemoryShare(null, { memoryRef: priv.id, granteeRef: grantee.handle, role: 'reader' }, asOwner()),
     ).rejects.toThrow(/only personal-class memories can be shared.*class='private'/s);
   });
 });

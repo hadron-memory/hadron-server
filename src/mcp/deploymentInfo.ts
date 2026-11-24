@@ -219,11 +219,19 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // refusals and what the field accepts (an id or a URN) are unchanged. `beginAssetUpload` and `agentAssets`, the
 // deprecated v1 calls, keep `agentUrn` until they are retired.
 //
-// 0.35.0 — BREAKING, #1796 step 2: `encryptMemory(memoryRef)` no longer accepts `dataKey` or `passphrase`, no alias.
+// 0.35.0 — BREAKING, entity refs S1 (#4137): the six memory share/member mutations take refs and nothing else, no alias.
+// `createMemoryShare` / `updateMemoryShareRole` (`memoryId` -> `memoryRef: ID!`, `granteeRef: ID!`), `deleteMemoryShare`
+// (`granteeRef: String`, omitted = the caller's own share) and `addMemoryMember` / `updateMemoryMemberRole` /
+// `removeMemoryMember` (`memoryRef: ID!`, `userRef: ID!`). The deprecated `granteeId`, `memoryId` and `userId` arguments are
+// removed, and the surviving refs are now required `ID!` (were optional `String`). A lagging client's old name is an UNKNOWN
+// argument and GraphQL refuses the whole operation. The existence-hiding order is unchanged: memory resolved, principal gate,
+// counterparty resolved. (0.34.0 is #5046, #4368, merged first.)
+//
+// 0.36.0 — BREAKING, #1796 step 2: `encryptMemory(memoryRef)` no longer accepts `dataKey` or `passphrase`, no alias.
 // A document naming either is refused as an unknown argument before any resolver runs. The secret travels only in
 // `x-hadron-memory-keys` (strict owner) or `x-hadron-operation-key` (owning App completion). CLI floor: hadron-cli
 // v0.56.0.
-export const HADRON_SERVER_VERSION = '0.35.0';
+export const HADRON_SERVER_VERSION = '0.36.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
