@@ -16,7 +16,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
 let manager: { id: string };
-let agent: { id: string; systemMemoryId: string | null };
+let agent: { id: string; urn: string; systemMemoryId: string | null };
 const ctx = (over?: Partial<Context>): Context => ({ db, roles: ['READER'], userId: manager.id, ...over });
 const save = () => resolvers.Mutation.createRevision({}, { agentRef: agent.id }, ctx());
 const softDelete = () => db.agent.update({ where: { id: agent.id }, data: { deletedAt: new Date() } });
@@ -81,12 +81,15 @@ describe('#5039 item 1: the snapshot re-read gates the served row', () => {
 
   it('an Agent deleted between the gate and the snapshot gets the read gate\'s own refusal, byte for byte', async () => {
     await save();
+    // #5107 LOCAL F1: addressed by URN, not id, so a refusal built from agent.id instead of the caller's ref differs.
+    const ref = `hrn:agent:${agent.urn}`;
+    expect(ref).not.toContain(agent.id);
     const { proxy, state } = dbWithHookBeforeSnapshot(agent.id, softDelete);
-    const raced = await refusal(resolvers.Query.agentRevisions({}, { agentRef: agent.id }, ctx({ db: proxy })));
+    const raced = await refusal(resolvers.Query.agentRevisions({}, { agentRef: ref }, ctx({ db: proxy })));
     expect(state.ran).toBe(true); // the snapshot transaction opened, so the gate (and ADMIN) passed
     expect(state.liveGateReadsAtHook).toBeGreaterThanOrEqual(1); // the gate read the LIVE row before the delete landed
     // The same Agent, now deleted, refused by the read gate itself (no window needed).
-    const gated = await refusal(resolvers.Query.agentRevisions({}, { agentRef: agent.id }, ctx()));
+    const gated = await refusal(resolvers.Query.agentRevisions({}, { agentRef: ref }, ctx()));
     expect(gated.name).toBe('AgentNotFoundError');
     expect(raced).toEqual(gated);
   });
