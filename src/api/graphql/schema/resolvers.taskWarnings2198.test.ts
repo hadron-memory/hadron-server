@@ -182,7 +182,7 @@ describe('#4855 an assignment that cannot start its worker because a session is 
     await openSession(liam);
     const queued = await create(ctx(member.id), {});
     const c = ctx(member.id);
-    const t = await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, c);
+    const t = await M.assignAgentTask({}, { taskRef: queued.id, assignee: { worker: liam.id } }, c);
     expect(t.assigneeWorkerId).toBe(liam.id);
     expect(codes(c)).toContain('task.assign.session-open');
   });
@@ -191,7 +191,7 @@ describe('#4855 an assignment that cannot start its worker because a session is 
     await openSession(liam, new Date());
     const queued = await create(ctx(member.id), {});
     const c = ctx(member.id);
-    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, c);
+    await M.assignAgentTask({}, { taskRef: queued.id, assignee: { worker: liam.id } }, c);
     expect(codes(c)).toContain('task.assign.session-open');
   });
 
@@ -202,14 +202,14 @@ describe('#4855 an assignment that cannot start its worker because a session is 
     expect(codes(named)).toContain('task.assign.session-open');
     const t = await create(ctx(member.id), { assignee: { worker: rook.id } });
     const r = ctx(member.id);
-    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: liam.id } }, r);
+    await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: liam.id } }, r);
     expect(codes(r)).toContain('task.assign.session-open');
   });
 
   it('no open session, or an ended one: nothing to say', async () => {
     const queued = await create(ctx(member.id), {});
     const none = ctx(member.id);
-    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, none);
+    await M.assignAgentTask({}, { taskRef: queued.id, assignee: { worker: liam.id } }, none);
     expect(codes(none)).not.toContain('task.assign.session-open');
     const s = await openSession(anne);
     await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
@@ -223,7 +223,7 @@ describe('#4855 an assignment that cannot start its worker because a session is 
     await openSession(anne, new Date());
     const queued = await create(ctx(member.id), {});
     const c = ctx(member.id);
-    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, c);
+    await M.assignAgentTask({}, { taskRef: queued.id, assignee: { worker: liam.id } }, c);
     expect(codes(c)).not.toContain('task.assign.session-open');
   });
 
@@ -269,7 +269,7 @@ describe('#4855 an assignment that cannot start its worker because a session is 
     await openSession(liam, new Date());
     const queued = await create(ctx(member.id), {});
     const c = ctx(member.id);
-    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, c);
+    await M.assignAgentTask({}, { taskRef: queued.id, assignee: { worker: liam.id } }, c);
     expect(codes(c)).toEqual(['task.assign.assignee-paused', 'task.assign.session-open']);
   });
 
