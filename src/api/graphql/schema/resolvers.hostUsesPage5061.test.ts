@@ -205,7 +205,7 @@ describe('P4: the size is clamped through pageArgs', () => {
       // One batch holding both the count and the page, so total and hasMore come from the rows' own snapshot.
       expect(tx).toHaveBeenCalledTimes(1);
       expect(tx).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ isolationLevel: 'RepeatableRead' }));
-      expect((tx.mock.calls[0]![0] as unknown[]).length).toBe(2);
+      expect((tx.mock.calls[0]![0] as unknown as unknown[]).length).toBe(2);
     } finally {
       find.mockRestore();
       count.mockRestore();
