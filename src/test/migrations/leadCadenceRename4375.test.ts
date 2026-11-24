@@ -99,12 +99,13 @@ describe('#4375 migration 20261123020000_lead_cadence_rename', () => {
         CREATE TABLE lead_cadence_clocks (worker_id text PRIMARY KEY, app_id text NOT NULL, observed_at timestamp(3) NOT NULL);`);
       await pg.query(`INSERT INTO apps VALUES ('a1'); INSERT INTO workers VALUES ('w1'), ('w2'), ('w3'); INSERT INTO agent_team_events VALUES ('e1'), ('e2');
         UPDATE workers SET reports_to_worker_id = 'w1' WHERE id = 'w3'; UPDATE workers SET reports_to_worker_id = 'w2' WHERE id = 'w1';
-        INSERT INTO coordinator_cadence_episodes (id, app_id, worker_id, event_id, opened_at) VALUES ('old-ep', 'a1', 'w1', 'e1', '2026-11-20 10:00:00');
+        INSERT INTO coordinator_cadence_episodes (id, app_id, worker_id, event_id, opened_at, ended_at) VALUES ('old-ep', 'a1', 'w1', 'e1', '2026-11-20 10:00:00', '2026-11-20 10:30:00');
         INSERT INTO coordinator_cadence_clocks (worker_id, app_id, observed_at) VALUES ('w1', 'a1', '2026-11-01 09:00:00'), ('w2', 'a1', '2026-11-02 09:00:00');
         INSERT INTO lead_cadence_clocks (worker_id, app_id, observed_at) VALUES ('w2', 'a1', '2026-11-22 09:00:00');`);
       await pg.query(NEW);
       expect((await pg.query(`SELECT to_regclass('coordinator_cadence_episodes') AS a, to_regclass('coordinator_cadence_clocks') AS b`)).rows[0]).toEqual({ a: null, b: null });
-      expect((await pg.query(`SELECT id FROM lead_cadence_episodes`)).rows).toEqual([{ id: 'old-ep' }]);
+      // The old episode's non-null ended_at is copied as it was (#4987): a null fixture would let a wrong copy pass.
+      expect((await pg.query(`SELECT id, to_char(ended_at, 'YYYY-MM-DD HH24:MI:SS') AS ended FROM lead_cadence_episodes`)).rows).toEqual([{ id: 'old-ep', ended: '2026-11-20 10:30:00' }]);
       // w1 and w2 lead (w3 reports to w1, w1 reports to w2); w2's row already in the new table wins over the old one.
       expect((await pg.query(`SELECT worker_id, to_char(observed_at, 'YYYY-MM-DD') AS d FROM lead_cadence_clocks ORDER BY worker_id`)).rows)
         .toEqual([{ worker_id: 'w1', d: '2026-11-01' }, { worker_id: 'w2', d: '2026-11-22' }]);

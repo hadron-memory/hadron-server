@@ -3336,14 +3336,42 @@ export async function requireMemoryMemberOwner(
  */
 export async function resolveMemoryRefForMemberGate(
   ctx: Context,
-  args: { ref?: string | null; id?: string | null },
+  ref: string,
 ): Promise<string> {
+  return resolveMemoryRefConcealed(ctx, ref, memoryMemberForbidden);
+}
+
+/**
+ * The shared memory-ref resolution for the existence-hiding mutations
+ * (cor:api:140:02): the memory resolves BEFORE its gate, so every expected
+ * resolution refusal that depends on what exists folds into the gate's uniform
+ * FORBIDDEN, classified by TYPE (#3275, never by words in a message): an unknown or
+ * soft-deleted memory, and an ambiguous legacy URN (`Memory.legacyUrn` is
+ * non-unique by design, so one legacy ref can name two rows; #4761 section 10
+ * P2-1). A blank ref or a relative URN depends only on the input's shape, never on
+ * existence, so it propagates as `BAD_USER_INPUT` / `URN_NOT_QUALIFIED`
+ * (cor:api:140:01).
+ *
+ * The folded set is CLOSED: `resolveMemoryRef` (src/lib/entityRef/memoryRef.ts) throws
+ * only `MemoryNotFoundError` (unknown or soft-deleted), `AmbiguousLegacyUrnError`
+ * (`resolveLegacyAlias`, more than one live legacy match) and the shape errors
+ * (`UrnNotQualifiedError`, `UrnParseError`), never a `GraphQLError` for a miss. The
+ * class of each is pinned in resolvers.memoryShareRefs4137.test.ts (#4761 blind P2-1).
+ */
+export async function resolveMemoryRefConcealed(
+  ctx: Context,
+  ref: string,
+  forbidden: () => GraphQLError,
+  options?: { includeDeleted?: boolean },
+): Promise<string> {
+  const chosen = ref?.trim();
+  if (!chosen) {
+    throw new GraphQLError('memoryRef is required.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
   try {
-    return await resolveMemoryRefArg(ctx.db, args);
+    return (await resolveMemoryRef(ctx.db, chosen, options)).id;
   } catch (e) {
-    if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') {
-      throw memoryMemberForbidden();
-    }
+    if (e instanceof MemoryNotFoundError || e instanceof AmbiguousLegacyUrnError) throw forbidden();
     throw e;
   }
 }
@@ -3357,14 +3385,19 @@ export async function resolveMemoryRefForMemberGate(
  */
 export async function resolveSelfUserRefForMemberGate(
   ctx: Context,
-  args: { ref?: string | null; id?: string | null },
+  ref: string,
 ): Promise<string> {
+  const chosen = ref?.trim();
+  if (!chosen) {
+    throw new GraphQLError('userRef is required.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
   try {
-    return await resolveUserRefArg(ctx.db, args);
+    return (await resolveUserRefOrEmail(ctx.db, chosen)).id;
   } catch (e) {
-    if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') {
-      throw memoryMemberForbidden();
-    }
+    // By type (#3275): an unknown user and two accounts differing only by email
+    // case both fold, or the ambiguity would tell a non-owner the user exists
+    // (#4761 section 10 P3-1). A relative URN is shape-only and propagates.
+    if (e instanceof UserNotFoundError || e instanceof AmbiguousUserRefError) throw memoryMemberForbidden();
     throw e;
   }
 }

@@ -159,7 +159,7 @@ const SITES: Site[] = [
     absent: () => ({ message: 'Resource not found', extensions: { code: 'NOT_FOUND' } }) },
   { name: 'setAgentAssetUploadEnabled, another org\'s ADMIN',
     as: () => ctx(adminB),
-    req: (ref) => ({ query: 'mutation($r: String!) { setAgentAssetUploadEnabled(input: { agentUrn: $r, enabled: true }) { id } }', variables: { r: ref } }) },
+    req: (ref) => ({ query: 'mutation($r: String!) { setAgentAssetUploadEnabled(input: { agentRef: $r, enabled: true }) { id } }', variables: { r: ref } }) },
   { name: 'beginAssetUpload (agentUrn), another org\'s user',
     as: () => ctx(adminB),
     req: (ref) => ({ query: 'mutation($r: String!) { beginAssetUpload(input: { agentUrn: $r, filename: "a.png", mimeType: "image/png", sizeBytes: 10, uploadIntent: USER }) { uploadId } }', variables: { r: ref } }) },
@@ -292,7 +292,7 @@ describe('#1946 fix head (Atilla\'s P2s on #1955)', () => {
     for (const req of [
       { query: 'mutation($r: String!) { beginAssetUpload(input: { agentUrn: $r, filename: "a.png", mimeType: "image/png", sizeBytes: 10, uploadIntent: USER }) { uploadId } }', variables: { r: urnOf(secret) } },
       { query: 'query($r: String!) { agentAssets(agentUrn: $r) { total } }', variables: { r: urnOf(secret) } },
-      { query: 'mutation($r: String!) { setAgentAssetUploadEnabled(input: { agentUrn: $r, enabled: true }) { id } }', variables: { r: urnOf(secret) } },
+      { query: 'mutation($r: String!) { setAgentAssetUploadEnabled(input: { agentRef: $r, enabled: true }) { id } }', variables: { r: urnOf(secret) } },
     ]) {
       tripped = false;
       const a = await ask({ db: faulty, userId: adminB, roles: ['READER'] } as Context, req.query, req.variables);

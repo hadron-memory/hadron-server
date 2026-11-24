@@ -8947,8 +8947,9 @@ export const typeDefs = `#graphql
     URN (per spec 007 ID-or-URN dispatch). URN inputs MUST be fully
     qualified (org:agent) per spec 022 — relative-form URNs are rejected
     as GraphQL errors with extensions.code "URN_NOT_QUALIFIED".
+    #4368: renamed from agentUrn (hrn:node:hadronmemory.com:specs:cor:api:140:01); no alias.
     """
-    agentUrn: String!
+    agentRef: String!
     enabled:  Boolean!
   }
 
@@ -16437,7 +16438,7 @@ export const typeDefs = `#graphql
         caller does not own — both return FORBIDDEN before grantee lookup.
         An owner of a wrong-class memory (for example private) can pass that
         principal check and receive InvalidMemoryClassForShareError.
-      - MemoryShareGranteeMissingError — granteeId doesn't resolve to
+      - MemoryShareGranteeMissingError — the grantee doesn't resolve to
         an existing User. Only reachable when the caller passes the
         principal guard.
       - CrossOrgShareNotAllowedError — the grantee is not a member of an
@@ -16448,11 +16449,10 @@ export const typeDefs = `#graphql
         refusal; the ordinary GraphQL principal precheck conceals absence.
     """
     createMemoryShare(
-      memoryId: ID!
-      "#769 — the grantee as a reference resolved server-side: a user id, email, handle, or hrn:user:<handle> URN. Resolution sees the full user table, so a cross-org personal-memory share works by email/handle. Supply this OR granteeId."
-      granteeRef: String
-      "Deprecated (#769): the grantee's user PK. Use granteeRef, which also accepts email / handle / URN."
-      granteeId: ID @deprecated(reason: "Use granteeRef (accepts id / email / handle / hrn:user URN).")
+      "#4137 — the memory as an id or hrn:mem URN (was memoryId)."
+      memoryRef: ID!
+      "#769 — the grantee as a reference resolved server-side: a user id, email, handle, or hrn:user:<handle> URN. Resolution sees the full user table, so a cross-org personal-memory share works by email/handle. #4137: the only way to name the grantee (the deprecated granteeId is gone)."
+      granteeRef: ID!
       role: MemoryShareRole!
     ): CreateMemorySharePayload!
 
@@ -16491,23 +16491,22 @@ export const typeDefs = `#graphql
     deleteMemoryShare(
       "The memory, by id or URN (#785)."
       memoryRef: ID!
-      "#769 — the grantee as a server-resolved reference (id / email / handle / hrn:user URN). Supply this OR granteeId. Omit BOTH to target the caller's own share (self-removal)."
+      "#769 — the grantee as a server-resolved reference (id / email / handle / hrn:user URN). Omit it to target the caller's own share (self-removal). #4137: the deprecated granteeId is gone."
       granteeRef: String
-      granteeId: ID @deprecated(reason: "Use granteeRef (accepts id / email / handle / hrn:user URN).")
     ): DeleteMemorySharePayload!
 
     """
     023-app-shape US3 — change the role on an existing MemoryShare.
-    Throws MemoryShareNotFoundError if the (memoryId, granteeId) row
+    Throws MemoryShareNotFoundError if the (memory, grantee) row
     doesn't exist — use createMemoryShare to upsert.
 
     Caller-authority rule matches createMemoryShare.
     """
     updateMemoryShareRole(
-      memoryId: ID!
-      "#769 — the grantee as a server-resolved reference (id / email / handle / hrn:user URN). Supply this OR granteeId."
-      granteeRef: String
-      granteeId: ID @deprecated(reason: "Use granteeRef (accepts id / email / handle / hrn:user URN).")
+      "#4137 — the memory as an id or hrn:mem URN (was memoryId)."
+      memoryRef: ID!
+      "#769 — the grantee as a server-resolved reference (id / email / handle / hrn:user URN). #4137: the deprecated granteeId is gone."
+      granteeRef: ID!
       role: MemoryShareRole!
     ): UpdateMemoryShareRolePayload!
 
@@ -16534,12 +16533,10 @@ export const typeDefs = `#graphql
         existing sole owner to reader/writer.
     """
     addMemoryMember(
-      "#764 — the memory as an id or URN. Supply this OR memoryId."
-      memoryRef: String
-      memoryId: ID @deprecated(reason: "Use memoryRef (accepts id / URN).")
-      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
-      userRef: String
-      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+      "#764 — the memory as an id or URN. #4137: the deprecated memoryId is gone."
+      memoryRef: ID!
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. #4137: the deprecated userId is gone."
+      userRef: ID!
       role: MemoryMemberRole!
     ): AddMemoryMemberPayload!
 
@@ -16563,12 +16560,10 @@ export const typeDefs = `#graphql
       - LastOwnerProtectedError (FR-038) — would demote the sole owner.
     """
     updateMemoryMemberRole(
-      "#764 — the memory as an id or URN. Supply this OR memoryId."
-      memoryRef: String
-      memoryId: ID @deprecated(reason: "Use memoryRef (accepts id / URN).")
-      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
-      userRef: String
-      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+      "#764 — the memory as an id or URN. #4137: the deprecated memoryId is gone."
+      memoryRef: ID!
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. #4137: the deprecated userId is gone."
+      userRef: ID!
       role: MemoryMemberRole!
     ): UpdateMemoryMemberRolePayload!
 
@@ -16585,12 +16580,10 @@ export const typeDefs = `#graphql
     being removed (self-removal).
     """
     removeMemoryMember(
-      "#764 — the memory as an id or URN. Supply this OR memoryId."
-      memoryRef: String
-      memoryId: ID @deprecated(reason: "Use memoryRef (accepts id / URN).")
-      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
-      userRef: String
-      userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+      "#764 — the memory as an id or URN. #4137: the deprecated memoryId is gone."
+      memoryRef: ID!
+      "#764 — the user as an id / email / handle / hrn:user:<handle> URN. #4137: the deprecated userId is gone."
+      userRef: ID!
     ): RemoveMemoryMemberPayload!
 
     """
