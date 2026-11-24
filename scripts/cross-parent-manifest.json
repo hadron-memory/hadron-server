@@ -330,6 +330,7 @@
     "TeamMetricsWorkers": "value",
     "TeamMetricsFlow": "value",
     "WorkerUtilization": "value",
+    "TeamHealthWorker": "value",
     "MatchFailure": "value",
     "WebPollsPage": "envelope",
     "SigningRequestsPage": "envelope",

@@ -987,6 +987,9 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- #3819 slice 1: the saturation episodes.
 \ir saturation-invariants.sql
 
+-- #4531: the dark-team episodes.
+\ir team-dark-invariants.sql
+
 -- #3997 (S2 of #3991): App-owned secrets, versions, events, tombstones. One source, shared verbatim with migration
 -- 20261114120000_app_secret_versions. After worker-reference-invariants.sql: it puts the #1162 fence on its three tables.
 \ir secret-versions-invariants.sql
