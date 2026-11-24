@@ -11,6 +11,7 @@ import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { encryptNodeFields, encryptNodeFieldsWithKey, isAuthenticatedStringEnvelope } from '../../../lib/nodeCrypto.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 // Prevent git writes
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -567,7 +568,7 @@ describe('encryptMemory', () => {
     await db.memory.update({ where: { id: session.memoryId! }, data: { class: 'private' } });
 
     const key = generateDataKey().raw.toString('base64');
-    const encrypted = await resolvers.Mutation.encryptMemory(
+    const encrypted = await encryptWithSecret(
       {},
       { memoryRef: session.memoryId!, dataKey: key },
       sessionCtx,
@@ -591,7 +592,7 @@ describe('encryptMemory', () => {
       { agentRef: agent.id, externalUserId: 'mm-1' },
       appCtx(secretApp.id),
     ));
-    const completed = await resolvers.Mutation.encryptMemory(
+    const completed = await encryptWithSecret(
       {},
       { memoryRef: session.memoryId!, dataKey: key },
       await sessionOwnerCtx(secretApp.id, session.id),
@@ -606,7 +607,7 @@ describe('encryptMemory', () => {
       appCtx(secretApp.id),
     ));
     await db.memory.update({ where: { id: session.memoryId! }, data: { keyVerifier: null } });
-    await expect(resolvers.Mutation.encryptMemory(
+    await expect(encryptWithSecret(
       {}, { memoryRef: session.memoryId!, dataKey: key }, await sessionOwnerCtx(secretApp.id, session.id),
     )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT' } });
   });
@@ -655,7 +656,7 @@ describe('encryptMemory', () => {
       },
     });
 
-    await expect(resolvers.Mutation.encryptMemory(
+    await expect(encryptWithSecret(
       {}, { memoryRef: first.memoryId!, dataKey: wrongKey }, await sessionOwnerCtx(secretApp.id, first.id, false),
     )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId: first.memoryId } });
     expect((await db.memory.findUniqueOrThrow({ where: { id: first.memoryId! } })).keyVerifier).toBeNull();
@@ -690,7 +691,7 @@ describe('encryptMemory', () => {
     await db.memory.update({ where: { id: session.memoryId! }, data: { class: 'private' } });
 
     const key = generateDataKey().raw.toString('base64');
-    const encrypted = await resolvers.Mutation.encryptMemory(
+    const encrypted = await encryptWithSecret(
       {},
       { memoryRef: memoryRow.urn, dataKey: key },
       sessionCtx,
@@ -712,7 +713,7 @@ describe('encryptMemory', () => {
 
     const key = generateDataKey().raw.toString('base64');
     await expect(
-      resolvers.Mutation.encryptMemory(
+      encryptWithSecret(
         {},
         { memoryRef: session.memoryId!, dataKey: key },
         await sessionOwnerCtx(plaintextApp.id, session.id),
