@@ -444,12 +444,15 @@ export const orgMutations = {
       // (#677) — the ONE org soft-delete cascade, shared with deleteUser's
       // sole-member-org branch (see softDeleteOrganizationCore for the
       // idempotency + secret-sweep rationale).
-      const limitChanges: OwnerLimitChange[] = [];
-      const teardowns = await withAuthorizedTx(
+      const { teardowns, limitChanges } = await withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: resolvedId }],
         async (txCtx) => { requireRole(txCtx, 'ADMIN'); },
-        (tx) => softDeleteOrganizationCore(tx, resolvedId, undefined, ctx.userId ?? ctx.clientId ?? null, limitChanges),
+        async (tx) => {
+          const limitChanges: OwnerLimitChange[] = [];
+          const teardowns = await softDeleteOrganizationCore(tx, resolvedId, undefined, ctx.userId ?? ctx.clientId ?? null, limitChanges);
+          return { teardowns, limitChanges };
+        },
         { lockMode: 'exclusive', allowDeletedOrg: true },
       );
       // #4828: after the commit, once authorization has been judged, ask the Telegram and Slack tools to drop their side.

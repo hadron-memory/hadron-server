@@ -65,6 +65,23 @@ async function readableUser(ctx: Context, userRef: string): Promise<OwnerRef> {
   return { userId: id };
 }
 
+/**
+ * The organization an `orgRef` read is about: its live ADMIN or OWNER, or a platform admin. Anyone else gets the same refusal whether the
+ * ref names an organization, none, or (an old address) more than one; only a platform admin is told which. Unlike `readableUser` this
+ * admits a run acting for an ADMIN, as `creditBalance` does: the organization's totals are the role's to read, a person's are their own.
+ */
+async function readableOrg(ctx: Context, orgRef: string): Promise<OwnerRef> {
+  let id: string;
+  try {
+    ({ id } = await resolveOrgRef(ctx.db, orgRef));
+  } catch (error) {
+    if (!isPlatformAdmin(ctx) && refNamesNothing(error, { ambiguousNamesNothing: true })) throw authorizationDenied();
+    throw error;
+  }
+  await requireOrgRole(ctx, id, 'ADMIN');
+  return { organizationId: id };
+}
+
 /** Who may write limits. One predicate, judged on the request and again in the transaction (#5012 widens it to the billing role). */
 function requireLimitWriter(ctx: Context): void {
   if (!isPlatformAdmin(ctx)) throw authorizationDenied();
@@ -122,9 +139,7 @@ export const ownerLimitQueries = {
   ownerLimits: async (_: unknown, args: OwnerArgs, ctx: Context) => {
     assertOneOwner(args);
     if (args.orgRef != null) {
-      const { id } = await resolveOrgRef(ctx.db, args.orgRef);
-      await requireOrgRole(ctx, id, 'ADMIN');
-      return ownerUsage(ctx, { organizationId: id });
+      return ownerUsage(ctx, await readableOrg(ctx, args.orgRef));
     }
     return ownerUsage(ctx, await readableUser(ctx, args.userRef!));
   },
