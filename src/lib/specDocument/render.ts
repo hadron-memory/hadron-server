@@ -164,11 +164,16 @@ export function splitAtClosingRule(text: string): { body: string; tail: string }
   return { body: text, tail: '' };
 }
 
-/** The text of a numeric character reference decoded (`&#45;`, `&#x2d;`, and without the `;`), so an encoded id compares as a browser reads it. */
+/**
+ * An id value as a browser reads it, for the character references that can spell an anchor character: numeric ones with
+ * any zero padding (`&#45;`, `&#x2d;`, `&#0000045`, the `;` optional) and the named ones that spell `.`, `_` or the
+ * letters `fj` (`&period;`, `&lowbar;`, `&UnderBar;`, `&fjlig;`; a walk of the HTML entity table finds no others, and
+ * `&hyphen;` and `&dash;` are U+2010, not the ASCII hyphen). ONE left-to-right pass, as the HTML tokenizer reads them:
+ * an unterminated `&#x2d` followed by `&fjlig;` is two references, not one hex run.
+ */
 function decodeNumericRefs(v: string): string {
-  // The only named references that spell characters an anchor can hold (a walk of the whole HTML entity table): `.`, `_`
-  // and the two letters `fj`. `&hyphen;` and `&dash;` are U+2010, not the ASCII hyphen, so they are not decoded.
-  return v.replace(/&(period|lowbar|UnderBar|fjlig);/g, (_a, n: string) => (n === 'period' ? '.' : n === 'fjlig' ? 'fj' : '_')).replace(/&#(?:[xX]0*([0-9a-fA-F]{1,6})|0*([0-9]{1,7}));?/g, (all, hex?: string, dec?: string) => {
+  return v.replace(/&(?:#[xX]0*([0-9a-fA-F]{1,6});?|#0*([0-9]{1,7});?|(period|lowbar|UnderBar|fjlig);)/g, (all, hex?: string, dec?: string, name?: string) => {
+    if (name !== undefined) return name === 'period' ? '.' : name === 'fjlig' ? 'fj' : '_';
     const cp = hex !== undefined ? parseInt(hex, 16) : parseInt(dec as string, 10);
     return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : all;
   });
