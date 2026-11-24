@@ -57,7 +57,6 @@ describe('assertProductionSigningSecret (#421)', () => {
       prod({
         JWT_SECRET: 'short',
         WORKER_PROOF_TOKEN_SECRET: 'x'.repeat(64),
-        TEAM_ATTENTION_TOKEN_SECRET: 'z'.repeat(64), // the pre-#4509 name, still read for one cycle
         CSRF_SECRET: 'y'.repeat(64),
       }),
     );

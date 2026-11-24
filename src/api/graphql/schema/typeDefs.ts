@@ -2189,7 +2189,8 @@ export const typeDefs = `#graphql
 
   """
   046-usage-metering: append-only org credit ledger row. Signed
-  micro-cents as a base-10 integer string (grants +, debits -).
+  micro-cents as a base-10 integer string (grants +, debits -,
+  adjustments either sign).
   """
   type CreditLedgerEntry {
     id: ID!
@@ -2287,14 +2288,55 @@ export const typeDefs = `#graphql
     """
     expiresAt: String
     """
-    Idempotency + provenance pair (both or neither), e.g.
-    ('stripe-checkout', <session id>). (sourceType, sourceId) is unique
-    across the ledger - re-granting the same pair returns the EXISTING
-    entry instead of double-crediting (at-least-once webhook safety).
+    Idempotency + provenance pair, e.g. ('stripe-checkout', <session id>).
+    Required when the mutation runs (BAD_USER_INPUT when either half is
+    missing or blank; hrn:node:hadronmemory.com:specs:cor:dmo:170:03, every
+    entry names its source). (sourceType, sourceId) is unique across the
+    ledger - re-granting the same pair, account, amount and kind returns the
+    EXISTING entry instead of double-crediting (at-least-once webhook
+    safety); any other entry on that pair is IDEMPOTENCY_CONFLICT. Refused
+    (trimmed, case-insensitive) are the source types the server writes
+    itself: usage-event, grant-expiry, period-grant, cost-correction.
     """
     sourceType: String
+    """
+    The id within sourceType; required with it when the mutation runs.
+    """
     sourceId: String
     note: String
+  }
+
+  """
+  A signed correction on an organization's credit ledger, such as a refund
+  (hrn:node:hadronmemory.com:specs:cor:dmo:170:03). It is written as a new
+  adjustment entry, never as an edit of another
+  (hrn:node:hadronmemory.com:specs:cor:dmo:170:08).
+  """
+  input AdjustCreditsInput {
+    orgRef: String!
+    """
+    Signed, non-zero micro-cents, base-10 integer string within int8 (a
+    leading minus lowers the balance; no plus sign or fraction).
+    """
+    amountMicroCents: String!
+    """
+    Idempotency + provenance pair, e.g. ('refund', <refund id>); neither
+    half may be blank. The same pair, account, amount and kind returns the
+    EXISTING entry; any other entry on that pair, a grant included, is
+    IDEMPOTENCY_CONFLICT. Refused (trimmed, case-insensitive) are the source
+    types the server writes itself: usage-event, grant-expiry, period-grant,
+    cost-correction.
+    """
+    sourceType: String!
+    """
+    The id within sourceType; must not be blank.
+    """
+    sourceId: String!
+    """
+    Why the correction was made; must not be blank. Kept as long as the
+    entry: codes and ids, never personal data.
+    """
+    note: String!
   }
 
   "#1591 — whether a node's approval still covers its current text (#1611: title, abstract and content under approval-hash v1; a metadata-only revision keeps it)."
@@ -13932,6 +13974,8 @@ export const typeDefs = `#graphql
     setAiModelPrice(input: SetAiModelPriceInput!): AiModelPrice!
     "Mint credits for an org - a positive grant ledger row (spec 046). PLATFORM ADMIN ONLY (self-grant risk); processor top-ups land here later."
     grantCredits(input: GrantCreditsInput!): CreditLedgerEntry!
+    "Write a signed adjustment entry on an org's credit ledger, e.g. a refund (hrn:node:hadronmemory.com:specs:cor:dmo:170:03; a correction is a new entry, hrn:node:hadronmemory.com:specs:cor:dmo:170:08). PLATFORM ADMIN ONLY. Idempotent on (sourceType, sourceId); a different account, amount or kind on that pair is IDEMPOTENCY_CONFLICT."
+    adjustCredits(input: AdjustCreditsInput!): CreditLedgerEntry!
     "Author YOUR user-layer action-policy link (cor:acl:040:02, #510). Null clears (= no restriction)."
     updateMyPolicy(policy: JSON): User!
 
