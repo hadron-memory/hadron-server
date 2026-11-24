@@ -28,6 +28,8 @@
  *  - a `pre` at the head of a line (CommonMark type 1) with none of `</pre>`, `</script>`, `</style>`, `</textarea>` after it;
  *  - a comment with no `-->`, a CDATA section with no `]]>`, a processing instruction with no `?>`, a declaration with no `>`
  *    (CDATA and a processing instruction end for the browser at the first `>`, which is where the scan goes on).
+ * A raw-text element at the head of a line that CommonMark does not start a type 1 block with (`title`, `xmp`, `iframe` and the like)
+ * is judged like an inline one, so an end tag only inside code leaves it open: stricter than needed, anchor-safe, and deliberate.
  * Not read: fenced code, indented code (also inside a block quote), inline code spans and a backslash-escaped `<` (Markdown
  * shows those as text, and a character reference is not decoded inside code, so escaping there would change what a code
  * sample shows). A four-space continuation of a list item is read as indented code, so an unterminated construct in one is
@@ -47,9 +49,19 @@ const isLetter = (c: string | undefined): boolean => c !== undefined && ((c >= '
 const isBlank = (c: string): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
 const isAsciiPunct = (c: string | undefined): boolean => c !== undefined && /[!-/:-@[-`{-~]/.test(c);
 
-/** The end of the paragraph that holds `i`: the next blank line, or the end of the text. */
+/**
+ * The end of the inline run that holds `i`: where a code span that opened at `i` can no longer close. A code span never crosses a
+ * block boundary, so the run ends at a blank line (also with CRLF) or at a line that starts another block: an ATX heading, a fence,
+ * a quote, a list item or a thematic break. A heading is one line, so a span that opens in one ends with it. Where a line only
+ * looks like a block start the run is cut short, which means fewer code spans are skipped and more `<` are judged: the safe side.
+ */
+const BLOCK_START = /\n(?: {0,3}(?:#{1,6}(?:[ \t\r]|$)|`{3,}|~{3,}|>|[-+*](?:[ \t\r]|$)|\d{1,9}[.)](?:[ \t\r]|$)|(?:[-*_][ \t]*){3,}\r?(?:\n|$))|[ \t\r]*\n)/gm;
 function paragraphEnd(text: string, i: number): number {
-  const re = /\n[ \t]*\n/g;
+  const lineStart = text.lastIndexOf('\n', i - 1) + 1;
+  const eol = text.indexOf('\n', i);
+  const lineEnd = eol === -1 ? text.length : eol;
+  if (/^ {0,3}#{1,6}(?:[ \t\r]|$)/.test(text.slice(lineStart, lineEnd))) return lineEnd;
+  const re = new RegExp(BLOCK_START.source, BLOCK_START.flags);
   re.lastIndex = i;
   const m = re.exec(text);
   return m ? m.index : text.length;
@@ -162,7 +174,9 @@ function firstUnterminated(text: string, from: number): number {
       continue;
     }
     // CDATA and a processing instruction: Markdown ends the block at `]]>` / `?>` (both must be there), but the browser reads
-    // either as a bogus comment that ends at the FIRST `>`, so the scan goes on from there.
+    // either as a bogus comment that ends at the FIRST `>`, so the scan goes on from there. The closer is searched RAW, on purpose:
+    // inline HTML of this kind takes everything up to its closer, backticks included, so a closer inside what looks like a code span
+    // is still its closer (unlike a raw-text element, whose end tag is a separate tag that code can hide).
     if (text.startsWith('<![CDATA[', i)) {
       const first = text.indexOf('>', i + 2);
       if (first === -1 || text.indexOf(']]>', i + 9) === -1) return i;

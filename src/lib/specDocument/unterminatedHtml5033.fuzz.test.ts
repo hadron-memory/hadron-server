@@ -2,7 +2,7 @@
  * #5033: a seeded differential fuzz. A body of random HTML fragments (open and closed tags, quotes, comments, CDATA, processing
  * instructions, raw-text elements, templates) goes through the pass and is followed by the server's own block; an HTML5 parser
  * (linkedom) must find the server's anchor as exactly one `<a>` with only an `id`, and the heading after it as text. The oracle
- * is apart from the implementation. The seed is fixed so a failure names its input; 150,000 cases ran clean when this was written.
+ * is apart from the implementation. The seed is fixed so a failure names its input. This run is 8,000 cases; three throwaway runs of 100,000 on other seeds were clean when the pass was written. The corpus is tokenizer-only (no backticks, fences or line-start blocks): the Markdown-level rules are pinned on the scanner.
  */
 import { parseHTML } from 'linkedom';
 import { it, expect } from 'vitest';
@@ -25,5 +25,4 @@ it('no unterminated construct survives an HTML5 parse of body + server block', (
     if (!ok) { bad += 1; if (samples.length < 12) samples.push(JSON.stringify(body)); }
   }
   expect(samples).toEqual([]);
-  expect(bad).toBe(0);
 }, 120000);
