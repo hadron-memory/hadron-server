@@ -1231,15 +1231,11 @@ export const appRunQueries = {
     // shape error (BAD_USER_INPUT, pure and local: no run is looked up); a well-shaped ref that names no run, an
     // ambiguous legacy ref and a run outside this scope all answer the SAME exactly-empty page. Only a resolver miss
     // folds: a database fault propagates. The RESOLVED id feeds the filter, never the URN.
-    let parentRunId: string | null | undefined;
-    if (parentRunRef === undefined) {
-      parentRunId = undefined;
-    } else if (parentRunRef === null) {
-      parentRunId = null;
-    } else {
+    let parentRunId = parentRunRef; // undefined and null pass through; a ref is replaced by the id it resolves to
+    if (parentRunRef !== undefined && parentRunRef !== null) {
       assertAppRunRefShape(parentRunRef);
       try {
-        ({ id: parentRunId } = await resolveAppRunRef(ctx.db, parentRunRef));
+        parentRunId = (await resolveAppRunRef(ctx.db, parentRunRef)).id;
       } catch (error) {
         if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
         return { items: [], total: 0 };
