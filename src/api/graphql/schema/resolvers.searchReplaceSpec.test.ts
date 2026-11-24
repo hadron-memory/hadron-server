@@ -10,6 +10,7 @@ import { decryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -350,7 +351,7 @@ describe('searchReplaceInSpecNodes', () => {
     }, ctx());
     const spec = await node('pas:050:01', { abstract: 'cat summary' }, privateDraft.id);
     const dataKey = Buffer.alloc(32, 9).toString('base64');
-    await resolvers.Mutation.encryptMemory(null, { memoryRef: privateDraft.id, dataKey }, ctx());
+    await encryptWithSecret(null, { memoryRef: privateDraft.id, dataKey }, ctx());
     const key = parseDataKey(dataKey);
     sessionKeyCache.set('spec-replace-test', privateDraft.id, key);
 
@@ -380,7 +381,7 @@ describe('searchReplaceInSpecNodes', () => {
       orgRef: org.id, name: 'locked-draft', memoryClass: 'private', draftCorpus: true,
     }, ctx());
     const spec = await node('pas:051:01', {}, privateDraft.id);
-    await resolvers.Mutation.encryptMemory(null, {
+    await encryptWithSecret(null, {
       memoryRef: privateDraft.id, dataKey: Buffer.alloc(32, 10).toString('base64'),
     }, ctx());
     sessionKeyCache.clear();

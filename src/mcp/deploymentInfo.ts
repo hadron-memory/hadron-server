@@ -227,13 +227,18 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // argument and GraphQL refuses the whole operation. The existence-hiding order is unchanged: memory resolved, principal gate,
 // counterparty resolved. (0.34.0 is #5046, #4368, merged first.)
 //
-// 0.36.0 — SEMANTICS BREAK, Billing A1 (#5007): new mutation `adjustCredits(input: AdjustCreditsInput!)` (a signed
+// 0.36.0 — BREAKING, #1796 step 2: `encryptMemory(memoryRef)` no longer accepts `dataKey` or `passphrase`, no alias.
+// A document naming either is refused as an unknown argument before any resolver runs. The secret travels only in
+// `x-hadron-memory-keys` (strict owner) or `x-hadron-operation-key` (owning App completion). CLI floor: hadron-cli
+// v0.56.0.
+//
+// 0.37.0 — SEMANTICS BREAK, Billing A1 (#5007): new mutation `adjustCredits(input: AdjustCreditsInput!)` (a signed
 // ledger correction, platform admin only). `grantCredits` changes behaviour: a grant without a source pair
 // (`sourceType`, `sourceId`) is now refused with BAD_USER_INPUT when the mutation runs, so a lagging client that
 // granted without one fails at run time (its document still validates, because the SDL field types are unchanged).
 // The server-written source types are refused, and a mismatched replay answers one fixed IDEMPOTENCY_CONFLICT sentence
-// instead of naming the stored entry. (0.35.0 is #4761, #4137, merged first.)
-export const HADRON_SERVER_VERSION = '0.36.0';
+// instead of naming the stored entry. (0.36.0 is #5066, #1796, merged first.)
+export const HADRON_SERVER_VERSION = '0.37.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

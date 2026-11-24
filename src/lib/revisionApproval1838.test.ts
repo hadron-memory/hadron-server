@@ -11,6 +11,7 @@ import { revisionApprovalOf, endApprovalsOnEncryptedEntry } from './nodeApproval
 import { revisionsExemptFromPruning } from './nodeRevisionSnapshot.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../mcp/server.js';
+import { encryptWithSecret } from '../test/encryptMemoryWithSecret.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -211,7 +212,7 @@ describe('entering an encrypted memory ends approvals (#1838, cor:dmo:120:04)', 
     await resolvers.Mutation.approveNode(null, { nodeRef: gone.id }, as());
     await resolvers.Mutation.deleteNode(null, { nodeRef: gone.id }, as());
     const dataKey = Buffer.alloc(32, 9).toString('base64');
-    await resolvers.Mutation.encryptMemory(null, { memoryRef: enc.id, dataKey }, as());
+    await encryptWithSecret(null, { memoryRef: enc.id, dataKey }, as());
     for (const id of [n.id, gone.id]) {
       const row = await db.node.findUniqueOrThrow({ where: { id } });
       expect(row.approvalHash).toBeNull();
