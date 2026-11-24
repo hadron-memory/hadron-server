@@ -10,7 +10,9 @@
 -- src/api/graphql/schema/resolvers.appRunDurationSort855.test.ts reads the catalog of a database built that way.
 --
 -- Cost: ADD COLUMN ... GENERATED ... STORED rewrites app_runs under an ACCESS EXCLUSIVE lock for the length of the
--- rewrite, and the index build then takes a SHARE lock (writes wait; reads do not). Both run once, in this migration.
+-- rewrite. Prisma runs this file as ONE transaction, so that ACCESS EXCLUSIVE lock is held through the index build too
+-- (reads AND writes wait for rewrite plus index build; measured with `prisma migrate deploy`). Both run once, in this
+-- migration. Merge outside :15 to :27 UTC, when the hourly pg_dump would hold the lock queue.
 -- No backfill step: the column computes itself for every existing row during the rewrite.
 ALTER TABLE "app_runs"
   ADD COLUMN IF NOT EXISTS "duration_ms" BIGINT
