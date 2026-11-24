@@ -1703,6 +1703,7 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
     // issued, in order. Recorded on main before the change; the organization contexts must not move.
     it('freezes the answers and the query order of the organization contexts', async () => {
       const host = await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host' });
+      await createConfig({ hadronServerId: server.id }, 'hostonly', { apiKey: 'sk-hostonly' });
       const orgCfg = await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org' });
       await createConfig({ organizationId: org.id }, 'orgonly', { apiKey: 'sk-orgonly' });
       const orgApp = await db.app.create({ data: { id: generateId(), name: 'Org App', urn: 'acme-036:app-5075', organizationId: org.id } });
@@ -1727,6 +1728,10 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
           calls.length = 0;
           const one = await resolveAiConfig(db, 'default', c);
           const single = [...calls];
+          // #5075 (SEC10 P3-1): a platform-only name falls through the organization level to the platform level.
+          calls.length = 0;
+          const fall = await resolveAiConfig(db, 'hostonly', c);
+          const fallThrough = { level: fall?.ownerType ?? null, calls: [...calls] };
           calls.length = 0;
           const many = await resolveAiConfigs(db, c);
           out[label] = {
@@ -1734,22 +1739,32 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
             configId: one ? (one.config.id === orgCfg.id ? 'org' : one.config.id === host.id ? 'host' : 'other') : null,
             names: many.map((r) => `${r.ownerType}:${r.config.name}`),
             single,
+            fallThrough,
             list: [...calls],
           };
         }
       } finally { spies.forEach((sp) => sp.mockRestore()); }
-      expect(out).toEqual({
+            expect(out).toEqual({
         'org App alone': {
           'level': 'ORGANIZATION',
           'configId': 'org',
           'names': [
             'ORGANIZATION:default',
+            'HADRON_SERVER:hostonly',
             'ORGANIZATION:orgonly'
           ],
           'single': [
             'app',
             'cfg1'
           ],
+          'fallThrough': {
+            'level': 'HADRON_SERVER',
+            'calls': [
+              'app',
+              'cfg1',
+              'cfg1'
+            ]
+          },
           'list': [
             'app',
             'cfgN',
@@ -1761,6 +1776,7 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
           'configId': 'org',
           'names': [
             'ORGANIZATION:default',
+            'HADRON_SERVER:hostonly',
             'ORGANIZATION:orgonly'
           ],
           'single': [
@@ -1768,6 +1784,15 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
             'agent',
             'cfg1'
           ],
+          'fallThrough': {
+            'level': 'HADRON_SERVER',
+            'calls': [
+              'app',
+              'agent',
+              'cfg1',
+              'cfg1'
+            ]
+          },
           'list': [
             'app',
             'agent',
@@ -1780,6 +1805,7 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
           'configId': 'org',
           'names': [
             'ORGANIZATION:default',
+            'HADRON_SERVER:hostonly',
             'ORGANIZATION:orgonly'
           ],
           'single': [
@@ -1787,6 +1813,15 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
             'agent',
             'cfg1'
           ],
+          'fallThrough': {
+            'level': 'HADRON_SERVER',
+            'calls': [
+              'app',
+              'agent',
+              'cfg1',
+              'cfg1'
+            ]
+          },
           'list': [
             'app',
             'agent',
@@ -1799,6 +1834,7 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
           'configId': 'org',
           'names': [
             'ORGANIZATION:default',
+            'HADRON_SERVER:hostonly',
             'ORGANIZATION:orgonly'
           ],
           'single': [
@@ -1806,6 +1842,15 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
             'agent',
             'cfg1'
           ],
+          'fallThrough': {
+            'level': 'HADRON_SERVER',
+            'calls': [
+              'app',
+              'agent',
+              'cfg1',
+              'cfg1'
+            ]
+          },
           'list': [
             'app',
             'agent',
@@ -1818,12 +1863,21 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
           'configId': 'org',
           'names': [
             'ORGANIZATION:default',
+            'HADRON_SERVER:hostonly',
             'ORGANIZATION:orgonly'
           ],
           'single': [
             'agent',
             'cfg1'
           ],
+          'fallThrough': {
+            'level': 'HADRON_SERVER',
+            'calls': [
+              'agent',
+              'cfg1',
+              'cfg1'
+            ]
+          },
           'list': [
             'agent',
             'cfgN',
@@ -1834,11 +1888,18 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
           'level': 'HADRON_SERVER',
           'configId': 'host',
           'names': [
-            'HADRON_SERVER:default'
+            'HADRON_SERVER:default',
+            'HADRON_SERVER:hostonly'
           ],
           'single': [
             'cfg1'
           ],
+          'fallThrough': {
+            'level': 'HADRON_SERVER',
+            'calls': [
+              'cfg1'
+            ]
+          },
           'list': [
             'cfgN'
           ]
