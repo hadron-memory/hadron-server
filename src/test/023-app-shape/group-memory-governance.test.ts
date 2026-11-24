@@ -154,12 +154,12 @@ describe('US4: group memory governance via MemoryMember', () => {
     await locked;
 
     const addition = resolvers.Mutation.addMemoryMember({}, {
-      memoryId: memory.id, userId: fx.u1Id, role: 'reader',
+      memoryRef: memory.id, userRef: fx.u1Id, role: 'reader',
     }, userCtx(fx.ownerUserId));
     try {
       await waitForLockWaitersOfType(db, 'transactionid', 1);
       const removal = resolvers.Mutation.removeMemoryMember({}, {
-        memoryId: memory.id, userId: fx.u1Id,
+        memoryRef: memory.id, userRef: fx.u1Id,
       }, userCtx(fx.ownerUserId));
       await waitForLockWaitersOfType(db, 'advisory', 1);
       release();
@@ -244,17 +244,17 @@ describe('US4: group memory governance via MemoryMember', () => {
     );
     await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u1Id, role: 'reader' },
+      { memoryRef: mem.id, userRef: fx.u1Id, role: 'reader' },
       userCtx(fx.ownerUserId),
     );
     await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u2Id, role: 'writer' },
+      { memoryRef: mem.id, userRef: fx.u2Id, role: 'writer' },
       userCtx(fx.ownerUserId),
     );
     await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u3Id, role: 'owner' },
+      { memoryRef: mem.id, userRef: fx.u3Id, role: 'owner' },
       userCtx(fx.ownerUserId),
     );
 
@@ -279,13 +279,13 @@ describe('US4: group memory governance via MemoryMember', () => {
     );
     await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u4Id, role: 'reader' },
+      { memoryRef: mem.id, userRef: fx.u4Id, role: 'reader' },
       userCtx(fx.ownerUserId),
     );
     expect(await canRead(mem.id, fx.u4Id)).toBe(true);
     await resolvers.Mutation.removeMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u4Id },
+      { memoryRef: mem.id, userRef: fx.u4Id },
       userCtx(fx.ownerUserId),
     );
     expect(await canRead(mem.id, fx.u4Id)).toBe(false);
@@ -299,12 +299,12 @@ describe('US4: group memory governance via MemoryMember', () => {
     );
     await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u1Id, role: 'reader' },
+      { memoryRef: mem.id, userRef: fx.u1Id, role: 'reader' },
       userCtx(fx.ownerUserId),
     );
     const updated = await resolvers.Mutation.updateMemoryMemberRole(
       {},
-      { memoryId: mem.id, userId: fx.u1Id, role: 'writer' },
+      { memoryRef: mem.id, userRef: fx.u1Id, role: 'writer' },
       userCtx(fx.ownerUserId),
     );
     expect(updated.memoryMember.role).toBe('writer');
@@ -321,7 +321,7 @@ describe('US4: group memory governance via MemoryMember', () => {
     try {
       await resolvers.Mutation.removeMemoryMember(
         {},
-        { memoryId: mem.id, userId: fx.ownerUserId },
+        { memoryRef: mem.id, userRef: fx.ownerUserId },
         userCtx(fx.ownerUserId), // self-removal
       );
     } catch (err) {
@@ -341,7 +341,7 @@ describe('US4: group memory governance via MemoryMember', () => {
     try {
       await resolvers.Mutation.updateMemoryMemberRole(
         {},
-        { memoryId: mem.id, userId: fx.ownerUserId, role: 'writer' },
+        { memoryRef: mem.id, userRef: fx.ownerUserId, role: 'writer' },
         userCtx(fx.ownerUserId),
       );
     } catch (err) {
@@ -359,13 +359,13 @@ describe('US4: group memory governance via MemoryMember', () => {
     );
     await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u1Id, role: 'owner' },
+      { memoryRef: mem.id, userRef: fx.u1Id, role: 'owner' },
       userCtx(fx.ownerUserId),
     );
     // Now ownerUser can self-remove because u1 is still an owner.
     await resolvers.Mutation.removeMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.ownerUserId },
+      { memoryRef: mem.id, userRef: fx.ownerUserId },
       userCtx(fx.ownerUserId),
     );
     const owners = await db.memoryMember.findMany({
@@ -383,12 +383,12 @@ describe('US4: group memory governance via MemoryMember', () => {
     );
     await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u1Id, role: 'reader' },
+      { memoryRef: mem.id, userRef: fx.u1Id, role: 'reader' },
       userCtx(fx.ownerUserId),
     );
     await resolvers.Mutation.removeMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u1Id },
+      { memoryRef: mem.id, userRef: fx.u1Id },
       userCtx(fx.ownerUserId),
     );
     const stillThere = await db.memory.findUnique({ where: { id: mem.id } });
@@ -408,7 +408,7 @@ describe('US4: group memory governance via MemoryMember', () => {
     );
     await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u1Id, role: 'writer' },
+      { memoryRef: mem.id, userRef: fx.u1Id, role: 'writer' },
       userCtx(fx.ownerUserId),
     );
     let caught: unknown;
@@ -416,7 +416,7 @@ describe('US4: group memory governance via MemoryMember', () => {
       // u1 is a writer, not an owner. Adding another member must be denied.
       await resolvers.Mutation.addMemoryMember(
         {},
-        { memoryId: mem.id, userId: fx.u2Id, role: 'reader' },
+        { memoryRef: mem.id, userRef: fx.u2Id, role: 'reader' },
         userCtx(fx.u1Id),
       );
     } catch (err) {
@@ -434,13 +434,13 @@ describe('US4: group memory governance via MemoryMember', () => {
     );
     await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u1Id, role: 'reader' },
+      { memoryRef: mem.id, userRef: fx.u1Id, role: 'reader' },
       userCtx(fx.ownerUserId),
     );
     // u1 self-removes — permitted.
     await resolvers.Mutation.removeMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u1Id },
+      { memoryRef: mem.id, userRef: fx.u1Id },
       userCtx(fx.u1Id),
     );
     expect(
@@ -458,12 +458,12 @@ describe('US4: group memory governance via MemoryMember', () => {
     );
     await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u1Id, role: 'reader' },
+      { memoryRef: mem.id, userRef: fx.u1Id, role: 'reader' },
       userCtx(fx.ownerUserId),
     );
     const second = await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u1Id, role: 'writer' },
+      { memoryRef: mem.id, userRef: fx.u1Id, role: 'writer' },
       userCtx(fx.ownerUserId),
     );
     expect(second.memoryMember.role).toBe('writer');
@@ -481,7 +481,7 @@ describe('US4: group memory governance via MemoryMember', () => {
     );
     await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: mem.id, userId: fx.u1Id, role: 'reader' },
+      { memoryRef: mem.id, userRef: fx.u1Id, role: 'reader' },
       userCtx(fx.ownerUserId),
     );
     const m = await db.memory.findUniqueOrThrow({ where: { id: mem.id } });
@@ -517,12 +517,12 @@ describe('US4: group memory governance via MemoryMember', () => {
     // u1 → alpha; u2 → beta.
     await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: teamAlpha.id, userId: fx.u1Id, role: 'writer' },
+      { memoryRef: teamAlpha.id, userRef: fx.u1Id, role: 'writer' },
       userCtx(fx.ownerUserId),
     );
     await resolvers.Mutation.addMemoryMember(
       {},
-      { memoryId: teamBeta.id, userId: fx.u2Id, role: 'writer' },
+      { memoryRef: teamBeta.id, userRef: fx.u2Id, role: 'writer' },
       userCtx(fx.ownerUserId),
     );
 
