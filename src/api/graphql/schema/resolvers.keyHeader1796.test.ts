@@ -58,7 +58,7 @@ const startQuery = 'mutation($agent: ID!, $user: String) { startAgentSession(age
 const linkQuery = 'mutation($memory: ID!, $user: String!) { linkMemoryToUser(memoryRef: $memory, externalUserId: $user) { id isEncrypted class } }';
 
 describe('#1796 schema boundary', () => {
-  it('removes provisioning key arguments and allow-lists encryptMemory by name', () => {
+  it('no Query or Mutation field takes a dataKey or passphrase argument, and the exception list is empty (#1796 step 2)', () => {
     const found: string[] = [];
     const encryptionArgs: string[] = [];
     for (const definition of parse(typeDefs).definitions) {
@@ -76,8 +76,8 @@ describe('#1796 schema boundary', () => {
         }
       }
     }
-    expect(encryptionArgs.sort()).toEqual(['dataKey', 'memoryRef', 'passphrase']);
-    expect(found.sort()).toEqual(['Mutation.encryptMemory.dataKey', 'Mutation.encryptMemory.passphrase']);
+    expect(encryptionArgs.sort()).toEqual(['memoryRef']);
+    expect(found).toEqual([]);
   });
 
 

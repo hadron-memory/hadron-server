@@ -13,3 +13,12 @@ Gate-4 follow-ups: [hadron-docs#376](https://github.com/hadron-memory/hadron-doc
 For source inventory, rollout evidence and remaining coverage gaps see [the caller inventory](operation-key-caller-inventory.md). The inventory records a historical snapshot, not current migration state: CLI #846 is now closed with released v0.21.0; CLI #847 merged and its release is published. Five caller/raw-client controls belong to the assigned fresh-stack QA seat.
 
 Current carried coverage residuals are **linkMemoryToUser cache-substitution** and **MCP transport staging**, tracked in [server#1814](https://github.com/hadron-memory/hadron-server/issues/1814) and the [#1825 PR residual dispositions](https://github.com/hadron-memory/hadron-server/pull/1825). These remain open; the historical inventory is not a claim that they were tested. Celine's cycle-0 QA pins warm-cache refusal for startAgentSession, which does not close the linkMemoryToUser cache-substitution residual.
+
+## encryptMemory: the last key arguments are removed (#1796 step 2)
+
+**Breaking change.** `encryptMemory(memoryRef)` no longer accepts `dataKey` or `passphrase`. A document that names either is refused by GraphQL validation (`Unknown argument`) before any resolver runs, whatever the value. No alias is kept.
+
+- **CLI floor: hadron-cli v0.56.0.** It sends the secret only in `X-Hadron-Memory-Keys` (strict owner: a `dataKey` or `passphrase` entry naming the memory; a first encryption is established by that entry) or `X-Hadron-Operation-Key` (the owning App's completion). A CLI older than v0.56.0 can no longer run `memory encrypt`.
+- The header paths are unchanged: first encryption by the strict owner, completion by the owner, completion by the owning App key. A non-owner still gets the missing-memory answer.
+- `hadron-client` and the portal have no caller. After this slice no Query or Mutation field in the schema takes a `dataKey` or `passphrase` argument; the schema test (`resolvers.keyHeader1796.test.ts`) pins that with an empty exception list.
+- The server deploys on merge. Generated or custom callers must drop both arguments from their documents and move the secret to the header.
