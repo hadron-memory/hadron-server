@@ -25,6 +25,7 @@ vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => nu
 
 const F = resolvers as any;
 const ROWS = 201;
+const TIES = 5;
 
 let org: { id: string; urn: string };
 let app: { id: string };
@@ -89,12 +90,16 @@ beforeAll(async () => {
   const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   orca1 = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label: 'orca1' }, select: { id: true } });
 
-  // 201 uses, one second apart, plus two rows that tie on usedAt (the id tie-break orders them).
+  // 201 uses: 196 one second apart, plus five that tie on usedAt (the id tie-break orders them).
   const t0 = Date.parse('2026-11-01T00:00:00Z');
-  const rows = Array.from({ length: ROWS - 2 }, (_, i) => ({ id: generateId(), appKeyId: orca1.id, appId: app.id, hostId: 'orca1', action: 'collect', count: i, usedAt: new Date(t0 + i * 1000) }));
+  const rows = Array.from({ length: ROWS - TIES }, (_, i) => ({ id: generateId(), appKeyId: orca1.id, appId: app.id, hostId: 'orca1', action: 'collect', count: i, usedAt: new Date(t0 + i * 1000) }));
   const tieAt = new Date(t0 + 50_500);
-  const ties = [generateId(), generateId()].map((id) => ({ id, appKeyId: orca1.id, appId: app.id, hostId: 'orca1', action: 'read', count: null, usedAt: tieAt }));
-  await db.hostKeyUse.createMany({ data: [...rows, ...ties] });
+  // Five rows tie on usedAt, inserted in an order that is neither id-ascending nor id-descending, so only the
+  // explicit id tie-break (not insertion or physical order) can put them in id desc order (Betty's LOCAL P2).
+  const sortedTieIds = Array.from({ length: TIES }, () => generateId()).sort();
+  const ties = [2, 0, 4, 1, 3].map((i) => ({ id: sortedTieIds[i]!, appKeyId: orca1.id, appId: app.id, hostId: 'orca1', action: 'read', count: null, usedAt: tieAt }));
+  await db.hostKeyUse.createMany({ data: rows });
+  for (const t of ties) await db.hostKeyUse.create({ data: t });
   ids = (await db.hostKeyUse.findMany({ where: { appKeyId: orca1.id }, orderBy: [{ usedAt: 'desc' }, { id: 'desc' }], select: { id: true } })).map((r) => r.id);
   tieIds = ties.map((t) => t.id).sort().reverse();
 
@@ -141,7 +146,7 @@ describe('P1: hostUsesPage pages every use once, newest first, with total and ha
     expect(seen).toEqual(ids);
     // The two rows that tie on usedAt come out by id desc, adjacent.
     const at = seen.indexOf(tieIds[0]);
-    expect(seen.slice(at, at + 2)).toEqual(tieIds);
+    expect(seen.slice(at, at + TIES)).toEqual(tieIds);
   });
 
   it('the items are whole HostKeyUse rows, as the old field returns them', async () => {
@@ -189,6 +194,20 @@ describe('P3: over HTTP, total discloses nothing the old field does not', () => 
 });
 
 describe('P4: the size is clamped through pageArgs', () => {
+  it('runs count and page in one RepeatableRead batch with database take/skip', async () => {
+    const find = vi.spyOn(db.hostKeyUse, 'findMany');
+    const tx = vi.spyOn(db, '$transaction');
+    try {
+      await F.AppKey.hostUsesPage(keyArg(), { limit: 10, offset: 5 }, ctx(manager.id));
+      expect(find).toHaveBeenCalledWith(expect.objectContaining({ take: 10, skip: 5 }));
+      expect(tx).toHaveBeenCalledTimes(1);
+      expect(tx).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ isolationLevel: 'RepeatableRead' }));
+    } finally {
+      find.mockRestore();
+      tx.mockRestore();
+    }
+  });
+
   it('an over-cap limit is served as 200, with hasMore', async () => {
     const page = await F.AppKey.hostUsesPage(keyArg(), { limit: 100_000 }, ctx(manager.id));
     expect(page.items).toHaveLength(200);
