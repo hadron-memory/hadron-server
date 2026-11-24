@@ -215,6 +215,8 @@ describe('an inherited node shows its content and none of the base tenant\'s rec
     expect(await N.memory(got, {}, ctx(reader))).toBeNull();
     expect(await N.deletedAt(got, {}, ctx(reader))).toBeNull();
     expect(await N.authorship(got, {}, ctx(reader))).toBeNull();
+    expect(await N.storedBytes(got, {}, ctx(reader))).toBeNull(); // #5018: the base owner's storage figures, never served
+    expect(await N.revisionBytes(got, {}, ctx(reader))).toBeNull();
     expect(await N.createdByWorker(got, {}, ctx(reader))).toBeNull();
     expect(await N.signingRequests(got, {}, ctx(reader))).toEqual([]);
     expect(await N.signingRequestsPage(got, {}, ctx(reader))).toEqual({ items: [], total: 0, hasMore: false, nextCursor: null });
