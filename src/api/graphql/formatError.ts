@@ -32,6 +32,7 @@ import { AssetUploadError } from '../../controller/operations/beginAssetUpload.j
 import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
 import { QueryTooComplexError } from './admissionComplexity.js';
 import { TeamReadBusyError } from '../../lib/agentTasks/teamReadBudget.js';
+import { OwnerLimitReachedError } from '../../lib/ownerLimits/errors.js';
 import { AuthStoreBusyError } from '../../lib/authStoreBusy.js';
 import { GitCommandError } from '../../integrations/github/execGit.js';
 import { SessionExpiredError } from '../../lib/nodeCrypto.js';
@@ -65,6 +66,12 @@ function mapping<E>(
 }
 
 const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
+  // #5009: an owner reached a limit. The caller's to resolve (delete, or ask the owner), so silenced; the extensions are the contract.
+  mapping(
+    (err): err is OwnerLimitReachedError => err instanceof OwnerLimitReachedError,
+    (err) => ({ ...err.extensions }),
+    { silenceInSentry: true },
+  ),
   // #4455: the bounded team read (roster/composition/utilization) surfacing its budget expiry typed and RETRYABLE.
   // The error is already a GraphQLError carrying its code, but mapping it here guarantees the extensions merge at
   // the Apollo boundary and states the Sentry column. NOT silenced: these are the availability signal — the

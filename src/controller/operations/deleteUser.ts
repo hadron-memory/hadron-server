@@ -5,6 +5,7 @@ import { encryptToken } from '../../lib/tokenCrypto.js';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { deleteToolConnection } from '../../lib/emailClient.js';
 import { deleteSecretsForOwner } from '../../lib/secrets.js';
+import { assertOwnerLimitSnapshotFresh, deleteOwnerLimits, logOwnerLimitChanges, type OwnerLimitChange } from '../../lib/ownerLimits/changes.js';
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { softDeleteOrganizationCore } from './softDeleteOrganization.js';
 import { dispatchChatToolTeardown, type ChatToolTeardown } from '../../lib/chatToolTeardown.js';
@@ -143,7 +144,7 @@ export async function deleteUserAccount(
   // re-reads the membership scope, takes its locks again and re-judges under them (a target the winner already erased
   // refuses "User not found", never erases twice). It is nested inside the serialization retry, so
   // isSerializationFailure is not widened for any other caller (#4318).
-  const { toolConnections, chatTeardowns, assetKeys } = await retryOnSerializationFailure(() => retryOnDeadlock(async () => {
+  const { toolConnections, chatTeardowns, assetKeys, limitChanges } = await retryOnSerializationFailure(() => retryOnDeadlock(async () => {
     const membershipScope = (await db.orgMember.findMany({
       where: { userId: targetUserId, deletedAt: null },
       select: { organizationId: true },
@@ -161,6 +162,7 @@ export async function deleteUserAccount(
   }
   // #4828: the Telegram and Slack registrations of the organizations that died with the account, the same post-commit posture.
   dispatchChatToolTeardown(chatTeardowns);
+  logOwnerLimitChanges(actorUserId, limitChanges);
   // Same posture for the deleted memories' files: the Asset rows went
   // with the cascade, so these keys are the last record of the bytes.
   // Post-commit and best-effort — a dead object store must log, not fail.
@@ -191,6 +193,8 @@ async function runDeletionTxn(
   toolConnections: Array<{ provider: string; toolConnectionId: string }>;
   /** #4828: chat tool registrations of the sole-member organizations deleted with the account, torn down post-commit. */
   chatTeardowns: ChatToolTeardown[];
+  /** #5009: the owner-limit rows removed with the account and its sole-member organizations, logged post-commit. */
+  limitChanges: OwnerLimitChange[];
   /** Object-store keys of the deleted memories' assets — purged post-commit. */
   assetKeys: CollectedAssetKeys;
 }> {
@@ -226,6 +230,7 @@ async function runDeletionTxn(
       `;
       if (locked.length === 0) throw new Error('User not found');
       await assertUserGrantSnapshotFresh(tx, db, targetUserId);
+      await assertOwnerLimitSnapshotFresh(tx, db, [{ userId: targetUserId }, ...membershipScope.map((organizationId) => ({ organizationId }))]);
       for (const orgId of membershipScope) {
         await tx.$queryRaw`
           SELECT id FROM org_members
@@ -296,8 +301,9 @@ async function runDeletionTxn(
       if (blockers.length > 0) throw new SoleOrgOwnerError(blockers);
 
       const chatTeardowns: ChatToolTeardown[] = [];
+      const limitChanges: OwnerLimitChange[] = [];
       for (const orgId of soleMemberOrgIds) {
-        chatTeardowns.push(...(await softDeleteOrganizationCore(tx, orgId, actorUserId)));
+        chatTeardowns.push(...(await softDeleteOrganizationCore(tx, orgId, actorUserId, undefined, limitChanges)));
       }
       // Soft-delete every remaining live membership row (the platform-wide
       // OrgMember revocation shape — removeOrgMember; audit tuple persists).
@@ -439,6 +445,7 @@ async function runDeletionTxn(
       await tx.memoryConfigTemplate.deleteMany({ where: { ownerUserId: targetUserId } });
       await tx.pendingSetup.deleteMany({ where: { userId: targetUserId } });
       await deleteSecretsForOwner(tx, 'user', targetUserId);
+      limitChanges.push(...(await deleteOwnerLimits(tx, { userId: targetUserId }, 'owner-deleted')));
 
       // ── 3b. #1647: audit + notice intent, in THIS transaction ───────
       // Read the address BEFORE the scrub nulls it. The audit and the intent commit with the erasure or not at all;
@@ -532,6 +539,7 @@ async function runDeletionTxn(
           toolConnectionId: string;
         }>,
         chatTeardowns,
+        limitChanges,
         assetKeys,
       };
     },

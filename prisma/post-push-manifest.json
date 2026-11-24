@@ -682,6 +682,18 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_owner_limits_one_owner",
+      "kind": "check-constraint",
+      "file": "owner-limit-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_owner_limits_shape",
+      "kind": "check-constraint",
+      "file": "owner-limit-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_passkey_cancel_token_shape",
       "kind": "check-constraint",
       "file": "passkey-registration-invariants.sql",

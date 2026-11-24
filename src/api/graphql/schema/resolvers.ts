@@ -61,6 +61,7 @@ import { nodeMutations } from './resolvers.mutation.node.js';
 import { objectQueries, objectMutations } from './resolvers.object.js';
 import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
 import { meteringMutations, meteringQueries } from './resolvers.metering.js';
+import { ownerLimitMutations, ownerLimitQueries } from './resolvers.ownerLimits.js';
 import { connectionGrantMutations, connectionGrantQueries } from './resolvers.connectionGrant.js';
 import { principalGrantMutations, principalGrantQueries } from './resolvers.principalGrant.js';
 import { grantFieldResolvers, grantQueries } from './resolvers.grant.js';
@@ -285,6 +286,7 @@ export const resolvers = {
     ...grantActionQueries,
     ...grantSigningQueries,
     ...meteringQueries,
+    ...ownerLimitQueries,
     ...rateLimitQueries,
     ...impersonationQueries,
   },
@@ -298,6 +300,7 @@ export const resolvers = {
     ...appWriteGrantMutations,
     ...automationReadGrantMutations,
     ...meteringMutations,
+    ...ownerLimitMutations,
     ...rateLimitMutations,
     ...connectionGrantMutations,
     ...principalGrantMutations,

@@ -56,6 +56,8 @@ export default defineConfig({
       // #2990 — the graph-view queries are OFF by default in production; the suite runs them ON (flag lifted) so the
       // existing graph tests keep reading rows. The #2990 pins set the variable explicitly, so the default is still pinned.
       GRAPH_VIEW_DISABLED: 'false',
+      // #5009 — a dev machine's default owner limits must not refuse a fixture's creation.
+      OWNER_DEFAULT_LIMITS: '',
       EMBEDDING_API_URL: '',
       EMBEDDING_SAGEMAKER_ENDPOINT_NAME: '',
       NATS_URL: '',
