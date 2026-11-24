@@ -73,6 +73,13 @@ describe.each(DOORS)('#5037 $name', ({ call, id, notFound }) => {
     await untouched();
   });
 
+  it('an App key of ANOTHER App is answered as for a missing id; an App key of this App keeps the door\'s own refusal', async () => {
+    const other = await db.app.create({ data: { organizationId: (await db.organization.findFirstOrThrow({ where: { urn: 'b5037.test' } })).id, name: 'App B', urn: 'b5037.test:app' } });
+    const nothing = await answer(call(missing(), { db, appId: other.id, roles: [] } as unknown as Context));
+    expect(await answer(call(id(), { db, appId: other.id, roles: [] } as unknown as Context))).toEqual(nothing);
+    expect(await answer(call(id(), { db, appId: appA.id, roles: [] } as unknown as Context))).toMatchObject({ code: 'FORBIDDEN' });
+  });
+
   it('control: the org ADMIN is admitted', async () => {
     const got = await answer(call(id(), ctxOf(adminA)));
     expect(got).toHaveProperty('admitted');
