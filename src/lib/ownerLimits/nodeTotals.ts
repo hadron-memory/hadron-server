@@ -10,18 +10,19 @@ export interface NodeTotalDrift {
 /** Every memory whose stored figure differs from its recount, in one statement and so in one snapshot. A missing row counts as 0. */
 export function findMemoryNodeTotalDrift(db: Pick<PrismaClient, '$queryRaw'>): Promise<NodeTotalDrift[]> {
   return db.$queryRaw<NodeTotalDrift[]>(Prisma.sql`
-    SELECT m.id AS "memoryId", COALESCE(t.live_nodes, 0)::bigint AS stored, COALESCE(c.n, 0)::bigint AS counted
+    SELECT m.id AS "memoryId", (COALESCE(t.live_nodes, 0) + COALESCE(p.n, 0))::bigint AS stored, COALESCE(c.n, 0)::bigint AS counted
     FROM memories m
     LEFT JOIN memory_node_totals t ON t.memory_id = m.id
+    LEFT JOIN (SELECT memory_id, sum(delta)::bigint AS n FROM memory_node_pending GROUP BY memory_id) p ON p.memory_id = m.id
     LEFT JOIN (SELECT memory_id, count(*) AS n FROM nodes WHERE deleted_at IS NULL GROUP BY memory_id) c ON c.memory_id = m.id
-    WHERE COALESCE(t.live_nodes, 0) <> COALESCE(c.n, 0)
+    WHERE COALESCE(t.live_nodes, 0) + COALESCE(p.n, 0) <> COALESCE(c.n, 0)
     ORDER BY m.id`);
 }
 
 /**
  * Set one memory's figure to its recount. The total row is locked FIRST and the recount is a later statement of a READ COMMITTED
- * transaction: a writer that has already counted holds the row to its commit, so this waits and then sees its nodes; one that has not
- * counted yet waits for this and adds on top. `nodes` is never locked.
+ * transaction: a writer that has folded its change holds the row to its commit, so this waits and then sees its nodes; one that has not
+ * folded yet waits for this and adds on top. `nodes` is never locked. Left-over pending rows keep counting, so they are taken off here.
  */
 export async function repairMemoryNodeTotal(db: Pick<PrismaClient, '$transaction'>, memoryId: string): Promise<void> {
   await db.$transaction(async (tx) => {
@@ -32,6 +33,7 @@ export async function repairMemoryNodeTotal(db: Pick<PrismaClient, '$transaction
     await tx.$queryRaw`SELECT 1 FROM memory_node_totals WHERE memory_id = ${memoryId} FOR UPDATE`;
     await tx.$executeRaw`
       UPDATE memory_node_totals SET live_nodes = (SELECT count(*) FROM nodes WHERE memory_id = ${memoryId} AND deleted_at IS NULL)
+        - COALESCE((SELECT sum(delta) FROM memory_node_pending WHERE memory_id = ${memoryId}), 0)
       WHERE memory_id = ${memoryId}`;
   }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, timeout: 120_000 });
 }

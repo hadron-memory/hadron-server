@@ -38,11 +38,15 @@ export const countOwnerNodesOnDemand = (db: OwnerCountDb, owner: OwnerRef): Prom
 
 /**
  * The same figure from the per-memory totals the triggers on `nodes` keep (#5078). The owner and the memory's liveness are joined here, so
- * a deleted, transferred or merged memory needs no write to the totals. The stored figure is only an input to this sum
+ * a deleted, transferred or merged memory needs no write to the totals. The pending rows are this transaction's own (a commit folds
+ * them in), so a check inside a writing transaction counts what it already wrote. The stored figure is only an input to this sum
  * (hrn:node:hadronmemory.com:specs:cor:acl:150:03): never serve it.
  */
 const countOwnerNodesFromTotals = (db: OwnerCountDb, owner: OwnerRef): Promise<bigint> => countOf(db, Prisma.sql`
-  SELECT COALESCE(sum(t.live_nodes), 0)::bigint AS n FROM memory_node_totals t JOIN memories o ON o.id = t.memory_id
+  SELECT COALESCE(sum(f.n), 0)::bigint AS n FROM (
+    SELECT memory_id, live_nodes AS n FROM memory_node_totals
+    UNION ALL SELECT memory_id, delta FROM memory_node_pending
+  ) f JOIN memories o ON o.id = f.memory_id
   WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL`);
 
 /** Read per call. Only the exact value `on-demand` goes back to counting the rows; anything else reads the totals. */

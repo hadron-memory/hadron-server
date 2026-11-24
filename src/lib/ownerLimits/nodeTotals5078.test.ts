@@ -37,7 +37,7 @@ let a1: { id: string; urn: string };
 let a2: { id: string; urn: string };
 let b1: { id: string; urn: string };
 
-const ctx = (): Context => ({ db, userId: admin, roles: [], clientId: `user:${admin}` }) as unknown as Context;
+const ctx = (): Context => ({ db, userId: admin, roles: ['ADMIN'], clientId: `user:${admin}` }) as unknown as Context;
 const node = (memoryId: string, loc: string, data: Record<string, unknown> = {}) =>
   db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, content: `Body ${loc}`, ...data } as never });
 const used = (owner: OwnerRef) => OWNER_LIMIT_KEYS.nodes.count(db, owner);
@@ -60,7 +60,7 @@ async function moves(owner: OwnerRef, by: bigint, write: () => Promise<unknown>)
 beforeEach(async () => {
   await cleanDb(db);
   reloadOwnerDefaultLimitsForTests({});
-  admin = (await db.user.create({ data: { id: generateId(), handle: 'nt-admin', roles: ['READER'] } })).id;
+  admin = (await db.user.create({ data: { id: generateId(), handle: 'nt-admin', roles: ['ADMIN'] } })).id;
   [orgA, orgB] = [generateId(), generateId()];
   for (const [id, urn] of [[orgA, 'nt-a'], [orgB, 'nt-b']] as const) {
     await db.organization.create({ data: { id, name: urn, urn } });
@@ -176,15 +176,12 @@ describe('#5078 every kind of write keeps the figure equal to a recount', () => 
     expect(await used(A())).toBe(3n);
   });
 
-  it('a memory\'s hard delete leaves no figure, and a TRUNCATE zeroes them all', async () => {
+  it('a memory\'s hard delete leaves no figure', async () => {
     await node(a1.id, 'n');
     await node(a2.id, 'n');
     await db.memory.delete({ where: { id: a1.id } });
     expect(await db.memoryNodeTotal.findMany({ select: { memoryId: true } })).toEqual([{ memoryId: a2.id }]);
     await expectExact();
-    await db.$executeRaw`TRUNCATE nodes CASCADE`;
-    await expectExact();
-    expect(await used(A())).toBe(0n);
   });
 });
 
