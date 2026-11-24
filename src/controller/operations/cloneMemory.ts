@@ -1,4 +1,5 @@
 import { lockMemoriesForChannelChange } from '../../lib/channels.js';
+import { requireNodeHeadroom } from '../../lib/ownerLimits/nodes.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -132,6 +133,12 @@ export interface CloneMemoryArgs {
   actorId: string | null;
   /** #2167 — memories the copier may read (`getAccessibleMemoryIds`); `null` = unrestricted. */
   copierReadableMemoryIds: ReadableMemoryIds;
+  /**
+   * #5015 (cor:acl:150:04) — the person whose act this clone is, for the owner-limit refusal's form (null for an
+   * unattended or impersonated caller). REQUIRED so a new caller states it. The copies are new live nodes of the new
+   * memory's owner: the whole batch is judged once, before the insert.
+   */
+  ownerLimitCaller: { userId: string } | null;
 }
 
 export interface CloneMemoryResult {
@@ -362,6 +369,10 @@ export async function cloneMemoryGraphInTx(
       createdBy: args.actorId,
     };
   });
+  // #5015 — every copied row is a new live node of the new memory's owner, judged as one batch before the insert. The
+  // new memory row was created in this transaction, so its owner cannot change before commit; the owner-limit key is
+  // the clone's last lock (gate ruling 5) and nothing after it locks a row the clone does not already hold or own.
+  await requireNodeHeadroom(tx, { memoryId, amount: BigInt(nodeRows.length), caller: args.ownerLimitCaller });
   if (nodeRows.length > 0) {
     // #992/#2622: the copy preserves loc + seq.
     // Unreachable by input today — a clone always lands in a NEW memory — but

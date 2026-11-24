@@ -20,6 +20,7 @@
  * fingerprint includes the rows' `xmin`, so a change that is reverted before the second read still differs
  * (a reverted update is a new tuple version); an `xmin` freeze mid-transaction can only cause a spurious retry.
  */
+import { ownerLimitCaller } from '../ownerLimits/nodes.js';
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { requireOrgRole, requireReadableAgent, getAccessibleMemoryIds, type Context, AGENT_INCLUDE } from '../../api/graphql/schema/resolvers.helpers.js';
@@ -270,6 +271,8 @@ async function writeClone(
   await claimUrn(tx, urn);
 
   const memoryCopy = await cloneMemoryGraphInTx(tx, {
+    // #5015 — the system memory copy is the clone's node batch, judged against the target organization's `nodes` limit.
+    ownerLimitCaller: ownerLimitCaller(ctx),
     sourceMemoryId: plan.systemMemoryId,
     name: `${name} System`,
     newUrn: `${urn}-system`,

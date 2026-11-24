@@ -26,7 +26,7 @@ async function seed(loc = 'relocate', nodeType = 'info') {
     chunkIndex: 0, charStart: 0, charEnd: 21, chunkText: 'source secret payload', embedding: q }]);
   return node;
 }
-const rawMerge = (database = db) => mergeMemoryGraph(database, { sourceMemoryId: source.id, targetMemoryId: target.id,
+const rawMerge = (database = db) => mergeMemoryGraph(database, { ownerLimitCaller: null, sourceMemoryId: source.id, targetMemoryId: target.id,
   fields: new Set(['CONTENT']), deleteSourceMem: false, editor: { userId: actorId, info: null } });
 const vectorOpts = () => ({ memoryIds: [source.id], queryEmbedding: q, limit: 10 });
 

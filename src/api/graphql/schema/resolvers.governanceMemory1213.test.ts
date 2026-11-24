@@ -191,14 +191,14 @@ function heldTransactionDb(ready: ReturnType<typeof latch<number>>, release: Ret
 async function extract(database: typeof db, move = false) {
   const { extractParentNodeGraph } = await import('../../../controller/operations/extractParentNode.js');
   const source = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
-  return extractParentNodeGraph(database, { sourceMemoryId: memoryId, parentLoc: 'ordinary',
+  return extractParentNodeGraph(database, { ownerLimitCaller: null, sourceMemoryId: memoryId, parentLoc: 'ordinary',
     name: 'extracted', rootLoc: 'extracted', newUrn: 'test-org:extracted', targetOrganizationId: source.organizationId!,
     newClass: 'knowledge', visibility: null, ownerUserId: null, groupOwnerUserId: null,
     vectorIndexEnabled: false, move, actorId: userId, copierReadableMemoryIds: null, principal: ctx() });
 }
 async function mergeInto(database: typeof db, targetMemoryId: string) {
   const { mergeMemoryGraph } = await import('../../../controller/operations/mergeMemories.js');
-  return mergeMemoryGraph(database, { sourceMemoryId: memoryId, targetMemoryId, fields: new Set(), deleteSourceMem: false,
+  return mergeMemoryGraph(database, { ownerLimitCaller: null, sourceMemoryId: memoryId, targetMemoryId, fields: new Set(), deleteSourceMem: false,
     editor: { userId }, principal: ctx() });
 }
 async function destination() {
@@ -414,7 +414,7 @@ it('real PG: revision restore joins even for an ordinary snapshot', async () => 
 it('real PG: standalone memory clone takes the source key before copying stored signals', async () => {
   const { cloneMemoryGraph } = await import('../../../controller/operations/cloneMemory.js');
   const source = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
-  await assertOperationJoins(context => cloneMemoryGraph(context.db, { sourceMemoryId: memoryId,
+  await assertOperationJoins(context => cloneMemoryGraph(context.db, { ownerLimitCaller: null, sourceMemoryId: memoryId,
     name: 'copy', newUrn: 'test-org:copy', targetOrganizationId: source.organizationId!,
     ownerUserId: null, groupOwnerUserId: null, actorId: userId, copierReadableMemoryIds: null }));
   const copy = await db.memory.findFirstOrThrow({ where: { urn: 'test-org:copy' } });

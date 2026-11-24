@@ -215,7 +215,7 @@ describe('mergeMemories — source disposition', () => {
       return rows;
     }) as never);
     try {
-      await mergeMemoryGraph(db, {
+      await mergeMemoryGraph(db, { ownerLimitCaller: null,
         sourceMemoryId: srcMem.id,
         targetMemoryId: tgtMem.id,
         fields: new Set(['CONTENT']),
@@ -245,7 +245,7 @@ describe('mergeMemories — source disposition', () => {
       await mayRelease;
     }, { timeout: 20_000 });
     await held;
-    const folding = mergeMemoryGraph(db, {
+    const folding = mergeMemoryGraph(db, { ownerLimitCaller: null,
       sourceMemoryId: srcMem.id,
       targetMemoryId: tgtMem.id,
       fields: new Set(['CONTENT']),
@@ -314,7 +314,7 @@ describe('mergeMemories — batched / resumable (#363)', () => {
   // very large source memory exercises, without seeding hundreds of rows.
   const actorId = () => admin.id;
   function mergeBatched(extra: Record<string, unknown> = {}) {
-    return mergeMemoryGraph(db, {
+    return mergeMemoryGraph(db, { ownerLimitCaller: null,
       sourceMemoryId: srcMem.id,
       targetMemoryId: tgtMem.id,
       fields: new Set(['CONTENT', 'ABSTRACT', 'DESCRIPTION', 'TAGS', 'DATA', 'PROPERTIES', 'EDGES']),
@@ -424,7 +424,7 @@ describe('mergeMemories — batched / resumable (#363)', () => {
     await makeNode(tgtMem.id, 'n1', { content: 't1' });
     await makeNode(tgtMem.id, 'n3', { content: 't3' });
 
-    const res = await mergeMemoryGraph(db, {
+    const res = await mergeMemoryGraph(db, { ownerLimitCaller: null,
       sourceMemoryId: srcMem.id,
       targetMemoryId: tgtMem.id,
       fields: new Set(['CONTENT', 'EDGES']),
@@ -601,7 +601,7 @@ describe('mergeMemories — tombstone-held target loc (#1684)', () => {
     }
     await makeNode(srcMem.id, 'free');
     const err = await caught(
-      mergeMemoryGraph(db, {
+      mergeMemoryGraph(db, { ownerLimitCaller: null,
         sourceMemoryId: srcMem.id,
         targetMemoryId: tgtMem.id,
         fields: new Set(['CONTENT']),
@@ -641,7 +641,7 @@ describe('mergeMemories — tombstone-held target loc (#1684)', () => {
     }) as never);
     try {
       const err = await caught(
-        mergeMemoryGraph(db, {
+        mergeMemoryGraph(db, { ownerLimitCaller: null,
           sourceMemoryId: srcMem.id, targetMemoryId: tgtMem.id, fields: new Set(['CONTENT']),
           deleteSourceMem: false, editor: { userId: admin.id }, batchSize: 1, classifyPageSize: 1,
         }),

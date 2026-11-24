@@ -1,4 +1,5 @@
 import { lockMemoriesForChannelChange } from '../../lib/channels.js';
+import { requireNodeHeadroom, sameMemoryOwner } from '../../lib/ownerLimits/nodes.js';
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -92,6 +93,12 @@ export interface ExtractParentNodeArgs {
   actorId: string | null;
   /** #2167 — memories the copier may read (`getAccessibleMemoryIds`); `null` = unrestricted. */
   copierReadableMemoryIds: ReadableMemoryIds;
+  /**
+   * #5015 (cor:acl:150:04) — the person whose act this extract is, for the owner-limit refusal's form (null for an
+   * unattended or impersonated caller). REQUIRED so a new caller states it. The copies are new live nodes of the new
+   * memory's owner; a move inside one owner soft-deletes as many as it copies and is net zero.
+   */
+  ownerLimitCaller: { userId: string } | null;
 }
 
 export interface ExtractParentNodeResult {
@@ -369,6 +376,13 @@ export async function extractParentNodeGraph(
         createdBy: args.actorId,
         };
       });
+      // #5015 — the copies are new live nodes of the new memory's owner. A move soft-deletes every copied source in this
+      // same transaction (`movedIds` is the copied set), so a move that stays with one owner is net zero; a copy, or a
+      // move to another owner, adds every row. The source row is held FOR SHARE on a move and the new memory was created
+      // here, so neither owner changes before commit; the owner-limit key is the extract's last lock (gate ruling 5).
+      if (!(args.move && (await sameMemoryOwner(tx, args.sourceMemoryId, memoryId)))) {
+        await requireNodeHeadroom(tx, { memoryId, amount: BigInt(nodeRows.length), caller: args.ownerLimitCaller });
+      }
       if (nodeRows.length > 0) {
         // #992/#2622: this bulk copy preserves loc + seq.
         // Unreachable by input today — the op creates a FRESH target memory in

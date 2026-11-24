@@ -176,7 +176,7 @@ it('10: plaintext clone carries operational state through the node-id map', asyn
   const { cloneMemoryGraphInTx } = await import('../controller/operations/cloneMemory.js');
   await updateChatRootData(db, root, enc(), d => ({ ...d, stageName: 'live-stage' }));
   const memory = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
-  const copy = await db.$transaction(tx => cloneMemoryGraphInTx(tx, { sourceMemoryId: root.memoryId, name: 'copy', newUrn: `engine3501:copy-${generateId()}`, targetOrganizationId: memory.organizationId!, ownerUserId: userId, groupOwnerUserId: null, actorId: userId, copierReadableMemoryIds: null }));
+  const copy = await db.$transaction(tx => cloneMemoryGraphInTx(tx, { ownerLimitCaller: null, sourceMemoryId: root.memoryId, name: 'copy', newUrn: `engine3501:copy-${generateId()}`, targetOrganizationId: memory.organizationId!, ownerUserId: userId, groupOwnerUserId: null, actorId: userId, copierReadableMemoryIds: null }));
   expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: copy.nodeIdMap.get(root.id)! } })).state).toMatchObject({ stageName: 'live-stage' });
 });
 it('read-only list overlay prefers live row, never seeds, and keeps encrypted names null', async () => {
@@ -340,7 +340,7 @@ it('11: a plaintext cross-memory chat move still refuses, and merge relocation r
   const target = await db.memory.create({ data: { id: generateId(), organizationId: own.organizationId, name: 'target', urn: `engine3501:target-${generateId()}`, class: 'knowledge' } });
   const source = await raw();
   await expect(db.$transaction(tx => moveNodeSubtree(tx, { ownerLimitCaller: null, source, destLoc: 'chats:moved', destMemoryId: target.id, editor: { userId } }))).rejects.toThrow('chat');
-  await mergeMemoryGraph(db, { sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(), deleteSourceMem: false, editor: { userId } });
+  await mergeMemoryGraph(db, { ownerLimitCaller: null, sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(), deleteSourceMem: false, editor: { userId } });
   expect((await raw()).memoryId).toBe(target.id);
   expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).state).toHaveProperty('stageName', 'live-stage');
 });
@@ -359,7 +359,7 @@ it('11: encrypted clone, transfer and memory merge retain their existing typed r
   const receivingOrg = await db.organization.create({ data: { id: generateId(), name: 'receiving', urn: `engine3501-receiving-${generateId()}` } });
   await db.orgMember.create({ data: { organizationId: receivingOrg.id, userId, role: 'ADMIN' } });
   await expect(memoryTransferMutations.transferMemoryOwnership(null, { memoryRef: root.memoryId, orgRef: receivingOrg.id, targetClass: 'knowledge' }, ctx)).rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_MEMORY_TRANSFER_UNSUPPORTED' } });
-  await expect(mergeMemoryGraph(db, { sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(), deleteSourceMem: false, editor: { userId } })).rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_MEMORY_MERGE_UNSUPPORTED' } });
+  await expect(mergeMemoryGraph(db, { ownerLimitCaller: null, sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(), deleteSourceMem: false, editor: { userId } })).rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_MEMORY_MERGE_UNSUPPORTED' } });
   expect(await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).toEqual(before);
 });
 
@@ -371,7 +371,7 @@ it.each(['row', 'legacy', 'absent'] as const)('11: collision preserves target %s
   const targetData = kind === 'absent' ? { title: 'Target' } : { title: 'Target', conversationName: 'target-conversation', stageName: 'target-stage' };
   const survivor = await db.node.create({ data: { id: generateId(), memoryId: target.id, loc: root.loc, nodeType: 'record', name: 'Target', data: targetData } });
   if (kind === 'row') await db.chatRootEngineState.create({ data: { chatRootNodeId: survivor.id, state: { conversationName: 'target-conversation', stageName: 'target-live' } } });
-  await mergeMemoryGraph(db, { sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(['DATA']), deleteSourceMem: false, editor: { userId } });
+  await mergeMemoryGraph(db, { ownerLimitCaller: null, sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(['DATA']), deleteSourceMem: false, editor: { userId } });
   expect(await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: root.id } })).toBeNull();
   const merged = await db.node.findUniqueOrThrow({ where: { id: survivor.id } });
   if (kind === 'absent') {

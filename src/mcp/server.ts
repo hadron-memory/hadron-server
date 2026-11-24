@@ -4667,6 +4667,10 @@ export function createMcpServerInstance(
           if (!prior || prior.deletedAt) {
             await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted, auth);
           }
+          // #5015 (cor:acl:150:04) — only a fresh insert adds a live node here: the upsert leaves a tombstone deleted and
+          // a live section is an update. The memory row is held FOR SHARE just above, so the owner read is the one at
+          // commit; the owner-limit key is this write's last lock (gate ruling 5).
+          if (!prior) await requireNodeHeadroom(tx, { memoryId, caller: ownerLimitCaller(auth) });
           const row = await tx.node.upsert({
             ...upsertArgs,
             update: { ...upsertArgs.update, ...(sectionChanged ? (sectionStamp ?? clearNodeAuthorship()) : {}), revisionContentHash: revisionStateHashRefreshMarker() },
@@ -7071,6 +7075,10 @@ export function createMcpServerInstance(
           const autoSeq = seq === undefined && pre == null;
           if (autoSeq && !loc.includes(':')) await lockRootSiblings(tx, memoryId);
           const nestedSeq = autoSeq ? await nextSiblingSeq(tx, memoryId, loc) : null;
+          // #5015 (cor:acl:150:04) — every write that reaches here adds a live node (a live loc refused above): an insert,
+          // or a tombstone revived. The memory row is held FOR SHARE (assertMemoryEncryptionStateForWrite), so the owner
+          // read is the one at commit; the owner-limit key is this write's last lock (gate ruling 5).
+          await requireNodeHeadroom(tx, { memoryId, caller: ownerLimitCaller(auth) });
           const written = await tx.node.upsert({
             ...upsertArgs,
             create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
