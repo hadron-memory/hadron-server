@@ -170,6 +170,7 @@ import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
 import { installDeleteAllowed, lockInstallAuthorityFirst } from './installMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { refuseBillingMemberRole } from '../../../lib/auth/billingRole.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 
@@ -2075,6 +2076,8 @@ export const memoryMutations = {
           { extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' } },
         );
           }
+          // #5012: BILLING is a platform role, never a subscription's (after the gate, before the write).
+          refuseBillingMemberRole(role);
         },
         (tx) => tx.memorySubscription.create({
           data: { id: generateId(), memoryId: resolvedMemoryId, organizationId: resolvedOrgId, role: role as Role, createdBy: ctx.userId ?? ctx.clientId ?? null },
@@ -2108,6 +2111,8 @@ export const memoryMutations = {
           const current = await txCtx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
           await requireMemoryManageAccess(txCtx, current);
           await requireMemorySubscription(txCtx, resolvedMemoryId, resolvedOrgId, memoryRef);
+          // #5012: BILLING is a platform role, never a subscription's (after the gate, before the write).
+          refuseBillingMemberRole(role);
         },
         (tx) => tx.memorySubscription.update({
           where: { memoryId_organizationId: { memoryId: resolvedMemoryId, organizationId: resolvedOrgId } },

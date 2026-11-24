@@ -27,7 +27,7 @@ const mod = core as Mod;
 
 let logSpy: ReturnType<typeof vi.spyOn>;
 const roleLines = () =>
-  logSpy.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith('user.roles.changed'));
+  logSpy.mock.calls.map((c: unknown[]) => String(c[0])).filter((l: string) => l.startsWith('user.roles.changed'));
 
 beforeEach(async () => {
   await cleanDb(db);

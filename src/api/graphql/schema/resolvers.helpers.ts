@@ -93,6 +93,7 @@ import {
   Prisma,
   type Agent,
   type PrismaClient,
+  type Role,
 } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
@@ -167,7 +168,7 @@ export interface Context {
   sessionId?: string;      // Session.id — set when operating inside an active session
   /** #1705 — a named X-Hadron-Session failed validation (see AuthContext.sessionBindingRefused). */
   sessionBindingRefused?: boolean;
-  roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
+  roles?: Role[];          // #5012: the generated enum (BILLING included); thresholds stay four-valued
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)
   signInId?: string;       // #1897: the factor-protected sign-in this credential descends from (JWT sid or key root)
@@ -1499,6 +1500,22 @@ export { requireOrgRole } from '../../../lib/auth/appParticipantRead.js';
 
 export function isPlatformAdmin(ctx: Context): boolean {
   return !!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'));
+}
+
+/**
+ * May this caller write the credit ledger (`grantCredits`, `adjustCredits`)? A platform ADMIN or OWNER, or a user
+ * holding the BILLING platform role (#5012, Billing A5; hrn:node:hadronmemory.com:specs:cor:api:010:01, Proposed
+ * line). BILLING admits these two writes and nothing else: it is not in `ROLE_ORDER` (so it fails every
+ * `requireRole` / `requireOrgRole` threshold) and `isPlatformAdmin` does not name it.
+ *
+ * The BILLING branch needs an ordinary user principal: never an impersonated session (whose roles are the target's,
+ * and are `[]` by construction anyway) and never an App key (which carries no platform roles). Use it on those two
+ * mutations only; every other admin surface keeps `isPlatformAdmin`.
+ */
+export function mayWriteLedger(ctx: Context): boolean {
+  if (isPlatformAdmin(ctx)) return true;
+  if (!ctx.userId || ctx.impersonation || ctx.appId || ctx.appKeyId) return false;
+  return ctx.roles?.includes('BILLING') === true;
 }
 
 /**

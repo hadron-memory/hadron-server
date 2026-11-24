@@ -11,17 +11,26 @@
  * browser, no external IdP. After that first token, `hadron auth token create`
  * (hadron-cli#68) covers everything else.
  *
- * **Contract: require an existing user.** This command mints a token for a
- * user that ALREADY exists; it never creates one (issue #300 decision). User
- * provisioning stays a separate concern — the operator points `--email` /
- * `--user-id` / `--handle` at a row that is already there (seeded, or created
- * by a prior browser login) and this hands back a `hdr_user_*` key for it.
+ * **Contract: a selector names an existing user.** With `--email` /
+ * `--user-id` / `--handle` this mints a token for a user that ALREADY exists
+ * and never creates one (issue #300 decision): the operator points the selector
+ * at a row that is already there (seeded, or created by a prior browser login)
+ * and this hands back a `hdr_user_*` key for it.
+ *
+ * **The one exception: `--create-service-user <handle>` (#5012, Billing A5).**
+ * It creates a SERVICE user (no email, no identity provider, no name) whose only
+ * platform role is BILLING, and mints its key — the credential a payment service
+ * holds so it no longer needs a platform admin's key. It refuses a handle that
+ * is taken in the shared principal pool (a user's or an organization's name).
  *
  * The CLI wrapper lives in `scripts/admin-mint-token.ts`; the testable core is
  * here so it runs under the normal vitest `src/**` set.
  */
-import type { PrismaClient } from '../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
 import { mintUserApiKey } from '../middleware/auth.js';
+import { isHandleTaken, normalizeHandle } from '../lib/userHandle.js';
+import { ensureUserPrincipal, RootNameTakenError } from '../lib/principal/mintPrincipal.js';
+import { logUserRolesChanged } from '../lib/auth/userRolesChanged.js';
 
 /**
  * Exactly one of these identifies the target user. Email is matched
@@ -142,4 +151,136 @@ export async function mintBootstrapToken(
       name: user.name,
     },
   };
+}
+
+/** Default label of a service user's key (#5012 gate ruling 10.3), unless `--label` is given. */
+export const SERVICE_USER_TOKEN_LABEL = 'billing-service';
+
+/** The audit actor of a host-script role change: the script has no authenticated user (#5012 gate ruling 10.4). */
+export const HOST_SCRIPT_ACTOR = 'host-script';
+
+/**
+ * Create a service user whose only platform role is BILLING, and mint its key (#5012, Billing A5).
+ *
+ * The user has `email`, `name` and `identityProvider` null (gate ruling 10.3) and `createdBy` null (a host script
+ * has no authenticated actor). The handle is validated strictly (`normalizeHandle`: an illegal handle is refused, not
+ * replaced by a random one) and must be free in the shared principal pool (`isHandleTaken`, so an organization's name
+ * also counts as taken). The user and its principal are created in one transaction; a concurrent claim of the same
+ * name (`RootNameTakenError`) gets the same refusal. The key goes through the shared `mintUserApiKey` path with
+ * `issuedVia: 'admin'`, labelled `billing-service` unless a label is given. One `user.roles.changed` line is written
+ * after the user commits, with the actor `host-script` (gate ruling 10.4).
+ */
+export async function mintServiceUser(
+  db: PrismaClient,
+  input: { handle: string },
+  opts: { label?: string | null } = {},
+): Promise<MintedBootstrapToken> {
+  let handle: string;
+  try {
+    handle = normalizeHandle(input.handle ?? '');
+  } catch (err) {
+    throw new BootstrapTokenError(
+      `"${input.handle}" is not a legal handle: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const taken = () => new BootstrapTokenError(`The handle "${handle}" is already taken; refusing to create a service user.`);
+
+  const user = await db
+    .$transaction(async (tx) => {
+      if (await isHandleTaken(tx, handle)) throw taken();
+      const created = await tx.user.create({
+        data: { handle, email: null, name: null, identityProvider: null, roles: ['BILLING'], createdBy: null },
+      });
+      await ensureUserPrincipal(tx, created);
+      return created;
+    })
+    .catch((err: unknown) => {
+      // The pool probe and the inserts are two steps: a concurrent claim of the name loses in the principal pool
+      // (RootNameTakenError) or on the users handle index (P2002, the only unique value this insert supplies).
+      if (err instanceof RootNameTakenError) throw taken();
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') throw taken();
+      throw err;
+    });
+  logUserRolesChanged({ actor: HOST_SCRIPT_ACTOR, target: user.id, before: [], after: user.roles });
+
+  const label = opts.label !== undefined && opts.label !== null && opts.label.length > 0
+    ? opts.label
+    : SERVICE_USER_TOKEN_LABEL;
+  const { rawKey } = await mintUserApiKey(db, {
+    userId: user.id,
+    label,
+    createdBy: user.id,
+    issuedVia: BOOTSTRAP_ISSUED_VIA,
+  });
+  return { rawKey, user: { id: user.id, email: user.email, handle: user.handle, name: user.name } };
+}
+
+/** What `admin:mint-token` was asked to do. */
+export interface MintTokenArgs {
+  selector: UserSelector;
+  /** `--create-service-user <handle>` (#5012): create a BILLING service user instead of selecting one. */
+  serviceUserHandle?: string;
+  label?: string;
+  help: boolean;
+}
+
+/**
+ * Parse `admin:mint-token`'s arguments (minimal `--key value` / `--key=value`; no arg-parsing dependency in the
+ * repo). `--create-service-user` excludes every selector. Lives here, not in the script, so it runs under vitest.
+ */
+export function parseMintTokenArgs(argv: string[]): MintTokenArgs {
+  const selector: UserSelector = {};
+  let serviceUserHandle: string | undefined;
+  let label: string | undefined;
+  let help = false;
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '-h' || arg === '--help') {
+      help = true;
+      continue;
+    }
+    const eq = arg.indexOf('=');
+    const key = eq >= 0 ? arg.slice(0, eq) : arg;
+    const inlineVal = eq >= 0 ? arg.slice(eq + 1) : undefined;
+    const valueFor = (): string => {
+      if (inlineVal !== undefined) return inlineVal;
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) {
+        throw new BootstrapTokenError(`Missing value for ${key}.`);
+      }
+      i++;
+      return next;
+    };
+
+    switch (key) {
+      case '--email':
+        selector.email = valueFor();
+        break;
+      case '--user-id':
+        selector.userId = valueFor();
+        break;
+      case '--handle':
+        selector.handle = valueFor();
+        break;
+      case '--create-service-user':
+        serviceUserHandle = valueFor();
+        break;
+      case '--label':
+        label = valueFor();
+        break;
+      default:
+        throw new BootstrapTokenError(`Unknown argument: ${arg}`);
+    }
+  }
+
+  if (serviceUserHandle !== undefined) {
+    const selectors = (['email', 'userId', 'handle'] as const).filter((k) => selector[k] !== undefined);
+    if (selectors.length > 0) {
+      throw new BootstrapTokenError(
+        `--create-service-user creates a new user; it cannot be combined with ${selectors.map((k) => SELECTOR_FLAGS[k]).join(', ')}.`,
+      );
+    }
+  }
+  return { selector, serviceUserHandle, label, help };
 }

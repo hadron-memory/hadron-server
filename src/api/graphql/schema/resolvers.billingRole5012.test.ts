@@ -91,7 +91,7 @@ async function balance(): Promise<string> {
 
 let logSpy: ReturnType<typeof vi.spyOn>;
 const roleLines = () =>
-  logSpy.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith('user.roles.changed'));
+  logSpy.mock.calls.map((c: unknown[]) => String(c[0])).filter((l: string) => l.startsWith('user.roles.changed'));
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -357,7 +357,8 @@ describe('G1: every role-typed write that takes caller input calls the refusal',
       if (!/\bas Role\b/.test(text)) continue;
       const lines = text.split('\n');
       lines.forEach((line, i) => {
-        if (!/\b(role|memberRole)\b\s*(as Role|\)?\s*as Role|:\s*\(?\s*[\w.]+\s+as Role)/.test(line)) return;
+        // A property write: `role: x as Role` or `memberRole: (x as Role) ?? …`.
+        if (!/\b(role|memberRole):\s*\(?\s*[\w.?]+\s+as Role\b/.test(line)) return;
         // The enclosing resolver: the nearest preceding `name: async (` at resolver indentation.
         for (let j = i; j >= 0; j--) {
           const m = /^ {4}(\w+): async \(/.exec(lines[j]);
