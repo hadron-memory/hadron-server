@@ -87,9 +87,9 @@ describe('#4344 — the contract migration', () => {
     const rows = await db.$queryRaw<{ indexname: string; indexdef: string }[]>`SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'agent_team_events' AND indexdef ILIKE '%UNIQUE%' AND indexname LIKE 'agent_team_events_episode%'`;
     const byName = new Map(rows.map((r) => [r.indexname, r.indexdef]));
     expect(byName.has(OLD_INDEX)).toBe(false);
-    const [{ n }] = await db.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM pg_indexes WHERE indexname IN ('agent_team_events_task_id_type_idx')`;
+    const [{ n }] = await db.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'agent_team_events' AND indexname = 'agent_team_events_task_id_type_idx'`;
     expect(Number(n), 'the (task_id, type) index the progress/queued reads use').toBe(1);
-    const [{ m }] = await db.$queryRaw<{ m: bigint }[]>`SELECT count(*) AS m FROM pg_indexes WHERE indexname = 'agent_team_events_task_id_idx'`;
+    const [{ m }] = await db.$queryRaw<{ m: bigint }[]>`SELECT count(*) AS m FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'agent_team_events' AND indexname = 'agent_team_events_task_id_idx'`;
     expect(Number(m), 'the redundant single-column index is gone').toBe(0);
     expect(byName.get('agent_team_events_episode_app_uniq')).toMatch(/\(app_id, task_id, type, episode_start\)/);
   });
@@ -105,7 +105,9 @@ describe('#4344 — the contract migration', () => {
     expect(readFileSync(new URL(`${expand}/migration.sql`, dir), 'utf8')).not.toMatch(/DROP INDEX[^;]*agent_team_events_episode_uniq/);
     expect(readFileSync(new URL(`${contract}/migration.sql`, dir), 'utf8')).toMatch(/DROP INDEX CONCURRENTLY IF EXISTS "agent_team_events_episode_uniq";/);
     // Each CONCURRENTLY file holds exactly one statement (a multi-statement file runs in one transaction and refuses).
-    for (const n of names.filter((d) => /_agent_team_events_(task_type_idx|episode_contract|task_id_idx_drop)$/.test(d))) {
+    const concurrent = names.filter((d) => /_agent_team_events_(task_type_idx|episode_contract|task_id_idx_drop)$/.test(d));
+    expect(concurrent.map((d) => d.replace(/^\d+_/, '')).sort(), 'all three CONCURRENTLY migrations were found, so none is skipped').toEqual(['agent_team_events_episode_contract', 'agent_team_events_task_id_idx_drop', 'agent_team_events_task_type_idx']);
+    for (const n of concurrent) {
       const sql = readFileSync(new URL(`${n}/migration.sql`, dir), 'utf8').split('\n').filter((l) => !l.startsWith('--')).join('\n');
       expect(sql.match(/;/g), n).toHaveLength(1);
       expect(sql, n).toMatch(/CONCURRENTLY/);
