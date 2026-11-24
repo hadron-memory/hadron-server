@@ -365,22 +365,46 @@ export function setIterativeScanSupportForTests(v: boolean | null): void {
   iterativeScanProbe = null;
 }
 
+const PROBE_SQL = Prisma.sql`SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
+let probeSql: Prisma.Sql = PROBE_SQL;
+/** Test seam (#4938, BLIND P2 at 548c0cb9): replace the probe's statement, e.g. with one that raises a SQL error (null restores it). */
+export function setIterativeScanProbeSqlForTests(sql: Prisma.Sql | null): void {
+  probeSql = sql ?? PROBE_SQL;
+  iterativeScanProbe = null;
+}
+
 /**
  * #2772 — does this database's pgvector support the iterative index scan? Read once per process from
  * `pg_extension`; on an older version (or a failed read) it logs ONE `vector.iterative_scan_unsupported` line and
  * the search uses the exact scan instead, still under the work budget. This never refuses to start anything.
  */
-export function iterativeScanSupported(db: PrismaClient): Promise<boolean> {
+export function iterativeScanSupported(
+  db: Pick<PrismaClient, '$queryRaw' | '$executeRaw'> | Prisma.TransactionClient,
+  opts: { inTransaction?: boolean } = {},
+): Promise<boolean> {
   if (iterativeScanOverride != null) {
     if (!iterativeScanOverride) logIterativeUnsupported('stubbed');
     return Promise.resolve(iterativeScanOverride);
   }
   iterativeScanProbe ??= (async () => {
     let version: string | null;
+    // #4938 BLIND P2 (Billie, at 548c0cb9): inside a transaction a failed statement aborts it (25P02), so the caught
+    // failure below would still refuse every statement after it. A SAVEPOINT around the probe lets the catch roll back to
+    // it and leave the caller's transaction usable for the exact scan. Only a cold probe pays for it: a cached answer
+    // never reaches this closure.
+    const inTx = opts.inTransaction === true;
     try {
-      const rows = await db.$queryRaw<{ extversion: string }[]>`SELECT extversion FROM pg_extension WHERE extname = 'vector'`;
+      if (inTx) await db.$executeRaw`SAVEPOINT vector_version_probe`;
+      const rows = await db.$queryRaw<{ extversion: string }[]>(probeSql);
+      if (inTx) await db.$executeRaw`RELEASE SAVEPOINT vector_version_probe`;
       version = rows[0]?.extversion ?? null;
     } catch {
+      if (inTx) {
+        // A rollback that fails too (the connection is gone, or the transaction's own clock ended it) leaves the
+        // transaction unusable: the caller's next statement then fails loudly with the real cause. Never throw from here:
+        // this probe's promise is shared, and another request awaiting it must not inherit this transaction's failure.
+        try { await db.$executeRaw`ROLLBACK TO SAVEPOINT vector_version_probe`; } catch { /* surfaced by the next statement */ }
+      }
       // A failed read says nothing about the version (the database may not be reachable yet at boot): do NOT
       // remember it, so the next search probes again instead of running every query exact until restart.
       iterativeScanProbe = null;
@@ -433,30 +457,55 @@ export function isStatementTimeout(e: unknown, phase?: 'waiting' | 'running'): b
 }
 
 /**
- * #4779 (BLIND P2-1, Elena) — the early-stop test for one budgeted vector transaction. Besides {@link isStatementTimeout}:
- * a P2028 raised while still WAITING for a connection is the early stop, not a pool error, when the wait was cut short by
- * the request's deadline (`txMs` below the ordinary `VECTOR_TX_MAX_WAIT_MS`): the budget ran out while queued, which is
- * the work budget ending the search (cor:api:090:04), not the pool failing. A wait that had its full `maxWait` and still
- * timed out stays an error that reaches alerting.
- */
-/**
  * Clock slack for "the request deadline has passed" when Prisma reports the connection-wait timeout (BLIND F5): Prisma
  * fires that timeout on its own timer, which can run a few milliseconds ahead of ours, so a wait that ended AT the deadline
  * must not read as one that ended before it.
  */
 const DEADLINE_CLOCK_SLACK_MS = 25;
 
+/**
+ * #4779 (BLIND P2-1, Elena) — the early-stop test for one budgeted vector transaction. Besides {@link isStatementTimeout}:
+ * a P2028 raised while still WAITING for a connection is the early stop, not a pool error, when the wait was cut short by
+ * the request's deadline (`txMs` below the ordinary `VECTOR_TX_MAX_WAIT_MS`): the budget ran out while queued, which is
+ * the work budget ending the search (cor:api:090:04), not the pool failing. A wait that had its full `maxWait` and still
+ * timed out stays an error that reaches alerting.
+ */
 function isVectorEarlyStop(e: unknown, phase: 'waiting' | 'running', txMs: number, deadline: number, cappedByRequest: boolean): boolean {
   if (isStatementTimeout(e, phase)) return true;
   const err = e as { code?: string; message?: string; meta?: { message?: string } } | null;
   // BLIND N2 (Elena): only Prisma's connection-wait timeout (not any Transaction API error), only when the wait was
   // capped by the request's deadline (not the ordinary maxWait), and only when that deadline has in fact passed.
-  return err?.code === 'P2028' && phase === 'waiting'
+  const stop = err?.code === 'P2028'
+    // #4938: `phase === 'waiting'` is implied, not pinned: a P2028 in phase 'running' already returned true through
+    // isStatementTimeout(e, 'running') above, so this term changes no outcome (the gate's equivalence proof).
+    && phase === 'waiting'
     && /unable to start a transaction/i.test(`${err.message ?? ''} ${err.meta?.message ?? ''}`)
     // BLIND F6 (Elena): the REQUEST deadline (`deadlineAt`) must be what bound the wait, not merely a budget below the
     // ordinary maxWait (a small VECTOR_SEARCH_TIMEOUT_MS with no request deadline is still pool pressure).
     && cappedByRequest && txMs < VECTOR_TX_MAX_WAIT_MS && Date.now() >= deadline - DEADLINE_CLOCK_SLACK_MS;
+  if (stop) notePoolWaitEarlyStop();
+  return stop;
 }
+
+/**
+ * #4938 F5 (Elena, BLIND on #4928 at 5ad0665b) — a pool wait the request deadline cut short is the early stop, so it never
+ * reaches error alerting; when that happens on every request (a saturated pool, or a budget below `VECTOR_TX_MAX_WAIT_MS`)
+ * pool pressure would be silent. Count every such stop and log one fixed line, at most once a minute, carrying the count
+ * since the last line: visible to log alerting, never one line per request.
+ */
+let poolWaitEarlyStops = 0;
+let poolWaitLoggedAt = 0;
+export const POOL_WAIT_LOG_INTERVAL_MS = 60_000;
+function notePoolWaitEarlyStop(): void {
+  poolWaitEarlyStops++;
+  const now = Date.now();
+  if (now - poolWaitLoggedAt < POOL_WAIT_LOG_INTERVAL_MS) return;
+  poolWaitLoggedAt = now;
+  console.warn(`vector.pool_wait_early_stop count=${poolWaitEarlyStops} — vector searches stopped early while waiting for a pooled connection (the request deadline ended the wait)`);
+  poolWaitEarlyStops = 0;
+}
+/** Test seam: re-arm the once-a-minute line and zero its count. */
+export function resetPoolWaitEarlyStopLogForTests(): void { poolWaitEarlyStops = 0; poolWaitLoggedAt = 0; }
 
 /** Prisma options for one budgeted vector transaction: its clock runs past the budget so Postgres ends the statement first. */
 function vectorTxOptions(budgetMs: number): { timeout: number; maxWait: number } {
@@ -589,7 +638,6 @@ async function rankUnderBudget<R>(
   },
 ): Promise<{ rows: R[]; exhausted: boolean; stopped: boolean }> {
   let best: R[] = [];
-  const iterative = await iterativeScanSupported(db);
   let phase: 'waiting' | 'running' = 'waiting';
   let txMs = Number.POSITIVE_INFINITY;
   let deadline = Number.POSITIVE_INFINITY;
@@ -600,9 +648,15 @@ async function rankUnderBudget<R>(
     txMs = clock.txMs;
     deadline = clock.deadline;
     cappedByRequest = clock.cappedByRequest;
-    left(); // a request whose deadline already passed stops here, before taking a connection
+    left(); // a request whose deadline already passed stops here, before taking a connection (or probing)
     return await db.$transaction(async (tx) => {
       phase = 'running';
+      // #4938 N2 (Celine, QA on #4928): the version probe runs INSIDE the budgeted transaction, first, so its wait for a
+      // connection is this transaction's deadline-capped `maxWait`. Outside it, a cold probe (a fresh process, or a failed
+      // one, which is not cached) waited Prisma's `pool_timeout` (10 s by default) on a saturated pool, whatever the deadline.
+      // It runs before any SET LOCAL: with no statement_timeout of its own it cannot be cut mid-transaction (a failed
+      // statement would abort the transaction under every statement after it); the transaction's own clock bounds it.
+      const iterative = await iterativeScanSupported(tx, { inTransaction: true });
       if (iterative) {
         // Set once for the shared transaction, so it is also in force for the exact statement below (BLIND F7): harmless,
         // since that statement ranks a MATERIALIZED CTE with no ORDER BY the HNSW index could serve.
@@ -837,6 +891,41 @@ export interface ChunkHit {
   score: number; // cosine similarity in [0,1]-ish (1 - distance)
 }
 
+/** The chunk path's scope: the parts of {@link vectorSearchChunks}' options its eligibility reads. */
+export interface ChunkVectorScope {
+  memoryIds: string[];
+  hasOpenThreads?: boolean | null;
+  syntheticCommentMemoryIds?: string[];
+  /** #2772 — the structured filters, the caller's exclusions and the deleted rule (see NodeVectorScope.filterSql). */
+  filterSql?: Prisma.Sql;
+  /** #1608 — content, comments or both. Absent = ALL. */
+  scope?: 'CONTENT' | 'COMMENTS' | 'ALL';
+}
+
+/**
+ * #4938 F8 — ONE chunk eligibility fragment (`FROM … WHERE …` over `node_embeddings ne` joined to `nodes n`) per scope, the
+ * chunk counterpart of {@link nodeVectorEligibility}: the COMMENTS statement and the content walk, count and exact
+ * statement all read it, so the two scopes cannot drift apart on the stub rule, the open-thread filter, the access scope or
+ * the caller's filter (#3054's warning). It differs per scope only where the scope does:
+ * - COMMENTS: comment rows, with {@link COMMENT_NOT_DELETED} whatever the filter says (a deleted comment never ranks);
+ * - CONTENT / ALL: the filter owns the deleted predicate when there is one (an includeDeleted search keeps recoverable
+ *   tombstones), and CONTENT excludes comments inside the scan, before any limit.
+ */
+export function chunkVectorEligibility(opts: ChunkVectorScope): Prisma.Sql {
+  const threadSql = openThreadsVectorSql(opts.hasOpenThreads, opts.syntheticCommentMemoryIds);
+  const tail = Prisma.sql`WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB} ${threadSql} ${opts.filterSql ?? Prisma.empty}`;
+  if (opts.scope === 'COMMENTS') {
+    return Prisma.sql`FROM node_embeddings ne
+      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${COMMENT_NOT_DELETED} AND n.node_type = 'comment'
+      ${tail}`;
+  }
+  const deletedSql = opts.filterSql ? Prisma.empty : Prisma.sql`AND n.deleted_at IS NULL`;
+  const scopeSql = opts.scope === 'CONTENT' ? Prisma.sql`AND n.node_type <> 'comment'` : Prisma.empty;
+  return Prisma.sql`FROM node_embeddings ne
+    JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${deletedSql} ${scopeSql}
+    ${tail}`;
+}
+
 /**
  * Spec 033 US2 (T041) — chunk-level vector search returning passages.
  *
@@ -873,20 +962,17 @@ export async function vectorSearchChunks(
     opts.onWindow?.({ exhausted: true });
     return [];
   }
-  const threadSql = openThreadsVectorSql(opts.hasOpenThreads, opts.syntheticCommentMemoryIds);
+  const eligibleFrom = chunkVectorEligibility(opts);
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const windowCut = opts.limit > windowRowsMax;
   const k = Math.min(opts.limit, windowRowsMax);
   const kAsk = windowCut ? k + 1 : k; // #4779: see vectorSearchNodes
-  const deletedSql = opts.filterSql ? Prisma.empty : Prisma.sql`AND n.deleted_at IS NULL`;
   if (opts.scope === 'COMMENTS') {
     // #4779 (P3-6): budgeted, as in vectorSearchNodes; the deleted rule is COMMENT_NOT_DELETED.
     const { rows, stopped } = await oneStatementUnderBudget(db, (tx) => tx.$queryRaw<{ node_id: string; chunk_index: number; char_start: number; char_end: number; chunk_text: string; distance: number }[]>`
       SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
              ne.embedding <=> ${qvec}::vector AS distance
-      FROM node_embeddings ne
-      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${COMMENT_NOT_DELETED} AND n.node_type = 'comment'
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB} ${threadSql} ${opts.filterSql ?? Prisma.empty}
+      ${eligibleFrom}
       ORDER BY distance ASC, ne.node_id ASC, ne.chunk_index ASC
       LIMIT ${kAsk}`, opts.deadlineAt);
     const cut = windowCut && rows.length > k;
@@ -896,12 +982,6 @@ export async function vectorSearchChunks(
       charEnd: Number(r.char_end), chunkText: r.chunk_text, score: 1 - Number(r.distance),
     }));
   }
-  const chunkScopeSql = opts.scope === 'CONTENT' ? Prisma.sql`AND n.node_type <> 'comment'` : Prisma.empty;
-  // #3054 / #2772: one eligibility fragment for the iterative scan, the count and the exact scan; the structured
-  // filters and the access scope ride in it, before the page is chosen.
-  const eligibleFrom = Prisma.sql`FROM node_embeddings ne
-    JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${deletedSql} ${chunkScopeSql}
-    WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB} ${threadSql} ${opts.filterSql ?? Prisma.empty}`;
   type ChunkRow = { node_id: string; chunk_index: number; char_start: number; char_end: number; chunk_text: string; distance: number };
   const ranked = await rankUnderBudget<ChunkRow>(db, {
     deadlineAt: opts.deadlineAt,
