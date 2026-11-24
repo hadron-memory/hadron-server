@@ -16796,11 +16796,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    encryptMemory(
-      memoryRef: ID!
-      dataKey: String @deprecated(reason: "Send the key in x-hadron-memory-keys, or x-hadron-operation-key for an owning App's completion.")
-      passphrase: String @deprecated(reason: "Send the passphrase in x-hadron-memory-keys.")
-    ): Memory!
+    encryptMemory(memoryRef: ID!): Memory!
   }
 
   # ── Chat types ──────────────────────────────────────────────────────

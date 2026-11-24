@@ -44,6 +44,7 @@ import type { AuthContext } from '../../../middleware/auth.js';
 import { formatGraphQLError } from '../formatError.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -373,7 +374,7 @@ describe('#4142 S6 chunk B — memory writes', () => {
           urn: `${org.urn}:enc-${generateId()}`, name: 'enc', class: 'private', visibility: null,
         },
       });
-      const out = await resolvers.Mutation.encryptMemory(
+      const out = await encryptWithSecret(
         {},
         { memoryRef: byUrn ? memory.urn : memory.id, dataKey: key.raw.toString('base64') },
         adminCtx(),
