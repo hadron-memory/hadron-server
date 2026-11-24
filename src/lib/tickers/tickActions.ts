@@ -153,7 +153,11 @@ export function renderTickText(wake: WorkerWake, tickers: Map<string, { name: st
     }
     if (a?.state === 'UNMAPPED') return prefix + 'no task is mapped for ' + a.code;
     if (a?.state === 'UNRESOLVED') return prefix + 'no task found at ' + a.taskLoc + ' for ' + a.code;
-    return prefix + 'resolve your task for ' + (a?.code ?? 'tick.unknown') + ' yourself';
+    // #4999: this serves every state that is not MAPPED, UNMAPPED or UNRESOLVED, and a worker with no task is still due
+    // (cor:agt:080:10), so the sentence must not presume a task. WITHHELD (the register lookup failed open) says so, so a degraded path stays visible.
+    const code = a?.code ?? 'tick.unknown';
+    if (a?.state === 'WITHHELD') return prefix + 'task lookup withheld; if you have a task for ' + code + ', resolve it yourself';
+    return prefix + 'if you have a task for ' + code + ', resolve it yourself';
   });
   return lines.length ? lines.join(' · ').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ') : null;
 }
