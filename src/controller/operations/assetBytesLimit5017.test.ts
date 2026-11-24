@@ -17,6 +17,7 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { beginAssetUpload, beginAssetUploadV2 } from './beginAssetUpload.js';
 import { completeAssetUpload } from './completeAssetUpload.js';
 import { restoreAsset } from './restoreAsset.js';
+import { assetLimitCaller } from '../../lib/asset/ownerBytes.js';
 
 const headObjectMock = vi.hoisted(() => vi.fn());
 const deleteObjectMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
@@ -38,7 +39,7 @@ vi.mock('../../lib/scanClient.js', () => ({ isScanConfigured: vi.fn().mockReturn
 const KB = 1024;
 const CAP = 1_048_576; // 1 MiB
 const limits = (value: unknown) => reloadOwnerDefaultLimitsForTests({ OWNER_DEFAULT_LIMITS: JSON.stringify(value) });
-const settle = async (p: Promise<unknown>) => p.then(() => null, (e: unknown) => e as { extensions?: Record<string, unknown>; message: string });
+const settle = async (p: Promise<unknown>) => p.then(() => null, (e: unknown) => e as { extensions?: Record<string, unknown>; message: string; code?: string });
 
 let org: { id: string; urn: string };
 let contrib: { id: string };
@@ -115,6 +116,7 @@ describe('#5017 begin: the cap is answered before a presigned URL exists', () =>
     await asset(memory.id, 600 * KB);
     const refused = await settle(beginAssetUpload(
       db, { userId: contrib.id },
+      // agentUrn accepts an id or a URN (007-entity-id-or-urn).
       { agentUrn: agentId, filename: 'a.pdf', mimeType: 'application/pdf', sizeBytes: 600 * KB, uploadIntent: 'USER' },
       async () => ({ memoryId: memory.id }),
     ));
@@ -147,6 +149,18 @@ describe('#5017 begin: the cap is answered before a presigned URL exists', () =>
     await expect(begin(600 * KB)).resolves.toBeTruthy();
     limits({ organization: { nodes: 1 } });
     await expect(begin(600 * KB)).resolves.toBeTruthy();
+  });
+
+  it('a negative size is refused as the upload\'s own INVALID_INPUT at both begins, before any limit is read', async () => {
+    const v2 = await settle(begin(-1));
+    expect(v2).toMatchObject({ code: 'INVALID_INPUT' });
+    const v1 = await settle(beginAssetUpload(
+      db, { userId: contrib.id },
+      { agentUrn: agentId, filename: 'a.pdf', mimeType: 'application/pdf', sizeBytes: -1, uploadIntent: 'USER' },
+      async () => ({ memoryId: memory.id }),
+    ));
+    expect(v1).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(mintPutUrlMock).not.toHaveBeenCalled();
   });
 
   it('OWNER_DEFAULT_LIMITS naming assetBytes boots', () => {
@@ -207,7 +221,7 @@ describe('#5017 restore: an un-delete adds live bytes', () => {
 describe('#5017 what counts', () => {
   const used = () => OWNER_LIMIT_KEYS.assetBytes.count(db, { organizationId: org.id });
 
-  it('counts live files of live memories, PENDING included; never BLOCKED, soft-deleted, deleted-memory or memory-less files', async () => {
+  it('counts live file rows until reclaimed, a deleted memory\'s included (re-gate on #5017); PENDING counts; BLOCKED, soft-deleted and memory-less files do not', async () => {
     const gone = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: 'ab-org:gone', name: 'gone', class: 'knowledge', visibility: 'ORGANIZATION', deletedAt: new Date() },
     });
@@ -217,7 +231,17 @@ describe('#5017 what counts', () => {
     await asset(memory.id, 400, { deletedAt: new Date() });
     await asset(gone.id, 800);
     await asset(null, 3200);
-    expect(await used()).toBe(1700n);
+    expect(await used()).toBe(2500n); // 100 + 1600 PENDING + 800 in the deleted memory
+  });
+
+  it('deleting a memory frees no file headroom: its files keep counting until reclaimed, so the cap cannot be cycled by delete-and-refill', async () => {
+    limits({ organization: { assetBytes: CAP } });
+    const filled = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: 'ab-org:filled', name: 'filled', class: 'knowledge', visibility: 'ORGANIZATION' },
+    });
+    await asset(filled.id, 900 * KB);
+    await db.memory.update({ where: { id: filled.id }, data: { deletedAt: new Date() } });
+    expect(await settle(begin(600 * KB))).toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED', limitKey: 'assetBytes' } });
   });
 
   it('deleting the first file lets the second through at once', async () => {
@@ -235,5 +259,14 @@ describe('#5017 what counts', () => {
     expect(await used()).toBe(4_000_000_007n);
     const rows = await (resolvers.Query as any).ownerLimits({}, { orgRef: org.id }, { db, userId: admin.id, roles: ['READER'] } as Context);
     expect(rows.find((r: { key: string }) => r.key === 'assetBytes')).toMatchObject({ used: '4000000007', limit: null });
+  });
+});
+
+describe('#5017 the refusal\'s caller form', () => {
+  it('assetLimitCaller: a person acting as themselves is named; an impersonated or unattended caller is not', () => {
+    expect(assetLimitCaller({ userId: 'u1' })).toEqual({ userId: 'u1' });
+    expect(assetLimitCaller({ userId: 'u1', impersonation: { actorUserId: 'admin' } })).toBeNull();
+    expect(assetLimitCaller({ userId: null })).toBeNull();
+    expect(assetLimitCaller({})).toBeNull();
   });
 });

@@ -1,6 +1,6 @@
 /**
  * #5017 (Billing A10): a transfer carries the memory's live files to the receiving owner, so their bytes must fit that owner's
- * `assetBytes` cap. A refusal changes nothing; a BLOCKED, soft-deleted or no-file memory moves freely. Red on main: the transfer applies.
+ * `assetBytes` cap. A refusal changes nothing; a memory whose only files are BLOCKED or soft-deleted moves freely. Red on main: the transfer applies.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -49,7 +49,7 @@ describe('#5017 transferMemoryOwnership and the receiving owner\'s assetBytes ca
     expect(await db.asset.count({ where: { memoryId: source.id } })).toBe(1);
   });
 
-  it('applies when the files fit; a BLOCKED, a soft-deleted and no file at all are not counted', async () => {
+  it('applies when the files fit: BLOCKED and soft-deleted files of the moving memory are not counted', async () => {
     limits({ organization: { assetBytes: CAP } });
     await asset(orgMemory.id, 600 * KB);
     await asset(source.id, 900 * KB, { scanStatus: 'BLOCKED' });
@@ -58,7 +58,7 @@ describe('#5017 transferMemoryOwnership and the receiving owner\'s assetBytes ca
     expect((await db.memory.findUniqueOrThrow({ where: { id: source.id } })).organizationId).toBe(org.id);
   });
 
-  it('with the variable unset, or the cap raised, the same transfer applies', async () => {
+  it('with the variable unset the same transfer applies', async () => {
     await asset(orgMemory.id, 600 * KB);
     await asset(source.id, 600 * KB);
     await expect(transfer()).resolves.toMatchObject({ applied: true });
