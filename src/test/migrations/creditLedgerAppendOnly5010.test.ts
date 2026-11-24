@@ -72,4 +72,13 @@ describe('#5010 migration', () => {
     expect(MIGRATION.endsWith(SOURCE)).toBe(true);
     expect(read('post-push.sql')).toContain('\\ir credit-ledger-invariants.sql');
   });
+
+  it('pin 12: both ledger functions pin search_path, in the installed database and in the migration text', async () => {
+    const r = await pg.query(`SELECT proname, proconfig FROM pg_proc WHERE proname IN ('hadron_credit_ledger_user_merged', 'hadron_credit_ledger_entries_append_only') ORDER BY proname`);
+    expect(r.rows).toEqual([
+      { proname: 'hadron_credit_ledger_entries_append_only', proconfig: ['search_path=public, pg_temp'] },
+      { proname: 'hadron_credit_ledger_user_merged', proconfig: ['search_path=public, pg_temp'] },
+    ]);
+    expect(MIGRATION.match(/SET search_path = public, pg_temp/g)).toHaveLength(2);
+  });
 });

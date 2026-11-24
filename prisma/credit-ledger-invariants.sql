@@ -19,12 +19,12 @@ ALTER TABLE credit_ledger_entries ADD CONSTRAINT chk_credit_ledger_not_soft_dele
 -- Schema-qualified on purpose: an unqualified name would resolve to a session TEMP table of the same name first (TEMP is
 -- granted to PUBLIC), letting a DML-only role forge the merge proof (SEC10, #5083).
 CREATE OR REPLACE FUNCTION hadron_credit_ledger_user_merged(old_id text, new_id text) RETURNS boolean
-LANGUAGE sql STABLE AS $$
+LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
   SELECT old_id IS NOT NULL AND new_id IS NOT NULL
     AND EXISTS (SELECT 1 FROM public.user_merges m WHERE m.source_user_id = old_id AND m.target_user_id = new_id)
 $$;
 CREATE OR REPLACE FUNCTION hadron_credit_ledger_entries_append_only() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'Credit ledger entries are append-only' USING ERRCODE = '23514';
