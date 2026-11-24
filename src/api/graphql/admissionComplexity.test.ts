@@ -26,6 +26,7 @@ const REVIEWED_PAGED_FIELDS = [
   "AgentTask.findingDispositions", // #2663: pageArgs default20/cap200.
   "AgentTaskResult.findings", // #2662: pageArgs default20/cap200; result itself is bounded at100 findings.
   "AppKey.hostUses",
+  "AppKey.hostUsesPage", // #5061: pageArgs, default 20, cap 200 (PAGE_ARGS_FIELDS).
   "Chat.servedPrompts",
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
   "Mutation.collectHostOperations",

@@ -21,7 +21,7 @@ import { requirePersonOnlyAct, type PersonOnlyAct } from '../../../lib/auth/pers
 import { APP_KEY_SCOPES, APP_KEY_SCOPE_CATALOGUE, isAppKeyScope, type AppKeyScopeName } from '../../../lib/appKeyScopes/scopes.js';
 import { generateId } from '../../../lib/id.js';
 import { HOST_ID_PATTERN } from '../../../lib/agentTasks/hosts.js';
-import { appKeyHostUses } from './resolvers.hostOperation.js';
+import { appKeyHostUses, appKeyHostUsesPage } from './resolvers.hostOperation.js';
 import { type ActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { admitAppManagement, requireInstructedActKeepingRuns, readActInstruction, callerIsWorkerSession, lockCallerSession } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
@@ -144,6 +144,7 @@ export const appKeyScopeFieldResolvers = {
     },
     /** #1709 — what the key did as a host (cor:agt:070:07). Gated the same way, for the same reason. */
     hostUses: (key: { id: string; appId: string }, a: { first?: number | null }, ctx: Context) => appKeyHostUses(key, a, ctx),
+    hostUsesPage: (key: { id: string; appId: string }, a: { limit?: number | null; offset?: number | null }, ctx: Context) => appKeyHostUsesPage(key, a, ctx),
   },
   AppKeyScope: {
     grantedBy: (s: { grantedByUserId: string }) => s.grantedByUserId,

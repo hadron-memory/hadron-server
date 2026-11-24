@@ -4069,6 +4069,8 @@ export const typeDefs = `#graphql
     scopes: [AppKeyScope!]!
     "#1709 — what this key did as a host, newest first (hrn:node:hadronmemory.com:specs:cor:agt:070:07: every use is recorded). Whoever manages the App only."
     hostUses(first: Int): [HostKeyUse!]!
+    "#5061 — what this key did as a host, one page, newest first (usedAt, then id): the paged sibling of hostUses (hrn:node:hadronmemory.com:specs:cor:api:120:04, hrn:node:hadronmemory.com:specs:cor:agt:070:07). Whoever manages the App only, refused exactly as hostUses is, before anything is counted. limit omitted is 20, 0 is count-only, a negative limit is 0, a limit over 200 is served as 200 (never a refusal); a negative offset is 0. Continue with offset; hasMore says whether rows remain past this page."
+    hostUsesPage(limit: Int, offset: Int): HostKeyUsePage!
   }
 
   "#1749 — a scope an App key holds. A closed list: attention:deliver, and (#1709) host:operate."
@@ -4103,6 +4105,13 @@ export const typeDefs = `#graphql
     "#1881 — the refusal code when the server refused this use (e.g. APP_KEY_SCOPE_REQUIRED); null for a use that succeeded. A refused use is recorded too (hrn:node:hadronmemory.com:specs:cor:agt:070:07: every use)."
     refusedCode: String
     usedAt: DateTime!
+  }
+
+  "#5061 — one page of a host key's uses (AppKey.hostUsesPage). total counts every use of the key; hasMore is whether rows remain past this page."
+  type HostKeyUsePage {
+    items: [HostKeyUse!]!
+    total: Int!
+    hasMore: Boolean!
   }
 
   """
@@ -6724,6 +6733,8 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
     """Expiry time."""
     expiresAt: DateTime!
+    """The server-hosted ceremony page where the requester completes or declines this change with a passkey (hrn:node:hadronmemory.com:specs:cor:sec:070:02): the server origin plus /secret-changes/<id>, with no token. The same link SECRET_PROTECTED_NEEDS_PASSKEY carries in its ceremonyUrl extension. Copy it verbatim; never compose it. Served on every state, because it is a stable address: an ended request's page only explains that it ended. Read through the same requester-only gate as the rest of this type."""
+    ceremonyUrl: String!
   }
 
   "How a secret read client is used: REVEAL hands the value to a person or worker, USE injects it by reference into a run's web request."
@@ -10410,11 +10421,22 @@ export const typeDefs = `#graphql
       tables (a value that is not an object prints as a fenced JSON block), Edges as a list, Metadata as a list, a section with nothing in it
       left out. No sections named prints the content only. Comments is not a
       section yet.
-    Auth: same node-read gate as node(ref:). (HTML + asUrl delivery land
+    Edges: an outgoing edge is exported only when the caller can read its
+    TARGET's memory (the Edge.target rule, denied ≡ absent), so a
+    partial-access caller's file — full: true included — omits those edges.
+    The round trip is additive: "hadron node import --with-edges" wires the
+    edges the file carries and never deletes an edge the file lacks, so an
+    omitted edge survives a restore into a memory that still has it. The
+    PDF's Edges section applies the same readability rule and additionally
+    drops soft-deleted targets (it prints locs, so it keeps only live ones).
+    ref: the node's PK or URN (hrn:node:hadronmemory.com:specs:cor:api:140). Auth: the same node-read gate as
+    node(ref:), including read-only PUBLIC knowledge for an App key or userless
+    run (hrn:node:hadronmemory.com:specs:cor:acl:010:01). A node the caller can't read, a missing ref and a
+    soft-deleted node all refuse as NODE_NOT_FOUND. (HTML + asUrl delivery land
     later; the result shape is forward-compatible.)
     """
     nodeExport(
-      id: ID!
+      ref: ID!
       format: NodeExportFormat = MD
       full: Boolean = true
       sections: [NodeExportSection!]
