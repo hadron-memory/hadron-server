@@ -155,6 +155,9 @@ export async function beginAssetUpload(
 
   // FR-006 — size + MIME pinned by the presigned policy. Validated
   // here before minting; verified again on completion via HeadObject.
+  if (input.sizeBytes < 0) {
+    throw new AssetUploadError('INVALID_INPUT', `sizeBytes ${input.sizeBytes} must not be negative`);
+  }
   const limits = getEffectiveLimits();
   if (input.sizeBytes > limits.maxBytes) {
     throw new AssetUploadError(
@@ -371,6 +374,9 @@ export async function beginAssetUploadV2(
   }
 
   // 4. Size + MIME limits — same as v1.
+  if (input.sizeBytes < 0) {
+    throw new AssetUploadError('INVALID_INPUT', `sizeBytes ${input.sizeBytes} must not be negative`);
+  }
   const limits = getEffectiveLimits();
   if (input.sizeBytes > limits.maxBytes) {
     throw new AssetUploadError(

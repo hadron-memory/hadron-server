@@ -6,7 +6,10 @@ import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import type { OwnerRef } from '../owner.js';
 import { requireOwnerHeadroom } from '../ownerLimits/gate.js';
 
-/** The owner a memory row names (organization XOR person), or null for a row naming neither (never stored; counts for nobody). */
+/**
+ * The owner a memory row names, or null for a row naming neither. The two columns are exclusive (chk_memory_owner_xor, post-push.sql), so
+ * the person-first order only matches `ownedBy` in keys.ts; a row naming neither cannot be stored and counts for nobody.
+ */
 export function memoryOwnerRef(row: { organizationId: string | null; ownerUserId: string | null }): OwnerRef | null {
   if (row.ownerUserId) return { userId: row.ownerUserId };
   if (row.organizationId) return { organizationId: row.organizationId };
@@ -28,10 +31,6 @@ export async function requireAssetBytesHeadroom(
   await requireOwnerHeadroom(tx, { owner, key: 'assetBytes', amount: BigInt(bytes), caller });
 }
 
-/**
- * The early answer at begin and before a stored file's bytes are written: a short transaction that reads the memory's owner under a
- * FOR SHARE lock and checks the headroom, then ends. It reserves nothing; the final check runs where the row is written.
- */
 /** The owner of a live memory, read under a FOR SHARE lock so a transfer's FOR UPDATE and the write that follows are ordered. */
 export async function lockMemoryOwner(tx: Prisma.TransactionClient, memoryId: string): Promise<{ found: boolean; owner: OwnerRef | null }> {
   const [row] = await tx.$queryRaw<Array<{ organization_id: string | null; owner_user_id: string | null }>>`
@@ -40,6 +39,10 @@ export async function lockMemoryOwner(tx: Prisma.TransactionClient, memoryId: st
   return { found: true, owner: memoryOwnerRef({ organizationId: row.organization_id, ownerUserId: row.owner_user_id }) };
 }
 
+/**
+ * The early answer at begin and before a stored file's bytes are written: a short transaction that reads the memory's owner under a
+ * FOR SHARE lock and checks the headroom, then ends. It reserves nothing; the final check runs where the row is written.
+ */
 export async function checkAssetBytesHeadroom(
   db: Pick<PrismaClient, '$transaction'>,
   memoryId: string,
