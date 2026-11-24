@@ -9,7 +9,7 @@ import { generateId } from '../../../lib/id.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import pg from 'pg';
-import { workerCensusTimeoutMs } from '../../../lib/workerMiscastRepair.js';
+import { miscastHasReferences, WorkerCensusIncompleteError, workerCensusTimeoutMs } from '../../../lib/workerMiscastRepair.js';
 import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
@@ -121,6 +121,48 @@ describe('#4809 bounded worker census', () => {
         expect(await snapshot()).toEqual(before);
       } finally { await holder.query('ROLLBACK').catch(() => {}); await holder.end(); }
     }, 60_000);
+
+  // #5042: the JS deadline check in `miscastHasReferences` (`if (left <= 0) throw`) is its own arm. The 1 ms case above is
+  // also cancelled by the statement_timeout armed on the first statement, so Postgres hides it. Here the budget is spent BETWEEN
+  // statements, in JS, while no statement runs: the first statement (the session read) answers at once, the wrapper then idles
+  // past the budget, and the next arm() meets left <= 0. Postgres has nothing to cancel, so only the JS check can refuse. With
+  // the check mutated to `return`, the census carries on under the first statement's setting and answers false (no refusal).
+  it('the JS deadline between two statements refuses WORKER_CENSUS_INCOMPLETE, with no statement for Postgres to cancel', async () => {
+    process.env.WORKER_CENSUS_TIMEOUT_MS = '250';
+    const worker = { id: f.target.id, memoryId: f.target.memoryId ?? null, heldByUserId: f.target.heldByUserId ?? null };
+    let postgresCancelled = false;
+    let elapsed = 0;
+    await db.$transaction(async (tx) => {
+      const slowAfterFirst = new Proxy(tx, {
+        get(target, prop, receiver) {
+          if (prop === 'session') {
+            return new Proxy(target.session, {
+              get(s, m, r) {
+                if (m !== 'findMany') return Reflect.get(s, m, r);
+                return async (...args: unknown[]) => {
+                  const rows = await (s.findMany as (...a: unknown[]) => Promise<unknown[]>)(...args);
+                  await new Promise((resolve) => setTimeout(resolve, 450)); // JS-side idle: no statement is running
+                  return rows;
+                };
+              },
+            });
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+      const started = Date.now();
+      try {
+        await miscastHasReferences(slowAfterFirst as typeof tx, worker);
+        throw new Error('expected WorkerCensusIncompleteError');
+      } catch (e) {
+        elapsed = Date.now() - started;
+        postgresCancelled = !(e instanceof WorkerCensusIncompleteError) && /statement timeout|canceling statement/i.test(String((e as Error)?.message));
+        expect(e).toBeInstanceOf(WorkerCensusIncompleteError);
+      }
+    });
+    expect(postgresCancelled).toBe(false);
+    expect(elapsed).toBeGreaterThanOrEqual(450); // the idle really happened inside the census; the refusal came after it, from the JS check
+  }, 30_000);
 
   it('the worker id itself anywhere in a JSON column refuses WORKER_IN_USE', async () => {
     await db.node.create({ data: { id: 'refw4809', memoryId: f.memory.id, loc: 'ref:w', name: 'ref', data: { who: [f.target.id] } } });
