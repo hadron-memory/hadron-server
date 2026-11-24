@@ -19,7 +19,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { AGENT_PRESENT_STATUSES, TERMINAL_REASONS, TERMINAL_STATUSES } from '../workerTerminal.js';
 import { loadHostDesiredState } from './desiredState.js';
-import { agentRunsOnAnyHost, LONG_HOLD_LOG_MS, pruneRunningLog, runningLogSize, TERMINAL_FUTURE_TOLERANCE_MS, resetDesiredStartStateLog, startDesiredWorker, startDesiredWorkers, START_FAILING_EVENT_TYPE, TERMINAL_FRESH_MS, terminalFreshMs } from './desiredStart.js';
+import { agentRunsOnAnyHost, LONG_HOLD_LOG_MS, pruneRunningLog, runningLogSize, TERMINAL_FUTURE_TOLERANCE_MS, resetDesiredStartStateLog, startDesiredWorker, startDesiredWorkers, START_FAILING_EVENT_TYPE, TERMINAL_FRESH_MS, derivedTerminalFreshMs } from './desiredStart.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 // A pass-through wrapper, so a test can make one read fail (the "could not read every host" pins).
@@ -182,7 +182,7 @@ describe('#4933: when the host does not run the agent, the worker is started as 
 });
 
 describe('#4970 item 6: the freshness window is derived from the reporting host\'s registration', () => {
-  const win = async (terminal: Parameters<typeof terminalFreshMs>[2]) => terminalFreshMs(db, app.id, terminal);
+  const win = async (terminal: Parameters<typeof derivedTerminalFreshMs>[2]) => derivedTerminalFreshMs(db, app.id, terminal);
   it('poll interval x the default 3 check-ins (600 s -> 30 minutes)', async () => {
     expect(await win({ host: { id: 'orca1' } })).toBe(30 * 60_000);
   });
@@ -190,9 +190,26 @@ describe('#4970 item 6: the freshness window is derived from the reporting host\
     await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 2 } });
     expect(await win({ host: { id: 'orca1' } })).toBe(20 * 60_000);
   });
-  it('the poll interval counts (a host that polls every 60 s -> 3 minutes)', async () => {
+  it('the poll interval counts (a host that polls every 300 s -> 15 minutes)', async () => {
+    await db.$executeRaw`UPDATE host_registrations SET poll_interval_seconds = 300 WHERE app_id = ${app.id} AND host_id = 'orca1'`;
+    expect(await win({ host: { id: 'orca1' } })).toBe(15 * 60_000);
+  });
+  it('never below the 5-minute constant: a fast poll with 2 check-ins (60 s x 2 = 2 minutes) floors at 5', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 2 } });
     await db.$executeRaw`UPDATE host_registrations SET poll_interval_seconds = 60 WHERE app_id = ${app.id} AND host_id = 'orca1'`;
-    expect(await win({ host: { id: 'orca1' } })).toBe(3 * 60_000);
+    expect(await win({ host: { id: 'orca1' } })).toBe(TERMINAL_FRESH_MS);
+  });
+  it('the floor holds through the guard: a 4-minute-old report from a fast-polling host still holds the worker', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 2 } });
+    await db.$executeRaw`UPDATE host_registrations SET poll_interval_seconds = 60 WHERE app_id = ${app.id} AND host_id = 'orca1'`;
+    await report({ status: 'idle', ageMs: 4 * 60_000 });
+    await tick();
+    expect(await starts()).toHaveLength(0);
+  });
+  it('a huge poll interval x check-ins does not overflow (86400 s x 10)', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 10 } });
+    await db.$executeRaw`UPDATE host_registrations SET poll_interval_seconds = 86400 WHERE app_id = ${app.id} AND host_id = 'orca1'`;
+    expect(await win({ host: { id: 'orca1' } })).toBe(864_000_000);
   });
   it('a report naming no host, or a host with no registration here, falls back to the constant', async () => {
     expect(await win({})).toBe(TERMINAL_FRESH_MS);
@@ -201,10 +218,10 @@ describe('#4970 item 6: the freshness window is derived from the reporting host\
   });
   it('another App\'s registration of the same host id does not widen it', async () => {
     const other = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` }, select: { id: true } });
-    expect(await terminalFreshMs(db, other.id, { host: { id: 'orca1' } })).toBe(TERMINAL_FRESH_MS);
+    expect(await derivedTerminalFreshMs(db, other.id, { host: { id: 'orca1' } })).toBe(TERMINAL_FRESH_MS);
   });
   it('the guard ages the report, not the registration: a registration refreshed just now does not keep a stale report fresh', async () => {
-    await db.$executeRaw`UPDATE host_registrations SET refreshed_at = now() WHERE app_id = ${app.id} AND host_id = 'orca1'`;
+    await db.$executeRaw`UPDATE host_registrations SET refreshed_at = (now() at time zone 'utc') WHERE app_id = ${app.id} AND host_id = 'orca1'`;
     await report({ status: 'idle', ageMs: 31 * 60_000 });
     await tick();
     expect(await starts()).toHaveLength(1);
@@ -432,6 +449,17 @@ describe('#4970 item 3: the failure count is judged at the moment of the decisio
     for (const m of [1, 2, 3]) await failedStart(m);
     const passNow = new Date(Date.now() - 10 * 60_000);
     expect(await startDesiredWorker(db, { appId: app.id, workerId: kit.id, hostId: 'orca1' }, passNow, performance.now() - 10 * 60_000)).toBe('tripped');
+  });
+});
+
+describe('#4970 item 3: the host registration is judged live at the moment of the decision', () => {
+  it('a registration live at the slow pass\'s `now` but lapsed by its decision does not take the start (no-host or skipped, never issued)', async () => {
+    // Refreshed 35 minutes ago: lapses 5 minutes ago at 600 s x 3; live at a `now` ten minutes back.
+    await db.$executeRaw`UPDATE host_registrations SET refreshed_at = (now() at time zone 'utc') - interval '35 minutes' WHERE app_id = ${app.id} AND host_id = 'orca1'`;
+    const passNow = new Date(Date.now() - 10 * 60_000);
+    const out = await startDesiredWorker(db, { appId: app.id, workerId: kit.id, hostId: 'orca1' }, passNow, performance.now() - 10 * 60_000);
+    expect(['no-host', 'skipped']).toContain(out);
+    expect(await starts()).toHaveLength(0);
   });
 });
 
