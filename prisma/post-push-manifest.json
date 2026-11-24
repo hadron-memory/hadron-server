@@ -1858,6 +1858,12 @@
       "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
+      "name": "credit_ledger_entries_expiring_grants_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
       "name": "dark_worker_episodes_app_id_ended_at_idx",
       "kind": "index",
       "file": "dark-alarm-invariants.sql",
