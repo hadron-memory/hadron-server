@@ -149,6 +149,14 @@ const RESUME_SESSION_SELECT = {
 /** What a lapsed-session resume would do: resume, refuse as DORMANT (DY-5), or refuse. */
 export type ResumeVerdict = 'OK' | 'DORMANT' | 'REFUSED';
 
+/**
+ * #5000: WHY a resume was refused, as a code a client can print. It names the condition and never another worker or
+ * session (cor:agt:020:09). A caller who does not own the session (or names none) always gets NOT_OWNER, so the code is
+ * no existence oracle: ENDED, OTHER_SESSION_LIVE and DORMANT are told only to the session's own holder.
+ */
+export type ResumeRefusalReason = 'NOT_OWNER' | 'ENDED' | 'OTHER_SESSION_LIVE' | 'DORMANT';
+export type ResumeDecision = { verdict: 'OK' } | { verdict: 'DORMANT' | 'REFUSED'; reason: ResumeRefusalReason };
+
 /** The principals that may resume at all: an ordinary user, or a pure App key (DY-1). */
 function resumingPrincipal(ctx: Context): 'user' | 'appKey' | null {
   if (ctx.impersonation) return null;
@@ -177,21 +185,31 @@ function resumingPrincipal(ctx: Context): 'user' | 'appKey' | null {
  *        only its human holder's explicit rebind brings the worker back.
  */
 async function resumeVerdict(ctx: Context, db: Context['db'], sessionId: string, now: Date): Promise<ResumeVerdict> {
+  return (await resumeDecision(ctx, db, sessionId, now)).verdict;
+}
+
+/**
+ * {@link resumeVerdict} with the failed condition named (#5000). Ownership is judged FIRST, so a refusal that is not the
+ * caller's own session is NOT_OWNER whatever state that session is in; the state-revealing reasons follow only for the owner.
+ */
+async function resumeDecision(ctx: Context, db: Context['db'], sessionId: string, now: Date): Promise<ResumeDecision> {
+  const notOwner: ResumeDecision = { verdict: 'REFUSED', reason: 'NOT_OWNER' };
   const principal = resumingPrincipal(ctx);
-  if (!principal) return 'REFUSED';
+  if (!principal) return notOwner;
   const s = await db.session.findUnique({ where: { id: sessionId }, select: RESUME_SESSION_SELECT });
-  if (
-    !s || s.endedAt || s.deletedAt || !s.workerId || !s.worker ||
-    (s.expiresAt && s.expiresAt.getTime() <= now.getTime()) ||
-    s.worker.retiredAt
-  ) return 'REFUSED';
+  if (!s || !s.worker) return notOwner;
   const owns = principal === 'user'
     ? s.userId === ctx.userId && s.worker.heldByUserId === ctx.userId
     : s.userId === null && s.appId === ctx.appId && s.worker.appId === ctx.appId && s.worker.heldByUserId === null;
-  if (!owns) return 'REFUSED';
-  if (!(await mayStillDriveWorkerApp({ ...ctx, db } as Context, s.worker.appId))) return 'REFUSED';
+  if (!owns) return notOwner;
+  if (
+    s.endedAt || s.deletedAt || !s.workerId ||
+    (s.expiresAt && s.expiresAt.getTime() <= now.getTime()) ||
+    s.worker.retiredAt
+  ) return { verdict: 'REFUSED', reason: 'ENDED' };
+  if (!(await mayStillDriveWorkerApp({ ...ctx, db } as Context, s.worker.appId))) return notOwner;
   const ownEvent = (await loadLastEventBySession(db as never, [s.id])).get(s.id);
-  if (isSessionDormant(s, ownEvent, s.worker.app?.sessionDormancyDays ?? DEFAULT_SESSION_DORMANCY_DAYS, now)) return 'DORMANT';
+  if (isSessionDormant(s, ownEvent, s.worker.app?.sessionDormancyDays ?? DEFAULT_SESSION_DORMANCY_DAYS, now)) return { verdict: 'DORMANT', reason: 'DORMANT' };
   const others = await db.session.findMany({
     where: {
       workerId: s.workerId, id: { not: sessionId }, endedAt: null, deletedAt: null,
@@ -201,9 +219,14 @@ async function resumeVerdict(ctx: Context, db: Context['db'], sessionId: string,
     select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
     take: OPEN_SESSION_SCAN_CAP + 1,
   });
-  if (others.length > OPEN_SESSION_SCAN_CAP) return 'REFUSED';
+  if (others.length > OPEN_SESSION_SCAN_CAP) return { verdict: 'REFUSED', reason: 'OTHER_SESSION_LIVE' };
   const events = await loadLastEventBySession(db as never, others.map((o) => o.id));
-  return others.some((o) => isSessionLive(o, events.get(o.id), now)) ? 'REFUSED' : 'OK';
+  return others.some((o) => isSessionLive(o, events.get(o.id), now)) ? { verdict: 'REFUSED', reason: 'OTHER_SESSION_LIVE' } : { verdict: 'OK' };
+}
+
+/** #5000: the lock-free verdict with its refusal reason, for a gate that must say why. */
+export async function lapsedResumeDecision(ctx: Context, sessionId: string): Promise<ResumeDecision> {
+  return resumeDecision(ctx, ctx.db, sessionId, new Date());
 }
 
 /**
@@ -248,25 +271,35 @@ export async function resumeOwnLapsedSessionInTx(
   tx: Prisma.TransactionClient,
   sessionId: string,
 ): Promise<boolean> {
+  return (await tryResumeOwnLapsedSessionInTx(ctx, tx, sessionId)) === null;
+}
+
+/** {@link resumeOwnLapsedSessionInTx} that names the refusing condition (#5000): null when it resumed. */
+export async function tryResumeOwnLapsedSessionInTx(
+  ctx: Context,
+  tx: Prisma.TransactionClient,
+  sessionId: string,
+): Promise<ResumeRefusalReason | null> {
   const principal = resumingPrincipal(ctx);
-  if (!principal) return false;
+  if (!principal) return 'NOT_OWNER';
   const pre = await tx.session.findUnique({
     where: { id: sessionId },
     select: { userId: true, appId: true, workerId: true, worker: { select: { appId: true } } },
   });
-  if (!pre?.workerId || !pre.worker) return false;
+  if (!pre?.workerId || !pre.worker) return 'NOT_OWNER';
   // Refuse foreign refs before taking another tenant's lifecycle locks
   // (#1741, Rook P3). This is only an early rejection: resumeVerdict and the
   // guarded update still re-check ownership after the App/Worker lock wait.
   if (principal === 'user' ? pre.userId !== ctx.userId
-    : pre.userId !== null || pre.appId !== ctx.appId || pre.worker.appId !== ctx.appId) return false;
+    : pre.userId !== null || pre.appId !== ctx.appId || pre.worker.appId !== ctx.appId) return 'NOT_OWNER';
   const [app] = await tx.$queryRaw<Array<{ deleted_at: Date | null; uninstalled_at: Date | null }>>`
     SELECT deleted_at, uninstalled_at FROM apps WHERE id = ${pre.worker.appId} FOR SHARE`;
-  if (!app || app.deleted_at || app.uninstalled_at) return false;
+  if (!app || app.deleted_at || app.uninstalled_at) return 'NOT_OWNER';
   await tx.$queryRaw`SELECT id FROM workers WHERE id = ${pre.workerId} FOR UPDATE`;
   const now = new Date();
   const db = tx as unknown as Context['db'];
-  if ((await resumeVerdict(ctx, db, sessionId, now)) !== 'OK') return false;
+  const decision = await resumeDecision(ctx, db, sessionId, now);
+  if (decision.verdict !== 'OK') return decision.reason;
   const touched = await tx.session.updateMany({
     where: {
       id: sessionId, workerId: pre.workerId, endedAt: null, deletedAt: null,
@@ -276,7 +309,8 @@ export async function resumeOwnLapsedSessionInTx(
     },
     data: { updatedAt: now },
   });
-  return touched.count === 1;
+  // A guarded write that matched nothing means the session ended or expired between the decision and the write.
+  return touched.count === 1 ? null : 'ENDED';
 }
 
 /** #1617 B: resume in a transaction of its own, for an act (a served read) that has no write to join. */
@@ -746,8 +780,10 @@ export async function markOwnTeamChatRead(
   const app = await resolvePilotApp(ctx, args.appRef);
   const session = await ownLiveSessionWorker(ctx, args.sessionRef, app.id);
   if (!session) {
-    // DY-5: say so when the reason is dormancy, keeping the code clients rebind on.
-    if ((await lapsedResumeVerdict(ctx, args.sessionRef.trim())) === 'DORMANT') {
+    // DY-5: say so when the reason is dormancy, keeping the code clients rebind on. #5000: any other refusal names its
+    // condition too (a code, never another worker or session).
+    const decision = await lapsedResumeDecision(ctx, args.sessionRef.trim());
+    if (decision.verdict === 'DORMANT') {
       fail(
         'That session is DORMANT: idle past its App\'s dormancy threshold, so no agent act resumes it. ' +
           'Its holder must start a new session for this worker.',
@@ -755,7 +791,7 @@ export async function markOwnTeamChatRead(
         { reason: 'DORMANT' },
       );
     }
-    fail('That session is not one of your live Worker sessions in this App.', 'SESSION_NOT_LIVE');
+    fail('That session is not one of your live Worker sessions in this App.', 'SESSION_NOT_LIVE', decision.verdict === 'OK' ? undefined : { reason: decision.reason });
   }
   const { workerId } = session;
   // The caller names the Channel. The MCP tool resolves an OMITTED channel to
