@@ -4,12 +4,13 @@
  *
  * hrn:node:hadronmemory.com:specs:cor:dmo:170:10, hrn:node:hadronmemory.com:specs:cor:dmo:170:11; gate rulings 10.1
  * (settle at expiresAt <= now - 60 s, every read answers the computed figure), 10.3 (a grant already expired is
- * refused), 10.7 (one figure rule for the impersonated read and a read inside the 60 s).
+ * refused), 10.4 (a settlement that fails in a read logs one line and the read answers the computed figure), 10.7 (one
+ * figure rule for the impersonated read and a read inside the 60 s).
  *
  * Red on main: `expiring` is not a field of CreditBalance (a validation error), the balance includes the expired
  * remainder, nothing settles, and grantCredits accepts an expiry in the past.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 
 import { db } from '../../../integrations/db/client.js';
@@ -21,6 +22,9 @@ import { resolvers, type Context } from './resolvers.js';
 const server = new ApolloServer<Context>({ typeDefs, resolvers });
 async function gql(query: string, ctx: Partial<Context>, variables?: Record<string, unknown>) {
   const res = await server.executeOperation({ query, variables }, { contextValue: { db, ...ctx } as Context });
+  return single(res);
+}
+function single(res: Awaited<ReturnType<typeof server.executeOperation>>) {
   if (res.body.kind !== 'single') throw new Error('unexpected');
   return res.body.singleResult;
 }
@@ -157,6 +161,46 @@ describe('#5011 creditBalance and grant expiry', () => {
       'sourceId: String',
       'note: String',
     ]);
+  });
+
+  it('R7 (ruling 10.4): a settlement that fails inside the read logs one line and answers the computed figure', async () => {
+    const now = await dbNow();
+    await entry('grant', 100, shift(now, -3_600_000), shift(now, -120_000));
+    await entry('debit', 30, shift(now, -1_800_000));
+    // The settlement's one write fails as a database error would; every read goes through.
+    const ledger = new Proxy(db.creditLedgerEntry, {
+      get(target, key) {
+        if (key === 'createMany') {
+          return () => Promise.reject(Object.assign(new Error('secret detail 70 grant-expiry'), { code: 'P1001' }));
+        }
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const failing = new Proxy(db, {
+      get(target, key) {
+        if (key === 'creditLedgerEntry') return ledger;
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as typeof db;
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = single(
+        await server.executeOperation(
+          { query: BALANCE_ONLY, variables: { orgRef: orgId } },
+          { contextValue: { ...orgAdminCtx(), db: failing } as Context },
+        ),
+      );
+      expect(res.errors).toBeUndefined();
+      expect((res.data as { creditBalance: { balanceMicroCents: string } }).creditBalance.balanceMicroCents).toBe('0');
+      const lines = log.mock.calls.filter((c) => c[0] === 'credit_expiry.settle_failed');
+      expect(lines).toEqual([['credit_expiry.settle_failed', { organizationId: orgId, code: 'P1001' }]]);
+      expect(JSON.stringify(log.mock.calls)).not.toContain('secret detail');
+    } finally {
+      log.mockRestore();
+    }
+    expect(await settlementCount()).toBe(0);
   });
 
   it('R6 (ruling 10.3): a grant whose expiresAt is not later than now is refused BAD_USER_INPUT and writes nothing', async () => {

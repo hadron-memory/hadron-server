@@ -9,11 +9,10 @@
  *
  * Red on main: `./settleExpiredGrants.js` does not exist.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
-import { replayLedger } from './expiry.js';
 import {
   CREDIT_EXPIRY_CREATED_BY,
   SETTLE_DELAY_MS,
@@ -59,6 +58,36 @@ async function debit(amount: number, createdAt: Date, deletedAt: Date | null = n
 }
 const settlements = () =>
   db.creditLedgerEntry.findMany({ where: { sourceType: 'grant-expiry' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+
+/**
+ * The client with its ledger reads counted: the probe is a single raw query, so a call the probe ends reads no ledger
+ * rows through the model (the window rule alone would also return nothing, so only the reads can tell the probe ran
+ * first).
+ */
+function countingLedgerReads() {
+  const counter = { reads: 0 };
+  const ledger = new Proxy(db.creditLedgerEntry, {
+    get(target, key) {
+      const value = Reflect.get(target, key);
+      if (typeof value !== 'function') return value;
+      if (key === 'findMany' || key === 'aggregate') {
+        return (...args: unknown[]) => {
+          counter.reads += 1;
+          return (value as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      }
+      return (value as (...a: unknown[]) => unknown).bind(target);
+    },
+  });
+  const client = new Proxy(db, {
+    get(target, key) {
+      if (key === 'creditLedgerEntry') return ledger;
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    },
+  }) as typeof db;
+  return { client, counter };
+}
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -167,21 +196,24 @@ describe('#5011 settleExpiredGrants', () => {
   it('S5: a fully used grant is settled once with a zero entry; the next call ends at the probe', async () => {
     const g = await grant(100, d('01-01'), d('02-01'));
     await debit(100, d('01-10'));
-    expect(await settleExpiredGrants(db, { organizationId: orgId }, { now: d('02-02') })).toEqual([
+    // The control: a call the probe lets through reads the ledger through the counted client.
+    const first = countingLedgerReads();
+    expect(await settleExpiredGrants(first.client, { organizationId: orgId }, { now: d('02-02') })).toEqual([
       { grantId: g.id, amountMicroCents: 0n },
     ]);
+    expect(first.counter.reads).toBeGreaterThan(0);
     expect((await settlements()).map((s) => s.amountMicroCents)).toEqual([0n]);
-    const replay = vi.fn(replayLedger);
-    expect(await settleExpiredGrants(db, { organizationId: orgId }, { now: d('03-01'), replay })).toEqual([]);
-    expect(replay).not.toHaveBeenCalled();
+    const { client, counter } = countingLedgerReads();
+    expect(await settleExpiredGrants(client, { organizationId: orgId }, { now: d('03-01') })).toEqual([]);
+    expect(counter.reads).toBe(0);
   });
 
   it('S6: a grant with no expiry is never touched; the probe ends the call', async () => {
     await grant(100, d('01-01'), null);
     await debit(30, d('01-10'));
-    const replay = vi.fn(replayLedger);
-    expect(await settleExpiredGrants(db, { organizationId: orgId }, { now: d('12-31'), replay })).toEqual([]);
-    expect(replay).not.toHaveBeenCalled();
+    const { client, counter } = countingLedgerReads();
+    expect(await settleExpiredGrants(client, { organizationId: orgId }, { now: d('12-31') })).toEqual([]);
+    expect(counter.reads).toBe(0);
     expect(await settlements()).toHaveLength(0);
     expect(await unsettledRemainders(db, { organizationId: orgId }, d('12-31'))).toBe(0n);
   });

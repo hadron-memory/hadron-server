@@ -38,8 +38,6 @@ export interface Settlement {
 export interface SettleOptions {
   /** The instant to settle at; defaults to the database clock. */
   now?: Date;
-  /** The replay to run; a test seam (a spy proves the probe ends the call). */
-  replay?: typeof replayLedger;
 }
 
 /** `created_at` and `expires_at` are naive UTC timestamps: bind a naive UTC literal (finding prisma-naive-timestamp-raw-sql). */
@@ -78,12 +76,7 @@ async function hasUnsettledExpiredGrant(db: PrismaClient, organizationId: string
  * grant and every taken settlement pair, one opening figure for the entries before the window, the live entries from
  * it to `now`. Null when the organization holds no unsettled expiring grant.
  */
-async function replayOwner(
-  db: PrismaClient,
-  organizationId: string,
-  now: Date,
-  replay: typeof replayLedger,
-): Promise<ReplayResult | null> {
+async function replayOwner(db: PrismaClient, organizationId: string, now: Date): Promise<ReplayResult | null> {
   const grants = await db.creditLedgerEntry.findMany({
     where: { organizationId, kind: 'grant', expiresAt: { not: null }, deletedAt: null },
     select: { id: true, createdAt: true, expiresAt: true },
@@ -117,7 +110,7 @@ async function replayOwner(
       },
     }),
   ]);
-  return replay(entries, now, { opening: opening._sum.amountMicroCents ?? 0n, settled });
+  return replayLedger(entries, now, { opening: opening._sum.amountMicroCents ?? 0n, settled });
 }
 
 /**
@@ -159,7 +152,7 @@ export async function settleExpiredGrants(db: PrismaClient, owner: OwnerRef, opt
   const now = opts.now ?? (await databaseNow(db));
   const cutoff = new Date(now.getTime() - SETTLE_DELAY_MS);
   if (!(await hasUnsettledExpiredGrant(db, organizationId, cutoff))) return [];
-  const result = await replayOwner(db, organizationId, now, opts.replay ?? replayLedger);
+  const result = await replayOwner(db, organizationId, now);
   const due = (result?.toSettle ?? [])
     .filter((g) => g.expiresAt.getTime() <= cutoff.getTime())
     .map((g) => ({ grantId: g.grantId, amountMicroCents: -g.remaining }));
@@ -175,12 +168,12 @@ export async function settleExpiredGrants(db: PrismaClient, owner: OwnerRef, opt
 export async function unsettledRemainders(db: PrismaClient, owner: OwnerRef, now: Date): Promise<bigint> {
   const organizationId = ownerOrganizationId(owner);
   if (!(await hasUnsettledExpiredGrant(db, organizationId, now))) return 0n;
-  const result = await replayOwner(db, organizationId, now, replayLedger);
+  const result = await replayOwner(db, organizationId, now);
   return (result?.toSettle ?? []).reduce((acc, g) => acc + g.remaining, 0n);
 }
 
 /** What is left of each unexpired expiring grant of `owner` at `now`, soonest first (CreditBalance.expiring). */
 export async function expiringCredit(db: PrismaClient, owner: OwnerRef, now: Date) {
-  const result = await replayOwner(db, ownerOrganizationId(owner), now, replayLedger);
+  const result = await replayOwner(db, ownerOrganizationId(owner), now);
   return result?.expiring ?? [];
 }
