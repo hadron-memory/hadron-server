@@ -216,7 +216,7 @@ describe('`approved` includes (cor:dmo:150:02)', () => {
       const mcp = createTestableMcpServer({ userId: reader.id, roles: [], clientId: `user:${reader.id}` });
       const text = await mcp.callToolText('hadron_get_node', { urn: `hrn:node:${(await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).urn}:inc` });
       expect(text).toContain('x v1 y');
-      const exp = await resolvers.Query.nodeExport({}, { id: inc.id, full: false }, ctx());
+      const exp = await resolvers.Query.nodeExport({}, { ref: inc.id, full: false }, ctx());
       expect(exp.data).toContain('x v1 y');
       expect(exp.data).not.toContain('v2 draft');
     });
