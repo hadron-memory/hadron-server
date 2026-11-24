@@ -4,12 +4,14 @@
  * authoring attestation check. Every verdict here is also driven against the real write, so the
  * read can neither pass what the write refuses nor refuse what it accepts.
  */
+import { readFileSync } from 'node:fs';
 import { GraphQLError } from 'graphql';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { generateId } from '../../../lib/id.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -236,5 +238,110 @@ describe('#4168 no write', () => {
     await check(person(ann), { ref: nodeId, role: 'guide' });
     await check(person(ann), { memoryId, loc: 'x', role: 'guide', authoredWith: { task: taskId, revision: 4 } });
     expect(await footprint()).toEqual(before);
+  });
+});
+
+/**
+ * #5034: the deferred P3s of #5005's reviews. Tests and text only: nothing here changes what the check answers.
+ * Red-first, by mutating the guarded behaviour: drop `byRef === byAddress` or the `memoryId == null || loc == null`
+ * clause of the input check (the input cases); drop `existing === null ||` from `authoredChange` (the create pin);
+ * replace `authoringFromRequest` by a bare attested context (the portal pin); drop `deletedAt: null` from the by-address
+ * lookup (the soft-delete pin); change either not-found throw site's message (the parity pin).
+ */
+describe('#5034 the input names the node one way', () => {
+  const cases: Array<[string, () => Record<string, unknown>]> = [
+    ['neither', () => ({})],
+    ['both ways', () => ({ ref: nodeId, memoryId, loc: 'doc' })],
+    ['memoryId only', () => ({ memoryId })],
+    ['loc only', () => ({ loc: 'doc' })],
+    ['a ref and a loc', () => ({ ref: nodeId, loc: 'doc' })],
+    ['a ref and a memoryId', () => ({ ref: nodeId, memoryId })],
+  ];
+  it.each(cases)('%s is BAD_USER_INPUT, before anything is read', async (_label, input) => {
+    expect(await code(check(person(ann), { ...input(), role: 'guide' }))).toBe('BAD_USER_INPUT');
+  });
+});
+
+describe('#5034 a create is always an authored change', () => {
+  it('changesAuthoredContent: false does not excuse a create: REFUSED, as the write refuses it, and nothing is written', async () => {
+    const verdict = await check(person(ann), { memoryId, loc: 'brand-new', role: 'guide', changesAuthoredContent: false });
+    expect(verdict).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
+    const refused = await refusedWrite(M.createNode({}, { input: { memoryId, loc: 'brand-new', name: 'b', content: 'x', role: 'guide' } }, person(ann)));
+    expect(refused?.extensions?.code).toBe('AUTHORING_ATTESTATION_MISSING');
+    expect(await db.node.count({ where: { memoryId, loc: 'brand-new' } })).toBe(0);
+  });
+});
+
+describe('#5034 a trusted portal human is judged as the write judges them', () => {
+  it('passes with no claim, and the write accepts the same request; the same person without the portal signal is refused', async () => {
+    const portal = { ...person(ann), portalHumanUserId: ann } as Context;
+    expect(await check(person(ann), { ref: nodeId, role: 'guide' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
+    expect(await check(portal, { ref: nodeId, role: 'guide' })).toMatchObject({ state: 'PASS' });
+    const written = await M.updateNode({}, { input: { id: nodeId, role: 'guide', content: 'by a person' } }, portal);
+    expect(written.id).toBe(nodeId);
+  });
+
+  it('a portal signal naming another user is no trust', async () => {
+    const other = { ...person(ann), portalHumanUserId: ben } as Context;
+    expect(await check(other, { ref: nodeId, role: 'guide' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
+  });
+});
+
+describe('#5034 by memory and loc, a soft-deleted node is no node', () => {
+  it('the answer is the one for a loc that never existed, and the deleted node\'s role is not inherited', async () => {
+    const gone = (await db.node.create({ data: { id: generateId(), memoryId, loc: 'gone', name: 'G', content: 'x', role: 'guide', deletedAt: new Date() } })).id;
+    const goneAnswer = await check(person(ann), { memoryId, loc: 'gone' });
+    const neverAnswer = await check(person(ann), { memoryId, loc: 'never-existed' });
+    expect(goneAnswer).toEqual(neverAnswer);
+    expect(goneAnswer).toMatchObject({ state: 'PASS' });
+    // The control: the same node, live, is judged by its own role.
+    await db.node.update({ where: { id: gone }, data: { deletedAt: null } });
+    expect(await check(person(ann), { memoryId, loc: 'gone' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
+  });
+});
+
+describe('#5034 the not-found answers compare with the write\'s', () => {
+  const grab = async (p: Promise<unknown>) => {
+    const e = await p.then(() => null, (x: unknown) => x) as (Error & { code?: string; extensions?: { code?: string } }) | null;
+    expect(e, 'expected a refusal').not.toBeNull();
+    return { cls: e!.constructor, code: e!.extensions?.code ?? e!.code, message: e!.message };
+  };
+
+  it('by memory and loc: the same class, code and message as the write\'s, for a memory the caller cannot read and for one that does not exist', async () => {
+    for (const id of [memoryId, generateId()]) {
+      const checked = await grab(check(person(carol), { memoryId: id, loc: 'doc', role: 'guide' }));
+      const written = await grab(M.createNode({}, { input: { memoryId: id, loc: 'fresh', name: 'f', content: 'x' } }, person(carol)));
+      expect(checked).toEqual(written);
+      expect(checked.code).toBe('MEMORY_NOT_FOUND');
+    }
+  });
+
+  it('by ref: a node the caller cannot read and one that does not exist answer alike (class, code, and message up to the ref named); the code is the write\'s', async () => {
+    const hidden = await grab(check(person(carol), { ref: nodeId, role: 'guide' }));
+    const missingId = generateId();
+    const missing = await grab(check(person(carol), { ref: missingId, role: 'guide' }));
+    expect(hidden.cls).toBe(missing.cls);
+    expect(hidden.code).toBe(missing.code);
+    expect(hidden.message.split(nodeId).join('<ref>')).toBe(missing.message.split(missingId).join('<ref>'));
+    // The write's code for the same unreadable node. Its wording differs today (the check throws the typed
+    // NodeNotFoundError, the write a GraphQLError), so the code is the contract pinned here.
+    const written = await grab(M.updateNode({}, { input: { id: nodeId, content: 'x' } }, person(carol)));
+    expect(hidden.code).toBe(written.code);
+  });
+});
+
+describe('#5034 the text says what the check does', () => {
+  it('the header says the shared computation takes a shared lock and reads, not that the transaction is read-only', () => {
+    const header = readFileSync(new URL('./resolvers.nodeAuthoringCheck.ts', import.meta.url), 'utf8').split('*/')[0]!;
+    expect(header).not.toMatch(/read-only transaction/);
+    expect(header).toMatch(/transaction that takes a shared advisory lock and reads/);
+  });
+
+  it('AuthoringCheckLoad says graphql always has a route', () => {
+    expect(typeDefs).toMatch(/graphql always has a route and is never null; mcp and cli are null when the task has no URN to name/);
+  });
+
+  it('the PASS description says the answer covers the authoring attestation check and not the rest of the write\'s validation', () => {
+    expect(typeDefs).toMatch(/PASS: the write would pass the authoring attestation check; the answer covers that check and not the\s+rest of the write's validation/);
   });
 });
