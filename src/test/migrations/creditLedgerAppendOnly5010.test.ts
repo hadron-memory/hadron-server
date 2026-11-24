@@ -32,8 +32,8 @@ describe('#5010 migration', () => {
       await preMigrationShape();
       await pg.query(`INSERT INTO credit_ledger_entries (id, organization_id, kind, amount_micro_cents, deleted_at) VALUES ($1, $2, 'grant', 1, now())`, [generateId(), orgId]);
       await pg.query('SAVEPOINT before_migration');
-      let err: { code?: string; message?: string; detail?: string } | null = null;
-      try { await pg.query(MIGRATION); } catch (e) { err = e as typeof err; }
+      let err: { code?: string; message?: string; detail?: string } | undefined;
+      try { await pg.query(MIGRATION); } catch (e) { err = e as { code?: string; message?: string; detail?: string }; }
       expect(err?.code).toBe('HDPRF');
       expect(err?.detail).toBe('count of rows with deleted_at set: 1');
       expect(err?.message).not.toContain(orgId);
