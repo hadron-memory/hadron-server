@@ -2518,8 +2518,9 @@ export const memoryMutations = {
     // Spec 041 (D-2026-07-06-B): convert a plaintext PRIVATE memory to
     // encrypted. The secret is exactly one of a dataKey / passphrase entry
     // beside the operation (x-hadron-memory-keys, #1796). The passphrase path
-    // stores KDF salt+params, and BOTH paths store a keyVerifier so later unlocks detect a wrong key without touching
-    // node rows. The server never persists the key itself.
+    // stores KDF salt+params, and BOTH paths store a keyVerifier so later
+    // unlocks detect a wrong key without touching node rows. The server never
+    // persists the key itself.
     encryptMemory: async (
       _: unknown,
       { memoryRef }: { memoryRef: string },
@@ -2591,7 +2592,8 @@ export const memoryMutations = {
         try {
           // Beside the operation, not an argument. Every supplied key must prove itself against the
           // verifier, so a mismatch between channels can't pass: an operation key is verified here,
-          // the staged key was verified at staging, and a first-encryption entry below.
+          // the staged key was verified at staging, and a first-encryption entry is verified by
+          // resolveSuppliedKey below.
           const operationKey = operationKeySupplied ? getRequestOperationKey() : null;
           if (operationKey && !verifyDataKey(memory.keyVerifier as string, operationKey)) {
             throw new MemoryUnlockError('Wrong passphrase or data key for this memory.', 'WRONG_KEY');
@@ -2608,7 +2610,7 @@ export const memoryMutations = {
         }
       } else if (passphrase) {
         if (dataKey) {
-          throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
+          throw new GraphQLError('Send exactly one of dataKey or passphrase in the x-hadron-memory-keys entry.', {
             extensions: { code: 'BAD_USER_INPUT' },
           });
         }
@@ -2626,7 +2628,7 @@ export const memoryMutations = {
           });
         }
       } else {
-        throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
+        throw new GraphQLError('Send a dataKey or passphrase entry for this memory in x-hadron-memory-keys.', {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }

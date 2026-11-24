@@ -455,6 +455,9 @@ describe('#1796 step 2: encryptMemory has no secret argument', () => {
     expect(args.map((a) => a.name)).toEqual(['memoryRef']);
   });
 
+  // Passphrase completion and first encryption: acceptance 2 above. App completion by operation key and
+  // the refusals: `resolvers.encryptionOwner1644.test.ts` (the helper delivers an App's key as
+  // x-hadron-operation-key) and acceptance 3 above.
   it('completion through the header alone still works', async () => {
     const reply = await send(ENCRYPT, { id: memory.id }, { keys: [{ memory: memory.id, dataKey }] });
     expect(reply.errors).toBeUndefined();

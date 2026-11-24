@@ -160,7 +160,6 @@ it('4: keyless write keeps the existing SESSION_EXPIRED refusal and writes nothi
   expect(await raw()).toEqual(before); expect(await db.chatRootEngineState.count()).toBe(0);
 });
 it('11: encryptMemory converts state on live AND tombstoned roots in its real conversion path', async () => {
-  const { memoryMutations } = await import('../api/graphql/schema/resolvers.mutation.memory.js');
   await updateChatRootData(db, root, enc(), d => d);
   const dead = await db.node.create({ data: { id: generateId(), memoryId: root.memoryId, loc: 'chats:dead', name: 'dead', nodeType: 'record', deletedAt: new Date(), data: {} } });
   await db.chatRootEngineState.create({ data: { chatRootNodeId: dead.id, state: { conversationName: 'tombstone-private-name', stageName: 'old-stage' } } });
@@ -420,7 +419,6 @@ it.each([{ stageName: '\t', unknown: 'keep opaque' }, ['malformed', 'shape'], 42
 });
 
 it('security: real encryptMemory completes past malformed engine state and encrypts later content', async () => {
-  const { memoryMutations } = await import('../api/graphql/schema/resolvers.mutation.memory.js');
   const key = generateDataKey();
   await db.memory.update({ where: { id: root.memoryId }, data: { class: 'private' } });
   await db.chatRootEngineState.create({ data: { chatRootNodeId: root.id, state: { stageName: '\t' } } });

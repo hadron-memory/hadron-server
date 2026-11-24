@@ -8,7 +8,7 @@ import { db } from '../db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 import { generateDataKey } from '../../lib/crypto.js';
-import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import type { Context } from '../../api/graphql/schema/resolvers.js';
 import * as locks from './mirrorCheckoutLock.js';
 import { withMirrorCheckout } from './gitMirrorCheckout.js';
 import { execGit } from './execGit.js';

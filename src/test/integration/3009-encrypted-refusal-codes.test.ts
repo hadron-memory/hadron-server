@@ -7,7 +7,6 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/jwt.js';
 import { generateId } from '../../lib/id.js';
-import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { FR_026_DISCLOSURE } from '../../lib/entityRef/errors.js';
 import { sessionKeyCache } from '../../lib/sessionKeyCache.js';
 import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';

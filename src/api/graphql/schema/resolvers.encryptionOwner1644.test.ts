@@ -92,6 +92,18 @@ describe('#1644 encryption authority', () => {
     expect(await snapshot()).toEqual(beforeCompletion);
   });
 
+  it("an owning App's operation key never first-encrypts its own plaintext private memory (#1796 step 2, §10)", async () => {
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: orgId, name: 'Owner agent', urn: `enc-owner.test:agent-${generateId()}` } });
+    await db.memory.update({ where: { id: memoryId }, data: { appId, userMemoryOfAgentId: agent.id } });
+    const before = await snapshot();
+    // appCompletionOnly needs memory.isEncrypted: with the argument gone, that arm is the only thing that
+    // keeps an operation key (completion only) from becoming a first encryption.
+    await expect(withTestOperationKey(dataKey, appId, () => resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId }, { db, appId, roles: [] } as Context)))
+      .rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
+    expect(await snapshot()).toEqual(before);
+    expect(before.memory.isEncrypted).toBe(false);
+  });
+
   it('an App key cannot complete a free-standing encrypted holding even with the correct key', async () => {
     await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     const before = await snapshot();

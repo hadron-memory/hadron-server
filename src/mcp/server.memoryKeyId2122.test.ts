@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
-import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import type { Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';

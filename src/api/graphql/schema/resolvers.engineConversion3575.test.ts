@@ -19,9 +19,7 @@ import { withTestOperationKey } from '../../../test/operationKey.js';
 import { formatGraphQLError } from '../formatError.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
-import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
-import { requestFirstEncryptionStorage, type FirstEncryptionEntry } from '../../../lib/requestKeys.js';
-import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { encryptWithSecret, withEncryptionSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -29,15 +27,13 @@ const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: for
 type Answer = { data: unknown; error: { message: string; extensions: Record<string, unknown> } | null };
 async function ask(contextValue: Context, query: string, variables: Record<string, unknown> = {}): Promise<Answer> {
   // #1796 step 2: the key is no argument. A fixture that names `k` hands it over as the request's
-  // first-encryption entry, the way `x-hadron-memory-keys` does over HTTP.
+  // first-encryption entry, as `x-hadron-memory-keys` does over HTTP.
   const { k, ...operationVariables } = variables;
-  const entries = new Map<string, FirstEncryptionEntry>();
-  if (typeof k === 'string' && typeof operationVariables.m === 'string') {
-    const { id } = await resolveMemoryRef(contextValue.db, operationVariables.m);
-    entries.set(id, { dataKey: k });
-  }
-  const res = await requestFirstEncryptionStorage.run(entries, () =>
-    server.executeOperation({ query, variables: operationVariables }, { contextValue }));
+  if (k !== undefined && typeof operationVariables.m !== 'string') throw new Error('ask: a key `k` needs a string memory `m`');
+  const execute = () => server.executeOperation({ query, variables: operationVariables }, { contextValue });
+  const res = typeof k === 'string'
+    ? await withEncryptionSecret(operationVariables.m as string, { dataKey: k }, contextValue, execute)
+    : await execute();
   if (res.body.kind !== 'single') throw new Error('unexpected incremental response');
   const { data, errors } = res.body.singleResult;
   const e = errors?.[0];

@@ -283,7 +283,7 @@ describe('#3450 nothing staged outlives its request', () => {
     const staged = await send(invalid, { id: memory.id }, [{ memory: memory.id, passphrase: 'never-used-3450' }]);
     expect(staged.errors?.length).toBeGreaterThan(0);
     const later = await send(ENCRYPT, { id: memory.id }, undefined);
-    expect(later.errors?.[0].message).toContain('Provide exactly one');
+    expect(later.errors?.[0].message).toContain('x-hadron-memory-keys');
     expect((await row(memory.id)).isEncrypted).toBe(false);
   });
 });
