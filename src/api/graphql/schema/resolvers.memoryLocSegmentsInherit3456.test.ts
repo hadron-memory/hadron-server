@@ -46,21 +46,21 @@ beforeEach(async () => {
 
 describe('#3456 inheritance', () => {
   it('the base\'s segments appear under the base\'s memory id; the child\'s keep the child\'s', async () => {
-    const page = await Q.memoryLocSegments({}, { memoryIds: [backend.mem], parentLoc: '', limit: 200 }, ctx(reader));
+    const page = await Q.memoryLocSegments({}, { memoryRefs: [backend.mem], parentLoc: '', limit: 200 }, ctx(reader));
     const rows = page.items.map((i: any) => `${i.memoryId === backend.mem ? 'backend' : i.memoryId === engineer.mem ? 'engineer' : '?'}:${i.segment}:${i.hasNode}`).sort();
     // engineer's `tasks` branch is wholly overridden by the child's tasks:open-pr, so only the child lists `tasks`.
     expect(rows).toEqual(['backend:notes:false', 'backend:tasks:false', 'engineer:basefolder:false', 'engineer:processes:false']);
   });
 
   it('a base node the child overrides is not listed; the base\'s boot prompt makes no segment', async () => {
-    const root = await Q.memoryLocSegments({}, { memoryIds: [backend.mem], parentLoc: 'tasks', limit: 200 }, ctx(reader));
+    const root = await Q.memoryLocSegments({}, { memoryRefs: [backend.mem], parentLoc: 'tasks', limit: 200 }, ctx(reader));
     expect(root.items.map((i: any) => [i.segment, i.memoryId])).toEqual([['open-pr', backend.mem]]);
-    const prompts = await Q.memoryLocSegments({}, { memoryIds: [backend.mem], parentLoc: 'prompts', limit: 200 }, ctx(reader));
+    const prompts = await Q.memoryLocSegments({}, { memoryRefs: [backend.mem], parentLoc: 'prompts', limit: 200 }, ctx(reader));
     expect(prompts.items).toEqual([]);
   });
 
   it('a reader who cannot read the base asks for the base directly and gets the empty page', async () => {
-    const page = await Q.memoryLocSegments({}, { memoryIds: [engineer.mem], parentLoc: '' }, ctx(reader));
+    const page = await Q.memoryLocSegments({}, { memoryRefs: [engineer.mem], parentLoc: '' }, ctx(reader));
     expect(page).toEqual({ items: [], hasMore: false, endCursor: null });
   });
 });

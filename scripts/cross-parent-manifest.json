@@ -62,6 +62,9 @@
     "NodeContentValidationStatus": "value",
     "NodeValidationTaskEntry": "value",
     "NodeValidationTaskSet": "value",
+    "NodeAuthoringCheck": "value",
+    "AuthoringCheckRecovery": "value",
+    "AuthoringCheckLoad": "value",
     "AiModelPriceList": "envelope",
     "CreditLedgerEntryList": "envelope",
     "CreditBalance": "value",
@@ -151,6 +154,7 @@
     "ConnectionStart": "value",
     "ConnectionFlow": "value",
     "SlackConnectionsPage": "envelope",
+    "TelegramConnectionsPage": "envelope",
     "McpServersPage": "envelope",
     "McpServerTool": "value",
     "SecretsPage": "envelope",
@@ -312,7 +316,22 @@
     "ReviewSlotReadiness": "value",
     "GrantSignatureStatus": "value",
     "TeamUtilization": "value",
+    "TeamMetrics": "value",
+    "TeamMetricsCount": "value",
+    "TeamMetricsNamedId": "value",
+    "TeamMetricsWindow": "value",
+    "TeamMetricsProject": "value",
+    "TeamMetricsProjectGroup": "value",
+    "TeamMetricsOwnerGroup": "value",
+    "TeamMetricsStartedOwned": "value",
+    "TeamMetricsChildStatus": "value",
+    "TeamMetricsProjectRow": "value",
+    "TeamMetricsProjects": "value",
+    "TeamMetricsWorkers": "value",
+    "TeamMetricsFlow": "value",
     "WorkerUtilization": "value",
+    "TeamHealthWorker": "value",
+    "MatchFailure": "value",
     "WebPollsPage": "envelope",
     "SigningRequestsPage": "envelope",
     "WorkerDesiredState": "value",
@@ -1975,6 +1994,12 @@
       "resolver": "src/api/graphql/schema/resolvers.query.slack.ts::isOrgMemberOrAdmin",
       "target": "SlackConnection"
     },
+    "TelegramConnectionsPage.items": {
+      "class": "parent-implies-child",
+      "audience": "live org members (resolveOrgScope memberOrgIds); telegramConnection(ref) admits isOrgMemberOrAdmin of the owning org",
+      "resolver": "src/api/graphql/schema/resolvers.query.telegram.ts::isOrgMemberOrAdmin",
+      "target": "TelegramConnection"
+    },
     "SpecCorpusMintReport.unresolvedFeedback": {
       "class": "parent-implies-child",
       "audience": "the report exists only in the mintMemoryNodes and mintSpecCorpus answers, after concealUnreadableDenial and mayMintNodes (memory write access); open-comment counts on nodes of that memory",
@@ -2023,6 +2048,12 @@
       "class": "closed-projection",
       "projection": "AgentTaskParty",
       "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience App participants+App key)",
+      "target": "AgentTaskParty"
+    },
+    "TeamMetricsOwnerGroup.owner": {
+      "class": "closed-projection",
+      "projection": "AgentTaskParty",
+      "why": "AgentTaskParty(kind,id,name,urn via partyView; worker same-App or user handle only; audience: the roster audience, and the group exists only for a reader who may read the App's tasks, cor:agt:050:21)",
       "target": "AgentTaskParty"
     },
     "TeamCompositionWorker.worker": {

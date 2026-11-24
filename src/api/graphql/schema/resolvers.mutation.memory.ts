@@ -1,4 +1,4 @@
-import { encryptChatEngineStateWithKey, engineStateIncomplete } from '../../../lib/chatRootEngineState.js';
+import { encryptChatEngineStateWithKey, buildEngineStateIncompleteError } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../../../integrations/github/syncNotAttempted.js';
@@ -1028,7 +1028,8 @@ export const memoryMutations = {
 
       // 033 US5 FR-026 — enabling the vector index on an encrypted memory
       // requires explicit acknowledgment of the embedding-inversion
-      // disclosure (stored vectors are plaintext + partially invertible —
+      // disclosure (stored vectors are plaintext + partially invertible, and
+      // with content passages their verbatim chunk text is stored unencrypted —
       // see FR_026_DISCLOSURE in src/lib/entityRef/errors.ts for the full
       // four-point text). The friendly typed error fires at the API
       // boundary; the chk_memory_vector_encrypted_ack CHECK is the DB-level
@@ -2414,15 +2415,15 @@ export const memoryMutations = {
           // refusal carries an exact count and the ids (ruling 0228); the throw rolls back every node, state, identity,
           // alias and expiry change in this transaction (progressCommitted:false). A root that moved out of this memory
           // is skipped after the locked membership recheck.
-          const blockedRoots: string[] = [];
+          const blockedRoots = new Set<string>();
           for (const engine of engineRoots) {
             await tx.$queryRaw`SELECT id FROM nodes WHERE id=${engine.chatRootNodeId} FOR UPDATE`;
             const owner = await tx.node.findUnique({ where: { id: engine.chatRootNodeId }, select: { memoryId: true } });
             if (!owner || owner.memoryId !== resolvedMemoryId) continue;
-            if ((await encryptChatEngineStateWithKey(tx, engine.chatRootNodeId, key)) === 'blocked') blockedRoots.push(engine.chatRootNodeId);
+            if ((await encryptChatEngineStateWithKey(tx, engine.chatRootNodeId, key)) === 'blocked') blockedRoots.add(engine.chatRootNodeId);
           }
-          if (blockedRoots.length) {
-            throw engineStateIncomplete({
+          if (blockedRoots.size) {
+            throw buildEngineStateIncompleteError({
               memoryId: resolvedMemoryId, operation: 'PROMOTE_ANONYMOUS_MEMORY', blockedRootIds: blockedRoots,
               scanFinished: true, progressCommitted: false,
             });
@@ -2725,6 +2726,8 @@ export const memoryMutations = {
       // #3575 (ruling 0225): a chat-engine row whose envelope fails authentication is preserved and REPORTED, never repaired,
       // and it never stops the conversion of healthy rows (including the blocked root's own node fields). `blockedRoots` is
       // the last traversed pass's set; the count is exact only when a pass converted nothing (a clean traversal).
+      // Invariant: a blocked row never stops being blocked under this key, and every pass rescans the WHOLE memory, so the last
+      // pass's set is the full set. A future early exit or partial rescan must revisit this (replace it with a union).
       let blockedRoots = new Set<string>();
       let engineScanFinished = false;
       let conversionProgress = false;
@@ -2926,7 +2929,7 @@ export const memoryMutations = {
       // completion (and the approvals it ends) waits for a state with no unauthenticated envelope. Existing errors
       // (authority, wrong key, database, history convergence) keep their own precedence: they are thrown above.
       if (blockedRoots.size > 0) {
-        throw engineStateIncomplete({
+        throw buildEngineStateIncompleteError({
           memoryId: resolvedMemoryId, operation: 'ENCRYPT_MEMORY', blockedRootIds: blockedRoots,
           scanFinished: engineScanFinished, progressCommitted: conversionProgress,
         });

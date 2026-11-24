@@ -6,11 +6,12 @@
  * Rows are read straight from `git_mirror_obligations`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { inspect } from 'node:util';
-import { execFileSync } from 'child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { inspect, promisify } from 'node:util';
+import { execFile as execFileCb, execFileSync } from 'child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { fileURLToPath } from 'node:url';
 import { db } from '../db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
@@ -373,13 +374,116 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
     await expect(insert({ kind: 'REMOVE', removeLoc: '' })).rejects.toThrow();
     await expect(insert({ kind: 'WRITE', removeLoc: 'old' })).rejects.toThrow();
     await expect(insert({ state: 'NOT_CLONED', errorClass: 'PUSH_FAILED' })).rejects.toThrow();
+    // #425 review: the state/error_class pairing is closed in BOTH directions. 'PENDING' is the
+    // trigger's word alone — a PENDING row wears it and no other state does, EXHAUSTED included (a debt that
+    // was never attempted cannot have run out of attempts) — and a captured debt is no failure class.
+    await expect(insert({ errorClass: 'PENDING' })).rejects.toThrow();
+    await expect(insert({ state: 'PENDING', errorClass: 'TREE_WRITE' })).rejects.toThrow();
+    await expect(insert({ state: 'EXHAUSTED', errorClass: 'PENDING', attempts: 10 })).rejects.toThrow();
+    // An un-cloned attempt that reaches the cap is the EXHAUSTED shape the settle writer does produce.
+    await expect(insert({ state: 'EXHAUSTED', errorClass: 'NOT_CLONED', attempts: 10 })).resolves.toBeDefined();
+    await db.gitMirrorObligation.deleteMany({});
+    await expect(insert({ state: 'PENDING', errorClass: 'PENDING', kind: 'REMOVE', removeLoc: 'docs:a' })).resolves.toBeDefined();
+    await db.gitMirrorObligation.deleteMany({});
   });
 
-  it('(k) the migration carries a byte-identical copy of the invariants file', () => {
+  it('(k) a migration carries a byte-identical copy of the current invariants file', () => {
     const sql = readFileSync(new URL('../../../prisma/git-mirror-obligation-invariants.sql', import.meta.url), 'utf8');
-    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d.endsWith('_git_mirror_push_rejected'));
-    expect(dir).toBeDefined();
-    const migration = readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8');
-    expect(migration.endsWith(sql)).toBe(true);
+    const migrations = new URL('../../../prisma/migrations', import.meta.url);
+    // The file is the one source post-push.sql and the test globalSetup apply; a deployed
+    // database reaches the same shape ONLY through a migration, so the CURRENT bytes must end
+    // some migration verbatim (older carriers keep older copies and no longer match — that is
+    // the point: editing the file without a carrying migration goes red here). #425 moved the
+    // carrier from 20261117800000_git_mirror_push_rejected to 20261122140000_git_mirror_remove_pending.
+    const carriers = readdirSync(migrations).filter((d) => {
+      const p = new URL(`../../../prisma/migrations/${d}/migration.sql`, import.meta.url);
+      return existsSync(p) && readFileSync(p, 'utf8').endsWith(sql);
+    });
+    expect(carriers.length, 'no applied migration ends with the current invariants file — append it verbatim to the migration that changes it').toBeGreaterThan(0);
+  });
+
+  // One SQL file through psql the way `prisma migrate deploy` and the globalSetup run it (one file, ON_ERROR_STOP).
+  const runPsqlFile = async (file: string) => {
+    const url = new URL(process.env.DATABASE_URL!); // the per-worker URL — never TEST_DATABASE_URL
+    // Prisma-only pool parameters ride along on DATABASE_URL (#448); libpq rejects unknown query parameters.
+    url.searchParams.delete('connection_limit');
+    url.searchParams.delete('pool_timeout');
+    await promisify(execFileCb)('psql', [url.toString(), '-q', '-v', 'ON_ERROR_STOP=1', '-f', file],
+      { cwd: fileURLToPath(new URL('../../..', import.meta.url)), maxBuffer: 64 * 1024 * 1024 });
+  };
+
+  const INVARIANTS_FILE = 'prisma/git-mirror-obligation-invariants.sql';
+  const MIGRATION_FILE = 'prisma/migrations/20261122140000_git_mirror_remove_pending/migration.sql';
+  const constraintDef = async () =>
+    (await db.$queryRawUnsafe<{ d: string }[]>("SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'chk_git_mirror_obligation_shape'"))[0]?.d ?? '';
+  type LegacyState = 'FAILED' | 'EXHAUSTED' | 'NOT_CLONED' | 'PENDING';
+  const insertObligation = (nodeId: string, state: LegacyState, errorClass: string, extra: Partial<MirrorObligationRef> = {}) =>
+    db.gitMirrorObligation.create({ data: { ...row(extra), nodeId, state, errorClass, attempts: 3, attemptSeq: 1n } as never });
+  const snapshot = async () => (await db.gitMirrorObligation.findMany({ orderBy: [{ nodeId: 'asc' }, { kind: 'asc' }] }))
+    .map((r) => `${r.nodeId}|${r.kind}|${r.removeLoc}|${r.state}|${r.errorClass}`);
+
+  /**
+   * Put the table in the shape a pre-#425 database has, seed it, then apply `migrationFile` through psql. The shared
+   * per-worker schema must end with the CURRENT invariants whatever happens (a failed seed, a failed psql step, a failed
+   * assertion), so everything from the first DDL on runs inside the try. Cleanup steps are each attempted and none replaces
+   * the error that came first (an AggregateError carries both).
+   */
+  async function landOnLegacyTable(migrationFile: string): Promise<void> {
+    await setup();
+    let failure: unknown;
+    try {
+      await db.$executeRawUnsafe('ALTER TABLE git_mirror_obligations DROP CONSTRAINT chk_git_mirror_obligation_shape');
+      await db.$executeRawUnsafe(`ALTER TABLE git_mirror_obligations ADD CONSTRAINT chk_git_mirror_obligation_shape CHECK (
+        error_class IN ('TOKEN_UNAVAILABLE', 'BRANCH_SETUP', 'TREE_WRITE', 'PUSH_FAILED', 'PUSH_REJECTED', 'LOCK_FAILED', 'NOT_CLONED') AND
+        ((state::text = 'NOT_CLONED' AND error_class = 'NOT_CLONED') OR
+         (state::text = 'FAILED' AND error_class <> 'NOT_CLONED') OR state::text = 'EXHAUSTED') AND
+        ((kind = 'WRITE' AND remove_loc = '') OR (kind = 'REMOVE' AND remove_loc <> '')) AND
+        attempts >= 1)`);
+      // One distinct node id per row: the PK is (memory, node, kind, remove_loc, branch), and node ids carry no FK.
+      const classes = ['TOKEN_UNAVAILABLE', 'BRANCH_SETUP', 'TREE_WRITE', 'PUSH_FAILED', 'PUSH_REJECTED', 'LOCK_FAILED'];
+      for (const [i, ec] of classes.entries()) await insertObligation(`legacy-failed-${i}`, 'FAILED', ec);
+      // EXHAUSTED with every old-legal class as a WRITE row (the old CHECK allowed any class, NOT_CLONED included), plus
+      // one REMOVE row for the kind coupling #425 left alone: a stricter re-added CHECK on any of these goes red here.
+      for (const [i, ec] of [...classes, 'NOT_CLONED'].entries()) await insertObligation(`legacy-exhausted-${i}`, 'EXHAUSTED', ec);
+      await insertObligation('legacy-exhausted-rm', 'EXHAUSTED', 'TOKEN_UNAVAILABLE', { kind: 'REMOVE', removeLoc: 'docs:gone' });
+      await insertObligation('legacy-not-cloned', 'NOT_CLONED', 'NOT_CLONED');
+      const before = await snapshot();
+      expect(before).toHaveLength(15);
+      // psql, one file, ON_ERROR_STOP: the same runner the test globalSetup uses. It autocommits each statement, which
+      // `prisma migrate deploy` does not, so this proves the file's SQL against the data, not Prisma's transaction handling.
+      await runPsqlFile(migrationFile);
+      // Every legacy row survived the swap unchanged, and the constraint now in force is the new one.
+      expect(await snapshot()).toEqual(before);
+      await expect(insertObligation('legacy-post-swap', 'EXHAUSTED', 'PENDING')).rejects.toThrow(/chk_git_mirror_obligation_shape/);
+      // It is the new CHECK that discriminates, not a bare failure: PENDING with PENDING is now legal.
+      await insertObligation('legacy-post-swap-ok', 'PENDING', 'PENDING');
+      expect(await db.gitMirrorObligation.count()).toBe(16);
+    } catch (err) {
+      failure = err;
+      throw err;
+    } finally {
+      // A failing cleanup step must not skip the invariants, nor replace the error that came first.
+      const cleanup: unknown[] = [];
+      try { await db.gitMirrorObligation.deleteMany({}); } catch (err) { cleanup.push(err); }
+      try { await runPsqlFile(INVARIANTS_FILE); } catch (err) { cleanup.push(err); } // the CHECK validates rows, so they went first
+      if (cleanup.length) throw new AggregateError(failure === undefined ? cleanup : [failure, ...cleanup], 'cleanup after the legacy-table test failed');
+    }
+  }
+
+  it('(l) the #425 migration lands on a legacy-shaped table: every seeded pre-#425-legal row survives the re-added CHECK', async () => {
+    // The migration re-adds chk_git_mirror_obligation_shape with a plain ADD CONSTRAINT (no NOT VALID), so a deploy
+    // validates every existing row: a CHECK stricter than the old one refuses the deploy on data. The rows seeded are
+    // the ones the OLD shape (20261117800000's: seven error classes, no PENDING word) allowed that this test reaches:
+    // FAILED with each non-NOT_CLONED class, EXHAUSTED with every class as WRITE, one EXHAUSTED REMOVE row, one NOT_CLONED.
+    await landOnLegacyTable(MIGRATION_FILE);
+    expect(await constraintDef()).toContain('PENDING');
+  });
+
+  it('(m) a failing migration step still leaves the current invariants and no legacy rows behind', async () => {
+    const bad = join(env.root, 'failing-migration.sql');
+    writeFileSync(bad, 'SELECT 1 / 0;\n');
+    await expect(landOnLegacyTable(bad)).rejects.toThrow();
+    expect(await constraintDef()).toContain('PENDING'); // the legacy-shaped CHECK is gone
+    expect(await db.gitMirrorObligation.count()).toBe(0);
   });
 });

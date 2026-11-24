@@ -106,6 +106,8 @@ CASES = [
      with_(action='secret.reveal', values={'secret': GRANT, 'auto-delete': 'keep'}), 1, REQ),
     ('secret-reveal-delete', 'secret.reveal with the mark "delete": a different terms hash',
      with_(action='secret.reveal', values={'secret': GRANT, 'auto-delete': 'delete'}), 1, REQ),
+    ('secret-use-binding', 'secret.use: signed secret, mark, HTTPS prefix and header',
+     with_(action='secret.use', values={'secret': GRANT, 'auto-delete': 'keep', 'binding-prefix': 'https://api.example.test/v1', 'binding-header': 'Authorization'}), 1, REQ),
     ('reason-surrounding-space', 'leading and trailing spaces kept as stored', with_(reason='  padded  '), 1, REQ),
 ]
 

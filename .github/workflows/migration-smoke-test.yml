@@ -20,6 +20,7 @@ on:
       - '.github/scripts/migration-baseline.sh'
       - 'prisma/runtime-role.sql'
       - 'scripts/db/**'
+  merge_group:
   push:
     branches: [main]
     paths:

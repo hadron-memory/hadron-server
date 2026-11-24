@@ -112,7 +112,7 @@ it('restoring an actual legacy revision cannot roll back the counter; real conte
     const revision = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: r.id }, orderBy: { revNo: 'asc' } });
     expect(revision.data).toMatchObject({ messageCount: 40 });
     expect((await post(r)).seq).toBe(41);
-    await nodeMutations.restoreNodeRevision(null, { revisionId: revision.id }, ctx);
+    await nodeMutations.restoreNodeRevision(null, { nodeRevRef: revision.id }, ctx);
     expect((await readChatCounters(db, [await db.node.findUniqueOrThrow({ where: { id: r.id } })])).get(r.id)?.messageCount).toBe(41);
     expect((await post(r)).seq).toBe(42);
     expect((await db.node.findUniqueOrThrow({ where: { id: r.id } })).data).not.toHaveProperty('messageCount');

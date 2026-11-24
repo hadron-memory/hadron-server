@@ -34,7 +34,7 @@ describe('#3998 secret.reveal', () => {
       { name: 'secret', type: 'secret-ref', refusesWildcard: true },
       { name: 'auto-delete', type: 'secret-mark', refusesWildcard: true },
     ]);
-    expect(PLATFORM_ACTIONS.find((x) => x.name === 'secret.use')).toBeUndefined();
+    expect(PLATFORM_ACTIONS.find((x) => x.name === 'secret.use')).toBeDefined();
   });
 
   it('admits the secret id and a keep or delete mark, and stores the signed bytes the reviewer fixed', async () => {

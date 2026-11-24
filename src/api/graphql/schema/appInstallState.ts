@@ -16,10 +16,12 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { AmbiguousLegacyUrnError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { refHasUnstorableChars } from '../../../lib/entityRef/refNamesNothing.js';
 import { normalizeUrnForLookup, parseUrnInput } from '../../../lib/urn.js';
 import { findLiveUrnAliasTargets } from '../../../lib/urnAlias.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 
 type AppRow = { id: string; organizationId: string | null; ownerUserId: string | null };
 
@@ -36,8 +38,12 @@ async function locate(ctx: Context, ref: string): Promise<AppRow | null> {
     const { id } = await resolveAppRef(ctx.db, ref);
     return await ctx.db.app.findUnique({ where: { id }, select });
   } catch (e) {
-    if (!(e instanceof AppNotFoundError)) throw e;
+    if (!isAppRefResolutionFailure(e)) throw e;
   }
+  // #2975 §10 / Baylor P2 on #4948: a ref carrying a NUL or lone surrogate was pre-rejected by
+  // resolveAppRef above (names nothing), and the tolerant parse + lookup below would hand that
+  // code point to Postgres — a DRIVER fault, not the one denial. It names nothing here too.
+  if (refHasUnstorableChars(ref)) return null;
   const urn = normalizeUrnForLookup(parseUrnInput(ref).value);
   const rows = await ctx.db.app.findMany({ where: { urn, uninstalledAt: { not: null }, deletedAt: null }, select, take: 2 });
   return rows.length === 1 ? rows[0]! : null;

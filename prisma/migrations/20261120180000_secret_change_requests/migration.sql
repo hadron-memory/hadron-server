@@ -1,11 +1,18 @@
+-- #4717: this migration was edited after it merged (#4177) and was applied, so it exists in production. That is safe:
+-- `prisma migrate deploy`, the only migration command boot runs (scripts/docker-start.sh), never re-runs or checksums an
+-- applied migration (hrn:node:hadronmemory.com:dev:findings:migrate-deploy-tolerates-edited-and-missing-migrations).
+-- The edit changes only what a fresh chain executes, and there the idempotent statements create the same objects.
 -- Any committed secret mutation invalidates earlier proposals, including same-millisecond changes.
 ALTER TABLE secrets ADD COLUMN IF NOT EXISTS change_revision integer NOT NULL DEFAULT 0;
 CREATE OR REPLACE FUNCTION hadron_secret_change_revision() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN NEW.change_revision := OLD.change_revision + 1; RETURN NEW; END $$;
 DROP TRIGGER IF EXISTS secret_change_revision ON secrets;
 CREATE TRIGGER secret_change_revision BEFORE UPDATE ON secrets FOR EACH ROW EXECUTE FUNCTION hadron_secret_change_revision();
+-- #3999 change-request objects: prisma/secret-change-requests-invariants.sql, copied verbatim into migration
+-- 20261120180000_secret_change_requests and included by post-push.sql (#4717 item 4). Every statement is idempotent,
+-- so the two apply in either order, twice.
 -- #3999: staged values are request-bound; terminal requests retain no ciphertext.
-CREATE TABLE secret_change_requests (
+CREATE TABLE IF NOT EXISTS secret_change_requests (
  id text PRIMARY KEY,
  app_id text NOT NULL REFERENCES apps(id) ON DELETE CASCADE ON UPDATE CASCADE,
  secret_id text,
@@ -33,9 +40,9 @@ ALTER TABLE secret_change_requests ADD CONSTRAINT chk_secret_change_shape CHECK 
  ((staged_value_encrypted IS NULL) OR (key_version IS NOT NULL AND size_bytes IS NOT NULL)) AND
  ((state = 'open') = (ended_at IS NULL))
 );
-CREATE INDEX secret_change_requests_secret_open ON secret_change_requests(app_id,secret_name,state);
-CREATE INDEX secret_change_requests_expiry ON secret_change_requests(expires_at) WHERE state = 'open';
-CREATE FUNCTION hadron_guard_secret_change_request() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE INDEX IF NOT EXISTS secret_change_requests_secret_open ON secret_change_requests(app_id,secret_name,state);
+CREATE INDEX IF NOT EXISTS secret_change_requests_expiry ON secret_change_requests(expires_at) WHERE state = 'open';
+CREATE OR REPLACE FUNCTION hadron_guard_secret_change_request() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  IF TG_OP = 'UPDATE' THEN
   IF OLD.state <> 'open' OR
@@ -49,21 +56,24 @@ BEGIN
  IF NEW.state <> 'open' THEN NEW.staged_value_encrypted := NULL; END IF;
  RETURN NEW;
 END $$;
+DROP TRIGGER IF EXISTS secret_change_requests_guard ON secret_change_requests;
 CREATE TRIGGER secret_change_requests_guard BEFORE INSERT OR UPDATE ON secret_change_requests
  FOR EACH ROW EXECUTE FUNCTION hadron_guard_secret_change_request();
 -- External deletion (App deletion, auto-delete) must not leave staged copies behind.
-CREATE FUNCTION hadron_end_deleted_secret_changes() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION hadron_end_deleted_secret_changes() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  UPDATE secret_change_requests SET state='stale',ended_at=(clock_timestamp() AT TIME ZONE 'UTC')
  WHERE secret_id=OLD.id AND state='open';
  RETURN OLD;
 END $$;
+DROP TRIGGER IF EXISTS secret_changes_secret_deleted ON secrets;
 CREATE TRIGGER secret_changes_secret_deleted AFTER DELETE ON secrets FOR EACH ROW EXECUTE FUNCTION hadron_end_deleted_secret_changes();
-CREATE FUNCTION hadron_clear_deleted_app_changes() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION hadron_clear_deleted_app_changes() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
  IF NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL THEN DELETE FROM secret_change_requests WHERE app_id=NEW.id; END IF;
  RETURN NEW;
 END $$;
+DROP TRIGGER IF EXISTS secret_changes_app_deleted ON apps;
 CREATE TRIGGER secret_changes_app_deleted AFTER UPDATE OF deleted_at ON apps FOR EACH ROW EXECUTE FUNCTION hadron_clear_deleted_app_changes();
 
 -- #3999 R22: capture at passkey issuance, not at request. Legacy and pending rows have no captured fact.

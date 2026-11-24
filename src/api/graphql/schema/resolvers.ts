@@ -1,4 +1,5 @@
 import { utilizationQueries } from './resolvers.utilization.js';
+import { teamMetricsQueries } from './resolvers.teamMetrics.js';
 import { runTeamSnapshotMutations, runTeamSnapshotQueries } from './resolvers.runTeamSnapshot.js';
 import { rateLimitQueries, rateLimitMutations } from './resolvers.rateLimit.js';
 import { registerRolePickQueries } from './resolvers.registerRolePick.js';
@@ -29,6 +30,7 @@ export type { Context };
 import { dateTimeScalar } from './dateTimeScalar.js';
 import { typeResolvers } from './resolvers.types.js';
 
+import { nodeAuthoringCheckQueries } from './resolvers.nodeAuthoringCheck.js';
 import { nodeQueries } from './resolvers.query.node.js';
 import { recoveryQueries, recoveryMutations, recoveryFieldResolvers } from './resolvers.recovery.js';
 import { skillQueries } from './resolvers.query.skill.js';
@@ -41,6 +43,7 @@ import { appQueries } from './resolvers.query.app.js';
 import { chatQueries } from './resolvers.query.chat.js';
 import { sessionQueries } from './resolvers.query.session.js';
 import { slackQueries } from './resolvers.query.slack.js';
+import { telegramQueries } from './resolvers.query.telegram.js';
 import { mcpQueries } from './resolvers.query.mcp.js';
 import { webPollMutations, webPollQueries } from './resolvers.webPoll.js';
 import { homeAssistantQueries } from './resolvers.query.homeAssistant.js';
@@ -81,7 +84,7 @@ import { compileBootPromptMutations } from './resolvers.mutation.compileBootProm
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamSpecQueries } from './resolvers.teamSpec.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
-import { teamAttentionMutations } from './resolvers.teamAttention.js';
+import { ownWorkerSessionsMutations } from './resolvers.ownWorkerSessions.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
 import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolvers.ticker.js';
@@ -95,6 +98,7 @@ import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.j
 import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.deliveryBatch.js';
 import { appKeyScopeMutations, appKeyScopeFieldResolvers, appKeyScopeQueries } from './resolvers.appKeyScope.js';
 import { hostOperationMutations, hostOperationQueries, hostOperationFieldResolvers } from './resolvers.hostOperation.js';
+import { sessionRestartMutations } from './resolvers.sessionRestart4855.js';
 import { hostSweepRunMutations, hostSweepRunQueries } from './resolvers.hostSweepRuns.js';
 import { desiredStateMutations, desiredStateQueries, desiredStateWorkerFields } from './resolvers.desiredState.js';
 import { hostAssignmentMutations, hostAssignmentQueries, hostAssignmentFieldResolvers } from './resolvers.hostAssignment.js';
@@ -137,6 +141,7 @@ import { appMutations } from './resolvers.mutation.app.js';
 import { chatMutations } from './resolvers.mutation.chat.js';
 import { sessionMutations } from './resolvers.mutation.session.js';
 import { slackMutations } from './resolvers.mutation.slack.js';
+import { telegramMutations } from './resolvers.mutation.telegram.js';
 import { mcpMutations } from './resolvers.mutation.mcp.js';
 import { homeAssistantMutations } from './resolvers.mutation.homeAssistant.js';
 import { resendSenderMutations } from './resolvers.mutation.resendSender.js';
@@ -206,6 +211,7 @@ export const resolvers = {
     ...passkeyQueries,
     ...recoveryQueries,
     ...nodeQueries,
+    ...nodeAuthoringCheckQueries,
     ...specCorpusQueries,
     ...specDocumentQueries,
     ...nodeApprovalQueries,
@@ -244,6 +250,7 @@ export const resolvers = {
     ...accountUsageQueries,
     ...reviewQualityQueries,
     ...utilizationQueries,
+    ...teamMetricsQueries,
     ...registerRoleCandidateQueries,
     ...registerRolePickQueries,
     ...actionRegisterIndexQueries,
@@ -258,6 +265,7 @@ export const resolvers = {
     ...teamSpecQueries,
     ...sessionQueries,
     ...slackQueries,
+    ...telegramQueries,
     ...mcpQueries,
     ...webPollQueries,
     ...homeAssistantQueries,
@@ -307,7 +315,7 @@ export const resolvers = {
     ...compileBootPromptMutations,
     ...teamRoleMutations,
     ...teamChatMutations,
-    ...teamAttentionMutations,
+    ...ownWorkerSessionsMutations,
     ...teamWorkMutations,
     ...agentTaskMutations,
     ...prProtocolMutations,
@@ -323,6 +331,7 @@ export const resolvers = {
     ...deliveryBatchMutations,
     ...appKeyScopeMutations,
     ...hostOperationMutations,
+    ...sessionRestartMutations,
     ...desiredStateMutations,
     ...hostSweepRunMutations,
     ...hostAssignmentMutations,
@@ -350,6 +359,7 @@ export const resolvers = {
     ...chatMutations,
     ...sessionMutations,
     ...slackMutations,
+    ...telegramMutations,
     ...mcpMutations,
     ...webPollMutations,
     ...homeAssistantMutations,

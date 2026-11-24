@@ -16,7 +16,7 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
 import { parseNodeRevUrnV2, composeNodeRevUrnV2, normalizeUrnForLookup } from '../urn.js';
-import { NodeRevisionNotFoundError, NodeNotFoundError } from './errors.js';
+import { NodeRevisionNotFoundError, NodeNotFoundError, AmbiguousLegacyUrnError } from './errors.js';
 import { resolveNodeRef } from './nodeRef.js';
 
 /**
@@ -81,7 +81,9 @@ export async function resolveNodeRevRef(
   try {
     ({ id: nodeId } = await resolveNodeRef(db, `hrn:node:${root}::${memory}::${loc}`));
   } catch (err) {
-    if (err instanceof NodeNotFoundError) throw new NodeRevisionNotFoundError(ref);
+    // A legacy alias shared by several live nodes would answer AMBIGUOUS_LEGACY_URN before any read gate, so the
+    // answer would depend on what exists in a memory the caller may not read. A revision ref folds it to missing.
+    if (err instanceof NodeNotFoundError || err instanceof AmbiguousLegacyUrnError) throw new NodeRevisionNotFoundError(ref);
     throw err;
   }
 

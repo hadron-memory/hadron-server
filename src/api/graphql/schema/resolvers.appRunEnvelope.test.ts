@@ -39,8 +39,8 @@ describe('#548 — fan-out state exposed in GraphQL schema', () => {
   const appRunsArgs = () =>
     typeDefs.match(/\n\s*appRuns\(([\s\S]*?)\n\s*\): AppRunsPage!/)?.[1] ?? '';
 
-  it('appRuns accepts a parentRunId filter', () => {
-    expect(appRunsArgs()).toMatch(/parentRunId:\s*ID\b/);
+  it('appRuns accepts a parentRunRef filter', () => {
+    expect(appRunsArgs()).toMatch(/parentRunRef:\s*ID\b/);
   });
 
   it('appRuns accepts the #836 statuses list and keeps the deprecated singular', () => {

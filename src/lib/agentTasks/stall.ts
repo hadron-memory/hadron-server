@@ -59,7 +59,7 @@ import { type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { loadLastGapEnd } from './stallGap.js';
-import { ASSIGNED_EVENT_TYPES, ASSIGNEE_CLEARED_EVENT_TYPES, PASSIVE_EVENT_TYPES, appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
+import { ASSIGNED_EVENT_TYPES, ASSIGNEE_CLEARED_EVENT_TYPES, LEAD_CADENCE_EVENT_TYPES, PASSIVE_EVENT_TYPES, appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
 import { markStalled } from './availability.js';
 import { appManagerUserIds } from '../auth/appManagement.js';
 import { isSerializationFailure } from './serializationFailure.js';
@@ -741,7 +741,7 @@ export async function evaluateStalls(db: PrismaClient, now = new Date(), anchor:
     for (const i of inputs) due.push(...stallCandidates(i, windows.get(i.task.appId) as StallWindows, now));
     // #4273: an episode whose alarm is already raised is the common case on every pass after the first, and
     // `raiseStallAlarm` would reload the task's inputs in its own transaction only to find the unique key
-    // (task, type, episode start) taken. One read for the page answers it; a key raised between this read and the
+    // (app, task, type, episode start) taken. One read for the page answers it; a key raised between this read and the
     // raise is still refused by that same unique key, so the alarms are the ones raised before.
     const raisedKeys = await loadRaisedEpisodeKeys(db, due);
     for (const c of due) {
@@ -764,13 +764,14 @@ export async function evaluateStalls(db: PrismaClient, now = new Date(), anchor:
 
 /**
  * #4273 — the keys (`alarmEpisodeKey`) of these candidates' episodes whose alarm event already exists. Asks for exactly the
- * candidates' own (task, type, episode start) tuples, served by that unique key, so a task with a long alarm history
+ * candidates' own (app, task, type, episode start) tuples, served by that unique key, so a task with a long alarm history
  * (every earlier episode) costs one row per candidate, never one per past episode (Diego P2 on 34689907).
  *
- * #4285 (Arianna New-3): the join predicate IS the unique key `agent_team_events_episode_uniq` (task_id, type,
- * episode_start) (schema.prisma `@@unique([taskId, type, episodeStart])`), the same key `appendAlarmEvent` (events.ts) inserts
- * under `ON CONFLICT (task_id, type, episode_start) DO NOTHING`. A row this read finds is therefore exactly a row that
- * insert would refuse, so skipping it changes no outcome. Change the three together. No resolution state lives outside
+ * #4285 (Arianna New-3), #4344: the join predicate IS the unique key `agent_team_events_episode_app_uniq` (app_id, task_id,
+ * type, episode_start) (schema.prisma `@@unique([appId, taskId, type, episodeStart])`), the same key `appendAlarmEvent`
+ * (events.ts) inserts under `ON CONFLICT (app_id, task_id, type, episode_start) DO NOTHING`. A row this read finds is
+ * therefore exactly a row that insert would refuse, so skipping it changes no outcome. The App is in the key since #4344
+ * (Holger's ruling A): an alarm row of another App naming this task is not this App's alarm and no longer hides it. Change the three together. No resolution state lives outside
  * the key: an acknowledged or escalation-ended alarm keeps its row and so still takes the key (pinned in
  * stallPassCost4273.test.ts, the "what the skip replaces" block).
  */
@@ -780,8 +781,8 @@ async function loadRaisedEpisodeKeys(db: Db, candidates: StallCandidate[]): Prom
   const rows = await db.$queryRaw<{ taskId: string; type: string; episodeStart: Date }[]>`
     SELECT e.task_id AS "taskId", e.type, e.episode_start AS "episodeStart"
     FROM unnest(${candidates.map((c) => c.taskId)}::text[], ${candidates.map((c) => STALL_EVENT_TYPE[c.rule])}::text[],
-                ${candidates.map((c) => toNaiveUtc(c.episodeStart))}::timestamp[]) AS p(task_id, type, start)
-    JOIN agent_team_events e ON e.task_id = p.task_id AND e.type = p.type AND e.episode_start = p.start`;
+                ${candidates.map((c) => toNaiveUtc(c.episodeStart))}::timestamp[], ${candidates.map((c) => c.appId)}::text[]) AS p(task_id, type, start, app_id)
+    JOIN agent_team_events e ON e.app_id = p.app_id AND e.task_id = p.task_id AND e.type = p.type AND e.episode_start = p.start`;
   for (const r of rows) out.add(alarmEpisodeKey(r.taskId, r.type, r.episodeStart));
   return out;
 }
@@ -1059,7 +1060,7 @@ export async function endedAlarmEpisodeInstants(
  * #3934 (cor:agt:050:20, V77) — the instant each of these alarms' OWN episode ended, by event id: the one answer the
  * wake schedule and the event reads share, for every kind of alarm.
  *   - a task alarm: {@link endedAlarmEpisodeInstants};
- *   - a dark-worker or coordinator-cadence alarm (task-less): the `ended_at` of its own episode row (#2755, #2763);
+ *   - a dark-worker or lead-cadence alarm (task-less): the `ended_at` of its own episode row (#2755, #2763);
  *   - any other alarm (a post-limit alarm, #2014): no episode condition, so never.
  * An alarm absent from the map has not had its episode end. Acknowledgement is not here: it is the reader's to
  * combine, and the wake pass has already excluded acknowledged alarms. Writers: {@link recordEndedEscalations} and {@link freezeEndedEscalation}.
@@ -1083,10 +1084,17 @@ export async function alarmEpisodeEnds(
     const over = await db.darkWorkerEpisode.findMany({ where: { eventId: { in: darkIds }, endedAt: { not: null } }, select: { eventId: true, endedAt: true } });
     for (const e of over) out.set(e.eventId, e.endedAt as Date);
   }
-  // #2763: the same for a coordinator-cadence alarm, whose episode ends at the coordinator's next counted assignment.
-  const cadenceIds = alarms.filter((a) => a.type === 'alarm.coordinator-cadence').map((a) => a.id);
+  // #2763: the same for a lead-cadence alarm, whose episode ends at the lead's next counted assignment. Alarms raised
+  // before #4375 carry the legacy type and have the same episode table (#4375: read both).
+  const cadenceIds = alarms.filter((a) => (LEAD_CADENCE_EVENT_TYPES as readonly string[]).includes(a.type)).map((a) => a.id);
   if (cadenceIds.length) {
-    const over = await db.coordinatorCadenceEpisode.findMany({ where: { eventId: { in: cadenceIds }, endedAt: { not: null } }, select: { eventId: true, endedAt: true } });
+    const over = await db.leadCadenceEpisode.findMany({ where: { eventId: { in: cadenceIds }, endedAt: { not: null } }, select: { eventId: true, endedAt: true } });
+    for (const e of over) out.set(e.eventId, e.endedAt as Date);
+  }
+  // #4531: a team.dark alarm's episode ends when `team_dark_episodes` says so (a team.recovered, or its App gone).
+  const teamDarkIds = alarms.filter((a) => a.type === 'team.dark').map((a) => a.id);
+  if (teamDarkIds.length) {
+    const over = await db.teamDarkEpisode.findMany({ where: { eventId: { in: teamDarkIds }, endedAt: { not: null } }, select: { eventId: true, endedAt: true } });
     for (const e of over) out.set(e.eventId, e.endedAt as Date);
   }
   // #4233: a stale-sweep alarm's episode ends when the host records its next run (or the App's sweep mode goes OFF).
@@ -1117,7 +1125,7 @@ export async function recordEndedEscalations(db: Db, now: Date): Promise<number>
       // re-asked every pass for ever.
       where: {
         severity: 'alarm', acknowledgedAt: null, escalationEnd: { is: null }, id: { gt: after },
-        type: { in: [...STALL_ALARM_TYPES, 'alarm.dark-worker', 'alarm.coordinator-cadence', 'alarm.stale-sweep'] },
+        type: { in: [...STALL_ALARM_TYPES, 'alarm.dark-worker', ...LEAD_CADENCE_EVENT_TYPES, 'alarm.stale-sweep'] },
         app: { deletedAt: null, uninstalledAt: null },
       },
       select: { id: true, appId: true, taskId: true, type: true, episodeStart: true, createdAt: true },
@@ -1195,7 +1203,7 @@ export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise
     const taskIds = [...new Set(due.map((d) => d.taskId).filter((t): t is string => !!t))].sort();
     if (taskIds.length) await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id IN (${Prisma.join(taskIds)}) ORDER BY id FOR SHARE`;
     // #3934: the one answer the event reads share (`alarmEpisodeEnds`), for every kind of alarm: a task alarm by its
-    // task's record (#2200), a dark-worker (#2755) or coordinator-cadence (#2763) alarm by its own episode row.
+    // task's record (#2200), a dark-worker (#2755) or lead-cadence (#2763) alarm by its own episode row.
     const endedEvents = new Set((await alarmEpisodeEnds(tx, due.map((d) => ({ id: d.eventId, appId: d.appId, taskId: d.taskId, type: d.type, episodeStart: d.episodeStart, raisedAt: d.raisedAt })), now)).keys());
     if (endedEvents.size) {
       // The alarm's own episode is over: close EVERY row of it still unwoken (not only the due ones), so no later

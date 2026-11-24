@@ -2,6 +2,7 @@ import type { SyncNotAttemptedReason } from './syncNotAttempted.js';
 import { acquireSyncRunLock } from './syncRunLock.js';
 import { committedSyncReport, failedSyncReport, type SyncReportEntry } from './syncReport.js';
 import { GitCommandError } from './execGit.js';
+import { syncFailureText } from './syncErrorText.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, withSyncCaller } from '../../lib/bootPrompt.js';
 import { currentActor } from '../../lib/requestActor.js';
@@ -1875,12 +1876,12 @@ const syncGraphFromGithubAsSystem = async (
     // Update sync status to ERROR
     await db.memory.update({
       where: { id: graph.id },
-      data: { syncStatus: 'ERROR', syncError: (error as Error).message,
+      data: { syncStatus: 'ERROR', syncError: syncFailureText(error),
         lastSyncReport: failedSyncReport(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError ? 'BAD_USER_INPUT' : 'SYNC_FAILED') },
     }).catch(() => {});
     console.error(`Failed to sync memory "${graph.name}":`, error);
     return {
-      error: (error as Error).message,
+      error: syncFailureText(error), // #4731: no host or port from a driver or Prisma fault, in the row or the return
       ...(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError
         ? { errorCode: 'BAD_USER_INPUT' as const }
         : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE }

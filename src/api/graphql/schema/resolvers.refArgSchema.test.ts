@@ -32,6 +32,10 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   addMemoryToAgent: ['agentRef', 'memoryRef'],
   updateAgentMemoryRole: ['agentRef', 'memoryRef'],
   removeMemoryFromAgent: ['agentRef', 'memoryRef'],
+  // #4138 (S2): the node-revision mutations take a revision ref (URN or PK); Query.nodeRevision is in EXPECTED_QUERY_REF_ARGS.
+  restoreNodeRevision: ['nodeRevRef'],
+  deleteNodeRevision: ['nodeRevRef'],
+  updateNodeRevision: ['nodeRevRef'],
   updateApp: ['ref'],
   deleteApp: ['ref'],
   regenerateAppKey: ['appRef'],
@@ -123,7 +127,13 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   agent: ['ref'],
   appRun: ['ref'],
   nodeRevisions: ['nodeRef'],
-  appRuns: ['appRef', 'orgRef'],
+  nodeRevision: ['nodeRevRef'], // #4138 (S2)
+  appRuns: ['appRef', 'orgRef', 'parentRunRef'],
+  // #4142 (S6 chunk A): the memory reads.
+  usageEvents: ['memoryRef', 'nodeRef'],
+  usageEventsPage: ['memoryRef', 'nodeRef'],
+  memoryAssets: ['memoryRef'],
+  memoryLocSegments: ['memoryRefs'],
 };
 
 /**
@@ -149,9 +159,6 @@ const ALLOWED_ID_ARGS = new Set([
   // App's IdP; the Hadron memory is named by memoryRef.
   'linkMemoryToUser.externalUserId',
   // #4136 (S0): Query fields are keyed `Query.<field>.<arg>` so a Query field can never share a Mutation field's allowance.
-  // appRuns.parentRunId: a genuine PK-only filter (the run whose children are listed), not a ref that accepts a URN
-  // (cor:api:140:01 keeps `<entity>Id` for genuine PKs). #4141 renames it `parentRunRef` and removes this line with it.
-  'Query.appRuns.parentRunId',
 ]);
 
 /** The legacy-`Id` check, one (field, arg) at a time, against a per-field allow-list. */
@@ -268,8 +275,8 @@ describe('#4136 (S0) — the checker fails where it must (fixture schema)', () =
     expect(strayIdProblems('Mutation', { change: ['ref'] }, FIXTURE_SDL, new Set())).toEqual(['change.thingId']);
     expect(strayIdProblems('Mutation', { change: ['ref'] }, FIXTURE_SDL, new Set(['change.thingId']))).toEqual([]);
   });
-  it('the real appRuns.parentRunId allowance is exactly one entry and covers no other appRuns Id arg', () => {
-    expect(isStrayLegacyIdArg('Query.appRuns', 'parentRunId')).toBe(false);
+  it('the appRuns.parentRunId allowance is gone (#4141 renamed it parentRunRef), so the old name is a stray Id arg', () => {
+    expect(isStrayLegacyIdArg('Query.appRuns', 'parentRunId')).toBe(true);
     expect(isStrayLegacyIdArg('Query.appRuns', 'orgId')).toBe(true);
     expect(isStrayLegacyIdArg('Query.agentTasks', 'parentRunId')).toBe(true);
   });

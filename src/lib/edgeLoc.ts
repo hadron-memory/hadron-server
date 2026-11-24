@@ -157,6 +157,17 @@ export function isAuthoredLoc(loc: string | null | undefined): loc is string {
 }
 
 /**
+ * #4813 — the ONE coercion every inline-edge door applies to a caller-supplied loc: `null`, `undefined` and `''` all
+ * mean "nothing authored" (so the loc derives at write, cor:dmo:060:03 — `isAuthoredLoc` is the same predicate), and
+ * any other value passes through UNCHANGED, to be validated (`validateLocOrThrow`) before any write. Replaces the
+ * copy-pasted `edge.loc || null` at the GraphQL node-write resolver and MCP `resolveEdgeRefs`, so the next inline-edge
+ * write path cannot re-decide what "empty" means.
+ */
+export function normalizeAuthoredEdgeLoc(loc: string | null | undefined): string | null {
+  return isAuthoredLoc(loc) ? loc : null;
+}
+
+/**
  * #2947 (Xabat's backfill rule): whether an edge's `loc` decodes as the derivation grammar
  * `<source loc>:<name atom>:<target loc>` with the edge's OWN name, from any endpoint generation. The sanitized name is
  * one INTERIOR atom of the loc, in either spelling (the runtime one and the historical code-point one, #4583). It is

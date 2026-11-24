@@ -13,7 +13,7 @@ let appId: string;
 let agentId: string;
 const start = async (timeout?: number | null, withApp = true) => {
   const out = await server.executeOperation({
-    query: 'mutation($a: ID!, $t: Int) { startAgentSession(agentId: $a, sessionTimeoutSeconds: $t) { id expiresAt } }',
+    query: 'mutation($a: ID!, $t: Int) { startAgentSession(agentRef: $a, sessionTimeoutSeconds: $t) { id expiresAt } }',
     variables: { a: agentId, ...(timeout === undefined ? {} : { t: timeout }) },
   }, { contextValue: { db, roles: [], ...(withApp ? { appId } : {}) } });
   if (out.body.kind !== 'single') throw new Error('incremental response');

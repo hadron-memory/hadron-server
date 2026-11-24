@@ -439,7 +439,7 @@ describe('a filled placeholder cannot be restored back to a blank non-placeholde
     const revisions = await db.nodeRevision.findMany({ where: { nodeId: reserved.id }, orderBy: { createdAt: 'asc' } });
     const blank = revisions.find((r) => (r.content ?? '').trim() === '');
     expect(blank).toBeDefined();
-    expect(await codeOf(resolvers.Mutation.restoreNodeRevision(null, { revisionId: blank!.id }, as(admin.id))))
+    expect(await codeOf(resolvers.Mutation.restoreNodeRevision(null, { nodeRevRef: blank!.id }, as(admin.id))))
       .toBe('ROLE_GOVERNED');
     expect(await row(draft.id, 'pas:170:01')).toMatchObject({ content: 'Written.', isPlaceholder: false });
   });

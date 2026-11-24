@@ -41,8 +41,9 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
-import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
@@ -218,7 +219,8 @@ export const appMemoryMutations = {
     try { ({ id } = await resolveAppRef(ctx.db, appRef)); }
     catch (error) {
       // #2843: a stranger and an unknown/deleted App have one public answer.
-      if (error instanceof AppNotFoundError) throw authorizationDenied();
+      // #4893: the whole shared resolution list folds — a malformed ref is the same answer.
+      if (isAppRefResolutionFailure(error)) throw authorizationDenied();
       throw error;
     }
     const observed = await ctx.db.app.findUniqueOrThrow({ where: { id } });

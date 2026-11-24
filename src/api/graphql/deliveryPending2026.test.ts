@@ -100,7 +100,8 @@ describe('#2026 response footer',()=>{
   expect(pull.batches[0].overflow).toBe(3);
   const got=await observe(()=>request());const out=got.result;expect(out.errors).toBeUndefined();
   expectFooter({result:out.extensions?.hadron?.deliveryPending,omitted:got.omitted},metadata(13));
-  expect(JSON.stringify(out.extensions)).not.toMatch(/private-body|Private Author|chats:team/);
+  // #4917: a sanctioned load omission sends no extensions key; JSON.stringify(undefined) is undefined and toMatch throws a TypeError, so check the key or an empty object.
+  expect(JSON.stringify(out.extensions ?? {})).not.toMatch(/private-body|Private Author|chats:team/);
   expect(await db.channelReadState.count()).toBe(0);expect(await db.workerDeliveryChannel.count()).toBe(0);expect(await db.appLogEntry.count()).toBe(0);
  });
  it('SDK carries the same metadata and one separate attention text',async()=>{

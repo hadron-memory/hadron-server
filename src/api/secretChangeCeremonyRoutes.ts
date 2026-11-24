@@ -8,7 +8,7 @@ import { ceremonyShell } from './ceremonyShell.js';
 import { signingSurfacePolicy } from '../lib/signing/surface.js';
 import { passkeyRpId, signingCeremonyOrigins } from '../lib/signing/config.js';
 import { SECRET_CHANGE_PATH as PATH } from '../lib/secrets/changeRequests.js';
-import { openSecretProof, proveSecretChange, completeSecretChange, SecretCeremonyRefused } from '../lib/secrets/changeCeremony.js';
+import { openSecretProof, proveSecretChange, completeSecretChange, declineSecretChange, SecretCeremonyRefused } from '../lib/secrets/changeCeremony.js';
 import { respondInternalFault } from '../lib/internalFault.js';
 const COOKIE='hadron_secret_change';
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
@@ -52,10 +52,16 @@ start.onclick=async()=>{
   const note=document.createElement('p');note.textContent='Approve only the change you requested. A store uses the value you supplied; it is never shown here.';review.append(note);
   if(out.summary.operation==='DELETE'){const warning=document.createElement('p');warning.textContent='Deleting this secret removes its versions and cannot be undone.';review.append(warning);}
   const approve=document.createElement('button');approve.textContent='Approve with my passkey';review.append(approve);approve.focus();
+  const decline=document.createElement('button');decline.textContent='Decline this request';review.append(decline);
   approve.onclick=async()=>{
-   approve.disabled=true;
+   approve.disabled=true;decline.disabled=true;
    try{await post('complete',await assert(out));review.replaceChildren();status.textContent=completionText(out.summary)+' Next: return to where you requested the change.';$('title').focus();}
-   catch(e){status.textContent=errorText(e);approve.disabled=terminal(e);}
+   catch(e){status.textContent=errorText(e);approve.disabled=terminal(e);decline.disabled=terminal(e);}
+  };
+  decline.onclick=async()=>{
+   approve.disabled=true;decline.disabled=true;
+   try{await post('decline',await assert({...out.decline,rpId:out.rpId}));review.replaceChildren();status.textContent='This request was declined. Nothing was changed. Open a new request if you still need the change.';$('title').focus();}
+   catch(e){status.textContent=errorText(e);approve.disabled=terminal(e);decline.disabled=terminal(e);}
   };
  }catch(e){status.textContent=cancelled(e)?errorText(e):'The request is unavailable, or the passkey proof did not succeed.';start.disabled=false;}
 };
@@ -70,7 +76,7 @@ export function mountSecretChangeCeremonyRoutes(app:Express){
  const body=express.json({limit:'16kb'});
  app.get(`${PATH}/ceremony.js`,limiter,(_,res)=>{res.set(HEADERS).type('application/javascript').send(SCRIPT);});
  app.get(`${PATH}/:id`,limiter,(_,res)=>{res.set(HEADERS).type('html').send(SHELL);});
- for(const operation of ['proof/challenge','proof','complete'])app.post(`${PATH}/:id/${operation}`,limiter,limited,body,async(req,res)=>{
+ for(const operation of ['proof/challenge','proof','complete','decline'])app.post(`${PATH}/:id/${operation}`,limiter,limited,body,async(req,res)=>{
   res.set(HEADERS);
   try{
    if(typeof req.headers.origin!=='string'||!signingCeremonyOrigins().includes(req.headers.origin))throw new SecretCeremonyRefused();
@@ -87,6 +93,7 @@ export function mountSecretChangeCeremonyRoutes(app:Express){
     const result=await proveSecretChange(db,a);const {nonce:newNonce,...out}=result.outcome==='change'?result:{...result,nonce:undefined};
     if(newNonce)res.cookie(COOKIE,newNonce,cookieOptions);res.json(out);return;
    }
+   if(operation==='decline'){await declineSecretChange(db,a);res.json({ok:true});return;}
    await completeSecretChange(db,a);res.json({ok:true});
   }catch(e){
    if(e instanceof SecretCeremonyRefused){res.status(403).json({code:'FORBIDDEN'});return;}

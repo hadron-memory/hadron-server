@@ -272,10 +272,12 @@ describe('the guard trigger and the events CHECK (A24)', () => {
     await refused(`UPDATE grants SET withdrawn_at = withdrawn_at + interval '1 second' WHERE id = $1`, wd); // moved
     await expect(insertGrant(w, { revoked_at: raw(DB_NOW), revoked_by: w.userId, withdrawn_at: raw(DB_NOW) })).rejects.toThrow(); // at INSERT
   });
-  it('WITHDRAW is an accepted event action; others are still refused', async () => {
+  it('WITHDRAW is an accepted event action; others are still refused; a WITHDRAW event attributes its act (#4767: a person or a run)', async () => {
     const id = await insertGrant(w);
-    await sql(`INSERT INTO grant_events (id, grant_id, app_id, action, at) VALUES ('ev-w', $1, $2, 'WITHDRAW', ${DB_NOW})`, id, w.appId);
+    await sql(`INSERT INTO grant_events (id, grant_id, app_id, action, run_id, at) VALUES ('ev-w', $1, $2, 'WITHDRAW', 'run_w', ${DB_NOW})`, id, w.appId);
     await expect(sql(`INSERT INTO grant_events (id, grant_id, app_id, action, at) VALUES ('ev-x', $1, $2, 'BOGUS', ${DB_NOW})`, id, w.appId)).rejects.toThrow();
+    // chk_grant_events_shape (#4767): a WITHDRAW event with neither a person nor a run is refused — the act is always someone's.
+    await expect(sql(`INSERT INTO grant_events (id, grant_id, app_id, action, at) VALUES ('ev-n', $1, $2, 'WITHDRAW', ${DB_NOW})`, id, w.appId)).rejects.toThrow();
   });
 });
 

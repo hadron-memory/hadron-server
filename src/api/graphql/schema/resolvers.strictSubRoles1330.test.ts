@@ -204,7 +204,7 @@ describe('#1330 — restore is exempt from strictSubRoles (Holger, 2026-09-27)',
     await rules({ role: 'doc', strictSubRoles: true }, { role: 'doc.current' });
     // The same assignment through an ordinary write IS refused.
     expect(await refusal(update('r', { role: 'doc.historic' }))).toMatchObject({ code: 'ROLE_NOT_DECLARED' });
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: revision.id }, ctx());
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: revision.id }, ctx());
     expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({ role: 'doc.historic', content: 'then' });
   });
 });
