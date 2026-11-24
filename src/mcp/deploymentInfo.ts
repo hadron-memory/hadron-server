@@ -218,7 +218,12 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // A lagging client's old name is an UNKNOWN input field and GraphQL refuses the whole operation. The gate, the
 // refusals and what the field accepts (an id or a URN) are unchanged. `beginAssetUpload` and `agentAssets`, the
 // deprecated v1 calls, keep `agentUrn` until they are retired.
-export const HADRON_SERVER_VERSION = '0.34.0';
+//
+// 0.35.0 — BREAKING, #1796 step 2: `encryptMemory(memoryRef)` no longer accepts `dataKey` or `passphrase`, no alias.
+// A document naming either is refused as an unknown argument before any resolver runs. The secret travels only in
+// `x-hadron-memory-keys` (strict owner) or `x-hadron-operation-key` (owning App completion). CLI floor: hadron-cli
+// v0.56.0.
+export const HADRON_SERVER_VERSION = '0.35.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
