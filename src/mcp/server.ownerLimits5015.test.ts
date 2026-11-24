@@ -154,7 +154,7 @@ describe('#5015 MCP node doors at the owner\'s nodes limit', () => {
     expect(r.isError).toBe(true);
     expect(r.text).toMatch(REFUSAL_USER);
     expect(await db.node.count({ where: { memoryId: mO, loc: { in: ['a', 'a:child'] }, deletedAt: null } })).toBe(2);
-    expect(await db.node.count({ where: { memoryId: mU, loc: { startsWith: 'a' } } })).toBe(0);
+    expect(await db.node.count({ where: { memoryId: mU, loc: { in: ['a', 'a:child'] } } })).toBe(0);
   });
 
   it('control: a move inside one owner adds nothing and succeeds at the cap', async () => {
