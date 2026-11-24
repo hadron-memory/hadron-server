@@ -22,7 +22,7 @@ import { managesApp } from '../../../lib/auth/appManagement.js';
 import { requirePersonAsThemselves, requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { GRANT_MEMORY_SELECT, grantTargetRefusal, isStrictOwnerClass } from '../../../lib/appWriteGrant.js';
-import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
+import { refNamesNothing, refHasUnstorableChars } from '../../../lib/entityRef/refNamesNothing.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { parseUrnInput } from '../../../lib/urn.js';
@@ -53,7 +53,7 @@ function parsePrefix(raw: string): string {
 function parseRegisterUrn(raw: string | null | undefined): string | null {
   if (raw == null || raw.trim() === '') return null;
   const urn = raw.trim();
-  if (urn.length > REGISTER_URN_MAX || parseUrnInput(urn).type !== 'node') {
+  if (urn.length > REGISTER_URN_MAX || refHasUnstorableChars(urn) || parseUrnInput(urn).type !== 'node') {
     throw badInput('registerNodeUrn must be a node URN (hrn:node:<root>:<memory>:<loc>).');
   }
   return urn;

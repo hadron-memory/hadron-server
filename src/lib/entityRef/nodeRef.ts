@@ -51,7 +51,8 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
-import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
+import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup, UrnNotQualifiedError } from '../urn.js';
+import { refHasUnstorableChars } from './refNamesNothing.js';
 import { findLiveUrnAliasTargets } from '../urnAlias.js';
 import { AmbiguousLegacyUrnError, NodeNotFoundError } from './errors.js';
 
@@ -145,6 +146,10 @@ export async function resolveNodeRef(
   contextMemoryId?: string,
   options?: { includeDeleted?: boolean; projection?: NodeRefProjection },
 ): Promise<{ id: string }> {
+  // #4971 (follow-up of #4893/#4948): a NUL or lone surrogate names no stored node, and Postgres rejects it as a
+  // query parameter, so it would surface as a driver fault on every door that narrowed its catch. Reject it
+  // before any lookup, as the App, Agent, Memory, Org and User resolvers do.
+  if (refHasUnstorableChars(ref)) throw new UrnNotQualifiedError(ref, undefined, 'node');
   // Apply the prospective address view only at the data lookup seam; keep
   // every normal reference-resolution branch and its alias rules below.
   const projection = options?.projection;

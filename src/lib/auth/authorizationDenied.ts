@@ -18,6 +18,9 @@ import { GraphQLError } from 'graphql';
  *
  * @param message The refusal text. Defaults to the gates' established `Forbidden`.
  */
+/** The wire code of {@link authorizationDenied}: the one spelling a catch that folds a typed denial matches (#4971). */
+export const AUTHORIZATION_DENIED_CODE = 'FORBIDDEN';
+
 export function authorizationDenied(message = 'Forbidden'): GraphQLError {
-  return new GraphQLError(message, { extensions: { code: 'FORBIDDEN' } });
+  return new GraphQLError(message, { extensions: { code: AUTHORIZATION_DENIED_CODE } });
 }
