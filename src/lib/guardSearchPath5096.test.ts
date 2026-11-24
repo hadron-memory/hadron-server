@@ -17,7 +17,7 @@ describe('the shared source', () => {
     const sql = file('guard-search-path-invariants.sql');
     const dirs = readdirSync(new URL('../../prisma/migrations/', import.meta.url)).sort().reverse();
     const dir = dirs.find((d) => { try { return file(`migrations/${d}/migration.sql`).includes('$guard_search_path$'); } catch { return false; } });
-    expect(dir).toBe('20261124190000_guard_function_search_path');
+    expect(dir).toBe('20261124210000_guard_function_search_path');
     expect(file(`migrations/${dir}/migration.sql`).endsWith(sql)).toBe(true);
     const lines = file('post-push.sql').split('\n').map((l) => l.trim()).filter((l) => l !== '' && !l.startsWith('--'));
     expect(lines[lines.length - 1]).toBe('\\ir guard-search-path-invariants.sql');

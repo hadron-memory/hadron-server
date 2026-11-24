@@ -5,7 +5,7 @@
 
 -- #5096 (same class as #5089): pin the schema search path of every guard function, so a session-local (pg_temp) table or function
 -- of the same name cannot stand in for the real one a guard reads. One source: the newest migration to carry it (today
--- 20261124190000_guard_function_search_path) ends with it verbatim (pinned by src/lib/guardSearchPath5096.test.ts), and post-push.sql
+-- 20261124210000_guard_function_search_path) ends with it verbatim (pinned by src/lib/guardSearchPath5096.test.ts), and post-push.sql
 -- applies it LAST, after every file that (re)creates a function: CREATE OR REPLACE FUNCTION without a SET clause resets a function's
 -- configuration, so this must run after them.
 --
