@@ -2,7 +2,8 @@
  * #1332 — recording a content-validation report (hrn:node:hadronmemory.com:specs:cor:dmo:160:01).
  * Pins follow the issue's acceptance list (1-7, 5a-5e, 6a-6d) and Vera's FIT readings (#80505).
  */
-import { readFileSync } from 'fs';
+import { readdirSync, readFileSync } from 'fs';
+import { inFreshRolledBackSession, shadowTable } from '../../../test/freshSession5089.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrismaClient } from '../../../generated/prisma/index.js';
 import { GraphQLError } from 'graphql';
@@ -765,10 +766,24 @@ describe('#1332 storage invariants', () => {
     expect(await db.nodeContentValidationReport.findFirstOrThrow({ where: { runId: 'imm' } })).toMatchObject({ reporterUserId: mia });
   });
 
+  it('#5089: a session temp table named user_merges cannot forge the merge proof', async () => {
+    await report(person(leo), { runId: 'shadow' });
+    await expect(inFreshRolledBackSession(async (c) => {
+      await shadowTable(c, 'user_merges');
+      await c.query('INSERT INTO pg_temp.user_merges (source_user_id, target_user_id) VALUES ($1, $2)', [leo, mia]);
+      await c.query(`UPDATE node_content_validation_reports SET reporter_user_id = $1 WHERE run_id = 'shadow'`, [mia]);
+    })).rejects.toThrow(/append-only/);
+    expect(await db.nodeContentValidationReport.findFirstOrThrow({ where: { runId: 'shadow' } })).toMatchObject({ reporterUserId: leo });
+  });
+
   it('the migration carries the shared invariants file verbatim', () => {
     const shared = readFileSync('prisma/content-validation-report-invariants.sql', 'utf8');
-    const migration = readFileSync('prisma/migrations/20261105170000_content_validation_reporter/migration.sql', 'utf8');
-    expect(migration.endsWith(shared)).toBe(true);
+    // #5089: the newest migration to carry the file (it ends with it) is the carrier; the original one carried the older text.
+    const first = shared.split('\n')[0]!;
+    const dir = readdirSync('prisma/migrations').sort().reverse()
+      .find((d) => { try { return readFileSync(`prisma/migrations/${d}/migration.sql`, 'utf8').includes(first); } catch { return false; } });
+    expect(dir).toBeTruthy();
+    expect(readFileSync(`prisma/migrations/${dir}/migration.sql`, 'utf8').endsWith(shared)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir content-validation-report-invariants.sql');
   });
 });
