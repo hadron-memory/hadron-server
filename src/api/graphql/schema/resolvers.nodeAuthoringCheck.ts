@@ -12,8 +12,8 @@
  *   3. only then the rules, through {@link judgeAuthoring}.
  *
  * It shows the verdict and the write's recovery (a task the caller cannot read is NO_RECOVERY, no
- * id, reference, revision or count) and nothing else from the memory's configuration. The lock the
- * shared computation takes is a shared advisory lock inside a read-only transaction: nothing is
+ * id, reference, revision or count) and nothing else from the memory's configuration. The shared
+ * computation runs in a transaction that takes a shared advisory lock and reads: nothing is
  * written, so no revision, stamp, event or usage record exists afterwards.
  */
 import { GraphQLError } from 'graphql';
