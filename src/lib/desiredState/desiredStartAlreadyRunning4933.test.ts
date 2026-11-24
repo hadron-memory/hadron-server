@@ -19,10 +19,10 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { AGENT_PRESENT_STATUSES, TERMINAL_REASONS, TERMINAL_STATUSES } from '../workerTerminal.js';
 import { loadHostDesiredState } from './desiredState.js';
-import { agentRunsOnAnyHost, LONG_HOLD_LOG_MS, pruneRunningLog, runningLogSize, TERMINAL_FUTURE_TOLERANCE_MS, resetDesiredStartStateLog, startDesiredWorker, startDesiredWorkers, START_FAILING_EVENT_TYPE, TERMINAL_FRESH_MS } from './desiredStart.js';
+import { agentRunsOnAnyHost, LONG_HOLD_LOG_MS, pruneRunningLog, runningLogSize, TERMINAL_FUTURE_TOLERANCE_MS, resetDesiredStartStateLog, startDesiredWorker, startDesiredWorkers, START_FAILING_EVENT_TYPE, TERMINAL_FRESH_MS, terminalFreshMs } from './desiredStart.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
-// A pass-through wrapper, so a test can make one read fail (blind P2-3).
+// A pass-through wrapper, so a test can make one read fail (the "could not read every host" pins).
 vi.mock('./desiredState.js', async (orig) => {
   const m = await orig<typeof import('./desiredState.js')>();
   return { ...m, loadHostDesiredState: vi.fn(m.loadHostDesiredState) };
@@ -163,9 +163,16 @@ describe('#4933: when the host does not run the agent, the worker is started as 
     await report({ status: 'locked', reason });
     expect(await startsWith()).toBe(1);
   });
-  it('a report older than the freshness window decides nothing', async () => {
-    await report({ status: 'idle', ageMs: TERMINAL_FRESH_MS + 60_000 });
+  // The window is the reporting host's poll interval x the App's lapse check-ins (#4970 item 6): the test host polls
+  // every 600 s and the default is 3 check-ins, so 30 minutes. It ages the REPORT (reportedAt), not the registration.
+  const WINDOW = 600 * 3 * 1000;
+  it('a report older than the derived window decides nothing', async () => {
+    await report({ status: 'idle', ageMs: WINDOW + 60_000 });
     expect(await startsWith()).toBe(1);
+  });
+  it('a report older than the old 5-minute constant but inside the derived window still holds the worker', async () => {
+    await report({ status: 'idle', ageMs: TERMINAL_FRESH_MS + 60_000 });
+    expect(await startsWith()).toBe(0);
   });
   it('three failed starts still trip a worker the host does not run (the trip is unchanged)', async () => {
     for (const m of [10, 20, 30]) await failedStart(m);
@@ -174,7 +181,50 @@ describe('#4933: when the host does not run the agent, the worker is started as 
   });
 });
 
+describe('#4970 item 6: the freshness window is derived from the reporting host\'s registration', () => {
+  const win = async (terminal: Parameters<typeof terminalFreshMs>[2]) => terminalFreshMs(db, app.id, terminal);
+  it('poll interval x the default 3 check-ins (600 s -> 30 minutes)', async () => {
+    expect(await win({ host: { id: 'orca1' } })).toBe(30 * 60_000);
+  });
+  it('the App\'s own lapse check-ins count (2 -> 20 minutes)', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 2 } });
+    expect(await win({ host: { id: 'orca1' } })).toBe(20 * 60_000);
+  });
+  it('the poll interval counts (a host that polls every 60 s -> 3 minutes)', async () => {
+    await db.$executeRaw`UPDATE host_registrations SET poll_interval_seconds = 60 WHERE app_id = ${app.id} AND host_id = 'orca1'`;
+    expect(await win({ host: { id: 'orca1' } })).toBe(3 * 60_000);
+  });
+  it('a report naming no host, or a host with no registration here, falls back to the constant', async () => {
+    expect(await win({})).toBe(TERMINAL_FRESH_MS);
+    expect(await win(null)).toBe(TERMINAL_FRESH_MS);
+    expect(await win({ host: { id: 'orca7' } })).toBe(TERMINAL_FRESH_MS);
+  });
+  it('another App\'s registration of the same host id does not widen it', async () => {
+    const other = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` }, select: { id: true } });
+    expect(await terminalFreshMs(db, other.id, { host: { id: 'orca1' } })).toBe(TERMINAL_FRESH_MS);
+  });
+  it('the guard ages the report, not the registration: a registration refreshed just now does not keep a stale report fresh', async () => {
+    await db.$executeRaw`UPDATE host_registrations SET refreshed_at = now() WHERE app_id = ${app.id} AND host_id = 'orca1'`;
+    await report({ status: 'idle', ageMs: 31 * 60_000 });
+    await tick();
+    expect(await starts()).toHaveLength(1);
+  });
+  it('the window the App states decides the guard (2 check-ins: a 25-minute-old report no longer holds the worker)', async () => {
+    await db.agentTaskStallSchedule.create({ data: { appId: app.id, hostLapseCheckIns: 2 } });
+    await report({ status: 'idle', ageMs: 25 * 60_000 });
+    await tick();
+    expect(await starts()).toHaveLength(1);
+  });
+});
+
 describe('#4933: agentRunsOnAnyHost, directly', () => {
+  it('takes the window as an argument: the same report is fresh inside it and stale outside', () => {
+    const now = new Date('2026-11-23T00:00:00Z');
+    const rep = { host: { id: 'h' }, status: 'idle', reason: null, reportedAt: new Date(now.getTime() - 10 * 60_000).toISOString() };
+    expect(agentRunsOnAnyHost(rep, now, 10 * 60_000)).toBe(true);
+    expect(agentRunsOnAnyHost(rep, now, 10 * 60_000 - 1)).toBe(false);
+    expect(agentRunsOnAnyHost(rep, now)).toBe(false);
+  });
   const now = new Date('2026-11-23T00:00:00Z');
   const t = (o: Record<string, unknown>) => ({ host: { id: 'h' }, status: 'idle', reason: null, reportedAt: new Date(now.getTime() - 1000).toISOString(), ...o });
   it('says yes for a fresh busy, idle or locked report, from this host or any other', () => {
@@ -355,7 +405,7 @@ describe('#4941: freshness is judged on reportedAt (the server\'s clock), not th
   });
 });
 
-describe('#4941: the guard judges at the moment of the decision, not at the pass\'s start (blind P2-2)', () => {
+describe('#4941: the guard judges at the moment of the decision, not at the pass\'s start', () => {
   it('a report stored while the pass waited (reportedAt later than the pass `now` by more than the tolerance) still counts as running', async () => {
     await report({ status: 'idle', ageMs: 30_000 });
     // A pass whose `now` was taken ten minutes before its decision (the anchor says ten minutes of waits).
@@ -366,35 +416,79 @@ describe('#4941: the guard judges at the moment of the decision, not at the pass
   });
 });
 
-describe('#4941: a pass that could not read every host keeps the log (blind P2-3, local F1)', () => {
+describe('#4970 item 1: the pass passes its anchor to every worker it decides', () => {
+  it('a slow pass (its `now` ten minutes before the decision) still reads a report stored mid-pass as running', async () => {
+    await report({ status: 'idle', ageMs: 30_000 });
+    // startDesiredWorkers, not startDesiredWorker: were the pass not to hand its anchor on, each worker would judge at
+    // its own default anchor (about the pass's `now`), the report would read ten minutes in the future and a start would be issued.
+    const passNow = new Date(Date.now() - 10 * 60_000);
+    expect(await startDesiredWorkers(db, passNow, performance.now() - 10 * 60_000)).toBe(0);
+    expect(await starts()).toHaveLength(0);
+  });
+});
+
+describe('#4970 item 3: the failure count is judged at the moment of the decision too', () => {
+  it('three failed starts finished while a slow pass waited (after its `now`, before its decision) trip the worker', async () => {
+    for (const m of [1, 2, 3]) await failedStart(m);
+    const passNow = new Date(Date.now() - 10 * 60_000);
+    expect(await startDesiredWorker(db, { appId: app.id, workerId: kit.id, hostId: 'orca1' }, passNow, performance.now() - 10 * 60_000)).toBe('tripped');
+  });
+});
+
+describe('#4941: a pass that could not read every host keeps the log', () => {
   const held = async () => {
     await report({ status: 'idle' });
     await tick();
     expect(runningLogSize()).toBe(1);
   };
   it('listing an App\'s hosts fails: the held worker stays in the log', async () => {
+    let q: { mockRestore: () => void } | undefined;
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     try {
       await held();
-      const q = vi.spyOn(db, '$queryRaw').mockRejectedValueOnce(new Error('hosts list failed'));
+      // Reject only the host list (the one query naming host_registrations UNION host_worker_assignments), so the injected
+      // failure is the one the test names; every other raw query runs.
+      const real = db.$queryRaw.bind(db) as (...a: unknown[]) => Promise<unknown>;
+      let consumed = 0;
+      q = vi.spyOn(db, '$queryRaw').mockImplementation(((...a: unknown[]) => {
+        const text = Array.isArray(a[0]) ? (a[0] as string[]).join('?') : String((a[0] as { sql?: string })?.sql ?? '');
+        if (consumed === 0 && text.includes('host_worker_assignments') && text.includes('UNION')) {
+          consumed++;
+          return Promise.reject(new Error('hosts list failed'));
+        }
+        return real(...a);
+      }) as never);
       await tick();
-      q.mockRestore();
+      expect(consumed, 'the injected failure was never reached').toBe(1);
+      expect(err.mock.calls.some((c) => String(c[0]).includes('listing an App\'s hosts failed') && (c[1] as { appId?: string })?.appId === app.id)).toBe(true);
       expect(runningLogSize()).toBe(1);
     } finally {
+      q?.mockRestore();
       err.mockRestore();
       info.mockRestore();
     }
   });
   it('reading one host\'s desired state fails: the held worker stays in the log', async () => {
+    const realLoad = vi.mocked(loadHostDesiredState).getMockImplementation()!;
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     try {
       await held();
-      vi.mocked(loadHostDesiredState).mockRejectedValueOnce(new Error('read failed'));
+      let consumed = 0;
+      vi.mocked(loadHostDesiredState).mockImplementation(async (...a) => {
+        if (consumed === 0) {
+          consumed++;
+          throw new Error('read failed');
+        }
+        return realLoad(...a);
+      });
       await tick();
+      expect(consumed, 'the injected failure was never reached').toBe(1);
+      expect(err.mock.calls.some((c) => String(c[0]).includes('reading a host\'s desired state failed') && (c[1] as { appId?: string; hostId?: string })?.hostId === 'orca1')).toBe(true);
       expect(runningLogSize()).toBe(1);
     } finally {
+      vi.mocked(loadHostDesiredState).mockImplementation(realLoad);
       err.mockRestore();
       info.mockRestore();
     }
@@ -434,7 +528,7 @@ describe('#4941: the log of what was seen', () => {
       for (const at of [t0, new Date(t0.getTime() + LONG_HOLD_LOG_MS - 60_000), new Date(t0.getTime() + LONG_HOLD_LOG_MS), new Date(t0.getTime() + LONG_HOLD_LOG_MS + 60 * 60_000)]) {
         await reportAt(new Date(at.getTime() - 1000));
         // Each pass must answer `running` itself: were the guard off, the lapsed registration would answer `no-host` and
-        // an empty starts() would prove nothing (blind F6).
+        // an empty starts() would prove nothing.
         expect(await startDesiredWorker(db, { appId: app.id, workerId: kit.id, hostId: 'orca1' }, at)).toBe('running');
         await startDesiredWorkers(db, at);
       }
