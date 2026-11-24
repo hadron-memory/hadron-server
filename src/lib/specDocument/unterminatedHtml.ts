@@ -27,10 +27,8 @@
  */
 import { stepFence, type OpenFence } from './fences.js';
 
-/** Elements whose content is text up to their own end tag. */
-const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript']);
-/** CommonMark HTML block type 1 ends at a line holding any one of these. */
-const BLOCK_ONE_CLOSE = /<\/(?:pre|script|style|textarea)>/gi;
+/** Elements whose content is text up to their own end tag (`template`: its content is inert, so the anchor would sit unreachable inside it). */
+const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'template']);
 const MAX_RESTARTS = 32;
 
 const isLetter = (c: string | undefined): boolean => c !== undefined && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
@@ -45,6 +43,42 @@ function paragraphEnd(text: string, i: number): number {
   return m ? m.index : text.length;
 }
 
+/**
+ * The index just past the `>` that ends the start or end tag at `i` (`<name ...>` or `</name ...>`), or -1 when the tag never
+ * ends: a quote opens a value only right after `=`, an unquoted value ends at a blank or `>`, and an unclosed value takes the
+ * rest of the text.
+ */
+function tagEndOf(text: string, i: number, nameFrom: number): number {
+  const n = text.length;
+  let p = nameFrom;
+  while (p < n && !isBlank(text[p]) && text[p] !== '/' && text[p] !== '>') p += 1;
+  while (p < n) {
+    const ch = text[p];
+    if (ch === '>') return p + 1;
+    if (ch === '=') {
+      p += 1;
+      while (p < n && isBlank(text[p])) p += 1;
+      const q = text[p];
+      if (q === '"' || q === "'") {
+        // An unclosed value takes the rest of the text, so no `>` ends the tag.
+        const close = text.indexOf(q, p + 1);
+        p = close === -1 ? n : close + 1;
+      } else {
+        while (p < n && !isBlank(text[p]) && text[p] !== '>') p += 1;
+      }
+      continue;
+    }
+    p += 1;
+  }
+  return -1;
+}
+
+/** True when the `<` at `i` is the first non-space of its line, within three spaces of indent (where CommonMark starts an HTML block). */
+function startsLine(text: string, i: number): boolean {
+  const lineStart = text.lastIndexOf('\n', i - 1) + 1;
+  return i - lineStart <= 3 && /^ *$/.test(text.slice(lineStart, i));
+}
+
 /** The index of the `<` that opens the first unterminated construct at or after `from`, or -1. */
 function firstUnterminated(text: string, from: number): number {
   const n = text.length;
@@ -52,6 +86,10 @@ function firstUnterminated(text: string, from: number): number {
   let paraEnd = -1;
   // What the previous line was, for indented code: after a blank line (or at the start) a four-space line is code, after text it continues the paragraph.
   let prev: 'blank' | 'code' | 'other' = 'blank';
+  // A raw-text element opened in the middle of a line is inline HTML: Markdown goes on parsing after it, so only an end tag
+  // that Markdown also reads as HTML (outside code, a fence and a backslash escape) closes it. -1 when none is open.
+  let rawStart = -1;
+  let rawName = '';
   // A backtick run of length N that found no closer in its paragraph: no later run of N in the same paragraph has one either.
   const noCloser = new Map<number, number>();
   let i = from;
@@ -60,13 +98,15 @@ function firstUnterminated(text: string, from: number): number {
       const nl = text.indexOf('\n', i);
       const end = nl === -1 ? n : nl;
       const line = text.slice(i, end);
+      // Block quote markers do not change what is code inside them.
+      const inner = line.replace(/^ {0,3}(?:> ?)+/, '');
       const wasOpen = fence !== null;
-      const step = stepFence(line, fence);
+      const step = stepFence(inner, fence);
       fence = step.open;
       if (step.fenceLine || wasOpen) { prev = 'other'; i = end + 1; continue; }
       // An indented code block: a line of four spaces or a tab, after a blank line, the start of the text or another such line.
-      if (/^(?: {4}|\t)/.test(line) && line.trim() !== '' && prev !== 'other') { prev = 'code'; i = end + 1; continue; }
-      prev = line.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : 'other';
+      if (/^(?: {4}|\t)/.test(inner) && inner.trim() !== '' && prev !== 'other') { prev = 'code'; i = end + 1; continue; }
+      prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : 'other';
     }
     const c = text[i];
     if (c === '\\') { i += isAsciiPunct(text[i + 1]) ? 2 : 1; continue; }
@@ -89,6 +129,16 @@ function firstUnterminated(text: string, from: number): number {
     }
     if (c !== '<') { i += 1; continue; }
 
+    if (rawStart !== -1) {
+      // Inside an inline raw-text element: the only markup is its own end tag.
+      if (text[i + 1] === '/' && text.slice(i + 2, i + 2 + rawName.length).toLowerCase() === rawName && /[\s/>]/.test(text[i + 2 + rawName.length] ?? 'x')) {
+        const end = tagEndOf(text, i, i + 2);
+        if (end === -1) return rawStart;
+        rawStart = -1;
+        i = end;
+      } else i += 1;
+      continue;
+    }
     if (text.startsWith('<!--', i)) {
       if (text.startsWith('<!-->', i)) { i += 5; continue; }
       if (text.startsWith('<!--->', i)) { i += 6; continue; }
@@ -116,55 +166,51 @@ function firstUnterminated(text: string, from: number): number {
       continue;
     }
     const isEnd = text[i + 1] === '/';
+    if (isEnd && !isLetter(text[i + 2]) && text[i + 2] !== '>') {
+      // `</` and anything but a letter or `>` is a bogus comment, which runs to the next `>`.
+      const close = text.indexOf('>', i + 2);
+      if (close === -1) return i;
+      i = close + 1;
+      continue;
+    }
     if (!isLetter(text[i + (isEnd ? 2 : 1)])) { i += 1; continue; }
 
     // A start or end tag: the name, then attributes up to the `>` outside a quoted value.
-    let p = i + (isEnd ? 2 : 1);
-    const nameStart = p;
-    while (p < n && !isBlank(text[p]) && text[p] !== '/' && text[p] !== '>') p += 1;
-    const name = text.slice(nameStart, p).toLowerCase();
-    let tagEnd = -1;
-    while (p < n) {
-      const ch = text[p];
-      if (ch === '>') { tagEnd = p + 1; break; }
-      if (ch === '=') {
-        p += 1;
-        while (p < n && isBlank(text[p])) p += 1;
-        const q = text[p];
-        if (q === '"' || q === "'") {
-          // An unclosed value takes the rest of the text, so no `>` ends the tag below.
-          const close = text.indexOf(q, p + 1);
-          p = close === -1 ? n : close + 1;
-        } else {
-          while (p < n && !isBlank(text[p]) && text[p] !== '>') p += 1;
-        }
-        continue;
-      }
-      p += 1;
-    }
+    const nameStart = i + (isEnd ? 2 : 1);
+    const tagEnd = tagEndOf(text, i, nameStart);
     if (tagEnd === -1) return i;
     if (isEnd) { i = tagEnd; continue; }
+    let nameEnd = nameStart;
+    while (nameEnd < n && !isBlank(text[nameEnd]) && text[nameEnd] !== '/' && text[nameEnd] !== '>') nameEnd += 1;
+    const name = text.slice(nameStart, nameEnd).toLowerCase();
 
     if (name === 'plaintext') return i;
     if (RAW_TEXT.has(name)) {
-      const closer = new RegExp(`</${name}(?=[\\s/>])`, 'gi');
-      closer.lastIndex = tagEnd;
-      const m = closer.exec(text);
-      if (!m) return i;
-      i = m.index;
+      if (startsLine(text, i) && (name === 'script' || name === 'style' || name === 'textarea')) {
+        // CommonMark type 1: the block runs raw to the first line that holds an end tag, code or not.
+        const closer = new RegExp(`</${name}(?=[\\s/>])`, 'gi');
+        closer.lastIndex = tagEnd;
+        const m = closer.exec(text);
+        if (!m) return i;
+        const end = tagEndOf(text, m.index, m.index + 2);
+        if (end === -1) return i;
+        i = end;
+      } else {
+        rawStart = i;
+        rawName = name;
+        i = tagEnd;
+      }
       continue;
     }
-    if (name === 'pre') {
-      // CommonMark type 1 only starts a block at the head of a line (up to three spaces of indent).
-      const lineStart = text.lastIndexOf('\n', i - 1) + 1;
-      if (i - lineStart <= 3 && /^ *$/.test(text.slice(lineStart, i))) {
-        BLOCK_ONE_CLOSE.lastIndex = i;
-        if (!BLOCK_ONE_CLOSE.test(text)) return i;
-      }
+    if (name === 'pre' && startsLine(text, i)) {
+      // CommonMark type 1 ends at a line holding any one of these four end tags.
+      const closer = /<\/(?:pre|script|style|textarea)>/gi;
+      closer.lastIndex = i;
+      if (!closer.test(text)) return i;
     }
     i = tagEnd;
   }
-  return -1;
+  return rawStart;
 }
 
 /** `text` with the opening `<` of every unterminated raw-HTML construct written as `&lt;`; the same string when there is none. */
@@ -173,7 +219,7 @@ export function escapeUnterminatedHtml(text: string): string {
   let out = '';
   let copied = 0;
   let from = 0;
-  for (let k = 0; k <= MAX_RESTARTS; k += 1) {
+  for (let k = 0; ; k += 1) {
     const at = firstUnterminated(text, from);
     if (at === -1) return copied === 0 ? text : out + text.slice(copied);
     if (k === MAX_RESTARTS) {
@@ -184,5 +230,4 @@ export function escapeUnterminatedHtml(text: string): string {
     copied = at + 1;
     from = at + 1;
   }
-  return text;
 }

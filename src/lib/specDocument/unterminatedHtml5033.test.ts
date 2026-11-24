@@ -82,6 +82,21 @@ describe('#5033 the class, not two spellings', () => {
     ['a line-start pre block', '<pre>\ncode lines\nmore'],
     ['a line-start tag spanning lines', 'text <a\nhref="x"\nclass='],
     ['a tag that a blank-line paragraph does not close', 'one <b\n\ntwo'],
+    // BLIND P1-1: a partial end tag matches the closer lookahead but never reaches `>`.
+    ['a raw-text element whose end tag has no `>`', 'a <script>b</script c'],
+    ['a textarea whose end tag stops at an attribute', 'a <textarea>b</textarea attr='],
+    // BLIND P1-2 (a closer inside a code span, a fence or after a backslash is no closer) is a Markdown-level reading; the
+    // harness here parses the raw string, where it would pass vacuously, so it is pinned on the scanner below.
+    // LOCAL P2-1: `</` and a non-letter is a bogus comment up to the next `>`.
+    ['`</` at the end', 'a </'],
+    ['`</` and a blank', 'a </ b'],
+    ['`</` and a digit', 'x </3'],
+    ['`</` and a quote', 'x </"'],
+    ['`</` and a bang', 'a </!'],
+    ['`<//`', 'a <//'],
+    ['`</` and a question mark', 'a </? b'],
+    // LOCAL P3-2: an unclosed template holds the anchor in its inert content.
+    ['an unclosed template', 'a <template>'],
   ];
   it.each(OPEN)('%s at a body end keeps the next anchor', (_label, body) => {
     const out = renderSpecDocument(THREE(body));
@@ -123,6 +138,14 @@ describe('#5033 refusals: nothing else changes', () => {
     'x <pre>unclosed inline pre is harmless in an HTML5 reader',
     '<div class="x">y</div>',
     '<a title="a > b">link</a>',
+    'a </> stays',
+    'a </b> and </i> stay',
+    'a <script>b</script> and <style>c</style>',
+    'a <script>b</SCRIPT >c',
+    'a <template>x</template>',
+    'text\n    <pre>\nx (a four-space continuation line is not a pre block)',
+    '> quoted\n>\n>     <pre x= (a code sample in a blockquote)',
+    '>     <pre x= (a code sample in a blockquote)',
     '<!-- closed -->',
     '<!---->',
     '<!-->',
@@ -178,19 +201,49 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('  <pre>\nx')).toBe('  &lt;pre>\nx');
     expect(escapeUnterminatedHtml('word <pre>\nx')).toBe('word <pre>\nx');
   });
+  it('a partial end tag leaves the element open, so BOTH the element and the end tag are escaped', () => {
+    expect(escapeUnterminatedHtml('a <script>b</script c')).toBe('a &lt;script>b&lt;/script c');
+    expect(escapeUnterminatedHtml('<textarea>x</textarea attr=')).toBe('&lt;textarea>x&lt;/textarea attr=');
+  });
+  it('an inline raw-text element is closed only by an end tag outside code and not escaped by a backslash', () => {
+    expect(escapeUnterminatedHtml('a <script>b `</script>` c')).toBe('a &lt;script>b `</script>` c');
+    expect(escapeUnterminatedHtml('a <script>b ``</script>`` c</script>')).toBe('a <script>b ``</script>`` c</script>');
+    expect(escapeUnterminatedHtml('a <script>b \\</script>')).toBe('a &lt;script>b \\</script>');
+    expect(escapeUnterminatedHtml('a <script>b</script>')).toBe('a <script>b</script>');
+  });
+  it('a line-start raw-text block is closed by a closer anywhere after it (CommonMark type 1)', () => {
+    expect(escapeUnterminatedHtml('<script>\nx `</script>` y')).toBe('<script>\nx `</script>` y');
+  });
+  it('`</` and a non-letter is closed by a later `>`; `</>` is complete', () => {
+    expect(escapeUnterminatedHtml('a </ b >c')).toBe('a </ b >c');
+    expect(escapeUnterminatedHtml('a </ b')).toBe('a &lt;/ b');
+    expect(escapeUnterminatedHtml('a </>')).toBe('a </>');
+  });
+  it('the restart cap: a later complete tag survives up to the cap, and the bulk escape past it covers every `<` left', () => {
+    expect(escapeUnterminatedHtml('<a x=\'1 <b x="2 <i>ok</i> <c')).toBe('&lt;a x=\'1 &lt;b x="2 <i>ok</i> &lt;c');
+    for (const n of [31, 32, 33, 40]) expect(escapeUnterminatedHtml('<a '.repeat(n))).toBe('&lt;a '.repeat(n));
+  });
+  it('a line-start pre block starts within three spaces of indent, not four', () => {
+    expect(escapeUnterminatedHtml('   <pre>\nx')).toBe('   &lt;pre>\nx');
+    expect(escapeUnterminatedHtml('text\n    <pre>\nx')).toBe('text\n    <pre>\nx');
+  });
+  it('a CDATA section is closed by `]]>`, not by `]>`', () => {
+    expect(escapeUnterminatedHtml('<![CDATA[ x ]> y')).toBe('&lt;![CDATA[ x ]> y');
+    expect(escapeUnterminatedHtml('<![CDATA[ x ]]> y')).toBe('<![CDATA[ x ]]> y');
+  });
   it('stays linear on a body of thousands of stray `<a`', () => {
-    const body = '<a '.repeat(20000);
+    const body = '<a '.repeat(40000);
     const t0 = Date.now();
     const out = escapeUnterminatedHtml(body);
-    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(Date.now() - t0).toBeLessThan(5000);
     expect(out).not.toMatch(/<a /);
-    expect(out.length).toBe(body.length + 3 * 20000);
+    expect(out.length).toBe(body.length + 3 * 40000);
   });
   it('stays linear on thousands of unmatched backtick runs', () => {
-    const body = '` ``'.repeat(15000) + ' <pre x=';
+    const body = '` ``'.repeat(30000) + ' <pre x=';
     const t0 = Date.now();
     const out = escapeUnterminatedHtml(body);
-    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(Date.now() - t0).toBeLessThan(5000);
     expect(out.endsWith(' &lt;pre x=')).toBe(true);
   });
 });
