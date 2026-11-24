@@ -15,6 +15,10 @@ import { recordStallPass } from './stallGap.js';
 import { currentAlarmEpisodes, endedAlarmEpisodes } from './stall.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 
+// #4531: every pass now also evaluates the dark-team episode of each App (one more due-wake derivation per pass), and these
+// tests drive dozens of passes; on a shared CI runner that passed the 5 s default. Time only, no assertion changes.
+vi.setConfig({ testTimeout: 30_000 });
+
 const M = resolvers.Mutation as any;
 const at = (hhmm: string): Date => new Date(`2026-10-09T${hhmm}:00Z`);
 const ctx = (userId?: string): Context => ({ db, userId, roles: ['READER'] });
