@@ -21,10 +21,10 @@ const badInput = (message: string) => new GraphQLError(message, { extensions: { 
 
 const INT8_MAX = 9_223_372_036_854_775_807n;
 
-interface OwnerArgs { orgRef?: string | null; userRef?: string | null }
-interface SourceArgs { sourceType: string; sourceId: string; note: string; onlySourceType?: string | null }
-interface SetInput extends OwnerArgs, SourceArgs { limits: Array<{ key: string; limit?: string | null }>; replace?: boolean | null }
-interface ClearInput extends OwnerArgs, SourceArgs { keys?: string[] | null }
+export interface OwnerArgs { orgRef?: string | null; userRef?: string | null }
+export interface SourceArgs { sourceType: string; sourceId: string; note: string; onlySourceType?: string | null }
+export interface SetInput extends OwnerArgs, SourceArgs { limits: Array<{ key: string; limit?: string | null }>; replace?: boolean | null }
+export interface ClearInput extends OwnerArgs, SourceArgs { keys?: string[] | null }
 
 function assertOneOwner({ orgRef, userRef }: OwnerArgs): void {
   if ((orgRef == null) === (userRef == null)) throw badInput('Give exactly one of orgRef and userRef.');
