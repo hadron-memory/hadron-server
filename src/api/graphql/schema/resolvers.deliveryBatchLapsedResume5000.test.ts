@@ -164,6 +164,18 @@ describe('#5000 the resume commits with the read or not at all', () => {
   });
 });
 
+describe('#5000 concurrent reads through one lapsed session', () => {
+  // The resume takes the Worker row FOR UPDATE; if it ran AFTER a Worker SHARE this transaction already held, two or three
+  // readers would each hold SHARE and wait on the other's upgrade (40P01). All of them must succeed.
+  it('three concurrent inbox reads through one 43 h-idle session all succeed and resume it once', async () => {
+    const s = await lapsed(43);
+    const results = await Promise.allSettled([inbox(s), inbox(s), inbox(s)]);
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
+    expect((await row(s)).updatedAt!.getTime()).toBeGreaterThan(Date.now() - 60_000);
+    expect(await db.appLogEntry.count({ where: { sessionId: s.id, message: 'delivery.batch.read' } })).toBe(3);
+  });
+});
+
 describe('#5000 the decision is judged on ownership first (no existence oracle)', () => {
   it('a caller who does not own the session gets NOT_OWNER whatever state it is in, and a missing one the same', async () => {
     const outsider = await db.user.create({ data: { githubId: 91_000_000 + Math.floor(Math.random() * 1_000_000), githubUsername: 'lp-oracle', roles: ['ADMIN'] } });

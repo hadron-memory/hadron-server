@@ -114,6 +114,7 @@ export async function ownBatchSession(ctx: Context, expectedAppId?: string, lock
   // app_members row, then the App (shared) and the Worker, then the Session. An 'in-tx' resume takes the Worker row
   // FOR UPDATE, so it runs AFTER the app_members lock and BEFORE the Worker SHARE below: it must never be an upgrade of
   // a SHARE this transaction already holds, and never put the Worker ahead of the authority row (#5000, blind P2).
+  if (resume === 'in-tx' && !lock) throw new Error('ownBatchSession: an in-tx resume needs the lock pass');
   if (lock) {
     if (ctx.userId && initial.appId) await ctx.db.$queryRaw`SELECT user_id FROM app_members WHERE app_id = ${initial.appId} AND user_id = ${ctx.userId} FOR SHARE`;
     if (resume === 'in-tx' && !initial.endedAt) {
