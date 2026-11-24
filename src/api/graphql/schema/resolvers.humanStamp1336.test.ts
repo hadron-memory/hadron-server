@@ -134,7 +134,7 @@ describe('#1336 carry and clear sites never mint', () => {
     const first = await create('a', { authoredWith: claim() });
     await update('a', { content: 'second', authoredWith: claim() });
     const revision = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: first.id as string } });
-    await M.restoreNodeRevision({}, { revisionId: revision.id }, portal());
+    await M.restoreNodeRevision({}, { nodeRevRef: revision.id }, portal());
     expect(await stored('a')).toMatchObject({ content: 'body', authorshipKind: 'TASK', authoredByTask: taskId, authoredByHuman: null });
   });
 

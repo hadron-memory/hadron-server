@@ -182,7 +182,7 @@ describe('#1219 Node.role empty normalization (cor:dmo:060:02, ruling A)', () =>
     const second = revs.find((r) => r.role === 'second');
     if (!second) throw new Error('second revision not snapshotted');
     await db.nodeRevision.update({ where: { id: second.id }, data: { role: '' } });
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: second.id }, fx.ctx);
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: second.id }, fx.ctx);
     expect((await persisted('r-hist')).role).toBeNull();
   });
 });

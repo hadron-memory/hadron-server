@@ -414,7 +414,7 @@ describe('approvals on an encrypted memory (#1591)', () => {
         if(cached) sessionKeyCache.set('history-key',memory.id,parseDataKey(dataKey));
         const ctx: Context = {...as(),roles:['READER']};
         const list = await resolvers.Query.nodeRevisions(null,{nodeRef:n.id},ctx);
-        const single = await resolvers.Query.nodeRevision(null,{revisionId:retained.id},ctx);
+        const single = await resolvers.Query.nodeRevision(null,{nodeRevRef:retained.id},ctx);
         expect(list.some((r:{id:string})=>r.id===retained.id)).toBe(true);
         for(const r of [...list,single]) {
           expect(r).not.toBeNull();
