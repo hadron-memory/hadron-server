@@ -143,17 +143,17 @@ it('fails open to code-only guidance when register lookup throws', async () => {
   const out = await due();
   expect(action(out, w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
   expect(out.wakes[0].proof).toBeTruthy();
-  expect(out.wakes[0].tickText).toBe('tick Shared: routine tick, read your tagged messages and act on what is yours; if you have a task for tick.shared, resolve it yourself');
+  expect(out.wakes[0].tickText).toBe('tick Shared: task lookup withheld; if you have a task for tick.shared, resolve it yourself');
 });
 
 // #4999: the fallthrough serves every action state that is not MAPPED, UNMAPPED or UNRESOLVED, and the renderer cannot know the
 // worker has no task, so the sentence must not presume one: a no-action pass is a correct answer to a routine tick.
-it.each([['UNKNOWN', { code: 'tick.shared', state: 'UNKNOWN' as const }], ['WITHHELD', { code: 'tick.shared', state: 'WITHHELD' as const }], ['none', undefined]])(
+it.each([['UNKNOWN', { code: 'tick.shared', state: 'UNKNOWN' as const }], ['none', undefined]])(
   'the fallthrough for a %s action does not presume a task (#4999)', (_label, action) => {
     const wake = { reasons: [{ kind: 'TICK' as const, tickerId: 'a', k: 1, ...(action ? { action } : {}) }], channels: [], unread: 0, unreadMentions: 0, exempt: false };
     const text = renderTickText(wake as never, new Map([['a', { name: 'Shared' }]]));
     expect(text).not.toContain('resolve your task');
-    expect(text).toBe('tick Shared: routine tick, read your tagged messages and act on what is yours; if you have a task for ' + (action?.code ?? 'tick.unknown') + ', resolve it yourself');
+    expect(text).toBe('tick Shared: if you have a task for ' + (action?.code ?? 'tick.unknown') + ', resolve it yourself');
   });
 
 it('the MAPPED, UNMAPPED and UNRESOLVED texts are unchanged (#4999)', () => {
