@@ -3124,7 +3124,7 @@ describe('#2754 — the server tick line', () => {
     'tick eden-queue-tick: same task as above',
     'tick team-tick: no task is mapped for tick.team',
     'tick team-tick: no task found at x-system:tasks:on-team-tick for tick.team',
-    'tick team-tick: resolve your task for tick.team yourself',
+    'tick team-tick: routine tick, read your tagged messages and act on what is yours; if you have a task for tick.team, resolve it yourself',
   ];
   const TEAM = { kind: 'TICK', ticker: { id: 'V', name: 'team-tick' } };
   const mapped = (t: any, state: string) => ({ ...t, action: { state } });
@@ -3133,6 +3133,15 @@ describe('#2754 — the server tick line', () => {
     f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[0])];
     await go();
     expect(f.sent).toEqual([`${FORMS[0]} ${nudgeText(['team-tick'], [])}`]);
+  });
+
+  // #4999: the receiver set does not change: a due worker with no open task still gets the routine tick, whose text no longer presumes one.
+  it('a task-less due worker still receives the fallthrough tick line and the nudge (#4999)', async () => {
+    f.openTasks = {};
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[4])];
+    await go();
+    expect(f.sent).toEqual([`${FORMS[4]} ${nudgeText(['team-tick'], [])}`]);
+    expect(f.sent[0]).not.toContain('resolve your task');
   });
 
   for (const form of FORMS) {
@@ -3225,7 +3234,7 @@ describe('#2754 — the server tick line', () => {
 
   for (const action of [null, undefined, { state: 'UNMAPPED' }, { state: 'UNRESOLVED' }, { state: 'WITHHELD' }]) {
     it(`9. a coordinator-tick with action ${JSON.stringify(action)} keeps today's base-tick sentence`, async () => {
-      f.wakes = [wake('w-ada', 'Ada', [{ ...TICK, ...(action === undefined ? {} : { action }) }], proof(['T:1']), [], undefined, 'tick coordinator-tick: resolve your task for tick.coordinator yourself')];
+      f.wakes = [wake('w-ada', 'Ada', [{ ...TICK, ...(action === undefined ? {} : { action }) }], proof(['T:1']), [], undefined, 'tick coordinator-tick: routine tick, read your tagged messages and act on what is yours; if you have a task for tick.coordinator, resolve it yourself')];
       await go();
       expect(f.sent[0]).toContain('run your base tick (coordinator-system:tasks:on-base-tick)');
     });
