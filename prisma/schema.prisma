@@ -85,6 +85,10 @@ enum Role {
   ADMIN
   CONTRIBUTOR
   READER
+  /// A platform role only (#5012, Billing A5): a payment service's user, which may write credit grants and
+  /// adjustments (`grantCredits`, `adjustCredits`) and nothing else. Refused as an organization member's,
+  /// a memory subscription's and an invitation's role, and never combined with another role on one user.
+  BILLING
 }
 
 /// Per-App default role assigned to new members when no Agent
@@ -503,6 +507,7 @@ model User {
   principal                     Principal?                  @relation("UserPrincipal", fields: [principalId], references: [id], onDelete: SetNull)
   /// #1325 — MemoryConfig templates this user owns (user-owned owner branch).
   memoryConfigTemplates         MemoryConfigTemplate[]      @relation("MemoryConfigTemplateOwnerUser")
+  ownerLimits                   OwnerLimit[]                @relation("OwnerLimitUser")
   /// #1715 — this account's merge into another, if it was merged away.
   mergedInto                    UserMerge?                  @relation("UserMergeSource")
   /// #1715 — accounts merged into this one.
@@ -735,6 +740,7 @@ model Organization {
   // 046-usage-metering: billing back-relations.
   usageEvents            UsageEvent[]
   creditLedgerEntries    CreditLedgerEntry[]
+  ownerLimits            OwnerLimit[]
   apps                   App[]
   agentOrgGrants         AgentOrgGrant[]
   aiServiceConfigs       AiServiceConfig[]
@@ -2183,7 +2189,7 @@ model Session {
 ///   when the event was written, so a request attributed to a lapsed session does not make it live again.
 /// - Rollup: database triggers on this table maintain UsageActivityCell.
 ///
-/// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:080:02, hrn:node:hadronmemory.com:specs:cor:dmo:100:02.
+/// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:080:02, hrn:node:hadronmemory.com:specs:cor:dmo:170:06.
 model UsageEvent {
   id               String    @id @default(cuid())
   type             String
@@ -4163,6 +4169,7 @@ model App {
   hostSweepRuns           HostSweepRun[]
   hostSweepEpisodes       HostSweepEpisode[]
   saturationEpisodes      SaturationEpisode[]
+  teamDarkEpisodes        TeamDarkEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
   memoryWriteGrants       AppMemoryWriteGrant[]
@@ -6123,6 +6130,14 @@ model AppRun {
   publishedAt          DateTime?            @map("published_at")
   startedAt            DateTime?            @map("started_at")
   finishedAt           DateTime?            @map("finished_at")
+  /// #855: elapsed milliseconds, finished_at - started_at, NULL while either is NULL (PENDING, RUNNING, failed before
+  /// it finished). A STORED GENERATED column that Prisma cannot express: the migration creates it, post-push.sql
+  /// converts the plain column `db push` makes (src/test/integration/855-apprun-duration-resync.test.ts pins the expression and type of both). NEVER written (the database
+  /// refuses a value); read-only here so appRuns can order by it through the same findMany/count pair. BIGINT: an
+  /// INTEGER of milliseconds overflows at 24.8 days. Negative (clock skew) is kept as stored. Left out of every default
+  /// read by the client's global omit (src/integrations/db/client.ts): a BigInt breaks JSON.stringify of a row, and the
+  /// generated column cannot be written back; select it by name when it is needed.
+  durationMs           BigInt?              @map("duration_ms")
   createdAt            DateTime             @default(now()) @map("created_at")
   createdBy            String?              @map("created_by")
 
@@ -6135,6 +6150,7 @@ model AppRun {
   @@index([agentId])
   @@index([parentRunId]) // spawn completion checks + child listings (plan-spawn)
   @@index([organizationId, createdAt])
+  @@index([organizationId, durationMs])
   @@map("app_runs")
 }
 
@@ -6213,10 +6229,10 @@ model AgentSchedule {
   @@map("agent_schedules")
 }
 
-/// A usage counter for one App or one organization: how much of one metered action has been used in the current day,
+/// A usage counter for one App, one organization or one person: how much of one metered action has been used in the current day,
 /// and the limit. It is the first of the two quota tiers, the continuous one.
 ///
-/// Relationships: none by foreign key. `scopeKind` (`app` or `org`) and `scopeId` name the owner as plain values. One
+/// Relationships: none by foreign key. `scopeKind` (`app`, `org` or `user`) and `scopeId` name the owner as plain values. One
 /// row per owner, action and window.
 ///
 /// Behaviour:
@@ -6226,6 +6242,8 @@ model AgentSchedule {
 ///   stored `limit` is what is enforced, and it can be changed per row (`setQuotaLimit`); 0 pauses the owner.
 /// - `used` is checked at the launch gate and raised while a run executes. When `resetAt` has passed, the next touch
 ///   sets `used` back to 0 and moves `resetAt` to the next midnight UTC.
+///
+/// A `user` row is a person's shared counter for their Apps: it can be read and set, and is enforced once a person's App can run.
 ///
 /// Rules: hrn:node:hadronmemory.com:specs:cor:acl:050:01, hrn:node:hadronmemory.com:specs:cor:acl:050:04.
 model QuotaCounter {
@@ -6293,7 +6311,7 @@ model ActionTicket {
 /// - Managed by a platform admin (`setAiModelPrice`). A model with no price row gets no cost; the call itself is
 ///   never blocked.
 ///
-/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:100:02. Background (history, not law): the Spec Kit spec 046.
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:170:06. Background (history, not law): the Spec Kit spec 046.
 model AiModelPrice {
   id                      String    @id
   provider                String
@@ -6337,17 +6355,18 @@ model AiModelPrice {
 /// Behaviour:
 /// - `kind` is `grant` (a positive amount), `debit` (negative) or `adjustment` (either). `amountMicroCents` is
 ///   signed, in micro-cents (1e-8 USD).
-/// - Grants are written by a platform admin (`grantCredits`) and debits by usage metering (`debitCredits`,
-///   src/lib/metering/index.ts). A debit is written only when `BILLING_DEBIT_ENABLED` is on, and only for usage on
-///   the platform's own provider key (hrn:node:hadronmemory.com:specs:cor:dmo:100:03). No code writes an `adjustment`
-///   today.
+/// - Grants and adjustments are written by a platform admin (`grantCredits`, `adjustCredits`) and debits by usage
+///   metering (`debitCredits`, src/lib/metering/index.ts). A debit is written only when `BILLING_DEBIT_ENABLED` is
+///   on, and only for usage on the platform's own provider key (hrn:node:hadronmemory.com:specs:cor:dmo:170:07).
 /// - Entries are never edited or reset. A correction is a new `adjustment` entry. Soft-deleting an entry is an
 ///   emergency measure for operators only; the balance leaves soft-deleted entries out.
 /// - At most one entry per (`sourceType`, `sourceId`), so a payment notification that arrives twice produces one
-///   entry. Entries with no source are not limited.
+///   entry; the same pair with another organization, amount or kind is refused. A grant or an adjustment must name
+///   its source (hadron-server#5007); entries with no source (a debit written without one, or a grant written
+///   before #5007) are not limited.
 /// - `expiresAt` on a grant is stored and not enforced.
 ///
-/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:100:04. Background (history, not law): the Spec Kit spec 046.
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:170:08. Background (history, not law): the Spec Kit spec 046.
 model CreditLedgerEntry {
   id               String    @id
   organizationId   String    @map("organization_id")
@@ -6371,12 +6390,46 @@ model CreditLedgerEntry {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
-  // Idempotency for at-least-once payment webhooks (hadrontool-billing):
+  // Idempotency for at-least-once payment webhooks (a payment service):
   // one ledger row per (sourceType, sourceId); NULL-source rows unaffected
   // (Postgres unique treats NULLs as distinct).
   @@unique([sourceType, sourceId])
   @@index([organizationId, createdAt])
   @@map("credit_ledger_entries")
+}
+
+/// How much of one measure an owner may hold: nodes, memories, agents or apps. The keys are src/lib/ownerLimits/keys.ts.
+///
+/// Relationships: belongs to exactly one Organization or one User (`chk_owner_limits_one_owner`).
+///
+/// Behaviour:
+/// - The limit in force for an owner and key is this row when one exists, else the deployment default for the owner's
+///   kind (`OWNER_DEFAULT_LIMITS`), else unlimited. A null `limitValue` means unlimited and lifts the default.
+/// - A row is a setting, not a record: it is deleted when cleared, with its owner, and for the merged-away person of an
+///   account merge. The `owner.limits.changed` log line is the record.
+/// - `sourceType` and `sourceId` say what set it. `note` must not hold personal data.
+/// - Two nullable uniques, not one: a NULL never collides, so each covers only its own kind of owner.
+model OwnerLimit {
+  id             String   @id
+  organizationId String?  @map("organization_id")
+  ownerUserId    String?  @map("owner_user_id")
+  key            String
+  /// Null means unlimited. 64-bit, because a later key counts bytes.
+  limitValue     BigInt?  @map("limit_value")
+  sourceType     String   @map("source_type")
+  sourceId       String   @map("source_id")
+  note           String
+  createdAt      DateTime @default(now()) @map("created_at")
+  createdBy      String?  @map("created_by")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  updatedBy      String?  @map("updated_by")
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ownerUser    User?         @relation("OwnerLimitUser", fields: [ownerUserId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, key])
+  @@unique([ownerUserId, key])
+  @@map("owner_limits")
 }
 
 /// A trigger that starts a headless run when an outside system calls a URL. Each accepted call creates one AppRun.
@@ -7526,6 +7579,10 @@ model AgentTask {
   /// #2646 (hrn:node:hadronmemory.com:specs:cor:agt:050:02, What a clone does): the task this one was cloned from, set once at creation and never
   /// changed. Always in the same App (the clone is made in the source's App). Null for every task not made by a clone.
   clonedFromId         String?   @map("cloned_from_id")
+  /// #4997 (hrn:node:hadronmemory.com:specs:cor:agt:050:01 Project marker; hrn:node:hadronmemory.com:specs:cor:agt:150 A project): the
+  /// project marker. Set only at creation and never changed (trg_agent_tasks_project_marker_immutable refuses a change);
+  /// AT0 is never marked (chk_agent_tasks_at0_unmarked). Both in raw SQL, agent-task-project-marker-invariants.sql.
+  isProject            Boolean   @default(false) @map("is_project")
   ownerWorkerId        String?   @map("owner_worker_id")
   ownerUserId          String?   @map("owner_user_id")
   /// Both null ⇒ queued while pending (hrn:node:hadronmemory.com:specs:cor:agt:050:03).
@@ -7787,17 +7844,17 @@ model AgentTeamEvent {
   startFailingEpisode StartFailingEpisode?
   hostSweepEpisode HostSweepEpisode?
   saturationEpisode SaturationEpisode?
+  teamDarkEpisode TeamDarkEpisode? @relation("TeamDarkRaised")
+  teamDarkRecovered TeamDarkEpisode? @relation("TeamDarkRecovered")
   /// #3934 (V77): the recorded end of this alarm's escalation, written once by the evaluator pass or the acknowledgement.
   escalationEnd AlarmEscalationEnd?
 
-  @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
-  /// #4344 (ruling A): the App joins the key. The three-column index above is kept until the contract migration drops it
-  /// (an image still writing the three-column ON CONFLICT target would raise 42P10 without it).
+  /// #4344 (ruling A): the App is in the one-alarm-per-episode key. The three-column index was dropped by the contract migration.
   @@unique([appId, taskId, type, episodeStart], map: "agent_team_events_episode_app_uniq")
   @@index([appId, createdAt])
   /// #4084: the changed-since read's commit-safe order (agentTaskExternalIdChanges).
   @@index([appId, txId, createdAt, id])
-  @@index([taskId])
+  @@index([taskId, type])
   /// #1707 — "assigned least recently" (hrn:node:hadronmemory.com:specs:cor:agt:060:06) reads a worker's
   /// latest assignment event.
   @@index([subjectWorkerId, createdAt])
@@ -8234,6 +8291,35 @@ model SaturationEpisode {
 
   @@index([appId, endedAt])
   @@map("saturation_episodes")
+}
+
+/// #4531 (hrn:node:hadronmemory.com:specs:cor:agt:050:34, Proposed) — one dark-team episode of an App: the team as a whole
+/// went silent past the dark window. Written only by the stall evaluator (src/lib/agentTasks/teamDark.ts).
+///
+/// Relationships: belongs to an App. `eventId` is the one `team.dark` alarm the episode raised, written in the transaction
+/// that opened it; `recoveredEventId` is the one `team.recovered` event written in the transaction that ended it, null
+/// while the episode is open.
+///
+/// Behaviour:
+/// - The alarm stream is append-only, so an episode's end lives here, not on the alarm.
+/// - Exactly one OPEN row per App (partial unique index, raw SQL in prisma/team-dark-invariants.sql): the race between two
+///   passes or two server instances is decided by that index, so a second pass records no second alarm.
+/// - `endedAt` is never before `openedAt` (CHECK `chk_team_dark_episodes_shape`), and a row that names a `team.recovered`
+///   event is ended. The converse does not hold: an episode whose App left the live set ends with no recovery event.
+model TeamDarkEpisode {
+  id               String    @id @default(cuid())
+  appId            String    @map("app_id")
+  eventId          String    @unique @map("event_id")
+  recoveredEventId String?   @unique @map("recovered_event_id")
+  openedAt         DateTime  @map("opened_at")
+  endedAt          DateTime? @map("ended_at")
+
+  app            App             @relation(fields: [appId], references: [id], onDelete: Cascade)
+  event          AgentTeamEvent  @relation("TeamDarkRaised", fields: [eventId], references: [id], onDelete: Cascade)
+  recoveredEvent AgentTeamEvent? @relation("TeamDarkRecovered", fields: [recoveredEventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("team_dark_episodes")
 }
 
 /// Whether one worker is available for work, and if not, why and until when. It is one of the inputs to

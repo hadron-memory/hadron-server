@@ -19,6 +19,7 @@ import {
   deleteUserAccount,
   SoleOrgOwnerError,
 } from '../../../controller/operations/deleteUser.js';
+import { logOwnerLimitChanges, type OwnerLimitChange } from '../../../lib/ownerLimits/changes.js';
 import { softDeleteOrganizationCore } from '../../../controller/operations/softDeleteOrganization.js';
 import { dispatchChatToolTeardown } from '../../../lib/chatToolTeardown.js';
 import { validateOrgRoot } from '../../../lib/org/orgRoot.js';
@@ -48,6 +49,8 @@ import { isUniqueViolationOn, HANDLE_TARGETS } from '../../../auth/userProvision
 import { withAuthorizedTx } from './authorizedTx.js';
 import { AuthoritySnapshotStale } from '../../../lib/auth/authorityAnchors.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../../lib/auth/revokeOrgInvitations.js';
+import { refuseBillingMemberRole, refuseCombinedBillingRole } from '../../../lib/auth/billingRole.js';
+import { logUserRolesChanged } from '../../../lib/auth/userRolesChanged.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { assertInviteLimits, inviteExpiresAt, inviteMaxActivations } from '../../../lib/invitationLimits.js';
@@ -157,11 +160,20 @@ export const orgMutations = {
       ctx: Context,
     ) => {
       requireRole(ctx, 'ADMIN');
-      return withAuthorizedTx(
+      const { user, before } = await withAuthorizedTx(
         ctx,
         [{ kind: 'user', id: userId }],
         async (txCtx) => { requireRole(txCtx, 'ADMIN'); },
-        (tx) => tx.user.update({ where: { id: userId }, data: { roles } }),
+        async (tx) => {
+          // #5090 BLIND P3-6: a role named twice is stored once.
+          const unique = [...new Set(roles)];
+          // #5012 ruling 10.1: BILLING stands alone (judged after the gate, before the write).
+          refuseCombinedBillingRole(unique);
+          // Read under the FOR UPDATE afterLock took, so `before` is the row this write replaces.
+          const prior = await tx.user.findUnique({ where: { id: userId }, select: { roles: true } });
+          const updated = await tx.user.update({ where: { id: userId }, data: { roles: unique } });
+          return { user: updated, before: prior?.roles ?? [] };
+        },
         {
           lockMode: 'exclusive',
           afterLock: async (tx) => {
@@ -172,6 +184,9 @@ export const orgMutations = {
           },
         },
       );
+      // #5012: after commit, so a rolled-back change logs nothing.
+      logUserRolesChanged({ actor: ctx.userId ?? 'unknown', target: userId, before, after: user.roles });
+      return user;
     },
 
     beginMergeUsersConsent: async (_: unknown, { source, target }: { source: string; target: string }, ctx: Context) => {
@@ -443,15 +458,20 @@ export const orgMutations = {
       // (#677) — the ONE org soft-delete cascade, shared with deleteUser's
       // sole-member-org branch (see softDeleteOrganizationCore for the
       // idempotency + secret-sweep rationale).
-      const teardowns = await withAuthorizedTx(
+      const { teardowns, limitChanges } = await withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: resolvedId }],
         async (txCtx) => { requireRole(txCtx, 'ADMIN'); },
-        (tx) => softDeleteOrganizationCore(tx, resolvedId, undefined, ctx.userId ?? ctx.clientId ?? null),
+        async (tx) => {
+          const limitChanges: OwnerLimitChange[] = [];
+          const teardowns = await softDeleteOrganizationCore(tx, resolvedId, undefined, ctx.userId ?? ctx.clientId ?? null, limitChanges);
+          return { teardowns, limitChanges };
+        },
         { lockMode: 'exclusive', allowDeletedOrg: true },
       );
       // #4828: after the commit, once authorization has been judged, ask the Telegram and Slack tools to drop their side.
       dispatchChatToolTeardown(teardowns);
+      logOwnerLimitChanges(ctx.userId ?? ctx.clientId ?? null, limitChanges);
       return true;
     },
 
@@ -534,6 +554,8 @@ export const orgMutations = {
         (tx) => {
           // #2984: judged after the role gate, so a refused caller gets the same answer whatever the values.
           assertInviteLimits({ expiresInDays, maxActivations });
+          // #5012: BILLING is a platform role, never an invitation's (judged after the gate, before the write).
+          refuseBillingMemberRole(memberRole);
           return tx.userInvitation.create({
             data: {
               id: generateId(),
@@ -716,6 +738,8 @@ export const orgMutations = {
         [{ kind: 'org', id: resolvedOrgId }, { kind: 'user', id: resolvedUserId }],
         (txCtx) => requireOrgRole(txCtx, resolvedOrgId, 'ADMIN'),
         async (tx) => {
+          // #5012: BILLING is a platform role, never a member's (judged after the gate, before the write).
+          refuseBillingMemberRole(role);
           // Membership revocation is a soft delete, so the composite (org,
           // user) PK may hold a tombstone. Reactivate it rather than insert a
           // duplicate, but never let the pre-transaction read decide this.
@@ -780,6 +804,8 @@ export const orgMutations = {
         [{ kind: 'org', id: resolvedOrgId }, { kind: 'user', id: resolvedUserId }],
         (txCtx) => requireOrgRole(txCtx, resolvedOrgId, 'ADMIN'),
         async (tx) => {
+        // #5012: BILLING is a platform role, never a member's (judged after the gate, before any write).
+        refuseBillingMemberRole(role);
         // The typed miss comes only after the in-transaction authorize that
         // runs before this write: a caller revoked before or while queued must
         // get FORBIDDEN (or 40001), never learn the target is absent (#2871).

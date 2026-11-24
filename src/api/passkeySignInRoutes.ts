@@ -289,7 +289,7 @@ export function mountPasskeySignInRoutes(app: Express, env: NodeJS.ProcessEnv = 
       const u = done.user;
       const jwt = await signJwt({
         login: done.login, sid: done.signInId, sub: u.id,
-        roles: u.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+        roles: u.roles,
         ...(u.email ? { email: u.email } : {}),
       });
       const exp = JSON.parse(Buffer.from(jwt.split('.')[1]!, 'base64url').toString()).exp as number | undefined;

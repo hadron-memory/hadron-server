@@ -244,7 +244,7 @@ describe('#1581: App-minted users through createAppUser + startAgentSession', ()
 
   async function mintedSession(appId: string, externalId: string) {
     const user = await M.createAppUser({}, { externalId }, appKey(appId));
-    const started = await M.startAgentSession({}, { agentId: agent.id, externalUserId: externalId }, appKey(appId));
+    const started = await M.startAgentSession({}, { agentRef: agent.id, externalUserId: externalId }, appKey(appId));
     const sessionId: string = started.sessionId ?? started.session?.id ?? started.id;
     return { user, sessionId };
   }

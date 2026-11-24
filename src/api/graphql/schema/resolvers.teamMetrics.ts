@@ -11,7 +11,7 @@ import { GraphQLError } from 'graphql';
 import type { Context } from './resolvers.helpers.js';
 import { withRosterAppRead } from './resolvers.agentTaskMatching.js';
 import { mayReadAppTasks, partyView } from './resolvers.agentTask.js';
-import { MetricsWindowError, loadFlow, loadStartedOwned, loadStartedProjects, loadWorkerCounts, resolveMetricsWindow } from '../../../lib/agentTasks/teamMetrics.js';
+import { MetricsWindowError, attachMetricNames, loadFlow, loadStartedOwned, loadStartedProjects, loadWorkerCounts, resolveMetricsWindow } from '../../../lib/agentTasks/teamMetrics.js';
 
 export interface TeamMetricsArgs { appRef: string; since?: unknown; until?: unknown }
 
@@ -38,6 +38,8 @@ export const teamMetricsQueries = {
         canReadTasks ? loadStartedProjects(db, app.id) : null,
         canReadTasks ? loadFlow(db, app.id, window.since, window.until) : null,
       ]);
+      // #4992: the names, in one batch, for exactly the reports this reader may see (a null report is never read).
+      await attachMetricNames(db, app.id, { tasks: [startedOwned, projects, flow], workers: [workers] });
       return {
         appId: app.id,
         asOf,

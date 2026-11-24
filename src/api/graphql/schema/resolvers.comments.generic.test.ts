@@ -84,7 +84,7 @@ describe('generic node writes refuse comments (cor:dmo:110:04)', () => {
     const c = await comment(target.id, 'v1');
     await legacyRevision(c.id);
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: c.id } });
-    expect((await errorOf(M.restoreNodeRevision(null, { revisionId: rev.id }, as()))).extensions).toMatchObject(governed);
+    expect((await errorOf(M.restoreNodeRevision(null, { nodeRevRef: rev.id }, as()))).extensions).toMatchObject(governed);
   });
 
   it('replace_text skips comments and reports them as governed', async () => {
@@ -218,8 +218,8 @@ describe('#1663 review cycle', () => {
     const adminHistory = await Q.nodeRevisions(null, { nodeRef: c.id }, { ...as(), roles: ['ADMIN'] });
     expect(adminHistory.map((h: { content: string | null }) => h.content)).toEqual(['secret words']);
     const revId = (await db.nodeRevision.findFirstOrThrow({ where: { nodeId: c.id } })).id;
-    expect(await Q.nodeRevision(null, { revisionId: revId }, { ...as(r.id), roles: ['READER'] })).toBeNull();
-    expect(await Q.nodeRevision(null, { revisionId: revId }, { ...as(), roles: ['ADMIN'] })).not.toBeNull();
+    expect(await Q.nodeRevision(null, { nodeRevRef: revId }, { ...as(r.id), roles: ['READER'] })).toBeNull();
+    expect(await Q.nodeRevision(null, { nodeRevRef: revId }, { ...as(), roles: ['ADMIN'] })).not.toBeNull();
   });
 
   it('deleting a thread frees its author\'s open-thread allowance, stub or not', async () => {

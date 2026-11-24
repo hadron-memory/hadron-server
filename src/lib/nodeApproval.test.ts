@@ -16,6 +16,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { isCiphertext, parseDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { createTestableMcpServer } from '../mcp/server.js';
+import { encryptWithSecret } from '../test/encryptMemoryWithSecret.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -370,7 +371,7 @@ describe('approvals on an encrypted memory (#1591)', () => {
     }, as());
     const n = await db.node.create({data: {id: generateId(), memoryId: enc.id, loc: 'e:1', name: 'Secret', content: 'Hidden body'}});
     const dataKey = Buffer.alloc(32, 7).toString('base64');
-    await resolvers.Mutation.encryptMemory(null, { memoryRef: enc.id, dataKey }, as());
+    await encryptWithSecret(null, { memoryRef: enc.id, dataKey }, as());
     const stored = await db.node.findUniqueOrThrow({where: {id: n.id}});
     expect(isCiphertext(stored.content)).toBe(true);
     try {
@@ -407,14 +408,14 @@ describe('approvals on an encrypted memory (#1591)', () => {
     await edit(n.id, 'changed');
     const retained = await db.nodeRevision.findFirstOrThrow({where:{nodeId:n.id,approvalHash:{not:null}}});
     const dataKey = Buffer.alloc(32,9).toString('base64');
-    await resolvers.Mutation.encryptMemory(null,{memoryRef:memory.id,dataKey},as());
+    await encryptWithSecret(null,{memoryRef:memory.id,dataKey},as());
     try {
       for (const cached of [false,true]) {
         sessionKeyCache.clear();
         if(cached) sessionKeyCache.set('history-key',memory.id,parseDataKey(dataKey));
         const ctx: Context = {...as(),roles:['READER']};
         const list = await resolvers.Query.nodeRevisions(null,{nodeRef:n.id},ctx);
-        const single = await resolvers.Query.nodeRevision(null,{revisionId:retained.id},ctx);
+        const single = await resolvers.Query.nodeRevision(null,{nodeRevRef:retained.id},ctx);
         expect(list.some((r:{id:string})=>r.id===retained.id)).toBe(true);
         for(const r of [...list,single]) {
           expect(r).not.toBeNull();

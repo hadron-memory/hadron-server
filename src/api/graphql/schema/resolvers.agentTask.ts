@@ -1367,7 +1367,7 @@ export function refuseEnded(task: TaskRow, remedy?: string): void {
 // ── Mutations ─────────────────────────────────────────────────────────────
 
 /** #2646: the overrides of a clone; every field is optional, and a field left out keeps the source's value. */
-type CloneInput = Partial<Pick<CreateInput, 'title' | 'description' | 'source' | 'tags' | 'references' | 'closeSessionWhenDone' | 'priority' | 'properties' | 'requirements' | 'owner' | 'assignee' | 'status' | 'startBy' | 'finishBy' | 'project' | 'parentTaskId'>>;
+type CloneInput = Partial<Pick<CreateInput, 'title' | 'description' | 'source' | 'tags' | 'references' | 'closeSessionWhenDone' | 'priority' | 'properties' | 'requirements' | 'owner' | 'assignee' | 'status' | 'startBy' | 'finishBy' | 'project' | 'isProject' | 'parentTaskId'>>;
 
 type CreateInput = {
   match?: boolean | null;
@@ -1391,8 +1391,10 @@ type CreateInput = {
   tags?: string[] | null;
   closeSessionWhenDone?: boolean | null;
   status?: string | null;
-  /** #2553: make a top-level PROJECT (AT1, AT2, ...) instead of a task under AT0. Not with a parentTaskId. */
+  /** #2553: make a top-level PROJECT (AT1, AT2, ...) instead of a task under AT0. Not with a parentTaskId. #4997: also sets the project marker. */
   project?: boolean | null;
+  /** #4997 (cor:agt:050:01 Project marker): mark any task, nested or under AT0, as a project. `false` with `project: true` is refused. */
+  isProject?: boolean | null;
   /** #2420 (cor:agt:050:28): the task's own properties; left out, not refused, for a creator who may not write them. */
   properties?: unknown;  /** #2649 (cor:agt:050:01 References): any creator may set them, as it sets the title. */
   references?: unknown;
@@ -1421,6 +1423,8 @@ async function insertTask(
     status?: 'backlog' | 'pending';
     /** #2553: make a top-level PROJECT (numbered from the App's project counter) instead of a child of AT0. */
     project?: boolean;
+    /** #4997: the project marker, decided by the caller ({@link resolveProjectMarker}); set only here, at creation. */
+    isProject?: boolean;
     matchPending?: boolean;
     /** #2646: the task a clone was made from; set only here, at creation, and named in the one task.created event. */
     clonedFromId?: string | null;
@@ -1480,6 +1484,7 @@ async function insertTask(
       status: a.status ?? 'pending',
       parentTaskId: parentId,
       clonedFromId: a.clonedFromId ?? null,
+      isProject: a.isProject ?? a.project === true,
       requirements: a.requirements ?? Prisma.DbNull,
       runFamily: a.runSettings?.family ?? null, runModel: a.runSettings?.model ?? null,
       runTier: a.runSettings?.tier ?? null, runEffort: a.runSettings?.effort ?? null,
@@ -1660,6 +1665,8 @@ type PreparedCreate = {
   priority: number;
   title: string; description: string | null; source: string | null; tags: string[];
   references: TaskReference[]; externalId: string | null;
+  /** #4997: the project marker this create sets. */
+  isProject: boolean;
   startBy: Date | null; finishBy: Date | null; closeSessionWhenDone: boolean;
   status: 'backlog' | 'pending';
   /** #2198: advice decided inside the write transaction, filed after it commits. */
@@ -1675,10 +1682,19 @@ type PreparedCreate = {
  * parent's readability, and the fields. `inApp` (#2653) is the App a createAgentTasks call names: a parent in another
  * App reads as not found, and a root task naming another App is refused as that App is.
  */
-async function prepareTaskCreate(ctx: Context, input: CreateInput, inApp?: { app: TaskApp; actor: TaskActor }): Promise<PreparedCreate> {
+async function prepareTaskCreate(
+  ctx: Context, input: CreateInput, inApp?: { app: TaskApp; actor: TaskActor },
+  /** #4997: a clone decides the marker itself from the source and its overrides ({@link cloneProjectMarker}). */
+  opts?: { isProject: boolean },
+): Promise<PreparedCreate> {
   if (!input) throw badInput('input is required.');
   const parentRef = input.parentTaskId?.trim() || null;
   if (input.project && parentRef) throw badInput('A project is a top-level task: it takes no parentTaskId.');
+  // #4997: judged from the input alone, before any read, so a contradiction writes nothing and reveals nothing.
+  const isProject = opts ? opts.isProject : resolveProjectMarker(input.project, input.isProject);
+  // A top-level task is a project (ruling A), so a clone that would make an unmarked one is the same contradiction;
+  // the database marks every top-level task other than AT0 (prisma/agent-task-project-marker-invariants.sql).
+  if (input.project === true && !isProject) throw badInput('project: true makes a project, so it cannot be combined with isProject: false.');
   // #2553: the parent's canonical id once it resolves (a handle is an alias); `parentRef` stays the caller's spelling for echoes.
   let parentTaskId: string | null = null;
   let app: TaskApp;
@@ -1745,9 +1761,34 @@ async function prepareTaskCreate(ctx: Context, input: CreateInput, inApp?: { app
   // #2162: a task created straight onto a worker takes that worker's per-worker lock, before any row.
   const lockedAssignee = await partyWorkerForLock(ctx, app.id, input.assignee);
   return {
-    input, parentRef, parentTaskId, app, actor, priority, title, description, source, tags, references, externalId,
+    input, parentRef, parentTaskId, app, actor, priority, title, description, source, tags, references, externalId, isProject,
     startBy, finishBy, closeSessionWhenDone, status, warn, lockedAssignee, refused,
   };
+}
+
+/**
+ * #4997 (hrn:node:hadronmemory.com:specs:cor:agt:050:01 Project marker, Proposed): `project: true` makes a top-level task
+ * AND marks it, so a caller who says a task is a project gets one; `isProject` marks any task (under a parent or under
+ * AT0); without either the marker is false. `isProject: false` with `project: true` is a contradiction and is refused.
+ * Who may set it: whoever may create the task (cor:agt:050:06, :07); it has no gate of its own.
+ */
+function resolveProjectMarker(project: unknown, isProject: unknown): boolean {
+  if (isProject != null && typeof isProject !== 'boolean') throw badInput('isProject must be a boolean.');
+  if (project === true && isProject === false) {
+    throw badInput('project: true makes a project, so it cannot be combined with isProject: false.');
+  }
+  return isProject ?? project === true;
+}
+
+/**
+ * #4997 (cor:agt:050:02, What a clone does): a clone keeps the source's marker unless the call overrides it, as it may any
+ * copied field. `isProject` sets it outright; an explicit `project` override (true or false) says whether the clone is a
+ * project; the two may not contradict. Leaving both out copies the source's marker, whatever parent the clone gets.
+ */
+function cloneProjectMarker(ov: CloneInput, sourceMarked: boolean): boolean {
+  if (ov.isProject == null && ov.project == null) return sourceMarked;
+  if (ov.isProject == null) return ov.project === true;
+  return resolveProjectMarker(ov.project, ov.isProject);
 }
 
 /**
@@ -1860,7 +1901,7 @@ async function applyTaskCreate(
   const keepPriority = !p.clone?.priorityCopied
     || (await mayDirectTask(tx, txCtx, app, actor, { ownerWorkerId: owner.workerId ?? null, ownerUserId: owner.userId ?? null }));
   const made = await insertTask(tx, {
-    app, parentId: parentTaskId, project: input.project === true, title: p.title, description: p.description, source: p.source,
+    app, parentId: parentTaskId, project: input.project === true, isProject: p.isProject, title: p.title, description: p.description, source: p.source,
     externalId: p.externalId, tags: p.tags, references: p.references, startBy: p.startBy, finishBy: p.finishBy,
     closeSessionWhenDone: p.closeSessionWhenDone, requirements, runSettings, properties, owner, assignee, status: p.status, priority: keepPriority ? p.priority : undefined, clonedFromId: p.clone?.sourceId ?? null,
     created: createdStamp(txCtx), assigned: assignedStamp(txCtx, new Date()), evActor: eventActor(txCtx.userId), matchPending: input.match === true,
@@ -1979,7 +2020,7 @@ export const agentTaskMutations = {
   },
 
   /** #2645: Proposed cor:agt:050:09 Editing. The assignment gate and transaction are the only write door. */
-  updateAgentTask: async (_: unknown, { taskId, input, instruction }: { taskId: string; input: Record<string, unknown>; instruction?: ActInstruction | null }, ctx: Context) =>
+  updateAgentTask: async (_: unknown, { taskRef: taskId, input, instruction }: { taskRef: string; input: Record<string, unknown>; instruction?: ActInstruction | null }, ctx: Context) =>
     mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       // #2420 (cor:agt:050:28) and #3441 (ruling 0233, cor:agt:050:01 / :09): the task's assignee may write its
       // `properties` and its `references` and nothing else; a patch that names any other field needs the
@@ -2265,7 +2306,7 @@ export const agentTaskMutations = {
    * whatever its status. Every create gate applies to the copied values (the parent, the root gate, properties,
    * priority); the source is never changed. An ended task never reopens: this makes a NEW task.
    */
-  cloneAgentTask: async (_: unknown, { taskId, input }: { taskId: string; input?: CloneInput | null }, ctx: Context, info?: GraphQLResolveInfo) => {
+  cloneAgentTask: async (_: unknown, { taskRef: taskId, input }: { taskRef: string; input?: CloneInput | null }, ctx: Context, info?: GraphQLResolveInfo) => {
     const readable = await loadReadableTask(ctx, taskId);
     // Unknown, unreadable and cross-App sources answer alike (#1577 posture): no existence oracle over task ids.
     if (!readable) throw notFound(taskId);
@@ -2308,7 +2349,7 @@ export const agentTaskMutations = {
       requirements: named('requirements') ? ov.requirements : undefined,
       owner: ov.owner, assignee: ov.assignee, status: ov.status, startBy: ov.startBy, finishBy: ov.finishBy,
     };
-    const p = await prepareTaskCreate(ctx, createInput);
+    const p = await prepareTaskCreate(ctx, createInput, undefined, { isProject: cloneProjectMarker(ov, src.isProject) });
     p.clone = {
       sourceId: src.id,
       priorityCopied: ov.priority == null,
@@ -2332,7 +2373,7 @@ export const agentTaskMutations = {
    */
   assignAgentTask: async (
     _: unknown,
-    { taskId, assignee, closeSessionWhenDone, instruction }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null; instruction?: ActInstruction | null },
+    { taskRef: taskId, assignee, closeSessionWhenDone, instruction }: { taskRef: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null; instruction?: ActInstruction | null },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2401,7 +2442,7 @@ export const agentTaskMutations = {
    * assignee becomes BACKLOG — unassigned, never matched, never waited on, no
    * alarms. Whoever may assign a task may park it (cor:agt:050:09).
    */
-  parkAgentTask: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context) =>
+  parkAgentTask: async (_: unknown, { taskRef: taskId, instruction }: { taskRef: string; instruction?: ActInstruction | null }, ctx: Context) =>
     mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, parks it in the backlog.", { taskId });
@@ -2435,7 +2476,7 @@ export const agentTaskMutations = {
    * becomes pending and the task enters the queue. Whoever may assign a task
    * may make it ready (cor:agt:050:09).
    */
-  makeAgentTaskReady: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context) => {
+  makeAgentTaskReady: async (_: unknown, { taskRef: taskId, instruction }: { taskRef: string; instruction?: ActInstruction | null }, ctx: Context) => {
     const ready = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, makes a backlog task ready.", { taskId });
@@ -2475,7 +2516,7 @@ export const agentTaskMutations = {
    */
   reassignAgentTask: async (
     _: unknown,
-    { taskId, assignee, closeSessionWhenDone, instruction }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null; instruction?: ActInstruction | null },
+    { taskRef: taskId, assignee, closeSessionWhenDone, instruction }: { taskRef: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null; instruction?: ActInstruction | null },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2528,7 +2569,7 @@ export const agentTaskMutations = {
    * Start a task: the assignee only (cor:agt:050:08). Explicit start only —
    * 050:02's inferred start is an open question (#1705 interim).
    */
-  startAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+  startAgentTask: async (_: unknown, { taskRef: taskId }: { taskRef: string }, ctx: Context, info?: GraphQLResolveInfo) => {
     const warn: TaskWarningCode[] = [];
     const started = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
@@ -2563,7 +2604,7 @@ export const agentTaskMutations = {
   },
 
   /** Record progress on a started task: the assignee only (cor:agt:050:08). Carries no text (050:11). */
-  recordAgentTaskProgress: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+  recordAgentTaskProgress: async (_: unknown, { taskRef: taskId }: { taskRef: string }, ctx: Context, info?: GraphQLResolveInfo) => {
     const warn: TaskWarningCode[] = [];
     const recorded = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
@@ -2625,7 +2666,7 @@ export const agentTaskMutations = {
    */
   finishAgentTask: async (
     _: unknown,
-    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null; findings?: unknown; workedFromRoleTaskRefs?: unknown } },
+    { taskRef: taskId, result }: { taskRef: string; result: { outcome: string; summary?: string | null; evidence?: string | null; findings?: unknown; workedFromRoleTaskRefs?: unknown } },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2681,7 +2722,7 @@ export const agentTaskMutations = {
    * Cancel a pending, started or backlog task: its owner, or whoever manages
    * the App (cor:agt:050:09, Proposed; backlog directly, Holger team chat #8150).
    */
-  cancelAgentTask: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context, info?: GraphQLResolveInfo) => {
+  cancelAgentTask: async (_: unknown, { taskRef: taskId, instruction }: { taskRef: string; instruction?: ActInstruction | null }, ctx: Context, info?: GraphQLResolveInfo) => {
     const warn: TaskWarningCode[] = [];
     const cancelled = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
@@ -2725,7 +2766,7 @@ export const agentTaskMutations = {
    * pass (agentTaskExternalIdChanges); it is passive history, never stall activity. The id is never set again on this
    * task: `externalId` is not in the update input (V29).
    */
-  releaseAgentTaskExternalId: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context) =>
+  releaseAgentTaskExternalId: async (_: unknown, { taskRef: taskId, instruction }: { taskRef: string; instruction?: ActInstruction | null }, ctx: Context) =>
     mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, releases its external id.", { taskId });
@@ -2975,7 +3016,7 @@ type ListArgs = {
   startedBefore?: unknown;
   finishedAfter?: unknown;
   finishedBefore?: unknown;
-  parentTaskId?: string | null;
+  parentTaskRef?: string | null;
   rootsOnly?: boolean | null;
   queued?: boolean | null;
   limit?: number | null;
@@ -3099,7 +3140,7 @@ async function agentTaskListWhere(c: Context, app: TaskApp, args: ListArgs): Pro
     appId: app.id,
     ...(statuses?.length ? { status: { in: statuses } } : {}),
     ...(args.tag ? { tags: { has: args.tag } } : {}),
-    ...(args.parentTaskId ? { parentTaskId: (await resolveTaskRef(c, args.parentTaskId, app.id)) ?? args.parentTaskId } : {}),
+    ...(args.parentTaskRef ? { parentTaskId: (await resolveTaskRef(c, args.parentTaskRef, app.id)) ?? args.parentTaskRef } : {}),
     ...(args.queued ? { status: 'pending', assigneeWorkerId: null, assigneeUserId: null } : {}),
   };
   // #2553: AT0 is the platform's bookkeeping row, not a task anyone works: a LIST never shows it (it still reads by
@@ -3128,8 +3169,8 @@ const AGENT_TASK_LIST_ORDER: Prisma.AgentTaskOrderByWithRelationInput[] = [{ cre
 
 export const agentTaskQueries = {
   /** One task, or null when it does not exist or the caller may not read it (cor:agt:050:21). */
-  agentTask: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-    return withReadableTask(ctx, id, async (_c, { task }) => task, true);
+  agentTask: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+    return withReadableTask(ctx, ref, async (_c, { task }) => task, true);
   },
 
   /** An App's tasks, newest first, for its participants and the App's own key (cor:agt:050:21, #1755). */
@@ -3312,7 +3353,7 @@ export const agentTaskQueries = {
 };
 
 /** #4316 item 4: exported so the parity pin (resolvers.teamEventCursor4098.test.ts) can tie its filter cases to these keys. */
-export type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskId?: string | null; limit?: number | null };
+export type TeamEventsArgs = { appRef: string; since?: unknown; after?: string | null; before?: string | null; newestFirst?: boolean | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; alarmsInEffect?: boolean | null; taskRef?: string | null; limit?: number | null };
 
 /** #4316: how long a held-back horizon stays quiet before `team_events.horizon_lag` says something. */
 const HORIZON_LAG_MIN_AGE_MS = 30_000;
@@ -3509,7 +3550,7 @@ export async function readTeamEvents(c: Context, app: { id: string }, args: Team
     if (!cursor) throw badInput('after is not an event of this App. Pass the id of the last event you read.');
     afterKey = cursor;
   }
-  const taskId = args.taskId ? (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId : null;
+  const taskId = args.taskRef ? (await resolveTaskRef(c, args.taskRef, app.id)) ?? args.taskRef : null;
   const where: Prisma.AgentTeamEventWhereInput = {
     appId: app.id,
     ...(since ? { createdAt: { gt: since } } : {}),

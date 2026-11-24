@@ -17,7 +17,7 @@
  * the condition — the assignment, the start, the child's finish, the last
  * activity — never the evaluator's clock. Two passes, on one instance or two,
  * therefore compute the same key, and the unique index on that key
- * (agent_team_events_episode_uniq) admits one alarm. A move by the task gives
+ * (agent_team_events_episode_app_uniq, which carries the App) admits one alarm. A move by the task gives
  * the condition a new start, which is a new episode. Per rule:
  *   - not-started: the assignment (`assignedAt`). The deadline is an explicit
  *     `startBy` when it is later than the assignment, else the window counted
@@ -1089,6 +1089,12 @@ export async function alarmEpisodeEnds(
   const cadenceIds = alarms.filter((a) => (LEAD_CADENCE_EVENT_TYPES as readonly string[]).includes(a.type)).map((a) => a.id);
   if (cadenceIds.length) {
     const over = await db.leadCadenceEpisode.findMany({ where: { eventId: { in: cadenceIds }, endedAt: { not: null } }, select: { eventId: true, endedAt: true } });
+    for (const e of over) out.set(e.eventId, e.endedAt as Date);
+  }
+  // #4531: a team.dark alarm's episode ends when `team_dark_episodes` says so (a team.recovered, or its App gone).
+  const teamDarkIds = alarms.filter((a) => a.type === 'team.dark').map((a) => a.id);
+  if (teamDarkIds.length) {
+    const over = await db.teamDarkEpisode.findMany({ where: { eventId: { in: teamDarkIds }, endedAt: { not: null } }, select: { eventId: true, endedAt: true } });
     for (const e of over) out.set(e.eventId, e.endedAt as Date);
   }
   // #4233: a stale-sweep alarm's episode ends when the host records its next run (or the App's sweep mode goes OFF).

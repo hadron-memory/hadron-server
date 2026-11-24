@@ -50,8 +50,8 @@ export const assetQueries = {
     // v2 (spec 006): memory-addressed listing.
     memoryAssets: async (
       _: unknown,
-      input: {
-        memoryId: string;
+      { memoryRef, ...rest }: {
+        memoryRef: string;
         mimeType?: string;
         skip?: number;
         count?: number;
@@ -86,7 +86,8 @@ export const assetQueries = {
           roles: ctx.roles,
           organizationId: ctx.organizationId,
         },
-        input,
+        // #4142 (S6 chunk A): `memoryRef` on the wire; the controller still names its input `memoryId`.
+        { ...rest, memoryId: memoryRef },
       );
       return {
         assets: result.assets,

@@ -16,6 +16,7 @@ import { questionDataSchema, questionLogDataSchema, type AnswerEntry, type Quest
 import { canonicalQuestionJson, questionName, renderQuestion, renderQuestionAbstract, renderQuestionLog } from '../../../lib/questions/render.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { resolvers, type Context } from './resolvers.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -632,9 +633,9 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
     }
     const revs = await db.nodeRevision.findMany({ where: { nodeId: d.row.id } });
     expect(revs).toHaveLength(3);
-    expect(await codeOf(M.deleteNodeRevision(null, { revisionId: revs[0].id }, as()))).toBe('QUESTION_CONTAINED');
+    expect(await codeOf(M.deleteNodeRevision(null, { nodeRevRef: revs[0].id }, as()))).toBe('QUESTION_CONTAINED');
     expect(await codeOf(M.clearNodeHistory(null, { nodeRef: d.row.id }, as()))).toBe('QUESTION_CONTAINED');
-    expect(await codeOf(M.restoreNodeRevision(null, { revisionId: revs[0].id }, as()))).toBe('ROLE_GOVERNED');
+    expect(await codeOf(M.restoreNodeRevision(null, { nodeRevRef: revs[0].id }, as()))).toBe('ROLE_GOVERNED');
     expect(await db.nodeRevision.count({ where: { nodeId: d.row.id } })).toBe(3);
   });
 
@@ -654,7 +655,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
     const priv = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'assistant', memoryClass: 'private' }, as(holger.id));
     await M.createQuestionLog(null, { memoryRef: priv.id, loc: 'questions', defaultDeciders: [holger.id] }, as(holger.id));
     const dataKey = Buffer.alloc(32, 7).toString('base64');
-    expect(await codeOf(M.encryptMemory(null, { memoryRef: priv.id, dataKey }, as(holger.id)))).toBe('QUESTION_LOG_ENCRYPTED');
+    expect(await codeOf(encryptWithSecret(null, { memoryRef: priv.id, dataKey }, as(holger.id)))).toBe('QUESTION_LOG_ENCRYPTED');
   });
 
   it('approval: a log is never approvable, an unanswered question is QUESTION_NOT_ANSWERED (#4429), and bulk approval skips both with a receipt', async () => {
@@ -681,7 +682,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
       await messageOf(M.approveNode(null, { nodeRef: log.row.id }, as(holger.id))),
       await messageOf(M.approveNode(null, { nodeRef: d.row.id }, as(holger.id))),
       await messageOf(M.clearNodeHistory(null, { nodeRef: d.row.id }, as())),
-      await messageOf(M.deleteNodeRevision(null, { revisionId: rev.id }, as())),
+      await messageOf(M.deleteNodeRevision(null, { nodeRevRef: rev.id }, as())),
     ];
     expect(msgs[0]).toBe('A question log holds settings, not a question; it is never approved.');
     expect(msgs[1]).toBe(`${(d.row.data as { code: string }).code} has no standing answer to approve.`);
@@ -695,7 +696,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
     const d = await ask(log.row.id);
     await M.amendQuestion(null, { ref: d.row.id, input: { title: 'Title 1' }, expectedRevision: 1, reason: 'r1' }, as(writer.id));
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: d.row.id } });
-    const e = await errorOf(M.updateNodeRevision(null, { revisionId: rev.id, revLabel: 'x' }, as()));
+    const e = await errorOf(M.updateNodeRevision(null, { nodeRevRef: rev.id, revLabel: 'x' }, as()));
     expect(e.extensions.code).toBe('QUESTION_CONTAINED');
     expect(e.message).toContain("Editing a question's history");
   });

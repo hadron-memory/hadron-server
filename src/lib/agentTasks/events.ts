@@ -314,6 +314,9 @@ export const ALARM_EVENT_TYPES = [
   // #3819 slice 1: a family/tier/role combination the platform could not give work to (cor:agt:060:14). Task-less and
   // workerless, with an empty chain; its episode lives in `saturation_episodes`.
   'alarm.saturation',
+  // #4531 (cor:agt:050:34, Proposed): the whole team went dark. App-owned, task-less and workerless, with an empty chain; it
+  // wakes nobody and cannot be acknowledged. Its episode lives in `team_dark_episodes`; its end is a `team.recovered` event.
+  'team.dark',
 ] as const;
 export type AlarmEventType = (typeof ALARM_EVENT_TYPES)[number];
 
@@ -331,8 +334,8 @@ export type AlarmPayload = {
 
 /**
  * Append one stall alarm, once per episode (cor:agt:050:13). The episode's key
- * is (task, type, episodeStart) under the unique index
- * agent_team_events_episode_uniq, so a second insert of the same episode —
+ * is (app, task, type, episodeStart) under the unique index
+ * agent_team_events_episode_app_uniq, so a second insert of the same episode —
  * a re-run, or a concurrent evaluator pass on another instance — does
  * nothing: `ON CONFLICT DO NOTHING`, never a read-then-write. A concurrent
  * insert of the same key waits for the first to commit and then conflicts.

@@ -406,7 +406,7 @@ it('real PG: revision restore joins even for an ordinary snapshot', async () => 
   const { resolvers } = await import('./resolvers.js');
   await writeNodeCore({ memoryId, loc: 'ordinary', content: 'second' }, ctx(), 'update', { authoring: { kind: 'carry' }, targetNodeId: nodeId });
   const revision = await db.nodeRevision.findFirstOrThrow({ where: { nodeId }, orderBy: { createdAt: 'asc' } });
-  await assertOperationJoins(context => resolvers.Mutation.restoreNodeRevision({}, { revisionId: revision.id }, context));
+  await assertOperationJoins(context => resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: revision.id }, context));
   expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content).toBe('before');
 }, 20000);
 

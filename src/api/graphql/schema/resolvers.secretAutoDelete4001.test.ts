@@ -114,7 +114,17 @@ it.each(['live', 'revoked', 'departed', 'protected'])('signed %s client deletes 
   if (ending === 'protected') await db.$executeRaw`UPDATE secret_read_clients SET ended_at = (clock_timestamp() AT TIME ZONE 'UTC'), end_reason = 'PROTECTED' WHERE id = ${a.clientId}`;
   await secretSweepTick(db); expect(await exists()).toBe(1);
   await expired(a.grantId);
-  expect(await failure(reveal(a.clientId))).not.toBe('OK');
+  // #4988 item 1: the exact refusal of the read door once the window has passed and BEFORE the sweep, per ending. The secret
+  // still exists here (checked below), so a refusal is judged by what the door answers for each client state: a live client
+  // is EXPIRED; a revoked client, and a departed holder (its grant is ended the same way), are REVOKED; a client that has
+  // ended (the PROTECTED fixture sets ended_at) is answered SECRET_DELETED by this door (readClientReveal.ts: any ended
+  // client), even though the row is still there. A mutant answering another code for any of them fails here.
+  const expectedRefusal: Record<string, string> = {
+    live: 'SECRET_READ_CLIENT_EXPIRED', revoked: 'SECRET_READ_CLIENT_REVOKED',
+    departed: 'SECRET_READ_CLIENT_REVOKED', protected: 'SECRET_DELETED',
+  };
+  expect(await exists()).toBe(1);
+  expect(await failure(reveal(a.clientId))).toBe(expectedRefusal[ending]);
   await Promise.all([secretSweepTick(db), secretSweepTick(db)]); await secretSweepTick(db);
   expect(await exists()).toBe(0); expect(await deletedEvents()).toBe(1);
 }, 30_000);
@@ -398,7 +408,9 @@ describe('#4635 poison batch: one secret whose deletion fails must not stop the 
     const good = secretId;
     const dueB = await client('delete', null, await dbDeadline(3));
     // The pins below rely on the poisoned id sorting first in the sweep's `ORDER BY s.id`.
-    expect([poisoned, good].sort()[0]).toBe(poisoned);
+    // #4988 item 2: the order comes from the database (its collation), not a JavaScript code-unit sort.
+    const order = await db.$queryRaw<Array<{ id: string }>>`SELECT id FROM secrets WHERE id IN (${poisoned}, ${good}) ORDER BY id`;
+    expect(order.map(r => r.id)).toEqual([poisoned, good]);
     await db.$executeRawUnsafe(`CREATE FUNCTION ${POISON_FN}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'poisoned delete CANARY'; END $$`);
     await db.$executeRawUnsafe(`CREATE TRIGGER zz_poison_secret_delete_4635 BEFORE DELETE ON secrets FOR EACH ROW WHEN (OLD.id = '${poisoned}') EXECUTE FUNCTION ${POISON_FN}()`);
     await expired(dueA.grantId); await expired(dueB.grantId);
@@ -434,5 +446,35 @@ describe('#4635 poison batch: one secret whose deletion fails must not stop the 
     } finally { error.mockRestore(); }
     await expectPoisonedKept(poisoned);
     expect(await db.secret.count({ where: { id: good } })).toBe(0);
+  }, 30_000);
+
+  it('#4988 item 3: the cursor moves past every row a batch SELECTED, not past the rows it deleted: two poisoned ids and one healthy id, batch size 2', async () => {
+    // Three due secrets; the two that sort first in the database's `ORDER BY id` are poisoned, the third is healthy. A cursor on
+    // the last DELETED id never moves (batch one deletes nothing) and re-selects the poisoned pair until the 20-batch cap; a
+    // cursor on the FIRST selected id re-selects the second poisoned id in batch two. Either shows as extra failure lines.
+    const ids = [secretId];
+    const dues = [await client('delete', null, await dbDeadline(3))];
+    for (const name of ['tok-b', 'tok-c']) {
+      secretId = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name, kind: 'generic', value: 's6-canary' }, ctx())).id;
+      ids.push(secretId);
+      dues.push(await client('delete', null, await dbDeadline(3)));
+    }
+    const [p1, p2, good] = (await db.$queryRaw<Array<{ id: string }>>`SELECT id FROM secrets WHERE id IN (${ids[0]}, ${ids[1]}, ${ids[2]}) ORDER BY id`).map(r => r.id);
+    await db.$executeRawUnsafe(`CREATE FUNCTION ${POISON_FN}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'poisoned delete CANARY'; END $$`);
+    await db.$executeRawUnsafe(`CREATE TRIGGER zz_poison_secret_delete_4635 BEFORE DELETE ON secrets FOR EACH ROW WHEN (OLD.id IN ('${p1}', '${p2}')) EXECUTE FUNCTION ${POISON_FN}()`);
+    for (const d of dues) await expired(d.grantId);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let failures = 0;
+    try {
+      expect(await deletion.sweepSecretAutoDelete(db, 2)).toBe(1);
+      failures = error.mock.calls.filter(c => c[0] === 'secret_sweep.auto_delete_row_failed').length;
+    } finally { error.mockRestore(); }
+    expect(failures).toBe(2);
+    for (const kept of [p1, p2]) {
+      expect(await db.secret.count({ where: { id: kept } })).toBe(1);
+      expect(await db.secretEvent.count({ where: { secretId: kept, kind: 'DELETE' } })).toBe(0);
+    }
+    expect(await db.secret.count({ where: { id: good } })).toBe(0);
+    expect(await db.secretEvent.count({ where: { secretId: good, kind: 'DELETE' } })).toBe(1);
   }, 30_000);
 });

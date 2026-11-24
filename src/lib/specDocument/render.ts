@@ -164,6 +164,57 @@ export function splitAtClosingRule(text: string): { body: string; tail: string }
   return { body: text, tail: '' };
 }
 
+/**
+ * An id value as a browser reads it, for the character references that can spell an anchor character: numeric ones with
+ * any zero padding (`&#45;`, `&#x2d;`, `&#0000045`, the `;` optional) and the named ones that spell `.`, `_` or the
+ * letters `fj` (`&period;`, `&lowbar;`, `&UnderBar;`, `&fjlig;`; a walk of the HTML entity table finds no others, and
+ * `&hyphen;` and `&dash;` are U+2010, not the ASCII hyphen). ONE left-to-right pass, as the HTML tokenizer reads them:
+ * an unterminated `&#x2d` followed by `&fjlig;` is two references, not one hex run.
+ */
+function decodeNumericRefs(v: string): string {
+  return v.replace(/&(?:#[xX]0*([0-9a-fA-F]{1,6});?|#0*([0-9]{1,7});?|(period|lowbar|UnderBar|fjlig);)/g, (all, hex?: string, dec?: string, name?: string) => {
+    if (name !== undefined) return name === 'period' ? '.' : name === 'fjlig' ? 'fj' : '_';
+    const cp = hex !== undefined ? parseInt(hex, 16) : parseInt(dec as string, 10);
+    return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : all;
+  });
+}
+
+/**
+ * One `id` attribute, found by its text alone (no tag, quote or block is judged): the name `id` not glued to a longer
+ * name or a URL query key (`data-id`, `?id=`, `&id=`, `&amp;id=`, `#id=`, `a:id`), then `=`, then a quoted or bare value. Blanks and
+ * `>` (a blockquote marker the renderer drops) may sit before the `=` and before the value. Linear: each `id=` scans only
+ * its own run of blanks and its own value, and a value never contains the next match's start.
+ */
+const ID_ATTR = /(?<![\w:.?&=#;-])id[\s>]*=[\s>]*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`=]+))/gi;
+
+/**
+ * #4512 (cor:spc:030:02 "Authored ids"; Peter's approach ruling, chat 143451, after five review rounds on removing the
+ * attribute): an `id` attribute whose value equals an anchor assigned in this document is RENAMED `data-id`. The value,
+ * the spacing, the line breaks and every other byte stay exactly as written, so no cut can join two neighbours into a
+ * new live id, leave a blank line inside a tag or change the Markdown around it, and a `data-id` is never an anchor
+ * target. Nothing about tags, quotes, code, comments or blocks is judged: an assigned id written anywhere (code sample,
+ * comment, prose, URL path) is renamed too, and the worst case is a slightly altered sample, never a second element
+ * carrying a server anchor. Limits: of the named character references only those that spell an anchor character (`.`, `_`, `fj`) are decoded (numeric ones, zero-padded or not, are), and a URL query key is not
+ * an attribute (`?id=`, `&id=`, `#id=`) and is left alone.
+ */
+export function neutraliseAssignedIds(text: string, assigned: ReadonlySet<string>): string {
+  if (assigned.size === 0 || !/id/i.test(text)) return text;
+  let out = '';
+  let copied = 0;
+  const re = new RegExp(ID_ATTR.source, ID_ATTR.flags);
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    // Resume just past the name, so a value that holds another `id=` is still searched.
+    re.lastIndex = m.index + 2;
+    let value = m[1] ?? m[2] ?? m[3] ?? '';
+    // A bare value read up to the tag-closing slash (`<a id=X/>`) is the value without that slash.
+    if (m[3] !== undefined && value.endsWith('/') && text[m.index + m[0].length] === '>') value = value.slice(0, -1);
+    if (!assigned.has(decodeNumericRefs(value))) continue;
+    out += `${text.slice(copied, m.index)}data-id`;
+    copied = m.index + 2;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
 const SPEC_CORE_DIV = /^<div class="spec-core"[^>]*><\/div>\s*$/;
 
 /** Drop the spec's own H1 and the `spec-core` divider divs; optionally move every heading down one level. */
@@ -246,7 +297,7 @@ const stateLine = (p: DocPart): string => `Approval: ${approvalText(p.approval)}
 const heading = (p: DocPart): string => (p.name === p.loc || p.name.startsWith(`${p.loc} `) ? p.name : `${p.name} [${p.loc}]`);
 
 /** The part's body as shown, or null when it shows none (placeholder, superseded, empty). */
-function shownBody(p: DocPart, shift: boolean, links: ReadonlyMap<string, LinkResolution>, anchors: ReadonlyMap<string, string>): string | null {
+function shownBody(p: DocPart, shift: boolean, links: ReadonlyMap<string, LinkResolution>, anchors: ReadonlyMap<string, string>, assigned: ReadonlySet<string>): string | null {
   if (p.isPlaceholder || p.superseded || p.body == null) return null;
   const { body } = splitAtClosingRule(p.body);
   const cleaned = renderLinks(cleanBody(body, shift), links, anchors);
@@ -256,9 +307,17 @@ function shownBody(p: DocPart, shift: boolean, links: ReadonlyMap<string, LinkRe
 /** The `YYYY-MM-DDTHH:MMZ` form of the render time. */
 const renderedStamp = (d: Date): string => `${d.toISOString().slice(0, 16)}Z`;
 
-export function renderSpecDocument(input: DocInput): string {
+/** Marks where the server writes its own `<a id>`; authored NUL is replaced by U+FFFD on the way in (as CommonMark does), so no authored text can forge one. */
+const ANCHOR_MARK = '\u0000';
+const ANCHOR_PLACEHOLDER = /\u0000([^\u0000]*)\u0000/g;
+const noNul = (t: string): string => t.replace(/\u0000/g, '\uFFFD');
+const cleanPart = (p: DocPart): DocPart => ({ ...p, loc: noNul(p.loc), name: noNul(p.name), body: p.body == null ? null : noNul(p.body) });
+
+export function renderSpecDocument(rawInput: DocInput): string {
+  const input: DocInput = { ...rawInput, memory: noNul(rawInput.memory), feature: cleanPart(rawInput.feature), parts: rawInput.parts.map(cleanPart) };
   const { feature, parts, links } = input;
   const anchors = assignAnchors(inDocumentOrder(parts));
+  const assigned: ReadonlySet<string> = new Set(anchors.values());
   const all = [feature, ...parts];
   const openQuestions = all
     .filter((p) => !p.isPlaceholder && !p.superseded && p.body != null && hasOpenQuestions(splitAtClosingRule(p.body).body))
@@ -276,7 +335,7 @@ export function renderSpecDocument(input: DocInput): string {
   ];
   if (feature.isPlaceholder) blocks.push('Placeholder.');
   else {
-    const featureBody = shownBody({ ...feature, superseded: false }, false, links, anchors);
+    const featureBody = shownBody({ ...feature, superseded: false }, false, links, anchors, assigned);
     if (featureBody) blocks.push(featureBody);
   }
 
@@ -285,13 +344,14 @@ export function renderSpecDocument(input: DocInput): string {
     if (members.length === 0) continue;
     blocks.push(`# ${g.heading}`);
     for (const p of members) {
-      const head = `<a id="${anchors.get(p.loc)}"></a>\n\n## ${heading(p)}\n${stateLine(p)}`;
+      // The server's own anchor is a placeholder here, so the one neutralising pass over the whole document cannot touch it.
+      const head = `${ANCHOR_MARK}${anchors.get(p.loc)}${ANCHOR_MARK}\n\n## ${heading(p)}\n${stateLine(p)}`;
       if (p.superseded) {
         blocks.push(`${head}\n\n${p.supersededBy.length ? `Superseded by ${p.supersededBy.join(', ')}.` : 'Superseded.'}`);
       } else if (p.isPlaceholder) {
         blocks.push(`${head}\n\nPlaceholder.`);
       } else {
-        const body = shownBody(p, true, links, anchors);
+        const body = shownBody(p, true, links, anchors, assigned);
         blocks.push(body ? `${head}\n\n${body}` : head);
       }
     }
@@ -301,5 +361,8 @@ export function renderSpecDocument(input: DocInput): string {
     const tail = renderLinks(trimNewlines(splitAtClosingRule(feature.body).tail), links, anchors);
     if (tail !== '') blocks.push(tail);
   }
-  return `${blocks.join('\n\n')}\n`;
+  // One pass over everything the document shows, so two authored pieces that join across a blank line cannot form an id
+  // that neither held alone (a part body ending `<pre id` and a Feature tail starting `="X">`); then the anchors go in.
+  const text = neutraliseAssignedIds(`${blocks.join('\n\n')}\n`, assigned);
+  return text.replace(ANCHOR_PLACEHOLDER, (_all, anchor: string) => `<a id="${anchor}"></a>`);
 }

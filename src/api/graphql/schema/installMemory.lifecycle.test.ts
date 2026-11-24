@@ -756,7 +756,7 @@ describe('#2044 install memory — lock order and the pooled-only writers (Diego
     const [row] = await f.installRows();
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
     const before = await db.node.findUniqueOrThrow({ where: { id: node.id } });
-    await expect(M.restoreNodeRevision({}, { revisionId: rev.id }, ctxOf(f.admin.id))).resolves.toBeTruthy();
+    await expect(M.restoreNodeRevision({}, { nodeRevRef: rev.id }, ctxOf(f.admin.id))).resolves.toBeTruthy();
     await expect(M.moveNode({}, { sourceRef: node.id, targetUrn: emitNodeUrnV2(row!.urn, 'prompts:moved') }, ctxOf(f.admin.id))).resolves.toMatchObject({ loc: 'prompts:moved' });
     // The original supported door still writes after the move.
     await expect(M.updateNode({}, { input: { install: f.install, loc: 'prompts:moved', content: 'v3' } }, ctxOf(f.admin.id))).resolves.toBeTruthy();

@@ -18,8 +18,8 @@ const child = (parent: string, who = author.id) => M.createAgentTask!({}, { inpu
 const seatCmd = (taskRef: string, head = H, who = author.id) => M.assignReviewSeat!({}, { taskRef, slot: 'local', head }, ctx(who));
 const verdictCmd = (taskRef: string, head = H, who = reviewer.id) => M.recordReviewVerdict!({}, { taskRef, head, verdict: 'APPROVE' }, ctx(who));
 const finishTask = async (id: string, who: string) => {
-  await M.startAgentTask!({}, { taskId: id }, ctx(who));
-  await M.finishAgentTask!({}, { taskId: id, result: { outcome: 'done' } }, ctx(who));
+  await M.startAgentTask!({}, { taskRef: id }, ctx(who));
+  await M.finishAgentTask!({}, { taskRef: id, result: { outcome: 'done' } }, ctx(who));
 };
 async function readyBuild() {
   await M.setReviewSchedule!({}, { taskRef: build.id, slots: ['local'] }, ctx(owner.id));
@@ -57,7 +57,7 @@ describe('#4494 refusal texts name the remedy (rows 1-7)', () => {
       `This task is finished; an ended task never moves again. A verdict is recorded only on a live seat. ${REMEDY}`));
   });
   it('row 4: pr verdict on a live seat that was never bound', async () => {
-    await readyBuild(); const t = await child(build.id); await M.startAgentTask!({}, { taskId: t.id }, ctx(reviewer.id));
+    await readyBuild(); const t = await child(build.id); await M.startAgentTask!({}, { taskRef: t.id }, ctx(reviewer.id));
     await expect(verdictCmd(t.id)).rejects.toMatchObject(refused('REVIEW_SEAT_UNASSIGNED',
       `The task has no assigned review seat: it was never bound with pr seat. ${REMEDY}`));
   });
@@ -73,12 +73,12 @@ describe('#4494 refusal texts name the remedy (rows 1-7)', () => {
       `This is not the build task's frozen head. Bind at the build task's frozen head (pr freeze records it). If the seat truly cannot bind, ${UNBINDABLE}`));
   });
   it('row 7: pr verdict at a head other than the assigned one', async () => {
-    await readyBuild(); const t = await child(build.id); await seatCmd(t.id); await M.startAgentTask!({}, { taskId: t.id }, ctx(reviewer.id));
+    await readyBuild(); const t = await child(build.id); await seatCmd(t.id); await M.startAgentTask!({}, { taskRef: t.id }, ctx(reviewer.id));
     await expect(verdictCmd(t.id, H2)).rejects.toMatchObject(refused('REVIEW_HEAD_MISMATCH',
       `The verdict head differs from the assigned head. Record at the head the seat was bound to. If the seat truly cannot record, ${UNBINDABLE}`));
   });
   it('the unchanged outcomes: a live seat at the frozen head still binds and records', async () => {
-    await readyBuild(); const t = await child(build.id); await seatCmd(t.id); await M.startAgentTask!({}, { taskId: t.id }, ctx(reviewer.id));
+    await readyBuild(); const t = await child(build.id); await seatCmd(t.id); await M.startAgentTask!({}, { taskRef: t.id }, ctx(reviewer.id));
     await expect(verdictCmd(t.id)).resolves.toBeTruthy();
   });
 });

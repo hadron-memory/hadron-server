@@ -59,20 +59,21 @@ async function worker(name: string, opts: { role?: string; session?: boolean; ap
   if (opts.session !== false) await db.session.create({ data: { id: generateId(), appId: opts.app ?? appId, agentId, workerId: id, family: 'claude', llmModel: 'claude-sonnet-5-5', startedAt: ago(48 * HOUR), updatedAt: ago(48 * HOUR) } });
   return id;
 }
-type TaskOpts = { owner: string; assignee?: string | null; status?: string; parent?: string | null; source?: string | null; externalId?: string | null; startedAt?: Date; finishedAt?: Date; cancelledAt?: Date; app?: string; title?: string };
+type TaskOpts = { owner: string; assignee?: string | null; status?: string; parent?: string | null; source?: string | null; externalId?: string | null; startedAt?: Date; finishedAt?: Date; cancelledAt?: Date; app?: string; title?: string; isProject?: boolean };
 async function task(o: TaskOpts) {
   const status = o.status ?? 'started';
   const assigned = o.assignee ? { assigneeWorkerId: o.assignee, assignedAt: ago(48 * HOUR) } : {};
   return db.agentTask.create({ data: {
     appId: o.app ?? appId, title: o.title ?? 'Synthetic', ownerWorkerId: o.owner, parentTaskId: o.parent ?? null, status,
-    source: o.source === undefined ? 'https://github.com/example/repo/issues/1' : o.source, externalId: o.externalId ?? null, ...assigned,
+    source: o.source === undefined ? 'https://github.com/example/repo/issues/1' : o.source, externalId: o.externalId ?? null, isProject: o.isProject ?? false, ...assigned,
     ...(status === 'started' || status === 'finished' ? { startedAt: o.startedAt ?? ago(2 * HOUR) } : {}),
     ...(status === 'finished' ? { finishedAt: o.finishedAt ?? ago(HOUR), resultOutcome: 'succeeded' } : {}),
     ...(status === 'cancelled' ? { cancelledAt: o.cancelledAt ?? ago(HOUR) } : {}),
   } });
 }
+/** #4997: a project carries the project marker; being top-level makes a task nothing (cor:agt:150 A project). */
 async function project(title: string, status = 'started', owner = w.ada) {
-  return task({ owner, status, title, source: null, assignee: status === 'pending' ? null : owner });
+  return task({ owner, status, title, source: null, assignee: status === 'pending' ? null : owner, isProject: true });
 }
 const at0 = () => db.agentTask.create({ data: { appId, title: 'No project', ownerWorkerId: w.ada, status: 'backlog', taskNumber: 0, handle: 'AT0' } });
 const idsOf = (c: { ids: string[] }) => [...c.ids].sort();
@@ -135,7 +136,7 @@ describe('#4447 report 1: started owned tasks by owner and project (cor:agt:150:
 });
 
 describe('#4447 report 2: started projects with child counts by status', () => {
-  it('lists started top-level tasks other than AT0, each with its direct children counted by status', async () => {
+  it('lists started projects (tasks carrying the marker, #4997), each with the tasks under it counted by status', async () => {
     await at0();
     const p1 = await project('Alpha project');
     await project('Pending project', 'pending');
@@ -396,7 +397,7 @@ describe('#4447 SDL', () => {
     for (const t of ['TeamMetrics', 'TeamMetricsCount', 'TeamMetricsWorkers', 'TeamMetricsFlow']) {
       expect(assertObjectType(schema.getType(t)).description, `${t} is described`).toBeTruthy();
     }
-    expect(Object.keys(assertObjectType(schema.getType('TeamMetricsCount')).getFields()).sort()).toEqual(['ids', 'total', 'truncated']);
+    expect(Object.keys(assertObjectType(schema.getType('TeamMetricsCount')).getFields()).sort()).toEqual(['ids', 'named', 'total', 'truncated']);
   });
 });
 
@@ -410,7 +411,7 @@ describe('#4850 same-App only: a same-handle project in another App never appear
     const mine = await task({ owner: w.ada, assignee: w.dev1, parent: ours.id });
     // The other App's AT1, created later (so a lookup that drops the App would find it last and, unordered, could pick it).
     const stranger = await worker('Stranger', { app: otherAppId });
-    const theirs = await task({ owner: stranger, assignee: stranger, status: 'started', title: 'FOREIGN-4850-TITLE', source: null, app: otherAppId });
+    const theirs = await task({ owner: stranger, assignee: stranger, status: 'started', title: 'FOREIGN-4850-TITLE', source: null, app: otherAppId, isProject: true });
     const theirChild = await task({ owner: stranger, assignee: stranger, parent: theirs.id, status: 'finished', app: otherAppId, finishedAt: ago(HOUR) });
     const theirStarted = await task({ owner: stranger, assignee: stranger, parent: theirs.id, status: 'started', app: otherAppId });
     expect(theirs.handle, 'both Apps number their first project AT1').toBe(ours.handle);
@@ -439,7 +440,7 @@ describe('#4850 truncation: a short list never reads as the whole one (cor:api:1
     expect(r.ownersTruncated).toBe(true);
   });
   it('one owner across more than 200 projects: 200 project groups and projectsTruncated; more than 200 started projects: truncated', async () => {
-    await db.agentTask.createMany({ data: Array.from({ length: 201 }, (_, i) => ({ appId, title: `P${i}`, ownerWorkerId: w.ada, assigneeWorkerId: w.ada,
+    await db.agentTask.createMany({ data: Array.from({ length: 201 }, (_, i) => ({ appId, title: `P${i}`, isProject: true, ownerWorkerId: w.ada, assigneeWorkerId: w.ada,
       assignedAt: ago(HOUR), status: 'started', startedAt: ago(HOUR) })) });
     const parents = await db.agentTask.findMany({ where: { appId, parentTaskId: null, taskNumber: { gt: 0 } }, select: { id: true } });
     expect(parents).toHaveLength(201);

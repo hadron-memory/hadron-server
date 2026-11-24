@@ -61,7 +61,7 @@ describe('setAgentAssetUploadEnabled', () => {
     const updated = await setAgentAssetUploadEnabled(
       db,
       { userId: admin.id },
-      { agentUrn: agent.urn, enabled: true },
+      { agentRef: agent.urn, enabled: true },
       isAdminFor,
     );
     expect(updated.agentTools).toContain('asset:upload');
@@ -75,7 +75,7 @@ describe('setAgentAssetUploadEnabled', () => {
     const updated = await setAgentAssetUploadEnabled(
       db,
       { userId: admin.id },
-      { agentUrn: agent.urn, enabled: false },
+      { agentRef: agent.urn, enabled: false },
       isAdminFor,
     );
     expect(updated.agentTools).not.toContain('asset:upload');
@@ -90,7 +90,7 @@ describe('setAgentAssetUploadEnabled', () => {
     const updated = await setAgentAssetUploadEnabled(
       db,
       { userId: admin.id },
-      { agentUrn: agent.urn, enabled: true },
+      { agentRef: agent.urn, enabled: true },
       isAdminFor,
     );
     expect(updated.agentTools).toEqual(['asset:upload']);
@@ -101,7 +101,7 @@ describe('setAgentAssetUploadEnabled', () => {
       setAgentAssetUploadEnabled(
         db,
         { userId: nonAdmin.id },
-        { agentUrn: agent.urn, enabled: true },
+        { agentRef: agent.urn, enabled: true },
         isAdminFor,
       ),
     ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
@@ -112,28 +112,28 @@ describe('setAgentAssetUploadEnabled', () => {
       setAgentAssetUploadEnabled(
         db,
         { userId: admin.id },
-        { agentUrn: 'asset-org:does-not-exist', enabled: true },
+        { agentRef: 'asset-org:does-not-exist', enabled: true },
         isAdminFor,
       ),
     ).rejects.toThrow(SetAssetEnabledError);
   });
 
-  // 007-entity-id-or-urn FR-012: agentUrn input accepts ID or URN.
-  it('accepts a raw agent ID as agentUrn input', async () => {
+  // 007-entity-id-or-urn FR-012: agentRef input accepts ID or URN.
+  it('accepts a raw agent ID as agentRef input', async () => {
     const updated = await setAgentAssetUploadEnabled(
       db,
       { userId: admin.id },
-      { agentUrn: agent.id, enabled: true },
+      { agentRef: agent.id, enabled: true },
       isAdminFor,
     );
     expect(updated.agentTools).toContain('asset:upload');
   });
 
-  it('accepts a prefixed URN (urn:agent:...) as agentUrn input', async () => {
+  it('accepts a prefixed URN (urn:agent:...) as agentRef input', async () => {
     const updated = await setAgentAssetUploadEnabled(
       db,
       { userId: admin.id },
-      { agentUrn: `urn:agent:${agent.urn}`, enabled: true },
+      { agentRef: `urn:agent:${agent.urn}`, enabled: true },
       isAdminFor,
     );
     expect(updated.agentTools).toContain('asset:upload');
@@ -155,7 +155,7 @@ describe('setAgentAssetUploadEnabled', () => {
       setAgentAssetUploadEnabled(
         db,
         { userId: admin.id },
-        { agentUrn: orphanUrn, enabled: true },
+        { agentRef: orphanUrn, enabled: true },
         isAdminFor,
       ),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });

@@ -93,7 +93,7 @@ async function darkWorkersOf(
  * is inside the idle one. Only the worker's own driving writes those inputs: a host key writes no session (cor:agt:070:04) and
  * the deliverer's `dueWakes` read and `acknowledgeWakes` touch none of them, so the delivery side cannot hide a dark worker.
  */
-async function activeInsideWindow(db: PrismaClient, workerIds: string[], windowSeconds: number, now: Date): Promise<Set<string>> {
+export async function activeInsideWindow(db: PrismaClient, workerIds: string[], windowSeconds: number, now: Date): Promise<Set<string>> {
   const out = new Set<string>();
   if (workerIds.length === 0) return out;
   const sessions = await db.session.findMany({
@@ -117,7 +117,7 @@ async function activeInsideWindow(db: PrismaClient, workerIds: string[], windowS
  * reserved or charged. A wake is "due and unacknowledged" for as long as it is still derived: an acknowledgement moves
  * the marks that make it due. Only the wake's own anchor counts, never the delivery floor or the batching window.
  */
-async function unackedWakeAges(db: PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, resumedAtOf: Map<string, Date | null>, windowSeconds: number, now: Date): Promise<Map<string, number>> {
+export async function unackedWakeAges(db: PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, resumedAtOf: Map<string, Date | null>, windowSeconds: number, now: Date, floorAt: Date | null = null): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   let after: string | null = null;
   for (;;) {
@@ -133,7 +133,8 @@ async function unackedWakeAges(db: PrismaClient, app: { id: string; organization
     });
     for (const wake of page.wakes) {
       if (!resumedAtOf.has(wake.workerId)) continue;
-      const startedAt = Math.max(wake.timing.anchorAt.getTime(), resumedAtOf.get(wake.workerId)?.getTime() ?? -Infinity);
+      // #4531: `floorAt` is a floor on every wake's age, e.g. the end of an evaluator gap (cor:agt:050:32); null for none.
+      const startedAt = Math.max(wake.timing.anchorAt.getTime(), resumedAtOf.get(wake.workerId)?.getTime() ?? -Infinity, floorAt?.getTime() ?? -Infinity);
       const ageSeconds = Math.floor((now.getTime() - startedAt) / 1000);
       if (ageSeconds > windowSeconds) out.set(wake.workerId, Math.max(ageSeconds, out.get(wake.workerId) ?? 0));
     }

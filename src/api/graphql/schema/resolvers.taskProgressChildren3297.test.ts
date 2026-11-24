@@ -56,7 +56,7 @@ function task(status: string, data: Record<string, unknown> = {}, appId = app.id
     select: { id: true },
   });
 }
-const progress = (c: Context, w: { id: string }, id: string) => asWorker(w, () => M.recordAgentTaskProgress({}, { taskId: id }, c));
+const progress = (c: Context, w: { id: string }, id: string) => asWorker(w, () => M.recordAgentTaskProgress({}, { taskRef: id }, c));
 
 beforeEach(async () => {
   await cleanDb(db);

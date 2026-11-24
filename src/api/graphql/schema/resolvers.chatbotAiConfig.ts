@@ -20,6 +20,7 @@ import { chatToolChoiceFor } from '../../../lib/llm/chatToolChoice.js';
 import { resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
+import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -127,7 +128,9 @@ export const chatbotAiConfigQueries = {
       if (!isDirectPerson(ctx)) throw new AppNotFoundError(appRef);
       const app = await loadApp(ctx, appRef);
       // One answer for a missing App and an App the caller is not in.
-      if (!(await isMember(ctx, app)) && !isPlatformAdmin(ctx)) throw new AppNotFoundError(appRef);
+      // #5076: or the owner of a person's App (no member row needed); `isDirectPerson` above already refused an App key,
+      // an impersonated session, a run and a worker-bound request.
+      if (!(await isMember(ctx, app)) && !isStrictOwner(ctx, app.ownerUserId) && !isPlatformAdmin(ctx)) throw new AppNotFoundError(appRef);
       return await listChatAiConfigChoices(ctx.db, app.id);
     } catch (e) {
       return rethrowAiConfigTyped(e);

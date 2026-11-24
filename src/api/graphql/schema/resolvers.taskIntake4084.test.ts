@@ -66,7 +66,7 @@ const changes = async (args: Record<string, unknown> = {}, userId: string = owne
 /** The same read with no settle: what a poller sees while another transaction is still open. */
 const changesNow = (args: Record<string, unknown> = {}, userId: string = owner.id, appRef: string = app.id) =>
   Q.agentTaskExternalIdChanges(null, { appRef, ...args }, ctx(userId));
-const release = (taskId: string, c: Context = ctx()) => M.releaseAgentTaskExternalId({}, { taskId }, c);
+const release = (taskId: string, c: Context = ctx()) => M.releaseAgentTaskExternalId({}, { taskRef: taskId }, c);
 const stored = (id: string) => db.agentTask.findUniqueOrThrow({ where: { id } });
 const releaseEvents = (taskId: string) => db.agentTeamEvent.findMany({ where: { taskId, type: 'task.external-id-released' } });
 
@@ -156,15 +156,15 @@ describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with a
     const b = await create({ externalId: Y });
     const c = await create({ externalId: Z });
     const plain = await create({});
-    await M.assignAgentTask({}, { taskId: a.id, assignee: { user: assignee.id } }, ctx());
-    await M.assignAgentTask({}, { taskId: plain.id, assignee: { user: assignee.id } }, ctx());
-    await M.reassignAgentTask({}, { taskId: a.id, assignee: { user: sibling.id } }, ctx());
-    await M.startAgentTask({}, { taskId: a.id }, ctx(sibling.id));
+    await M.assignAgentTask({}, { taskRef: a.id, assignee: { user: assignee.id } }, ctx());
+    await M.assignAgentTask({}, { taskRef: plain.id, assignee: { user: assignee.id } }, ctx());
+    await M.reassignAgentTask({}, { taskRef: a.id, assignee: { user: sibling.id } }, ctx());
+    await M.startAgentTask({}, { taskRef: a.id }, ctx(sibling.id));
     await M.handBackAgentTask({}, { taskRef: a.id, reason: { code: 'CANNOT_DO' } }, ctx(sibling.id));
-    await M.assignAgentTask({}, { taskId: b.id, assignee: { user: assignee.id } }, ctx());
-    await M.startAgentTask({}, { taskId: b.id }, ctx(assignee.id));
-    await M.finishAgentTask({}, { taskId: b.id, result: { outcome: 'done' } }, ctx(assignee.id));
-    await M.cancelAgentTask({}, { taskId: c.id }, ctx());
+    await M.assignAgentTask({}, { taskRef: b.id, assignee: { user: assignee.id } }, ctx());
+    await M.startAgentTask({}, { taskRef: b.id }, ctx(assignee.id));
+    await M.finishAgentTask({}, { taskRef: b.id, result: { outcome: 'done' } }, ctx(assignee.id));
+    await M.cancelAgentTask({}, { taskRef: c.id }, ctx());
     await release(c.id);
     const page = await changes();
     expect(page.changes.map((ch: any) => [ch.kind, ch.externalId, ch.task.id])).toEqual([
@@ -190,12 +190,12 @@ describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with a
 
   it('a change after the release carries no id and is left out; the changes before it keep the released id', async () => {
     const t = await create({ externalId: X });
-    await M.assignAgentTask({}, { taskId: t.id, assignee: { user: assignee.id } }, ctx());
+    await M.assignAgentTask({}, { taskRef: t.id, assignee: { user: assignee.id } }, ctx());
     // Read between the assignment and the release: the reader sees the assignment with X.
     const early = await changes();
     expect(early.changes.map((ch: any) => [ch.kind, ch.externalId])).toEqual([['ASSIGNED', X]]);
     await release(t.id);
-    await M.reassignAgentTask({}, { taskId: t.id, assignee: { user: sibling.id } }, ctx());
+    await M.reassignAgentTask({}, { taskRef: t.id, assignee: { user: sibling.id } }, ctx());
     // Read after both: the same assignment, then the release; the later reassignment concerns no outside item.
     const late = await changes();
     expect(late.changes.map((ch: any) => [ch.kind, ch.externalId])).toEqual([['ASSIGNED', X], ['RELEASED', X]]);
@@ -207,7 +207,7 @@ describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with a
     const ids: string[] = [];
     for (const id of [X, Y, Z]) {
       const t = await create({ externalId: id });
-      await M.cancelAgentTask({}, { taskId: t.id }, ctx());
+      await M.cancelAgentTask({}, { taskRef: t.id }, ctx());
       ids.push(id);
     }
     const first = await changes({ limit: 2 });
@@ -240,7 +240,7 @@ describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with a
         `INSERT INTO agent_team_events (id, app_id, type, task_id, payload, created_at)
          VALUES ($1, $2, 'task.cancelled', $3, '{"type":"task.cancelled"}', (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 second')`,
         [generateId(), app.id, a.id]);
-      await M.cancelAgentTask({}, { taskId: b.id }, ctx());
+      await M.cancelAgentTask({}, { taskRef: b.id }, ctx());
       // A poller reads while A is still open, and keeps its cursor.
       await poll();
       await pg.query('COMMIT');
@@ -256,7 +256,7 @@ describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with a
   it('a change written after a poll with an older stamp (the matcher passes its tick time) is not behind the cursor', async () => {
     const a = await create({ externalId: X });
     const b = await create({ externalId: Y });
-    await M.cancelAgentTask({}, { taskId: b.id }, ctx());
+    await M.cancelAgentTask({}, { taskRef: b.id }, ctx());
     const first = await changes();
     expect(first.changes.map((ch: any) => ch.externalId)).toEqual([Y]);
     // A transaction that begins after that poll but stamps an earlier time, as appendTaskEvent's createdAt allows.
@@ -277,12 +277,12 @@ describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with a
 
   it('a cursor from another App is refused like an unknown one; a non-participant gets APP_NOT_FOUND', async () => {
     const t = await create({ externalId: X }, owner.id, other.id);
-    await M.cancelAgentTask({}, { taskId: t.id }, ctx());
+    await M.cancelAgentTask({}, { taskRef: t.id }, ctx());
     const foreign = (await changes({}, owner.id, other.id)).changes[0].cursor;
     // Another App's change never appears in this App's answer, even for a reader of both Apps.
     expect((await changes()).changes).toEqual([]);
     const mine = await create({ externalId: X });
-    await M.cancelAgentTask({}, { taskId: mine.id }, ctx());
+    await M.cancelAgentTask({}, { taskRef: mine.id }, ctx());
     expect((await changes()).changes.map((ch: any) => ch.task.id)).toEqual([mine.id]);
     await expect(changes({ after: foreign })).rejects.toMatchObject(code('BAD_USER_INPUT'));
     await expect(changes({ after: 'nonsense' })).rejects.toMatchObject(code('BAD_USER_INPUT'));
@@ -291,7 +291,7 @@ describe('#4084 (2): agentTaskExternalIdChanges — what changed on tasks with a
 
   it('is in the SDL', async () => {
     const t = await create({ externalId: X });
-    await M.cancelAgentTask({}, { taskId: t.id }, ctx());
+    await M.cancelAgentTask({}, { taskRef: t.id }, ctx());
     // Served once every older transaction has ended (xmin is cluster-wide: another worker's open transaction counts).
     await settle();
     const r = await gql(
@@ -307,7 +307,7 @@ describe('#4084 (3): releaseAgentTaskExternalId — V87 (Proposed): whoever may 
   it('S6: a worker the owner reports to releases a cancelled task; it stays cancelled, the id is cleared, X can be claimed again', async () => {
     const t = await runAsActor({ workerId: worker.id, agentId: agent.id }, () => create({ externalId: X }));
     expect(t.ownerWorkerId).toBe(worker.id);
-    await runAsActor({ workerId: worker.id, agentId: agent.id }, () => M.cancelAgentTask({}, { taskId: t.id }, ctx()));
+    await runAsActor({ workerId: worker.id, agentId: agent.id }, () => M.cancelAgentTask({}, { taskRef: t.id }, ctx()));
     const before = await stored(t.id);
     const released = await runAsActor({ workerId: head.id, agentId: agent.id }, () => release(t.id));
     expect(released).toMatchObject({ id: t.id, status: 'cancelled', externalId: null });
@@ -329,7 +329,7 @@ describe('#4084 (3): releaseAgentTaskExternalId — V87 (Proposed): whoever may 
     const before = await stored(t.id);
     const err = await release(t.id, ctx(assignee.id)).catch((e: any) => e);
     expect(err).toMatchObject(code('TASK_NOT_OWNER'));
-    const cancelErr = await M.cancelAgentTask({}, { taskId: t.id }, ctx(assignee.id)).catch((e: any) => e);
+    const cancelErr = await M.cancelAgentTask({}, { taskRef: t.id }, ctx(assignee.id)).catch((e: any) => e);
     expect(cancelErr).toMatchObject(code('TASK_NOT_OWNER'));
     expect(await stored(t.id)).toEqual(before);
     expect(await releaseEvents(t.id)).toEqual([]);
@@ -364,13 +364,13 @@ describe('#4084 (3): releaseAgentTaskExternalId — V87 (Proposed): whoever may 
 
   it('in any status: whoever manages the App releases a finished task, which stays finished', async () => {
     const t = await create({ externalId: X, assignee: { user: assignee.id } });
-    await M.startAgentTask({}, { taskId: t.id }, ctx(assignee.id));
-    await M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'done' } }, ctx(assignee.id));
+    await M.startAgentTask({}, { taskRef: t.id }, ctx(assignee.id));
+    await M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'done' } }, ctx(assignee.id));
     const released = await release(t.id, ctx(manager.id));
     expect(released).toMatchObject({ status: 'finished', externalId: null });
     // The owner may release a started one too.
     const s = await create({ externalId: Y, assignee: { user: assignee.id } });
-    await M.startAgentTask({}, { taskId: s.id }, ctx(assignee.id));
+    await M.startAgentTask({}, { taskRef: s.id }, ctx(assignee.id));
     expect(await release(s.id)).toMatchObject({ status: 'started', externalId: null, assigneeUserId: assignee.id });
   });
 
@@ -382,7 +382,7 @@ describe('#4084 (3): releaseAgentTaskExternalId — V87 (Proposed): whoever may 
 
   it('is in the SDL', async () => {
     const t = await create({ externalId: X });
-    const r = await gql('mutation($t:ID!){releaseAgentTaskExternalId(taskId:$t){id externalId status}}', { t: t.id });
+    const r = await gql('mutation($t:ID!){releaseAgentTaskExternalId(taskRef:$t){id externalId status}}', { t: t.id });
     expect(r.errors).toBeUndefined();
     expect(r.data.releaseAgentTaskExternalId).toEqual({ id: t.id, externalId: null, status: 'PENDING' });
   });
@@ -405,8 +405,8 @@ describe('#4084 (4): AgentTask.portalUrl — the server prints the task page lin
   it('is null when FRONTEND_URL is unset or malformed, so no client builds the link', async () => {
     const t = await create({});
     vi.stubEnv('FRONTEND_URL', '');
-    expect((await gql('query($id:ID!){agentTask(id:$id){portalUrl}}', { id: t.id })).data.agentTask.portalUrl).toBeNull();
+    expect((await gql('query($id:ID!){agentTask(ref:$id){portalUrl}}', { id: t.id })).data.agentTask.portalUrl).toBeNull();
     vi.stubEnv('FRONTEND_URL', 'not a url');
-    expect((await gql('query($id:ID!){agentTask(id:$id){portalUrl}}', { id: t.id })).data.agentTask.portalUrl).toBeNull();
+    expect((await gql('query($id:ID!){agentTask(ref:$id){portalUrl}}', { id: t.id })).data.agentTask.portalUrl).toBeNull();
   });
 });
