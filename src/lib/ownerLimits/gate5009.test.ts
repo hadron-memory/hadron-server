@@ -266,7 +266,7 @@ describe('#5009 the refusal on the wire, and the table', () => {
 
   it('the CHECKs have one source: the migration ends with the file post-push.sql includes', () => {
     const guard = readFileSync('prisma/owner-limit-invariants.sql', 'utf8');
-    expect(readFileSync('prisma/migrations/20261124130000_owner_limits/migration.sql', 'utf8').endsWith(guard)).toBe(true);
+    expect(readFileSync('prisma/migrations/20261124163000_owner_limits/migration.sql', 'utf8').endsWith(guard)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir owner-limit-invariants.sql');
   });
 

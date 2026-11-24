@@ -108,6 +108,7 @@ import {
   CONTENT_RAW_DEFAULT,
   readAiServiceConfigByUrn,
   aiConfigOwnerOf,
+  nonNegativeTake,
 } from './resolvers.helpers.js';
 import { loadAiConfigOwners, aiConfigOwnerKey } from '../../../lib/aiConfigOwner.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
@@ -2762,7 +2763,7 @@ export const nodeQueries = {
           memoryId: { in: accessibleMemoryIds },
         },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        take: limit ?? 20,
+        take: nonNegativeTake(limit),
       });
       // #3688: a loc names a resource, so other principals' rows are volumes only (cor:acl:090:01, ruling 0246).
       return projectUsageRowsFor(ctx, rows);
@@ -2776,7 +2777,7 @@ export const nodeQueries = {
       const rows = await ctx.db.nodeEdgeRemoval.findMany({
         where: { sourceId: scope.nodeId, memoryId: { in: scope.accessible } },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        take: limit ?? 20,
+        take: nonNegativeTake(limit),
       });
       // The deleted target's address is another node's identity, and the edge's own loc is derived from both
       // endpoints: show neither where the target's memory is not readable.
@@ -2793,7 +2794,7 @@ export const nodeQueries = {
       const revisions = await ctx.db.nodeRevision.findMany({
         where: { nodeId },
         orderBy: { createdAt: 'desc' },
-        take: limit ?? 20,
+        take: nonNegativeTake(limit),
       });
       // Drop snapshots captured while the node lived in a memory the caller
       // can't read. Legacy rows (memoryId NULL) fall back to the node's current

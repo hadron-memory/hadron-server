@@ -136,6 +136,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_agent_tasks_at0_unmarked",
+      "kind": "check-constraint",
+      "file": "agent-task-project-marker-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_agent_tasks_external_id",
       "kind": "check-constraint",
       "file": "agent-task-external-id-invariants.sql",
@@ -1093,6 +1099,18 @@
       "name": "agent_tasks_number_immutable",
       "kind": "function",
       "file": "agent-task-number-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks_project_marker_immutable",
+      "kind": "function",
+      "file": "agent-task-project-marker-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks_project_marker_top_level",
+      "kind": "function",
+      "file": "agent-task-project-marker-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -2197,6 +2215,18 @@
       "name": "agent_tasks.trg_agent_tasks_number_immutable",
       "kind": "trigger",
       "file": "agent-task-number-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks.trg_agent_tasks_project_marker_immutable",
+      "kind": "trigger",
+      "file": "agent-task-project-marker-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "agent_tasks.trg_agent_tasks_project_marker_top_level",
+      "kind": "trigger",
+      "file": "agent-task-project-marker-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {

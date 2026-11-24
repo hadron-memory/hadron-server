@@ -19,6 +19,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
+import { encryptWithSecret } from '../test/encryptMemoryWithSecret.js';
 
 const projectionBaseline: { scopes: Record<'abstract' | 'all', { fields: ProjectionFieldHashes }> } = JSON.parse(readFileSync(new URL('../test/fixtures/mcpProjection2801.json', import.meta.url), 'utf8'));
 
@@ -218,7 +219,7 @@ it.each([
   const single = () => server.callToolText('hadron_get_node', { urn: 'hrn:node:batch-org:parity:root', ...options });
   const batch = () => server.callToolText('hadron_get_nodes', { refs: [root.id], ...options });
   if (encrypted) {
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memory.id, passphrase: 'synthetic2774' }, { db, roles: ['ADMIN'], userId: fx.user2.id } as Context);
+    await encryptWithSecret({}, { memoryRef: memory.id, passphrase: 'synthetic2774' }, { db, roles: ['ADMIN'], userId: fx.user2.id } as Context);
     const locked = await single();
     expect(await batch()).toContain(locked);
     expect(locked).toContain('Locked:');
@@ -287,7 +288,7 @@ it.each([[true, false, false], [false, false, false], [true, true, false], [fals
   const node = await db.node.create({ data: { memoryId: memory.id, loc: 'no-abstract', name: 'No abstract', content: 'UNNEEDED'.repeat(16_384), abstract: null, data: { note: 'VISIBLE DATA' } } });
   const server = createTestableMcpServer(adminAuth(), { sessionId: 'batch2774-empty' });
   if (encrypted) {
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memory.id, passphrase: 'synthetic2774' }, { db, roles: ['ADMIN'], userId: fx.admin.id } as Context);
+    await encryptWithSecret({}, { memoryRef: memory.id, passphrase: 'synthetic2774' }, { db, roles: ['ADMIN'], userId: fx.admin.id } as Context);
     if (!locked) expect(await server.callToolText('hadron_unlock_memory', { memoryUrn: memory.urn, passphrase: 'synthetic2774' })).toContain('unlocked');
     else sessionKeyCache.clear();
   }
