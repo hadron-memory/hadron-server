@@ -155,16 +155,17 @@ describe('#4141 cancelAppRun(ref:)', () => {
     expect((await db.appRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe('RUNNING');
   });
 
-  it('an ADMIN of ANOTHER org is FORBIDDEN on this org\'s run by PK and by URN, and the run is untouched', async () => {
+  it('an ADMIN of ANOTHER org is NOT_FOUND (#5037: as for a missing run) on this org\'s run by PK and by URN, and the run is untouched', async () => {
     const orgB = await db.organization.create({ data: { name: 'refs4141b', urn: 'refs4141b' } });
     const adminB = await db.user.create({ data: { email: 'adminb4141@example.com', name: 'AdminB' } });
     await db.orgMember.create({ data: { organizationId: orgB.id, userId: adminB.id, role: 'ADMIN' } });
     const ctx = { userId: adminB.id, roles: [] as Context['roles'] };
     const byPk = await cancel(runId, ctx);
     const byUrn = await cancel(composeAppRunUrn(appUrn, runId), ctx);
-    expect(code(byPk)).toBe('FORBIDDEN');
-    expect(code(byUrn)).toBe('FORBIDDEN');
+    expect(code(byPk)).toBe('NOT_FOUND');
+    expect(code(byUrn)).toBe('NOT_FOUND');
     expect(message(byUrn)).toBe(message(byPk));
+    expect(message(byPk)).toBe(message(await cancel(generateId(), ctx)));
     expect((await db.appRun.findUniqueOrThrow({ where: { id: runId } })).status).toBe('RUNNING');
   });
 
