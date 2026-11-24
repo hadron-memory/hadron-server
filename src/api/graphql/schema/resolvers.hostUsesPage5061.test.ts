@@ -71,11 +71,12 @@ async function refusal(p: Promise<unknown>): Promise<{ code: unknown; message: s
 }
 
 beforeAll(async () => {
+  // #3066: clean the worker's clone before the app starts (a retained rate-limit manifest refuses boot).
+  await cleanDb(db);
   server = createHttpServer(await createServer());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/graphql`;
 
-  await cleanDb(db);
   const n = generateId();
   org = await db.organization.create({ data: { name: 'Uses', urn: `uses5061-${n}.example` }, select: { id: true, urn: true } });
   manager = await db.user.create({ data: { handle: `u5061-mgr-${n}`, roles: ['READER'] }, select: { id: true } });
