@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { lintSpec, isSpecSubject } from './specLint.js';
+import { retirementBanner } from './retireSpecText.js';
 
 const rule = (body: string, extra: Record<string, unknown> = {}) =>
   ({ loc: 'cor:agt:100:03', name: 'Rule: A thing [cor:agt:100:03]', role: 'spec.rule', content: body, ...extra });
@@ -81,12 +82,67 @@ describe('#5109 sentence check: a restriction needs a reason', () => {
   });
   it('a node that is not a spec has no findings, whatever it says', () => {
     expect(lintSpec({ loc: 'notes:todo', name: 'Todo', content: 'Never do this.' })).toEqual([]);
-    expect(lintSpec({ loc: 'cor:agt:100:03', role: 'spec.rule', content: null })).toEqual([expect.objectContaining({ rule: 'RULE_WHY_MISSING' })]);
+    // A node with no text is an unwritten spec (a placeholder), not a malformed one.
+    for (const content of [null, '', '  \n ']) expect(lintSpec({ loc: 'cor:agt:100:03', role: 'spec.rule', content })).toEqual([]);
   });
   it('findings are capped and the sentence is trimmed', () => {
     const many = Array.from({ length: 300 }, (_, i) => `- Item ${i} is never shown.`).join('\n');
     expect(lintSpec(spec(`# X\n\n${many}\n`))).toHaveLength(200);
     const long = lintSpec(spec(`# X\n\nIt is never ${'a'.repeat(500)}.\n`));
     expect(long[0].sentence!.length).toBeLessThanOrEqual(300);
+  });
+});
+
+describe('#5109 fold: blind P2-1/P2-2, local P2 and P3s', () => {
+  const spec = (body: string) => ({ loc: 'cor:api:120:03', name: 'Feature: X [cor:api:120:03]', role: 'spec.feature', content: body });
+
+  it('blind P2-1: a Why heading inside a fenced code block is not a Why section', () => {
+    const body = '# Rule Spec: A\n\n## The Rule\n\nIt checks.\n\n```\n## Why We Need This Rule\n\nquoted template\n```\n';
+    expect(lintSpec(rule(body))).toEqual([expect.objectContaining({ rule: 'RULE_WHY_MISSING' })]);
+    // and a real, empty Why after a fenced one reports the real heading line, not the quoted one
+    const both = '# R\n\n```\n## Why We Need This Rule\n```\n\n## Why We Need This Rule\n\n## Scenarios\n';
+    expect(lintSpec(rule(both))).toEqual([expect.objectContaining({ rule: 'RULE_WHY_EMPTY', line: 7 })]);
+  });
+
+  it('blind P2-2: a ### subheading stays inside the Why section; its text is neither a restriction nor ends the section', () => {
+    const body = '# Rule Spec: A\n\n## Why We Need This Rule\n\nWe cap budgets.\n\n### Rationale\n\nOnly the owner may raise the cap, never an agent.\n\n## Scenarios\n\nOne.\n';
+    expect(lintSpec(rule(body))).toEqual([]);
+    // a Why that holds only a ### subsection is not empty
+    expect(lintSpec(rule('# R\n\n## Why We Need This Rule\n\n### Why\n\nBecause.\n'))).toEqual([]);
+    // text after the next ## heading is body again
+    expect(lintSpec(rule('# R\n\n## Why We Need This Rule\n\nok.\n\n## Scenarios\n\nIt is never sent.\n')).map((f) => f.sentence)).toEqual(['It is never sent.']);
+  });
+
+  it('local P2: pathological text is linear (repeated unclosed openers, 400 KB, well under a second)', () => {
+    for (const unit of ['](', '[[', '`', '<!--', '](ruling ', '.']) {
+      const text = `# Feature Spec: X\n\nIt is never ${unit.repeat(Math.ceil(400_000 / unit.length))}\n`;
+      const t0 = performance.now();
+      lintSpec(spec(text));
+      lintSpec(rule(`# R\n\n## Why We Need This Rule\n\n${unit.repeat(Math.ceil(400_000 / unit.length))}\n`));
+      expect(performance.now() - t0, `unit ${JSON.stringify(unit)}`).toBeLessThan(1000);
+    }
+  });
+
+  it('local P3-3: a temporal "since" is not a reason; a causal one is', () => {
+    expect(lintSpec(spec('# X\n\nIt is never sent since 2026-11-01.\n'))).toHaveLength(1);
+    expect(lintSpec(spec('# X\n\nIt is never sent since v0.38.0.\n'))).toHaveLength(1);
+    expect(lintSpec(spec('# X\n\nIt is never sent since nobody reads it.\n'))).toEqual([]);
+  });
+
+  it('blind P3-5: the retirement banner is the one retireSpecText writes, only under the title', () => {
+    const body = (form: 'RESCIND' | 'SUPERSEDE', withdrawn: boolean) =>
+      `# Rule Spec: A\n\n${retirementBanner({ form, withdrawn, date: '2026-11-01', reason: 'x', successor: null })}\n\nIt is never sent.\n`;
+    for (const [form, withdrawn] of [['SUPERSEDE', false], ['RESCIND', false], ['RESCIND', true]] as const) {
+      expect(lintSpec(rule(body(form, withdrawn)))).toEqual([]);
+    }
+    // a banner QUOTED far below the title does not retire the spec
+    const far = '# Rule Spec: A\n\n' + 'filler.\n\n'.repeat(20) + '> **⚠️ Superseded** (quoted).\n';
+    expect(lintSpec(rule(far)).map((f) => f.rule)).toEqual(['RULE_WHY_MISSING']);
+  });
+
+  it('blind P3-4: the human-facing messages are the ones the CLI will show', () => {
+    expect(lintSpec(rule('# R\n\nBody.\n'))[0].message).toBe('A Rule spec needs a "## Why We Need This Rule" section.');
+    expect(lintSpec(rule('# R\n\n## Why We Need This Rule\n\n## S\n'))[0].message).toBe('The "## Why We Need This Rule" section is empty.');
+    expect(lintSpec(spec('# X\n\nIt is never sent.\n'))[0].message).toMatch(/restricts something and gives no reason/);
   });
 });
