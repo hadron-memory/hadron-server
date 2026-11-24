@@ -30,6 +30,7 @@ export type { Context };
 import { dateTimeScalar } from './dateTimeScalar.js';
 import { typeResolvers } from './resolvers.types.js';
 
+import { nodeAuthoringCheckQueries } from './resolvers.nodeAuthoringCheck.js';
 import { nodeQueries } from './resolvers.query.node.js';
 import { recoveryQueries, recoveryMutations, recoveryFieldResolvers } from './resolvers.recovery.js';
 import { skillQueries } from './resolvers.query.skill.js';
@@ -210,6 +211,7 @@ export const resolvers = {
     ...passkeyQueries,
     ...recoveryQueries,
     ...nodeQueries,
+    ...nodeAuthoringCheckQueries,
     ...specCorpusQueries,
     ...specDocumentQueries,
     ...nodeApprovalQueries,
