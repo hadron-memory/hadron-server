@@ -536,7 +536,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
         login,
         sub: user.id,
         githubUsername: user.githubUsername ?? undefined,
-        roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+        roles: user.roles,
         githubId: ghUser.id,
       });
 
@@ -711,7 +711,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       const jwt = await signJwt({
         login,
         sub: user.id,
-        roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+        roles: user.roles,
         ...(user.email ? { email: user.email } : {}),
       });
 
@@ -878,7 +878,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       const jwt = await signJwt({
         login,
         sub: user.id,
-        roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+        roles: user.roles,
         ...(user.email ? { email: user.email } : {}),
       });
 
@@ -1068,7 +1068,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
         const jwt = await signJwt({
           login,
           sub: user.id,
-          roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+          roles: user.roles,
           ...(user.email ? { email: user.email } : {}),
         });
         const { exp } = decodeJwt(jwt);
@@ -1165,7 +1165,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
       login: redeemed.login,
       ...(redeemed.signInId ? { sid: redeemed.signInId } : {}),
       sub: user.id,
-      roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+      roles: user.roles,
       ...(user.githubUsername ? { githubUsername: user.githubUsername } : {}),
       ...(user.githubId != null ? { githubId: user.githubId } : {}),
       ...(user.email ? { email: user.email } : {}),

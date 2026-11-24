@@ -23,6 +23,7 @@ import {
   consumeActionTicket,
   consumeQuota,
   defaultQuotaLimit,
+  type QuotaScopeKind,
 } from '../../../jobs/appRuns.js';
 import { isResendToolConfigured, maskEmailAddress, sendResendEmail } from '../../resendToolClient.js';
 import { decryptResendCredentials, isPlatformResendAllowed } from '../../resendSenders.js';
@@ -46,7 +47,7 @@ function idempotencyKey(runId: string, to: string, subject: string, text: string
   return `email:${runId}:${digest.slice(0, 32)}`;
 }
 
-async function refundEmailQuota(db: PrismaClient, scopeKind: 'app' | 'org', scopeId: string): Promise<void> {
+async function refundEmailQuota(db: PrismaClient, scopeKind: QuotaScopeKind, scopeId: string): Promise<void> {
   await db.quotaCounter.updateMany({
     where: { scopeKind, scopeId, action: 'email.send', window: 'day', used: { gt: 0 } },
     data: { used: { decrement: 1 } },

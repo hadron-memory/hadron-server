@@ -364,6 +364,8 @@ async function runDeletionTxn(
       // members, installs, runs, schedules, webhooks, pending setups — and
       // their Worker castings (Worker.appId cascades).
       await tx.app.deleteMany({ where: { ownerUserId: targetUserId } });
+      // #5074: the person's own daily counters (`user` scope; no foreign key, so no cascade). Idempotent under retry.
+      await tx.quotaCounter.deleteMany({ where: { scopeKind: 'user', scopeId: targetUserId } });
       // Worker castings of the target's agents: `Worker.agentId` is ON DELETE
       // RESTRICT (#974), so any surviving casting would fail the agent delete
       // below with P2003 and roll back the whole erasure. In v1 this set is

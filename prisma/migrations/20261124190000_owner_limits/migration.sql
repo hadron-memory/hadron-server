@@ -28,7 +28,7 @@ ALTER TABLE "owner_limits" ADD CONSTRAINT "owner_limits_organization_id_fkey" FO
 -- AddForeignKey
 ALTER TABLE "owner_limits" ADD CONSTRAINT "owner_limits_owner_user_id_fkey" FOREIGN KEY ("owner_user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
--- #5009 (Billing A7a): the owner-limit rows. One source, shared verbatim with migration 20261124163000_owner_limits.
+-- #5009 (Billing A7a): the owner-limit rows. One source, shared verbatim with migration 20261124190000_owner_limits.
 -- Idempotent: drop-then-add.
 ALTER TABLE owner_limits DROP CONSTRAINT IF EXISTS chk_owner_limits_one_owner;
 ALTER TABLE owner_limits ADD CONSTRAINT chk_owner_limits_one_owner

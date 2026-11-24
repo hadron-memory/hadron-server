@@ -12,6 +12,7 @@ import { typeDefs } from './typeDefs.js';
 import { resolveRunSecret } from '../../../lib/runner/secrets.js';
 import { currentAppSecretValue, lockSecretRow, MAX_SECRETS_PER_APP, MAX_SECRET_VERSIONS } from '../../../lib/secrets/appSecrets.js';
 import { readdirSync, readFileSync } from 'node:fs';
+import { inFreshRolledBackSession, shadowTable } from '../../../test/freshSession5089.js';
 
 let ownerId: string;
 let memberId: string;
@@ -425,6 +426,82 @@ describe('App secrets S2 public acceptance', () => {
     await expect(db.secretEvent.delete({ where: { id: le.id } })).rejects.toBeTruthy();
   });
 
+  // #5089: the guards read their proof tables schema-qualified, so a session TEMP table of the same name cannot stand in for one.
+  // Each pin runs the real trigger on a fresh connection (src/test/freshSession5089.ts) with the shadow in place; it is refused.
+  it('#5089: a temp secret_owner_tombstones cannot forge the one-year purge of an event', async () => {
+    const owner = `gone-${generateId()}`;
+    const ev = await db.secretEvent.create({ data: { ownerType: 'app', ownerId: owner, secretId: 's', secretName: 'n', kind: 'STORE', outcome: 'OK' } });
+    await expect(inFreshRolledBackSession(async (c) => {
+      await shadowTable(c, 'secret_owner_tombstones');
+      await c.query(`INSERT INTO pg_temp.secret_owner_tombstones (owner_type, owner_id, deleted_at) VALUES ('app', $1, now() - interval '400 days')`, [owner]);
+      await c.query('DELETE FROM secret_events WHERE id = $1', [ev.id]);
+    })).rejects.toThrow(/Secret events are append-only/);
+    expect(await db.secretEvent.count({ where: { id: ev.id } })).toBe(1);
+  });
+
+  it('#5089: a temp secret_events cannot hide an owner\'s events from the tombstone guard', async () => {
+    const owner = `old-${generateId()}`;
+    await db.secretOwnerTombstone.create({ data: { ownerType: 'app', ownerId: owner, deletedAt: new Date(Date.now() - 400 * 86_400_000) } });
+    await db.secretEvent.create({ data: { ownerType: 'app', ownerId: owner, secretId: 's', secretName: 'n', kind: 'STORE', outcome: 'OK' } });
+    await expect(inFreshRolledBackSession(async (c) => {
+      await shadowTable(c, 'secret_events');
+      await c.query(`DELETE FROM secret_owner_tombstones WHERE owner_type = 'app' AND owner_id = $1`, [owner]);
+    })).rejects.toThrow(/owner tombstone is written once/);
+    expect(await db.secretOwnerTombstone.count({ where: { ownerId: owner } })).toBe(1);
+  });
+
+  it('#5089: a temp secret_events cannot make an App\'s hard delete skip its tombstone', async () => {
+    await create(memberId);
+    const written = await inFreshRolledBackSession(async (c) => {
+      await shadowTable(c, 'secret_events');
+      await c.query('DELETE FROM apps WHERE id = $1', [appId]);
+      return (await c.query('SELECT count(*)::int AS n FROM public.secret_owner_tombstones WHERE owner_id = $1', [appId])).rows[0].n as number;
+    });
+    expect(written).toBe(1);
+  });
+
+  it('#5089: a temp apps cannot make a LIVE App look gone to the event purge guard', async () => {
+    await create(memberId);
+    await db.secretOwnerTombstone.create({ data: { ownerType: 'app', ownerId: appId, deletedAt: new Date(Date.now() - 400 * 86_400_000) } });
+    const ev = (await db.secretEvent.findMany({ where: { ownerId: appId } }))[0]!;
+    await expect(inFreshRolledBackSession(async (c) => {
+      await shadowTable(c, 'apps');
+      await c.query('DELETE FROM secret_events WHERE id = $1', [ev.id]);
+    })).rejects.toThrow(/Secret events are append-only/);
+    expect(await db.secretEvent.count({ where: { id: ev.id } })).toBe(1);
+  });
+
+  it('#5089: a temp secret_owner_tombstones cannot swallow the tombstone an App\'s hard delete writes', async () => {
+    await create(memberId);
+    const written = await inFreshRolledBackSession(async (c) => {
+      await shadowTable(c, 'secret_owner_tombstones');
+      await c.query('DELETE FROM apps WHERE id = $1', [appId]);
+      return (await c.query('SELECT count(*)::int AS n FROM public.secret_owner_tombstones WHERE owner_id = $1', [appId])).rows[0].n as number;
+    });
+    expect(written).toBe(1);
+  });
+
+  it('#5089: a temp secrets cannot make an App\'s hard delete leave its real secrets behind', async () => {
+    await create(memberId);
+    const left = await inFreshRolledBackSession(async (c) => {
+      await shadowTable(c, 'secrets');
+      await c.query('DELETE FROM apps WHERE id = $1', [appId]);
+      return (await c.query('SELECT count(*)::int AS n FROM public.secrets WHERE owner_type = $1 AND owner_id = $2', ['app', appId])).rows[0].n as number;
+    });
+    expect(left).toBe(0);
+  });
+
+  it('#5089: a temp secrets cannot make a version belong to an App that does not own its secret', async () => {
+    const real = await db.secret.create({ data: { ownerType: 'user', ownerId: memberId, name: 'mine', kind: 'generic', metadata: {}, valueEncrypted: 'x' } });
+    await expect(inFreshRolledBackSession(async (c) => {
+      await shadowTable(c, 'secrets');
+      await c.query('INSERT INTO pg_temp.secrets SELECT * FROM public.secrets WHERE id = $1', [real.id]);
+      await c.query(`UPDATE pg_temp.secrets SET owner_type = 'app', owner_id = $2 WHERE id = $1`, [real.id, appId]);
+      await c.query(`INSERT INTO secret_versions (id, secret_id, version_no, value_encrypted, app_id, key_version, size_bytes) VALUES ($1, $2, 1, 'x', $3, 1, 1)`, [generateId(), real.id, appId]);
+    })).rejects.toThrow(/belongs to the App that owns its secret/); // this guard's own refusal, not another constraint's
+    expect(await db.secretVersion.count({ where: { secretId: real.id } })).toBe(0);
+  });
+
   // ── deployment files ────────────────────────────────────────────────────────────────────────────────────────────
   it('the serve role cannot update or truncate secret_events; the snapshot script leaves out secret_versions; the migration carries the invariants verbatim', () => {
     const rr = readFileSync(new URL('../../../../prisma/runtime-role.sql', import.meta.url), 'utf8');
@@ -434,7 +511,13 @@ describe('App secrets S2 public acceptance', () => {
     const sh = readFileSync(new URL('../../../../scripts/dev-from-prod-snapshot.sh', import.meta.url), 'utf8');
     expect(sh).toMatch(/--exclude-table='secret_versions'/);
     const inv = readFileSync(new URL('../../../../prisma/secret-versions-invariants.sql', import.meta.url), 'utf8');
-    const mig = readFileSync(new URL('../../../../prisma/migrations/20261114120000_app_secret_versions/migration.sql', import.meta.url), 'utf8');
+    // #5089: the newest migration carrying the file is the carrier (the original carried the older, unqualified text).
+    const migDir = new URL('../../../../prisma/migrations/', import.meta.url);
+    const first = inv.split('\n')[0]!;
+    const carrier = readdirSync(migDir).sort().reverse()
+      .find((d) => { try { return readFileSync(new URL(`${d}/migration.sql`, migDir), 'utf8').includes(first); } catch { return false; } });
+    expect(carrier).toBeTruthy();
+    const mig = readFileSync(new URL(`${carrier}/migration.sql`, migDir), 'utf8');
     expect(mig).toContain(inv);
     // `prisma migrate diff` prints an update banner after its script; pasting stdout once put it in this file and the migration failed to apply.
     expect(mig).not.toMatch(/[┌│└─]|Update available/);
