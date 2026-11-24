@@ -51,7 +51,7 @@ const registerWithWorktree = () =>
 const starts = () => db.hostOperation.findMany({ where: { type: 'worker.start' } });
 const unassigned = () =>
   db.agentTask.create({ data: { appId: f.app.id, title: 'Do it', ownerUserId: f.manager.id, closeSessionWhenDone: false }, select: { id: true } });
-const assignKit = (taskId: string) => M.assignAgentTask({}, { taskId, assignee: { worker: f.kit.id } }, ctx(f.manager.id));
+const assignKit = (taskId: string) => M.assignAgentTask({}, { taskRef: taskId, assignee: { worker: f.kit.id } }, ctx(f.manager.id));
 
 beforeEach(async () => {
   f = await setUpResetFixture();
@@ -124,7 +124,7 @@ describe('an open task keeps the worker up (G7: no parking)', () => {
     expect(await sweepSessionEndRequests(db, new Date(Date.now() + 60 * MIN))).toBe(0);
     expect((await db.session.findUniqueOrThrow({ where: { id: f.session.id } })).endedAt).toBeNull();
     // The second one is the last: finishing it asks.
-    await f.asWorker(f.kit, () => M.startAgentTask({}, { taskId: second.id }, ctx(f.holder.id)));
+    await f.asWorker(f.kit, () => M.startAgentTask({}, { taskRef: second.id }, ctx(f.holder.id)));
     await f.finish(second.id);
     expect(await requestOf(second.id)).toMatchObject({ sessionId: f.session.id, resolution: null });
     expect(await resets()).toBe(0);
@@ -161,9 +161,9 @@ describe('an open task keeps the worker up (G7: no parking)', () => {
       });
     const review = await child('Review');
     const merge = await child('Merge');
-    await f.asWorker(f.ada, () => M.startAgentTask({}, { taskId: review.id }, ctx(f.holder.id)));
+    await f.asWorker(f.ada, () => M.startAgentTask({}, { taskRef: review.id }, ctx(f.holder.id)));
     await f.finish(review.id, f.ada);
-    await f.asWorker(f.kit, () => M.cancelAgentTask({}, { taskId: merge.id }, ctx(f.holder.id)));
+    await f.asWorker(f.kit, () => M.cancelAgentTask({}, { taskRef: merge.id }, ctx(f.holder.id)));
     expect(await db.taskSessionEndRequest.count({ where: { workerId: f.kit.id } })).toBe(0);
     expect((await db.session.findUniqueOrThrow({ where: { id: f.session.id } })).endedAt).toBeNull();
     // Only then does Kit finish its own task, its last one.
@@ -303,8 +303,8 @@ describe('the next assignment starts a fresh run (cor:agt:070:08)', () => {
     // Moved by hand to a person and back to Kit during a second pause: the latest assignment is a hand one, which
     // names no family (launchAssignee passes none either), so the lift starts Kit as the host launches it.
     await M.setTeamPause({}, { appRef: f.app.id, paused: true }, ctx(f.manager.id));
-    await M.reassignAgentTask({}, { taskId: matched.id, assignee: { user: f.holder.id } }, ctx(f.manager.id));
-    await M.reassignAgentTask({}, { taskId: matched.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id));
+    await M.reassignAgentTask({}, { taskRef: matched.id, assignee: { user: f.holder.id } }, ctx(f.manager.id));
+    await M.reassignAgentTask({}, { taskRef: matched.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id));
     expect(await starts()).toEqual([]);
     await M.setTeamPause({}, { appRef: f.app.id, paused: false }, ctx(f.manager.id));
     expect((await starts()).map((o) => o.args)).toEqual([{ workerId: f.kit.id, worktree: 'hadron-server/kit', family: 'codex', taskId: matched.id }]);
@@ -329,7 +329,7 @@ describe('the next assignment starts a fresh run (cor:agt:070:08)', () => {
 describe('the last task reassigned away ends the session too (Peter, team chat #108497)', () => {
   const F = resolvers as any;
   const reassign = (taskId: string, to: { id: string }, c = ctx(f.manager.id)) =>
-    M.reassignAgentTask({}, { taskId, assignee: { worker: to.id } }, c);
+    M.reassignAgentTask({}, { taskRef: taskId, assignee: { worker: to.id } }, c);
   const requestsOf = (taskId: string) => db.taskSessionEndRequest.findMany({ where: { taskId }, orderBy: [{ requestedAt: 'asc' }, { id: 'asc' }] });
 
   it('reassigning Kit\'s last open task to Ada asks Kit to end its session, wakes it (END_SESSION), and requests no reset', async () => {
@@ -377,7 +377,7 @@ describe('the last task reassigned away ends the session too (Peter, team chat #
     await db.worker.update({ where: { id: f.kit.id }, data: { leaveAlone: false, leaveAloneReason: null, leaveAloneAt: null } });
     // To a person: Kit still loses its last task.
     const toPerson = await f.startedTask();
-    await M.reassignAgentTask({}, { taskId: toPerson.id, assignee: { user: f.holder.id } }, ctx(f.manager.id));
+    await M.reassignAgentTask({}, { taskRef: toPerson.id, assignee: { user: f.holder.id } }, ctx(f.manager.id));
     expect(await requestsOf(toPerson.id)).toMatchObject([{ workerId: f.kit.id }]);
   });
 
@@ -403,7 +403,7 @@ describe('the last task reassigned away ends the session too (Peter, team chat #
     expect(await F.AgentTask.sessionEndRequest(finished, {}, ctx(f.holder.id))).toBeNull();
     // Moved to a person: the task shows nothing either.
     const p = await f.startedTask();
-    const toPerson = await M.reassignAgentTask({}, { taskId: p.id, assignee: { user: f.holder.id } }, ctx(f.manager.id));
+    const toPerson = await M.reassignAgentTask({}, { taskRef: p.id, assignee: { user: f.holder.id } }, ctx(f.manager.id));
     expect(await F.AgentTask.sessionEndRequest(toPerson, {}, ctx(f.manager.id))).toBeNull();
   });
 
@@ -448,7 +448,7 @@ describe('the last task reassigned away ends the session too (Peter, team chat #
     const t = await f.startedTask();
     await reassign(t.id, f.ada);
     await reassign(t.id, f.kit);
-    await f.asWorker(f.kit, () => M.startAgentTask({}, { taskId: t.id }, ctx(f.holder.id))).catch(() => undefined);
+    await f.asWorker(f.kit, () => M.startAgentTask({}, { taskRef: t.id }, ctx(f.holder.id))).catch(() => undefined);
     const finished = await f.finish(t.id);
     const all = await requestsOf(t.id);
     expect(all.map((r) => r.workerId)).toEqual([f.kit.id, f.kit.id]);

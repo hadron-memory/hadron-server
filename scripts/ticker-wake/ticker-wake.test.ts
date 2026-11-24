@@ -54,7 +54,7 @@ interface Fake {
   retryReply: (() => string) | null;
   /** The worker's checkStatus.lastCheckedAt as the server reports it; null = never checked. */
   lastCheckedAt: string | null;
-  /** agentTask(id) replies, by task id. */
+  /** agentTask(ref) replies, by task id. */
   tasks: Record<string, unknown>;
   evidenceQueries: string[];
   /** When set, the worker check-status read answers this GraphQL error. */
@@ -72,7 +72,7 @@ interface Fake {
   sessions: Record<string, Array<{ id: string; workerId: string; appId: string; endedAt: string | null }>>;
   sessionsError: string | null;
   sessionQueries: string[];
-  /** #1704: agentTeamEvents(taskId, alarmsOnly) replies, by task id. */
+  /** #1704: agentTeamEvents(taskRef, alarmsOnly) replies, by task id. */
   alarms: Record<string, unknown[]>;
   /** When set, the alarm read answers this GraphQL error. */
   alarmError: string | null;

@@ -43,8 +43,8 @@ const endSessionWakes = async (w: { id: string } = f.kit) =>
   ((await pendingTaskWakes(db, [w.id], new Date())).get(w.id) ?? []).filter((x) => x.event === 'END_SESSION').map((x) => x.taskId);
 /** The re-queued task given to Ada by hand and started by her. */
 const adaTakes = async (taskId: string) => {
-  await M.assignAgentTask({}, { taskId, assignee: { worker: f.ada.id } }, ctx(f.manager.id));
-  await f.asWorker(f.ada, () => M.startAgentTask({}, { taskId }, ctx(f.holder.id)));
+  await M.assignAgentTask({}, { taskRef: taskId, assignee: { worker: f.ada.id } }, ctx(f.manager.id));
+  await f.asWorker(f.ada, () => M.startAgentTask({}, { taskRef: taskId }, ctx(f.holder.id)));
 };
 
 beforeEach(async () => {

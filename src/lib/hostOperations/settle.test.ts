@@ -194,7 +194,7 @@ describe('an operation never collected is settled when its host lapses or its re
     const t = await db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: manager.id, assigneeWorkerId: kit.id, assignedAt: new Date(), closeSessionWhenDone: false }, select: { id: true } });
     const op = await issue('worker.start', { ...START, taskId: t.id });
     expect(await sweepUnreportedHostOperations(db)).toBe(0);
-    await M.cancelAgentTask({}, { taskId: t.id }, ctx(manager.id));
+    await M.cancelAgentTask({}, { taskRef: t.id }, ctx(manager.id));
     expect(await sweepUnreportedHostOperations(db)).toBe(1);
     expect(await opOf(op.id)).toMatchObject({ status: 'failed', collectedAt: null, failureReason: "The task this start was for is no longer the worker's open task." });
   });

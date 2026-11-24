@@ -70,7 +70,7 @@ describe('successful-field history', () => {
     c.taskWarningState = { spentMs: warnings.REQUEST_READ_BUDGET_MS + 50, gate: new Map(), registers: new Map(), team: new Map() };
     const as = <T,>(fn: () => Promise<T>) => runAsActor({ workerId: worker.id, agentId }, fn);
     const [id] = await parentsFor(1, { worker: worker.id }, as);
-    const task: { id: string } = await as<any>(() => M.finishAgentTask({}, { taskId: id, result: { outcome: 'succeeded' } }, c));
+    const task: { id: string } = await as<any>(() => M.finishAgentTask({}, { taskRef: id, result: { outcome: 'succeeded' } }, c));
     expect(c.taskWarnings?.[0].warning.register).toBeUndefined();
     await flush(c);
     expect(await history()).toHaveLength(1);
@@ -102,7 +102,7 @@ describe('successful-field history', () => {
     const s = new ApolloServer<Context>({ typeDefs, resolvers: badResolvers, plugins: [taskWarningsPlugin] });
     try {
       const [okId, badId] = await parentsFor(2);
-      const r = await s.executeOperation({ query: `mutation { ${field('ok', okId)} bad: finishAgentTask(taskId: "${badId}", result: { outcome: "succeeded" }) {id title} }` }, { contextValue: ctx() });
+      const r = await s.executeOperation({ query: `mutation { ${field('ok', okId)} bad: finishAgentTask(taskRef: "${badId}", result: { outcome: "succeeded" }) {id title} }` }, { contextValue: ctx() });
       expect(r.body.kind).toBe('single');
       const rows = await history();
       expect(await db.agentTask.count({ where: { id: { in: [okId, badId] }, status: 'finished' } })).toBe(2);
@@ -159,11 +159,11 @@ describe('successful-field history', () => {
     const [pid] = await parentsFor(1);
     const r = await graphql(`mutation { ${field('ok', pid)} }`);
     const taskId = (r.data as any).ok.id;
-    const rows = await Q.agentTeamEvents({}, { appRef: app.id, types: ['task.warning'], taskId }, ctx());
+    const rows = await Q.agentTeamEvents({}, { appRef: app.id, types: ['task.warning'], taskRef: taskId }, ctx());
     expect(rows).toHaveLength(1);
     await expect(Q.agentTeamEvents({}, { appRef: app.id, types: ['task.warning'] }, { ...ctx(), userId: outsider.id })).rejects.toThrow();
     const other = await db.app.create({ data: { ownerUserId: outsider.id, name: 'Other', urn: `history-other-${generateId()}` } });
-    await expect(Q.agentTeamEvents({}, { appRef: other.id, types: ['task.warning'], taskId }, ctx())).rejects.toThrow();
+    await expect(Q.agentTeamEvents({}, { appRef: other.id, types: ['task.warning'], taskRef: taskId }, ctx())).rejects.toThrow();
   });
 
   it('recording failure never changes the response and is not retried', async () => {
