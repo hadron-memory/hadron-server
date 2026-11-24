@@ -2214,6 +2214,60 @@ export const typeDefs = `#graphql
     balanceMicroCents: String!
   }
 
+  """
+  One owner limit of an organization or a person (hadron-server issue 5009): what may be held and how much of it is held now.
+  """
+  type OwnerLimitUsage {
+    "Which measure this is."
+    key: String!
+    "The limit in force, a base-10 integer string: the owner's own limit, else the deployment default for that kind of owner. Null means unlimited."
+    limit: String
+    "How much the owner holds now, a base-10 integer string, counted when asked for. A total only."
+    used: String!
+  }
+
+  input OwnerLimitInput {
+    key: String!
+    "A non-negative base-10 integer string. Null or omitted means unlimited, which lifts the deployment default."
+    limit: String
+  }
+
+  input SetOwnerLimitsInput {
+    "The organization, an id or a URN. Exactly one of orgRef and userRef."
+    orgRef: String
+    "The person, an id or a URN. Exactly one of orgRef and userRef."
+    userRef: ID
+    "The limits to write. Each key at most once."
+    limits: [OwnerLimitInput!]!
+    "When true, also delete the owner's limits for keys not named here."
+    replace: Boolean
+    "Narrows the deletion of replace to limits written with this source type. Refused without replace."
+    onlySourceType: String
+    "What set these limits, for example manual. Must not hold personal data: it is logged."
+    sourceType: String!
+    "Which one. Must not hold personal data: it is logged."
+    sourceId: String!
+    "Why. Must not hold personal data."
+    note: String!
+  }
+
+  input ClearOwnerLimitsInput {
+    "The organization, an id or a URN. Exactly one of orgRef and userRef."
+    orgRef: String
+    "The person, an id or a URN. Exactly one of orgRef and userRef."
+    userRef: ID
+    "The keys to clear. Omit for every key; an empty list is refused."
+    keys: [String!]
+    "Clear only limits written with this source type."
+    onlySourceType: String
+    "What cleared these limits. Must not hold personal data: it is logged."
+    sourceType: String!
+    "Which one. Must not hold personal data: it is logged."
+    sourceId: String!
+    "Why. Not stored, since the row is deleted. Must not hold personal data."
+    note: String!
+  }
+
   input SetAiModelPriceInput {
     provider: String!
     model: String!
@@ -12331,6 +12385,8 @@ export const typeDefs = `#graphql
     creditLedgerEntries(orgRef: String!, limit: Int, offset: Int): CreditLedgerEntryList!
     "One org's credit balance - SUM over the append-only ledger (spec 046). Org-ADMIN."
     creditBalance(orgRef: String!): CreditBalance!
+    "The owner limits of an organization or a person, one row per measure (hadron-server issue 5009). Give exactly one ref. An organization's: its ADMIN or OWNER. A person's: that person in their own session. A platform admin reads any."
+    ownerLimits(orgRef: String, userRef: ID): [OwnerLimitUsage!]!
   }
 
   """
@@ -13878,6 +13934,10 @@ export const typeDefs = `#graphql
     setAiModelPrice(input: SetAiModelPriceInput!): AiModelPrice!
     "Mint credits for an org - a positive grant ledger row (spec 046). PLATFORM ADMIN ONLY (self-grant risk); processor top-ups land here later."
     grantCredits(input: GrantCreditsInput!): CreditLedgerEntry!
+    "Set an owner's limits (hadron-server issue 5009). PLATFORM ADMIN ONLY. Returns the owner's limits after the change."
+    setOwnerLimits(input: SetOwnerLimitsInput!): [OwnerLimitUsage!]!
+    "Delete an owner's limits, so the deployment default applies again (hadron-server issue 5009). PLATFORM ADMIN ONLY. Returns the owner's limits after the change."
+    clearOwnerLimits(input: ClearOwnerLimitsInput!): [OwnerLimitUsage!]!
     "Author YOUR user-layer action-policy link (cor:acl:040:02, #510). Null clears (= no restriction)."
     updateMyPolicy(policy: JSON): User!
 

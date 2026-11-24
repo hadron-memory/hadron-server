@@ -19,6 +19,7 @@ import {
   deleteUserAccount,
   SoleOrgOwnerError,
 } from '../../../controller/operations/deleteUser.js';
+import { logOwnerLimitChanges, type OwnerLimitChange } from '../../../lib/ownerLimits/changes.js';
 import { softDeleteOrganizationCore } from '../../../controller/operations/softDeleteOrganization.js';
 import { dispatchChatToolTeardown } from '../../../lib/chatToolTeardown.js';
 import { validateOrgRoot } from '../../../lib/org/orgRoot.js';
@@ -443,15 +444,17 @@ export const orgMutations = {
       // (#677) — the ONE org soft-delete cascade, shared with deleteUser's
       // sole-member-org branch (see softDeleteOrganizationCore for the
       // idempotency + secret-sweep rationale).
+      const limitChanges: OwnerLimitChange[] = [];
       const teardowns = await withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: resolvedId }],
         async (txCtx) => { requireRole(txCtx, 'ADMIN'); },
-        (tx) => softDeleteOrganizationCore(tx, resolvedId, undefined, ctx.userId ?? ctx.clientId ?? null),
+        (tx) => softDeleteOrganizationCore(tx, resolvedId, undefined, ctx.userId ?? ctx.clientId ?? null, limitChanges),
         { lockMode: 'exclusive', allowDeletedOrg: true },
       );
       // #4828: after the commit, once authorization has been judged, ask the Telegram and Slack tools to drop their side.
       dispatchChatToolTeardown(teardowns);
+      logOwnerLimitChanges(ctx.userId ?? ctx.clientId ?? null, limitChanges);
       return true;
     },
 

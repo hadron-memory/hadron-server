@@ -1097,3 +1097,6 @@ ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
 ALTER TABLE chat_tool_teardown_intents DROP CONSTRAINT IF EXISTS chk_chat_tool_teardown_state;
 ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_state
   CHECK (state IN ('PENDING', 'CONFIRMED', 'CAPPED'));
+
+-- #5009 (Billing A7a): the owner-limit rows.
+\ir owner-limit-invariants.sql

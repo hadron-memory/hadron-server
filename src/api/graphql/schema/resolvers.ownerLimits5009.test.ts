@@ -211,6 +211,7 @@ describe('#5009 setOwnerLimits and clearOwnerLimits', () => {
 
   it.each<[string, Record<string, unknown>]>([
     ['an unknown key', { keys: ['nodez'] }],
+    ['an inherited key name', { keys: ['toString'] }],
     ['an empty key list, which is not every key', { keys: [] }],
     ['a duplicate key', { keys: ['nodes', 'nodes'] }],
     ['both refs', { orgRef: 'x' }],
@@ -324,23 +325,33 @@ describe('#5009 the rows end with their owner', () => {
       [[p, 'nodes', 'owner-deleted', p], [solo, 'apps', 'owner-deleted', p]].sort());
   });
 
-  it('deleteUser also removes a row that committed while the deletion waited', async () => {
-    let del!: Promise<unknown>;
+  /** Hold the person's authority anchor, start `act`, prove it waits there, then commit a limit row it cannot see. */
+  async function rowDuringWait(act: () => Promise<unknown>) {
+    let running!: Promise<unknown>;
     await db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext('authorization:user'), hashtext(${p}))`;
-      del = deleteUserAccount(db, { targetUserId: p, actorUserId: p });
-      del.catch(() => {});
+      running = act();
+      running.catch(() => {});
       for (const until = Date.now() + 8_000; ;) {
         const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
           AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`;
         if (n > 0n) break;
-        if (Date.now() > until) throw new Error('the deletion never waited');
+        if (Date.now() > until) throw new Error('the operation never waited');
         await new Promise((r) => setTimeout(r, 5));
       }
       await tx.ownerLimit.create({ data: { id: generateId(), ownerUserId: p, key: 'nodes', limitValue: 1n, sourceType: 's', sourceId: 'i', note: 'n' } });
     }, { timeout: 20_000 });
-    await del;
+    await running;
     expect(await db.ownerLimit.count({ where: { ownerUserId: p } })).toBe(0);
+  }
+
+  it('deleteUser also removes a row that committed while the deletion waited', () =>
+    rowDuringWait(() => deleteUserAccount(db, { targetUserId: p, actorUserId: p })));
+
+  it('mergeUsers also removes a row that committed while the merge waited', async () => {
+    const consentProof = await approvedMergeProof(db, p, q, admin);
+    await rowDuringWait(async () =>
+      orgMutations.mergeUsers({}, { input: { source: p, target: q, consentProof } }, { db, ...adminCtx() } as Context));
   });
 
   it('mergeUsers keeps the survivor rows and removes the other account rows', async () => {

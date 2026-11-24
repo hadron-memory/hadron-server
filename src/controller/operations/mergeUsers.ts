@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import { GraphQLError } from 'graphql';
+import { assertOwnerLimitSnapshotFresh, deleteOwnerLimits, logOwnerLimitChanges, type OwnerLimitChange } from '../../lib/ownerLimits/changes.js';
 import { AuthoritySnapshotStale, lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
 import { consumeUserMergeConsent, mergeConsentAlreadyApplied } from '../../lib/userMergeConsent.js';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
@@ -127,6 +128,8 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   resend_senders: ['created_by', 'updated_by'],
   scopes: ['created_by', 'updated_by', 'deleted_by'],
   secrets: ['created_by', 'updated_by'],
+  // #5009: the stamps follow the survivor; the rows themselves do not (mergeUsers deletes the source's).
+  owner_limits: ['created_by', 'updated_by'],
   urn_aliases: ['created_by'],
   users: ['created_by', 'updated_by', 'deleted_by'],
   // #1416 (R204): `retired_by` is the retirer's exact User.id; it follows the survivor like every actor stamp.
@@ -297,7 +300,10 @@ export async function mergeUsers(
   let aborted = false;
   for (let attempt = 1; ; attempt++) {
     try {
-      return await runMergeTxn(db, { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles, consentProof });
+      const limitChanges: OwnerLimitChange[] = [];
+      const merged = await runMergeTxn(db, { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles, consentProof }, limitChanges);
+      logOwnerLimitChanges(actorUserId ?? null, limitChanges);
+      return merged;
     } catch (e) {
       const serialization = isSerializationAbort(e);
       aborted ||= serialization;
@@ -401,6 +407,7 @@ async function assertSourceActorRowsFresh(
 async function runMergeTxn(
   db: PrismaClient,
   { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles = false, consentProof }: MergeUsersArgs,
+  limitChanges: OwnerLimitChange[],
 ): Promise<User> {
   return db.$transaction(async (tx) => {
     // Serialize two merges involving either account. Ref resolution happens
@@ -429,6 +436,7 @@ async function runMergeTxn(
         { extensions: { code: 'MERGE_SOURCE_HAS_PASSKEYS', passkeyCount: livePasskeys } });
     }
     await assertSourceActorRowsFresh(tx, db, sourceUserId);
+    await assertOwnerLimitSnapshotFresh(tx, db, [{ userId: sourceUserId }]);
     const consent = await consumeUserMergeConsent(tx, consentProof, sourceUserId, targetUserId, actorUserId);
     await refuseUsersInOpenAlarmChains(tx, sourceUserId, targetUserId);
 
@@ -708,6 +716,9 @@ async function runMergeTxn(
     // #1332: written BEFORE the reassignments below, because the content-validation report
     // trigger admits a reporter_user_id change only along a merge recorded here.
     await tx.userMerge.create({ data: { sourceUserId, targetUserId, mergedBy: actor, ...consent } });
+
+    // #5009: the survivor's owner limits stay and the source's are deleted (never re-owned: one row per owner and key).
+    limitChanges.push(...(await deleteOwnerLimits(tx, { userId: sourceUserId }, 'account-merge')));
 
     // Non-conflicting ownership, attribution, credential, and history links.
     // An optional third element names a lineage column: rows that carry one stay
