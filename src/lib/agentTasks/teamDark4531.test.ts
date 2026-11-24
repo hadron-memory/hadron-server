@@ -109,11 +109,12 @@ describe('#4531 S1 — an unacknowledged wake past the window opens one episode 
     expect(cora.oldestWakeAgeSeconds).toBeGreaterThanOrEqual(0);
   });
 
-  it('the boundary is the window: exactly 30 minutes opens nothing, one pass later does', async () => {
+  it('the boundary is the window: a wake exactly 1800 s old opens nothing, 1801 s does', async () => {
     await bind('Cora', { touched: after(-5) });
     await say('hello @cora', ['cora']);
-    expect(await evaluate(new Date(Date.now() + 29 * MIN))).toEqual([]);
-    expect(await evaluate(new Date(Date.now() + 31 * MIN))).toHaveLength(1);
+    await db.node.updateMany({ where: { messageChannelId: channel.id }, data: { createdAt: T0 } });
+    expect(await evaluate(new Date(T0.getTime() + 1800_000))).toEqual([]);
+    expect(await evaluate(new Date(T0.getTime() + 1801_000))).toHaveLength(1);
   });
 
   it('a second pass records nothing more', async () => {
@@ -145,6 +146,21 @@ describe('#4531 S2 — a coordinator with no turn since its session started is d
   it('a coordinator driven after its start is not dark', async () => {
     await bind('Cora', { startedMinAgo: 0, touched: after(20) });
     expect(await evaluate(after(40))).toEqual([]);
+  });
+
+  it('the no-turn boundary is the window: exactly 1800 s since the start opens nothing, 1801 s does', async () => {
+    await bind('Cora', { startedMinAgo: 0 });
+    expect(await evaluate(new Date(T0.getTime() + 1800_000))).toEqual([]);
+    expect(await evaluate(new Date(T0.getTime() + 1801_000))).toHaveLength(1);
+  });
+
+  it('a coordinator still silent long past the session idle window does not "recover": the episode stays open', async () => {
+    await bind('Cora', { startedMinAgo: 0 });
+    expect(await evaluate(after(40))).toHaveLength(1);
+    expect(await evaluate(after(60 * 30))).toEqual([]); // 30 hours: past the default 24 h idle window
+    expect(await recoveredEvents()).toHaveLength(0);
+    const [ep] = await episodes();
+    expect(ep.endedAt).toBeNull();
   });
 
   it('a NON-coordinator with no turn does not open an episode on its own', async () => {
@@ -207,6 +223,12 @@ describe('#4531 (b) — work is waiting while no worker has been driven', () => 
     await bind('Liam', { touched: after(-60) });
     await bind('Tove', { touched: after(35) });
     await queued(after(-1));
+    expect(await evaluate(after(40))).toEqual([]);
+  });
+
+  it('a BLOCKED pending task is not queued work (the matcher cannot take it)', async () => {
+    await bind('Liam', { touched: after(-60) });
+    await db.agentTask.create({ data: { appId: app.id, title: 'Blocked', ownerUserId: user.id, createdAt: after(-60), blocked: true } });
     expect(await evaluate(after(40))).toEqual([]);
   });
 
@@ -295,8 +317,8 @@ describe('#4531 S6 — two evaluators, one alarm', () => {
   it('raiseTeamDark itself is guarded by the database (a direct second raise inserts nothing)', async () => {
     await bind('Cora', { touched: after(-5) });
     const mod = await teamDark();
-    const a = await mod.raiseTeamDark(db, app.id, { reason: 'wake-unacked', workerCount: 3, darkWorkerCount: 1, oldestWakeAgeSeconds: 2400, waitingSeconds: null }, after(40));
-    const b = await mod.raiseTeamDark(db, app.id, { reason: 'wake-unacked', workerCount: 3, darkWorkerCount: 1, oldestWakeAgeSeconds: 2400, waitingSeconds: null }, after(40));
+    const a = await mod.raiseTeamDark(db, app.id, { reason: 'wake-unacked', workerCount: 3, darkWorkerCount: 1, oldestWakeAgeSeconds: 2400, waitingSeconds: null, windowSeconds: 1800 }, after(40));
+    const b = await mod.raiseTeamDark(db, app.id, { reason: 'wake-unacked', workerCount: 3, darkWorkerCount: 1, oldestWakeAgeSeconds: 2400, waitingSeconds: null, windowSeconds: 1800 }, after(40));
     expect([a, b].filter(Boolean)).toHaveLength(1);
     expect(await darkEvents()).toHaveLength(1);
   });
@@ -363,5 +385,57 @@ describe('#4531 — team.dark is not acknowledgeable', () => {
     await say('hello @cora', ['cora']);
     const [id] = await evaluate(after(40));
     expect(await db.agentTeamAlarmSchedule.count({ where: { eventId: id } })).toBe(0);
+  });
+});
+
+describe('#4531 — the end paths', () => {
+  it('an App that leaves the live set ends its open episode with no team.recovered, never before it opened', async () => {
+    await bind('Cora', { touched: after(-5) });
+    await say('hello @cora', ['cora']);
+    await evaluate(after(40));
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: after(41) } });
+    await evaluate(after(42));
+    const [ep] = await episodes();
+    expect(ep.endedAt?.getTime()).toBe(after(42).getTime());
+    expect(ep.recoveredEventId).toBeNull();
+    expect(await recoveredEvents()).toHaveLength(0);
+    // a clock behind the opening is clamped to it (the row's CHECK needs ended >= opened)
+    await db.$executeRaw`UPDATE team_dark_episodes SET ended_at = NULL WHERE app_id = ${app.id}`;
+    await evaluate(after(10));
+    const [again] = await episodes();
+    expect(again.endedAt?.getTime()).toBe(after(40).getTime());
+  });
+
+  it('raiseTeamDark records nothing for an App that is no longer installed', async () => {
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: after(1) } });
+    const mod = await teamDark();
+    const id = await mod.raiseTeamDark(db, app.id, { reason: 'wake-unacked', workerCount: 3, darkWorkerCount: 1, oldestWakeAgeSeconds: 2400, waitingSeconds: null, windowSeconds: 1800 }, after(40));
+    expect(id).toBeNull();
+    expect(await darkEvents()).toHaveLength(0);
+    expect(await episodes()).toHaveLength(0);
+  });
+
+  it('the alarm is in effect while its episode is open and ended once it recovers (alarmEpisodeEnds)', async () => {
+    await bind('Cora', { touched: after(-5) });
+    await say('hello @cora', ['cora']);
+    const [id] = await evaluate(after(40));
+    const { alarmEpisodeEnds } = await import('./stall.js');
+    const alarm = { id, taskId: null, type: 'team.dark', episodeStart: null, raisedAt: after(40), appId: app.id };
+    expect((await alarmEpisodeEnds(db as never, [alarm], after(41))).has(id)).toBe(false);
+    await ackWake('Cora', after(41));
+    await evaluate(after(42));
+    expect((await alarmEpisodeEnds(db as never, [alarm], after(43))).get(id)?.getTime()).toBe(after(42).getTime());
+  });
+
+  it('the alarm payload carries the window from the state, not a constant', async () => {
+    await bind('Cora', { touched: after(-5) });
+    const mod = await teamDark();
+    const id = await mod.raiseTeamDark(db, app.id, { reason: 'work-waiting', workerCount: 3, darkWorkerCount: 0, oldestWakeAgeSeconds: null, waitingSeconds: 2400, windowSeconds: 900 }, after(40));
+    expect(((await db.agentTeamEvent.findUniqueOrThrow({ where: { id: id as string } })).payload as any).windowMinutes).toBe(15);
+  });
+
+  it('evidenceOf refuses a state that is not dark', async () => {
+    const mod = await teamDark();
+    expect(() => mod.evidenceOf({ dark: false, reason: null, windowSeconds: 1800, workers: [], darkWorkerIds: [], waitingSeconds: null })).toThrow();
   });
 });

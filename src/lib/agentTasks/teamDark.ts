@@ -38,9 +38,8 @@
 
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
-import { loadLastEventBySession, recentlyTouchedFilter, sessionActivityAt, toNaiveUtc } from '../sessionActivity.js';
+import { loadLastEventBySession, OPEN_SESSION_SCAN_CAP, sessionActivityAt, toNaiveUtc } from '../sessionActivity.js';
 import { loadWorkerCheckStatuses } from '../workerCheckStatus.js';
-import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { activeInsideWindow, EXEMPT_PENDING, unackedWakeAges } from './darkWorker.js';
 import { loadLastGapEnd } from './stallGap.js';
 import { isSerializationFailure } from './serializationFailure.js';
@@ -95,6 +94,7 @@ export type TeamDarkEvidence = {
   darkWorkerCount: number;
   oldestWakeAgeSeconds: number | null;
   waitingSeconds: number | null;
+  windowSeconds: number;
 };
 
 type AppRow = { id: string; organizationId: string | null; ownerUserId: string | null };
@@ -109,13 +109,19 @@ async function midShedWorkers(db: PrismaClient, workerIds: string[], now: Date):
   return new Set(claims.map((c) => c.workerId));
 }
 
-/** The newest live session of each worker, with its start and its latest activity (the platform's one derivation). */
+/**
+ * The newest open session of each worker. NOT narrowed by the idle window: a coordinator whose session has shown no turn
+ * for longer than that window is exactly the case (a) names, and dropping it would end its episode as a recovery.
+ * Bounded to the newest {@link OPEN_SESSION_SCAN_CAP} rows per worker.
+ * Each carries its start and its latest activity (the platform's one derivation). */
 async function liveSessionActivity(db: PrismaClient, workerIds: string[], now: Date): Promise<Map<string, { startedAt: Date; activityAt: Date }>> {
   const out = new Map<string, { startedAt: Date; activityAt: Date }>();
   if (workerIds.length === 0) return out;
   const sessions = await db.session.findMany({
-    where: { workerId: { in: workerIds }, endedAt: null, deletedAt: null, ...recentlyTouchedFilter(now) },
+    where: { workerId: { in: workerIds }, endedAt: null, deletedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
     select: { id: true, workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
+    orderBy: { startedAt: 'desc' },
+    take: OPEN_SESSION_SCAN_CAP * workerIds.length,
   });
   const lastEvents = await loadLastEventBySession(db as never, sessions.map((s) => s.id));
   for (const s of sessions) {
@@ -127,12 +133,12 @@ async function liveSessionActivity(db: PrismaClient, workerIds: string[], now: D
   return out;
 }
 
-/** The age in seconds of the oldest queued task (pending, no assignee), counted from its queueing and floored. */
+/** The age in seconds of the oldest queued task (pending, not blocked, no assignee: the matcher's own queue), counted from its queueing and floored. */
 async function oldestQueuedSeconds(db: PrismaClient, appId: string, floorAt: Date | null, now: Date): Promise<number | null> {
   const [row] = await db.$queryRaw<{ since: Date | null }[]>`
     SELECT min(GREATEST(COALESCE(released_at, created_at), created_at)) AS since
     FROM agent_tasks
-    WHERE app_id = ${appId} AND status = 'pending' AND assignee_worker_id IS NULL AND assignee_user_id IS NULL`;
+    WHERE app_id = ${appId} AND status = 'pending' AND blocked = false AND assignee_worker_id IS NULL AND assignee_user_id IS NULL`;
   if (!row?.since) return null;
   const since = Math.max(new Date(row.since).getTime(), floorAt?.getTime() ?? -Infinity);
   return Math.max(0, Math.floor((now.getTime() - since) / 1000));
@@ -150,8 +156,8 @@ export async function teamDarkOf(db: PrismaClient, app: AppRow, now: Date): Prom
   const ids = workers.map((w) => w.id);
   const gapEnd = await loadLastGapEnd(db);
   // Dynamic: resolvers.teamChat imports modules that import this one.
-  const { locateTeamChatChannel } = await import('../../api/graphql/schema/resolvers.teamChat.js');
-  const channel = await locateTeamChatChannel({ db } as Context, app.id);
+  const { locateTeamChatChannelOfApp } = await import('../../api/graphql/schema/resolvers.teamChat.js');
+  const channel = await locateTeamChatChannelOfApp(db, app.id);
   const statuses = await loadWorkerCheckStatuses(db, { appId: app.id, teamChannelId: channel?.channelId ?? null, workerIds: ids, now });
   const shed = await midShedWorkers(db, ids, now);
   const counted = workers.filter((w) => {
@@ -206,13 +212,15 @@ export async function teamDarkOf(db: PrismaClient, app: AppRow, now: Date): Prom
 
 /** The evidence a state's alarm carries: counts and ages only. */
 export function evidenceOf(state: TeamDarkState): TeamDarkEvidence {
+  if (state.reason === null) throw new Error('evidenceOf: the team is not dark');
   const ages = state.workers.map((w) => w.oldestWakeAgeSeconds).filter((a): a is number => a !== null);
   return {
-    reason: state.reason ?? 'wake-unacked',
+    reason: state.reason,
     workerCount: state.workers.length,
     darkWorkerCount: state.darkWorkerIds.length,
     oldestWakeAgeSeconds: ages.length ? Math.max(...ages) : null,
     waitingSeconds: state.waitingSeconds,
+    windowSeconds: state.windowSeconds,
   };
 }
 
@@ -229,7 +237,7 @@ export async function raiseTeamDark(db: PrismaClient, appId: string, evidence: T
       const eventId = generateId();
       const payload: Prisma.InputJsonObject = {
         reason: evidence.reason,
-        windowMinutes: TEAM_DARK_WINDOW_SECONDS / 60,
+        windowMinutes: evidence.windowSeconds / 60,
         workerCount: evidence.workerCount,
         darkWorkerCount: evidence.darkWorkerCount,
         oldestWakeAgeSeconds: evidence.oldestWakeAgeSeconds,

@@ -696,6 +696,9 @@ export const agentTaskAlarmQueries = {
    * #4921 slice A: the App's three role lists, for whoever may read its roster, through the roster's gate and its
    * refusal byte for byte (cor:agt:050:21, :23), as `saturationAlarmWakeRoles` does.
    */
+  appRoleLists: (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
+    withRosterAppRead(ctx, appRef, (readCtx, app) => appRoleListsView(readCtx.db, app.id)),
+
   /**
    * #4531 (hrn:node:hadronmemory.com:specs:cor:agt:050:34): whether the App's team is dark, the episode's start, and each
    * worker's oldest unacknowledged wake age, for whoever may read the App's tasks and events, through the roster's gate and
@@ -703,9 +706,6 @@ export const agentTaskAlarmQueries = {
    */
   teamHealth: (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
     withRosterAppRead(ctx, appRef, (readCtx, app) => teamHealthView(readCtx.db as never, app)),
-
-  appRoleLists: (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
-    withRosterAppRead(ctx, appRef, (readCtx, app) => appRoleListsView(readCtx.db, app.id)),
 
   /**
    * Every availability record in an App — its workers' and its model

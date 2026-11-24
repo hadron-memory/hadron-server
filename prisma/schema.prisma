@@ -8246,8 +8246,8 @@ model SaturationEpisode {
 /// - The alarm stream is append-only, so an episode's end lives here, not on the alarm.
 /// - Exactly one OPEN row per App (partial unique index, raw SQL in prisma/team-dark-invariants.sql): the race between two
 ///   passes or two server instances is decided by that index, so a second pass records no second alarm.
-/// - `endedAt` is never before `openedAt` (CHECK `chk_team_dark_episodes_shape`), and an ended episode names its
-///   `team.recovered` event.
+/// - `endedAt` is never before `openedAt` (CHECK `chk_team_dark_episodes_shape`), and a row that names a `team.recovered`
+///   event is ended. The converse does not hold: an episode whose App left the live set ends with no recovery event.
 model TeamDarkEpisode {
   id               String    @id @default(cuid())
   appId            String    @map("app_id")
