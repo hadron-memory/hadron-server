@@ -1,6 +1,6 @@
 /**
  * The registry of owner-limit keys (#5009). Adding a measure is one entry here and no schema change. Totals are counted when they are
- * asked for; there is no cache and no stored counter.
+ * asked for. Only `nodes` reads a stored figure (#5078): its answer must equal `countOwnerNodesOnDemand`, the truth.
  */
 import { Prisma } from '../../generated/prisma/index.js';
 import type { OwnerRef } from '../owner.js';
@@ -28,15 +28,32 @@ async function countOf(db: OwnerCountDb, query: Prisma.Sql): Promise<bigint> {
   return row.n;
 }
 
+/**
+ * Live nodes in every live memory of the owner, of any class, counted from the rows (#5009). A deleted memory keeps its node rows live, so
+ * the memory must be live too. This is the figure the stored one must equal: the fallback, and the reference of every pin.
+ */
+export const countOwnerNodesOnDemand = (db: OwnerCountDb, owner: OwnerRef): Promise<bigint> => countOf(db, Prisma.sql`
+  SELECT count(*) AS n FROM nodes n JOIN memories o ON o.id = n.memory_id
+  WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL AND n.deleted_at IS NULL`);
+
+/**
+ * The same figure from the per-memory totals the triggers on `nodes` keep (#5078). The owner and the memory's liveness are joined here, so
+ * a deleted, transferred or merged memory needs no write to the totals. The stored figure is only an input to this sum
+ * (hrn:node:hadronmemory.com:specs:cor:acl:150:03): never serve it.
+ */
+const countOwnerNodesFromTotals = (db: OwnerCountDb, owner: OwnerRef): Promise<bigint> => countOf(db, Prisma.sql`
+  SELECT COALESCE(sum(t.live_nodes), 0)::bigint AS n FROM memory_node_totals t JOIN memories o ON o.id = t.memory_id
+  WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL`);
+
+/** Read per call. Only the exact value `on-demand` goes back to counting the rows; anything else reads the totals. */
+const nodesOnDemand = (): boolean => process.env.OWNER_NODE_COUNT_SOURCE === 'on-demand';
+
 /** The order here is the order `ownerLimits` reports. */
 export const OWNER_LIMIT_KEYS: Readonly<Record<OwnerLimitKey, OwnerLimitKeyDef>> = {
-  /** Live nodes in every live memory of the owner, of any class. A deleted memory keeps its node rows live, so the memory must be live too. */
   nodes: {
     unitNoun: { one: 'node', many: 'nodes' },
     settable: true,
-    count: (db, owner) => countOf(db, Prisma.sql`
-      SELECT count(*) AS n FROM nodes n JOIN memories o ON o.id = n.memory_id
-      WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL AND n.deleted_at IS NULL`),
+    count: (db, owner) => (nodesOnDemand() ? countOwnerNodesOnDemand : countOwnerNodesFromTotals)(db, owner),
   },
   /** Free-standing memories of the four user-made classes. A memory inside an App, an install memory and a system memory are free. */
   memories: {

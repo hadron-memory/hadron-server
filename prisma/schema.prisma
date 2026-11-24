@@ -1171,6 +1171,7 @@ model Memory {
   /// #2883 — automation read grants on this memory.
   automationReadGrants AppAutomationReadGrant[]
   gitMirrorObligations GitMirrorObligation[]
+  nodeTotal           MemoryNodeTotal?
 
   // #723: ONE shared app-class memory per (App, Agent) — the find-or-create key
   // that replaced the deterministic `…:shared` URN. Spans soft-deleted rows (the
@@ -6430,6 +6431,26 @@ model OwnerLimit {
   @@unique([organizationId, key])
   @@unique([ownerUserId, key])
   @@map("owner_limits")
+}
+
+/// How many live nodes one memory holds, so an owner's node total is a sum over its memories and not a scan of `nodes` (#5078).
+///
+/// Relationships: belongs to exactly one Memory and ends with it.
+///
+/// Behaviour:
+/// - Written only by the triggers on `nodes` (`prisma/memory-node-total-invariants.sql`) and the reconcile script. No
+///   application code writes it, and no API serves it: it is only an input to the owner's sum
+///   (hrn:node:hadronmemory.com:specs:cor:acl:150:03).
+/// - Who owns the memory and whether it is live are joined when read, so a soft delete, a transfer or an account merge
+///   needs no write here. A memory without a row has never held a live node.
+/// - No CHECK keeps it non-negative: a drifted figure must never make a node delete fail. The script reports it.
+model MemoryNodeTotal {
+  memoryId  String @id @map("memory_id")
+  liveNodes BigInt @map("live_nodes")
+
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@map("memory_node_totals")
 }
 
 /// A trigger that starts a headless run when an outside system calls a URL. Each accepted call creates one AppRun.
