@@ -84,7 +84,7 @@ export function isChatSeqUniqueViolation(err: unknown): boolean {
   // other index, a different SQLSTATE, or a message that merely MENTIONS the index
   // does not match. A Prisma error carries its own `Pnnnn` code, never 23505, so it
   // cannot match here: a raw-SQL failure surfaced as P2010 (meta.code 23505) is refused on purpose, because no raw
-  // statement in src writes the (loc, seq, node_type) of a chat message (#2634 review: every `UPDATE nodes` raw write sets
+  // statement in src writes the (loc, seq, node_type) of a chat message (#2634 review: every raw statement that updates the nodes table sets
   // other columns); a future raw writer into that index must add its own P2010 branch and pin. The `code` and
   // `constraint` fields are node-postgres's documented error fields; this spelling was NOT probed against a live driver
   // error here (no code path produces one today).
