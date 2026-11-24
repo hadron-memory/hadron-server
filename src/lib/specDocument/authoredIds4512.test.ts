@@ -143,10 +143,22 @@ describe('#4512 review probes: no live assigned id', () => {
     const out = renderSpecDocument(doc([part('fx:fj:a', '<a id="fx-&fjlig;-a"></a>')], part('fx:fj', 'F', 'Feature: F')));
     expect(count(out, ' id="fx-fj-a"')).toBe(1);
   });
-  it('an authored NUL in a name or a loc is replaced, not kept', () => {
+  it('O1 (blind/local delta 7): references decode in ONE left-to-right pass, so an unterminated hex reference cannot absorb the next one', () => {
+    const fj = new Set(['fx-fj-a']);
+    const r = (t: string): string => neutraliseAssignedIds(t, fj);
+    expect(r('<a id="fx&#x2d&fjlig;-a">')).toBe('<a data-id="fx&#x2d&fjlig;-a">');
+    expect(r('<a id="fx&#45&fjlig;-a">')).toBe('<a data-id="fx&#45&fjlig;-a">');
+    expect(r('<a id="fx&#x2D;&fjlig;-a">')).toBe('<a data-id="fx&#x2D;&fjlig;-a">');
+    expect(r('<a id="fx-&fjlig;&#x2d;a">')).toBe('<a data-id="fx-&fjlig;&#x2d;a">');
+    expect(r('<a id="fx&#x2d&fjlig;-b">')).toBe('<a id="fx&#x2d&fjlig;-b">');
+    const out = renderSpecDocument(doc([part('fx:fj:a', '<a id="fx&#x2d&fjlig;-a"></a>')], part('fx:fj', 'F', 'Feature: F')));
+    expect(count(out, ' id="fx-fj-a"')).toBe(1);
+    expect(out).toContain('<a data-id="fx&#x2d&fjlig;-a"></a>');
+  });
+  it('an authored NUL in a name is replaced, not kept (the pin fails without the scrub)', () => {
     const out = renderSpecDocument(doc([part('fx:110:a', 'x', 'Rule: R\u0000S')]));
     expect(out).toContain('## Rule: R\uFFFDS [fx:110:a]');
-    expect(out).not.toContain('\u0000R');
+    expect(out.includes('\u0000')).toBe(false);
   });
   it('H2 (local full): two authored pieces joined by a blank line cannot form a live id between them', () => {
     const feature = part('fx:110', 'Head.\n\n---\n\n="fx-110-a">tail</pre>', 'Feature: F');
