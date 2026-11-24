@@ -21,7 +21,7 @@
  * ALREADY RUNNING (#4933, cor:agt:070:08 rev 21 and cor:agt:070:01). No platform start with no task is issued for a worker
  * whose Agent a host already runs: that host would refuse it ("an agent this host launched is still running") and
  * every minute would add a failed start, until the trip below stopped it. What the hosts have reported decides it: the
- * worker's stored terminal report (#2771) is fresh (`TERMINAL_FRESH_MS`) and shows an agent (status `busy`, `idle` or
+ * worker's stored terminal report (#2771) is fresh (`derivedTerminalFreshMs`) and shows an agent (status `busy`, `idle` or
  * `locked`, and a reason that is not agent-absent). The host it names does not matter: it is where the agent is, and a
  * start on another of the worker's hosts would be a second agent. The state is logged once when first seen and again
  * when a start follows (`already running`, then `starting`; after the transaction commits), never as a failure, and it
@@ -49,6 +49,7 @@ import {
   fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, startSettingsFor, type StartHold,
 } from '../hostOperations/launch.js';
 import { loadHostDesiredState } from './desiredState.js';
+import { HOST_LAPSE_CHECK_INS_DEFAULT } from '../agentTasks/hosts.js';
 import { AGENT_ABSENT_REASONS, AGENT_PRESENT_STATUSES } from '../workerTerminal.js';
 
 export const START_FAILING_EVENT_TYPE = 'alarm.start-failing';
@@ -58,17 +59,40 @@ export const DESIRED_RUNNING = 'DESIRED_RUNNING';
 export const START_FAILURE_LIMIT = 3;
 export const START_FAILURE_WINDOW_MS = 60 * 60_000;
 /**
- * #4933: how long a stored terminal report keeps saying the agent runs, measured from `reportedAt`, the SERVER's clock at
- * the moment it stored the report (#4941; `checkedAt` is the host's own clock, so a host clock more than this slow made
- * every report read stale and switched the guard off). A constant, not derived from the host's check-in interval
- * (cor:agt:070:01 judges a registration by that interval, which the App tunes 2 to 10 times): the cadence of the host's
- * terminal sweep is hadron-cli's and is not visible to the server, so five minutes is a tolerance for a few missed
- * reports, not a statement of that cadence. Open on #4941 whether to derive it from the registration's lapse rule.
+ * #4933: how long a stored terminal report keeps saying the agent runs when the window cannot be derived (see
+ * `derivedTerminalFreshMs`), measured from `reportedAt`, the SERVER's clock at the moment it stored the report (#4941;
+ * `checkedAt` is the host's own clock, so a host clock more than this slow made every report read stale and switched the
+ * guard off). A tolerance for a few missed reports, not a statement of the host's cadence.
  */
 export const TERMINAL_FRESH_MS = 5 * 60_000;
 /**
- * How far ahead of the pass's `now` a report's `reportedAt` may be and still count. `reportedAt` is the server's own
- * clock, so this is only the gap between a pass taking `now` and a report committed while the pass waited on its locks.
+ * #4970 item 6 (the gate decision on #4941 item 5): the window a report keeps saying the agent runs, derived from
+ * the registration of the host that REPORTED it, the same two inputs cor:agt:070:01 judges a registration by: its
+ * `poll_interval_seconds` times the App's lapse check-ins (`liveRegistrationsFor`). The cadence is server-visible, and a
+ * host that checks in every N seconds reports about as often. What is aged is the REPORT (`reportedAt`), never the
+ * registration's refresh: a registration that checked in a second ago says nothing about how old the report is. A report
+ * naming no host, or a host with no registration in the App, falls back to `TERMINAL_FRESH_MS`. FLOOR: never below
+ * `TERMINAL_FRESH_MS`. The unsafe direction is a window TOO SHORT: it switches the guard off while the agent still runs,
+ * and the loop goes back to issuing a start the host refuses every minute until the trip. A window too long only holds
+ * the worker longer after its agent died (and there is no cap: poll interval x check-ins, up to 10 x 86400 s, is the
+ * lapse rule's own bound; a cap is a team decision). A host has one registration per App (`host_registrations_app_host_uniq`). Read on the start's transaction, after the worker lock, like the report
+ * it judges.
+ */
+export async function derivedTerminalFreshMs(db: Db, appId: string, terminal: StoredTerminal | null): Promise<number> {
+  const hostId = terminal?.host?.id;
+  if (!hostId) return TERMINAL_FRESH_MS;
+  const rows = await db.$queryRaw<{ ms: number }[]>`
+    SELECT (r.poll_interval_seconds::float8 * COALESCE(s.host_lapse_check_ins, ${HOST_LAPSE_CHECK_INS_DEFAULT})::float8 * 1000) AS ms
+    FROM host_registrations r
+    LEFT JOIN agent_task_stall_schedule s ON s.app_id = r.app_id
+    WHERE r.app_id = ${appId} AND r.host_id = ${hostId}`;
+  const ms = rows[0]?.ms;
+  return typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? Math.max(TERMINAL_FRESH_MS, ms) : TERMINAL_FRESH_MS;
+}
+/**
+ * How far ahead of the moment of the decision (`decideAt`, the pass's `now` plus its lock waits) a report's `reportedAt`
+ * may be and still count. `reportedAt` is the server's own clock and the decision is judged after the lock waits, so
+ * this no longer has to cover them: it is only the small gap between `decideAt` being taken and the report being read.
  */
 export const TERMINAL_FUTURE_TOLERANCE_MS = 2 * 60_000;
 
@@ -89,20 +113,23 @@ function asTerminal(value: unknown): StoredTerminal | null {
  * `AGENT_PRESENT_STATUSES` (cor:agt:070:01: busy, idle, locked; `dark` and any status this code does not know say no),
  * unless the reason says the agent is absent.
  */
-export function agentRunsOnAnyHost(terminal: StoredTerminal | null, now: Date): boolean {
+export function agentRunsOnAnyHost(terminal: StoredTerminal | null, now: Date, freshMs: number = TERMINAL_FRESH_MS): boolean {
   if (!terminal) return false;
   if (!terminal.status || !AGENT_PRESENT_STATUSES.has(terminal.status)) return false;
   if (terminal.reason != null && AGENT_ABSENT_REASONS.has(terminal.reason)) return false;
   const at = terminal.reportedAt ? Date.parse(terminal.reportedAt) : NaN;
-  return Number.isFinite(at) && now.getTime() - at <= TERMINAL_FRESH_MS && at <= now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS;
+  return Number.isFinite(at) && now.getTime() - at <= freshMs && at <= now.getTime() + TERMINAL_FUTURE_TOLERANCE_MS;
 }
 
 /**
  * Workers whose last logged state is `already running`, with when it was first seen (a pass's `now`) and whether the
  * long-hold line was written. The log is per process: a restart forgets it, so `since` restarts and a long hold logs
- * `already running` again (log only). A `skipped` pass (lock contention, a brief absence from the startable list)
- * also forgets the entry and restarts the clock. An entry goes when the worker is started, when a pass no longer lists it as startable
- * (`pruneRunningLog`, so a deleted or retired worker's id is not held for the life of the process), or the process ends.
+ * `already running` again (log only). Each replica logs separately: every process has its own map, so N replicas write
+ * N lines for one worker. An entry goes when: the worker is started (`issued`); the pass for it ends in any outcome other
+ * than `running` or `no-host`, which includes `skipped` (lock contention, a brief absence from the startable list) and
+ * `tripped`, so the clock restarts; a pass that read every App and host no longer lists it as startable
+ * (`pruneRunningLog`, so a deleted or retired worker's id is not held for the life of the process); or the process
+ * restarts.
  */
 const loggedRunning = new Map<string, { since: number; longHoldLogged: boolean }>();
 /** For tests: forget what was logged. */
@@ -267,10 +294,11 @@ export async function startDesiredWorker(
       if (!row || !startable(row)) return 'skipped';
       // #4933: before the failure count, so a worker the host already runs is neither started nor tripped nor alarmed.
       const reported = asTerminal((await tx.worker.findUnique({ where: { id: a.workerId }, select: { terminal: true } }))?.terminal);
-      if (agentRunsOnAnyHost(reported, decideAt)) return 'running';
-      if ((await recentFailures(tx, a.workerId, now)) >= START_FAILURE_LIMIT) return 'tripped';
+      // The registration is read only when the report could count under some window (an agent shown, in time).
+      if (agentRunsOnAnyHost(reported, decideAt, Infinity) && agentRunsOnAnyHost(reported, decideAt, await derivedTerminalFreshMs(tx, a.appId, reported))) return 'running';
+      if ((await recentFailures(tx, a.workerId, decideAt)) >= START_FAILURE_LIMIT) return 'tripped';
       await fenceHostDecision(tx, a.appId);
-      const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, now, a.hostId)).find((r) => r.worktrees.length > 0);
+      const reg = (await liveRegistrationsFor(tx, a.appId, a.workerId, decideAt, a.hostId)).find((r) => r.worktrees.length > 0);
       if (!reg) return 'no-host';
       await insertWorkerStart(tx, {
         appId: a.appId, hostId: reg.hostId, workerId: a.workerId, worktree: reg.worktrees[0]!, family: reg.family,

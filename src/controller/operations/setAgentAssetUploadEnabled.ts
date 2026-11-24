@@ -28,7 +28,7 @@ export interface SetAgentAssetUploadEnabledCaller {
 }
 
 export interface SetAgentAssetUploadEnabledInput {
-  agentUrn: string;
+  agentRef: string;
   enabled: boolean;
 }
 
@@ -46,15 +46,14 @@ export async function setAgentAssetUploadEnabled(
   input: SetAgentAssetUploadEnabledInput,
   isAdminFor: IsAdminFor,
 ): Promise<App> {
-  // 007-entity-id-or-urn FR-012: input.agentUrn (named for backward
-  // compatibility) accepts ID or URN. Resolve to a definite ID first.
+  // 007-entity-id-or-urn FR-012: input.agentRef accepts ID or URN. Resolve to a definite ID first.
   //
   // Spec 022: `resolveAgentRef` throws `UrnNotQualifiedError` for non-ID
   // inputs that lack the `<org>:<agentSlug>` shape — let it propagate so
   // the GraphQL formatError can surface it as `URN_NOT_QUALIFIED`.
   let resolvedAgentId: string;
   try {
-    ({ id: resolvedAgentId } = await resolveAgentRef(db, input.agentUrn));
+    ({ id: resolvedAgentId } = await resolveAgentRef(db, input.agentRef));
   } catch (e) {
     if (e instanceof UrnNotQualifiedError) throw e;
     // #2979 (Atilla's P2): NARROW. This class is a trusted typed refusal on the wire, so only a ref that names nothing
