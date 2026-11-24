@@ -83,10 +83,16 @@ export function isChatSeqUniqueViolation(err: unknown): boolean {
   // driver carries on `code`, AND the index name, so a unique violation on some
   // other index, a different SQLSTATE, or a message that merely MENTIONS the index
   // does not match. A Prisma error carries its own `Pnnnn` code, never 23505, so it
-  // cannot match here.
+  // cannot match here: a raw-SQL failure surfaced as P2010 (meta.code 23505) is refused on purpose, because no raw
+  // statement in src writes the (loc, seq, node_type) of a chat message (#2634 review: every `UPDATE nodes` raw write sets
+  // other columns); a future raw writer into that index must add its own P2010 branch and pin. The `code` and
+  // `constraint` fields are node-postgres's documented error fields; this spelling was NOT probed against a live driver
+  // error here (no code path produces one today).
   return err instanceof Error
     && (err as { code?: unknown }).code === '23505'
-    && err.message.includes(CHAT_SEQ_UNIQUE_NAME);
+    && ((err as { constraint?: unknown }).constraint === CHAT_SEQ_UNIQUE_NAME
+      // Postgres quotes the constraint name, so a longer name that merely STARTS with ours does not match (#2634 BLIND P3-4).
+      || err.message.includes(`"${CHAT_SEQ_UNIQUE_NAME}"`));
 }
 
 /**
