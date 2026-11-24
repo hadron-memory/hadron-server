@@ -55,7 +55,7 @@ const isAsciiPunct = (c: string | undefined): boolean => c !== undefined && /[!-
  * a quote, a list item or a thematic break. A heading is one line, so a span that opens in one ends with it. Where a line only
  * looks like a block start the run is cut short, which means fewer code spans are skipped and more `<` are judged: the safe side.
  */
-const BLOCK_START = /\n(?: {0,3}(?:#{1,6}(?:[ \t\r]|$)|`{3,}|~{3,}|>|[-+*](?:[ \t\r]|$)|\d{1,9}[.)](?:[ \t\r]|$)|(?:[-*_][ \t]*){3,}\r?(?:\n|$))|[ \t\r]*\n)/gm;
+const BLOCK_START = /\n(?: {0,3}(?:#{1,6}(?:[ \t\r]|$)|`{3,}|~{3,}|>|[-+*][ \t]+\S|1[.)][ \t]+\S|(?:[-*_][ \t]*){3,}\r?(?:\n|$))|[ \t\r]*\n)/gm;
 function paragraphEnd(text: string, i: number): number {
   const lineStart = text.lastIndexOf('\n', i - 1) + 1;
   const eol = text.indexOf('\n', i);
@@ -116,6 +116,31 @@ function firstUnterminated(text: string, from: number): number {
   let rawName = '';
   // Open `<template>` elements: their content is tokenized as usual, but the anchor of the next block would sit in the inert content.
   const templates: number[] = [];
+  // How far a construct that starts at `j` may run. A construct opened inside a line is inline HTML, which never crosses a block boundary, so
+  // its end must come before the boundary or it is unterminated (and the scan must not jump past a fence opener or a heading to find one).
+  // At the head of a line, a tag runs to the next blank line, and an HTML block of type 2 to 5 (a comment, CDATA, a processing instruction, a
+  // declaration) runs to its closer wherever that is. A bound found at `j` holds for every later position below it.
+  let inlineFrom = -1;
+  let inlineTo = -1;
+  const inlineBound = (j: number): number => {
+    if (j >= inlineFrom && j < inlineTo) return inlineTo;
+    inlineFrom = j;
+    inlineTo = paragraphEnd(text, j);
+    return inlineTo;
+  };
+  let blankFrom = -1;
+  let blankTo = -1;
+  const blankBound = (j: number): number => {
+    if (j >= blankFrom && j < blankTo) return blankTo;
+    blankFrom = j;
+    const re = /\n[ \t\r]*\n/g;
+    re.lastIndex = j;
+    const m = re.exec(text);
+    blankTo = m ? m.index : n;
+    return blankTo;
+  };
+  const tagLimit = (j: number): number => (startsLine(text, j) ? blankBound(j) : inlineBound(j));
+  const blockLimit = (j: number): number => (startsLine(text, j) ? n : inlineBound(j));
   // A backtick run of length N that found no closer in its paragraph: no later run of N in the same paragraph has one either.
   const noCloser = new Map<number, number>();
   let i = from;
@@ -139,7 +164,7 @@ function firstUnterminated(text: string, from: number): number {
     if (c === '`') {
       let len = 1;
       while (text[i + len] === '`') len += 1;
-      if (i >= paraEnd) paraEnd = paragraphEnd(text, i);
+      paraEnd = inlineBound(i);
       if ((noCloser.get(len) ?? -1) >= paraEnd) { i += len; continue; }
       let k = i + len;
       let closed = -1;
@@ -159,7 +184,7 @@ function firstUnterminated(text: string, from: number): number {
       // Inside an inline raw-text element: the only markup is its own end tag.
       if (text[i + 1] === '/' && text.slice(i + 2, i + 2 + rawName.length).toLowerCase() === rawName && /[\s>]/.test(text[i + 2 + rawName.length] ?? 'x')) {
         const end = tagEndOf(text, i, i + 2);
-        if (end === -1) return rawStart;
+        if (end === -1 || end > tagLimit(i)) return rawStart;
         rawStart = -1;
         i = end;
       } else i += 1;
@@ -169,7 +194,7 @@ function firstUnterminated(text: string, from: number): number {
       if (text.startsWith('<!-->', i)) { i += 5; continue; }
       if (text.startsWith('<!--->', i)) { i += 6; continue; }
       const close = text.indexOf('-->', i + 4);
-      if (close === -1) return i;
+      if (close === -1 || close + 3 > blockLimit(i)) return i;
       i = close + 3;
       continue;
     }
@@ -179,19 +204,21 @@ function firstUnterminated(text: string, from: number): number {
     // is still its closer (unlike a raw-text element, whose end tag is a separate tag that code can hide).
     if (text.startsWith('<![CDATA[', i)) {
       const first = text.indexOf('>', i + 2);
-      if (first === -1 || text.indexOf(']]>', i + 9) === -1) return i;
+      const closer = text.indexOf(']]>', i + 9);
+      if (first === -1 || closer === -1 || closer + 3 > blockLimit(i)) return i;
       i = first + 1;
       continue;
     }
     if (text.startsWith('<?', i)) {
       const first = text.indexOf('>', i + 2);
-      if (first === -1 || text.indexOf('?>', i + 1) === -1) return i;
+      const closer = text.indexOf('?>', i + 1);
+      if (first === -1 || closer === -1 || closer + 2 > blockLimit(i)) return i;
       i = first + 1;
       continue;
     }
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
-      if (close === -1) return i;
+      if (close === -1 || close + 1 > blockLimit(i)) return i;
       i = close + 1;
       continue;
     }
@@ -199,7 +226,7 @@ function firstUnterminated(text: string, from: number): number {
     if (isEnd && !isLetter(text[i + 2]) && text[i + 2] !== '>') {
       // `</` and anything but a letter or `>` is a bogus comment, which runs to the next `>`.
       const close = text.indexOf('>', i + 2);
-      if (close === -1) return i;
+      if (close === -1 || close + 1 > tagLimit(i)) return i;
       i = close + 1;
       continue;
     }
@@ -208,7 +235,7 @@ function firstUnterminated(text: string, from: number): number {
     // A start or end tag: the name, then attributes up to the `>` outside a quoted value.
     const nameStart = i + (isEnd ? 2 : 1);
     const tagEnd = tagEndOf(text, i, nameStart);
-    if (tagEnd === -1) return i;
+    if (tagEnd === -1 || tagEnd > tagLimit(i)) return i;
     let nameEnd = nameStart;
     while (nameEnd < n && !isBlank(text[nameEnd]) && text[nameEnd] !== '/' && text[nameEnd] !== '>') nameEnd += 1;
     const name = text.slice(nameStart, nameEnd).toLowerCase();
