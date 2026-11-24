@@ -210,8 +210,8 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // usage "provide either nodeId or loc" refusal now names `nodeRef`.
 //
 // 0.33.0 — BREAKING, entity refs S2 (#4138): the node-revision operations take `nodeRevRef`, no alias.
-// `nodeRevision(revisionId)`, `restoreNodeRevision(revisionId)` and the delete-revision mutation
-// (`revisionId` → `nodeRevRef: String!`, a revision URN or id). A lagging client's old name is an UNKNOWN
+// `nodeRevision(revisionId)`, `restoreNodeRevision(revisionId)`, `updateNodeRevision(revisionId)` and the
+// delete-revision mutation (`revisionId` → `nodeRevRef: String!`, a revision URN or id). A lagging client's old name is an UNKNOWN
 // argument and GraphQL refuses the whole operation.
 export const HADRON_SERVER_VERSION = '0.33.0';
 
