@@ -29,6 +29,10 @@ export function needsPasskey(extra: Record<string, unknown> = {}): GraphQLError 
 export function changeSnapshot(secret: { id: string; updatedAt: Date; protected: boolean; metadata: unknown; changeRevision: number }, versionNo: number): string {
  return createHash('sha256').update(JSON.stringify([secret.id, secret.changeRevision, secret.updatedAt.toISOString(), secret.protected, secret.metadata, versionNo])).digest('hex');
 }
+/** The one mint of a change request's ceremony link (#5103): the error extension and `SecretChangeRequest.ceremonyUrl` both call it. No token: the id is the address. */
+export function secretChangeCeremonyUrl(id: string): string {
+ return `${getProjectBaseUrl()}${SECRET_CHANGE_PATH}/${id}`;
+}
 /** Open under the caller's App authority and secret/name lock. Return the refusal; throw it only AFTER transaction commit. */
 export async function stageSecretChange(tx: Prisma.TransactionClient, ctx: Context, a: {
  appId: string; secretId: string | null; name: string; kind: string; metadata: Prisma.JsonValue;
@@ -53,12 +57,12 @@ export async function stageSecretChange(tx: Prisma.TransactionClient, ctx: Conte
  (id,app_id,secret_id,secret_name,secret_kind,metadata,operation,requester_id,snapshot,staged_value_encrypted,key_version,size_bytes,protected_result,write_version,expires_at)
  VALUES (${id},${a.appId},${a.secretId},${a.name},${a.kind},${JSON.stringify(a.metadata)}::jsonb,${a.operation},${requester},${a.snapshot},${ciphertext},${keyVersion},${a.sizeBytes ?? null},${a.protectedResult ?? null},${a.writeVersion ?? true},
  (clock_timestamp() AT TIME ZONE 'UTC') + ${SECRET_CHANGE_TTL_SECONDS} * interval '1 second')`;
- return needsPasskey({ requestId: id, ceremonyUrl: `${getProjectBaseUrl()}${SECRET_CHANGE_PATH}/${id}` });
+ return needsPasskey({ requestId: id, ceremonyUrl: secretChangeCeremonyUrl(id) });
 }
 /** An expired request is never presented as live, even before the clearing sweep. */
 export function visibleChange(r: ChangeRequest, now: Date) {
  return { id: r.id, state: r.state === 'open' && r.expires_at <= now ? 'expired' : r.state,
-  operation: r.operation, createdAt: r.created_at, expiresAt: r.expires_at };
+  operation: r.operation, createdAt: r.created_at, expiresAt: r.expires_at, ceremonyUrl: secretChangeCeremonyUrl(r.id) };
 }
 /** Clear expired ciphertext in bounded batches; expiry remains enforced independently at every use. */
 export async function sweepExpiredSecretChanges(tx: Prisma.TransactionClient): Promise<number> {

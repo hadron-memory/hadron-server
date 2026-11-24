@@ -6670,6 +6670,8 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
     """Expiry time."""
     expiresAt: DateTime!
+    """The server-hosted ceremony page where the requester completes or declines this change with a passkey (hrn:node:hadronmemory.com:specs:cor:sec:070:02): the server origin plus /secret-changes/<id>, with no token. The same link SECRET_PROTECTED_NEEDS_PASSKEY carries in its ceremonyUrl extension. Copy it verbatim; never compose it. Served on every state, because it is a stable address: an ended request's page only explains that it ended. Read through the same requester-only gate as the rest of this type."""
+    ceremonyUrl: String!
   }
 
   "How a secret read client is used: REVEAL hands the value to a person or worker, USE injects it by reference into a run's web request."
