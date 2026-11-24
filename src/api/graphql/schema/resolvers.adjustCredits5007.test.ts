@@ -315,7 +315,11 @@ describe('library replay rules (#5007)', () => {
 
   it('the library refuses a grant or an adjustment with a missing or blank source, and an adjustment with no note or zero', async () => {
     const bad: Array<() => Promise<unknown>> = [
-      () => metering.grantCredits(db, { organizationId: orgId, amountMicroCents: 1n }),
+      () =>
+        metering.grantCredits(db, {
+          organizationId: orgId,
+          amountMicroCents: 1n,
+        } as metering.GrantCreditsParams),
       () =>
         metering.grantCredits(db, {
           organizationId: orgId,
