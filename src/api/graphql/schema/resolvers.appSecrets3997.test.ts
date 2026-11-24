@@ -460,6 +460,37 @@ describe('App secrets S2 public acceptance', () => {
     expect(written).toBe(1);
   });
 
+  it('#5089: a temp apps cannot make a LIVE App look gone to the event purge guard', async () => {
+    await create(memberId);
+    await db.secretOwnerTombstone.create({ data: { ownerType: 'app', ownerId: appId, deletedAt: new Date(Date.now() - 400 * 86_400_000) } });
+    const ev = (await db.secretEvent.findMany({ where: { ownerId: appId } }))[0]!;
+    await expect(inFreshRolledBackSession(async (c) => {
+      await shadowTable(c, 'apps');
+      await c.query('DELETE FROM secret_events WHERE id = $1', [ev.id]);
+    })).rejects.toThrow(/Secret events are append-only/);
+    expect(await db.secretEvent.count({ where: { id: ev.id } })).toBe(1);
+  });
+
+  it('#5089: a temp secret_owner_tombstones cannot swallow the tombstone an App\'s hard delete writes', async () => {
+    await create(memberId);
+    const written = await inFreshRolledBackSession(async (c) => {
+      await shadowTable(c, 'secret_owner_tombstones');
+      await c.query('DELETE FROM apps WHERE id = $1', [appId]);
+      return (await c.query('SELECT count(*)::int AS n FROM public.secret_owner_tombstones WHERE owner_id = $1', [appId])).rows[0].n as number;
+    });
+    expect(written).toBe(1);
+  });
+
+  it('#5089: a temp secrets cannot make an App\'s hard delete leave its real secrets behind', async () => {
+    await create(memberId);
+    const left = await inFreshRolledBackSession(async (c) => {
+      await shadowTable(c, 'secrets');
+      await c.query('DELETE FROM apps WHERE id = $1', [appId]);
+      return (await c.query('SELECT count(*)::int AS n FROM public.secrets WHERE owner_type = $1 AND owner_id = $2', ['app', appId])).rows[0].n as number;
+    });
+    expect(left).toBe(0);
+  });
+
   it('#5089: a temp secrets cannot make a version belong to an App that does not own its secret', async () => {
     const real = await db.secret.create({ data: { ownerType: 'user', ownerId: memberId, name: 'mine', kind: 'generic', metadata: {}, valueEncrypted: 'x' } });
     await expect(inFreshRolledBackSession(async (c) => {
