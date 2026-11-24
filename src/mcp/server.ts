@@ -172,7 +172,7 @@ import {
   mcpPrincipalKey,
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
-import { unstorableTextRefusal, refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { ownerLimitResult, unstorableTextRefusal, refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
 import { edgeTextFields, findUnstorableText, unstorableTextMessage, unstorableTextText } from '../lib/unstorableTextInput.js';
 import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
@@ -12356,7 +12356,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
       if (result.fault) throw new Error(result.error ?? 'sync fault');
       // #5015 — the owner-limit refusal in this caller's own form, as the trusted refusal its GraphQL twin throws.
-      if (result.ownerLimitError) return refusalResult(`[owner_limit_reached] ${result.ownerLimitError.message}`);
+      if (result.ownerLimitError) return ownerLimitResult(result.ownerLimitError);
       if (result.error) return refusalResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);
       // #1061 — one write per node the sync actually wrote. This tool is the
       // ONE entry point to a git sync that has a principal to attribute to; the
