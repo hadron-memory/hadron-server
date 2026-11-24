@@ -2,13 +2,15 @@
 // AI-credit billing Phase 0). Rates, grants and adjustments (#5007) are
 // PLATFORM-ADMIN writes: an org admin must never set the prices they are billed
 // at, and grantCredits / adjustCredits move money — the org-ADMIN bar of
-// setQuotaLimit does NOT carry over (self-grant risk). Ledger reads are
-// org-ADMIN (requireOrgRole).
+// setQuotaLimit does NOT carry over (self-grant risk). The two ledger writes also
+// admit the BILLING platform role (#5012, mayWriteLedger); rates do not. Ledger
+// reads are org-ADMIN (requireOrgRole).
 import { GraphQLError } from 'graphql';
 import {
   type Context,
   clampListTake,
   isPlatformAdmin,
+  mayWriteLedger,
   requireOrgRole,
   toISO,
 } from './resolvers.helpers.js';
@@ -350,7 +352,8 @@ export const meteringMutations = {
     },
     ctx: Context,
   ) => {
-    if (!isPlatformAdmin(ctx)) throw forbidden();
+    // #5012: a platform admin or the BILLING role (mayWriteLedger), judged before the organization resolves.
+    if (!mayWriteLedger(ctx)) throw forbidden();
     const { id: orgId } = await resolveOrgRef(ctx.db, input.orgRef);
     const amount = parseMicroCents(input.amountMicroCents, 'amountMicroCents');
     const expiresAt = input.expiresAt ? new Date(input.expiresAt) : null;
@@ -401,7 +404,8 @@ export const meteringMutations = {
     },
     ctx: Context,
   ) => {
-    if (!isPlatformAdmin(ctx)) throw forbidden();
+    // #5012: a platform admin or the BILLING role (mayWriteLedger), judged before the organization resolves.
+    if (!mayWriteLedger(ctx)) throw forbidden();
     const { id: orgId } = await resolveOrgRef(ctx.db, input.orgRef);
     const amount = parseSignedMicroCents(input.amountMicroCents, 'amountMicroCents');
     refuseServerWrittenSource(input.sourceType);

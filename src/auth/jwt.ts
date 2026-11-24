@@ -1,10 +1,11 @@
+import type { Role } from '../generated/prisma/index.js';
 import { SignJWT, jwtVerify, type JWTPayload } from 'jose';
 
 export interface HadronJwtPayload extends JWTPayload {
   /// Only verified first-party login callbacks set this; token issuance alone is not re-authentication.
   login?: { at: number; method: 'github' | 'google' | 'apple' | 'email' };
   sub: string;            // User.id (cuid)
-  roles: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
+  roles: Role[];
   githubUsername?: string; // GitHub username (GitHub users)
   githubId?: number;       // GitHub numeric ID (GitHub users)
   email?: string;          // email address (email users)
