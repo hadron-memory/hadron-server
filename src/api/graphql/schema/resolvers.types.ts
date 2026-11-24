@@ -1144,12 +1144,11 @@ function truncatedChunksBatched(ctx: Context, nodeId: string): Promise<number | 
  */
 const nodeBytesOf = tickBatch<string, { stored: number | null; revision: bigint | null; memoryIds: string[] } | null>(async (ctx, ids) => {
   const rows = await ctx.db.$queryRaw<Array<{
-    id: string; stored: number | null; revision: bigint | null; current: string; memory_ids: string[]; legacy: boolean;
+    id: string; stored: number | null; revision: bigint | null; current: string; memory_ids: string[];
   }>>`
     SELECT n.id, n.stored_bytes AS stored, n.revision_bytes AS revision, n.memory_id AS current,
-           COALESCE(array_agg(DISTINCT r.memory_id) FILTER (WHERE r.memory_id IS NOT NULL), ARRAY[]::text[]) AS memory_ids,
-           COALESCE(bool_or(r.id IS NOT NULL AND r.memory_id IS NULL), false) AS legacy
-    FROM nodes n LEFT JOIN node_revisions r ON r.node_id = n.id
+           COALESCE(array_agg(DISTINCT r.memory_id) FILTER (WHERE r.memory_id IS NOT NULL), ARRAY[]::text[]) AS memory_ids
+    FROM public.nodes n LEFT JOIN public.node_revisions r ON r.node_id = n.id
     WHERE n.id = ANY(${ids}::text[]) GROUP BY n.id`;
   // The node's current memory always counts (a legacy revision with no memory is read as it, as nodeRevisions does).
   return new Map(rows.map((r) => [r.id, { stored: r.stored, revision: r.revision, memoryIds: [...new Set([r.current, ...r.memory_ids])] }]));

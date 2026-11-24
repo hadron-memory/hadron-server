@@ -511,4 +511,17 @@ describe('Query.resolveUrn — noderev of a retracted comment (#1663, #2330)', (
     expect(await resolvers.Query.resolveUrn({}, { urn }, readerCtx)).toBeNull();
     expect(await resolvers.Query.resolveUrn({}, { urn }, memberCtx())).toMatchObject({ kind: 'noderev' });
   });
+
+  it('#5018: Node.revisionBytes of a retracted comment stub is null for a reader and the sum for a manager (the history is concealed)', async () => {
+    const { reader, c } = await seedStubRevision();
+    await M.replyToComment!(null, { commentRef: c.id, body: 'keeps the stub' }, memberCtx());
+    await M.deleteComment!(null, { commentRef: c.id, expectedRevision: 2 }, memberCtx());
+    const stub = await db.node.findUniqueOrThrow({ where: { id: c.id } });
+    const N = resolvers.Node as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>>;
+    const parent = { id: stub.id, memoryId: stub.memoryId };
+    const readerCtx: Context = { db, userId: reader.id, roles: ['READER'] };
+    // Control: a manager reads the figure the triggers recorded; a reader of the same stub reads nothing.
+    expect(await N.revisionBytes!(parent, {}, memberCtx())).toMatch(/^\d+$/);
+    expect(await N.revisionBytes!(parent, {}, readerCtx)).toBeNull();
+  });
 });

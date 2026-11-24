@@ -37,9 +37,9 @@ const recomputed = async (nodeId: string): Promise<{ stored: number; revision: b
 const mkNode = (data: Record<string, unknown> = {}, mem = memoryId) =>
   db.node.create({ data: { id: generateId(), memoryId: mem, loc: `n-${++seq}`, name: 'n', ...data } as never });
 /** A revision of the node's CURRENT state, taken through the one writer every revision site uses. */
-const snapshot = async (nodeId: string) => {
-  const n = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
-  await createNodeRevision(db, {
+const snapshot = async (nodeId: string, tx: Pick<typeof db, 'node' | 'nodeRevision' | 'memory' | 'nodeSignature' | '$queryRaw'> = db) => {
+  const n = await tx.node.findUniqueOrThrow({ where: { id: nodeId } });
+  await createNodeRevision(tx, {
     nodeId, memoryId: n.memoryId, loc: n.loc, name: n.name, description: n.description, content: n.content,
     // A missing data/properties is left out, not stored as the JSON text `null` (which would count 4 bytes).
     ...(n.data === null ? {} : { data: n.data as never }), ...(n.properties === null ? {} : { properties: n.properties as never }),
@@ -177,6 +177,20 @@ describe('#5018 revision_bytes follows the node_revisions rows', () => {
     const n = await mkNode({ content: 'abc' });
     await snapshot(n.id);
     await db.node.update({ where: { id: n.id }, data: { memoryId: other.id, loc: `moved-${++seq}` } });
+    expect((await bytes(n.id)).revision).toBe(3n);
+  });
+});
+
+describe('#5018 the trigger bodies are schema-qualified (#5089)', () => {
+  it('a session temp table named nodes cannot take the revision update away from the real nodes row', async () => {
+    const n = await mkNode({ content: 'abc' });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('CREATE TEMP TABLE nodes (id text, revision_bytes bigint) ON COMMIT DROP');
+      await tx.$executeRawUnsafe(`INSERT INTO pg_temp.nodes VALUES ('${n.id}', 100)`);
+      await snapshot(n.id, tx as never);
+      const [shadow] = await tx.$queryRawUnsafe<Array<{ revision_bytes: bigint }>>('SELECT revision_bytes FROM pg_temp.nodes');
+      expect(shadow!.revision_bytes).toBe(100n);
+    });
     expect((await bytes(n.id)).revision).toBe(3n);
   });
 });

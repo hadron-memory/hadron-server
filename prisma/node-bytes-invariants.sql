@@ -5,6 +5,7 @@
 --                      capped at the Int range so a write is never refused for its size.
 -- nodes.revision_bytes the same figure summed over the node's rows in node_revisions; a new node has 0, and a node that is not
 --                      measured yet (NULL) stays NULL until the hand-run backfill, so no trigger ever guesses a starting value.
+-- Every table and function the trigger bodies read or write is schema-qualified, so a session temp table named `nodes` cannot shadow them (#5089).
 -- The triggers keep the figures right for every writer, the raw UPDATEs of data included. The revision triggers update the node
 -- row, which the revision writer already holds locked, so the figure cannot drift under a concurrent edit or the backfill.
 
@@ -18,7 +19,7 @@ $$;
 
 CREATE OR REPLACE FUNCTION nodes_record_stored_bytes() RETURNS trigger AS $$
 BEGIN
-  NEW.stored_bytes := LEAST(hadron_node_state_bytes(NEW.content, NEW.description, NEW.data, NEW.properties), 2147483647);
+  NEW.stored_bytes := LEAST(public.hadron_node_state_bytes(NEW.content, NEW.description, NEW.data, NEW.properties), 2147483647);
   IF TG_OP = 'INSERT' THEN
     NEW.revision_bytes := 0;
   END IF;
@@ -33,15 +34,15 @@ CREATE TRIGGER nodes_record_stored_bytes BEFORE INSERT OR UPDATE OF content, des
 CREATE OR REPLACE FUNCTION node_revisions_record_bytes() RETURNS trigger AS $$
 BEGIN
   IF TG_OP = 'INSERT' THEN
-    UPDATE nodes SET revision_bytes = revision_bytes + hadron_node_state_bytes(NEW.content, NEW.description, NEW.data, NEW.properties)
+    UPDATE public.nodes SET revision_bytes = revision_bytes + public.hadron_node_state_bytes(NEW.content, NEW.description, NEW.data, NEW.properties)
       WHERE id = NEW.node_id AND revision_bytes IS NOT NULL;
   ELSIF TG_OP = 'DELETE' THEN
-    UPDATE nodes SET revision_bytes = GREATEST(revision_bytes - hadron_node_state_bytes(OLD.content, OLD.description, OLD.data, OLD.properties), 0)
+    UPDATE public.nodes SET revision_bytes = GREATEST(revision_bytes - public.hadron_node_state_bytes(OLD.content, OLD.description, OLD.data, OLD.properties), 0)
       WHERE id = OLD.node_id AND revision_bytes IS NOT NULL;
   ELSE
-    UPDATE nodes SET revision_bytes = GREATEST(
-        revision_bytes - hadron_node_state_bytes(OLD.content, OLD.description, OLD.data, OLD.properties)
-                       + hadron_node_state_bytes(NEW.content, NEW.description, NEW.data, NEW.properties), 0)
+    UPDATE public.nodes SET revision_bytes = GREATEST(
+        revision_bytes - public.hadron_node_state_bytes(OLD.content, OLD.description, OLD.data, OLD.properties)
+                       + public.hadron_node_state_bytes(NEW.content, NEW.description, NEW.data, NEW.properties), 0)
       WHERE id = NEW.node_id AND revision_bytes IS NOT NULL;
   END IF;
   RETURN NULL;
