@@ -86,6 +86,40 @@ describe('R9: refusals create no user', () => {
     await refused('acme-pay');
   });
 
+  it('the pool probe refuses a taken name before any user insert is attempted', async () => {
+    expect(typeof mod.mintServiceUser).toBe('function');
+    await db.organization.create({ data: { id: generateId(), name: 'acme-pay', urn: 'acme-pay' } });
+    const { ensureOrgPrincipal } = await import('../lib/principal/mintPrincipal.js');
+    await ensureOrgPrincipal(db, await db.organization.findFirstOrThrow({ where: { urn: 'acme-pay' } }));
+    // The same client, counting user inserts made inside its transactions.
+    let creates = 0;
+    const counted = (tx: object) => new Proxy(tx, {
+      get(target, prop) {
+        const v = Reflect.get(target, prop) as unknown;
+        if (prop !== 'user') return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        return new Proxy(v as object, {
+          get(delegate, name) {
+            const f = Reflect.get(delegate, name) as (...a: unknown[]) => unknown;
+            if (name === 'create') return (...a: unknown[]) => { creates++; return f.apply(delegate, a); };
+            return typeof f === 'function' ? f.bind(delegate) : f;
+          },
+        });
+      },
+    });
+    const observed = new Proxy(db, {
+      get(target, prop) {
+        if (prop === '$transaction') {
+          return (fn: (tx: object) => unknown, ...rest: unknown[]) =>
+            (target.$transaction as (...a: unknown[]) => Promise<unknown>)((tx: object) => fn(counted(tx)), ...rest);
+        }
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    await expect(mod.mintServiceUser!(observed, { handle: 'acme-pay' })).rejects.toBeInstanceOf(core.BootstrapTokenError);
+    expect(creates).toBe(0);
+  });
+
   it('an illegal handle', async () => {
     await refused('Not A Handle!');
   });

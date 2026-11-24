@@ -300,6 +300,28 @@ describe('R7: updateUserRoles writes one user.roles.changed line after commit', 
     ]);
   });
 
+  it('the line is written after the transaction commits, never inside it', async () => {
+    const order: string[] = [];
+    logSpy.mockImplementation(() => { order.push('log'); });
+    // The same client, with $transaction reporting when the transaction has committed.
+    const observed = new Proxy(db, {
+      get(target, prop) {
+        if (prop === '$transaction') {
+          return async (...args: unknown[]) => {
+            const out = await (target.$transaction as (...a: unknown[]) => Promise<unknown>)(...args);
+            order.push('commit');
+            return out;
+          };
+        }
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    });
+    const res = await gql(ROLES, { ...platformCtx(), db: observed as typeof db }, { u: member, r: ['BILLING'] });
+    expect(res.errors).toBeUndefined();
+    expect(order).toEqual(['commit', 'log']);
+  });
+
   it('a refused call logs nothing', async () => {
     const res = await gql(ROLES, outsiderCtx(), { u: member, r: ['BILLING'] });
     expect(code(res)).toBe('FORBIDDEN');
