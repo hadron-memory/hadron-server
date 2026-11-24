@@ -1176,7 +1176,7 @@ export const appRunQueries = {
       orgRef,
       status,
       statuses,
-      parentRunId,
+      parentRunRef,
       sortBy,
       sortDir,
       limit,
@@ -1187,7 +1187,7 @@ export const appRunQueries = {
       /** @deprecated #836 — superseded by `statuses`; still accepted for one release. */
       status?: string | null;
       statuses?: string[] | null;
-      parentRunId?: string | null;
+      parentRunRef?: string | null;
       sortBy?: AppRunSortField | null;
       sortDir?: 'asc' | 'desc' | null;
       limit?: number | null;
@@ -1222,14 +1222,31 @@ export const appRunQueries = {
         throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
       }
     }
+    // #4141: `parentRunRef` is a run PK or an hrn:apprun URN, resolved AFTER the org READER gate. Tri-state kept:
+    // omitted = no filter, null = top-level runs only, a ref = that run's children. A ref that cannot name a run is a
+    // shape error (BAD_USER_INPUT, pure and local: no run is looked up); a well-shaped ref that names no run, an
+    // ambiguous legacy ref and a run outside this scope all answer the SAME exactly-empty page. Only a resolver miss
+    // folds: a database fault propagates. The RESOLVED id feeds the filter, never the URN.
+    let parentRunId: string | null | undefined;
+    if (parentRunRef === undefined) {
+      parentRunId = undefined;
+    } else if (parentRunRef === null) {
+      parentRunId = null;
+    } else {
+      assertAppRunRefShape(parentRunRef);
+      try {
+        ({ id: parentRunId } = await resolveAppRunRef(ctx.db, parentRunRef));
+      } catch (error) {
+        if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+        return { items: [], total: 0 };
+      }
+    }
     const where = {
       organizationId,
       ...(appId ? { appId } : {}),
       ...buildStatusFilter(status, statuses),
       // Fan-out children of one parent (#548; index from PR-547). Rides the
       // same org/app authorization — the org scope already applies above.
-      // Explicit null = top-level runs only; omitted = no filter (PR-550
-      // review, Gemini).
       ...(parentRunId !== undefined ? { parentRunId } : {}),
     };
     const take = Math.min(Math.max(limit ?? 20, 1), 200);

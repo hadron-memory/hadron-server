@@ -12160,6 +12160,11 @@ export const typeDefs = `#graphql
     When statuses is non-null it wins, including an empty list; omitted or
     null statuses falls back to status. No removal date is promised here.
 
+    parentRunRef (#4141, renamed from parentRunId) is the run whose fan-out children are listed: its id or
+    its hrn:apprun URN. Omitted means no filter, null means top-level runs only, a ref means that run's
+    children. A ref that cannot name a run is BAD_USER_INPUT; a ref naming no run in scope (unknown,
+    outside the org, ambiguous legacy) answers the exactly empty page. It composes AND with appRef.
+
     sortBy / sortDir (#833) order the whole result set server-side, so a client
     table is no longer limited to sorting the page it happens to hold.
     """
@@ -12168,7 +12173,7 @@ export const typeDefs = `#graphql
       orgRef: String
       status: AppRunStatus @deprecated(reason: "Use statuses (#836) - a single value cannot express PENDING-or-RUNNING.")
       statuses: [AppRunStatus!]
-      parentRunId: ID
+      parentRunRef: ID
       sortBy: AppRunSortField
       sortDir: SortDirection
       limit: Int
