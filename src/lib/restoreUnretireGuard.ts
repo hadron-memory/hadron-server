@@ -6,8 +6,8 @@
  * restore, naming the specs, before anything is soft-deleted or written.
  *
  * It is a NEW rule keyed on each node's own mint record (cor:dmo:120:09, 120:08): `Node.mintedAt`, in a memory that is
- * not encrypted (120:00). It is deliberately NOT gated on `isMintedSpecPermanenceEnforced()` and never reads
- * `Memory.corpusMintedAt`; the two disabled #1591 guards stay as they are.
+ * not encrypted (120:00). It is deliberately NOT gated on `isMintedSpecPermanenceEnforced()` and never consults any
+ * memory-level corpus state; the two disabled #1591 guards stay as they are.
  *
  * What it does not do (ruling 0220 / the gate): protect a `superseded-by*` edge, refuse a restore that tombstones a
  * retired spec by omitting it, guard `restoreNode` or `restoreNodeRevision`, or restore the abstract.

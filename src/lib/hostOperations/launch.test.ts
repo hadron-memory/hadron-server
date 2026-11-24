@@ -431,7 +431,7 @@ describe('#1883 review (Diego): the start is fenced from issue to bind', () => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'host-lapse:' + app.id}))`;
       await tx.agentTaskStallSchedule.upsert({ where: { appId: app.id }, create: { appId: app.id, hostLapseCheckIns: 2 }, update: { hostLapseCheckIns: 2 } });
     });
-    await against(hold, () => M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id)));
+    await against(hold, () => M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: kit.id } }, ctx(manager.id)));
     expect(await db.hostOperation.count()).toBe(0);
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).assigneeWorkerId).toBe(kit.id);
   });
@@ -439,7 +439,7 @@ describe('#1883 review (Diego): the start is fenced from issue to bind', () => {
   it('P2-2: the platform\'s start also waits for a refresh dropping the worker', async () => {
     const t = await db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: manager.id, closeSessionWhenDone: false }, select: { id: true } });
     const hold = holdOpen(dropKitFromOrca1);
-    await against(hold, () => M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id)));
+    await against(hold, () => M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: kit.id } }, ctx(manager.id)));
     expect(await db.hostOperation.count()).toBe(0);
   });
 
@@ -537,7 +537,7 @@ describe('the platform starts an assigned worker with no live session (cor:agt:0
 
   it('S1: assigning Kit by hand asks orca1 to start Kit in its existing worktree; the session records the platform and the task', async () => {
     const t = await task();
-    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
+    await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
     const [op] = await db.hostOperation.findMany();
     expect(op).toMatchObject({ type: 'worker.start', hostId: 'orca1', issuedBy: 'platform', workerId: kit.id });
     expect(op!.args).toEqual({ workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude', taskId: t.id });
@@ -545,7 +545,7 @@ describe('the platform starts an assigned worker with no live session (cor:agt:0
     const s = await redeem(holder.id, got!.launchGrant!);
     expect(s).toMatchObject({ launchIssuedBy: 'platform', launchTaskId: t.id });
     // Reassigning to Kit again while its start is in flight or it is live issues nothing more.
-    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id)).catch(() => undefined);
+    await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: kit.id } }, ctx(manager.id)).catch(() => undefined);
     expect(await db.hostOperation.count()).toBe(1);
   });
 
@@ -557,12 +557,12 @@ describe('the platform starts an assigned worker with no live session (cor:agt:0
   it('S2: a worker nobody holds is never started; S3: with no worktree on a live host nothing is started, and the task waits', async () => {
     await db.worker.update({ where: { id: kit.id }, data: { heldByUserId: null, heldAt: null } });
     const t1 = await task();
-    await M.assignAgentTask({}, { taskId: t1.id, assignee: { worker: kit.id } }, ctx(manager.id));
+    await M.assignAgentTask({}, { taskRef: t1.id, assignee: { worker: kit.id } }, ctx(manager.id));
     expect(await db.hostOperation.count()).toBe(0);
     await db.worker.update({ where: { id: kit.id }, data: { heldByUserId: holder.id, heldAt: new Date() } });
     await M.registerHost({}, { input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'claude' }] } }, keyCtx(orca1));
     const t2 = await task();
-    await M.assignAgentTask({}, { taskId: t2.id, assignee: { worker: kit.id } }, ctx(manager.id));
+    await M.assignAgentTask({}, { taskRef: t2.id, assignee: { worker: kit.id } }, ctx(manager.id));
     expect(await db.hostOperation.count()).toBe(0);
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t2.id } })).status).toBe('pending');
     // cor:agt:070:06: no worktree is ever created for it.
@@ -572,7 +572,7 @@ describe('the platform starts an assigned worker with no live session (cor:agt:0
   it('a worker with a live session is not started: it simply has the task', async () => {
     await db.session.create({ data: { id: generateId(), appId: app.id, workerId: kit.id, userId: holder.id, startedAt: new Date(), updatedAt: new Date() } });
     const t = await task();
-    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
+    await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
     expect(await db.hostOperation.count()).toBe(0);
   });
 
@@ -604,7 +604,7 @@ describe('the platform starts an assigned worker with no live session (cor:agt:0
   it('#4237 (V16): assigning Kit by hand over its quiet open session issues no worker.start', async () => {
     await quietOpenSession();
     const t = await task();
-    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
+    await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).assigneeWorkerId).toBe(kit.id);
     expect(await starts(), 'a hand assignment started Kit over its quiet open session').toBe(0);
   });
@@ -612,7 +612,7 @@ describe('the platform starts an assigned worker with no live session (cor:agt:0
   it('#4237 (V16): reassigning to Kit over its quiet open session issues no worker.start', async () => {
     await quietOpenSession();
     const t = await db.agentTask.create({ data: { appId: app.id, title: 'Do it', ownerUserId: manager.id, assigneeWorkerId: ada.id, assignedAt: new Date(), closeSessionWhenDone: false }, select: { id: true } });
-    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
+    await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).assigneeWorkerId).toBe(kit.id);
     expect(await starts(), 'a reassign started Kit over its quiet open session').toBe(0);
   });
@@ -628,7 +628,7 @@ describe('the platform starts an assigned worker with no live session (cor:agt:0
     const s = await quietOpenSession();
     await db.session.update({ where: { id: s.id }, data: { endedAt: new Date(Date.now() - 59 * 86_400_000) } });
     const t = await task();
-    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
+    await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: kit.id } }, ctx(manager.id));
     expect(await starts()).toBe(1);
   });
 

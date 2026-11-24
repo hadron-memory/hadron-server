@@ -133,8 +133,8 @@ describe('#4098 every filter selects the same events on the forward (SQL) and th
    [{alarmsOnly:true},[open,acked,ended].map(e=>e.id)],
    [{alarmsInEffect:true},[open.id]],
    [{alarmsOnly:true,alarmsInEffect:true},[open.id]],
-   [{taskId},[onTask,open].map(e=>e.id)],
-   [{taskId,alarmsInEffect:true},[open.id]],
+   [{taskRef:taskId},[onTask,open].map(e=>e.id)],
+   [{taskRef:taskId,alarmsInEffect:true},[open.id]],
    [{since:new Date(T+4000).toISOString(),alarmsOnly:true,codePrefix:'stall.'},[acked,ended].map(e=>e.id)],
   ] as const satisfies ReadonlyArray<readonly [Partial<Record<FilterArg,unknown>>,readonly string[]]>;
   type CaseFilterKeys<T>=T extends object?keyof T:never; // distributes; a bare keyof would intersect the union of case filters

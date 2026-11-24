@@ -562,7 +562,6 @@ export const memoryMutations = {
         vectorIndexEnabled,
         embeddingSource,
         maxRevCount,
-        draftCorpus,
       }: {
         // spec 047: OPTIONAL — omitted ⇒ user-owned (caller's `@handle` namespace).
         orgRef?: string | null; name: string;
@@ -577,7 +576,9 @@ export const memoryMutations = {
         embeddingSource?: 'abstract' | 'contentChunks' | 'both' | null;
         // #621 — per-node revision cap; omitted ⇒ column default (10).
         maxRevCount?: number | null;
-        // #1448 — the ONLY way a memory becomes a draft spec corpus.
+        // #1448 legacy arg, a no-op since #5063: corpus state is derived from
+        // per-node minting, so nothing writes it. Accepted (and ignored) so
+        // the GraphQL contract stays stable.
         draftCorpus?: boolean | null;
         // GraphQL passes the full MemoryClass enum; the resolver
         // allowlists the user-creatable values below. Spec 034 added
@@ -756,10 +757,6 @@ export const memoryMutations = {
             ownerUserId: userOwned ? ctx.userId : null,
             urn: memoryUrn,
             name,
-            // #1448 legacy flag. Since #1591 nothing reads it: corpus state
-            // is derived from per-node minting, and every new node starts
-            // unminted whether or not draft was asked for.
-            corpusDraft: draftCorpus === true,
             shortDescription,
             description,
             // Free-form metadata bag (no server-side semantics). Mirrors the

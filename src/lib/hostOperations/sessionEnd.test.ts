@@ -63,7 +63,7 @@ async function startedTask(close = true) {
   });
 }
 const finish = (taskId: string) =>
-  asWorker(kit, () => M.finishAgentTask({}, { taskId, result: { outcome: 'succeeded' } }, ctx(holder.id)));
+  asWorker(kit, () => M.finishAgentTask({}, { taskRef: taskId, result: { outcome: 'succeeded' } }, ctx(holder.id)));
 const requestOf = (taskId: string) => db.taskSessionEndRequest.findFirst({ where: { taskId } });
 
 beforeEach(async () => {
@@ -128,7 +128,7 @@ describe('the ask (cor:agt:050:10)', () => {
       data: { appId: app.id, title: 'Cancel me', ownerUserId: manager.id, assigneeWorkerId: kit.id, status: 'pending', assignedAt: new Date(), closeSessionWhenDone: true },
       select: { id: true },
     });
-    await M.cancelAgentTask({}, { taskId: t.id }, ctx(manager.id));
+    await M.cancelAgentTask({}, { taskRef: t.id }, ctx(manager.id));
     const r = await requestOf(t.id);
     expect(r).toMatchObject({ sessionId: session.id, requestedByWorkerId: null });
     const due = (await pendingTaskWakes(db, [kit.id], new Date())).get(kit.id) ?? [];

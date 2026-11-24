@@ -142,7 +142,7 @@ describe('agentTask global search (#3945)', () => {
   it('the App\'s own key gets no task hits, even for its own App (ruled userless carve-out)', async () => {
     const keyCtx: Context = { db, appId: appX.id, appKeyId: keyX.id, roles: [] };
     // The direct read admits the key…
-    expect((await Q.agentTask({}, { id: taskX.id }, keyCtx))?.id).toBe(taskX.id);
+    expect((await Q.agentTask({}, { ref: taskX.id }, keyCtx))?.id).toBe(taskX.id);
     // …the search does not.
     const r = await search(keyCtx, 'zebra');
     expect(r.hits).toEqual([]);
@@ -325,7 +325,7 @@ describe('the candidate-App scope keeps every arm the gate admits (#3964 §10 F4
 
   it('a platform admin reads wherever the direct read admits it', async () => {
     const actx = { db, userId: stranger.id, roles: ['ADMIN'] } as Context;
-    expect((await Q.agentTask({}, { id: taskX.id }, actx))?.id).toBe(taskX.id);
+    expect((await Q.agentTask({}, { ref: taskX.id }, actx))?.id).toBe(taskX.id);
     const r = await search(actx, 'zebra');
     expect(agentTaskHits(r).map((h: any) => h.id).sort()).toEqual([taskX.id, taskY.id].sort());
   });

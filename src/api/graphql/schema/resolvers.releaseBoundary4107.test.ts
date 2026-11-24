@@ -43,7 +43,7 @@ const changes = async (args: Record<string, unknown> = {}) => {
 };
 const served = (page: any) => page.changes.map((ch: any) => [ch.kind, ch.externalId]);
 const create = () => M.createAgentTask({}, { input: { appRef: app.id, title: 'T', externalId: X } }, ctx());
-const release = (taskId: string) => M.releaseAgentTaskExternalId({}, { taskId }, ctx());
+const release = (taskId: string) => M.releaseAgentTaskExternalId({}, { taskRef: taskId }, ctx());
 /** An assignment event on the task, stamped `offset` from the database clock (appendTaskEvent's createdAt allows it). */
 const stampedAssignment = (taskId: string, offset: string) => db.$executeRaw`
   INSERT INTO agent_team_events (id, app_id, type, task_id, payload, created_at)

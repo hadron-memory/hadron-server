@@ -87,7 +87,7 @@ describe('#4855 the quiet control (S4) and the unchanged start', () => {
   it('S4: assigning Kit over a QUIET open session starts nothing and ends nothing', async () => {
     const s = await kitSession();
     const t = await task(null);
-    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit } }, w.person);
+    await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: kit } }, w.person);
     expect(await starts()).toHaveLength(0);
     expect((await sessionOf(s.id)).endedAt).toBeNull();
   });
@@ -96,7 +96,7 @@ describe('#4855 the quiet control (S4) and the unchanged start', () => {
     const g = await grant();
     const s = await kitSession();
     const t = await task(null);
-    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit } }, w.person);
+    await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: kit } }, w.person);
     expect(await starts()).toHaveLength(0);
     expect((await sessionOf(s.id)).endedAt).toBeNull();
     expect(await useCount(g)).toBe(0);
@@ -104,7 +104,7 @@ describe('#4855 the quiet control (S4) and the unchanged start', () => {
 
   it('an assignment to a worker with no open session starts as before', async () => {
     const t = await task(null);
-    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit } }, w.person);
+    await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: kit } }, w.person);
     expect((await starts()).map((o) => [o.issuedBy, (o.args as { taskId?: string }).taskId])).toEqual([['platform', t.id]]);
   });
 });
@@ -160,7 +160,7 @@ describe('#4855 the grant holder ends a dark session and starts the worker again
     await restart();
     expect(await code(restart())).toBe('WORKER_START_PENDING');
     const t = await task(null);
-    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: kit } }, w.person);
+    await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: kit } }, w.person);
     expect(await starts()).toHaveLength(1);
     expect(await useCount(g)).toBe(1);
   });

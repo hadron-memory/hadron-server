@@ -104,8 +104,13 @@ describe('#3587 restore refuses to un-retire a minted spec', () => {
     expect((await rowOf('specs:omitted')).deletedAt).not.toBeNull();
   });
 
-  it('keys on the node\'s own mint record, never the memory corpus stamp (an unminted retired spec in a corpus-stamped memory restores)', async () => {
-    await db.memory.update({ where: { id: memoryId }, data: { corpusMintedAt: MINT } });
+  it('keys on the node\'s own mint record, never the corpus (an unminted retired spec in a minted corpus restores)', async () => {
+    // A mint record elsewhere in the memory (#5063 re-key); 'specs:u' stays unminted.
+    await db.node.create({ data: {
+      id: generateId(), memoryId, loc: 'zz:mint-marker', name: 'zz:mint-marker',
+      content: 'minted elsewhere; tombstoned', role: null, tags: [],
+      mintedAt: MINT, mintedByInfo: 'test', deletedAt: MINT,
+    } });
     await mk('specs:u');
     const rev = await save();
     await db.node.updateMany({ where: { memoryId, loc: 'specs:u' }, data: { tags: ['superseded'] } });
