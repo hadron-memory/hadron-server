@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeEach, vi, beforeAll, afterAll } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createMintMarker } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import type { AuthContext } from '../../../middleware/auth.js';
@@ -60,12 +60,7 @@ async function memory(name: string, state: { mintedAt?: Date; deletedAt?: Date |
  * live-loc assertion in this suite sees it.
  */
 async function marker(memoryId: string, loc: string, mintedAt: Date) {
-  return db.node.create({
-    data: {
-      id: generateId(), memoryId, loc, name: loc, content: 'minted elsewhere; tombstoned',
-      role: null, tags: [], mintedAt, mintedByInfo: 'test', deletedAt: mintedAt,
-    },
-  });
+  return createMintMarker(db, memoryId, { loc, mintedAt });
 }
 
 /** The mint stamp the guard now derives: MAX(nodes.minted_at), tombstones included. */
@@ -677,23 +672,20 @@ describe('#1468 — race against a concurrent mint', () => {
     const racing = await memory('racing');
     const spec = await node(racing.id, 'pas:010', { tags: ['spec'] });
 
-    // Stand-in for the mint's fence + stamp: the memory row FOR UPDATE, the
-    // mint record written (a node gains minted_at, #5063 re-key), and the
-    // transaction held open.
+    // Stand-in for the mint's fence + stamp (#5088 F7: kept as a stand-in, but at the product's lock fidelity): the
+    // memory row FOR UPDATE, then every node row of the memory FOR UPDATE in id order (`fenceCorpusForMint`, so the
+    // spec row is held as the real mint holds it), the mint record written (a node gains minted_at, #5063 re-key),
+    // and the transaction held open. What it still does NOT do: run the mint's checks or stamp the live nodes; this
+    // test pins only the delete's ordering behind a mint in flight. The product mint is driven in specCorpusMint.test.ts.
     let release!: () => void;
     let flipped!: () => void;
     const hold = new Promise<void>((r) => { release = r; });
     const isFlipped = new Promise<void>((r) => { flipped = r; });
     const mint = db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${racing.id} FOR UPDATE`;
+      await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${racing.id} ORDER BY id FOR UPDATE`;
       const now = new Date();
-      await tx.node.create({
-        data: {
-          id: generateId(), memoryId: racing.id, loc: 'racing:mint-marker', name: 'racing:mint-marker',
-          content: 'minted elsewhere; tombstoned', role: null, tags: [],
-          mintedAt: now, mintedByInfo: 'test', deletedAt: now,
-        },
-      });
+      await createMintMarker(tx, racing.id, { loc: 'racing:mint-marker', mintedAt: now });
       flipped();
       await hold;
     }, { timeout: 20_000 });

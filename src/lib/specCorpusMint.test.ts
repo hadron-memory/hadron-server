@@ -534,58 +534,54 @@ describe('mintSpecCorpus does not rely on writers taking its fence (@codex P2s o
 });
 
 describe('an extraction that moves specs out serializes with minting (@codex P2 on #1462)', () => {
-  it('waits while a mint holds the corpus, so it cannot delete specs between the mint\'s read and its flip', async () => {
+  // #5088 F6: this drives the PRODUCT mint (`mintSpecCorpus`), not a hand-written stand-in UPDATE. The real mint takes
+  // the memory row FOR UPDATE, then fences every node row with a 500ms lock timeout that turns into the retryable
+  // SPEC_CORPUS_BUSY (`fenceCorpusForMint`). To hold it inside that window a test transaction locks one node row
+  // outside the extracted subtree, so the mint waits on it, then the extraction starts. Timing: the mint's own 500ms
+  // bound is the only clock, and the assertions below do not depend on which of the two reaches the other's lock first,
+  // only on the outcome and on the extraction not finishing before the mint has given up.
+  it('does not finish while a real mint holds the corpus: the mint refuses BUSY, stamps nothing, and the extraction then lands', async () => {
+    await spec('pas:020', 'Outside the extracted subtree.');
     let release!: () => void;
     let held!: () => void;
     const lockHeld = new Promise<void>((r) => { held = r; });
     const hold = new Promise<void>((r) => { release = r; });
-    let seenByMint = -1;
-    // What mintSpecCorpus holds from its report to its flip: the memory row,
-    // then the node stamp — bounded like the real fence (a lock timeout that
-    // turns into a retryable SPEC_CORPUS_BUSY), because the extraction below
-    // already holds the subtree rows a real mint must fence.
-    const minter = db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${draft.id} FOR NO KEY UPDATE`;
+    // The blocker: a node row of the corpus, outside the extracted pas:010 subtree, locked the way a direct update does.
+    const blocker = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${draft.id} AND loc = 'pas:020' FOR UPDATE`;
       held();
       await hold;
-      seenByMint = await tx.node.count({ where: { memoryId: draft.id, deletedAt: null, loc: { startsWith: 'pas:010' } } });
-      // …and stamps the mint records as a real mint does under its fence
-      // (#5063 re-key): the write hits node rows now, so it must stay bounded
-      // or a nodes-first writer (this extraction) would deadlock with it.
-      await tx.$queryRaw`SET LOCAL lock_timeout = '500ms'`;
-      await tx.$executeRaw`UPDATE nodes SET minted_at = now(), minted_by_info = 'test' WHERE memory_id = ${draft.id} AND deleted_at IS NULL AND minted_at IS NULL`;
     }, { timeout: 20_000 });
     await lockHeld;
 
-    const parent = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010' } });
-    const extracting = codeOf(resolvers.Mutation.extractParentNodeToMemory(
-      {}, { parentRef: parent.id, targetUrn: `${org.urn}::extracted-specs`, move: true } as never, as(),
-    ));
+    let mintDoneAt = 0;
+    let extractDoneAt = 0;
     try {
+      const minting = codeOf(mint()).then((c) => { mintDoneAt = Date.now(); return c; });
+      // The mint is now inside its fence, waiting on the blocker's row (it holds the memory row FOR UPDATE).
       await vi.waitFor(async () => {
         const waiting = await db.$queryRaw<Array<{ pid: number }>>`
           SELECT pid FROM pg_stat_activity
           WHERE datname = current_database() AND wait_event_type = 'Lock'
-            AND query LIKE '%FROM memories WHERE id%' AND query LIKE '%FOR SHARE%'
+            AND query LIKE '%FROM nodes WHERE memory_id%' AND query LIKE '%FOR UPDATE%'
         `;
         expect(waiting.length).toBeGreaterThan(0);
-      }, { timeout: 5_000, interval: 25 });
+      }, { timeout: 5_000, interval: 10 });
+      const parent = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010' } });
+      const extracting = codeOf(resolvers.Mutation.extractParentNodeToMemory(
+        {}, { parentRef: parent.id, targetUrn: `${org.urn}::extracted-specs`, move: true } as never, as(),
+      )).then((c) => { extractDoneAt = Date.now(); return c; });
+      // The real mint gives up on its own (500ms), retryable, and the stamp never lands.
+      expect(await minting).toBe('SPEC_CORPUS_BUSY');
+      expect(await db.node.count({ where: { memoryId: draft.id, mintedAt: { not: null } } })).toBe(0);
+      // Ordered after the mint's abort, the extraction is an ordinary edit of the (still unminted) corpus: extract
+      // has no draft-only behavior, and today's rules (#1447 §5) do not refuse removing a spec.
+      expect(await extracting).toBe('NO_ERROR');
+      expect(extractDoneAt).toBeGreaterThanOrEqual(mintDoneAt);
     } finally {
       release();
     }
-    // The real mint, finding the extraction's subtree fence on the rows it
-    // must stamp, gives up its own (retryable SPEC_CORPUS_BUSY) instead of
-    // racing it — the stamp never lands, so nothing was deleted between the
-    // mint's read and its flip.
-    await expect(minter).rejects.toSatisfy(
-      (e: unknown) => e instanceof Error && /55P03|40P01/.test(e.message),
-    );
-    // The mint's snapshot still had both specs: the extraction had not landed.
-    expect(seenByMint).toBe(2);
-    // Ordered after the mint's abort, the extraction is an ordinary edit of
-    // the (still unminted) corpus: extract has no draft-only behavior, and
-    // today's rules (#1447 §5) do not refuse removing a spec.
-    expect(await extracting).toBe('NO_ERROR');
+    await blocker;
     expect(await db.node.count({ where: { memoryId: draft.id, deletedAt: null, loc: { startsWith: 'pas:010' } } })).toBe(0);
     expect(await db.node.count({ where: { memoryId: draft.id, mintedAt: { not: null } } })).toBe(0);
   });

@@ -20,6 +20,33 @@
  * start — a divergence from the old never-moved stamp, live today only in
  * the harmless newlyMarked conflict branch (permanence off, #1591).
  *
+ * The mint time is derived, not stored, so it is not monotonic (F1, #5088):
+ * hard-deleting minted node rows moves MAX(minted_at) backward, or makes it
+ * vanish when none is left, which returns the memory to draft. That is the
+ * derived state working as specified (hrn:node:hadronmemory.com:specs:cor:dmo:120:00:
+ * the minted state "is not one-way: deleting every minted node makes it draft
+ * again"), not a defect. Soft deletes never clear it, since tombstones keep
+ * their `minted_at`. MAX is the mint time; MIN would be wrong.
+ *
+ * Isolation (F2): the guards assume READ COMMITTED. They take `FOR SHARE` on
+ * the memory row and then run a plain aggregate over `nodes`; under READ
+ * COMMITTED that aggregate takes a fresh snapshot after the lock is granted,
+ * so it sees a mint that committed while the lock waited. A stricter level
+ * would pin the snapshot at the first statement and could miss it.
+ *
+ * Fencing invariant (F3): the unlocked EXISTS probe in
+ * `lockMintedSpecUnmarks` is stable for the rows being written only because
+ * the mint fences EVERY spec row in scope (`fenceCorpusForMint`, `FOR UPDATE`
+ * on each), which waits on or times out behind this writer's own row locks.
+ * A mint path that fenced fewer rows would break that argument.
+ *
+ * Index (F5): the `EXISTS`/`MAX` reads over `(memory_id, minted_at)` have no
+ * dedicated index. The EXISTS probe runs today, with the switch off, on every
+ * write that newly marks a spec (pinned by C2/C2b); only the MAX reads are
+ * dormant. Whether a partial or composite index is warranted is to be decided
+ * with any future protection rule (cor:dmo:120:09), weighing that per-write
+ * probe cost; it is not a step before a switch flip.
+ *
  * The legacy implementation selects anything carrying the spec marker (`hasSpecMarker` — a `spec`
  * tag or a `spec`/`spec.*` role; both are plaintext at rest even in encrypted
  * memories). Because the removal guards pick specs out BY that marker,

@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, beforeEach, vi, beforeAll, afterAll } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createMintMarker } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { archivedTombstoneLoc } from '../../../lib/tombstoneArchive.js';
@@ -506,13 +506,7 @@ describe('#1468 — minted specs in an agent system memory', () => {
   /** The mint record the re-keyed guard reads (#5063): a tombstoned, non-spec marker node. */
   const stamp = () => {
     const mintedAt = new Date();
-    return db.node.create({
-      data: {
-        id: generateId(), memoryId: systemMemory.id, loc: 'zz:mint-marker', name: 'zz:mint-marker',
-        content: 'minted elsewhere; tombstoned', role: null, tags: [],
-        mintedAt, mintedByInfo: 'test', deletedAt: mintedAt,
-      },
-    });
+    return createMintMarker(db, systemMemory.id, { mintedAt });
   };
 
   it('restoreRevision refuses a snapshot that would drop a live minted spec', async () => {
