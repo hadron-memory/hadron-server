@@ -72,7 +72,7 @@ const MUTATION_MODULE = /^resolvers\.mutation\./;
  */
 const ALLOWLIST: Record<string, string> = {
   'resolvers.appRun.ts':
-    'createdBy is an audit-actor stamp on run writes (plugin-blocked); appRuns/appRun/latestAppRun reads are org-gated',
+    'createdBy is an audit-actor stamp on run writes (plugin-blocked); appRuns/appRun/latestAppRun reads are org-gated; quotaCounters/setQuotaLimit refuse an impersonated session on a person-owned App and on userRef (#5074)',
   'resolvers.metering.ts':
     'createdBy is an audit-actor stamp on grantCredits/setAiModelPrice (platform-admin mutations); price + ledger reads are org-derived',
 };

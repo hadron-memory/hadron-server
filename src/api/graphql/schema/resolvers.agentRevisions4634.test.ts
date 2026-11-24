@@ -58,10 +58,10 @@ describe('#4634 F2: agentRevisions pin and rows are one snapshot', () => {
     };
     const r = await list();
     expect(hook.beforeRows).toBeNull(); // the interleaving really ran
-    const published = r.revisions.filter((x: { published: boolean }) => x.published);
-    expect(published).toHaveLength(1);
-    // Whichever state was seen, the pin and the rows agree: the published row is a listed row.
-    expect(r.revisions.map((x: { revisionLoc: string }) => x.revisionLoc)).toContain(published[0].revisionLoc);
+    // #5039 item 4: the snapshot starts at its first statement (the pin read), before the interleaving commits, so the
+    // result is exactly the pre-interleaving state: rev-1 published, both rows listed, newest first.
+    expect(r.revisions.map((x: { revisionLoc: string; published: boolean }) => [x.revisionLoc, x.published]))
+      .toEqual([['revisions:rev-2', false], ['revisions:rev-1', true]]);
     // The committed truth afterwards is the post-publish state, read in a later request.
     expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).publishedRevisionLoc).toBe('revisions:rev-2');
     const after = await list();

@@ -18,7 +18,7 @@
  * Replaces v1's listAgentAssets in the v2 surface.
  */
 
-import type { Asset, PrismaClient } from '../../generated/prisma/index.js';
+import type { Asset, PrismaClient, Role } from '../../generated/prisma/index.js';
 import { canReadMemory } from '../../mcp/access-control.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
 import { resolveMemoryRef } from '../../lib/entityRef/memoryRef.js';
@@ -44,7 +44,7 @@ export interface ListMemoryAssetsInput {
 export interface ListMemoryAssetsCaller {
   userId: string;
   appId?: string;
-  roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
+  roles?: Role[];
   organizationId?: string;
 }
 

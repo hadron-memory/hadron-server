@@ -37,6 +37,12 @@ export const typeDefs = `#graphql
     ADMIN
     CONTRIBUTOR
     READER
+    """
+    A platform role for a payment service (#5012): it may write credit grants and adjustments (grantCredits,
+    adjustCredits) and nothing else. Refused (BAD_USER_INPUT) as an organization member's, a memory subscription's
+    or an invitation's role, and never combined with another platform role on one user.
+    """
+    BILLING
   }
 
   enum SubscriptionType {
@@ -2232,6 +2238,60 @@ export const typeDefs = `#graphql
     the balance when credit that never expires is below zero (hrn:node:hadronmemory.com:specs:cor:dmo:170:11).
     """
     expiring: [ExpiringCredit!]!
+  }
+
+  """
+  One owner limit of an organization or a person (hadron-server issue 5009): what may be held and how much of it is held now.
+  """
+  type OwnerLimitUsage {
+    "Which measure this is."
+    key: String!
+    "The limit in force, a base-10 integer string: the owner's own limit, else the deployment default for that kind of owner. Null means unlimited."
+    limit: String
+    "How much the owner holds now, a base-10 integer string, counted when asked for. A total only."
+    used: String!
+  }
+
+  input OwnerLimitInput {
+    key: String!
+    "A non-negative base-10 integer string. Null or omitted means unlimited, which lifts the deployment default."
+    limit: String
+  }
+
+  input SetOwnerLimitsInput {
+    "The organization, an id or a URN. Exactly one of orgRef and userRef."
+    orgRef: String
+    "The person, an id or a URN. Exactly one of orgRef and userRef."
+    userRef: ID
+    "The limits to write. Each key at most once."
+    limits: [OwnerLimitInput!]!
+    "When true, also delete the owner's limits for keys not named here."
+    replace: Boolean
+    "Narrows the deletion of replace to limits written with this source type. Refused without replace."
+    onlySourceType: String
+    "What set these limits, for example manual. Must not hold personal data: it is logged."
+    sourceType: String!
+    "Which one. Must not hold personal data: it is logged."
+    sourceId: String!
+    "Why. Must not hold personal data."
+    note: String!
+  }
+
+  input ClearOwnerLimitsInput {
+    "The organization, an id or a URN. Exactly one of orgRef and userRef."
+    orgRef: String
+    "The person, an id or a URN. Exactly one of orgRef and userRef."
+    userRef: ID
+    "The keys to clear. Omit for every key; an empty list is refused."
+    keys: [String!]
+    "Clear only limits written with this source type."
+    onlySourceType: String
+    "What cleared these limits. Must not hold personal data: it is logged."
+    sourceType: String!
+    "Which one. Must not hold personal data: it is logged."
+    sourceId: String!
+    "Why. Not stored, since the row is deleted. Must not hold personal data."
+    note: String!
   }
 
   """How aiSpend groups units. Each row's key is the group's value; a unit with no value for the grouping is the row with the empty key."""
@@ -5277,7 +5337,7 @@ export const typeDefs = `#graphql
   036-ai-service-config: a named AI service configuration (masked
   management view — never carries key material beyond the preview).
   Owned by exactly one of HadronServer / Organization / App / Agent.
-  Resolution walks App -> Agent -> Org (of the App) -> HadronServer and
+  Resolution walks App -> Agent -> Org (of the tenant: the owner of the App, #5075) -> HadronServer and
   returns the first ENABLED config with the requested name. Well-known
   fallback name: 'default' (conventional extras: 'fast', 'frontier').
   Name is unique per owner.
@@ -7205,7 +7265,8 @@ export const typeDefs = `#graphql
 
   """
   #4168 (hrn:node:hadronmemory.com:specs:cor:dmo:060:17): the verdict of a proposed write's authoring
-  attestation check. PASS: the write would pass. REFUSED: the write would be refused, with the code,
+  attestation check. PASS: the write would pass the authoring attestation check; the answer covers that check and not the
+  rest of the write's validation. REFUSED: the write would be refused, with the code,
   the governed role, the prose and the recovery the write returns. UNAVAILABLE: the caller reads the
   memory but does not write it, one answer for every node and role, so it shows nothing about the
   memory's rules. A preview, never a reservation, and a pass is never proof the procedure was followed.
@@ -7226,7 +7287,10 @@ export const typeDefs = `#graphql
     READABLE
     UNAVAILABLE
   }
-  "How to load the author task, per surface. A surface with no route is null."
+  """
+  How to load the author task, per surface. graphql always has a route and is never null; mcp and cli are null when the
+  task has no URN to name.
+  """
   type AuthoringCheckLoad {
     graphql: String!
     mcp: String
@@ -8332,7 +8396,7 @@ export const typeDefs = `#graphql
   "Usage-vs-limit for one scope x action window (#510). The stored limit is the enforced value; env defaults only seed first touch."
   type QuotaCounter {
     id: ID!
-    "app or org."
+    "app, org or user. A user row is the person's shared counter for their Apps; it is read and set now and enforced once a person's App can run (F3a)."
     scopeKind: String!
     scopeId: String!
     "run.execute, llm.tokens, sms.send, or email.send."
@@ -8345,10 +8409,12 @@ export const typeDefs = `#graphql
   }
 
   input SetQuotaLimitInput {
-    "Org - ref: PK or URN."
-    orgRef: String!
-    "Optional app scope - ref: PK or URN; must belong to the org. Omit to set the org-level limit."
+    "Org - ref: PK or URN. Alone: the organization's limit; with appRef: that App's. Omit with appRef alone (an App of an organization or of a person) or with userRef alone."
+    orgRef: String
+    "App scope - ref: PK or URN. With orgRef it must belong to the org; alone it names an organization's App (the org-ADMIN callers) or a person's App (its owner, owner-role members, a platform admin). Every denial answers NOT_FOUND, as for an unknown ref."
     appRef: String
+    "A person (user id): that person's own counters. The person as themself or a platform admin; never with orgRef or appRef (BAD_USER_INPUT)."
+    userRef: ID
     "run.execute, llm.tokens, sms.send, or email.send."
     action: String!
     "Non-negative integer; 0 pauses the scope (every launch denies QUOTA_EXCEEDED)."
@@ -9863,7 +9929,7 @@ export const typeDefs = `#graphql
     teamStopSignals(appRef: String!, worker: String, includeEnded: Boolean, first: Int, after: String): StopSignalPage!
     """
     #2017 (S1) — the ready-to-deliver batches of the workers registered on the calling host (hrn:node:hadronmemory.com:specs:cor:agt:080:22, :26).
-    An own live session reads only its bound worker. A host App key needs attention:deliver AND host:operate;
+    An own live session reads only its bound worker. #5000: a session past its idle window but inside its App's dormancy period is LAPSED, not ended, and its holder's own read resumes it (same session id); a refusal is SESSION_NOT_LIVE with extensions.reason OTHER_SESSION_LIVE or NOT_OWNER (not the caller's own session to resume, or the caller can no longer drive the App); an ended or dormant session is refused earlier, at the session binding, with the generic message. A host App key needs attention:deliver AND host:operate;
     the host is the key's, the request names none, and a worker not on that host is absent. The text is written by the server and typed unchanged. Reading moves nothing; acknowledge the batch ids.
     """
     deliveryBatches(appRef: String!, workerRefs: [String!], first: Int, after: String): DeliveryBatchPage!
@@ -10360,7 +10426,15 @@ export const typeDefs = `#graphql
       "hadron node import". Requires MD or JSON; sections is ignored.
     full: false returns a PRESENTATION render of the selected sections
       (default: all); not guaranteed round-trippable.
-    Auth: same node-read gate as node(ref:). (HTML/PDF + asUrl delivery land
+    format: PDF is always a presentation render and \`full\` does not apply
+      (hrn:node:hadronmemory.com:specs:cor:int:020:02, #395). The node's content
+      is always printed; the sections you name are ADDED after it (naming
+      CONTENT changes nothing), in the fixed order Abstract, Data, Properties,
+      Edges, Metadata whatever order you gave: Data and Properties as two-column
+      tables (a value that is not an object prints as a fenced JSON block), Edges as a list, Metadata as a list, a section with nothing in it
+      left out. No sections named prints the content only. Comments is not a
+      section yet.
+    Auth: same node-read gate as node(ref:). (HTML + asUrl delivery land
     later; the result shape is forward-compatible.)
     """
     nodeExport(
@@ -11683,8 +11757,14 @@ export const typeDefs = `#graphql
     and return its identity, with decrypted credentials only for a caller
     authorized to manage the selected source (successor to agentAIConfig/appAIConfig).
 
-    Walk: App -> Agent -> Org (of the App, else of the Agent) ->
-    HadronServer; disabled configs are skipped. When name is omitted,
+    Walk: App -> Agent -> Org -> HadronServer; disabled configs are skipped.
+    The tenant decides the last two levels (#5075,
+    hrn:node:hadronmemory.com:specs:cor:dmo:050:10): it is the owner of the
+    App when an App is named, else the explicit organization, else the owner
+    of the Agent. An organization's tenant consults that organization's
+    level and then the platform's. A person's App consults its own
+    configurations and the named Agent's own, and nothing else: no
+    organization level (never the publisher's) and no platform level. When name is omitted,
     'default' is resolved. When an explicit name misses, resolution falls
     back to 'default'; if that also misses, errors with
     NoAiConfigAvailableError. Consumers (webhooks, scheduled tasks, the
@@ -11697,7 +11777,7 @@ export const typeDefs = `#graphql
     context requires platform ADMIN/OWNER. A user-owned Agent is strictly
     owner-only, including when an App is also named. With no effective org,
     its owner can decrypt that Agent's own config or a user-owned App's
-    config; a host fallback is unavailable through this query. A user-owned
+    config; no organization or host level answers there. A user-owned
     App's owner needs the outer source's own authority to decrypt an installed
     Agent or org config; its App ownership alone grants only its App config.
     A HADRON_SERVER fallback can back a server-side call, but only a platform
@@ -11723,8 +11803,9 @@ export const typeDefs = `#graphql
     execution context — every distinct config name a chat in this context
     could select. Populates a config picker in the chatbot UI.
 
-    Same walk as resolveAIConfig (App -> Agent -> Org (of the App, else of
-    the Agent) -> HadronServer), but returns ALL names instead of resolving
+    Same walk and tenant rule as resolveAIConfig (App -> Agent -> Org ->
+    HadronServer; a person's App lists only its own and the named Agent's
+    configurations), but returns ALL names instead of resolving
     one: configs are deduped by name with the innermost owner winning, so
     each entry is the row the resolution walk selects for that name; this
     masked listing does not grant permission to decrypt it. Only
@@ -11734,7 +11815,7 @@ export const typeDefs = `#graphql
     unless the caller manages the selected source.
 
     Auth: scoped to one App's chat context. A non-admin caller MUST pass an
-    appRef, be a member of that App, and (when an agentRef is given) the Agent
+    appRef, be a member of that App (or the owner of a personal App), and (when an agentRef is given) the Agent
     must be installed and live-licensed in that App. Because the result is
     masked (no key material), App membership — not org admin — is the bar, unlike
     resolveAIConfig and the aiServiceConfigs management list. Platform
@@ -11746,8 +11827,8 @@ export const typeDefs = `#graphql
 
     """
     #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): what a chat of this App may choose from — the App's OWN enabled AI configs plus one
-    \`default\` entry, which resolves through the App -> Agent -> Org -> Host walk at turn time. Send an entry's
-    \`value\` back as the chat's aiConfigChoice. Never a key, key preview, params or endpoint. Any App member may
+    \`default\` entry, which resolves through the App -> Agent -> Org -> Host walk at turn time (a person's App reaches only its own and its Agent's configurations, #5075). Send an entry's
+    \`value\` back as the chat's aiConfigChoice. Never a key, key preview, params or endpoint. Any App member, or the owner of a personal App, may
     call it (a platform admin too); anyone else, a missing App and a request that is not a signed-in person get
     the same APP_NOT_FOUND answer.
     """
@@ -11756,7 +11837,7 @@ export const typeDefs = `#graphql
     """
     #4042 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10, hrn:node:hadronmemory.com:specs:cor:acl:030:01): the tool-choice decision the chat turn will use for this chat's
     effective config: same predicate, same resolve order as the turn (the chat's stored choice, else the App's chatbot
-    config, else the \`default\` walk). Null when no level matches, and for a user-owned App whose walk lands on the platform's config (which that App may not use); otherwise non-null.
+    config, else the \`default\` walk). Null when no level matches (the walk gives a person's App no organization or platform level, #5075); otherwise non-null.
     Authorized through the single-chat read gate chatHistory uses: a chat has no access layer of its own, so read is
     decided by the host memory. A chat the caller may not read answers exactly as a chat that does not exist.
     The decision only: no key, id, name, provider or model.
@@ -12428,8 +12509,8 @@ export const typeDefs = `#graphql
     principalGrant(ref: ID!): PrincipalGrant
     "Action grants. Default: the caller's own (self-audit is never gated). An org admin passing orgRef sees that org's grants, optionally narrowed by userRef."
     principalGrants(orgRef: String, userRef: String, limit: Int, offset: Int): PrincipalGrantsPage!
-    "Usage-vs-limit counters for an org (+ one app when appRef given). Org-ADMIN. Rows materialize on first view, seeded with platform defaults (#510)."
-    quotaCounters(orgRef: String!, appRef: String): [QuotaCounter!]!
+    "Usage-vs-limit counters (#510, #5074, hrn:node:hadronmemory.com:specs:cor:acl:050:04). orgRef: the org's (+ one app with appRef), org-ADMIN. appRef alone: the App's and its organization's, or for a person's App the App's and, for its owner or a platform admin, the owner's user counters; every denial is NOT_FOUND. userRef alone: that person's, the person or a platform admin (FORBIDDEN otherwise). No ref, or userRef with another ref: BAD_USER_INPUT. Rows materialize on first view, seeded with platform defaults."
+    quotaCounters(orgRef: String, appRef: String, userRef: ID): [QuotaCounter!]!
     "Explain the standing policy chain (org / user / app) for one action - which layer denies it (#510, cor:acl:040:02). Org-ADMIN on the app's org."
     effectiveActionPolicy(appRef: String!, action: String!, userRef: String): EffectiveActionPolicy!
     "One provider rate row by id (spec 046). Authenticated read - rates are not a secret."
@@ -12445,6 +12526,8 @@ export const typeDefs = `#graphql
     and never does for an impersonated session, which gets the same figure worked out and stored nowhere.
     """
     creditBalance(orgRef: String!): CreditBalance!
+    "The owner limits of an organization or a person, one row per measure (hadron-server issue 5009). Give exactly one ref. An organization's: its ADMIN or OWNER. A person's: that person in their own session. A platform admin reads any."
+    ownerLimits(orgRef: String, userRef: ID): [OwnerLimitUsage!]!
     """
     One organization's AI spend for [from, to), grouped one way (#5008, hrn:node:hadronmemory.com:specs:cor:dmo:170:04). Org-ADMIN, the gate of creditBalance, answered before the range is read. from is inclusive and to exclusive; both are ISO 8601 dates or date-times, a value with no offset is UTC and a date alone is midnight UTC. The range is at most 366 days. At most 500 rows are returned, largest charge first; truncated says more groups exist and totalGroups is the exact number of groups. Only token-bearing units of the organization count, soft-deleted ones are left out.
     """
@@ -13994,9 +14077,13 @@ export const typeDefs = `#graphql
     setQuotaLimit(input: SetQuotaLimitInput!): QuotaCounter!
     "Append an effective-dated provider rate row (spec 046). PLATFORM ADMIN - org admins must never set the prices they are billed at."
     setAiModelPrice(input: SetAiModelPriceInput!): AiModelPrice!
-    "Mint credits for an org - a positive grant ledger row (spec 046). PLATFORM ADMIN ONLY (self-grant risk); processor top-ups land here later."
+    "Mint credits for an org - a positive grant ledger row (spec 046). PLATFORM ADMIN or the BILLING platform role only (self-grant risk; #5012); processor top-ups land here."
     grantCredits(input: GrantCreditsInput!): CreditLedgerEntry!
-    "Write a signed adjustment entry on an org's credit ledger, e.g. a refund (hrn:node:hadronmemory.com:specs:cor:dmo:170:03; a correction is a new entry, hrn:node:hadronmemory.com:specs:cor:dmo:170:08). PLATFORM ADMIN ONLY. Idempotent on (sourceType, sourceId); a different account, amount or kind on that pair is IDEMPOTENCY_CONFLICT."
+    "Set an owner's limits (hadron-server issue 5009). PLATFORM ADMIN ONLY. Returns the owner's limits after the change."
+    setOwnerLimits(input: SetOwnerLimitsInput!): [OwnerLimitUsage!]!
+    "Delete an owner's limits, so the deployment default applies again (hadron-server issue 5009). PLATFORM ADMIN ONLY. Returns the owner's limits after the change."
+    clearOwnerLimits(input: ClearOwnerLimitsInput!): [OwnerLimitUsage!]!
+    "Write a signed adjustment entry on an org's credit ledger, e.g. a refund (hrn:node:hadronmemory.com:specs:cor:dmo:170:03; a correction is a new entry, hrn:node:hadronmemory.com:specs:cor:dmo:170:08). PLATFORM ADMIN or the BILLING platform role only (#5012). Idempotent on (sourceType, sourceId); a different account, amount or kind on that pair is IDEMPOTENCY_CONFLICT."
     adjustCredits(input: AdjustCreditsInput!): CreditLedgerEntry!
     "Author YOUR user-layer action-policy link (cor:acl:040:02, #510). Null clears (= no restriction)."
     updateMyPolicy(policy: JSON): User!
@@ -14193,6 +14280,7 @@ export const typeDefs = `#graphql
     or cleared by this call.
     """
     updateMyProfile(name: String, handle: String, email: String): User!
+    "Set a user's platform roles (platform ADMIN). BILLING stands alone: a list holding it with any other role is BAD_USER_INPUT (#5012)."
     updateUserRoles(userId: ID!, roles: [Role!]!): User!
     """
     Consolidate a duplicate account into a surviving user. Source-only
@@ -16243,7 +16331,8 @@ export const typeDefs = `#graphql
 
     Error codes (extensions.code): TEAM_CHAT_BODY_TOO_LARGE, TEAM_CHAT_DUPLICATE,
     TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_ENDED,
-    SESSION_NOT_LIVE (dormant or ineligible for lapsed-session resume),
+    SESSION_NOT_LIVE (dormant or ineligible for lapsed-session resume; extensions.reason
+    names the failed condition: DORMANT, ENDED, OTHER_SESSION_LIVE or NOT_OWNER),
     SESSION_NOT_WORKER_BOUND, CHANNEL_HOST_NOT_WRITABLE, WORKER_RETIRED,
     SESSION_EXPIRED (encrypted team memory without an active session key),
     TEAM_AGENT_NOT_FOUND / TEAM_AGENT_AMBIGUOUS (first-post bootstrap could

@@ -916,7 +916,7 @@ CREATE INDEX IF NOT EXISTS agent_team_events_person_activity_idx
 
 -- #5011 (Billing A4): expiring grants by organization, for the settlement probe and the hourly expiry job. Partial, so
 -- Prisma's schema language can't model it. Same definition as migration
--- 20261124170000_credit_ledger_expiring_grants_idx, which builds it CONCURRENTLY for production.
+-- 20261124210000_credit_ledger_expiring_grants_idx, which builds it CONCURRENTLY for production.
 CREATE INDEX IF NOT EXISTS credit_ledger_entries_expiring_grants_idx
   ON credit_ledger_entries (organization_id, expires_at) WHERE expires_at IS NOT NULL;
 
@@ -1107,3 +1107,6 @@ ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
 ALTER TABLE chat_tool_teardown_intents DROP CONSTRAINT IF EXISTS chk_chat_tool_teardown_state;
 ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_state
   CHECK (state IN ('PENDING', 'CONFIRMED', 'CAPPED'));
+
+-- #5009 (Billing A7a): the owner-limit rows.
+\ir owner-limit-invariants.sql

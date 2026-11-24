@@ -1,10 +1,34 @@
 /**
- * The account a credit ledger belongs to (subscription-billing-plan section 7, "One owner type"): an organization
- * today, and a person once Billing A6 (#5014) gives a person a ledger. Callers name the owner with this type so A6 can
- * widen every ledger function in one place. Compare owners explicitly by kind, never by a nullable column, so a person
- * owner can never read as "no organization" (finding org-xor-owner-null-comparison-bypass).
+ * "An organization or a person": the one owner value the limit, ledger and billing code passes (#5006). Never a nullable
+ * organization id. An App, Agent or Memory stores the same choice as `organizationId` XOR `ownerUserId`.
  */
 export type OwnerRef = { organizationId: string } | { userId: string };
+export type OwnerType = 'organization' | 'user';
+
+export const ownerType = (owner: OwnerRef): OwnerType => ('organizationId' in owner ? 'organization' : 'user');
+export const ownerId = (owner: OwnerRef): string => ('organizationId' in owner ? owner.organizationId : owner.userId);
+
+/** The two owner columns of an App, Agent or Memory row. */
+export type OwnedRow = { organizationId: string | null; ownerUserId: string | null };
+
+/**
+ * #5075: the owner a row names. Branches on `ownerUserId` first, as `requireOwnerOrOrgRole` does, and answers null for a
+ * row with neither column set: two ownerless rows are never "the same owner".
+ */
+export function ownerRefOf(row: OwnedRow | null | undefined): OwnerRef | null {
+  if (!row) return null;
+  if (row.ownerUserId != null) return { userId: row.ownerUserId };
+  if (row.organizationId != null) return { organizationId: row.organizationId };
+  return null;
+}
+
+/**
+ * cor:dmo:170:05 (the owner of the work is the owner of the App the work ran in): the App's owner when there is an App,
+ * else the Agent's. An App row with no owner at all answers null rather than falling through to the Agent.
+ */
+export function ownerOfWork(app: OwnedRow | null | undefined, agent: OwnedRow | null | undefined): OwnerRef | null {
+  return app ? ownerRefOf(app) : ownerRefOf(agent);
+}
 
 /** A person owner reached a ledger function that only knows organizations: a programming error, never a refusal. */
 export class PersonLedgerNotSupportedError extends Error {
