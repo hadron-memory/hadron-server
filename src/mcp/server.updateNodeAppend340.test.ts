@@ -485,6 +485,13 @@ describe('#4967 — pins the first review left open', () => {
       const text = await mcp().callToolText('hadron_update_node', { urn: urnFor(node.loc), content: `{{> ${target.loc} rev=1}}` });
       expect(text).toMatch(PIN_WARNING);
     });
+    it('a pin split ACROSS the join (body ends mid-tag, the append finishes it) warns: judged on the joined body, not the appended text alone', async () => {
+      const target = await seed('pin:target-c', { content: 'shared' });
+      const node = await seed('pin:split', { content: `{{> ${target.loc} re` });
+      const text = await mcp().callToolText('hadron_update_node', { urn: urnFor(node.loc), appendContent: 'v=1}}', separator: '' });
+      expect(await bodyOf(node.id)).toBe(`{{> ${target.loc} rev=1}}`);
+      expect(text).toMatch(PIN_WARNING);
+    });
     it('an append whose text carries the pin warns, as the replace does', async () => {
       const target = await seed('pin:target-b', { content: 'shared' });
       const node = await seed('pin:append');
