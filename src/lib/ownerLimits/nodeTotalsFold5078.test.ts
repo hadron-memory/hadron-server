@@ -11,6 +11,7 @@ import { expectNodeTotalsExact } from '../../test/nodeTotals.js';
 import { generateId } from '../id.js';
 import { retryOnSerializationFailure } from '../serializableRetry.js';
 import { countOwnerNodesOnDemand, OWNER_LIMIT_KEYS } from './keys.js';
+import { repairMemoryNodeTotal } from './nodeTotals.js';
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
@@ -62,6 +63,93 @@ describe('#5078 the fold at commit', () => {
       await mk(db, m1, 'other');
     });
     await expectExact(3n);
+  });
+
+  /** Runs `waiter` against a transaction that has already folded its own write and holds the total row, then commits that one. */
+  async function againstFolded(write: (tx: Pick<typeof db, 'node'>) => Promise<unknown>, waiter: () => Promise<unknown>) {
+    let waiting!: Promise<unknown>;
+    await db.$transaction(async (tx) => {
+      await write(tx);
+      await tx.$executeRaw`SET CONSTRAINTS ALL IMMEDIATE`;
+      waiting = waiter();
+      await waitForLockWaiters(db, 1);
+    }, { timeout: 30_000 });
+    await waiting;
+  }
+
+  it('two transactions that each write a memory\'s first node both count', async () => {
+    expect(await db.memoryNodeTotal.count()).toBe(0);
+    await againstFolded((tx) => mk(tx, m1, 'x'), () => mk(db, m1, 'y').then(() => undefined));
+    await expectExact(2n);
+  });
+
+  it('the repair waits for a writer that has folded and then counts its node', async () => {
+    await mk(db, m1, 'n');
+    await againstFolded((tx) => mk(tx, m1, 'x'), () => repairMemoryNodeTotal(db, m1));
+    await expectExact(2n);
+  });
+
+  it('a writer that folds while the repair runs waits for it and adds on top', async () => {
+    await mk(db, m1, 'n');
+    let writer!: Promise<unknown>;
+    const startWriter = async () => {
+      let folded = false;
+      writer = db.$transaction(async (w) => {
+        await mk(w, m1, 'x');
+        await w.$executeRaw`SET CONSTRAINTS ALL IMMEDIATE`;
+        folded = true;
+        // Unlocked, the repair now recounts without this node and waits for the total row: hold it until then. Locked, nobody waits.
+        await waitForLockWaiters(db, 1, 1_000).catch(() => undefined);
+      }, { timeout: 30_000 });
+      for (let i = 0; i < 100 && !folded; i++) {
+        const [{ n }] = await db.$queryRaw<Array<{ n: number }>>`
+          SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`;
+        if (n > 0) return;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    };
+    let statements = 0;
+    const pausing = { $transaction: (fn: (tx: unknown) => Promise<unknown>, opts: unknown) =>
+      (db.$transaction as unknown as (f: (tx: object) => Promise<unknown>, o: unknown) => Promise<unknown>)((tx) => fn(new Proxy(tx, { get(t, p) {
+        const real = Reflect.get(t, p) as (...a: unknown[]) => unknown;
+        if (p !== '$executeRaw') return typeof real === 'function' ? real.bind(t) : real;
+        return async (...a: unknown[]) => {
+          if (++statements === 2) await startWriter();
+          return real.apply(t, a);
+        };
+      } })), opts) } as unknown as Parameters<typeof repairMemoryNodeTotal>[0];
+    await repairMemoryNodeTotal(pausing, m1);
+    expect(statements).toBe(3);
+    await writer;
+    await expectExact(2n);
+  });
+
+  it('a fold takes the total rows in memory order', async () => {
+    const ids = [m1, m2, m3].sort();
+    for (const id of ids) await mk(db, id, 'n');
+    let writer!: Promise<unknown>;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM memory_node_totals WHERE memory_id = ${ids[0]} FOR UPDATE`;
+      writer = db.$transaction(async (w) => { for (const id of [...ids].reverse()) await mk(w, id, 'x'); }, { timeout: 30_000 });
+      await waitForLockWaiters(db, 1);
+      // It waits at the first row and has taken none of the later ones.
+      for (const id of ids.slice(1)) await tx.$queryRaw`SELECT 1 FROM memory_node_totals WHERE memory_id = ${id} FOR UPDATE NOWAIT`;
+    }, { timeout: 30_000 });
+    await writer;
+    await expectExact(6n);
+  });
+
+  it('a transaction whose changes cancel out takes no total row', async () => {
+    const n = await mk(db, m1, 'n');
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM memory_node_totals WHERE memory_id = ${m1} FOR UPDATE`;
+      await db.$transaction(async (other) => {
+        await other.$executeRaw`SET LOCAL lock_timeout = '2s'`;
+        await mk(other, m1, 'x');
+        await other.node.delete({ where: { id: n.id } });
+      });
+    }, { timeout: 30_000 });
+    await expectExact(1n);
   });
 
   it('two transactions that write the same memories in opposite orders both commit', async () => {

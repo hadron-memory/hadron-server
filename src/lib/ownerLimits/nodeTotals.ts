@@ -22,7 +22,7 @@ export function findMemoryNodeTotalDrift(db: Pick<PrismaClient, '$queryRaw'>): P
     LEFT JOIN memory_node_totals t ON t.memory_id = i.id
     LEFT JOIN (SELECT memory_id, sum(delta) AS n, count(*) AS rows FROM memory_node_pending GROUP BY memory_id) p ON p.memory_id = i.id
     LEFT JOIN (SELECT memory_id, count(*) AS n FROM nodes WHERE deleted_at IS NULL GROUP BY memory_id) c ON c.memory_id = i.id
-    WHERE COALESCE(t.live_nodes, 0) + COALESCE(p.n, 0) <> COALESCE(c.n, 0) OR p.rows > 0
+    WHERE COALESCE(t.live_nodes, 0) <> COALESCE(c.n, 0) OR p.rows > 0
     ORDER BY i.id`);
 }
 
