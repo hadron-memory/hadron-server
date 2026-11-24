@@ -54,6 +54,7 @@ import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { foreignIdentityScopedMemoryFilter } from '../../../lib/auth/memoryOwnership.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
+import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
   formatCanonicalUrn,
@@ -2221,7 +2222,14 @@ export async function requireAiConfigPickerAccess(
   const member = await ctx.db.appMember.findUnique({
     where: { appId_userId: { appId, userId: ctx.userId } },
   });
-  if (!member) throw authorizationDenied();
+  if (!member) {
+    // #5076 (cor:dmo:050:10, cor:acl:010:01): the owner of a person's App is a participant even with no member row (the
+    // owner is added as a member only when the Agent offers an `owner` role). Narrow on purpose: the owner acting as
+    // themself, not an organization CONTRIBUTOR (`isAppParticipant`), an App key, an impersonated session or a run.
+    // `ownerUserId === null` (an organization App) never compares two nulls: `isStrictOwner` needs a non-empty userId.
+    const app = await ctx.db.app.findUnique({ where: { id: appId }, select: { ownerUserId: true } });
+    if (!app || isRefusedPrincipal(ctx) || !isStrictOwner(ctx, app.ownerUserId)) throw authorizationDenied();
+  }
   // The named Agent must be installed in this App, or the walk could be
   // pointed at an unrelated Agent's (masked) configs.
   if (agentId && !(await isAgentInstalledAndLicensed(ctx.db, appId, agentId))) {

@@ -13,7 +13,7 @@ import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 
 const Q = resolvers.Query as any;
-let org: Organization, owner: User, other: User, platform: User, orgAdmin: User, contributor: User, member: User;
+let org: Organization, owner: User, other: User, platform: User, auditor: User, orgAdmin: User, contributor: User, member: User;
 let mine: App, orgApp: App, orgAgent: Agent, myAgent: Agent;
 let mineCfg: { id: string }, orgAppCfg: { id: string };
 const ctx = (u: User, roles: string[] = ['READER']): Context => ({ db, userId: u.id, roles } as Context);
@@ -25,6 +25,7 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { name: 'Acme', urn: `acme-${s}.example` } });
   [owner, other, platform, orgAdmin, contributor, member] = await Promise.all(['owner', 'other', 'platform', 'oadmin', 'contrib', 'member'].map(h =>
     db.user.create({ data: { handle: `${h}-${s}`, roles: h === 'platform' ? ['ADMIN'] : ['READER'] } })));
+  auditor = await db.user.create({ data: { handle: `auditor-${s}`, roles: ['OWNER'] } });
   await db.orgMember.createMany({ data: [
     { organizationId: org.id, userId: orgAdmin.id, role: 'ADMIN' },
     { organizationId: org.id, userId: contributor.id, role: 'CONTRIBUTOR' },
@@ -100,7 +101,7 @@ describe('everyone else is refused exactly as today', () => {
 describe('effectiveAccess reports the gate enforced on a person\'s AI configuration', () => {
   const ea = (user: User, resource: string, caller: Context) => Q.effectiveAccess(null, { user: user.id, resource }, caller);
   it('the owner has one AICONFIG_OWNER grant on a config of a person\'s App and a platform admin has none', async () => {
-    const asPlatform = ctx(platform, ['OWNER']);
+    const asPlatform = ctx(auditor, ['OWNER']); // a second platform admin audits, so no self-audit concealment applies
     const o = await ea(owner, mineCfg.id, asPlatform);
     expect(o.grants.map((g: any) => [g.source, g.role])).toEqual([['AICONFIG_OWNER', 'owner']]);
     const p = await ea(platform, mineCfg.id, asPlatform);
@@ -108,7 +109,7 @@ describe('effectiveAccess reports the gate enforced on a person\'s AI configurat
   });
   it('the same for a config of a person\'s Agent', async () => {
     const cfg = await db.aiServiceConfig.create({ data: { agentId: myAgent.id, name: 'default', provider: 'glm', model: 'g' } });
-    const asPlatform = ctx(platform, ['OWNER']);
+    const asPlatform = ctx(auditor, ['OWNER']); // a second platform admin audits, so no self-audit concealment applies
     expect((await ea(owner, cfg.id, asPlatform)).grants.map((g: any) => g.source)).toEqual(['AICONFIG_OWNER']);
     expect((await ea(platform, cfg.id, asPlatform)).grants).toEqual([]);
     expect((await ea(other, cfg.id, asPlatform)).grants).toEqual([]);
@@ -116,7 +117,7 @@ describe('effectiveAccess reports the gate enforced on a person\'s AI configurat
   it('organization and platform contexts are unchanged', async () => {
     const agentCfg = await db.aiServiceConfig.create({ data: { agentId: orgAgent.id, name: 'default', provider: 'glm', model: 'g' } });
     const orgCfg = await db.aiServiceConfig.create({ data: { organizationId: org.id, name: 'default', provider: 'glm', model: 'g' } });
-    const asPlatform = ctx(platform, ['OWNER']);
+    const asPlatform = ctx(auditor, ['OWNER']); // a second platform admin audits, so no self-audit concealment applies
     const table: Record<string, unknown> = {};
     for (const [name, cfg] of [['org', orgCfg], ['orgApp', orgAppCfg], ['orgAgent', agentCfg]] as const)
       for (const [who, u] of [['orgAdmin', orgAdmin], ['contributor', contributor], ['platform', platform]] as const)
