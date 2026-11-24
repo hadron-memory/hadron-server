@@ -130,10 +130,17 @@ describe('configuration resolution access', () => {
     expect(ownerLookups).toBe(1);
   });
 
-  // #5075: the former "an organization source authority fault propagates" case is gone with the path it guarded. The
-  // only organization source that can answer is now the App's own organization, and the caller who passes the App's
-  // ADMIN gate is that organization's ADMIN, who manages it, so no authority lookup on a non-manager remains.
-  // The fault guard for the Agent source stays above (agent.findFirst).
+  it('#5075: for an organization\'s App the App-ADMIN gate is the organization ADMIN gate, so the caller manages the organization source (no authority lookup on a non-manager remains)', async () => {
+    await db.aiServiceConfig.delete({ where: { id: config.id } });
+    await db.aiServiceConfig.create({ data: { organizationId: customer.id, name: 'default', provider: 'openai', model: 'outer-model', apiKeyEncrypted: encryptToken(KEY), enabled: true } });
+    // An App admin who is only an organization READER does not pass the App gate at all...
+    await db.appMember.create({ data: { appId: app.id, userId: manager.id, role: 'admin' } });
+    await db.orgMember.create({ data: { organizationId: customer.id, userId: manager.id, role: 'READER' } });
+    await expect(resolvers.Query.resolveAIConfig({}, { appRef: app.id, agentRef: agent.id }, ctx(manager.id))).rejects.toThrow(/Forbidden/);
+    // ...and the organization ADMIN who does pass it receives the organization source's key.
+    const answer = await resolvers.Query.resolveAIConfig({}, { appRef: app.id, agentRef: agent.id }, ctx());
+    expect(answer).toMatchObject({ ownerType: 'ORGANIZATION', apiKey: KEY });
+  });
 
   it('an identity-only result does not disclose configured params', async () => {
     await db.aiServiceConfig.update({ where: { id: config.id }, data: { params: { secret: 'fixture-param-sentinel' } } });

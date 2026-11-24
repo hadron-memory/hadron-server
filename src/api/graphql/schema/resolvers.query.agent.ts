@@ -516,6 +516,12 @@ export const agentQueries = {
         // Decide credential access from the selected source, not the install's
         // manager. An authorized installation can still resolve its identity.
         const discloseKey = await canManageResolvedConfig(ctx, config, agentRef);
+        // #5075 backstop (defense in depth, unreachable while the walk is right): a person's App never answers from the
+        // organization or platform level. The walk (aiConfigTenantFor) is the rule; this keeps the one query that
+        // decrypts keys from handing back such a row if the walk ever regresses.
+        if (appOwnerUserId !== null && (ownerType === 'HADRON_SERVER' || ownerType === 'ORGANIZATION')) {
+          throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this context');
+        }
         if (discloseKey && !config.apiKeyEncrypted) {
           // Resolvable but unusable: a config without a key cannot back an
           // LLM call (spec 036 edge case — name the config + level, never
