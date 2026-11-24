@@ -1101,3 +1101,6 @@ ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
 ALTER TABLE chat_tool_teardown_intents DROP CONSTRAINT IF EXISTS chk_chat_tool_teardown_state;
 ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_state
   CHECK (state IN ('PENDING', 'CONFIRMED', 'CAPPED'));
+
+-- #5096: pin every guard function's search path; LAST, after every file above that (re)creates a function.
+\ir guard-search-path-invariants.sql
