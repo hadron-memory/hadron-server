@@ -1,8 +1,8 @@
 /**
  * #5015 (Billing A7b, cor:acl:150:04): the MCP doors that add a live node refuse at the owner's `nodes` limit, over the real
  * Streamable HTTP transport (the envelope a client reads, not the handler's return value). One case per door the issue names
- * for MCP: hadron_create_node (plain and the tombstone revive), hadron_create_parent_node, hadron_move_node (one node, and a
- * subtree), hadron_restore_node and hadron_sync_graph. Each refusal writes nothing and its text carries the code.
+ * for MCP: hadron_create_node (plain and the tombstone revive), hadron_create_parent_node, hadron_create_task (a governed
+ * kind door), hadron_move_node (one node, and a subtree), hadron_restore_node and hadron_sync_graph. Each refusal writes nothing and its text carries the code.
  *
  * RED on main: every "refuses" case wrote the node (no MCP door called `requireNodeHeadroom`), and hadron_sync_graph had no
  * owner-limit branch.
@@ -128,6 +128,14 @@ describe('#5015 MCP node doors at the owner\'s nodes limit', () => {
     expect(r.isError).toBe(true);
     expect(r.text).toMatch(REFUSAL);
     expect(await db.node.count({ where: { memoryId: mO, loc: 'section' } })).toBe(0);
+  });
+
+  it('hadron_create_task (a governed kind door) refuses a new task and writes nothing', async () => {
+    await capAtCurrent({ organizationId: orgId });
+    const r = await call('hadron_create_task', { urn: urnO('tasks:t1'), name: 't1' });
+    expect(r.isError).toBe(true);
+    expect(r.text).toMatch(REFUSAL);
+    expect(await db.node.count({ where: { memoryId: mO, loc: 'tasks:t1' } })).toBe(0);
   });
 
   it('hadron_move_node refuses one node moved into a capped person\'s memory and leaves it where it was', async () => {

@@ -5,8 +5,8 @@
  * prompt, team role node, worklog record, run output node, account merge) is pinned per call site by
  * `src/lib/ownerLimits/writeDoorsGuard5015.test.ts`, which fails if any of them turns to `refuse`.
  *
- * Also here: `importNode`, a refusing door whose node insert precedes its run, refuses at the cap and leaves no node and
- * no run (RED on main: the node was written and the run started).
+ * Also here, two refusing doors outside the main pin file: `importNode`, whose node insert precedes its run, refuses at the cap
+ * and leaves no node and no run; `createAssetReferenceNode` refuses and writes no node (RED on main: both wrote the node).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -17,6 +17,7 @@ import { OWNER_LIMIT_KEYS } from '../../../lib/ownerLimits/keys.js';
 import type { OwnerRef } from '../../../lib/owner.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { resolvers, type Context } from './resolvers.js';
+import { createAssetReferenceNode } from '../../../controller/operations/createAssetReferenceNode.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -93,5 +94,18 @@ describe('#5015 importNode at the owner\'s nodes limit', () => {
       .rejects.toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED', limitKey: 'nodes', callerCanManageOwner: true } });
     expect(await db.node.findUnique({ where: { loc_memoryId: { loc: 'clips:refused', memoryId: mO } } })).toBeNull();
     expect(await db.appRun.count()).toBe(0);
+  });
+});
+
+describe('#5015 createAssetReferenceNode at the owner\'s nodes limit', () => {
+  it('refuses the reference node and writes nothing', async () => {
+    const assetId = generateId();
+    await db.asset.create({ data: { id: assetId, memoryId: mU, filename: 'plan.pdf', mimeType: 'application/pdf', sizeBytes: 2048,
+      storageKey: `key-${assetId}`, scanStatus: 'CLEAN', uploadedBy: u } });
+    await capAtCurrent({ userId: u });
+    await expect(createAssetReferenceNode(db, { userId: u, roles: ['READER'] as never }, ctx() as never,
+      { assetRef: assetId, nodeUrn: 'hrn:node:co5015-u:u:files:plan' }))
+      .rejects.toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED', limitKey: 'nodes', ownerType: 'user', callerCanManageOwner: true } });
+    expect(await db.node.count({ where: { memoryId: mU, loc: 'files:plan' } })).toBe(0);
   });
 });
