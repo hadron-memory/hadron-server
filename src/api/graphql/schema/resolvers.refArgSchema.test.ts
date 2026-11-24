@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildSchema, GraphQLObjectType } from 'graphql';
+import { buildSchema, GraphQLObjectType, GraphQLInputObjectType } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 
 /** The expected reference-argument names, per cor:api:140. */
@@ -230,6 +230,20 @@ describe('#4136 (S0) — the same guard over Query fields', () => {
 
   it('none of the listed Query fields still declares a legacy <entity>Id reference arg', () => {
     expect(strayIdProblems('Query', EXPECTED_QUERY_REF_ARGS)).toEqual([]);
+  });
+});
+
+/**
+ * #4368: an input-object field that names an entity takes `<entity>Ref` too. `setAgentAssetUploadEnabled` carries its ref in
+ * `input`, which the argument tables above never see. The two deprecated v1 asset calls (beginAssetUpload, agentAssets) keep
+ * `agentUrn` until their deprecation window ends (gate decision, #4368).
+ */
+describe('#4368 — setAgentAssetUploadEnabled names its Agent with agentRef', () => {
+  const input = buildSchema(typeDefs).getType('SetAgentAssetUploadEnabledInput') as GraphQLInputObjectType;
+  it('declares agentRef (required) and no agentUrn alias', () => {
+    const f = input.getFields();
+    expect(f.agentRef?.type.toString()).toBe('String!');
+    expect(f.agentUrn).toBeUndefined();
   });
 });
 

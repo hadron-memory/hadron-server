@@ -53,7 +53,14 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:nodes`, name: 'nodes', class: 'knowledge' },
   });
 });
-afterEach(() => sessionKeyCache.clear());
+/** #4967 (BLIND F10): every injection must have fired, or the test passed without ever opening its window. */
+const injections: Array<{ fired: boolean }> = [];
+afterEach(() => {
+  sessionKeyCache.clear();
+  const unfired = injections.filter((i) => !i.fired).length;
+  injections.length = 0;
+  expect(unfired, 'writeJustBeforeNextTransaction never fired: the window under test was never opened').toBe(0);
+});
 
 const seed = (loc: string, over: Record<string, unknown> = {}) =>
   db.node.create({ data: { id: generateId(), memoryId: memory.id, loc, name: loc, content: 'BODY', ...over } });
@@ -76,10 +83,11 @@ const bodyOf = async (id: string) => (await db.node.findUniqueOrThrow({ where: {
 /** Run `raw` once, right before the next interactive transaction begins (the #1339 window). */
 function writeJustBeforeNextTransaction(raw: () => Promise<unknown>) {
   const original = db.$transaction.bind(db);
-  let fired = false;
+  const injection = { fired: false };
+  injections.push(injection);
   vi.spyOn(db, '$transaction').mockImplementation((async (arg: unknown, opts?: unknown) => {
-    if (!fired && typeof arg === 'function') {
-      fired = true;
+    if (!injection.fired && typeof arg === 'function') {
+      injection.fired = true;
       await raw();
     }
     return (original as any)(arg, opts);
@@ -413,5 +421,82 @@ describe('#340 — the registered schema', () => {
       expect(client.toolParamSchema('hadron_update_node', p).parse('x')).toBe('x');
       expect(() => client.toolParamSchema('hadron_update_node', p).parse(null)).toThrow();
     }
+  });
+});
+
+describe('#4967 — pins the first review left open', () => {
+  const FINAL = 'BODY\n\nTAIL';
+  const hashOf = async (id: string) => (await db.node.findUniqueOrThrow({ where: { id } })).abstractOriginHash;
+
+  // Pins the DOCUMENTED hazard (the abstractStillAccurate CONCURRENCY text): the flag certifies whatever abstract is stored under the
+  // lock, including one this caller never read. The test fixes that behaviour so a change to it is deliberate.
+  it('abstractStillAccurate reads the abstract UNDER THE LOCK: one a concurrent writer first set between the probe and the transaction is fingerprinted', async () => {
+    const node = await seed('lockabs:set');
+    writeJustBeforeNextTransaction(() => db.node.update({ where: { id: node.id }, data: { abstract: 'late summary' } }));
+    await mcp().callToolText('hadron_update_node', { urn: urnFor(node.loc), appendContent: 'TAIL', abstractStillAccurate: true });
+    expect(await bodyOf(node.id)).toBe(FINAL);
+    expect(await hashOf(node.id)).toBe(computeContentHash(FINAL));
+  });
+
+  it('abstractStillAccurate reads the abstract UNDER THE LOCK: one a concurrent writer cleared leaves no ghost hash', async () => {
+    const node = await seed('lockabs:clear', { abstract: 'summary', abstractOriginHash: computeContentHash('BODY') });
+    writeJustBeforeNextTransaction(() => db.node.update({ where: { id: node.id }, data: { abstract: null, abstractOriginHash: null } }));
+    await mcp().callToolText('hadron_update_node', { urn: urnFor(node.loc), appendContent: 'TAIL', abstractStillAccurate: true });
+    expect(await bodyOf(node.id)).toBe(FINAL);
+    expect(await hashOf(node.id)).toBeNull();
+  });
+
+  it('abstract: null with an append clears the abstract and its hash and still joins the body', async () => {
+    const node = await seed('abs:null', { abstract: 'summary', abstractOriginHash: computeContentHash('BODY') });
+    await mcp().callToolText('hadron_update_node', { urn: urnFor(node.loc), appendContent: 'TAIL', abstract: null });
+    const row = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect([row.content, row.abstract, row.abstractOriginHash]).toEqual([FINAL, null, null]);
+  });
+
+  it('abstractStillAccurate with an append on a node with NO abstract mints no ghost hash', async () => {
+    const node = await seed('abs:none');
+    await mcp().callToolText('hadron_update_node', { urn: urnFor(node.loc), appendContent: 'TAIL', abstractStillAccurate: true });
+    const row = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect([row.content, row.abstract, row.abstractOriginHash]).toEqual([FINAL, null, null]);
+  });
+
+  it('an expectedRevision that only goes stale AFTER the probe (a write in the window) is NODE_WRITE_CONFLICT and appends nothing', async () => {
+    const node = await seed('rev:window');
+    writeJustBeforeNextTransaction(() => db.node.update({ where: { id: node.id }, data: { content: 'OTHER', revSeq: { increment: 1 } } }));
+    const text = await mcp().callToolText('hadron_update_node', { urn: urnFor(node.loc), appendContent: 'TAIL', expectedRevision: 1 });
+    expect(text).toMatch(/^\[node_write_conflict\]/);
+    expect(await bodyOf(node.id)).toBe('OTHER');
+  });
+
+  for (const [label, extra] of [['appendContent', { appendContent: 'TAIL' }], ['prependContent', { prependContent: 'HEAD' }], ['prependContent', { prependContent: 'HEAD', separator: ' | ' }]] as const) {
+    it(`install with ${label} ${JSON.stringify(extra)}: refused before forwarding`, async () => {
+      const text = await mcp().callToolText('hadron_update_node', {
+        urn: 'prompts:lane', install: { app: generateId(), agent: generateId() }, ...extra,
+      });
+      expect(text).toMatch(new RegExp('`install` does not support .*`' + label + '`'));
+    });
+  }
+
+  describe('the include-pin warning is judged on the JOINED body', () => {
+    const PIN_WARNING = /Warning \[include\.pin\.unkept\]/;
+    it('control: a replace carrying an unkept revision pin warns', async () => {
+      const target = await seed('pin:target-a', { content: 'shared' });
+      const node = await seed('pin:control');
+      const text = await mcp().callToolText('hadron_update_node', { urn: urnFor(node.loc), content: `{{> ${target.loc} rev=1}}` });
+      expect(text).toMatch(PIN_WARNING);
+    });
+    it('a pin split ACROSS the join (body ends mid-tag, the append finishes it) warns: judged on the joined body, not the appended text alone', async () => {
+      const target = await seed('pin:target-c', { content: 'shared' });
+      const node = await seed('pin:split', { content: `{{> ${target.loc} re` });
+      const text = await mcp().callToolText('hadron_update_node', { urn: urnFor(node.loc), appendContent: 'v=1}}', separator: '' });
+      expect(await bodyOf(node.id)).toBe(`{{> ${target.loc} rev=1}}`);
+      expect(text).toMatch(PIN_WARNING);
+    });
+    it('an append whose text carries the pin warns, as the replace does', async () => {
+      const target = await seed('pin:target-b', { content: 'shared' });
+      const node = await seed('pin:append');
+      const text = await mcp().callToolText('hadron_update_node', { urn: urnFor(node.loc), appendContent: `{{> ${target.loc} rev=1}}` });
+      expect(text).toMatch(PIN_WARNING);
+    });
   });
 });

@@ -8947,8 +8947,9 @@ export const typeDefs = `#graphql
     URN (per spec 007 ID-or-URN dispatch). URN inputs MUST be fully
     qualified (org:agent) per spec 022 — relative-form URNs are rejected
     as GraphQL errors with extensions.code "URN_NOT_QUALIFIED".
+    #4368: renamed from agentUrn (hrn:node:hadronmemory.com:specs:cor:api:140:01); no alias.
     """
-    agentUrn: String!
+    agentRef: String!
     enabled:  Boolean!
   }
 
