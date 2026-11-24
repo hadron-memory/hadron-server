@@ -6123,6 +6123,12 @@ model AppRun {
   publishedAt          DateTime?            @map("published_at")
   startedAt            DateTime?            @map("started_at")
   finishedAt           DateTime?            @map("finished_at")
+  /// #855: elapsed milliseconds, finished_at - started_at, NULL while either is NULL (PENDING, RUNNING, failed before
+  /// it finished). A STORED GENERATED column that Prisma cannot express: the migration creates it, post-push.sql
+  /// converts the plain column `db push` makes (and the verifier in src/test pins both). NEVER written (the database
+  /// refuses a value); read-only here so appRuns can order by it through the same findMany/count pair. BIGINT: an
+  /// INTEGER of milliseconds overflows at 24.8 days. Negative (clock skew) is kept as stored.
+  durationMs           BigInt?              @map("duration_ms")
   createdAt            DateTime             @default(now()) @map("created_at")
   createdBy            String?              @map("created_by")
 
@@ -6135,6 +6141,7 @@ model AppRun {
   @@index([agentId])
   @@index([parentRunId]) // spawn completion checks + child listings (plan-spawn)
   @@index([organizationId, createdAt])
+  @@index([organizationId, durationMs])
   @@map("app_runs")
 }
 
