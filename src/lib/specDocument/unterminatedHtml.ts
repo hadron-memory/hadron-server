@@ -130,12 +130,11 @@ function firstUnterminated(text: string, from: number): number {
       if (ch === '=') {
         p += 1;
         while (p < n && isBlank(text[p])) p += 1;
-        if (p >= n) return i;
         const q = text[p];
         if (q === '"' || q === "'") {
+          // An unclosed value takes the rest of the text, so no `>` ends the tag below.
           const close = text.indexOf(q, p + 1);
-          if (close === -1) return i;
-          p = close + 1;
+          p = close === -1 ? n : close + 1;
         } else {
           while (p < n && !isBlank(text[p]) && text[p] !== '>') p += 1;
         }
