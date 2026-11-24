@@ -6127,7 +6127,9 @@ model AppRun {
   /// it finished). A STORED GENERATED column that Prisma cannot express: the migration creates it, post-push.sql
   /// converts the plain column `db push` makes (src/test/integration/855-apprun-duration-resync.test.ts pins the expression and type of both). NEVER written (the database
   /// refuses a value); read-only here so appRuns can order by it through the same findMany/count pair. BIGINT: an
-  /// INTEGER of milliseconds overflows at 24.8 days. Negative (clock skew) is kept as stored.
+  /// INTEGER of milliseconds overflows at 24.8 days. Negative (clock skew) is kept as stored. Left out of every default
+  /// read by the client's global omit (src/integrations/db/client.ts): a BigInt breaks JSON.stringify of a row, and the
+  /// generated column cannot be written back; select it by name when it is needed.
   durationMs           BigInt?              @map("duration_ms")
   createdAt            DateTime             @default(now()) @map("created_at")
   createdBy            String?              @map("created_by")

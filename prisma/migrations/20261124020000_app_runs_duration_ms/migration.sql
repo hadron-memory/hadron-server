@@ -12,7 +12,10 @@
 -- Cost: ADD COLUMN ... GENERATED ... STORED rewrites app_runs under an ACCESS EXCLUSIVE lock for the length of the
 -- rewrite. Prisma runs this file as ONE transaction, so that ACCESS EXCLUSIVE lock is held through the index build too
 -- (reads AND writes wait for rewrite plus index build; measured with `prisma migrate deploy`). Both run once, in this
--- migration. Merge outside :15 to :27 UTC, when the hourly pg_dump would hold the lock queue.
+-- migration. It runs at `prisma migrate deploy` in the container boot (scripts/docker-start.sh), so the lock lands at the
+-- deploy that boots this image, not at merge. Production size before the change: 50 rows, 368640 bytes (prod preflight
+-- on the PR), so the rewrite and the index build take milliseconds. No lock_timeout here on purpose: a timeout would fail
+-- the migration, which stops boot (a non-HDPRF failure, then P3009 on restart); waiting is the safer failure. Merge outside :15 to :27 UTC, when the hourly pg_dump would hold the lock queue.
 -- No backfill step: the column computes itself for every existing row during the rewrite.
 ALTER TABLE "app_runs"
   ADD COLUMN IF NOT EXISTS "duration_ms" BIGINT

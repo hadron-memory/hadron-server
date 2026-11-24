@@ -90,7 +90,7 @@ describe('#855 app_runs.duration_ms survives the dev-setup sequence', () => {
     const post = norm(read('post-push.sql').match(expr));
     expect(mig).toBe('round(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000)');
     expect(post).toBe(mig);
-    // Bridget F3: the column TYPE is part of the shared definition, not only the expression.
+    // The column TYPE is part of the shared definition, not only the expression.
     const typ = /"?duration_ms"?\s+(\w+)\s+GENERATED ALWAYS/i;
     expect(read('migrations/20261124020000_app_runs_duration_ms/migration.sql').match(typ)?.[1].toUpperCase()).toBe('BIGINT');
     expect(read('post-push.sql').match(typ)?.[1].toUpperCase()).toBe('BIGINT');

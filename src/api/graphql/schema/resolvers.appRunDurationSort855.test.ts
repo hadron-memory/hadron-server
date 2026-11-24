@@ -191,13 +191,13 @@ describe('app_runs.duration_ms in the catalog (#855)', () => {
   });
 });
 
-describe('durationMs stays out of default reads (#855, blind P2-1/P2-2)', () => {
+describe('durationMs stays out of default reads (#855)', () => {
   it('a default AppRun read carries no durationMs, so JSON.stringify works and a spread write-back is accepted', async () => {
     const run = await seedRun({ ...took(1000) });
     const row = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
     expect('durationMs' in row).toBe(false);
     expect(() => JSON.stringify(row)).not.toThrow();
-    await expect(db.appRun.update({ where: { id: run.id }, data: { ...row } as never })).resolves.toBeTruthy();
+    await expect(db.appRun.update({ where: { id: run.id }, data: { ...row } })).resolves.toBeTruthy();
     const picked = await db.appRun.findUniqueOrThrow({ where: { id: run.id }, select: { durationMs: true } });
     expect(picked.durationMs).toBe(1000n);
   });
