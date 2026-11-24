@@ -1083,10 +1083,41 @@ export const hostOperationFieldResolvers = {
  * An `AppKey` reaches callers through fields that do not re-check (App.keys), so this field does.
  */
 export async function appKeyHostUses(key: { id: string; appId: string }, a: { first?: number | null }, ctx: Context) {
+  const scope = await hostUsesScope(key, ctx);
+  const first = Math.min(Math.max(a.first ?? 20, 1), PAGE_MAX);
+  return ctx.db.hostKeyUse.findMany({ ...scope, take: first });
+}
+
+/**
+ * #5061 (#2212 A4b) — the one gate and order both host-use reads share (cor:agt:070:07 S3): whoever manages the key's
+ * App, as a person (an App key, an impersonation session and an unauthenticated caller are refused by `managesApp`).
+ * Refuses with the same `FORBIDDEN` and text before any host-use row is counted or read, so the paged sibling's `total`
+ * reaches exactly the callers the old list already reaches. Order is `usedAt desc, id desc` (total, so pages never
+ * overlap or skip).
+ */
+async function hostUsesScope(key: { id: string; appId: string }, ctx: Context) {
   const app = await ctx.db.app.findUnique({ where: { id: key.appId }, select: { id: true, organizationId: true, ownerUserId: true } });
   if (!app || !(await managesApp(ctx, app))) {
     throw taskError('FORBIDDEN', "Only whoever manages this App can read what its keys did.");
   }
-  const first = Math.min(Math.max(a.first ?? 20, 1), PAGE_MAX);
-  return ctx.db.hostKeyUse.findMany({ where: { appKeyId: key.id }, orderBy: [{ usedAt: 'desc' }, { id: 'desc' }], take: first });
+  return {
+    where: { appKeyId: key.id },
+    orderBy: [{ usedAt: 'desc' as const }, { id: 'desc' as const }],
+  };
+}
+
+/**
+ * #5061 (#2212 A4b, hrn:node:hadronmemory.com:specs:cor:api:120:04) — `AppKey.hostUsesPage`, the paged sibling of
+ * {@link appKeyHostUses}: `{ items, total, hasMore }` through the shared `pageArgs` (omitted 20, 0 count-only, a negative
+ * limit 0, over 200 served as 200; a negative offset 0). Gate first ({@link hostUsesScope}), then count and page in one
+ * RepeatableRead snapshot so `total` and `hasMore` agree with the rows.
+ */
+export async function appKeyHostUsesPage(key: { id: string; appId: string }, args: { limit?: number | null; offset?: number | null }, ctx: Context) {
+  const { take, skip } = pageArgs(args);
+  const scope = await hostUsesScope(key, ctx);
+  const [total, items] = await ctx.db.$transaction([
+    ctx.db.hostKeyUse.count({ where: scope.where }),
+    ctx.db.hostKeyUse.findMany({ ...scope, take, skip }),
+  ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+  return pageEnvelope(items, total, skip);
 }
