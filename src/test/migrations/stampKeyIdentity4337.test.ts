@@ -198,6 +198,11 @@ describe('#4337 the conversion block in prisma/stamp-key-identity-invariants.sql
       await pg.connect();
       const before = await snapshot(pg);
       expect(before).toMatchObject({ identity: 'd', has_default: false });
+      // #855: the sequence's first step is pre-push.sql, because a push against the generated app_runs.duration_ms fails
+      // without it (prisma/app-run-duration-pre-push.sql); the later push is judged for the identity, not for that.
+      await execFileAsync('psql', [url, '-q', '-v', 'ON_ERROR_STOP=1', '-f', 'prisma/pre-push.sql'], {
+        cwd: new URL('../../../', import.meta.url).pathname, maxBuffer: 64 * 1024 * 1024,
+      });
       await execFileAsync('node_modules/.bin/prisma', ['db', 'push', '--skip-generate', '--accept-data-loss'], {
         cwd: new URL('../../../', import.meta.url).pathname, env: { ...process.env, DATABASE_URL: url }, maxBuffer: 64 * 1024 * 1024,
       });
