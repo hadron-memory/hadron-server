@@ -60,20 +60,21 @@ async function worker(name: string, opts: { role?: string; session?: boolean; ap
   if (opts.session !== false) await db.session.create({ data: { id: generateId(), appId: opts.app ?? appId, agentId, workerId: id, family: 'claude', llmModel: 'claude-sonnet-5-5', startedAt: ago(48 * HOUR), updatedAt: ago(48 * HOUR) } });
   return id;
 }
-type TaskOpts = { owner: string; assignee?: string | null; status?: string; parent?: string | null; source?: string | null; externalId?: string | null; startedAt?: Date; finishedAt?: Date; cancelledAt?: Date; app?: string; title?: string };
+type TaskOpts = { owner: string; assignee?: string | null; status?: string; parent?: string | null; source?: string | null; externalId?: string | null; startedAt?: Date; finishedAt?: Date; cancelledAt?: Date; app?: string; title?: string; isProject?: boolean };
 async function task(o: TaskOpts) {
   const status = o.status ?? 'started';
   const assigned = o.assignee ? { assigneeWorkerId: o.assignee, assignedAt: ago(48 * HOUR) } : {};
   return db.agentTask.create({ data: {
     appId: o.app ?? appId, title: o.title ?? 'Synthetic', ownerWorkerId: o.owner, parentTaskId: o.parent ?? null, status,
-    source: o.source === undefined ? 'https://github.com/example/repo/issues/1' : o.source, externalId: o.externalId ?? null, ...assigned,
+    source: o.source === undefined ? 'https://github.com/example/repo/issues/1' : o.source, externalId: o.externalId ?? null, isProject: o.isProject ?? false, ...assigned,
     ...(status === 'started' || status === 'finished' ? { startedAt: o.startedAt ?? ago(2 * HOUR) } : {}),
     ...(status === 'finished' ? { finishedAt: o.finishedAt ?? ago(HOUR), resultOutcome: 'succeeded' } : {}),
     ...(status === 'cancelled' ? { cancelledAt: o.cancelledAt ?? ago(HOUR) } : {}),
   } });
 }
+/** #4997: a project carries the project marker; being top-level makes a task nothing (cor:agt:150 A project). */
 async function project(title: string, status = 'started', owner = w.ada) {
-  return task({ owner, status, title, source: null, assignee: status === 'pending' ? null : owner });
+  return task({ owner, status, title, source: null, assignee: status === 'pending' ? null : owner, isProject: true });
 }
 const at0 = () => db.agentTask.create({ data: { appId, title: 'No project', ownerWorkerId: w.ada, status: 'backlog', taskNumber: 0, handle: 'AT0' } });
 const idsOf = (c: { ids: string[] }) => [...c.ids].sort();
