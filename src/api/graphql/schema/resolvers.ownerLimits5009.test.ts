@@ -78,6 +78,27 @@ describe('#5009 ownerLimits', () => {
     }
   });
 
+  it('a caller who may not read an organization gets one answer, whether or not the ref names one', async () => {
+    // An old address two live organizations hold: the ambiguity answer would itself confirm that they exist.
+    const other = (await db.organization.create({ data: { id: generateId(), name: 'olr2', urn: 'olr2-org' } })).id;
+    for (const entityId of [orgId, other]) {
+      await db.urnAlias.create({ data: { id: generateId(), entityType: 'ORGANIZATION', entityId, urn: 'olr-old', reason: 'RENAME' } as never });
+    }
+    const impersonated = { ...ctxOf(orgAdmin, []), impersonation: { orgId: generateId() } } as unknown as Partial<Context>;
+    const callers: Array<Partial<Context>> = [ctxOf(p), ctxOf(reader), ctxOf(revoked), { roles: [] }, { appId: 'a', appKeyId: 'k', roles: [] }, impersonated];
+    const refs = [orgId, 'hrn:org:olr-org', generateId(), 'hrn:org:olr-nowhere', 'hrn:org:olr-old', 'a:b:c', 'a\u0000b'];
+    const answers = new Set<string>();
+    for (const ctx of callers) for (const orgRef of refs) {
+      const r = await gql(READ, ctx, { orgRef });
+      expect(codeOf(r), orgRef).toBe('FORBIDDEN');
+      answers.add(JSON.stringify([r.errors![0].message, r.errors![0].extensions]));
+    }
+    expect(answers.size).toBe(1);
+    // A platform admin may know, so a miss keeps its own answer.
+    expect(codeOf(await gql(READ, adminCtx(), { orgRef: generateId() }))).toBe('ORGANIZATION_NOT_FOUND');
+    expect(codeOf(await gql(READ, adminCtx(), { orgRef: 'hrn:org:olr-old' }))).not.toBe('FORBIDDEN');
+  });
+
   it('who may read a person', async () => {
     const own = ctxOf(p);
     for (const ctx of [adminCtx(), own, { ...own, appId: 'selected-app' }]) expect(codeOf(await gql(READ, ctx, { userRef: p }))).toBeNull();

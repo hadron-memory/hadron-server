@@ -1,4 +1,5 @@
 /** #5009 (Billing A7a): requireOwnerHeadroom, called directly on a real transaction. */
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../generated/prisma/index.js';
@@ -261,6 +262,12 @@ describe('#5009 the refusal on the wire, and the table', () => {
     const out = formatGraphQLError({ message: e.message, extensions: { code: 'INTERNAL_SERVER_ERROR' } }, e);
     expect(out.message).toBe('Your account has reached its limit of 3 nodes.');
     expect(out.extensions).toMatchObject({ code: 'OWNER_LIMIT_REACHED', limitKey: 'nodes', ownerType: 'user', ownerId: 'u', limit: '3' });
+  });
+
+  it('the CHECKs have one source: the migration ends with the file post-push.sql includes', () => {
+    const guard = readFileSync('prisma/owner-limit-invariants.sql', 'utf8');
+    expect(readFileSync('prisma/migrations/20261124130000_owner_limits/migration.sql', 'utf8').endsWith(guard)).toBe(true);
+    expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir owner-limit-invariants.sql');
   });
 
   it.each([
