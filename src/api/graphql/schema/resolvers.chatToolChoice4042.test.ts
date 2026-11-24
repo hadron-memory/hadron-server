@@ -225,6 +225,16 @@ describe('(c) chatEffectiveToolChoice(chatId)', () => {
     expect(await ask()).toBe('AUTO');
   });
 
+  it('#5075: in a person\'s App with an organization Agent, the publisher organization\'s `default` decides nothing (null); the Agent\'s own still does', async () => {
+    await cfg({ organizationId: org.id }, 'default', 'anthropic', 'claude-sonnet-5-5');
+    const mine = await db.app.create({ data: { ownerUserId: member.id, name: 'Mine5075', urn: `member-${generateId()}:mine5075` } });
+    await db.appAgent.create({ data: { appId: mine.id, agentId: agent.id } });
+    const ask = () => effectiveChatToolChoice(db, { appId: mine.id, agentId: agent.id, storedChoice: null });
+    expect(await ask()).toBeNull();
+    await cfg({ agentId: agent.id }, 'default', 'anthropic', 'claude-opus-5-5');
+    expect(await ask()).toBe('AUTO');
+  });
+
   it('#829: a planted node at the chat\'s loc cannot be picked over the real chat', async () => {
     await cfg({ appId: app.id }, 'default', 'openai', 'gpt-x'); // the real chat's App: FORCED
     const { chatId } = await start({ aiConfigChoice: 'default' });
