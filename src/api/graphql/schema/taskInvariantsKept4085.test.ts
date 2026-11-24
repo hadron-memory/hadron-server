@@ -39,13 +39,13 @@ beforeEach(async () => {
 describe('an App key makes no task write (cor:agt:050:23), nine mutations', () => {
   const cases: Array<[string, () => Promise<unknown>]> = [
     ['createAgentTask', () => M.createAgentTask({}, { input: { appRef: app.id, title: 'by key', owner: { user: member.id } } }, keyCtx())],
-    ['startAgentTask', () => M.startAgentTask({}, { taskId }, keyCtx())],
-    ['finishAgentTask', () => M.finishAgentTask({}, { taskId, result: { outcome: 'done' } }, keyCtx())],
-    ['assignAgentTask', () => M.assignAgentTask({}, { taskId, assignee: { worker: anne.id } }, keyCtx())],
-    ['reassignAgentTask', () => M.reassignAgentTask({}, { taskId, assignee: { worker: anne.id } }, keyCtx())],
-    ['cancelAgentTask', () => M.cancelAgentTask({}, { taskId }, keyCtx())],
-    ['parkAgentTask', () => M.parkAgentTask({}, { taskId }, keyCtx())],
-    ['recordAgentTaskProgress', () => M.recordAgentTaskProgress({}, { taskId }, keyCtx())],
+    ['startAgentTask', () => M.startAgentTask({}, { taskRef: taskId }, keyCtx())],
+    ['finishAgentTask', () => M.finishAgentTask({}, { taskRef: taskId, result: { outcome: 'done' } }, keyCtx())],
+    ['assignAgentTask', () => M.assignAgentTask({}, { taskRef: taskId, assignee: { worker: anne.id } }, keyCtx())],
+    ['reassignAgentTask', () => M.reassignAgentTask({}, { taskRef: taskId, assignee: { worker: anne.id } }, keyCtx())],
+    ['cancelAgentTask', () => M.cancelAgentTask({}, { taskRef: taskId }, keyCtx())],
+    ['parkAgentTask', () => M.parkAgentTask({}, { taskRef: taskId }, keyCtx())],
+    ['recordAgentTaskProgress', () => M.recordAgentTaskProgress({}, { taskRef: taskId }, keyCtx())],
     ['setAgentTaskPriority', () => M.setAgentTaskPriority({}, { taskRef: taskId, priority: 3 }, keyCtx())],
   ];
   for (const [name, call] of cases) {

@@ -66,7 +66,7 @@ describe('an App key reads its OWN App\'s tasks and events (#1755)', () => {
     await mk(appY.id, 'on Y');
     const list = await Q.agentTasks({}, { appRef: appX.id }, keyCtx());
     expect(list.map((r: { id: string }) => r.id)).toEqual([t.id]);
-    expect((await Q.agentTask({}, { id: t.id }, keyCtx()))?.id).toBe(t.id);
+    expect((await Q.agentTask({}, { ref: t.id }, keyCtx()))?.id).toBe(t.id);
     expect((await Q.agentTaskTree({}, { root: t.id }, keyCtx()))?.map((r: { id: string }) => r.id)).toEqual([t.id]);
     const events = await Q.agentTeamEvents({}, { appRef: appX.urn }, keyCtx());
     expect(events.length).toBeGreaterThan(0);
@@ -78,7 +78,7 @@ describe('an App key reads its OWN App\'s tasks and events (#1755)', () => {
     await expectCode(Q.agentTasks({}, { appRef: appY.id }, keyCtx()), 'APP_NOT_FOUND');
     await expectCode(Q.agentTeamEvents({}, { appRef: appY.id }, keyCtx()), 'APP_NOT_FOUND');
     await expectCode(Q.agentTasks({}, { appRef: generateId() }, keyCtx()), 'APP_NOT_FOUND');
-    expect(await Q.agentTask({}, { id: y.id }, keyCtx())).toBeNull();
+    expect(await Q.agentTask({}, { ref: y.id }, keyCtx())).toBeNull();
     expect(await Q.agentTaskTree({}, { root: y.id }, keyCtx())).toBeNull();
   });
 
@@ -86,14 +86,14 @@ describe('an App key reads its OWN App\'s tasks and events (#1755)', () => {
     const t = await mk(appX.id, 'on X');
     await db.appKey.update({ where: { id: keyX.id }, data: { revokedAt: new Date() } });
     await expectCode(Q.agentTasks({}, { appRef: appX.id }, keyCtx()), 'APP_NOT_FOUND');
-    expect(await Q.agentTask({}, { id: t.id }, keyCtx())).toBeNull();
+    expect(await Q.agentTask({}, { ref: t.id }, keyCtx())).toBeNull();
   });
 
   it('a deleted App reads as missing', async () => {
     const t = await mk(appX.id, 'on X');
     await db.app.update({ where: { id: appX.id }, data: { deletedAt: new Date() } });
     await expectCode(Q.agentTasks({}, { appRef: appX.id }, keyCtx()), 'APP_NOT_FOUND');
-    expect(await Q.agentTask({}, { id: t.id }, keyCtx())).toBeNull();
+    expect(await Q.agentTask({}, { ref: t.id }, keyCtx())).toBeNull();
   });
 
   it('a key carrying a session is refused, never narrowed or run as the worker', async () => {
@@ -112,8 +112,8 @@ describe('an App key reads its OWN App\'s tasks and events (#1755)', () => {
     const t = await mk(appX.id, 'on X');
     const before = await db.agentTeamEvent.count();
     await expectCode(M.createAgentTask({}, { input: { appRef: appX.id, title: 'nope' } }, keyCtx()), 'APP_NOT_FOUND');
-    await expectCode(M.cancelAgentTask({}, { taskId: t.id }, keyCtx()), 'TASK_NOT_FOUND');
-    await expectCode(M.assignAgentTask({}, { taskId: t.id, assignee: { worker: anne.id } }, keyCtx()), 'TASK_NOT_FOUND');
+    await expectCode(M.cancelAgentTask({}, { taskRef: t.id }, keyCtx()), 'TASK_NOT_FOUND');
+    await expectCode(M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: anne.id } }, keyCtx()), 'TASK_NOT_FOUND');
     await expectCode(
       runAsActor({ workerId: anne.id, agentId }, () => M.createAgentTask({}, { input: { appRef: appX.id, title: 'nope' } }, keyCtx())),
       'APP_NOT_FOUND',
@@ -139,8 +139,8 @@ describe('an App key reads its OWN App\'s tasks and events (#1755)', () => {
   });
 
   it('malformed and unknown task ids read as null', async () => {
-    expect(await Q.agentTask({}, { id: 'nope' }, keyCtx())).toBeNull();
-    expect(await Q.agentTask({}, { id: generateId() }, keyCtx())).toBeNull();
+    expect(await Q.agentTask({}, { ref: 'nope' }, keyCtx())).toBeNull();
+    expect(await Q.agentTask({}, { ref: generateId() }, keyCtx())).toBeNull();
   });
 });
 
@@ -151,9 +151,9 @@ describe('isolation: a key never reaches another App\'s rows (#1785 cycle 1)', (
     const foreign = await db.agentTask.create({ data: { ...row, id: generateId(), appId: appY.id, parentTaskId: root.id, title: "foreign child", handle: `${row.handle}.${row.taskNumber}` } as any });
     const tree = await Q.agentTaskTree({}, { root: root.id }, keyCtx());
     expect(tree.map((t: { id: string }) => t.id)).toEqual([root.id]);
-    expect(await Q.agentTask({}, { id: foreign.id }, keyCtx())).toBeNull();
+    expect(await Q.agentTask({}, { ref: foreign.id }, keyCtx())).toBeNull();
     // Listing X by that child's parent still never returns Y's row.
-    const kids = await Q.agentTasks({}, { appRef: appX.id, parentTaskId: root.id }, keyCtx());
+    const kids = await Q.agentTasks({}, { appRef: appX.id, parentTaskRef: root.id }, keyCtx());
     expect(kids).toEqual([]);
   });
 
@@ -166,8 +166,8 @@ describe('isolation: a key never reaches another App\'s rows (#1785 cycle 1)', (
     expect(seen.length).toBeGreaterThan(0);
     expect(seen.every((e: { appId: string }) => e.appId === appX.id)).toBe(true);
     await expectCode(Q.agentTeamEvents({}, { appRef: appX.id, after: yEvents[0]!.id }, keyCtx()), 'BAD_USER_INPUT');
-    expect(await Q.agentTeamEvents({}, { appRef: appX.id, taskId: y.id }, keyCtx())).toEqual([]);
-    expect((await Q.agentTeamEvents({}, { appRef: appX.id, taskId: x.id }, keyCtx())).length).toBeGreaterThan(0);
+    expect(await Q.agentTeamEvents({}, { appRef: appX.id, taskRef: y.id }, keyCtx())).toEqual([]);
+    expect((await Q.agentTeamEvents({}, { appRef: appX.id, taskRef: x.id }, keyCtx())).length).toBeGreaterThan(0);
   });
 });
 
@@ -177,7 +177,7 @@ describe('every task-domain write is refused for a key (#1785 cycle 1)', () => {
     const names = Object.keys(M).filter((n) => /agenttask|alarm|availability|ticker/i.test(n));
     expect(names.length).toBeGreaterThan(8);
     const args = {
-      taskId: t.id, id: t.id, appRef: appX.id, workerRef: anne.id, worker: anne.id, assignee: { worker: anne.id },
+      taskRef: t.id, ref: t.id, taskId: t.id, id: t.id, appRef: appX.id, workerRef: anne.id, worker: anne.id, assignee: { worker: anne.id },
       input: { appRef: appX.id, taskId: t.id, title: 'x', name: 'x' }, result: { outcome: 'succeeded' },
     };
     // #2553: the task number counters are part of "nothing is written"; their BigInts serialize as strings.
@@ -224,7 +224,7 @@ describe('a revocation or deletion that lands DURING a key\'s read still wins (#
     const list = await duringRead(revoke, () => Q.agentTasks({}, { appRef: appX.id }, keyCtx()));
     expect((list as GraphQLError).extensions?.code).toBe('APP_NOT_FOUND');
     for (const [name, read] of [
-      ['get', () => Q.agentTask({}, { id: t.id }, keyCtx())],
+      ['get', () => Q.agentTask({}, { ref: t.id }, keyCtx())],
       ['tree', () => Q.agentTaskTree({}, { root: t.id }, keyCtx())],
     ] as const) {
       await db.appKey.update({ where: { id: keyX.id }, data: { revokedAt: null } });

@@ -39,7 +39,7 @@ describe('#3123 refusal atomicity', () => {
     const beforeEvents = await db.agentTeamEvent.findMany({ where: { appId }, orderBy: { id: 'asc' } });
     const references = [good, ref];
     const result = await (mode === 'create' ? create(references) :
-      M.updateAgentTask({}, { taskId: task.id, input: { title: 'Changed', references } }, ctx())).catch((e: unknown) => e);
+      M.updateAgentTask({}, { taskRef: task.id, input: { title: 'Changed', references } }, ctx())).catch((e: unknown) => e);
     expect(result).toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     expect(result.message).toContain('Reference 2:');
     expect(result.message).toContain(rule);
@@ -54,7 +54,7 @@ it('accepts ASCII/non-Cf Unicode labels and @ outside the written authority, thr
   const task = await create(refs);
   expect((await db.agentTask.findUniqueOrThrow({ where: { id: task.id } })).references).toEqual(refs.map(r => ({ ...r, kind: 'url' })));
   const reversed = [...refs].reverse();
-  await M.updateAgentTask({}, { taskId: task.id, input: { references: reversed } }, ctx());
+  await M.updateAgentTask({}, { taskRef: task.id, input: { references: reversed } }, ctx());
   expect((await db.agentTask.findUniqueOrThrow({ where: { id: task.id } })).references).toEqual(reversed.map(r => ({ ...r, kind: 'url' })));
 });
 it('covers Cf beyond the three examples and written authority delimiters directly', () => {

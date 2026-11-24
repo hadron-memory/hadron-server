@@ -190,11 +190,11 @@ describe('no new work and no new session while resetting (§4, R118)', () => {
   it('assign, reassign and create onto Kit are refused WORKER_RESETTING; to Ada they go through', async () => {
     await claimed();
     const free = await db.agentTask.create({ data: { appId: f.app.id, title: 'Free', ownerUserId: f.manager.id, status: 'backlog', closeSessionWhenDone: false }, select: { id: true } });
-    expect(await code(M.assignAgentTask({}, { taskId: free.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id)))).toBe('WORKER_RESETTING');
+    expect(await code(M.assignAgentTask({}, { taskRef: free.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id)))).toBe('WORKER_RESETTING');
     const adas = await db.agentTask.create({ data: { appId: f.app.id, title: 'Ada\'s', ownerUserId: f.manager.id, assigneeWorkerId: f.ada.id, status: 'pending', assignedAt: new Date(), closeSessionWhenDone: false }, select: { id: true } });
-    expect(await code(M.reassignAgentTask({}, { taskId: adas.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id)))).toBe('WORKER_RESETTING');
+    expect(await code(M.reassignAgentTask({}, { taskRef: adas.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id)))).toBe('WORKER_RESETTING');
     expect(await code(M.createAgentTask({}, { input: { appRef: f.app.id, title: 'New', assignee: { worker: f.kit.id } } }, ctx(f.manager.id)))).toBe('WORKER_RESETTING');
-    expect(await code(M.assignAgentTask({}, { taskId: free.id, assignee: { worker: f.ada.id } }, ctx(f.manager.id)))).toBeUndefined();
+    expect(await code(M.assignAgentTask({}, { taskRef: free.id, assignee: { worker: f.ada.id } }, ctx(f.manager.id)))).toBeUndefined();
     expect(await db.agentTask.count({ where: { assigneeWorkerId: f.kit.id, status: { in: ['pending', 'started'] } } })).toBe(0);
   });
 
@@ -217,7 +217,7 @@ describe('no new work and no new session while resetting (§4, R118)', () => {
     await f.step('reportContextResetRelaunchFailed', { resetId: s.resetId, epoch: 1, reason: 'CHECKPOINT_FAILED' });
     expect(await resetting()).toBe(false);
     const free = await db.agentTask.create({ data: { appId: f.app.id, title: 'Free', ownerUserId: f.manager.id, status: 'backlog', closeSessionWhenDone: false }, select: { id: true } });
-    expect(await code(M.assignAgentTask({}, { taskId: free.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id)))).toBeUndefined();
+    expect(await code(M.assignAgentTask({}, { taskRef: free.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id)))).toBeUndefined();
   });
 });
 

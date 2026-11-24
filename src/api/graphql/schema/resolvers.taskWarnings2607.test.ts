@@ -111,7 +111,7 @@ describe('task.cancel.open-children', () => {
       const parent = await task({ ownerUserId: member.id });
       await child(parent.id, { ownerUserId: member.id }, status);
       const c = ctx(member.id);
-      const out = await M.cancelAgentTask({}, { taskId: parent.id }, c);
+      const out = await M.cancelAgentTask({}, { taskRef: parent.id }, c);
       expect(out.status).toBe('cancelled');
       expect(codes(c)).toEqual([CANCEL]);
       expect(c.taskWarnings![0].warning.text).toBe('This task still has open child tasks; cancelling it does not end them.');
@@ -121,12 +121,12 @@ describe('task.cancel.open-children', () => {
   it('does not fire for zero children, or for children that are backlog, finished or cancelled (the finish predicate)', async () => {
     const solo = await task({ ownerUserId: member.id });
     const c0 = ctx(member.id);
-    await M.cancelAgentTask({}, { taskId: solo.id }, c0);
+    await M.cancelAgentTask({}, { taskRef: solo.id }, c0);
     expect(codes(c0)).toEqual([]);
     const parent = await task({ ownerUserId: member.id });
     for (const status of ['backlog', 'finished', 'cancelled']) await child(parent.id, { ownerUserId: member.id }, status);
     const c = ctx(member.id);
-    expect((await M.cancelAgentTask({}, { taskId: parent.id }, c)).status).toBe('cancelled');
+    expect((await M.cancelAgentTask({}, { taskRef: parent.id }, c)).status).toBe('cancelled');
     expect(codes(c)).toEqual([]);
   });
 
@@ -134,7 +134,7 @@ describe('task.cancel.open-children', () => {
     const parent = await task({ ownerUserId: member.id });
     await child(parent.id, { ownerUserId: member.id }, 'pending');
     const c = ctx(member.id);
-    await expectCode(asWorker(anne, teamAgentId, () => M.cancelAgentTask({}, { taskId: parent.id }, c)), 'TASK_NOT_OWNER');
+    await expectCode(asWorker(anne, teamAgentId, () => M.cancelAgentTask({}, { taskRef: parent.id }, c)), 'TASK_NOT_OWNER');
     expect(codes(c)).toEqual([]);
   });
 
@@ -142,7 +142,7 @@ describe('task.cancel.open-children', () => {
     const parent = await task({ ownerUserId: member.id });
     await child(parent.id, { ownerUserId: member.id }, 'pending');
     const c = rollingBack(member.id);
-    await expect(M.cancelAgentTask({}, { taskId: parent.id }, c)).rejects.toThrow('forced rollback');
+    await expect(M.cancelAgentTask({}, { taskRef: parent.id }, c)).rejects.toThrow('forced rollback');
     expect(codes(c)).toEqual([]);
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: parent.id } })).status).toBe('pending');
   });
@@ -153,17 +153,17 @@ describe('task.cancel.open-children', () => {
       return p;
     });
     const unmapped = ctx(member.id);
-    await asWorker(ada, teamAgentId, async () => M.cancelAgentTask({}, { taskId: (await parent()).id }, unmapped));
+    await asWorker(ada, teamAgentId, async () => M.cancelAgentTask({}, { taskRef: (await parent()).id }, unmapped));
     expect(unmapped.taskWarnings![0].warning.register).toEqual({ state: 'unmapped' });
 
     await node(teamMemoryId, `register:${CANCEL}`, { data: { registerEntry: { code: CANCEL, taskLoc: 'tasks:cancel' } } });
     const unresolved = ctx(member.id);
-    await asWorker(ada, teamAgentId, async () => M.cancelAgentTask({}, { taskId: (await parent()).id }, unresolved));
+    await asWorker(ada, teamAgentId, async () => M.cancelAgentTask({}, { taskRef: (await parent()).id }, unresolved));
     expect(unresolved.taskWarnings![0].warning.register).toEqual({ state: 'unresolved' });
 
     await node(teamMemoryId, 'tasks:cancel', { isRunnable: true });
     const mapped = ctx(member.id);
-    await asWorker(ada, teamAgentId, async () => M.cancelAgentTask({}, { taskId: (await parent()).id }, mapped));
+    await asWorker(ada, teamAgentId, async () => M.cancelAgentTask({}, { taskRef: (await parent()).id }, mapped));
     expect(mapped.taskWarnings![0].warning.register).toEqual({
       state: 'mapped', taskLoc: 'tasks:cancel', taskUrn: `hrn:node:${teamMemoryUrn}:tasks:cancel`,
     });
@@ -171,7 +171,7 @@ describe('task.cancel.open-children', () => {
     const p = await task({ ownerUserId: member.id });
     await child(p.id, { ownerUserId: member.id }, 'pending');
     const person = ctx(member.id);
-    await M.cancelAgentTask({}, { taskId: p.id }, person);
+    await M.cancelAgentTask({}, { taskRef: p.id }, person);
     expect(codes(person)).toEqual([CANCEL]);
     expect(person.taskWarnings![0].warning.register).toBeUndefined();
   });
@@ -180,7 +180,7 @@ describe('task.cancel.open-children', () => {
     const parent = await task({ ownerUserId: member.id });
     await child(parent.id, { ownerUserId: member.id }, 'pending');
     const server = new ApolloServer<Context>({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) }, plugins: [taskWarningsPlugin] });
-    await server.executeOperation({ query: `mutation { c: cancelAgentTask(taskId: "${parent.id}") { id } }` }, { contextValue: ctx(member.id) });
+    await server.executeOperation({ query: `mutation { c: cancelAgentTask(taskRef: "${parent.id}") { id } }` }, { contextValue: ctx(member.id) });
     expect(await db.agentTeamEvent.count({ where: { appId: app.id, type: 'task.warning' } })).toBe(0);
   });
 });
@@ -262,7 +262,7 @@ describe('the carrier: extensions.warnings on a real GraphQL response', () => {
     const a = await alarm();
     const server = new ApolloServer<Context>({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) }, plugins: [taskWarningsPlugin] });
     const res = await server.executeOperation({
-      query: `mutation { c: cancelAgentTask(taskId: "${parent.id}") { id status } k: acknowledgeAlarm(eventId: "${a.id}") { id } }`,
+      query: `mutation { c: cancelAgentTask(taskRef: "${parent.id}") { id status } k: acknowledgeAlarm(eventId: "${a.id}") { id } }`,
     }, { contextValue: ctx(admin.id) });
     if (res.body.kind !== 'single') throw new Error('single expected');
     expect(res.body.singleResult.errors).toBeUndefined();

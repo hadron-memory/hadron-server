@@ -116,7 +116,7 @@ async function startedAsCodex() {
 }
 /** Sam starts the task under session `s`, and the applied stamp is read back. */
 async function appliedAfterStart(t: { id: string }, s: { id: string }) {
-  await runAsActor({ workerId: sam.id, agentId: shortAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+  await runAsActor({ workerId: sam.id, agentId: shortAgent }, () => M.startAgentTask({}, { taskRef: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
   return T.appliedRunSettings(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }));
 }
 const counts = async () => ({ sessions: await db.session.count(), events: await db.agentTeamEvent.count(), consumed: await db.launchGrant.count({ where: { consumedAt: { not: null } } }) });

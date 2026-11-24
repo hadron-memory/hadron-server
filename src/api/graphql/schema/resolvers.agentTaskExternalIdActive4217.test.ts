@@ -129,9 +129,9 @@ describe('no transition leaves finished or cancelled, so create is the only writ
     const seen: string[] = [];
     for (const t of [f, c]) {
       for (const [name, call] of [
-        ['start', () => M.startAgentTask({}, { taskId: t.id }, ctx())],
-        ['finish', () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx())],
-        ['cancel', () => M.cancelAgentTask({}, { taskId: t.id }, ctx())],
+        ['start', () => M.startAgentTask({}, { taskRef: t.id }, ctx())],
+        ['finish', () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, ctx())],
+        ['cancel', () => M.cancelAgentTask({}, { taskRef: t.id }, ctx())],
       ] as Array<[string, () => Promise<unknown>]>) {
         const e: any = await call().then(() => null, (x: any) => x);
         seen.push(`${t.id === f.id ? 'finished' : 'cancelled'}.${name}:${e?.extensions?.code}`);

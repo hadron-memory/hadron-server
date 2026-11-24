@@ -13,7 +13,7 @@ const HOUR = 3_600_000;
 const iso = (offsetHours: number) => new Date(Date.now() + offsetHours * HOUR).toISOString();
 const create = (input: Record<string, unknown>) =>
   M.createAgentTask({}, { input: { appRef: app.id, title: 'T', assignee: { user: assignee.id }, ...input } }, ctx());
-const edit = (taskId: string, input: Record<string, unknown>) => M.updateAgentTask({}, { taskId, input }, ctx());
+const edit = (taskId: string, input: Record<string, unknown>) => M.updateAgentTask({}, { taskRef: taskId, input }, ctx());
 const row = (id: string) => db.agentTask.findUniqueOrThrow({ where: { id } });
 const edits = (taskId: string) => db.agentTeamEvent.findMany({ where: { taskId, type: 'task.edited' } });
 
