@@ -2281,6 +2281,16 @@ export function clampListTake(limit?: number | null): number {
 }
 
 /**
+ * #5062 (S4a of #2213) — the `take` of a bare list field that has no ceiling yet: omitted or null reads as the default of 20, a
+ * negative limit reads as 0 (an empty list, like `clampListTake` and every `<field>Page` sibling), and anything else is
+ * passed through, with NO upper bound (a ceiling needs client companions first, cor:api:120:04). Prisma reads a negative
+ * `take` from the far end of the order, so an unguarded `limit ?? 20` returned the oldest rows.
+ */
+export function nonNegativeTake(limit?: number | null): number {
+  return limit == null ? LIST_PAGE_DEFAULT : Math.max(0, limit);
+}
+
+/**
  * #2213 — size arguments of the `<field>Page` siblings (cor:api:120:04). An
  * omitted or null limit pages at 20; 0 is count-only (an empty page with the
  * real total); a negative limit is 0; a limit over 200 is served as 200, never a
