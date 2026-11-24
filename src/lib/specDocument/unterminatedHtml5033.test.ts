@@ -242,7 +242,10 @@ describe('escapeUnterminatedHtml', () => {
   });
   it('CDATA and a processing instruction end for the browser at the first `>`, so what follows them is still read', () => {
     expect(escapeUnterminatedHtml('<?><style>?>')).toBe('<?>&lt;style>?>');
-    expect(escapeUnterminatedHtml('<![CDATA[ a > b <style> ]]>')).toBe('<![CDATA[ a > b &lt;style> ]]>');
+    // A `>` before the closer: a browser ends the construct there, CommonMark and htmlparser2 at the closer. Neither may be left open.
+    expect(escapeUnterminatedHtml('<![CDATA[ a > b <style> ]]>')).toBe('&lt;![CDATA[ a > b &lt;style> ]]>');
+    expect(escapeUnterminatedHtml('<?x a > b ?>')).toBe('&lt;?x a > b ?>');
+    expect(escapeUnterminatedHtml('<![CDATA[ x ]]> y')).toBe('<![CDATA[ x ]]> y');
     expect(escapeUnterminatedHtml('<?xml version="1.0"?> <b>x</b>')).toBe('<?xml version="1.0"?> <b>x</b>');
   });
   it('a template is open until its own end tag, and its content is read as usual', () => {
@@ -289,6 +292,13 @@ describe('escapeUnterminatedHtml', () => {
     // A paragraph that runs on keeps a multi-line construct whole.
     expect(escapeUnterminatedHtml('a <!-- x\ny --> b')).toBe('a <!-- x\ny --> b');
     expect(escapeUnterminatedHtml('a <b\n  y="z"\n  w>')).toBe('a <b\n  y="z"\n  w>');
+  });
+  it('an inline raw-text element whose end tag would cross a block boundary stays open, and the fence opener is not skipped', () => {
+    const out = escapeUnterminatedHtml('a <script>x </script\n```\n>\n```\nq <textarea>z');
+    expect(out).toContain('a &lt;script>');
+    expect(out).toContain('&lt;/script');
+    expect(out).toContain('&lt;textarea>');
+    expect(escapeUnterminatedHtml(out)).toBe(out);
   });
   it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag (BLIND delta pin)', () => {
     expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');

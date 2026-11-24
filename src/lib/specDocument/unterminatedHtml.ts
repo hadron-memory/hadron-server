@@ -27,7 +27,10 @@
  *    (script, style, textarea) it is a CommonMark type 1 block that ends at the first line holding the end tag, code or not;
  *  - a `pre` at the head of a line (CommonMark type 1) with none of `</pre>`, `</script>`, `</style>`, `</textarea>` after it;
  *  - a comment with no `-->`, a CDATA section with no `]]>`, a processing instruction with no `?>`, a declaration with no `>`
- *    (CDATA and a processing instruction end for the browser at the first `>`, which is where the scan goes on).
+ *    (a construct that holds a `>` before its closer is left unterminated: a browser ends CDATA and a processing instruction at the
+ *    first `>`, Markdown and htmlparser2 at the closer, and the readers would resume in different places).
+ *  - inline (not at the head of a line), none of these may run past a block boundary: a heading, fence, quote, list item or
+ *    blank line ends the paragraph, so a closer beyond one is no closer.
  * A raw-text element at the head of a line that CommonMark does not start a type 1 block with (`title`, `xmp`, `iframe` and the like)
  * is judged like an inline one, so an end tag only inside code leaves it open: stricter than needed, anchor-safe, and deliberate.
  * Not read: fenced code, indented code (also inside a block quote), inline code spans and a backslash-escaped `<` (Markdown
@@ -184,7 +187,7 @@ function firstUnterminated(text: string, from: number): number {
       // Inside an inline raw-text element: the only markup is its own end tag.
       if (text[i + 1] === '/' && text.slice(i + 2, i + 2 + rawName.length).toLowerCase() === rawName && /[\s>]/.test(text[i + 2 + rawName.length] ?? 'x')) {
         const end = tagEndOf(text, i, i + 2);
-        if (end === -1 || end > tagLimit(i)) return rawStart;
+        if (end === -1 || end > inlineBound(i)) return rawStart;
         rawStart = -1;
         i = end;
       } else i += 1;
@@ -198,21 +201,22 @@ function firstUnterminated(text: string, from: number): number {
       i = close + 3;
       continue;
     }
-    // CDATA and a processing instruction: Markdown ends the block at `]]>` / `?>` (both must be there), but the browser reads
-    // either as a bogus comment that ends at the FIRST `>`, so the scan goes on from there. The closer is searched RAW, on purpose:
+    // CDATA and a processing instruction: Markdown (and htmlparser2) end the construct at `]]>` / `?>`, a browser reads either as a bogus
+    // comment that ends at the FIRST `>`. Where the two are the same `>` there is one answer; where a `>` comes before the closer the readers
+    // resume in different places, so the construct is left unterminated (escaped) rather than guessed. The closer is searched RAW, on purpose:
     // inline HTML of this kind takes everything up to its closer, backticks included, so a closer inside what looks like a code span
     // is still its closer (unlike a raw-text element, whose end tag is a separate tag that code can hide).
     if (text.startsWith('<![CDATA[', i)) {
       const first = text.indexOf('>', i + 2);
       const closer = text.indexOf(']]>', i + 9);
-      if (first === -1 || closer === -1 || closer + 3 > blockLimit(i)) return i;
+      if (first === -1 || closer === -1 || first !== closer + 2 || closer + 3 > blockLimit(i)) return i;
       i = first + 1;
       continue;
     }
     if (text.startsWith('<?', i)) {
       const first = text.indexOf('>', i + 2);
       const closer = text.indexOf('?>', i + 1);
-      if (first === -1 || closer === -1 || closer + 2 > blockLimit(i)) return i;
+      if (first === -1 || closer === -1 || first !== closer + 1 || closer + 2 > blockLimit(i)) return i;
       i = first + 1;
       continue;
     }
