@@ -78,30 +78,13 @@ export async function fenceChannelIncarnation(tx: Prisma.TransactionClient, chan
  * key. The v2 paged-attention codec that also consumed this secret was retired
  * with the attention API (#2027 S11). */
 export function workerProofSecret(): string {
-  // #4509: the new name first, the old one for one deprecation cycle, then the existing JWT_SECRET fallback.
-  const secret = process.env[PROOF_SECRET_ENV] || legacyProofSecret() || process.env.JWT_SECRET;
-  if (!secret) fail('The team-attention token signer is not configured.', 'TEAM_ATTENTION_NOT_CONFIGURED');
+  const secret = process.env[PROOF_SECRET_ENV] || process.env.JWT_SECRET;
+  if (!secret) fail('The worker proof signer is not configured.', 'WORKER_PROOF_NOT_CONFIGURED');
   return secret;
 }
 
-/** The proof secret's env name since #4509. */
+/** The proof secret's env name (#4509; its pre-#4509 name was dropped in #4989). */
 export const PROOF_SECRET_ENV = 'WORKER_PROOF_TOKEN_SECRET';
-/** Its name before #4509, still read for one deprecation cycle (the follow-up drops it). */
-export const LEGACY_PROOF_SECRET_ENV = 'TEAM_ATTENTION_TOKEN_SECRET';
-let legacyEnvWarned = false;
-/** For tests: let the once-per-process warning fire again. */
-export function resetLegacyProofSecretWarning(): void {
-  legacyEnvWarned = false;
-}
-/** The old name's value, with one warning per process (names only, never a value) when it is the one being used. */
-function legacyProofSecret(): string | undefined {
-  const value = process.env[LEGACY_PROOF_SECRET_ENV];
-  if (value && !legacyEnvWarned) {
-    legacyEnvWarned = true;
-    console.warn(`[config] ${LEGACY_PROOF_SECRET_ENV} is deprecated: set ${PROOF_SECRET_ENV} instead; the old name is read for one more release cycle.`);
-  }
-  return value || undefined;
-}
 
 /**
  * A LIVE App: not deleted, not uninstalled, and — when org-owned — in an org
