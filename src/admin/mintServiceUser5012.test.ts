@@ -139,3 +139,66 @@ describe('R9: refusals create no user', () => {
     });
   });
 });
+
+// #5090 BLIND P3-8 and P3-3: the race backstop answers only a handle unique, and a key-mint failure names the recovery.
+describe('R9b: the unique-violation backstop and the key-mint failure', () => {
+  /** The same client, with the user insert inside its transactions throwing a P2002 on `target`. */
+  const p2002On = (target: string[]) => {
+    const tx = (inner: object) => new Proxy(inner, {
+      get(t, prop) {
+        const v = Reflect.get(t, prop) as unknown;
+        if (prop !== 'user') return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+        return new Proxy(v as object, {
+          get(d, name) {
+            const f = Reflect.get(d, name) as (...a: unknown[]) => unknown;
+            if (name === 'create') {
+              return () => Promise.reject(Object.assign(new Error('Unique constraint failed'), { code: 'P2002', meta: { target } }));
+            }
+            return typeof f === 'function' ? f.bind(d) : f;
+          },
+        });
+      },
+    });
+    return new Proxy(db, {
+      get(t, prop) {
+        if (prop === '$transaction') {
+          return (fn: (x: object) => unknown, ...rest: unknown[]) =>
+            (t.$transaction as (...a: unknown[]) => Promise<unknown>)((x: object) => fn(tx(x)), ...rest);
+        }
+        const v = Reflect.get(t, prop) as unknown;
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+      },
+    });
+  };
+
+  it('a P2002 on the handle index (a lost race) is the taken-handle refusal', async () => {
+    await expect(core.mintServiceUser(p2002On(['users_handle_key']) as typeof db, { handle: 'pay-race' }))
+      .rejects.toThrow(/already taken/);
+  });
+
+  it('a P2002 on any other unique surfaces as itself, not as a taken handle', async () => {
+    const err = await core.mintServiceUser(p2002On(['email']) as typeof db, { handle: 'pay-other' }).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(core.BootstrapTokenError);
+    expect((err as { code?: string }).code).toBe('P2002');
+  });
+
+  it('a key-mint failure after the user commits names the --handle recovery', async () => {
+    let calls = 0;
+    const second = new Proxy(db, {
+      get(t, prop) {
+        if (prop === '$transaction') {
+          return (...a: unknown[]) => {
+            calls++;
+            if (calls === 2) return Promise.reject(new Error('key store down'));
+            return (t.$transaction as (...x: unknown[]) => Promise<unknown>)(...a);
+          };
+        }
+        const v = Reflect.get(t, prop) as unknown;
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+      },
+    });
+    await expect(core.mintServiceUser(second as typeof db, { handle: 'pay-nokey' }))
+      .rejects.toThrow(/was created but its key was not minted; mint it with --handle pay-nokey/);
+    expect(await db.user.count({ where: { handle: 'pay-nokey' } })).toBe(1);
+  });
+});

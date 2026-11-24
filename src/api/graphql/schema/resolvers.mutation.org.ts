@@ -164,11 +164,13 @@ export const orgMutations = {
         [{ kind: 'user', id: userId }],
         async (txCtx) => { requireRole(txCtx, 'ADMIN'); },
         async (tx) => {
+          // #5090 BLIND P3-6: a role named twice is stored once.
+          const unique = [...new Set(roles)];
           // #5012 ruling 10.1: BILLING stands alone (judged after the gate, before the write).
-          refuseCombinedBillingRole(roles);
+          refuseCombinedBillingRole(unique);
           // Read under the FOR UPDATE afterLock took, so `before` is the row this write replaces.
           const prior = await tx.user.findUnique({ where: { id: userId }, select: { roles: true } });
-          const updated = await tx.user.update({ where: { id: userId }, data: { roles } });
+          const updated = await tx.user.update({ where: { id: userId }, data: { roles: unique } });
           return { user: updated, before: prior?.roles ?? [] };
         },
         {

@@ -283,6 +283,14 @@ describe('ruling 10.1: BILLING is never combined with another platform role', ()
     });
   }
 
+  it('a role named twice is stored once (#5090 BLIND P3-6), and BILLING twice is BILLING alone', async () => {
+    const res = await gql(ROLES, platformCtx(), { u: member, r: ['BILLING', 'BILLING'] });
+    expect(res.errors).toBeUndefined();
+    expect((await db.user.findUniqueOrThrow({ where: { id: member } })).roles).toEqual(['BILLING']);
+    await gql(ROLES, platformCtx(), { u: member, r: ['READER', 'ADMIN', 'READER'] });
+    expect((await db.user.findUniqueOrThrow({ where: { id: member } })).roles).toEqual(['READER', 'ADMIN']);
+  });
+
   it('a non-admin caller gets the gate refusal, not the combination refusal', async () => {
     const res = await gql(ROLES, outsiderCtx(), { u: member, r: ['BILLING', 'READER'] });
     expect(code(res)).toBe('FORBIDDEN');

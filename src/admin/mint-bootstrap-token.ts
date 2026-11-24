@@ -26,11 +26,12 @@
  * The CLI wrapper lives in `scripts/admin-mint-token.ts`; the testable core is
  * here so it runs under the normal vitest `src/**` set.
  */
-import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
+import type { PrismaClient } from '../generated/prisma/index.js';
 import { mintUserApiKey } from '../middleware/auth.js';
 import { isHandleTaken, normalizeHandle } from '../lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from '../lib/principal/mintPrincipal.js';
 import { logUserRolesChanged } from '../lib/auth/userRolesChanged.js';
+import { isUniqueViolationOn, HANDLE_TARGETS } from '../auth/userProvision.js';
 
 /**
  * Exactly one of these identifies the target user. Email is matched
@@ -196,9 +197,10 @@ export async function mintServiceUser(
     })
     .catch((err: unknown) => {
       // The pool probe and the inserts are two steps: a concurrent claim of the name loses in the principal pool
-      // (RootNameTakenError) or on the users handle index (P2002, the only unique value this insert supplies).
+      // (RootNameTakenError) or on the users handle index (a P2002 naming a handle unique). Any other unique
+      // violation is not a taken handle and surfaces as itself (#5090 BLIND P3-8).
       if (err instanceof RootNameTakenError) throw taken();
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') throw taken();
+      if (isUniqueViolationOn(err, HANDLE_TARGETS)) throw taken();
       throw err;
     });
   logUserRolesChanged({ actor: HOST_SCRIPT_ACTOR, target: user.id, before: [], after: user.roles });
@@ -206,11 +208,18 @@ export async function mintServiceUser(
   const label = opts.label !== undefined && opts.label !== null && opts.label.length > 0
     ? opts.label
     : SERVICE_USER_TOKEN_LABEL;
+  // The user has committed; if the key mint fails, a rerun of this mode would refuse the taken handle, so name the
+  // recovery: mint for the existing user by its handle (#5090 BLIND P3-3).
   const { rawKey } = await mintUserApiKey(db, {
     userId: user.id,
     label,
     createdBy: user.id,
     issuedVia: BOOTSTRAP_ISSUED_VIA,
+  }).catch((err: unknown) => {
+    throw new BootstrapTokenError(
+      `The service user "${handle}" was created but its key was not minted; mint it with --handle ${handle}. ` +
+        `Cause: ${err instanceof Error ? err.message : String(err)}`,
+    );
   });
   return { rawKey, user: { id: user.id, email: user.email, handle: user.handle, name: user.name } };
 }
