@@ -13,7 +13,12 @@
  * over all rows), not by the legacy `Memory.corpusMintedAt` stamp. It must
  * not be re-enabled unchanged — the memory-keyed policy cor:dmo:120:09
  * (minting adds no removal protection) is what forbids returning it as-is,
- * and future protection needs a new decision and per-node checks.
+ * and future protection needs a new decision and per-node checks. The mint
+ * record is not memory-local the way the stamp was, either: `minted_at`
+ * travels with a relocated node (mergeMemories' cross-memory move), so a
+ * merge can make the source stop counting as minted and the destination
+ * start — a divergence from the old never-moved stamp, live today only in
+ * the harmless newlyMarked conflict branch (permanence off, #1591).
  *
  * The legacy implementation selects anything carrying the spec marker (`hasSpecMarker` — a `spec`
  * tag or a `spec`/`spec.*` role; both are plaintext at rest even in encrypted

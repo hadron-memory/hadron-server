@@ -22,6 +22,11 @@
  *   whole-corpus delete (NODE_WRITE_CONFLICT, nothing written). On main the
  *   probe reads the null stamp and the marking succeeds — red at the
  *   rejection; after the re-key it conflicts.
+ * - C2b the unminted counterpart (a control, green on main): in a
+ *   never-minted memory the probe must answer "not minted" and the guard
+ *   must take NO memory lock — a first spec mark does not conflict with a
+ *   concurrent whole-corpus delete. Kills the mutant that drops the probe's
+ *   `AND minted_at IS NOT NULL` term (every node row would read as minted).
  * - C4  control: `Memory.corpusMintedAt` (the derived field) stays
  *   MAX(nodes.minted_at) over live nodes.
  * - C5  control: the dry-run spec-replace plan hash is byte-stable for a
@@ -36,6 +41,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { lockMintedSpecUnmarks } from './mintedSpecPermanence.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -163,6 +169,39 @@ describe('#5063 C2 — the first-spec-mark conflict probe keys on the node mint,
       (e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT',
     );
     expect(await db.node.findUniqueOrThrow({ where: { id: n.id } })).toMatchObject({ tags: [] });
+  }, 20_000);
+
+  it("C2b — a never-minted memory's first spec mark takes no memory lock (control)", async () => {
+    const m = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'c2b' }, ctx());
+    const n = await db.node.create({
+      data: {
+        id: generateId(), memoryId: m.id, loc: 'c2b:010', name: 'c2b:010',
+        content: 'draft note', role: null, nodeType: 'info', tags: [],
+      },
+    });
+    // No mint record anywhere in the memory, and no legacy stamp either (the
+    // state PR 2 leaves behind). A stand-in whole-corpus delete holds the
+    // memory row FOR UPDATE, as deleteMemory does before its tombstone.
+    const { release, done } = await holdOpen(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${m.id} FOR UPDATE`;
+    });
+    try {
+      // The unlocked probe must answer "not minted" and the guard must return
+      // WITHOUT the coordinating memory FOR SHARE. Under a short lock_timeout
+      // that lock would abort (55P03) behind the stand-in delete, so finishing
+      // fast and empty is the proof no lock was taken. Kills the mutant that
+      // drops `AND minted_at IS NOT NULL` from the probe: with it, any memory
+      // holding a node row reads as minted and the first spec mark waits on
+      // the delete it must not care about.
+      await db.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
+        const guarded = await lockMintedSpecUnmarks(tx, m.id, [{ id: n.id, tags: ['spec'] }]);
+        expect(guarded).toEqual([]);
+      });
+    } finally { release(); }
+    await done;
+    // The mark itself was not the pin's subject (the door's own locks own
+    // that path); the guard's abstention is.
   }, 20_000);
 });
 
