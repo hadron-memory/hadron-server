@@ -15,7 +15,7 @@ DECLARE
   f record;
 BEGIN
   FOR f IN
-    SELECT p.oid::regprocedure AS sig
+    SELECT p.oid AS fn_oid
       FROM pg_proc p
       JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public'
@@ -24,7 +24,7 @@ BEGIN
        AND p.proconfig IS NULL
        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
   LOOP
-    EXECUTE format('ALTER FUNCTION %s SET search_path = public, pg_temp', f.sig);
+    EXECUTE pg_catalog.format('ALTER FUNCTION %s SET search_path = public, pg_temp', f.fn_oid::regprocedure);
   END LOOP;
 END
 $guard_search_path$;

@@ -593,6 +593,7 @@ function balancedClose(text, openAt) {
 }
 
 const REGCLASS_CAST = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*(?:\(.*\))?\s*::\s*(?:pg_catalog\s*\.\s*)?regclass$/is;
+const REGPROCEDURE_CAST = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*::\s*(?:pg_catalog\s*\.\s*)?regprocedure$/i;
 const REGCLASS_CAST_TAIL = /\)\s*::\s*(?:pg_catalog\s*\.\s*)?regclass$/i;
 
 /** An argument that IS a regclass value: a bare (qualified) name or ONE call, cast to regclass. Shape only: the cast itself turns any text into a relation's name or fails. */
@@ -609,6 +610,8 @@ function isRegclassCast(arg) {
  * template (no E-string, no concatenation, no USING) from this closed list:
  *   DROP SEQUENCE|INDEX [IF EXISTS] %s                    one arg, `<name or call>::regclass`
  *   ALTER TABLE %s DROP CONSTRAINT [IF EXISTS] %I         arg 1 `<name or call>::regclass`, arg 2 any (%I quotes it)
+ *   ALTER FUNCTION %s SET search_path = public, pg_temp   one arg, a bare (qualified) name cast to regprocedure (#5096: it
+ *                                                         changes one function's configuration, creates no object)
  * The function must be spelled `pg_catalog.format`: a bare `format` resolves by search_path and overload, so a function
  * the closure created as `public.format(text, regclass)` would win and could run anything (blind seat F2, #4800). Nothing
  * in the corpus creates one, but the spelling makes that a property of the text instead of an assumption.
@@ -640,6 +643,7 @@ function catalogDropSpan(text, found) {
   let ok = false;
   if (/^DROP (?:SEQUENCE|INDEX) (?:IF EXISTS )?%s$/i.test(template)) ok = same(['%s']) && args.length === 1 && isRegclassCast(args[0]);
   else if (/^ALTER TABLE %s DROP CONSTRAINT (?:IF EXISTS )?%I$/i.test(template)) ok = same(['%s', '%I']) && args.length === 2 && isRegclassCast(args[0]) && args[1] !== '';
+  else if (/^ALTER FUNCTION %s SET search_path = public, pg_temp$/i.test(template)) ok = same(['%s']) && args.length === 1 && REGPROCEDURE_CAST.test(args[0]);
   if (!ok) return 0; // %I quotes its argument and %s only takes a regclass value, so no argument text can reach the statement as SQL
   return closeAt + 1 + end[0].length - found.index;
 }
