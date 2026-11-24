@@ -95,7 +95,7 @@ const usageWindowInstant = z.string().datetime({ offset: true });
  * addressing rules and the scope, all resolved before any query.
  *
  * #2817 — the two scopes of hrn:node:hadronmemory.com:specs:cor:acl:090:01 (ruling 0244 items 1 and 2):
- *   - no resource named (no `memoryId`, `nodeId` or `loc`) → OWN ACTIVITY: the events attributed to the
+ *   - no resource named (no `memoryRef`, `nodeRef` or `loc`) → OWN ACTIVITY: the events attributed to the
  *     calling user (`UsageEvent.userId`), in any memory or none. A principal with no user identity (an App
  *     key, a userless run) has no own activity and gets an empty result, not an error.
  *   - a resource named → RESOURCE SCOPE: every principal's events there, bounded by the memory READ gate
@@ -150,7 +150,7 @@ async function usageEventsWhere(
         throw new GraphQLError('since must be earlier than until', { extensions: { code: 'BAD_USER_INPUT' } });
       }
 
-      // `loc` and `nodeId` are two different addressing modes for the same
+      // `loc` and `nodeRef` are two different addressing modes for the same
       // filter slot — a verbatim loc filter vs a shape-classified node token.
       // Passing both is a contradiction we refuse rather than pick a winner.
       if (loc !== undefined && nodeId !== undefined) {

@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { isStoreFault } from '../../secrets/storeFault.js';
+import { sweepSecretAutoDelete } from '../../secrets/autoDelete.js';
 import { meterRefusedSecretUse } from '../../secrets/readClientReveal.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -176,6 +177,72 @@ describe('#4775 cap counts refusals only, and delete-at-last-use works through w
     // The delete removes the secret, not the record of its use: the grant row and the OK event survive.
     expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(1);
     expect(await db.secretEvent.count({ where: { clientId, kind: 'USE', outcome: 'OK' } })).toBe(1);
+  });
+});
+
+describe('#4775 a use is not refunded (prepareSecretUse JSDoc)', () => {
+  it('a network failure after the use leaves the ticket, the run action and the grant use spent', async () => {
+    await tickets(1);
+    const before = await budget();
+    vi.mocked(httpRequest).mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+    await expect(call()).rejects.toThrow('ECONNREFUSED');
+    expect(httpRequest).toHaveBeenCalledTimes(1);
+    expect(await budget()).toBe(before! - 1);
+    expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(1);
+    expect(await db.actionTicket.count({ where: { organizationId: orgId, action: 'secret.use', consumedByRunId: ctx.run.id } })).toBe(1);
+  });
+});
+
+describe('#4775 a signed delete-marked secret.use grant deletes its secret when its window ends (item 3, cor:sec:060:03)', () => {
+  const HOUR = 3_600_000;
+  /** Set terms the grant guard forbids changing after issue; replica mode applies to this transaction only. */
+  const setGrant = (t: { signatureId: string | null; activated: boolean; expiresInMs: number }) => db.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+    await tx.$executeRaw`UPDATE grants SET action_values = jsonb_set(action_values, '{auto-delete}', '"delete"'), signature_id = ${t.signatureId},
+      activated_at = CASE WHEN ${t.activated} THEN COALESCE(activated_at, (clock_timestamp() AT TIME ZONE 'UTC')) END,
+      expires_at = (clock_timestamp() AT TIME ZONE 'UTC') + ${t.expiresInMs} * interval '1 millisecond' WHERE id = ${grantId}`;
+  });
+  const boundSecretId = async () => (await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } })).secretId;
+
+  it('the sweep deletes the secret after expires_at and keeps the grant row and its USE events', async () => {
+    const secretId = await boundSecretId();
+    await setGrant({ signatureId: 'sig-1', activated: true, expiresInMs: HOUR });
+    await tickets(1);
+    await expect(call()).resolves.toMatchObject({ status: 200 });
+    // Inside its window, with uses left, neither the use nor the sweep deletes it.
+    expect(await sweepSecretAutoDelete(db)).toBe(0);
+    expect(await db.secret.count({ where: { id: secretId } })).toBe(1);
+
+    await setGrant({ signatureId: 'sig-1', activated: true, expiresInMs: -HOUR });
+    const grantBefore = await db.grant.findUniqueOrThrow({ where: { id: grantId } });
+    const grantUses = await db.grantEvent.findMany({ where: { grantId, action: 'USE' } });
+    const secretUses = await db.secretEvent.findMany({ where: { clientId, kind: 'USE' } });
+    expect(grantUses).toHaveLength(1);
+    expect(secretUses).toMatchObject([{ outcome: 'OK', runId: ctx.run.id }]);
+
+    expect(await sweepSecretAutoDelete(db)).toBe(1);
+    expect(await db.secret.count({ where: { id: secretId } })).toBe(0);
+    expect(await db.secretVersion.count({ where: { secretId } })).toBe(0);
+    expect(await db.grant.findUniqueOrThrow({ where: { id: grantId } })).toEqual(grantBefore);
+    expect(await db.grantEvent.findMany({ where: { grantId, action: 'USE' } })).toEqual(grantUses);
+    expect(await db.secretEvent.findMany({ where: { clientId, kind: 'USE' } })).toEqual(secretUses);
+    // A second sweep finds nothing, and no other App's secret is touched: the second fixture secret survives.
+    expect(await sweepSecretAutoDelete(db)).toBe(0);
+    expect(await db.secret.count()).toBe(1);
+  });
+
+  it.each([
+    ['unsigned', { signatureId: null, activated: true }],
+    ['unactivated', { signatureId: 'sig-1', activated: false }],
+  ] as const)('an %s grant past expires_at deletes nothing; the same grant signed and activated does', async (_name, terms) => {
+    const secretId = await boundSecretId();
+    await setGrant({ ...terms, expiresInMs: -HOUR });
+    expect(await sweepSecretAutoDelete(db)).toBe(0);
+    expect(await db.secret.count({ where: { id: secretId } })).toBe(1);
+    // The missing term is the only thing that held the deletion back.
+    await setGrant({ signatureId: 'sig-1', activated: true, expiresInMs: -HOUR });
+    expect(await sweepSecretAutoDelete(db)).toBe(1);
+    expect(await db.secret.count({ where: { id: secretId } })).toBe(0);
   });
 });
 
