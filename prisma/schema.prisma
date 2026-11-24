@@ -6237,6 +6237,8 @@ model AgentSchedule {
 /// - `used` is checked at the launch gate and raised while a run executes. When `resetAt` has passed, the next touch
 ///   sets `used` back to 0 and moves `resetAt` to the next midnight UTC.
 ///
+/// A `user` row is a person's shared counter for their Apps: it can be read and set, and is enforced once a person's App can run.
+///
 /// Rules: hrn:node:hadronmemory.com:specs:cor:acl:050:01, hrn:node:hadronmemory.com:specs:cor:acl:050:04.
 model QuotaCounter {
   id        String   @id

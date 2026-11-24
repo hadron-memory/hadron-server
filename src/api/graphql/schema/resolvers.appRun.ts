@@ -43,7 +43,7 @@ import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } 
 import { withAuthorizedTx } from './authorizedTx.js';
 import { admitWorkerTrigger, workerBoundActor, workerTriggerGrantEnforced, workerTriggerWouldBeAdmitted } from '../../../lib/grants/triggerGrant.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
-import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import { authorizationDenied, AUTHORIZATION_DENIED_CODE } from '../../../lib/auth/authorizationDenied.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { refHasUnstorableChars } from '../../../lib/entityRef/refNamesNothing.js';
 import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
@@ -224,8 +224,9 @@ async function resolveQuotaScopes(
     try {
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
     } catch (e) {
-      // Every refusal this gate can raise folds into the unknown-ref answer (cor:api:120:01), whatever its code.
-      if (e instanceof GraphQLError) throw notFound();
+      // Only the gate's ACCESS refusal folds into the unknown-ref answer (cor:api:120:01); any other error is a fault and
+      // propagates.
+      if (e instanceof GraphQLError && e.extensions?.code === AUTHORIZATION_DENIED_CODE) throw notFound();
       throw e;
     }
     // An App of a deleted organization answers as the orgRef form does not (it refuses the organization): not found.

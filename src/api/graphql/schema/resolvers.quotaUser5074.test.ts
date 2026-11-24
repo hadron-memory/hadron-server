@@ -202,6 +202,13 @@ describe('review pins (#5074 LOCAL F1-F3, BLIND P2-2)', () => {
     expect((await caught(rows(outside, { appRef: orgApp.id })))).toEqual(wantUnknown);
   });
 
+  it('a non-refusal error on the organization-App gate propagates, it is not folded into the unknown-ref answer', async () => {
+    const boom = new Error('db fault');
+    const faulty = Object.create(db, { orgMember: { value: { findFirst: async () => { throw boom; } } } });
+    const c = { ...ctxOf(ordinary), db: faulty } as Context;
+    await expect(rows(c, { appRef: orgApp.id })).rejects.toBe(boom);
+  });
+
   it('an unstorable userRef (NUL, lone surrogate) from a platform admin is User not found, not a driver error', async () => {
     const a = ctxOf(admin, { roles: ['ADMIN'] });
     for (const ref of ['a\u0000b', 'x\uD800y']) {
