@@ -226,7 +226,28 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // removed, and the surviving refs are now required `ID!` (were optional `String`). A lagging client's old name is an UNKNOWN
 // argument and GraphQL refuses the whole operation. The existence-hiding order is unchanged: memory resolved, principal gate,
 // counterparty resolved. (0.34.0 is #5046, #4368, merged first.)
-export const HADRON_SERVER_VERSION = '0.35.0';
+//
+// 0.36.0 — BREAKING, #1796 step 2: `encryptMemory(memoryRef)` no longer accepts `dataKey` or `passphrase`, no alias.
+// A document naming either is refused as an unknown argument before any resolver runs. The secret travels only in
+// `x-hadron-memory-keys` (strict owner) or `x-hadron-operation-key` (owning App completion). CLI floor: hadron-cli
+// v0.56.0.
+//
+// 0.37.0 — SEMANTICS BREAK, Billing A1 (#5007): new mutation `adjustCredits(input: AdjustCreditsInput!)` (a signed
+// ledger correction, platform admin only). `grantCredits` changes behaviour: a grant without a source pair
+// (`sourceType`, `sourceId`) is now refused with BAD_USER_INPUT when the mutation runs, so a lagging client that
+// granted without one fails at run time (its document still validates, because the SDL field types are unchanged).
+// The server-written source types are refused, and a mismatched replay answers one fixed IDEMPOTENCY_CONFLICT sentence
+// instead of naming the stored entry. (0.36.0 is #5066, #1796, merged first.)
+//
+// 0.38.0 — BREAKING, entity refs S7 (#4148): the agent-task family takes refs, no alias. The eleven own-task mutations
+// (`updateAgentTask`, `assignAgentTask`, `reassignAgentTask`, `startAgentTask`, `recordAgentTaskProgress`,
+// `finishAgentTask`, `cancelAgentTask`, `releaseAgentTaskExternalId`, `parkAgentTask`, `cloneAgentTask`,
+// `makeAgentTaskReady`) take `taskRef: ID!` (was `taskId`); `agentTask(id)` → `agentTask(ref)`; `agentTasks` /
+// `agentTasksPage(parentTaskId)` → `parentTaskRef`; `agentTeamEvents` / `agentTeamEventsPage(taskId)` → `taskRef`. A
+// lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation (ship order per precedent
+// 0274: notices, server, companions). Gates and refusals are unchanged; `agentTasks(externalId)` keeps its name (an
+// external-system label). (0.36.0 is #5066, #1796, and 0.37.0 is #5064, Billing A1, both merged first.)
+export const HADRON_SERVER_VERSION = '0.38.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

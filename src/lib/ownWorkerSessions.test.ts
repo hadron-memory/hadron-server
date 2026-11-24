@@ -126,7 +126,6 @@ beforeEach(async () => {
 
 afterEach(() => {
   delete process.env.WORKER_PROOF_TOKEN_SECRET;
-  delete process.env.TEAM_ATTENTION_TOKEN_SECRET;
   sessionKeyCache.clear();
 });
 

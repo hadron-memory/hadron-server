@@ -17,7 +17,7 @@
  * the condition — the assignment, the start, the child's finish, the last
  * activity — never the evaluator's clock. Two passes, on one instance or two,
  * therefore compute the same key, and the unique index on that key
- * (agent_team_events_episode_uniq) admits one alarm. A move by the task gives
+ * (agent_team_events_episode_app_uniq, which carries the App) admits one alarm. A move by the task gives
  * the condition a new start, which is a new episode. Per rule:
  *   - not-started: the assignment (`assignedAt`). The deadline is an explicit
  *     `startBy` when it is later than the assignment, else the window counted

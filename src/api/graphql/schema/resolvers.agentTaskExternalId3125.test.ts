@@ -52,11 +52,11 @@ describe('externalId round-trip (#3125 S2)', () => {
     expect(await externalIdOf(t.id)).toBe(X);
     await api.start();
     try {
-      const r = await gql('query($id:ID!){agentTask(id:$id){externalId}}', { id: t.id });
+      const r = await gql('query($id:ID!){agentTask(ref:$id){externalId}}', { id: t.id });
       expect(r.errors).toBeUndefined();
       expect(r.data.agentTask.externalId).toBe(X);
       const bare = await create({});
-      const b = await gql('query($id:ID!){agentTask(id:$id){externalId}}', { id: bare.id });
+      const b = await gql('query($id:ID!){agentTask(ref:$id){externalId}}', { id: bare.id });
       expect(b.data.agentTask.externalId).toBeNull();
     } finally { await api.stop(); }
   });
@@ -68,7 +68,7 @@ describe('externalId round-trip (#3125 S2)', () => {
         { i: { appRef: app.id, title: 'SDL', externalId: X } });
       expect(c.errors).toBeUndefined();
       expect(c.data.createAgentTask.externalId).toBe(X);
-      const u = await gql('mutation($id:ID!,$i:UpdateAgentTaskInput!){updateAgentTask(taskId:$id,input:$i){id}}',
+      const u = await gql('mutation($id:ID!,$i:UpdateAgentTaskInput!){updateAgentTask(taskRef:$id,input:$i){id}}',
         { id: c.data.createAgentTask.id, i: { externalId: 'https://example.com/other' } });
       expect(u.errors?.[0]?.message).toMatch(/externalId/);
       expect(await externalIdOf(c.data.createAgentTask.id)).toBe(X);
@@ -77,7 +77,7 @@ describe('externalId round-trip (#3125 S2)', () => {
 
   it('an edit naming externalId past the SDL is refused and changes nothing (set once, never edited)', async () => {
     const t = await create({ externalId: X });
-    await expect(M.updateAgentTask({}, { taskId: t.id, input: { title: 'renamed', externalId: 'https://example.com/other' } }, ctx()))
+    await expect(M.updateAgentTask({}, { taskRef: t.id, input: { title: 'renamed', externalId: 'https://example.com/other' } }, ctx()))
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     expect(await externalIdOf(t.id)).toBe(X);
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).title).toBe('T');

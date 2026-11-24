@@ -59,14 +59,14 @@ describe('row 1: a clone is refused where a plain create is', () => {
     const before = await writes();
     const sourceBefore = await stored(source.id);
     const plain = await refusal(M.createAgentTask({}, { input: { appRef: app.id, title: 'Plain' } }, caller));
-    const cloned = await refusal(M.cloneAgentTask({}, { taskId: source.id, input: {} }, caller));
+    const cloned = await refusal(M.cloneAgentTask({}, { taskRef: source.id, input: {} }, caller));
     expect(plain?.code).toBe(expected);
     expect(cloned).toEqual(plain);
     // The gate is judged first, before the fields. The transaction re-checks it, so only this ordering shows that a
     // clone goes through the gate in prepareTaskCreate rather than leaning on the re-check.
     const invalid = { title: '   ' };
     const plainInvalid = await refusal(M.createAgentTask({}, { input: { appRef: app.id, ...invalid } }, caller));
-    const clonedInvalid = await refusal(M.cloneAgentTask({}, { taskId: source.id, input: invalid }, caller));
+    const clonedInvalid = await refusal(M.cloneAgentTask({}, { taskRef: source.id, input: invalid }, caller));
     expect(plainInvalid?.code).toBe(expected);
     expect(clonedInvalid).toEqual(plainInvalid);
     expect(await writes()).toEqual(before);
@@ -74,8 +74,8 @@ describe('row 1: a clone is refused where a plain create is', () => {
   });
 
   it('CONTROL: the same caller, plainly, may clone (a blank title is a field refusal), so the refusals above are the context\'s', async () => {
-    await expect(M.cloneAgentTask({}, { taskId: source.id, input: { title: '   ' } }, ctx(owner.id))).rejects.toMatchObject({ extensions: { code: expect.not.stringMatching(/^(FORBIDDEN|SESSION_NOT_BOUND)$/) } });
-    const c = await M.cloneAgentTask({}, { taskId: source.id, input: {} }, ctx(owner.id));
+    await expect(M.cloneAgentTask({}, { taskRef: source.id, input: { title: '   ' } }, ctx(owner.id))).rejects.toMatchObject({ extensions: { code: expect.not.stringMatching(/^(FORBIDDEN|SESSION_NOT_BOUND)$/) } });
+    const c = await M.cloneAgentTask({}, { taskRef: source.id, input: {} }, ctx(owner.id));
     expect((await stored(c.id)).clonedFromId).toBe(source.id);
   });
 });
@@ -93,14 +93,14 @@ describe('row 2: the catch around copied properties is only for GraphQL refusals
     fault.error = new Error('the check itself broke');
     expect(fault.error).not.toBeInstanceOf(GraphQLError);
     const before = await writes();
-    await expect(M.cloneAgentTask({}, { taskId: source.id, input: {} }, ctx(owner.id))).rejects.toBe(fault.error);
+    await expect(M.cloneAgentTask({}, { taskRef: source.id, input: {} }, ctx(owner.id))).rejects.toBe(fault.error);
     expect(fault.reached).toEqual(['schema:task-properties']);
     expect(await writes()).toEqual(before);
   });
 
   it('CONTROL: a GraphQL refusal at the same point is swallowed: the clone is made, without the properties', async () => {
     fault.error = new GraphQLError('refused', { extensions: { code: 'PROPERTIES_SCHEMA_VIOLATION' } });
-    const c = await M.cloneAgentTask({}, { taskId: source.id, input: {} }, ctx(owner.id));
+    const c = await M.cloneAgentTask({}, { taskRef: source.id, input: {} }, ctx(owner.id));
     expect(fault.reached).toEqual(['schema:task-properties']);
     expect(await stored(c.id)).toMatchObject({ clonedFromId: source.id, properties: null });
   });
@@ -108,8 +108,8 @@ describe('row 2: the catch around copied properties is only for GraphQL refusals
 
 describe('row 4a: a source removed from under its clones', () => {
   it('leaves each clone standing with a null link, through the real foreign key', async () => {
-    const a = await M.cloneAgentTask({}, { taskId: source.id, input: {} }, ctx(owner.id));
-    const b = await M.cloneAgentTask({}, { taskId: source.id, input: {} }, ctx(owner.id));
+    const a = await M.cloneAgentTask({}, { taskRef: source.id, input: {} }, ctx(owner.id));
+    const b = await M.cloneAgentTask({}, { taskRef: source.id, input: {} }, ctx(owner.id));
     expect((await F.clonedFrom(await stored(a.id), {}, ctx(owner.id))).id).toBe(source.id);
 
     await db.agentTask.delete({ where: { id: source.id } });
@@ -126,7 +126,7 @@ describe('row 4a: a source removed from under its clones', () => {
 
 describe('row 4b: a clone link across Apps', () => {
   it('is left out of both the count and the page; an ordinary clone is counted and listed', async () => {
-    const ordinary = await M.cloneAgentTask({}, { taskId: source.id, input: {} }, ctx(owner.id));
+    const ordinary = await M.cloneAgentTask({}, { taskRef: source.id, input: {} }, ctx(owner.id));
     const foreign = await M.createAgentTask({}, { input: { appRef: other.id, title: 'Foreign' } }, ctx(foreignMember.id));
     // SQL only: the API cannot make this row, because a clone is always made in its source's App (and refuses a
     // source in another). It exists here to pin the same-App join, which is defence in depth.

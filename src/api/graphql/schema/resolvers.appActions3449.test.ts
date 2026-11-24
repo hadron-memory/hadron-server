@@ -108,8 +108,8 @@ describe('App actions are passive', () => {
     const assigned = (await pendingTaskWakes(db, [worker.id], new Date())).get(worker.id) ?? [];
     expect(assigned.some(w => w.taskId === root.id && w.event === 'ASSIGNED')).toBe(true);
     const child = await runAsActor(actor, () => M.createAgentTask({}, { input: { parentTaskId: root.id, title: 'Child', assignee: { user: userId } } }, ctx()));
-    await M.startAgentTask({}, { taskId: child.id }, ctx());
-    await M.finishAgentTask({}, { taskId: child.id, result: { outcome: 'succeeded' } }, ctx());
+    await M.startAgentTask({}, { taskRef: child.id }, ctx());
+    await M.finishAgentTask({}, { taskRef: child.id, result: { outcome: 'succeeded' } }, ctx());
     const finished = (await pendingTaskWakes(db, [worker.id], new Date())).get(worker.id) ?? [];
     expect(finished.some(w => w.taskId === child.id && w.event === 'CHILD_FINISHED')).toBe(true);
     await runAsActor(actor, () => record({ taskRef: root.id }));

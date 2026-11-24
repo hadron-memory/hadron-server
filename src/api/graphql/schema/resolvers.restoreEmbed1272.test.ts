@@ -18,6 +18,7 @@ import { generateId } from '../../../lib/id.js';
 import { isCiphertext, parseDataKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { requestKeyStorage } from '../../../lib/requestKeys.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 const enqueueSpy = vi.hoisted(() => vi.fn());
 
@@ -46,7 +47,7 @@ function ownerCtx(): Context {
 /** encryptMemory refuses an indexed memory without an inversion ack; turn the index off first. */
 async function encryptWithIndexOff(): Promise<void> {
   await db.memory.update({ where: { id: memoryId }, data: { vectorIndexEnabled: false } });
-  await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+  await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
 }
 
 /** The `plaintext` argument of every enqueue call so far. */

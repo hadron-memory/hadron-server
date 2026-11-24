@@ -238,7 +238,7 @@ describe('cor:agt:050:15 — a started task with no progress raises an alarm', (
   it('S3: a teammate reading the task (their own activity) does not reset it', async () => {
     const t = await startedByAnne('10:00');
     await drive(liam, '10:30');
-    await Q.agentTask({}, { id: t.id }, ctx(mia.id)); // a person reading it
+    await Q.agentTask({}, { ref: t.id }, ctx(mia.id)); // a person reading it
     await tick('11:00');
     expect((await alarms()).map((a) => a.type)).toEqual(['stall.no-progress']);
   });
@@ -530,7 +530,7 @@ describe('cor:agt:050:17 — a task nobody could be assigned raises an alarm', (
 
   it('S3: a person outside the App cannot cancel it to silence it; the alarm is raised', async () => {
     const t = await task({ ownerUserId: mia.id, createdAt: at('10:00') });
-    await expectCode(M.cancelAgentTask({}, { taskId: t.id }, ctx(outsider.id)), 'TASK_NOT_FOUND');
+    await expectCode(M.cancelAgentTask({}, { taskRef: t.id }, ctx(outsider.id)), 'TASK_NOT_FOUND');
     await tick('10:30');
     expect((await alarms()).map((a) => a.type)).toEqual(['assignment.unassignable']);
   });
@@ -582,7 +582,7 @@ describe('cor:agt:050:13 — exactly one alarm per stall episode', () => {
       chain: [{ workerId: ada.id }, manager()], episodeStart: at('10:00'),
     };
     await db.agentTeamEvent.create({ data: row });
-    await expect(db.agentTeamEvent.create({ data: row })).rejects.toThrow(/agent_team_events_episode_uniq|Unique constraint/);
+    await expect(db.agentTeamEvent.create({ data: row })).rejects.toThrow(/Unique constraint failed on the fields: \(`app_id`,`task_id`,`type`,`episode_start`\)|agent_team_events_episode_app_uniq/);
   });
 });
 

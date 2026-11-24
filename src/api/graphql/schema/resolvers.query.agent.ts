@@ -473,7 +473,8 @@ export const agentQueries = {
             // admins and impersonated sessions (spec 047).
             await requireOwnerOrOrgRole(ctx, agent, 'ADMIN');
           }
-          if (!effectiveOrgId) {
+          // #5075: a person's App takes no organization from the Agent's publisher (cor:dmo:170:05).
+          if (!effectiveOrgId && appOwnerUserId === null) {
             effectiveOrgId = agent.organizationId;
           }
         }
@@ -515,14 +516,11 @@ export const agentQueries = {
         // Decide credential access from the selected source, not the install's
         // manager. An authorized installation can still resolve its identity.
         const discloseKey = await canManageResolvedConfig(ctx, config, agentRef);
-        if (appOwnerUserId !== null && ownerType === 'HADRON_SERVER') {
-          // Personal contexts do not gain a platform fallback through an install.
-          throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this App');
-        }
-        if (userOwnedAgent && !effectiveOrgId && ownerType === 'HADRON_SERVER') {
-          // A personal Agent may use its own config or one on the user-owned
-          // App it runs through. Neither context may reach the platform key.
-          throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this Agent');
+        // #5075 backstop (defense in depth, unreachable while the walk is right): a person's App never answers from the
+        // organization or platform level. The walk (aiConfigTenantFor) is the rule; this keeps the one query that
+        // decrypts keys from handing back such a row if the walk ever regresses.
+        if (appOwnerUserId !== null && (ownerType === 'HADRON_SERVER' || ownerType === 'ORGANIZATION')) {
+          throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this context');
         }
         if (discloseKey && !config.apiKeyEncrypted) {
           // Resolvable but unusable: a config without a key cannot back an

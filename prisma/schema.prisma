@@ -2183,7 +2183,7 @@ model Session {
 ///   when the event was written, so a request attributed to a lapsed session does not make it live again.
 /// - Rollup: database triggers on this table maintain UsageActivityCell.
 ///
-/// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:080:02, hrn:node:hadronmemory.com:specs:cor:dmo:100:02.
+/// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:080:02, hrn:node:hadronmemory.com:specs:cor:dmo:170:06.
 model UsageEvent {
   id               String    @id @default(cuid())
   type             String
@@ -6303,7 +6303,7 @@ model ActionTicket {
 /// - Managed by a platform admin (`setAiModelPrice`). A model with no price row gets no cost; the call itself is
 ///   never blocked.
 ///
-/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:100:02. Background (history, not law): the Spec Kit spec 046.
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:170:06. Background (history, not law): the Spec Kit spec 046.
 model AiModelPrice {
   id                      String    @id
   provider                String
@@ -6347,17 +6347,18 @@ model AiModelPrice {
 /// Behaviour:
 /// - `kind` is `grant` (a positive amount), `debit` (negative) or `adjustment` (either). `amountMicroCents` is
 ///   signed, in micro-cents (1e-8 USD).
-/// - Grants are written by a platform admin (`grantCredits`) and debits by usage metering (`debitCredits`,
-///   src/lib/metering/index.ts). A debit is written only when `BILLING_DEBIT_ENABLED` is on, and only for usage on
-///   the platform's own provider key (hrn:node:hadronmemory.com:specs:cor:dmo:100:03). No code writes an `adjustment`
-///   today.
+/// - Grants and adjustments are written by a platform admin (`grantCredits`, `adjustCredits`) and debits by usage
+///   metering (`debitCredits`, src/lib/metering/index.ts). A debit is written only when `BILLING_DEBIT_ENABLED` is
+///   on, and only for usage on the platform's own provider key (hrn:node:hadronmemory.com:specs:cor:dmo:170:07).
 /// - Entries are never edited or reset. A correction is a new `adjustment` entry. Soft-deleting an entry is an
 ///   emergency measure for operators only; the balance leaves soft-deleted entries out.
 /// - At most one entry per (`sourceType`, `sourceId`), so a payment notification that arrives twice produces one
-///   entry. Entries with no source are not limited.
+///   entry; the same pair with another organization, amount or kind is refused. A grant or an adjustment must name
+///   its source (hadron-server#5007); entries with no source (a debit written without one, or a grant written
+///   before #5007) are not limited.
 /// - `expiresAt` on a grant is stored and not enforced.
 ///
-/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:100:04. Background (history, not law): the Spec Kit spec 046.
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:170:08. Background (history, not law): the Spec Kit spec 046.
 model CreditLedgerEntry {
   id               String    @id
   organizationId   String    @map("organization_id")
@@ -6381,7 +6382,7 @@ model CreditLedgerEntry {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
-  // Idempotency for at-least-once payment webhooks (hadrontool-billing):
+  // Idempotency for at-least-once payment webhooks (a payment service):
   // one ledger row per (sourceType, sourceId); NULL-source rows unaffected
   // (Postgres unique treats NULLs as distinct).
   @@unique([sourceType, sourceId])
@@ -7532,6 +7533,10 @@ model AgentTask {
   /// #2646 (hrn:node:hadronmemory.com:specs:cor:agt:050:02, What a clone does): the task this one was cloned from, set once at creation and never
   /// changed. Always in the same App (the clone is made in the source's App). Null for every task not made by a clone.
   clonedFromId         String?   @map("cloned_from_id")
+  /// #4997 (hrn:node:hadronmemory.com:specs:cor:agt:050:01 Project marker; hrn:node:hadronmemory.com:specs:cor:agt:150 A project): the
+  /// project marker. Set only at creation and never changed (trg_agent_tasks_project_marker_immutable refuses a change);
+  /// AT0 is never marked (chk_agent_tasks_at0_unmarked). Both in raw SQL, agent-task-project-marker-invariants.sql.
+  isProject            Boolean   @default(false) @map("is_project")
   ownerWorkerId        String?   @map("owner_worker_id")
   ownerUserId          String?   @map("owner_user_id")
   /// Both null ⇒ queued while pending (hrn:node:hadronmemory.com:specs:cor:agt:050:03).
@@ -7798,14 +7803,12 @@ model AgentTeamEvent {
   /// #3934 (V77): the recorded end of this alarm's escalation, written once by the evaluator pass or the acknowledgement.
   escalationEnd AlarmEscalationEnd?
 
-  @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
-  /// #4344 (ruling A): the App joins the key. The three-column index above is kept until the contract migration drops it
-  /// (an image still writing the three-column ON CONFLICT target would raise 42P10 without it).
+  /// #4344 (ruling A): the App is in the one-alarm-per-episode key. The three-column index was dropped by the contract migration.
   @@unique([appId, taskId, type, episodeStart], map: "agent_team_events_episode_app_uniq")
   @@index([appId, createdAt])
   /// #4084: the changed-since read's commit-safe order (agentTaskExternalIdChanges).
   @@index([appId, txId, createdAt, id])
-  @@index([taskId])
+  @@index([taskId, type])
   /// #1707 — "assigned least recently" (hrn:node:hadronmemory.com:specs:cor:agt:060:06) reads a worker's
   /// latest assignment event.
   @@index([subjectWorkerId, createdAt])

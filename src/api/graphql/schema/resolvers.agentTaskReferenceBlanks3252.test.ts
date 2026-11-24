@@ -51,7 +51,7 @@ describe('#3252 refusal atomicity, both writers', () => {
     const beforeEvents = await db.agentTeamEvent.findMany({ where: { appId }, orderBy: { id: 'asc' } });
     const references = [good, ref];
     const result = await (mode === 'create' ? create(references) :
-      M.updateAgentTask({}, { taskId: task.id, input: { title: 'Changed', references } }, ctx())).catch((e: unknown) => e);
+      M.updateAgentTask({}, { taskRef: task.id, input: { title: 'Changed', references } }, ctx())).catch((e: unknown) => e);
     expect(result).toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     expect(result.message).toContain('Reference 2:');
     expect(result.message).toContain(rule);
@@ -67,7 +67,7 @@ it('accepts a variation selector in a label (an emoji label with U+FE0F round-tr
   const task = await create(refs);
   expect((await db.agentTask.findUniqueOrThrow({ where: { id: task.id } })).references).toEqual(refs.map(r => ({ ...r, kind: 'url' })));
   const reversed = [...refs].reverse();
-  await M.updateAgentTask({}, { taskId: task.id, input: { references: reversed } }, ctx());
+  await M.updateAgentTask({}, { taskRef: task.id, input: { references: reversed } }, ctx());
   expect((await db.agentTask.findUniqueOrThrow({ where: { id: task.id } })).references).toEqual(reversed.map(r => ({ ...r, kind: 'url' })));
 });
 
@@ -102,6 +102,6 @@ it('rows already stored are not rewritten: a legacy row reads back unchanged and
   const legacy = [{ kind: 'url', target: 'https://example.com/a\u2800b', label: 'old\u3164' }];
   await db.agentTask.update({ where: { id: task.id }, data: { references: legacy } });
   // An unrelated edit that leaves references alone does not touch them.
-  await M.updateAgentTask({}, { taskId: task.id, input: { title: 'Renamed' } }, ctx());
+  await M.updateAgentTask({}, { taskRef: task.id, input: { title: 'Renamed' } }, ctx());
   expect((await db.agentTask.findUniqueOrThrow({ where: { id: task.id } })).references).toEqual(legacy);
 });

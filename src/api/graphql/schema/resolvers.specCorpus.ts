@@ -1718,12 +1718,10 @@ async function mintMemoryNodes(
       // Unreachable under the fence; refuse rather than mint a partial set.
       throw new Error(`Mint stamped ${mintedCount} of ${ids.length} nodes; the memory changed under the fence`);
     }
-    // The legacy corpus stamp (#1448), kept for one release as the record of
-    // the latest mint; corpus state itself is derived from the nodes.
-    await tx.memory.update({
-      where: { id },
-      data: { corpusDraft: false, corpusMintedAt: now, corpusMintedBy: ctx.userId ?? ctx.clientId ?? null },
-    });
+    // #5063 (Xan R4a): the legacy corpus stamp is no longer written — the
+    // `minted_at` stamped on the nodes above IS the record. The memory row
+    // still bumps so change feeds see the mint.
+    await tx.memory.update({ where: { id }, data: { updatedAt: now } });
     return { ...report, minted: true, mintedCount, remintedCount: remintLocs.length };
   }, { timeout: 120_000 });
 }
