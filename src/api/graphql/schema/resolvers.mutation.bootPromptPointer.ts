@@ -26,6 +26,7 @@ import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import {
@@ -137,7 +138,11 @@ export const bootPromptPointerMutations = {
   /** Set or clear `AppAgent.bootPromptRef`: the App's manager, as themselves (R23). */
   setAppAgentBootPrompt: async (_: unknown, args: { appRef: string; agentRef: string } & NodeRefArg, ctx: Context) => {
     const nodeRef = requiredNodeRef(args);
-    const { id: appId } = await resolveAppRef(ctx.db, args.appRef);
+    // #4893: a malformed or ambiguous ref folds into the AppNotFoundError the participant
+    // gate below already answers — unresolvable and not-yours are one answer on this door.
+    let appId: string;
+    try { ({ id: appId } = await resolveAppRef(ctx.db, args.appRef)); }
+    catch (e) { if (isAppRefResolutionFailure(e)) throw new AppNotFoundError(args.appRef); throw e; }
     const app = await ctx.db.app.findFirst({
       where: { id: appId, deletedAt: null, uninstalledAt: null },
       select: { id: true, organizationId: true, ownerUserId: true },

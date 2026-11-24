@@ -20,6 +20,45 @@
  * pre-quote raw text.
  */
 
+import { GraphQLError } from 'graphql';
+
+/**
+ * #435 (ruling Holger 2026-11-22): the compiler is bounded. A raw query over MAX_QUERY_CHARS is REFUSED
+ * (BAD_USER_INPUT, no truncation); a query with more than MAX_LEAVES term/phrase leaves or nesting deeper than
+ * MAX_DEPTH (parentheses and NOT chains together) is a BooleanQueryError, so findNodes answers it with the flagged
+ * literal fallback rather than a stack overflow; a query the index cannot serve (UnindexableQueryError) is refused.
+ */
+export const MAX_QUERY_CHARS = 512;
+export const MAX_LEAVES = 64;
+export const MAX_DEPTH = 8;
+
+/** The raw query is longer than MAX_QUERY_CHARS. Typed BAD_USER_INPUT; deliberately NOT a BooleanQueryError, so no literal fallback swallows it. */
+export class QueryTooLongError extends GraphQLError {
+  constructor() {
+    super(`The search query is too long: at most ${MAX_QUERY_CHARS} characters are allowed. Shorten it; it is never truncated.`,
+      { extensions: { code: 'BAD_USER_INPUT' } });
+    this.name = 'QueryTooLongError';
+  }
+}
+
+/**
+ * Every satisfying branch of the query would match a row by exclusion alone (`-foo`, `a OR -b`, `NOT NOT a`), which the
+ * full-text index cannot serve and which would scan every node. BAD_USER_INPUT, not a BooleanQueryError: a literal
+ * fallback would invert the meaning (`-foo` would search for foo).
+ */
+export class UnindexableQueryError extends GraphQLError {
+  constructor() {
+    super('The search query only excludes terms, so it cannot use the index. Add at least one required term to every OR branch (for example `foo -bar`).',
+      { extensions: { code: 'BAD_USER_INPUT' } });
+    this.name = 'UnindexableQueryError';
+  }
+}
+
+/** Refuse a raw query over MAX_QUERY_CHARS. Run on the trimmed text, before any mode work. */
+export function assertQueryLength(q: string): void {
+  if (q.length > MAX_QUERY_CHARS) throw new QueryTooLongError();
+}
+
 export class BooleanQueryError extends Error {
   constructor(message: string) {
     super(message);
@@ -45,6 +84,10 @@ type Node =
 
 function tokenize(input: string): Tok[] {
   const toks: Tok[] = [];
+  let leaves = 0;
+  const leaf = (): void => {
+    if (++leaves > MAX_LEAVES) throw new BooleanQueryError(`Query has more than ${MAX_LEAVES} terms.`);
+  };
   let i = 0;
   while (i < input.length) {
     const c = input[i];
@@ -55,7 +98,7 @@ function tokenize(input: string): Tok[] {
       const end = input.indexOf('"', i + 1);
       if (end === -1) throw new BooleanQueryError('Unterminated quoted phrase.');
       const v = input.slice(i + 1, end).trim();
-      if (v) toks.push({ t: 'phrase', v });
+      if (v) { leaf(); toks.push({ t: 'phrase', v }); }
       i = end + 1;
       continue;
     }
@@ -77,7 +120,7 @@ function tokenize(input: string): Tok[] {
     if (word === 'AND') toks.push({ t: 'and' });
     else if (word === 'OR') toks.push({ t: 'or' });
     else if (word === 'NOT') toks.push({ t: 'not' });
-    else toks.push({ t: 'term', v: word });
+    else { leaf(); toks.push({ t: 'term', v: word }); }
   }
   return toks;
 }
@@ -85,6 +128,10 @@ function tokenize(input: string): Tok[] {
 /** Recursive-descent parser. Grammar: or := and (OR and)*; and := not (AND? not)*; not := (NOT|-)not | primary. */
 function parse(toks: Tok[]): Node {
   let pos = 0;
+  let depth = 0;
+  const enter = (): void => {
+    if (++depth > MAX_DEPTH) throw new BooleanQueryError(`Query is nested deeper than ${MAX_DEPTH} levels.`);
+  };
   const peek = () => toks[pos];
   const eof = () => pos >= toks.length;
 
@@ -115,7 +162,10 @@ function parse(toks: Tok[]): Node {
     if (!eof() && peek().t === 'not') {
       pos++;
       if (eof()) throw new BooleanQueryError('NOT with no operand.');
-      return { k: 'not', c: parseNot() };
+      enter();
+      const c = parseNot();
+      depth--;
+      return { k: 'not', c };
     }
     return parsePrimary();
   }
@@ -124,9 +174,11 @@ function parse(toks: Tok[]): Node {
     const tk = peek();
     if (tk.t === 'lparen') {
       pos++;
+      enter();
       const inner = parseOr();
       if (eof() || peek().t !== 'rparen') throw new BooleanQueryError('Unbalanced parentheses.');
       pos++;
+      depth--;
       return inner;
     }
     if (tk.t === 'rparen') throw new BooleanQueryError('Unexpected ")".');
@@ -154,6 +206,8 @@ export interface CompiledTsquery {
  * malformed input or a query with no searchable terms.
  */
 export function compileBooleanQuery(input: string, startIndex: number): CompiledTsquery {
+  // Defence in depth behind the findNodes entry bound: literalQuery adds two quotes to a query that already passed it.
+  if (input.length > MAX_QUERY_CHARS + 2) throw new BooleanQueryError(`Query is longer than ${MAX_QUERY_CHARS} characters.`);
   const toks = tokenize(input);
   if (toks.length === 0) throw new BooleanQueryError('Empty query.');
   const ast = parse(toks);

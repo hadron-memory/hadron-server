@@ -29,6 +29,8 @@ import { generateId } from '../lib/id.js';
 import { toNaiveUtc } from '../lib/sessionActivity.js';
 import { getBusClient } from '../lib/bus/index.js';
 import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron-memory/access-control';
+import { parseRunPolicySnapshot } from '../lib/runner/runPolicy.js';
+export { parseRunPolicySnapshot } from '../lib/runner/runPolicy.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import { emitNodeUrnV2 } from '../lib/urnEmit.js';
 import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/aiConfig.js';
@@ -615,7 +617,10 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // #3689: past this guard the run has its Agent; the column is NOT NULL with a foreign key, so there is no agentless row.
   const runAgentId = args.agentId;
   if (!runAgentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
-  const runAgent = await db.agent.findUniqueOrThrow({ where: { id: runAgentId }, select: { id: true, name: true, urn: true, personaRole: true } });
+  // #3911: a trigger's agent_id has no foreign key, so a hard-deleted Agent leaves a dangling id. It is the same typed refusal
+  // as no Agent (the headless run has no boot prompt to serve), not a P2025 that surfaces as a 500.
+  const runAgent = await db.agent.findUnique({ where: { id: runAgentId }, select: { id: true, name: true, urn: true, personaRole: true } });
+  if (!runAgent) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
   await resolveServedBootPrompt(db, { surface: 'run', appId: args.appId, agent: { id: runAgent.id, name: runAgent.name } });
   // cor:dmo:150:08: `session.llmModel` is the run's model. It is the one the run will resolve (same override, same registry
   // walk as `resolveConfig`), taken now so the record holds it; with none configured the run fails NO_AI_CONFIG anyway.
@@ -1299,21 +1304,6 @@ async function executeAppRunInner(
     // Unexpected infra error: record, don't crash the listener.
     return fail(err instanceof AutomationPinError ? err.code : 'INTERNAL', String((err as Error)?.message ?? err), err instanceof AutomationPinError ? err.reason : undefined);
   } finally { deps.releaseAutomationProof?.(run); }
-}
-
-/**
- * Parse an AppRun.policy snapshot into chain links. Two stored shapes:
- * `{chain: [link, ...]}` (#510 — the full conjunctive snapshot) and the
- * pre-#510 single-link object (runs minted before the deploy). Anything
- * unparseable yields `[null]` — an absent link, which the evaluator treats
- * as no restriction (PR-512 review: comment matched to behavior).
- */
-export function parseRunPolicySnapshot(raw: unknown): Array<{ allow: string[] } | null> {
-  if (raw != null && typeof raw === 'object' && !Array.isArray(raw)) {
-    const chain = (raw as { chain?: unknown }).chain;
-    if (Array.isArray(chain)) return chain.map((l) => parsePolicyLink(l));
-  }
-  return [parsePolicyLink(raw)];
 }
 
 /**

@@ -278,3 +278,31 @@ describe('#3180 item 2: security-optional coverage (names the existing pin each 
     expect(commands.some(args => args[0] === 'push')).toBe(false);   // a clean tree is the no-change path, never a push
   });
 });
+
+describe('#4926 the in-lock re-read uses the shared due-time rule', () => {
+  const ref = (nodeId: string) => [{ nodeId, kind: 'WRITE' as const }];
+  const oweState = async (nodeId: string, state: 'PENDING' | 'FAILED', lastAttemptAt: Date, attempts: number) =>
+    db.gitMirrorObligation.create({ data: {
+      memoryId, nodeId, kind: 'WRITE', removeLoc: '', state, errorClass: state === 'PENDING' ? 'PENDING' : 'PUSH_FAILED',
+      attempts, attemptSeq: await takeAttemptSeq(db), lastAttemptAt,
+    } });
+
+  it('a FAILED row still inside its backoff is skipped in the lock: no mutate, no sequence, row untouched', async () => {
+    const node = await makeNode();
+    await oweState(node.id, 'FAILED', new Date(), 1);
+    const before = await rows(); const seq = await sequenceValue();
+    expect(await withMirrorCheckout({ db, memoryId, obligations: ref(node.id), retry: RETRY(), commitSubject: 'backoff', logPrefix: '[4926]' }, noMutate)).toBe('skipped');
+    expect(await rows()).toEqual(before);
+    expect(await sequenceValue()).toEqual(seq);
+  });
+
+  it('a PENDING row stamped AFTER the tick (a competing writer re-captured it) is still attempted in the lock', async () => {
+    const node = await makeNode();
+    const now = new Date();
+    await oweState(node.id, 'PENDING', new Date(now.getTime() + 60 * 60_000), 1);
+    const mutate = vi.fn(() => false);
+    // The mutate callback running at all is the proof: a row filtered out of the re-read never reaches it.
+    await withMirrorCheckout({ db, memoryId, obligations: ref(node.id), retry: { now, maxAttempts: 10 }, commitSubject: 'pending', logPrefix: '[4926]' }, mutate);
+    expect(mutate).toHaveBeenCalledTimes(1);
+  });
+});

@@ -107,6 +107,12 @@ BEGIN
   IF to_regclass('public.secret_events') IS NOT NULL THEN
     EXECUTE format('REVOKE UPDATE, TRUNCATE ON TABLE public.secret_events FROM %I', serve);
   END IF;
+  -- #4573 (#4553 security review F2): only the owner-run root re-wrap moves the recorded root check. The serve role reads it and
+  -- INSERTs the first one (ON CONFLICT DO NOTHING); with UPDATE or DELETE it could put an earlier root's value back, and an instance
+  -- still on that root would mint again. A table created later is revoked by scripts/db/revoke-runtime-migrations.ts after migrate.
+  IF to_regclass('public.secret_root_check') IS NOT NULL THEN
+    EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON TABLE public.secret_root_check FROM %I', serve);
+  END IF;
 END
 $grants$;
 

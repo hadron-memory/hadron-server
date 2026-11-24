@@ -142,8 +142,24 @@ export const FIXED_LIST_SIZE: Readonly<Record<string, number>> = {
  * Fields whose resolver does heavy work whatever is selected: a fixed cost added to the children's.
  * #1302: `specDocument` reads and renders the whole document for `{ markdown }` as much as for `entries`.
  */
+/**
+ * #4758: statements `App.selfJoin` pays per App it reaches on a list, MEASURED by logging every statement of
+ * `{ apps { items { id selfJoin { state role } } } }` for a list of 5 and of 9 Apps (resolvers.appSelfJoinPolish4758.test.ts pins the
+ * ratio): 8 more statements per added App, and the same list without the field adds none. Each of the 8 is one statement per App,
+ * all of them in the shared read gate and joinApp's own decision (`resolveSelfJoinRole` and its readers), which this field must
+ * call rather than copy: two reads of the App's agent links, two of its agents, and one each of the organization, the caller's
+ * org membership, the installation policy's agent import and the App row the decision reads for itself. The App and membership reads
+ * of `loadSelfJoinFacts` are NOT among the 8: they run once per batch (per synchronous resolution tick, chunked at 500 Apps), so
+ * they are a fixed overhead per batch and add nothing per App. Before the batching those two reads were by-id lookups Prisma
+ * already coalesced within a tick, so batching removed one statement per App (9 before, 8 after), not two.
+ */
+export const APP_SELF_JOIN_COST = 8;
+
 export const FIXED_FIELD_COST: Readonly<Record<string, number>> = {
   'Query.specDocument': SPEC_DOCUMENT_CALL_COST,
+  // #4758: `App.selfJoin` pays the shared read gate and joinApp's own decision (two reads) for each App it reaches, on top of the
+  // batched App and membership reads; selected per row on a list, the parent's list factor multiplies this.
+  'App.selfJoin': APP_SELF_JOIN_COST,
 };
 
 export const DEFAULT_OMITTED_PAGE_SIZE = 100;

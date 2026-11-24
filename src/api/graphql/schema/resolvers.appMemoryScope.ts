@@ -16,12 +16,15 @@
  */
 
 import { GraphQLError } from 'graphql';
+import type { MemoryVisibility } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { effectiveScope, type EffectiveScope } from '../../../lib/effectiveSystemMemory.js';
 import { getAppMemoryCandidates, filterReadableMemoryIds, type AgentProvenance } from '../../../mcp/access-control.js';
 import { type AuthContext } from '../../../middleware/auth.js';
 import {
   clampListTake,
+  MEMORY_RECORD_GATE_SELECT,
+  filterReadableMemoryRecords,
   isAppParticipant,
   isOwnerOrOrgMember,
   requireMemoryWriteAccess,
@@ -248,12 +251,25 @@ export async function resolveAppNodeScope(ctx: Context, appRef: string): Promise
   return { appId: resolvedAppId, inheritance, sources };
 }
 
-/** One row of `appMemoryScope`: a leaf, never a nested Memory or Agent (cor:dmo:050:17). */
+/**
+ * One row of `appMemoryScope`: a leaf, never a nested Memory or Agent
+ * (cor:dmo:050:17). `description` is the memory's description WHERE THE
+ * RECORD GATE (`canReadMemoryRecord`, the one `Query.memory` applies) admits
+ * this caller, null otherwise — #4890's deliberate two-gate shape: the row's
+ * own audience (scope admission, which `name` rides) is WIDER than the record
+ * gate, and handing `description` the row's audience would be the #552
+ * widening class. A row the record gate refuses is still listed; only its
+ * description is withheld. `visibility` (#5003) rides the same gate and is
+ * withheld with it.
+ */
 export type AppScopedMemoryRow = {
   memoryId: string;
   memoryUrn: string;
   name: string;
   class: string;
+  description: string | null;
+  /** #5003: the memory's visibility on the same record gate as `description`; null when withheld OR not applicable to the class. */
+  visibility: MemoryVisibility | null;
   sources: AppMemorySource[];
   viewerCanWrite: boolean;
 };
@@ -264,6 +280,10 @@ export type AppScopedMemoryRow = {
  * per cor:api:120:04 with the shared list clamp. `viewerCanWrite` runs the
  * exact `createNode` gate with this request's own context, for the page's rows
  * only: a FORBIDDEN denial reads false, and any other failure fails the field.
+ * `description` rides the record gate (see {@link AppScopedMemoryRow}): the
+ * page's rows are batched through `filterReadableMemoryRecords`, the list form
+ * of the exact `canReadMemoryRecord` `Query.memory` applies. The memory record
+ * is never enciphered (cor:sec:040:03), so there is no key logic here.
  */
 export async function appMemoryScopePage(
   ctx: Context,
@@ -273,15 +293,47 @@ export async function appMemoryScopePage(
 ): Promise<{ items: AppScopedMemoryRow[]; total: number }> {
   const scope = await resolveAppNodeScope(ctx, appRef);
   if (!scope) return { items: [], total: 0 };
-  const rows = await ctx.db.memory.findMany({
+  // The order key only: the scope's ids with their URNs, loaded and sorted in
+  // full for each page request (pagination is not pushed to the database), but
+  // without descriptions or gate fields, which are fetched for the PAGE's ids
+  // below (#4905 F2). The sort is by URN with the id as a tie-break, so equal
+  // keys cannot reorder between requests.
+  const keys = await ctx.db.memory.findMany({
     where: { id: { in: [...scope.sources.keys()] } },
-    select: { id: true, urn: true, name: true, class: true },
+    select: { id: true, urn: true },
   });
-  const ordered = rows
-    .map((m) => ({ ...m, memoryUrn: safeCanonicalUrn('memory', m.urn) }))
-    .sort((a, b) => (a.memoryUrn < b.memoryUrn ? -1 : a.memoryUrn > b.memoryUrn ? 1 : 0));
+  const ordered = keys
+    .map((m) => ({ id: m.id, memoryUrn: safeCanonicalUrn('memory', m.urn) }))
+    .sort((a, b) => (a.memoryUrn < b.memoryUrn ? -1 : a.memoryUrn > b.memoryUrn ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const skip = Math.max(0, offset ?? 0);
-  const page = ordered.slice(skip, skip + clampListTake(limit));
+  const pageKeys = ordered.slice(skip, skip + clampListTake(limit));
+  if (pageKeys.length === 0) return { items: [], total: ordered.length };
+  const pageRows = await ctx.db.memory.findMany({
+    where: { id: { in: pageKeys.map((k) => k.id) } },
+    // The record gate's whole field list comes from ONE shared constant, so a
+    // gate field omitted by a caller that spreads it fails type-checking
+    // rather than failing the gate open (#1104). A caller that hand-writes its
+    // own select does not get that protection. `deletedAt` is added because
+    // `Query.memory` answers null for a soft-deleted record: its description
+    // is withheld too.
+    select: { ...MEMORY_RECORD_GATE_SELECT, name: true, description: true, visibility: true, deletedAt: true },
+  });
+  const byId = new Map(pageRows.map((m) => [m.id, m]));
+  // A row hard-deleted between the two reads has nothing to show and is
+  // dropped, so a page can come back shorter than `limit` while `total` still
+  // counts it: a short page is not an end marker, `total` and `offset` are.
+  const page = pageKeys.flatMap((k) => {
+    const m = byId.get(k.id);
+    return m ? [{ ...m, memoryUrn: k.memoryUrn }] : [];
+  });
+  // The record gate for the page's rows only, batched so membership and
+  // access-set queries are shared per request rather than repeated per row.
+  const readableIds = new Set(
+    (await filterReadableMemoryRecords(ctx, page.filter((m) => !m.deletedAt))).map((m) => m.id),
+  );
+  // `viewerCanWrite` is the exact createNode gate per row (no batched form
+  // exists), run one row at a time as before: the first failure in page order
+  // fails the field, and a page never queues a burst on the pool.
   const items: AppScopedMemoryRow[] = [];
   for (const m of page) {
     items.push({
@@ -289,6 +341,11 @@ export async function appMemoryScopePage(
       memoryUrn: m.memoryUrn,
       name: m.name,
       class: m.class,
+      description: readableIds.has(m.id) ? m.description : null,
+      // #5003: the same record gate as `description`, never the row's own audience. Null means withheld by the gate OR
+      // not applicable (only knowledge and group memories carry one, chk_memory_visibility_class); a knowledge memory
+      // may also have none. The row is still listed either way.
+      visibility: readableIds.has(m.id) ? m.visibility : null,
       sources: scope.sources.get(m.id)!,
       viewerCanWrite: await viewerCanWrite(ctx, m.id),
     });

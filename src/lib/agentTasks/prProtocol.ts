@@ -1,5 +1,5 @@
 /** #3448: closed protocol facts. Opaque task properties are never protocol inputs (cor:agt:050:28). */
-export const PR_EVENT_TYPES = ['review.scheduled', 'pr.frozen', 'review.seat.assigned', 'review.verdict', 'pr.ready'] as const;
+export const PR_EVENT_TYPES = ['review.scheduled', 'pr.frozen', 'review.seat.assigned', 'review.verdict', 'review.verdict.withdrawn', 'pr.ready'] as const;
 export const REVIEW_VERDICTS = ['APPROVE', 'CHANGES_REQUESTED', 'PASS', 'FAIL', 'CARRY', 'REFUSED'] as const;
 export type ReviewVerdict = typeof REVIEW_VERDICTS[number];
 export type PrProtocolEvent =
@@ -13,4 +13,10 @@ export type PrProtocolEvent =
    */
   | { type: 'review.verdict'; slot: string; head: string; verdict: ReviewVerdict; node: string | null; receipt: string | null;
       reviewerFamily: string | null; reviewerModel: string | null; modelReportedAt: string | null }
+  /**
+   * #4441 (Holger's ruling, team chat #138478): the holder who recorded a negative verdict, or the coordinator, withdraws
+   * it on a FINISHED seat at the same head. Names the verdict event it withdraws; that event stays. A withdrawn negative
+   * no longer blocks the head and never counts as a positive verdict.
+   */
+  | { type: 'review.verdict.withdrawn'; slot: string; head: string; verdictEventId: string; verdict: ReviewVerdict; receipt: string | null }
   | { type: 'pr.ready'; head: string };

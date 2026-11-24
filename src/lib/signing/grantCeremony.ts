@@ -36,6 +36,7 @@ import * as issuers from '../grants/issuers.js';
 import { GrantSummaryError, renderGrantSummary } from '../grants/summary.js';
 import { GrantTermsError, grantTermsFromRow, grantTermsHash } from '../grants/terms.js';
 import { emitEntityUrnV2, safeNodeUrnV2 } from '../urnEmit.js';
+import { composeWorkerUrnV2 } from '../urn.js';
 import type { AssertionParts } from './verify.js';
 import { verifySigningAssertion } from './verify.js';
 import { grantSignaturePayloadBytes } from './grantPayload.js';
@@ -240,6 +241,20 @@ async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: GrantRo
         const app = parseUrnV2(appUrn);
         refs[id] = { urn: composeAppSecretUrnV2(app.root, app.segments[0], secret.name) };
       } catch { return null; }
+      continue;
+    }
+    if (p.type === 'worker-ref') {
+      // #4855: each worker the grant names shows as its canonical worker URN (the App's root and slug, the worker's stored slug). A worker
+      // that is gone or of another App makes the sentence unsignable, never a guess. Retired workers still resolve (a name is never freed).
+      const value = values[p.name];
+      let app: ReturnType<typeof parseUrnV2>;
+      try { app = parseUrnV2(appUrn); } catch { return null; }
+      for (const id of Array.isArray(value) ? value : [value]) {
+        if (typeof id !== 'string' || Object.prototype.hasOwnProperty.call(refs, id)) continue;
+        const named = await tx.worker.findFirst({ where: { id, appId: g.app_id }, select: { slug: true } });
+        if (!named) return null;
+        try { refs[id] = { urn: composeWorkerUrnV2(app.root, app.segments[0]!, named.slug) }; } catch { return null; }
+      }
       continue;
     }
     if (p.type !== 'node-ref') continue;
@@ -528,12 +543,12 @@ export async function completeGrantSigning(db: PrismaClient, a: {
 }
 
 /**
- * #3998: a `secret.reveal` grant requested through the grant path (not `issueSecretReadClient`) has no client row yet. Signing
+ * #3998/#4000: a secret grant requested through the grant path (not `issueSecretReadClient`) has no client row yet. Signing
  * creates it: the signer is the issuer, fixed here and never changed; the client is self-issued when the holder is that person.
  * Idempotent for a grant `issueSecretReadClient` already gave a row.
  */
 async function ensureSecretReadClient(tx: Prisma.TransactionClient, g: GrantRow, signerId: string): Promise<void> {
-  if (g.action !== 'secret.reveal') return;
+  if (g.action !== 'secret.reveal' && g.action !== 'secret.use') return;
   const values = (g.action_values ?? {}) as Record<string, unknown>;
   const secretId = typeof values.secret === 'string' ? values.secret : null;
   if (!secretId) return;

@@ -26,6 +26,7 @@ import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { prepareWriteBranch, unpublishedCommitCount, quarantineUnpublishedCommits } from './gitBranch.js';
 import { hasIncompleteMirrorMutation } from './mirrorFileMutation.js';
 import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
+import { mirrorRetryDue } from './mirrorDueTime.js';
 import { execGit } from './execGit.js';
 import { sourceNamesRepo, validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
@@ -254,13 +255,14 @@ export async function withMirrorCheckout(
       }
       if (opts.retry) {
         // Exact captured branch key, re-read under the shared memory checkout lock.
+        // #425: a PENDING capture is admitted with no backoff wait — it is due the moment it exists.
         const rows = await db.gitMirrorObligation.findMany({ where: {
-          memoryId: resolvedMemoryId, state: { in: ['FAILED', 'NOT_CLONED'] },
+          memoryId: resolvedMemoryId, state: { in: ['PENDING', 'FAILED', 'NOT_CLONED'] },
           attempts: { lt: opts.retry.maxAttempts },
           OR: obligations.map(r => ({ nodeId: r.nodeId, kind: r.kind, removeLoc: r.removeLoc ?? '', branch: r.branch ?? capturedBranch })),
         } });
         const now = opts.retry.now.getTime();
-        obligations = rows.filter(r => r.lastAttemptAt.getTime() + Math.min(300_000 * 2 ** Math.min(r.attempts - 1, 7), 21_600_000) <= now)
+        obligations = rows.filter(r => mirrorRetryDue(r, now))
           .map(r => ({ nodeId: r.nodeId, kind: r.kind, removeLoc: r.removeLoc, branch: r.branch }));
         if (!obligations.length) return 'skipped';
         attemptSeq = retryAttemptSeq = await tryTakeAttemptSeq(db);

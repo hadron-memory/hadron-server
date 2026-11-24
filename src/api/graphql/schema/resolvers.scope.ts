@@ -26,6 +26,8 @@ import {
 } from './resolvers.helpers.js';
 import { resolveScopeRef } from '../../../lib/entityRef/scopeRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { narrowToAccessible } from '../../../lib/auth/narrowToAccessible.js';
@@ -132,7 +134,10 @@ export const scopeQueries = {
         if (filter.ownerType === 'ORGANIZATION') where.push({ organizationId: (await resolveOrgRef(ctx.db, ref)).id });
         else if (filter.ownerType === 'AGENT') where.push({ agentId: (await resolveAgentRef(ctx.db, ref)).id });
         else where.push({ appId: (await resolveAppRef(ctx.db, ref)).id });
-      } catch {
+      } catch (e) {
+        // #4893/#2975: only a name-resolution failure (typed miss, malformed or ambiguous
+        // ref, on any of the three owner arms) is the empty page; a fault propagates.
+        if (!refNamesNothing(e, { ambiguousNamesNothing: true })) throw e;
         return EMPTY_PAGE; // unresolvable ref ⇒ empty page, never an existence oracle
       }
     }
@@ -141,7 +146,9 @@ export const scopeQueries = {
       let appId: string;
       try {
         ({ id: appId } = await resolveAppRef(ctx.db, filter.appRef.trim()));
-      } catch {
+      } catch (e) {
+        // #4893/#2975: only a name-resolution outcome is the empty page; a fault propagates.
+        if (!isAppRefResolutionFailure(e)) throw e;
         return EMPTY_PAGE;
       }
       // Gated before the context is expanded (Codex P1 on PR #1160): a caller who
@@ -184,7 +191,9 @@ export const scopeQueries = {
       if (appRef) {
         try {
           ({ id: appId } = await resolveAppRef(ctx.db, appRef.trim()));
-        } catch {
+        } catch (e) {
+          // #4893/#2975: only a name-resolution outcome is the null answer; a fault propagates.
+          if (!isAppRefResolutionFailure(e)) throw e;
           return null;
         }
       }

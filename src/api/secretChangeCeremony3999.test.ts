@@ -6,7 +6,7 @@ import { type Server } from 'node:http';
 import { mountSecretChangeCeremonyRoutes } from './secretChangeCeremonyRoutes.js';
 let server:Server|undefined;
 afterEach(async()=>{vi.restoreAllMocks();vi.unstubAllEnvs();if(server)await new Promise<void>(r=>server!.close(()=>r()));server=undefined;});
-async function host(on:boolean){const app=express();process.env.PASSKEY_SIGNING_ENABLED=String(on);mountSecretChangeCeremonyRoutes(app);
+async function host(on:boolean){if(server){await new Promise<void>(r=>server!.close(()=>r()));server=undefined;}const app=express();process.env.PASSKEY_SIGNING_ENABLED=String(on);mountSecretChangeCeremonyRoutes(app);
  server=app.listen(0,'127.0.0.1');await new Promise<void>(r=>server!.once('listening',r));return `http://127.0.0.1:${(server.address() as any).port}`;}
 describe('#3999 server ceremony shell',()=>{
  it('is byte identical for every id, no-store and protected from framing',async()=>{
@@ -45,7 +45,7 @@ async function pageModel(over: Record<string,unknown> = {}, opts: { cancelled?:b
  }
  const elements=Object.fromEntries(['status','review','start','title'].map(id=>[id,new Element(id)]));elements.review.hidden=true;
  const summary={app:'hrn:app:example.test:demo',secret:'hrn:secret:example.test:app:demo:token',operation:'SET_PROTECTED',change:'Turn protection on',sizeBytes:1024,requester:'opaque-user-id',expiresAt:'2030-01-02T03:04:05Z',unexpectedValue:'never-render-canary',...over};
- const fetchModel=vi.fn(async(url:string)=>({ok:!(url.endsWith('/complete')&&opts.completeCode),json:async()=>url.endsWith('/proof/challenge')?{challenge:'AA',rpId:'localhost',ceremonyId:'proof'}:url.endsWith('/proof')?(opts.ended?{outcome:'ended',state:opts.ended}:{outcome:'change',summary,challenge:'AA',rpId:'localhost',ceremonyId:'complete'}):(opts.completeCode?{code:opts.completeCode}:{ok:true})}));
+ const fetchModel=vi.fn(async(url:string)=>({ok:!(url.endsWith('/complete')&&opts.completeCode),json:async()=>url.endsWith('/proof/challenge')?{challenge:'AA',rpId:'localhost',ceremonyId:'proof'}:url.endsWith('/proof')?(opts.ended?{outcome:'ended',state:opts.ended}:{outcome:'change',summary,challenge:'AA',rpId:'localhost',ceremonyId:'complete',decline:{challenge:'AA',ceremonyId:'decline'}}):(opts.completeCode?{code:opts.completeCode}:{ok:true})}));
  const credentials=vi.fn(async()=>{if(opts.cancelled)throw Object.assign(new Error('user cancelled'),{name:'NotAllowedError'});return{rawId:new ArrayBuffer(1),response:{authenticatorData:new ArrayBuffer(1),clientDataJSON:new ArrayBuffer(1),signature:new ArrayBuffer(1)}};});
  const base=await host(true),script=await(await fetch(base+'/secret-changes/ceremony.js')).text();
  runInNewContext(script,{document:{getElementById:(id:string)=>elements[id],createElement:(tag:string)=>new Element(tag)},location:{pathname:'/secret-changes/request'},navigator:{credentials:{get:credentials}},fetch:fetchModel,Uint8Array,ArrayBuffer,Date,Intl,btoa:(s:string)=>Buffer.from(s,'binary').toString('base64'),atob:(s:string)=>Buffer.from(s,'base64').toString('binary')});
@@ -78,5 +78,24 @@ describe('#3999 readable approval model (Node VM; no browser)',()=>{
  it('warns that delete is irreversible, then names the completed change and next step',async()=>{
   const {elements}=await pageModel({operation:'DELETE',change:'Delete this secret',sizeBytes:null});await elements.start.onclick!();expect(elements.review.children.some(n=>/cannot be undone/.test(n.textContent))).toBe(true);
   const approve=elements.review.children.find(n=>n.tagName==='button')!;await approve.onclick!();expect(elements.status.textContent).toMatch(/deleted/i);expect(elements.status.textContent).toMatch(/Next:/);
+ });
+});
+
+describe('#4703 the decline control on the ceremony page (Node VM; no browser)',()=>{
+ const buttons=(elements:Record<string,any>)=>elements.review.children.filter((n:any)=>n.tagName==='button');
+ it('offers a decline beside approve, and a decline posts the decline ceremony then says nothing was changed',async()=>{
+  const {elements,fetchModel}=await pageModel();await elements.start.onclick!();
+  const [approve,decline]=buttons(elements);expect(approve.textContent).toBe('Approve with my passkey');expect(decline.textContent).toBe('Decline this request');
+  await decline.onclick!();
+  const posts=fetchModel.mock.calls.map((c:any)=>String(c[0]));expect(posts.at(-1)).toBe('/secret-changes/request/decline');expect(posts).not.toContain('/secret-changes/request/complete');
+  const body=JSON.parse(String((fetchModel.mock.calls.at(-1) as any)[1].body));expect(body.ceremonyId).toBe('decline');
+  expect(elements.status.textContent).toMatch(/declined/i);expect(elements.status.textContent).toMatch(/Nothing was changed/);expect(elements.review.children).toHaveLength(0);
+ });
+});
+describe('#4703 the decline route',()=>{
+ it('is mounted with the others, refuses a missing Origin, and is gone when signing is off',async()=>{
+  const on=await host(true);const r=await fetch(on+'/secret-changes/missing/decline',{method:'POST'});
+  expect(r.status).toBe(403);expect(await r.json()).toEqual({code:'FORBIDDEN'});
+  const off=await host(false);expect((await fetch(off+'/secret-changes/missing/decline',{method:'POST'})).status).toBe(404);
  });
 });

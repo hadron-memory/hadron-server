@@ -133,6 +133,14 @@ export interface LexicalSearchOpts {
   propertySort?: NodePropertySort;
   offset?: number;
   limit: number;
+  /**
+   * #4938 N3 — a statement budget (ms) for the ranking statement, applied as a transaction-local `statement_timeout`
+   * (it dies with the transaction, so it never reaches a pooled session). It bounds the STATEMENT only: the wait for a
+   * pooled connection before it is Prisma's ordinary `pool_timeout`, not this budget. A cancelled statement throws the
+   * statement-timeout shape; the caller decides what a cut means. A finite value up to 2147483647; anything else is
+   * refused with a RangeError. Omit = no budget of its own (the default, unchanged).
+   */
+  statementTimeoutMs?: number;
 }
 
 export interface RegexSearchOpts {
@@ -184,6 +192,12 @@ export interface VectorSearchOpts {
    * drops comments from a CONTENT result.
    */
   contentScope?: ContentScope | null;
+  /**
+   * #4779 (BLIND P2-2): the request's ONE vector work-budget deadline (epoch ms). A request that makes several vector calls
+   * (a hybrid page's leg, its rank lookups, a re-ranking) passes the same value to each, so `VECTOR_SEARCH_TIMEOUT_MS`
+   * bounds the request, not each call. Absent = each call has its own budget.
+   */
+  deadlineAt?: number;
 }
 
 export interface NodeRetrievalProvider {
@@ -191,6 +205,12 @@ export interface NodeRetrievalProvider {
   regexSearch(opts: RegexSearchOpts): Promise<LexicalHit[]>;
   vectorSearch(opts: VectorSearchOpts): Promise<VectorHit[]>;
   vectorSearchChunks(opts: VectorSearchOpts): Promise<ChunkHit[]>;
+  /**
+   * #4779 — the exact node-level vector rank (1-based, in the exact ranking's order) of each of `nodeIds`, over the SAME
+   * eligibility as {@link vectorSearch} with these options (`limit` and `onWindow` are ignored). A node with no eligible
+   * vector is absent. `stoppedEarly` when the work budget ended the lookup. Hybrid search certifies its fused page with it.
+   */
+  vectorRanks(opts: Omit<VectorSearchOpts, 'limit' | 'onWindow'> & { nodeIds: string[] }): Promise<{ ranks: Map<string, number>; stoppedEarly: boolean }>;
   /**
    * No-query filtered browse (cor:api:090:02): the structured filter (incl. a
    * `where` predicate) applied + sorted + paged in SQL, returning ordered node

@@ -9,8 +9,7 @@
  */
 import { GraphQLError } from 'graphql';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
-import { UrnNotQualifiedError } from '../../../lib/urn.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { isMemoryReadableCached, type Context } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveGrantPerson, resolveGrantReader } from './resolvers.grant.js';
@@ -62,7 +61,7 @@ export const grantCreateMutations = {
       try {
         named = await resolveAppRef(ctx.db, input.appRef, { scope: { id: reader.appId } });
       } catch (error) {
-        if (error instanceof AppNotFoundError || error instanceof UrnNotQualifiedError) throw notWorker();
+        if (isAppRefResolutionFailure(error)) throw notWorker();
         throw error; // An operational lookup fault is not an absent or unauthorized App.
       }
       if (named.id !== reader.appId) throw notWorker();

@@ -20,6 +20,30 @@ export async function waitForLockWaiters(db: PrismaClient, n = 1, timeoutMs = 10
 }
 
 /**
+ * #4940: resolve once `n` backends in THIS database are blocked on a lock held by the backend `blockerPid` (it appears in
+ * their `pg_blocking_pids`). Use it when a pin must know ITS competitor is waiting on ITS holder: an unrelated waiter, in
+ * this database or any other, cannot satisfy it. `blockerPid` is the holder's `SELECT pg_backend_pid()`, read inside its own
+ * transaction (a Prisma interactive transaction pins one connection).
+ */
+export async function waitForLockWaitersBlockedBy(
+  db: PrismaClient,
+  blockerPid: number,
+  n = 1,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [{ waiting }] = await db.$queryRaw<Array<{ waiting: number }>>`
+      SELECT count(*)::int AS waiting FROM pg_stat_activity
+      WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()
+        AND ${blockerPid}::int = ANY (pg_blocking_pids(pid))`;
+    if (waiting >= n) return;
+    if (Date.now() > deadline) throw new Error(`waitForLockWaitersBlockedBy: no backend blocked behind pid ${blockerPid} within ${timeoutMs}ms`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+/**
  * The typed barrier: resolve once `n` backends in THIS database hold an
  * ungranted lock of `locktype`. Use it when a race stages waits of different
  * kinds in sequence, so an earlier row-lock waiter cannot satisfy a later

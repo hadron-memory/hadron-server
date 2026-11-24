@@ -218,6 +218,28 @@ describe('serve-role-smoke (#2413 S3)', { timeout: 120_000 }, () => {
     }
   });
 
+  it.each(['UPDATE', 'DELETE'])('fails when the serve role can %s the recorded root check (#4573)', async (priv) => {
+    await asOwner((c) => c.query(`GRANT ${priv} ON TABLE secret_root_check TO ${SERVE}`));
+    try {
+      const { code, out } = await smoke();
+      expect(code).toBe(EXIT.FAILED);
+      expect(out).toContain(`FAIL ${priv} on secret_root_check is refused (42501)`);
+    } finally {
+      grant();
+    }
+  });
+
+  it('fails when the serve role cannot record the first root check (#4573)', async () => {
+    await asOwner((c) => c.query(`REVOKE INSERT ON TABLE secret_root_check FROM ${SERVE}`));
+    try {
+      const { code, out } = await smoke();
+      expect(code).toBe(EXIT.FAILED);
+      expect(out).toContain('FAIL App secret store');
+    } finally {
+      grant();
+    }
+  });
+
   it('fails when default privileges are gone (a later table is unusable)', async () => {
         await asOwner((c) =>
       c.query(`ALTER DEFAULT PRIVILEGES FOR ROLE ${OWNER} IN SCHEMA public REVOKE ALL ON TABLES FROM ${SERVE}`),
@@ -329,4 +351,3 @@ describe('the App secret store check locks a real, owner-seeded key row (#4553 N
     await expect(check.run(fake(() => 0))).rejects.toThrow(/locked no App key row/);
   });
 });
-

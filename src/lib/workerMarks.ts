@@ -1,7 +1,7 @@
 /**
  * #2018 (S2, D-2026-10-16-001, Holger ruling A): one mark. The shared seam every path that moves a worker's marks
  * for message TEXT goes through, inside the caller's transaction: a text-batch ack (S1, `acknowledge.ts`) and a
- * worker's own mentions read (`teamAttention.ts`). Neither opens a transaction nor swallows an error.
+ * worker's own mentions read (`ownWorkerSessions.ts`). Neither opens a transaction nor swallows an error.
  *
  * - `raiseDeliveryMark` is the one writer of `worker_delivery_channels` (moved verbatim from `acknowledge.ts`).
  * - `raiseReadIfMentionOnly` moves the read position with it ONLY on a mention-only attendance: there unread IS

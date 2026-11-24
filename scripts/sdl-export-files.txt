@@ -1,0 +1,7 @@
+# Files the GraphQL SDL export imports, transitively, from scripts/export-graphql-sdl.mjs (#4916).
+# hadron-cli's Schema drift job reads this list to build its sparse checkout of this repository.
+# Generated: do not edit by hand. Regenerate with `pnpm sdl:manifest --write`.
+# One repo-relative path per line, sorted; a line starting with # is a comment.
+scripts/export-graphql-sdl.mjs
+src/api/graphql/schema/typeDefs.ts
+src/lib/agentTasks/teamMetricsCaps.ts

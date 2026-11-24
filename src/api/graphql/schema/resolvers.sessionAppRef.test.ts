@@ -188,14 +188,14 @@ describe('#943 — appRef resolution', () => {
     expect((await startSession(ctx(contrib.id), { appRef: '   ' })).appId).toBeNull();
   });
 
-  it('rejects an unknown appRef with BAD_USER_INPUT', async () => {
+  it('rejects an unknown appRef with the one concealed APP_NOT_FOUND (#4836)', async () => {
     await expectCode(
       startSession(ctx(contrib.id), { appRef: `${org.urn}:no-such-app` }),
-      'BAD_USER_INPUT',
+      'APP_NOT_FOUND',
     );
   });
 
-  it('rejects a soft-deleted App with BAD_USER_INPUT', async () => {
+  it('rejects a soft-deleted App with the one concealed APP_NOT_FOUND (#4836)', async () => {
     const dead = await db.app.create({
       data: {
         id: generateId(),
@@ -205,10 +205,10 @@ describe('#943 — appRef resolution', () => {
         deletedAt: new Date(),
       },
     });
-    await expectCode(startSession(ctx(admin.id), { appRef: dead.id }), 'BAD_USER_INPUT');
+    await expectCode(startSession(ctx(admin.id), { appRef: dead.id }), 'APP_NOT_FOUND');
   });
 
-  it('rejects an uninstalled App: APP_UNINSTALLED by PK, BAD_USER_INPUT by URN', async () => {
+  it('rejects an uninstalled App: APP_UNINSTALLED by PK (a member), concealed APP_NOT_FOUND by URN', async () => {
     const gone = await db.app.create({
       data: {
         id: generateId(),
@@ -218,13 +218,14 @@ describe('#943 — appRef resolution', () => {
         uninstalledAt: new Date(),
       },
     });
-    // By PK the row is unambiguous, so the refusal is the specific one.
+    // By PK the row is unambiguous, so a caller with standing gets the
+    // specific refusal (#4836 keeps this member answer).
     await expectCode(startSession(ctx(admin.id), { appRef: gone.id }), 'APP_UNINSTALLED');
-    // By URN it is not found at all, and that is correct rather than a gap
-    // (#944 review): App URNs are unique only among ACTIVE rows (spec 021
-    // FR-027), so this URN may name several uninstalled rows — and may later
-    // name a different LIVE App. Pinned so the asymmetry is deliberate.
-    await expectCode(startSession(ctx(admin.id), { appRef: gone.urn }), 'BAD_USER_INPUT');
+    // By URN it does not resolve at all (#944 review): App URNs are unique
+    // only among ACTIVE rows (spec 021 FR-027), so this URN may name several
+    // uninstalled rows — and may later name a different LIVE App. Since #4836
+    // that reads as the one concealed unknown-App answer for every caller.
+    await expectCode(startSession(ctx(admin.id), { appRef: gone.urn }), 'APP_NOT_FOUND');
   });
 
   it('declares appRef on SessionInput in the SDL (#789 drift class)', () => {
@@ -245,12 +246,12 @@ describe('#943 — the App-membership gate, one case per principal shape', () =>
     expect(s.appId).toBe(app.id);
   });
 
-  it('refuses a caller who belongs to neither the App nor its org', async () => {
-    await expectCode(startSession(ctx(outsider.id), { appRef: app.id }), 'FORBIDDEN');
+  it('refuses a caller who belongs to neither the App nor its org — concealed, like a missing App (#4836)', async () => {
+    await expectCode(startSession(ctx(outsider.id), { appRef: app.id }), 'APP_NOT_FOUND');
   });
 
-  it('refuses an anonymous caller (no user, no App key)', async () => {
-    await expectCode(startSession({ db }, { appRef: app.id }), 'FORBIDDEN');
+  it('refuses an anonymous caller (no user, no App key) — concealed (#4836)', async () => {
+    await expectCode(startSession({ db }, { appRef: app.id }), 'APP_NOT_FOUND');
   });
 
   it('admits the owner of a user-owned App, and only the owner', async () => {
@@ -262,9 +263,9 @@ describe('#943 — the App-membership gate, one case per principal shape', () =>
     const foreign = await db.app.create({
       data: { id: generateId(), ownerUserId: contrib.id, name: 'Their App', urn: `their-app-${generateId().slice(-8)}:solo` },
     });
-    await expectCode(startSession(ctx(outsider.id), { appRef: foreign.id }), 'FORBIDDEN');
+    await expectCode(startSession(ctx(outsider.id), { appRef: foreign.id }), 'APP_NOT_FOUND');
     // …and an org ADMIN of an unrelated org gets no path in either.
-    await expectCode(startSession(ctx(admin.id), { appRef: ownedApp.id }), 'FORBIDDEN');
+    await expectCode(startSession(ctx(admin.id), { appRef: ownedApp.id }), 'APP_NOT_FOUND');
   });
 });
 
@@ -275,10 +276,14 @@ describe('#943 — App-key precedence', () => {
     expect(s.userId).toBeNull();
   });
 
-  it('refuses an App-key principal whose appRef names a DIFFERENT App', async () => {
+  it('refuses an App-key principal whose appRef names a DIFFERENT App — concealed, like a missing one (#4836)', async () => {
+    // The old typed SESSION_APP_MISMATCH (with this ctx's appId) was an
+    // existence oracle: a key naming an EXISTING other App read differently
+    // from a key naming a missing one. A key reaches only its own App, so
+    // both now get the one unknown-App answer.
     await expectCode(
       startSession(ctx(undefined, app.id), { appRef: otherApp.id }),
-      'SESSION_APP_MISMATCH',
+      'APP_NOT_FOUND',
     );
   });
 
@@ -341,10 +346,12 @@ describe('#943 — App-key precedence', () => {
     // MCP's requireAppScope fills auth.appId from the user's active-App
     // SELECTION, which is not a credential
     // (findings:auth-appid-credential-vs-selection) — so the membership gate
-    // still runs even when the ref matches the selection.
+    // still runs even when the ref matches the selection. Since #4836 the
+    // outsider's refusal is the concealed unknown-App answer (an existence
+    // oracle told them App A exists).
     await expectCode(
       startSession(ctx(outsider.id, app.id), { appRef: app.id }),
-      'FORBIDDEN',
+      'APP_NOT_FOUND',
     );
     const s = await startSession(ctx(contrib.id, app.id), { appRef: app.id });
     expect(s.appId).toBe(app.id);
@@ -360,12 +367,13 @@ describe('#943 — App-key precedence', () => {
     // what "one rule" was actually protecting).
     //
     // The membership gate is what still bounds this, and it is asserted above:
-    // the outsider is FORBIDDEN whether or not their selection agrees.
+    // the outsider is refused the one unknown-App answer whether or not their
+    // selection agrees (#4836).
     const elsewhere = await startSession(ctx(contrib.id, app.id), { appRef: otherApp.id });
     expect(elsewhere.appId).toBe(otherApp.id);
     await expectCode(
       startSession(ctx(outsider.id, app.id), { appRef: otherApp.id }),
-      'FORBIDDEN',
+      'APP_NOT_FOUND',
     );
   });
 });

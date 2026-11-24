@@ -14,6 +14,7 @@ import { composeGrantUrn } from '../../entityRef/grantRef.js';
 import { listGrantsForRunAgent, type GrantView } from '../../grants/read.js';
 import { isRunPrincipal } from '../../auth/runPrincipal.js';
 import { createGrantForRun } from '../../../api/graphql/schema/resolvers.grantCreate.js';
+import { withdrawGrantForRun } from '../../../api/graphql/schema/resolvers.grantManage.js';
 import { signingSurfacePolicy } from '../../signing/surface.js';
 import type { RunToolDef } from './types.js';
 
@@ -123,4 +124,39 @@ export const hadronCreateGrant: RunToolDef = {
   },
 };
 
-export const GRANT_TOOLS: readonly RunToolDef[] = [hadronListGrants, hadronCreateGrant];
+/**
+ * #4767 (Grants R6; cor:acl:140:03 item 5, ruling 0255 item 21): `hadron_withdraw_grant`, the run tool by which a headless run
+ * withdraws a PENDING grant its OWN AGENT asked for through a run (created by `hadron_create_grant`, #3753). The requester is
+ * the row's fact — its holder agent plus `requested_by_run_id` — never the calling run's identity, so a later run of the same
+ * agent withdraws exactly as the one that asked. Authority comes from the run row, never from input: the grant's id is the
+ * only argument. Every way the grant is not this agent's own run-made request — unknown id, another agent's, this agent's in
+ * another App, a person's or a worker's request — is the ONE refusal (S2b's text, byte-identical to a missing id); only a
+ * grant already activated answers GRANT_NOT_PENDING, which tells the rightful caller what it can read anyway (#3710). The end
+ * names no person: the row records the withdrawal marker and the one WITHDRAW event carries this run. Cost 1, gated as
+ * `tool.hadron_withdraw_grant`. Registered only where signing is on (resolveRunTools), like the create tool.
+ * FLOW AUTHORS: where signing is off the tool does not exist, so a hop whose node declares `hadron_withdraw_grant` fails as an
+ * unknown tool when it runs (validation is per hop, not at publish).
+ */
+export const hadronWithdrawGrant: RunToolDef = {
+  name: 'hadron_withdraw_grant', cost: 1,
+  description: 'Withdraw a PENDING grant THIS agent asked for through a run in THIS App (from hadron_list_grants or hadron_create_grant). ' +
+    'A grant that was activated cannot be withdrawn; it must be revoked by a person instead. You cannot withdraw another agent\'s grant, ' +
+    'a grant a person or a worker asked for, or one in another App: each answers as if it were not yours. Costs one action.',
+  inputSchema: { type: 'object', additionalProperties: false, required: ['grantId'], properties: {
+    grantId: { type: 'string', description: 'The id of the pending grant to withdraw.' },
+  } },
+  execute: async (ctx, args) => {
+    const { run, principal } = ctx;
+    // Shape first, before any read: the call takes exactly one key, and its value is the grant's id.
+    if (Object.keys(args).some((k) => k !== 'grantId') || typeof args.grantId !== 'string' || args.grantId.length === 0) {
+      throw code('GRANT_WITHDRAW_INVALID_ARGUMENT', 'Expected exactly grantId (the id of the grant to withdraw).');
+    }
+    // Signing off: the tool does not exist (resolveRunTools), and a run resolved while it was on does not keep it (read per call, here too).
+    if (!signingSurfacePolicy().signing) throw code('GRANT_SIGNING_UNAVAILABLE', 'Grants cannot be withdrawn here: signing is not available. Do not retry.');
+    const { id, status } = await withdrawGrantForRun(principal, run, { grantId: args.grantId });
+    ctx.log(`withdrew grant ${id} (${status})`);
+    return { id, status };
+  },
+};
+
+export const GRANT_TOOLS: readonly RunToolDef[] = [hadronListGrants, hadronCreateGrant, hadronWithdrawGrant];

@@ -138,8 +138,13 @@ describe('#863: the MCP run tools return the prompt runTask executes', () => {
   });
 });
 
-describe('#863: the reads a compile makes stay inside the run node\'s own memory', () => {
+describe('#863, #4689: a compile reads the run node\'s own memory, and follows a foreign URN include only where the reader may read', () => {
   const FOREIGN = 'FOREIGN-MEMORY-CONTENT-THE-CALLER-MAY-EVEN-READ';
+  const mkOtherMemory = async () => {
+    const org = await db.organization.findFirstOrThrow();
+    const other = (await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `Other-${generateId()}` }, { db, roles: ['ADMIN'], userId: ownerId } as Context)) as { id: string };
+    return db.memory.findUniqueOrThrow({ where: { id: other.id }, select: { id: true, urn: true } });
+  };
 
   it.each(tools)('%s: an include of a node in the same memory is spliced in, as the executor does', async (_name, call) => {
     await mkNode('snippets:tone', 'Tone', 'Be brief.');
@@ -149,21 +154,20 @@ describe('#863: the reads a compile makes stay inside the run node\'s own memory
     expect(text).toBe(await executed('tasks:with-include', { subject: 'Ada' }));
   });
 
-  it.each(tools)('%s: an include that names a node of ANOTHER memory by URN is not resolved, readable or not', async (_name, call) => {
-    // The other memory belongs to the same owner, so the caller could read it directly. The render still does not
-    // follow the tag: a compile is given no reader filter for a foreign memory, so it must not turn a URN into a read.
-    const org = await db.organization.findFirstOrThrow();
-    const other = (await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: `Other-${generateId()}` }, { db, roles: ['ADMIN'], userId: ownerId } as Context)) as { id: string };
-    const otherUrn = (await db.memory.findUniqueOrThrow({ where: { id: other.id }, select: { urn: true } })).urn;
+  it.each(tools)('%s: an include that names a readable node of ANOTHER memory by URN is spliced in, as the executor does (#4689)', async (_name, call) => {
+    // The other memory belongs to the same owner, so the caller reads it directly: the render follows the tag under
+    // the caller's own read access (cor:dmo:150:04), and equals what runTask returns.
+    const other = await mkOtherMemory();
     await db.node.create({ data: { id: generateId(), memoryId: other.id, loc: 'secret', name: 'secret', nodeType: 'info', content: FOREIGN, tags: [] } });
-    await mkNode('tasks:crossing', 'Crossing', `Start. {{> hrn:node:${otherUrn}:secret}} End. {{subject}}`, { isRunnable: true });
+    await mkNode('tasks:crossing', 'Crossing', `Start. {{> hrn:node:${other.urn}:secret}} End. {{subject}}`, { isRunnable: true });
     const text = await call('tasks:crossing', { subject: 'x' });
-    expect(text).not.toContain(FOREIGN);
-    expect(text).toContain('[Include unavailable]');
+    expect(text).toContain(`Start. ${FOREIGN} End. x`);
     expect(text).toBe(await executed('tasks:crossing', { subject: 'x' }));
-    // A missing target reads the same: the notice says nothing about what exists.
-    const missing = await mkNode('tasks:missing', 'Missing', `Start. {{> hrn:node:${otherUrn}:no-such-node}} End. {{subject}}`, { isRunnable: true });
-    expect((await call('tasks:missing', { subject: 'x' })).replace('Missing', 'Crossing')).toBe(text);
+    // A missing target in that same memory is the notice, and says nothing about what exists (cor:dmo:150:05).
+    await mkNode('tasks:missing', 'Missing', `Start. {{> hrn:node:${other.urn}:no-such-node}} End. {{subject}}`, { isRunnable: true });
+    const missing = await call('tasks:missing', { subject: 'x' });
+    expect(missing).toContain('Start. [Include unavailable] End. x');
+    expect(missing).toBe(await executed('tasks:missing', { subject: 'x' }));
   });
 
   it.each(tools)('%s: a {{name.field}} reference reads a node of the same memory only', async (_name, call) => {

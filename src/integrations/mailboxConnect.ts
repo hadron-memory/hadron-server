@@ -1,4 +1,3 @@
-import { buildAuthRateAdmission } from '../auth/authRate.js';
 /**
  * Mailbox-connect OAuth flow — the ONE implementation of the
  * start-nonce → authorize-redirect → callback trio, mounted once per email
@@ -13,6 +12,7 @@ import { buildAuthRateAdmission } from '../auth/authRate.js';
  * provider tool holds the client secret and does the code exchange.
  */
 import crypto from 'crypto';
+import { buildAuthRateAdmission } from '../auth/authRate.js';
 import express, { type Express, type Response } from 'express';
 import {
   EXCHANGE_START_TTL_MS,
@@ -334,11 +334,11 @@ function sendConnectConfirmPage(
 /** Mount the three mailbox-connect routes for one provider. */
 export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfig): void {
   connectProviders.set(cfg.provider, cfg);
-  const authRate = buildAuthRateAdmission(db);
-  const startAuthRate = buildAuthRateAdmission(db, 'rest', 'bearer');
+  const authRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'none' });
+  const startAuthRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'bearer' });
   const pendingStates = new Map<
     string,
-    { orgId: string; userId: string; redirect: string; origin: ExchangeStartOrigin; flowId: string | null; loginHint?: string; expiresAt: number }
+    { orgId: string; userId: string; redirect: string; origin: ExchangeStartOrigin; flowId: string | null; expiresAt: number }
   >();
 
   // #477 Sink 2 — mailbox-connect OAuth start. The portal calls this
@@ -548,7 +548,6 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       redirect: started.redirect,
       origin: started.origin,
       flowId: started.flowId,
-      loginHint: started.loginHint ?? undefined,
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
 

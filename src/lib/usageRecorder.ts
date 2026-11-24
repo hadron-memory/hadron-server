@@ -290,8 +290,8 @@ export async function attributedRequestActivity(
   try {
     if (await usageEventCountsAsActivity(client as never, principal, sessionId, opts.at)) return true;
     if (principal.userId || principal.impersonation || !principal.appId) return false;
-    // Lazy import: teamAttention sits above this module in the graph.
-    const { reviveOwnLapsedSession, resumeOwnLapsedSessionInTx } = await import('./teamAttention.js');
+    // Lazy import: ownWorkerSessions sits above this module in the graph.
+    const { reviveOwnLapsedSession, resumeOwnLapsedSessionInTx } = await import('./ownWorkerSessions.js');
     const ctxLike = { db: client, appId: principal.appId, roles: [] } as never;
     if (opts.tx) return await resumeOwnLapsedSessionInTx(ctxLike, opts.tx as never, sessionId);
     if (!client.$transaction) return false;

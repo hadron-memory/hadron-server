@@ -320,7 +320,7 @@ describe('mergeNodes — encryption', () => {
     const appCtx: Context = { db, appId: app.id, roles: [], organizationId: org.id };
     const session = await withTestOperationKey(key, (appCtx).appId, () => resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-1' },
+      { agentRef: agent.id, externalUserId: 'mm-1' },
       appCtx,
     ));
     const memId = session.memoryId!;
@@ -359,7 +359,7 @@ describe('mergeNodes — encryption', () => {
     const key = generateDataKey().raw.toString('base64');
     const appCtx: Context = { db, appId: app.id, roles: [], organizationId: org.id };
     const session = await withTestOperationKey(key, (appCtx).appId, () => resolvers.Mutation.startAgentSession(
-      {}, { agentId: agent.id, externalUserId: 'mm-eo' }, appCtx,
+      {}, { agentRef: agent.id, externalUserId: 'mm-eo' }, appCtx,
     ));
     const memId = session.memoryId!;
     const driver = await db.session.findUniqueOrThrow({ where: { id: session.id }, select: { userId: true } });

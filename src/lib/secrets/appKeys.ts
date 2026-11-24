@@ -22,7 +22,7 @@
  * Everything fails closed into one typed refusal with fixed text: the cause (no root, no row, wrong AAD, tampering,
  * not 32 bytes) is the operator's to diagnose from the database, not an oracle for a caller.
  */
-import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, hkdfSync, randomBytes } from 'crypto';
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { decryptBytesAad, encryptBytesAad } from '../tokenCrypto.js';
@@ -46,6 +46,9 @@ export const secretVersionAad = (secretId: string, versionNo: number): string =>
 
 /** AAD of a staged change-request value: a different label from a version, so it is never copied across (R19). */
 export const stagedValueAad = (requestId: string): string => `hadron:secret-staged:v1:${requestId}`;
+
+/** The lock a root re-wrap holds exclusively and every mint holds shared. */
+export const SECRET_ROOT_LOCK = 'hadron:secret-root';
 
 const SUBKEY_LABEL_PREFIX = 'hadron:secret-subkey:v1:';
 
@@ -73,7 +76,7 @@ function handleFor(appId: string, keyVersion: number, appKey: Buffer): AppKeyHan
   };
 }
 
-/** The root key from the environment, or the refusal. Read per call so a change needs no restart. */
+/** The root key from the environment, or the refusal. Read per call so a change needs no restart. Exported for rotation.ts only. */
 export function rootKey(): Buffer {
   const raw = process.env[SECRET_ROOT_KEY_ENV];
   if (raw === undefined || !/^[0-9a-fA-F]{64}$/.test(raw)) throw new SecretKeyUnavailableError();
@@ -89,7 +92,7 @@ export function rootKey(): Buffer {
 export const rootBinding = (root: Buffer): string => createHash('sha256').update('hadron:secret-root-binding:v1:').update(root).digest('hex');
 
 /** Unwrap with the row's AAD and require exactly 32 bytes, or refuse. */
-export function unwrap(root: Buffer, appId: string, keyVersion: number, wrapped: string): Buffer {
+function unwrap(root: Buffer, appId: string, keyVersion: number, wrapped: string): Buffer {
   let key: Buffer;
   try {
     key = decryptBytesAad(wrapped, appKeyAad(appId, keyVersion), root);
@@ -336,9 +339,6 @@ export async function lockAppKeyMint(db: Prisma.TransactionClient, appId: string
   await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`hadron:secret-app-key-mint:${appId}`}))`;
 }
 
-/** The lock a root re-wrap holds exclusively and every mint holds shared. */
-export const SECRET_ROOT_LOCK = 'hadron:secret-root';
-
 /**
  * Create App key `keyVersion` as a fresh random key wrapped under `root`, and return its subkeys. The caller holds
  * {@link lockAppKeyMint} and has checked the root ({@link assertRootCheck}). The key is marked uncommitted for this
@@ -394,7 +394,6 @@ export async function assertRootCheck(db: Prisma.TransactionClient, root: Buffer
     row = await db.secretRootCheck.findUnique({ where: { id: 1 }, select: { checkValue: true } });
     if (!row) throw new SecretKeyUnavailableError();
   }
-  const a = Buffer.from(row.checkValue, 'utf8');
-  const b = Buffer.from(mine, 'utf8');
-  if (a.length !== b.length || !timingSafeEqual(a, b)) throw new SecretKeyUnavailableError();
+  // A plain comparison: the check value is an identifier of the root, not a secret a caller could guess at.
+  if (row.checkValue !== mine) throw new SecretKeyUnavailableError();
 }

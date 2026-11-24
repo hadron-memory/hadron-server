@@ -19,14 +19,19 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
-import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
+import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup, UrnNotQualifiedError } from '../urn.js';
 import { UserNotFoundError, AmbiguousUserRefError } from './errors.js';
+import { refHasUnstorableChars } from './refNamesNothing.js';
 
 export async function resolveUserRef(
   db: Pick<PrismaClient, 'user'>,
   ref: string,
   options?: { includeDeleted?: boolean },
 ): Promise<{ id: string }> {
+  // #2975 §10 / Baylor P2 on #4893 (the resolvers the #4893 doors fold): a NUL or lone
+  // surrogate passes the urn grammar but no stored handle can contain it — Postgres rejects it
+  // as a query parameter, a DRIVER fault a fold catch would misread. It names nothing.
+  if (refHasUnstorableChars(ref)) throw new UrnNotQualifiedError(ref, undefined, 'user');
   const isId = isIdFunc(ref);
   if (!isId) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).
