@@ -5,7 +5,8 @@
  * `Mutation.collectHostOperations` is deliberately untouched (gate R1 = (a)).
  *
  * P1 pages, P2 refusal parity (+ the gate runs before any count), P3 no extra disclosure over HTTP, P4 the cap,
- * P5 the old field byte-identical (green on main BY DESIGN: it is the parity control), P6 admission charges the cap.
+ * P5 the old field byte-identical (green on main BY DESIGN: it is the parity control), P6 admission charges the cap,
+ * P7 only this key's uses (a sibling key in the same App and a key in another org are excluded).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
@@ -32,6 +33,7 @@ let member: { id: string };
 let orca1: { id: string };
 let ids: string[]; // every row of orca1, in usedAt desc, id desc order
 let tieIds: string[];
+let neighbourIds: string[]; // uses of another key in the same App and of a key in another org
 let managerKey: string;
 let memberKey: string;
 let url: string;
@@ -95,6 +97,25 @@ beforeAll(async () => {
   await db.hostKeyUse.createMany({ data: [...rows, ...ties] });
   ids = (await db.hostKeyUse.findMany({ where: { appKeyId: orca1.id }, orderBy: [{ usedAt: 'desc' }, { id: 'desc' }], select: { id: true } })).map((r) => r.id);
   tieIds = ties.map((t) => t.id).sort().reverse();
+
+  // P7 neighbours: a second key in the same App and a key in another org's App, each with uses of its own.
+  const raw2 = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
+  const orca2 = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw2), keyPreview: raw2.slice(-4), label: 'orca2' }, select: { id: true } });
+  const otherOrg = await db.organization.create({ data: { name: 'Other', urn: `other5061-${n}.example` }, select: { id: true, urn: true } });
+  const otherApp = await db.app.create({ data: { organizationId: otherOrg.id, name: 'Other', urn: `${otherOrg.urn}:other` }, select: { id: true } });
+  const raw3 = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
+  const foreign = await db.appKey.create({ data: { id: generateId(), appId: otherApp.id, keyHash: hashAppKey(raw3), keyPreview: raw3.slice(-4), label: 'foreign' }, select: { id: true } });
+  // Newer than every orca1 row, so a scope that lost its key filter would put them first on page one.
+  const later = new Date(t0 + ROWS * 1000 + 60_000);
+  neighbourIds = [generateId(), generateId(), generateId(), generateId()];
+  await db.hostKeyUse.createMany({
+    data: [
+      { id: neighbourIds[0]!, appKeyId: orca2.id, appId: app.id, hostId: 'orca2', action: 'collect', count: 1, usedAt: later },
+      { id: neighbourIds[1]!, appKeyId: orca2.id, appId: app.id, hostId: 'orca2', action: 'read', count: null, usedAt: later },
+      { id: neighbourIds[2]!, appKeyId: foreign.id, appId: otherApp.id, hostId: 'foreign', action: 'collect', count: 1, usedAt: later },
+      { id: neighbourIds[3]!, appKeyId: foreign.id, appId: otherApp.id, hostId: 'foreign', action: 'read', count: null, usedAt: later },
+    ],
+  });
 
   managerKey = (await mintUserApiKey(db, { userId: manager.id, label: null, createdBy: manager.id, issuedVia: 'test' })).rawKey;
   memberKey = (await mintUserApiKey(db, { userId: member.id, label: null, createdBy: member.id, issuedVia: 'test' })).rawKey;
@@ -202,5 +223,21 @@ describe('P6: admission charges hostUsesPage for the page its resolver reads', (
     expect(r.status).toBe(200);
     const k = r.body.data.appKeysPage.items.find((i: { id: string }) => i.id === orca1.id);
     expect(k.hostUsesPage.items).toHaveLength(200);
+  });
+});
+
+describe('P7: the page reads only this key\'s uses, never a sibling key\'s or another org\'s', () => {
+  it('hostUsesPage total and items exclude the same-App sibling key and the foreign-org key', async () => {
+    const page = await F.AppKey.hostUsesPage(keyArg(), { limit: 200 }, ctx(manager.id));
+    expect(page.total).toBe(ROWS);
+    expect(page.items.map((u: { appKeyId: string }) => u.appKeyId)).toEqual(Array(200).fill(orca1.id));
+    expect(page.items.map((u: { id: string }) => u.id)).toEqual(ids.slice(0, 200));
+    const count = await F.AppKey.hostUsesPage(keyArg(), { limit: 0 }, ctx(manager.id));
+    expect(count.total).toBe(ROWS);
+  });
+  it('the old hostUses field excludes them too (the shared scope)', async () => {
+    const rows = await F.AppKey.hostUses(keyArg(), { first: 200 }, ctx(manager.id));
+    expect(rows.some((u: { id: string }) => neighbourIds.includes(u.id))).toBe(false);
+    expect(rows.map((u: { id: string }) => u.id)).toEqual(ids.slice(0, 200));
   });
 });
