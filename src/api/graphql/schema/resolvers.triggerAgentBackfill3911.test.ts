@@ -163,6 +163,95 @@ describe('#3911 V71: the imports half of "installed"', () => {
     await migrate();
     expect((await read(t)).schedule.agentId).toBe(agentA);
   });
+  // #4835 pin 2 — the physical branch's `JOIN apps` discrimination. The test above hosts the deleted App as an UNUSED
+  // install elsewhere, so it holds with or without the join. Here the trigger's OWN App is gone: it has no installed
+  // Agent (V71: "its App's single installed Agent"), so the row is DISABLED and KEPT, never filled from the App's
+  // (still listed) app_agents row. Dropping `ap.deleted_at IS NULL` or `ap.uninstalled_at IS NULL` from the physical
+  // branch's `JOIN apps` fills it instead. Each clause is pinned by its own App. The rows start enabled (schedule,
+  // webhook) and uncancelled (poll), so the disable arm has work to do and "disabled" is a real transition.
+  it.each([
+    ['deleted', { deletedAt: new Date() }],
+    ['uninstalled', { uninstalledAt: new Date() }],
+  ])('the trigger\'s own App is %s: disabled and kept, not filled from its app_agents row (#4835)', async (label, gone) => {
+    const appId = await app(`own-${label}`, [agentA]);
+    const t = await triggers(appId, null);
+    await db.app.update({ where: { id: appId }, data: gone });
+    const before = await total();
+    await migrate();
+    const r = await read(t);
+    expect([r.schedule.agentId, r.schedule.enabled]).toEqual([null, false]);
+    expect([r.webhook.agentId, r.webhook.enabled]).toEqual([null, false]);
+    expect(r.poll.agentId).toBeNull();
+    expect(r.poll.cancelledAt).not.toBeNull();
+    // Nothing is deleted: V71's last sentence. The rows, their App row and the run history survive.
+    expect(await total()).toBe(before);
+    expect(r.schedule.deletedAt).toBeNull();
+    expect(r.webhook.deletedAt).toBeNull();
+    expect(await db.app.count({ where: { id: appId } })).toBe(1); // the App row itself (deleted or uninstalled) is kept
+  });
+
+  // #4835 (LOCAL P3) — the IMPORTS branch has its own `apps` and `organizations` joins, so the physical-branch pin
+  // above does not reach them. The trigger's own App deleted or uninstalled, with an Agent installed that imports
+  // another: the physical branch excludes the App, so only the imports branch could credit the imported Agent, and it
+  // must not (disabled, not filled). Dropping `ap.deleted_at` / `ap.uninstalled_at` from the imports branch fills it
+  // with the imported Agent.
+  it.each([
+    ['deleted', { deletedAt: new Date() }],
+    ['uninstalled', { uninstalledAt: new Date() }],
+  ])('the trigger\'s own App is %s and an installed Agent imports another: disabled, not filled from the import (#4835)', async (label, gone) => {
+    const appId = await app(`own-imp-${label}`, [agentA]);
+    await imp(agentA, agentB);
+    const t = await triggers(appId, null);
+    await db.app.update({ where: { id: appId }, data: gone });
+    const before = await total();
+    await migrate();
+    const r = await read(t);
+    expect([r.schedule.agentId, r.schedule.enabled]).toEqual([null, false]);
+    expect([r.webhook.agentId, r.webhook.enabled]).toEqual([null, false]);
+    expect(r.poll.agentId).toBeNull();
+    expect(r.poll.cancelledAt).not.toBeNull();
+    expect(await total()).toBe(before); // nothing deleted
+  });
+
+  // The organization clause of the imports branch: with the owning organization deleted the import is not credited,
+  // so the physical install alone is the only installed Agent and fills the trigger. Dropping `o.deleted_at IS NULL`
+  // credits the import too (two installed Agents) and disables it instead. The asymmetry (a physical install is
+  // credited under a deleted organization, an import is not) is written in the migration's own header ("...as imports
+  // ... in a live, org-owned App") and mirrors `resolveAppInstallation` (src/lib/appInstallations.ts: physical rows
+  // are listed first, then the import loop is skipped when the organization is deleted). CURRENT BEHAVIOUR,
+  // UNCONFIRMED AGAINST SPEC: V71 says "installed" without saying whether an import counts under a deleted
+  // organization, so this pins what ships, not a confirmed rule (Vera has been asked to check it against the corpus;
+  // a follow-up issue only if she calls it a defect).
+  it('the owning organization is deleted: an import is not credited, so the physical install alone fills (#4835)', async () => {
+    const appId = await app('org-gone', [agentA]);
+    await imp(agentA, agentB);
+    const t = await triggers(appId, null);
+    await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    await migrate();
+    const r = await read(t);
+    expect([r.schedule.agentId, r.schedule.enabled]).toEqual([agentA, true]);
+  });
+
+  // #4835 pin 3 — an import counts only THROUGH its live importer (the imports branch joins the importing Agent with
+  // `deleted_at IS NULL`; appInstallations.ts filters importers the same way). With the physical install's Agent
+  // deleted and its import edge still live, neither branch credits the App: disabled, NOT filled with the imported
+  // Agent, and nothing deleted. Dropping the importer-live join would credit the imported Agent and fill from it.
+  it('the importer is deleted but its import edge is live: disabled, not filled from the import (#4835)', async () => {
+    const appId = await app('imp-importer-deleted', [agentA]);
+    await imp(agentA, agentB);
+    await db.agent.update({ where: { id: agentA }, data: { deletedAt: new Date() } });
+    const t = await triggers(appId, null);
+    const before = await total();
+    await migrate();
+    const r = await read(t);
+    expect([r.schedule.agentId, r.schedule.enabled]).toEqual([null, false]);
+    expect([r.webhook.agentId, r.webhook.enabled]).toEqual([null, false]);
+    expect(r.poll.agentId).toBeNull();
+    expect(r.poll.cancelledAt).not.toBeNull();
+    expect(await total()).toBe(before);
+    expect(await db.agentImport.count({ where: { parentAgentId: agentA, importedAgentId: agentB } })).toBe(1);
+  });
+
   it('a fill and a disable stamp updated_at, and a second run changes nothing', async () => {
     const t = await triggers(await app('stamp', [agentA]), null);
     const before = await read(t);
@@ -213,6 +302,24 @@ describe('#3911 V71: re-enabling a disabled schedule', () => {
     await M.updateAgentSchedule({}, { id: t.schedule, input: { agentRef: null, enabled: false } }, ctx());
     const r = (await read(t)).schedule;
     expect([r.agentId, r.enabled]).toEqual([null, false]);
+  });
+
+  // #4835 pin 1 — the SUCCESS branch of an `agentRef: null` edit of an ENABLED schedule: with exactly one installed
+  // Agent the edit is judged as a creation is (V70 resolution) and records that Agent instead of clearing; every
+  // refusal test above uses an App with several or none. The start state is reachable by uninstalling an Agent: the
+  // App had two installed Agents, the schedule names agentB, and agentB's install row is then removed (done directly
+  // here, not through the uninstall door), leaving agentA the only one. A reading that preserved the named Agent, or
+  // that cleared to null, would not end [agentA, true]. This pins the builder's reading of V70's resolution (record
+  // the single installed Agent); cor:api:210:01's "explicit null is treated as absent" could be read against it and
+  // the corpus does not state which holds (Vera records the reading as Proposed on merge).
+  it('clearing the Agent of an enabled schedule in an App with ONE installed Agent records that Agent (#4835)', async () => {
+    const appId = await app('clear-one', [agentA, agentB]);
+    const t = await triggers(appId, agentB);
+    await db.appAgent.delete({ where: { appId_agentId: { appId, agentId: agentB } } });
+    const returned = await M.updateAgentSchedule({}, { id: t.schedule, input: { agentRef: null } }, ctx());
+    expect([returned.agentId, returned.enabled]).toEqual([agentA, true]);
+    const r = (await read(t)).schedule;
+    expect([r.agentId, r.enabled]).toEqual([agentA, true]);
   });
 
   it('a schedule that names an Agent re-enables as before', async () => {

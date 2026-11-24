@@ -45,6 +45,8 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { isAppGateRefusal, appNotFound } from '../../../lib/auth/workerRead.js';
 import { serveBindInTransaction, resolveReadableWorkerRef, resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
@@ -123,7 +125,7 @@ import {
   toCandidates,
   writeResumeClaim,
 } from '../../../lib/resumeClaims.js';
-import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from '../../../lib/teamAttention.js';
+import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from '../../../lib/ownWorkerSessions.js';
 import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
@@ -570,6 +572,18 @@ export async function writeSessionHandoff(
 // #3587: the revision snapshot read and the revision row write, split so `restoreRevision` can run both inside its
 // own transaction (the auto-save then rolls back with a refused or failed restore).
 const STANDALONE_REVISION_TX_TIMEOUT_MS = 35_000;
+
+/**
+ * Test seam (#3587 gate item P2s, "a retirement between the auto-save and the check"): awaited inside
+ * `restoreRevision`'s transaction between the auto-save write and the retirement check, so a test can land a
+ * retirement in that window: committed (the check reads after the auto-save, not a stale earlier read) or held open
+ * (the check waits on the retirement's row lock). Null (the default) skips it; setting it outside NODE_ENV=test throws.
+ */
+let restorePauseBeforeRetirementCheck: (() => Promise<void>) | null = null;
+export function setRestorePauseBeforeRetirementCheckForTests(fn: (() => Promise<void>) | null): void {
+  if (fn && process.env.NODE_ENV !== 'test') throw new Error('restore pause seam is test-only');
+  restorePauseBeforeRetirementCheck = fn;
+}
 
 type RevisionSnapshotRead = {
   nodes: Array<Record<string, unknown>>;
@@ -2219,8 +2233,8 @@ export const sessionMutations = {
 
     startAgentSession: async (
       _: unknown,
-      { agentId, externalUserId, sessionTimeoutSeconds }: {
-        agentId: string;
+      { agentRef, externalUserId, sessionTimeoutSeconds }: {
+        agentRef: string;
         externalUserId?: string;
         sessionTimeoutSeconds?: number;
       },
@@ -2240,6 +2254,18 @@ export const sessionMutations = {
         // IS NULL) cannot operate any agent.
         // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
         // that the requested Agent is installed in the calling App.
+        // #4141: `agentRef` is a PK or a URN. A relative URN is a shape refusal (propagates, after the App-key
+        // gate above); everything that names no live Agent (unknown, soft-deleted, ambiguous legacy) folds into the
+        // SAME refusal an uninstalled Agent gets, so the answer carries no Agent id (cor:api:140:02). Only a
+        // resolver miss folds: a database fault propagates. The RESOLVED id feeds every use below.
+        let agentId: string;
+        try {
+          ({ id: agentId } = await resolveAgentRef(tx, agentRef));
+        } catch (error) {
+          if (error instanceof UrnNotQualifiedError) throw error;
+          if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+          throw forbiddenError('Forbidden: App is not allowed to operate this agent');
+        }
         if (!(await isAgentInstalledForAppOperation(tx, app.id, agentId))) {
           throw forbiddenError('Forbidden: App is not allowed to operate this agent');
         }
@@ -2669,6 +2695,7 @@ export const sessionMutations = {
           await writeRevisionRow(
             tx, sysMemId, await readRevisionSnapshot(tx, sysMemId), `Auto-save before restoring ${revisionLoc}`, ctx.userId ?? null,
           );
+          if (restorePauseBeforeRetirementCheck) await restorePauseBeforeRetirementCheck();
           // #3587 (ruling 0220): the authoritative check, under the row locks and before the soft-delete.
           await assertRestoreKeepsRetirement(tx, {
             memoryId: sysMemId, revisionLoc, snapshotNodes: snapshot.nodes, isEncrypted: sysMem?.isEncrypted ?? false,

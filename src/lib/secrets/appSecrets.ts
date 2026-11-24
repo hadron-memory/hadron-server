@@ -100,6 +100,7 @@ export async function addAppSecretVersion(
     await tx.$executeRaw`UPDATE secret_versions SET superseded_at = (clock_timestamp() AT TIME ZONE 'UTC')
       WHERE secret_id = ${secret.id} AND version_no < ${versionNo} AND superseded_at IS NULL`;
   }
+  // The retention pass (purge.ts `purgeable`) applies the same cap; one test pins both (#4573).
   // Retention by count: the newest MAX versions stay; older superseded ones go (never the current one). Each one
   // dropped writes a PURGE event (#4003) carrying the actor whose store pushed it out.
   const dropped = await tx.$queryRaw<Array<{ version_no: number }>>`DELETE FROM secret_versions

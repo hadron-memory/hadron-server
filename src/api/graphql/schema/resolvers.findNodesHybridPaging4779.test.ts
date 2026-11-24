@@ -351,10 +351,62 @@ describe('#4779 P3-1: a page left short by hydration', () => {
     } finally { if (deleted) await db.node.update({ where: { id: deleted }, data: { deletedAt: null } }); } // BLIND F4
   }, 60_000);
 
+  it('#4938 F6 (Elena): a re-ranking that a second drop pushes past ITS certified depth is left short and flagged, never filled from uncertified rows', async () => {
+    // Neither leg is exhausted (a larger memory): the keyword leg continues past KW with rows that are never nodes, and the
+    // vector leg reports a non-exhausted window. locPrefix 'n-' (every node meets it) reads both legs 5x deep, so no
+    // vector-rank lookup runs. X is deleted after the first ranking (its page reaches past depth 2: re-rank to depth 3);
+    // A and C are deleted after the re-ranking's own vector leg, so its page loses both at hydration and could only fill
+    // from past its certified depth of 3.
+    const tail = Array.from({ length: 5000 }, (_, i) => `nohit-${i}`);
+    keywordLeg([...KW, ...tail]);
+    const original = provider.vectorSearch.bind(provider);
+    let calls = 0;
+    vi.spyOn(provider, 'vectorSearch').mockImplementation(async (a) => {
+      const hits = await original({ ...a, onWindow: (w) => a.onWindow?.({ ...w, exhausted: false }) });
+      calls++;
+      if (calls === 1) await db.node.update({ where: { id: id.X! }, data: { deletedAt: new Date() } });
+      if (calls === 2) for (const n of [id.A!, id.C!]) await db.node.update({ where: { id: n }, data: { deletedAt: new Date() } });
+      return hits;
+    });
+    try {
+      const res = await findNodes({ query: 'q', mode: 'hybrid', limit: 2, filter: { locPrefix: 'n-' } });
+      expect(calls).toBe(2);
+      // The re-ranking was certified to depth 3 (X, A, C, … minus X): with A and C gone only D remains inside it.
+      expect(names(res.hits)).toEqual(['D']);
+      expect(res.degraded ?? '').toContain('stopped_early');
+    } finally { for (const n of [id.X!, id.A!, id.C!]) await db.node.update({ where: { id: n }, data: { deletedAt: null } }); }
+  }, 60_000);
+
+  it('#4938 F6: with both legs exhausted the re-ranked list is exact everywhere, so its page is filled, not cut short', async () => {
+    keywordLeg(KW); // 6 rows, read 15 deep: exhausted; the 12-node vector leg too
+    const original = provider.vectorSearch.bind(provider);
+    let calls = 0;
+    vi.spyOn(provider, 'vectorSearch').mockImplementation(async (a) => {
+      const hits = await original(a);
+      calls++;
+      if (calls === 1) await db.node.update({ where: { id: id.X! }, data: { deletedAt: new Date() } });
+      if (calls === 2) for (const n of [id.A!, id.C!]) await db.node.update({ where: { id: n }, data: { deletedAt: new Date() } });
+      return hits;
+    });
+    try {
+      const res = await findNodes({ query: 'q', mode: 'hybrid', limit: 2, filter: { locPrefix: 'n-' } });
+      const gone = ['X', 'A', 'C'];
+      const want = reciprocalRankFusionScored([KW.filter((n) => !gone.includes(n)), VEC.filter((n) => !gone.includes(n))], (x) => x).map((e) => e.item);
+      expect(names(res.hits)).toEqual(want.slice(0, 2));
+      expect(res.degraded ?? null).toBeNull();
+    } finally { for (const n of [id.X!, id.A!, id.C!]) await db.node.update({ where: { id: n }, data: { deletedAt: null } }); }
+  }, 60_000);
+
   it('BLIND F1 (Elena): a hybrid first page that filled PAST its certified depth is never kept in place of the re-ranking', async () => {
     // First attempt: X is deleted after ranking, so the offset-2 page fills from past the certified depth (incomplete by
     // depth, not by size). The re-ranking then stops early with an emptier page (no vector rows, no keyword rows).
+    // #4938 (Elena F3 at 5ad0665b): the precondition is asserted, not assumed. X is inside the first 4 fused rows (the
+    // offset-2 page's certified depth), so with X dropped the page's 2nd row comes from fused rank 5: past the depth.
+    expect(trueOrder().slice(0, 4)).toContain('X');
+    expect(trueOrder().length).toBeGreaterThanOrEqual(5);
+    // The keyword mock switches on an explicit flag (the re-ranking has begun), not on how many vector calls were made.
     let vecCalls = 0;
+    let reranking = false;
     const original = provider.vectorSearch.bind(provider);
     vi.spyOn(provider, 'vectorSearch').mockImplementation(async (a) => {
       if (vecCalls++ === 0) {
@@ -362,14 +414,15 @@ describe('#4779 P3-1: a page left short by hydration', () => {
         await db.node.update({ where: { id: id.X! }, data: { deletedAt: new Date() } });
         return hits;
       }
+      reranking = true;
       a.onWindow?.({ exhausted: false, stoppedEarly: true });
       return [];
     });
     vi.spyOn(provider, 'lexicalSearch').mockImplementation(async (a: any) =>
-      vecCalls > 1 ? [] : KW.slice(0, a.limit).map((n, i) => ({ nodeId: id[n]!, score: 1 / (i + 1) })));
+      reranking ? [] : KW.slice(0, a.limit).map((n, i) => ({ nodeId: id[n]!, score: 1 / (i + 1) })));
     try {
       const res = await findNodes({ query: 'q', mode: 'hybrid', limit: 2, offset: 2 });
-      expect(vecCalls).toBeGreaterThanOrEqual(2);
+      expect(reranking).toBe(true);
       expect(res.hits).toEqual([]); // the re-ranking's page, never the first attempt's uncertified rows
       expect(res.degraded ?? '').toContain('stopped_early');
     } finally { await db.node.update({ where: { id: id.X! }, data: { deletedAt: null } }); }

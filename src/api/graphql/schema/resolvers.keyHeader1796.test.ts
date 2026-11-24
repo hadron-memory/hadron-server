@@ -54,7 +54,7 @@ async function request(query: string, variables: Record<string, unknown>, suppli
     data?: Record<string, any>; errors?: Array<{ message: string; path?: Array<string | number>; extensions?: { code?: string } }>
   } };
 }
-const startQuery = 'mutation($agent: ID!, $user: String) { startAgentSession(agentId: $agent, externalUserId: $user) { id memoryId } }';
+const startQuery = 'mutation($agent: ID!, $user: String) { startAgentSession(agentRef: $agent, externalUserId: $user) { id memoryId } }';
 const linkQuery = 'mutation($memory: ID!, $user: String!) { linkMemoryToUser(memoryRef: $memory, externalUserId: $user) { id isEncrypted class } }';
 
 describe('#1796 schema boundary', () => {
@@ -192,7 +192,7 @@ describe('#1796 real HTTP header operations', () => {
     const before = await snapshot();
     for (const legacy of [undefined, null, '', key]) {
       const query = operation === 'session'
-        ? 'mutation($id: ID!, $key: String) { startAgentSession(agentId: $id, externalUserId: "removed", dataKey: $key) { id } }'
+        ? 'mutation($id: ID!, $key: String) { startAgentSession(agentRef: $id, externalUserId: "removed", dataKey: $key) { id } }'
         : 'mutation($id: ID!, $key: String) { linkMemoryToUser(memoryRef: $id, externalUserId: "removed", dataKey: $key) { id } }';
       const result = await request(query, { id: operation === 'session' ? agentId : memoryId, key: legacy });
       expect(result.body.errors?.[0]?.extensions?.code).toBe('GRAPHQL_VALIDATION_FAILED');
@@ -222,9 +222,9 @@ describe('#1796 real HTTP header operations', () => {
     const sessionsBefore = await db.session.count();
     const firstField = mode === 'promotion'
       ? 'first: linkMemoryToUser(memoryRef: $firstMemory, externalUserId: "single-first") { id }'
-      : 'first: startAgentSession(agentId: $agent, externalUserId: "single-first") { id }';
+      : 'first: startAgentSession(agentRef: $agent, externalUserId: "single-first") { id }';
     const secondField = mode === 'session'
-      ? 'second: startAgentSession(agentId: $agent, externalUserId: "single-second") { id }'
+      ? 'second: startAgentSession(agentRef: $agent, externalUserId: "single-second") { id }'
       : 'second: linkMemoryToUser(memoryRef: $secondMemory, externalUserId: "single-second") { id }';
     const declarations = mode === 'session' ? '$agent: ID!'
       : mode === 'promotion' ? '$firstMemory: ID!, $secondMemory: ID!'
@@ -246,7 +246,7 @@ describe('#1796 real HTTP header operations', () => {
   });
 
   it('a non-consuming field does not claim the staged header key', async () => {
-    const result = await request('mutation($agent: ID!) { unused: __typename next: startAgentSession(agentId: $agent, externalUserId: "after-unused") { id } }', { agent: agentId }, key);
+    const result = await request('mutation($agent: ID!) { unused: __typename next: startAgentSession(agentRef: $agent, externalUserId: "after-unused") { id } }', { agent: agentId }, key);
     expect(result.body.errors).toBeUndefined();
     expect(result.body.data?.next.id).toEqual(expect.any(String));
   });

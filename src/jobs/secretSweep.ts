@@ -13,7 +13,8 @@
  * Run one tick by hand:
  *   pnpm tsx src/jobs/secretSweep.ts
  */
-import { sweepSecretAutoDelete } from '../lib/secrets/autoDelete.js';
+import { pathToFileURL } from 'node:url';
+import { safeErrorCode, sweepSecretAutoDelete } from '../lib/secrets/autoDelete.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { purgeExpiredSecretEvents, purgeSupersededVersions } from '../lib/secrets/purge.js';
 
@@ -27,11 +28,6 @@ export interface SecretSweepLegs {
 
 const defaultLegs: SecretSweepLegs = { autoDelete: sweepSecretAutoDelete, purgeVersions: purgeSupersededVersions, purgeEvents: purgeExpiredSecretEvents };
 
-function errorCode(err: unknown): string {
-  const raw = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
-  return typeof raw === 'string' && /^(P\d{4}|[0-9A-Z]{5})$/.test(raw) ? raw : 'UNKNOWN';
-}
-
 /** One tick. Each leg is isolated: a failed version purge does not stop the event purge. Returns the counts. */
 export async function secretSweepTick(
   db: PrismaClient,
@@ -40,19 +36,19 @@ export async function secretSweepTick(
 ): Promise<{ versions: number; events: number; tombstones: number; deleted: number }> {
   const out = { versions: 0, events: 0, tombstones: 0, deleted: 0 };
   try { out.deleted = await legs.autoDelete?.(db) ?? 0; }
-  catch (err) { console.error(`${TAG}.auto_delete_failed`, { code: errorCode(err) }); }
+  catch (err) { console.error(`${TAG}.auto_delete_failed`, { code: safeErrorCode(err) }); }
   if (!runRetention) return out;
   try {
     out.versions = (await legs.purgeVersions(db)).purged;
   } catch (err) {
-    console.error(`${TAG}.version_purge_failed`, { code: errorCode(err) });
+    console.error(`${TAG}.version_purge_failed`, { code: safeErrorCode(err) });
   }
   try {
     const e = await legs.purgeEvents(db);
     out.events = e.events;
     out.tombstones = e.tombstones;
   } catch (err) {
-    console.error(`${TAG}.event_purge_failed`, { code: errorCode(err) });
+    console.error(`${TAG}.event_purge_failed`, { code: safeErrorCode(err) });
   }
   return out;
 }
@@ -64,11 +60,16 @@ export function secretSweepDisabledReason(env: NodeJS.ProcessEnv = process.env):
   return null;
 }
 
-/** Start the minute loop (hourly retention, first tick after 60 s; ticks never overlap). Returns the initial timer. */
+export interface SecretSweepLoop {
+  /** No tick starts after this; one already running finishes. */
+  stop: () => void;
+}
+
+/** Start the minute loop (hourly retention, first tick after 60 s; ticks never overlap). */
 export function startSecretSweepLoop(
   db: PrismaClient,
   options: { intervalMs?: number; initialDelayMs?: number; legs?: SecretSweepLegs } = {},
-): NodeJS.Timeout {
+): SecretSweepLoop {
   const intervalMs = options.intervalMs ?? 60 * 1000;
   const initialDelayMs = options.initialDelayMs ?? 60 * 1000;
   let running = false;
@@ -87,15 +88,22 @@ export function startSecretSweepLoop(
       running = false;
     }
   };
-  const timer = setTimeout(() => {
+  let interval: NodeJS.Timeout | undefined;
+  const initial = setTimeout(() => {
     void run();
-    setInterval(() => void run(), intervalMs).unref();
+    interval = setInterval(() => void run(), intervalMs);
+    interval.unref();
   }, initialDelayMs);
-  timer.unref();
-  return timer;
+  initial.unref();
+  return {
+    stop: () => {
+      clearTimeout(initial);
+      clearInterval(interval);
+    },
+  };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const { db } = await import('../integrations/db/client.js');
   console.log(JSON.stringify(await secretSweepTick(db)));
   await db.$disconnect();

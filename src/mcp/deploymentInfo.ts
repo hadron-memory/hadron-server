@@ -57,7 +57,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 //   importedAgentId -> parentAgentRef, importedAgentRef).
 // 0.13.0: #891 — new query `assets(filter, orgId, limit, offset)`, the uniform
 // cross-memory asset list (spec cor:api:120), plus the `AssetFilter` input and
-// `AssetsPage` type. A caller-detectable addition: `memoryAssets(memoryId:)`
+// `AssetsPage` type. A caller-detectable addition: `memoryAssets(memoryRef:)`
 // remains, but "every asset I can reach" was previously unanswerable.
 // 0.14.0: #1009/#1006 — caller-detectable MCP surface additions. New optional
 // `session` argument on hadron_list_workers / hadron_cast_worker /
@@ -140,7 +140,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `replaceSubtree.memoryId` is DELIBERATELY unchanged (legacy `String!`): the
 // field exists only so legacy callers reach REPLACE_SUBTREE_RETIRED instead
 // of an unknown-argument error (#4219 blind P2-A).
-// (Chunk A, the memory reads, follows #4136.)
+// (Chunk A, the memory reads, is 0.32.0, below.)
 //
 // 0.24.0 — BREAKING (#2027 S11): the attention API is RETIRED. The GraphQL fields
 // `teamAttention` / `teamAttentionPage` / `teamAttentionPreviewPage` /
@@ -183,7 +183,37 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 //      Why 0.29.0 and not 0.26.0: 0.26.0–0.28.0 are reserved numbers, taken by the
 //      concurrent surface renumbering recorded in team chat #138407 — this entry takes
 //      the next FREE number past them (blind review on #4871 asked).
-export const HADRON_SERVER_VERSION = '0.29.0';
+//
+// 0.30.0 — BREAKING, entity refs S5 (#4141, partial: `appRuns(parentRunId)` follows): two GraphQL
+// arguments renamed, no aliases. `cancelAppRun(id)` -> `cancelAppRun(ref)` and
+// `startAgentSession(agentId)` -> `startAgentSession(agentRef)`; each takes an id OR a URN (hrn:apprun /
+// hrn:agent). A client still sending the old name gets "Unknown argument" and the whole operation is
+// refused until it upgrades; `startAgentSession` is an App-key operation, so external integrators and SDK
+// callers are affected, not only the first-party clients. Refusals are unchanged: `cancelAppRun` keeps
+// NOT_FOUND "Run not found." and FORBIDDEN for a non-admin, with a ref that cannot name a run now
+// BAD_USER_INPUT; `startAgentSession` answers an unknown, deleted or uninstalled Agent with the one existing
+// FORBIDDEN, and a relative URN as URN_NOT_QUALIFIED.
+//
+// 0.31.0 — BREAKING, entity refs S5 (#4141, the third field; completes 0.30.0, which renamed `cancelAppRun` and
+// `startAgentSession`): the GraphQL argument `appRuns(parentRunId)` is renamed `appRuns(parentRunRef)`, no alias, and
+// takes a run id OR an hrn:apprun URN. A client still sending `parentRunId` gets "Unknown argument" and the whole
+// query is refused until it upgrades. The filter keeps its tri-state (omitted = no filter, null = top-level runs,
+// a ref = that run's children). A ref naming no run in scope (unknown, outside the org, ambiguous legacy) is the
+// exactly empty page, not an error; a ref that cannot name a run is BAD_USER_INPUT. The org READER gate still runs
+// first, so a non-member sees the App NOT_FOUND whatever the ref.
+//
+// 0.32.0 — BREAKING, entity refs S6 chunk A (#4142): the GraphQL memory READS take `<entity>Ref`, no alias.
+// `usageEvents` / `usageEventsPage` (`memoryId` → `memoryRef`, `nodeId` → `nodeRef`; both stay optional `ID`),
+// `memoryAssets` (`memoryId` → `memoryRef: ID!`) and `memoryLocSegments` (`memoryIds` → `memoryRefs: [ID!]!`).
+// A lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation. Nothing else
+// changes: every field already resolved an ID or URN and keeps its gate and its refusals byte-identical; the
+// usage "provide either nodeId or loc" refusal now names `nodeRef`.
+//
+// 0.33.0 — BREAKING, entity refs S2 (#4138): the node-revision operations take `nodeRevRef`, no alias.
+// `nodeRevision(revisionId)`, `restoreNodeRevision(revisionId)` and the delete-revision mutation
+// (`revisionId` → `nodeRevRef: String!`, a revision URN or id). A lagging client's old name is an UNKNOWN
+// argument and GraphQL refuses the whole operation.
+export const HADRON_SERVER_VERSION = '0.33.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

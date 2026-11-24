@@ -452,14 +452,24 @@ export const typeDefs = `#graphql
     """
     #4890: the memory's description, carried only where THIS caller could read
     it through Memory.description — the record gate (canReadMemoryRecord) that
-    Query.memory applies, reused, never the row's own admission. Null when the
-    record gate would refuse the caller; the row is still listed, only the
-    description is withheld. The memory record is never enciphered
+    Query.memory applies, reused, never the row's own admission. Null means
+    EITHER withheld (the record gate would refuse the caller; the row is still
+    listed, only the description is hidden) OR the memory has no description
+    set; the two are not distinguishable here. The memory record is never enciphered
     (hrn:node:hadronmemory.com:specs:cor:sec:040:03 enciphers node content
     only), so an encrypted memory's description is carried with no key in
     play, exactly as Memory.description serves it.
     """
     description: String
+    """
+    #5003: the memory's visibility, carried only where THIS caller could read it through Memory.visibility — the same
+    record gate as description (canReadMemoryRecord, the one Query.memory applies), never the row's own admission.
+    Null means EITHER withheld (the record gate would refuse the caller; the row is still listed, only this field is
+    hidden) OR not applicable: only knowledge and group memories carry a visibility, and a knowledge memory may have
+    none. The two are not distinguishable here, so a client must not read a null as a reason. The memory record is never
+    enciphered, so an encrypted memory's visibility is carried with no key in play. The leaf stays a leaf.
+    """
+    visibility: MemoryVisibility
     "Every reason this memory is in scope. Never empty. Ordered by kind (AGENT_SYSTEM, AGENT_LINK, INHERITED_BASE, TEAM_SPACE, APP_MEMORY), then by agent install order."
     sources: [AppMemorySource!]!
     """
@@ -7086,6 +7096,78 @@ export const typeDefs = `#graphql
   }
 
   """
+  #4168 (hrn:node:hadronmemory.com:specs:cor:dmo:060:17): the verdict of a proposed write's authoring
+  attestation check. PASS: the write would pass. REFUSED: the write would be refused, with the code,
+  the governed role, the prose and the recovery the write returns. UNAVAILABLE: the caller reads the
+  memory but does not write it, one answer for every node and role, so it shows nothing about the
+  memory's rules. A preview, never a reservation, and a pass is never proof the procedure was followed.
+  """
+  enum NodeAuthoringCheckState {
+    PASS
+    REFUSED
+    UNAVAILABLE
+  }
+  "The four refusals of the authoring attestation check, as a write returns them."
+  enum AuthoringCheckRefusalCode {
+    AUTHORING_ATTESTATION_MISSING
+    AUTHORING_ATTESTATION_WRONG_TASK
+    AUTHORING_ATTESTATION_STALE
+    AUTHOR_TASK_BROKEN
+  }
+  enum AuthoringCheckTaskAccess {
+    READABLE
+    UNAVAILABLE
+  }
+  "How to load the author task, per surface. A surface with no route is null."
+  type AuthoringCheckLoad {
+    graphql: String!
+    mcp: String
+    cli: String
+  }
+  """
+  What a refusal tells the writer about the required task, exactly as the write does (#1329). A task
+  the caller cannot read, a deleted task and an unrunnable one are all UNAVAILABLE with nulls: no id,
+  reference, revision or count.
+  """
+  type AuthoringCheckRecovery {
+    taskAccess: AuthoringCheckTaskAccess!
+    task: String
+    taskId: ID
+    taskRevision: Int
+    load: AuthoringCheckLoad
+  }
+  type NodeAuthoringCheck {
+    state: NodeAuthoringCheckState!
+    "Set when state is REFUSED."
+    code: AuthoringCheckRefusalCode
+    "The governed role whose rule refused. Set when state is REFUSED."
+    role: String
+    "The write's refusal prose. Set when state is REFUSED."
+    message: String
+    "Set when state is REFUSED."
+    recovery: AuthoringCheckRecovery
+  }
+  """
+  A proposed write to check. Name the node by ref (PK or URN of an existing node), or by memoryId and
+  loc together (an existing node at that loc is judged as itself; otherwise a new node).
+  """
+  input NodeAuthoringCheckInput {
+    "An existing node: PK or fully-qualified node URN. XOR with memoryId+loc."
+    ref: String
+    "With loc: the memory (ID or fully-qualified URN). XOR with ref."
+    memoryId: String
+    loc: String
+    "The role the write would leave the node with. Omit to keep the node's own; null to clear. A new node starts with none."
+    role: String
+    "Whether the write would leave the node runnable. Omit to keep the node's own."
+    isRunnable: Boolean
+    "The claim the write would carry, or omit for none."
+    authoredWith: AuthoredWithInput
+    "Whether the write changes authored content. Default true; a write that changes none needs no claim. A create always does."
+    changesAuthoredContent: Boolean = true
+  }
+
+  """
   #1328 — an authoring attestation. The writer states which task it worked from
   and that task's current revision (Node.revSeq). The server compares both with
   the rule and refuses a mismatch: AUTHORING_ATTESTATION_MISSING,
@@ -7633,20 +7715,21 @@ export const typeDefs = `#graphql
   SortDirection enum. Default createdAt desc — existing callers depend on
   newest-first.
 
-  startedAt / finishedAt are NULLABLE (a PENDING run has neither); nulls sort
-  LAST in both directions, so unstarted runs never crowd out the rows an
-  operator asked to see. Every sort carries an id tiebreak so offset paging is
-  deterministic.
+  startedAt / finishedAt / duration are NULLABLE (a PENDING run has neither
+  timestamp, and a RUNNING one has no finishedAt): nulls sort LAST in both
+  directions, so unstarted runs never crowd out the rows an operator asked to
+  see. Every sort carries an id tiebreak so offset paging is deterministic.
 
-  Duration (finishedAt - startedAt) is deliberately absent: it has no stored
-  column and Prisma cannot order by a computed expression, so it needs a
-  generated column of its own - tracked separately rather than half-shipped.
+  duration is finishedAt - startedAt in whole milliseconds (#855), from a stored
+  generated column; a run missing either timestamp has no duration. A negative
+  value (clock skew) sorts as stored, without clamping.
   """
   enum AppRunSortField {
     createdAt
     startedAt
     finishedAt
     status
+    duration
   }
 
   "Recurring trigger (cor:agt:010, D-2026-07-04-E)."
@@ -9458,11 +9541,21 @@ export const typeDefs = `#graphql
   #4447 (S1 of #3781; hrn:node:hadronmemory.com:specs:cor:agt:150): one count of a team's task or worker flow with the ids behind it,
   so a client can drill down and derive nothing. total is exact; ids holds at most ${METRICS_IDS_CAP} of them, and truncated is true
   when it holds fewer than total (hrn:node:hadronmemory.com:specs:cor:api:120:04). The ids are task ids, or worker ids in the worker counts.
+  #4992: named holds the same ids in the same order, each with its name (a task's title, a worker's name), so a client needs no read
+  per id; it is at most ${METRICS_IDS_CAP} long too. A name follows the same gate as its id: a count a reader may not see is null, and an
+  id with no readable name has a null name.
   """
   type TeamMetricsCount {
     total: Int!
     ids: [ID!]!
+    "One entry per id of ids, same order: the id and its name, null when no name is readable."
+    named: [TeamMetricsNamedId!]!
     truncated: Boolean!
+  }
+  "#4992: an id of a metrics count with its name (a task's title or a worker's name); the name follows the same gate as the id."
+  type TeamMetricsNamedId {
+    id: ID!
+    name: String
   }
   "The half-open window [since, until) report 4 was read over (hrn:node:hadronmemory.com:specs:cor:agt:150): since is included, until is not. The other reports ignore it."
   type TeamMetricsWindow {
@@ -10136,6 +10229,16 @@ export const typeDefs = `#graphql
     node(ref: ID!, memoryRef: ID, raw: Boolean): Node
 
     """
+    Check, without writing, whether a proposed node write and its authoredWith claim would pass the
+    authoring attestation check (hrn:node:hadronmemory.com:specs:cor:dmo:060:17). The answer is the
+    verdict the write would give for the same caller, node, role and claim: it is computed by the write's
+    own check. A caller who cannot read the node gets the node read's not-found (NODE_NOT_FOUND by ref,
+    MEMORY_NOT_FOUND by memory); a reader who does not write the memory gets UNAVAILABLE on every node.
+    Shows no rule list, writers level or validator setting. Writes nothing.
+    """
+    nodeAuthoringCheck(input: NodeAuthoringCheckInput!): NodeAuthoringCheck!
+
+    """
     Render one node to a portable, self-contained file (spec cor:api).
     full: true (default) returns the CANONICAL form — byte-identical to
       "hadron node export <urn>", all sections, round-trippable via
@@ -10344,48 +10447,48 @@ export const typeDefs = `#graphql
       nodeUsage(loc: 'cor:acl:010:01', limit: 20)
       usageEvents(loc: 'cor:acl:010:01', limit: 20)
 
-    Do NOT migrate to usageEvents(nodeId: <loc>): nodeId is shape-classified,
+    Do NOT migrate to usageEvents(nodeRef: <loc>): nodeRef is shape-classified,
     and a hierarchical loc with 3+ colon-separated segments (like the spec
     citation above) qualifies as node-URN shape and routes to ref resolution
     instead — NODE_NOT_FOUND, or another node's events (PR-986 review). The
     loc argument exists precisely so the migration needs no shape caveats.
 
-    usageEvents is a strict superset: nodeId accepts a PK or a fully-qualified
+    usageEvents is a strict superset: nodeRef accepts a PK or a fully-qualified
     node URN (memory-precise — a bare loc cannot disambiguate the same loc in
-    two memories), plus type filtering, memoryId scoping and offset paging. It
+    two memories), plus type filtering, memoryRef scoping and offset paging. It
     is also the surface that gets extended; nodeUsage will not grow arguments.
 
     Access control is identical and unchanged (#802) — see usageEvents below.
     Deprecated for redundancy, NOT because this field is unsafe.
     """
     nodeUsage(loc: String!, limit: Int): [UsageEvent!]!
-      @deprecated(reason: "Use usageEvents(loc: <loc>) — identical exact-match loc semantics and access scoping, plus PK/URN refs via nodeId, type filtering, memoryId scoping and paging (#802).")
+      @deprecated(reason: "Use usageEvents(loc: <loc>) — identical exact-match loc semantics and access scoping, plus PK/URN refs via nodeRef, type filtering, memoryRef scoping and paging (#802).")
 
     """
-    Usage events (most recent first), optionally filtered by type, memoryId,
-    nodeId, or time. since is inclusive and until is exclusive: since <= createdAt < until.
+    Usage events (most recent first), optionally filtered by type, memoryRef,
+    nodeRef, or time. since is inclusive and until is exclusive: since <= createdAt < until.
     Bounds must be ISO date-times with Z or an explicit offset.
     Either bound may be omitted; invalid bounds or since >= until are BAD_USER_INPUT.
     Windowing does not change scope (hrn:node:hadronmemory.com:specs:cor:acl:090:01).
 
-    Scope (#2817, hrn:node:hadronmemory.com:specs:cor:acl:090:01): naming NO resource (no memoryId,
-    nodeId or loc) reads the caller's OWN activity, the events attributed to the calling user in any
+    Scope (#2817, hrn:node:hadronmemory.com:specs:cor:acl:090:01): naming NO resource (no memoryRef,
+    nodeRef or loc) reads the caller's OWN activity, the events attributed to the calling user in any
     memory or none. An App key has no own activity and gets an empty list, not an error. Naming a resource
     reads every principal's events there, gated on READ access to the memory (#250: org membership /
     subscriptions / public / owned personal+private per spec 034; ADMIN/OWNER see all EXCEPT another
     user's personal/private memories and, per spec 047, another user's user-owned memories). A
-    memoryId the caller can't read answers MEMORY_NOT_FOUND exactly as a missing one
+    memoryRef the caller can't read answers MEMORY_NOT_FOUND exactly as a missing one
     (hrn:node:hadronmemory.com:specs:cor:api:140:03). An empty resource scope never falls back to own
     activity. An App key's resource read discloses volumes only: userId, sessionId, organizationId and
     actionArgs are null, and appId is null unless it is the key's own App. limit pages as usageEventsPage does: default 20, at most 200
     (hrn:node:hadronmemory.com:specs:cor:api:120:04).
 
-    memoryId is a memory identifier — accepts the memory's ID or URN. Results
+    memoryRef is a memory identifier — accepts the memory's ID or URN. Results
     are scoped on the denormalized UsageEvent.memoryId column (#796), so an
     event stays attributed to its memory after its node is deleted.
 
-    nodeId is a node token accepting a PK, a fully-qualified URN, or a bare
-    loc (no memoryId needed):
+    nodeRef is a node token accepting a PK, a fully-qualified URN, or a bare
+    loc (no memoryRef needed):
       - PK / URN  → resolved to a single node; scoped via its exact nodeId FK
                     (memory-precise).
       - bare loc  → exact nodeLoc match, bounded to readable memories; not
@@ -10401,7 +10504,7 @@ export const typeDefs = `#graphql
     loc works, hierarchical spec citations included), bounded to readable
     memories; not existence-checked. The migration target for the deprecated
     nodeUsage(loc:) above — same match, same gate (PR-986 review, Codex P2).
-    Mutually exclusive with nodeId (BAD_USER_INPUT when both are passed).
+    Mutually exclusive with nodeRef (BAD_USER_INPUT when both are passed).
 
     appKey (#2944, hrn:node:hadronmemory.com:specs:cor:acl:090:01 "Filtering by App key") — an App key's id.
     Keeps only the events made by requests that key authenticated; events made without a key, and every event
@@ -10414,9 +10517,9 @@ export const typeDefs = `#graphql
     only its own events there, in memories it can read. It composes with the window, type and resource filters.
     Rows stay volume-only as above.
     """
-    usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): [UsageEvent!]!
+    usageEvents(type: String, memoryRef: ID, nodeRef: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): [UsageEvent!]!
     """
-    #2212 - \`usageEvents\` as a page: the same principal gate, the same loc/nodeId rules and the same two scopes
+    #2212 - \`usageEvents\` as a page: the same principal gate, the same loc/nodeRef rules and the same two scopes
     (own activity when no resource is named, #2817), ordered newest first with an id tiebreak, with the windowed total.
     since is inclusive and until is exclusive: since <= createdAt < until.
     Bounds must be ISO date-times with Z or an explicit offset.
@@ -10424,7 +10527,7 @@ export const typeDefs = `#graphql
     hrn:node:hadronmemory.com:specs:cor:acl:090:01; paging: hrn:node:hadronmemory.com:specs:cor:api:120:04. Sizes as \`tickersPage\`.
     appKey filters by an App key exactly as on usageEvents (#2944), and the total counts the filtered rows.
     """
-    usageEventsPage(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): UsageEventPage!
+    usageEventsPage(type: String, memoryRef: ID, nodeRef: ID, loc: String, since: DateTime, until: DateTime, appKey: ID, limit: Int, offset: Int): UsageEventPage!
 
     """
     Revision history for a node, most recent first.
@@ -11206,15 +11309,15 @@ export const typeDefs = `#graphql
     """
     #3456 (hrn:node:hadronmemory.com:specs:cor:api:090:05): one page of the distinct next loc segments
     under parentLoc ("" for the root), including a branch with no node of its own. Reads over exactly
-    the nodes findNodes would read for the same memoryIds with no query: the same readable set, access
-    intersection, defaults and inheritance. memoryIds is required and non-empty (an empty list is
+    the nodes findNodes would read for the same memories with no query: the same readable set, access
+    intersection, defaults and inheritance. memoryRefs (each an ID or URN) is required and non-empty (an empty list is
     BAD_USER_INPUT); when no entry survives the gate the answer is the empty page, never the caller's
     default scope. An unreadable, unresolvable or empty memory, and a parent with nothing at or under
     it, all give the identical empty page. Rows are grouped by memory id; inside a memory, node-backed
     segments with a position come first by position, then every other segment by name (ruling 0217).
     Default page 20, cap 200 (larger is served as 200); after is the previous page's endCursor.
     """
-    memoryLocSegments(memoryIds: [ID!]!, parentLoc: String!, limit: Int, after: String): LocSegmentsPage!
+    memoryLocSegments(memoryRefs: [ID!]!, parentLoc: String!, limit: Int, after: String): LocSegmentsPage!
 
     """
     #2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): the memories appNodes
@@ -11946,7 +12049,7 @@ export const typeDefs = `#graphql
     Accepts the entity's ID or URN.
     """
     memoryAssets(
-      memoryId:       ID!
+      memoryRef:      ID!
       mimeType:       String
       skip:           Int = 0
       count:          Int = 20
@@ -12150,6 +12253,11 @@ export const typeDefs = `#graphql
     When statuses is non-null it wins, including an empty list; omitted or
     null statuses falls back to status. No removal date is promised here.
 
+    parentRunRef (#4141, renamed from parentRunId) is the run whose fan-out children are listed: its id or
+    its hrn:apprun URN. Omitted means no filter, null means top-level runs only, a ref means that run's
+    children. A ref that cannot name a run is BAD_USER_INPUT; a ref naming no run in scope (unknown,
+    outside the org, ambiguous legacy) answers the exactly empty page. It composes AND with appRef.
+
     sortBy / sortDir (#833) order the whole result set server-side, so a client
     table is no longer limited to sorting the page it happens to hold.
     """
@@ -12158,7 +12266,7 @@ export const typeDefs = `#graphql
       orgRef: String
       status: AppRunStatus @deprecated(reason: "Use statuses (#836) - a single value cannot express PENDING-or-RUNNING.")
       statuses: [AppRunStatus!]
-      parentRunId: ID
+      parentRunRef: ID
       sortBy: AppRunSortField
       sortDir: SortDirection
       limit: Int
@@ -13720,8 +13828,13 @@ export const typeDefs = `#graphql
     deleteAgentSchedule(id: ID!): Boolean!
     "Run an entry node now (MANUAL trigger) — same launch gate + kernel as a schedule."
     triggerAppRun(input: TriggerAppRunInput!): AppRun!
-    "The kill switch manual handle: PENDING/RUNNING to CANCELLED (cor:agt:010:02)."
-    cancelAppRun(id: ID!): AppRun!
+    """
+    The kill switch manual handle: PENDING/RUNNING to CANCELLED (hrn:node:hadronmemory.com:specs:cor:agt:010:02).
+    'ref' is the run's id or its hrn:apprun URN (renamed from 'id', #4141).
+    A ref that cannot name a run is BAD_USER_INPUT; an unknown run answers
+    NOT_FOUND "Run not found."; a non-admin keeps FORBIDDEN.
+    """
+    cancelAppRun(ref: ID!): AppRun!
 
     "Create a webhook trigger — returns the URL path + platform token ONCE (D-2026-05-02)."
     createAgentWebhook(input: CreateAgentWebhookInput!): AgentWebhookCredentials!
@@ -16567,9 +16680,16 @@ export const typeDefs = `#graphql
     after the new session commits; USER_ID mode rejects key supply.
     Only one key-consuming operation may use the header in a request;
     a second attempt is BAD_UNLOCK_INPUT.
+    'agentRef' is the Agent's id or its hrn:agent URN (renamed from 'agentId',
+    #4141). An Agent that does not exist, is deleted, or is not installed in
+    this App all answer the one FORBIDDEN "App is not allowed to operate this
+    agent". A ref that is neither an id nor a qualified hrn:agent URN (a
+    relative URN, a malformed ref, another entity's URN) is refused as
+    URN_NOT_QUALIFIED; cancelAppRun answers the same kind of ref with
+    BAD_USER_INPUT, its own door's existing shape code.
     """
     startAgentSession(
-      agentId: ID!
+      agentRef: ID!
       externalUserId: String
       sessionTimeoutSeconds: Int
     ): Session!
@@ -17864,14 +17984,14 @@ export const typeDefs = `#graphql
     project "No project": a task made with no project is AT0.<n>. An alias for the id, which stays canonical; every
     task operation that takes a task id also takes the handle. Immutable: parentage is fixed at creation. A person who
     belongs to several Apps qualifies it with the task's urn, hrn:agenttask:<app-urn>:at3.405, where the App URN is the
-    App's urn (either case is read). The handle is not the number of any GitHub issue the task's source names.
+    App's urn (as written; only the handle is read in either case). The handle is not the number of any GitHub issue the task's source names.
     """
     handle: String!
     """
     #3878: this task's URN, hrn:agenttask:<root>:<app-slug>:<handle>, for example
     hrn:agenttask:hadronmemory.com:hadron-dev-team:at3.405 (hrn:node:hadronmemory.com:specs:cor:urn:010:01). Computed
     when read from the App's current urn and the handle, never stored; emitted with the handle in lower case, while
-    the handle field and every display keep AT3.405. Query.resolveUrn reads it in either case, behind this task's
+    the handle field and every display keep AT3.405. Query.resolveUrn reads the handle in either case (the App part is matched as written, by reference), behind this task's
     own read gate, and an old App spelling still resolves after the App is renamed. Null only when the App's urn
     cannot form the address.
     """

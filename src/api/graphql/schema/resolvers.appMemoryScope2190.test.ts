@@ -82,6 +82,13 @@ async function scopeAll(who: string, pageSize = 2): Promise<Row[]> {
 const appNodesMemoryIds = async (who: string) =>
   new Set<string>((await Q.appNodes({}, { appRef: appId }, ctx(who))).map((x: { memoryId: string }) => x.memoryId));
 
+// Proxy passthrough that reads with the TARGET as receiver and binds methods to
+// it, so a delegate method never sees the proxy as `this` (#4905 F6).
+const passthroughBound = (target: object, prop: string | symbol) => {
+  const value = Reflect.get(target, prop, target);
+  return typeof value === 'function' ? value.bind(target) : value;
+};
+
 const keyOf = (id: string) => Object.entries(mem).find(([, v]) => v === id)?.[0] ?? id;
 const keysOf = (rows: Row[]) => rows.map((r) => keyOf(r.memoryId)).sort();
 
@@ -251,9 +258,74 @@ describe('#4890 — description rides the record gate, not the row\'s audience',
     for (const who of ['reader', 'member', 'external', 'admin']) {
       for (const row of await scopeAll(who)) {
         const record = await Q.memory({}, { ref: row.memoryId }, ctx(who));
-        expect(row.description, `${who} on ${keyOf(row.memoryId)}`).toBe(record?.description ?? null);
+        // The stored text is the independent oracle: the row carries it exactly
+        // when Query.memory opens the record, and null exactly when it does not.
+        const stored = (await db.memory.findUniqueOrThrow({ where: { id: row.memoryId }, select: { description: true } })).description;
+        expect(row.description, `${who} on ${keyOf(row.memoryId)}`).toBe(record ? stored : null);
       }
     }
+  });
+
+  it('a readable row with no description, or an empty one, returns null and the empty string as stored', async () => {
+    await db.memory.update({ where: { id: mem.KnowShared! }, data: { description: null } });
+    await db.memory.update({ where: { id: mem.KnowB! }, data: { description: '' } });
+    const rows = await scopeAll('admin');
+    const by = (k: string) => rows.find((r) => r.memoryId === mem[k])!;
+    // Both rows are openable by this caller; null here is "no description set", not "withheld".
+    expect(await Q.memory({}, { ref: mem.KnowShared! }, ctx('admin'))).not.toBeNull();
+    expect(by('KnowShared').description).toBeNull();
+    expect(by('KnowB').description).toBe('');
+  });
+
+  it('reads descriptions and gate fields for the page\'s ids only, one read, not the whole scope', async () => {
+    const calls: Array<{ ids: number; withDescription: boolean }> = [];
+    const spied = new Proxy(db.memory, {
+      get: (target, prop) => (prop === 'findMany'
+        ? (args: { where?: { id?: { in?: string[] } }; select?: { description?: boolean } }) => {
+            if (Array.isArray(args?.where?.id?.in)) calls.push({ ids: args.where!.id!.in!.length, withDescription: args.select?.description === true });
+            return target.findMany(args as never);
+          }
+        : passthroughBound(target, prop)),
+    });
+    const page = await Q.appMemoryScope({}, { appRef: appId, limit: 2, offset: 0 }, {
+      ...ctx('admin'),
+      db: new Proxy(db, { get: (t, p) => (p === 'memory' ? spied : passthroughBound(t, p)) }) as typeof db,
+    });
+    expect(page.items).toHaveLength(2);
+    expect(page.total).toBeGreaterThan(2);
+    const described = calls.filter((c) => c.withDescription);
+    expect(described).toHaveLength(1);
+    expect(described[0]!.ids).toBe(2);
+  });
+
+  it('a row hard-deleted between the key read and the page read is dropped; total still counts it', async () => {
+    const before = await Q.appMemoryScope({}, { appRef: appId }, ctx('admin'));
+    let fired = false;
+    const spied = new Proxy(db.memory, {
+      get: (target, prop) => (prop === 'findMany'
+        ? async (args: { where?: { id?: { in?: string[] } }; select?: { description?: boolean } }) => {
+            if (!fired && args?.select?.description === true) {
+              fired = true;
+              // The page read: remove one of the ids it is about to fetch.
+              await db.memory.delete({ where: { id: args.where!.id!.in![0]! } });
+            }
+            return target.findMany(args as never);
+          }
+        : passthroughBound(target, prop)),
+    });
+    const raced = await Q.appMemoryScope({}, { appRef: appId }, {
+      ...ctx('admin'),
+      db: new Proxy(db, { get: (t, p) => (p === 'memory' ? spied : passthroughBound(t, p)) }) as typeof db,
+    });
+    expect(fired).toBe(true);
+    expect(raced.total).toBe(before.total);
+    expect(raced.items).toHaveLength(before.items.length - 1);
+  });
+
+  it('an offset past the end returns no items and reads no page rows', async () => {
+    const page = await Q.appMemoryScope({}, { appRef: appId, limit: 5, offset: 1000 }, ctx('admin'));
+    expect(page.items).toEqual([]);
+    expect(page.total).toBeGreaterThan(0);
   });
 
   it('a memory soft-deleted between the scope snapshot and the page read stays listed, with description null', async () => {
@@ -266,7 +338,7 @@ describe('#4890 — description rides the record gate, not the row\'s audience',
     // memory query in the walk) to soft-delete KnowA right after it admits
     // the row, before the page read fetches it.
     const racedMemory = new Proxy(db.memory, {
-      get: (target, prop, recv) => (prop === 'findMany'
+      get: (target, prop) => (prop === 'findMany'
         ? async (args: { select?: { id?: boolean; urn?: boolean }; where?: { OR?: unknown; class?: unknown } }) => {
             const rows = await target.findMany(args as never);
             if (args?.select?.id === true && !args?.select?.urn && args?.where?.OR && !args?.where?.class) {
@@ -274,11 +346,11 @@ describe('#4890 — description rides the record gate, not the row\'s audience',
             }
             return rows;
           }
-        : Reflect.get(target, prop, recv)),
+        : passthroughBound(target, prop)),
     });
     const raced = await Q.appMemoryScope({}, { appRef: appId }, {
       ...ctx('member'),
-      db: new Proxy(db, { get: (t, p, r) => (p === 'memory' ? racedMemory : Reflect.get(t, p, r)) }) as typeof db,
+      db: new Proxy(db, { get: (t, p) => (p === 'memory' ? racedMemory : passthroughBound(t, p)) }) as typeof db,
     });
     const row = (raced.items as Row[]).find((r) => r.memoryId === mem.KnowA);
     expect(row).toBeDefined();
@@ -299,6 +371,17 @@ describe('#2190 — viewerCanWrite is the viewer\'s createNode gate, not the Age
     expect(row.viewerCanWrite).toBe(true);
   });
 
+  it('reports each row\'s own answer: a page mixing writable and read-only rows keeps them aligned', async () => {
+    const rows = await scopeAll('member', 100);
+    const answers = new Set(rows.map((r) => r.viewerCanWrite));
+    expect(answers.size, 'the principal must see both writable and read-only rows').toBe(2);
+    for (const r of rows) {
+      const solo = (await Q.appMemoryScope({}, { appRef: appId, limit: 1, offset: rows.indexOf(r) }, ctx('member'))).items[0] as Row;
+      expect(solo.memoryId).toBe(r.memoryId);
+      expect(solo.viewerCanWrite, keyOf(r.memoryId)).toBe(r.viewerCanWrite);
+    }
+  });
+
   it('agrees with createNode, row by row', async () => {
     for (const who of ['reader', 'member', 'admin']) {
       for (const row of await scopeAll(who)) {
@@ -311,7 +394,13 @@ describe('#2190 — viewerCanWrite is the viewer\'s createNode gate, not the Age
           // with SESSION_EXPIRED AFTER the write gate admitted. That refusal
           // is not the gate disagreeing — viewerCanWrite reports the gate
           // alone — so only FORBIDDEN counts as "cannot write".
-          gateAdmitted = (err as { extensions?: { code?: string } }).extensions?.code === 'SESSION_EXPIRED';
+          const e = err as { extensions?: { code?: string }; code?: string };
+          const code = e.extensions?.code ?? e.code;
+          // The named answers only: FORBIDDEN, or MEMORY_NOT_FOUND where createNode
+          // conceals a denial on a memory the caller cannot read. Anything else is a
+          // different failure, not an answer.
+          if (code !== 'SESSION_EXPIRED' && code !== 'FORBIDDEN' && code !== 'MEMORY_NOT_FOUND') throw err;
+          gateAdmitted = code === 'SESSION_EXPIRED';
         }
         expect(row.viewerCanWrite, `${who} on ${keyOf(row.memoryId)}`).toBe(gateAdmitted);
       }
@@ -323,9 +412,9 @@ describe('#2190 — a write-gate failure is a failure, never a read-only answer'
   it('fails the field when the gate errors with anything but its FORBIDDEN denial', async () => {
     const boom = new Error('simulated memory lookup failure');
     const memory = new Proxy(db.memory, {
-      get: (target, prop, recv) => (prop === 'findUniqueOrThrow' ? () => Promise.reject(boom) : Reflect.get(target, prop, recv)),
+      get: (target, prop) => (prop === 'findUniqueOrThrow' ? () => Promise.reject(boom) : passthroughBound(target, prop)),
     });
-    const failing = new Proxy(db, { get: (target, prop, recv) => (prop === 'memory' ? memory : Reflect.get(target, prop, recv)) });
+    const failing = new Proxy(db, { get: (target, prop) => (prop === 'memory' ? memory : passthroughBound(target, prop)) });
     await expect(Q.appMemoryScope({}, { appRef: appId }, { ...ctx('member'), db: failing as typeof db })).rejects.toBe(boom);
   });
 });

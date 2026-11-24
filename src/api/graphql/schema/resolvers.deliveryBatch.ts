@@ -12,7 +12,7 @@
 import type { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
-import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
+import { mayStillDriveWorkerApp } from '../../../lib/ownWorkerSessions.js';
 import { ownsSession, appPrincipalMayWriteSession } from '../../../lib/sessionOwnership.js';
 import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
 import { loadApp, taskError, type TaskApp } from './resolvers.agentTask.js';

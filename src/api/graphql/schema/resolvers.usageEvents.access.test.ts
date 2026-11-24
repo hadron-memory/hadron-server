@@ -131,7 +131,7 @@ describe('usageEvents access control — no resource named, and a bare loc acros
 
 describe('usageEvents access control — scoped (memoryId) path', () => {
   it('member can read their org memory\'s events', async () => {
-    const r = await resolvers.Query.usageEvents(null, { memoryId: memA.id }, asMember());
+    const r = await resolvers.Query.usageEvents(null, { memoryRef: memA.id }, asMember());
     expect(locsOf(r)).toEqual(new Set(['a-loc']));
   });
 
@@ -139,26 +139,26 @@ describe('usageEvents access control — scoped (memoryId) path', () => {
   // one. The old `[]` was the leak — a MISSING memory throws, so an empty page
   // meant "exists, not yours".
   it('member cannot read a memory in an org they don\'t belong to → MEMORY_NOT_FOUND, as if missing', async () => {
-    await expect(resolvers.Query.usageEvents(null, { memoryId: memB.id }, asMember())).rejects.toThrow(
+    await expect(resolvers.Query.usageEvents(null, { memoryRef: memB.id }, asMember())).rejects.toThrow(
       `MEMORY_NOT_FOUND: ${memB.id}`,
     );
   });
 
   it('owner can read their private memory\'s events', async () => {
-    const r = await resolvers.Query.usageEvents(null, { memoryId: privMem.id }, asMember());
+    const r = await resolvers.Query.usageEvents(null, { memoryRef: privMem.id }, asMember());
     expect(locsOf(r)).toEqual(new Set(['p-loc']));
   });
 
   it('non-owner cannot read someone else\'s private memory → MEMORY_NOT_FOUND, as if missing', async () => {
-    await expect(resolvers.Query.usageEvents(null, { memoryId: privMem.id }, asOther())).rejects.toThrow(
+    await expect(resolvers.Query.usageEvents(null, { memoryRef: privMem.id }, asOther())).rejects.toThrow(
       `MEMORY_NOT_FOUND: ${privMem.id}`,
     );
   });
 
   it('accepts a URN memoryId and still enforces access', async () => {
-    const allowed = await resolvers.Query.usageEvents(null, { memoryId: memA.urn }, asMember());
+    const allowed = await resolvers.Query.usageEvents(null, { memoryRef: memA.urn }, asMember());
     expect(locsOf(allowed)).toEqual(new Set(['a-loc']));
-    await expect(resolvers.Query.usageEvents(null, { memoryId: memB.urn }, asMember())).rejects.toThrow(
+    await expect(resolvers.Query.usageEvents(null, { memoryRef: memB.urn }, asMember())).rejects.toThrow(
       `MEMORY_NOT_FOUND: ${memB.urn}`,
     );
   });
@@ -166,18 +166,18 @@ describe('usageEvents access control — scoped (memoryId) path', () => {
 
 describe('usageEvents access control — nodeId path is access-bounded', () => {
   it('member can read a node in an accessible memory', async () => {
-    const r = await resolvers.Query.usageEvents(null, { nodeId: nodeA.id }, asMember());
+    const r = await resolvers.Query.usageEvents(null, { nodeRef: nodeA.id }, asMember());
     expect(locsOf(r)).toEqual(new Set(['a-loc']));
   });
 
   it('member querying a node in an inaccessible memory gets [] (not the event)', async () => {
-    const r = await resolvers.Query.usageEvents(null, { nodeId: nodeB.id }, asMember());
+    const r = await resolvers.Query.usageEvents(null, { nodeRef: nodeB.id }, asMember());
     expect(r).toEqual([]);
   });
 
   it('bare-loc nodeId is bounded to readable memories', async () => {
     // 'b-loc' only exists in memB (inaccessible to member) → [].
-    const r = await resolvers.Query.usageEvents(null, { nodeId: 'b-loc' }, asMember());
+    const r = await resolvers.Query.usageEvents(null, { nodeRef: 'b-loc' }, asMember());
     expect(r).toEqual([]);
   });
 });

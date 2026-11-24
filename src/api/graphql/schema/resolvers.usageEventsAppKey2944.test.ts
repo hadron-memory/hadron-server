@@ -179,10 +179,10 @@ describe('#2944 items 2 and 4: whoever manages the App sees K in the memories th
   });
 
   it('naming a memory narrows; an unreadable one answers MEMORY_NOT_FOUND exactly as a missing one', async () => {
-    expect(ids(await list({ appKey: keyK, memoryId: memA.id }, asUser(mgr)))).toEqual([kInA]);
+    expect(ids(await list({ appKey: keyK, memoryRef: memA.id }, asUser(mgr)))).toEqual([kInA]);
     const missing = generateId();
-    await expect(list({ appKey: keyK, memoryId: memB.id }, asUser(mgr))).rejects.toThrow(`MEMORY_NOT_FOUND: ${memB.id}`);
-    await expect(list({ appKey: keyK, memoryId: missing }, asUser(mgr))).rejects.toThrow(`MEMORY_NOT_FOUND: ${missing}`);
+    await expect(list({ appKey: keyK, memoryRef: memB.id }, asUser(mgr))).rejects.toThrow(`MEMORY_NOT_FOUND: ${memB.id}`);
+    await expect(list({ appKey: keyK, memoryRef: missing }, asUser(mgr))).rejects.toThrow(`MEMORY_NOT_FOUND: ${missing}`);
   });
 
   it('the window composes with the key filter', async () => {
@@ -227,7 +227,7 @@ describe('#2944 blind P3 (#3714): nodeId and loc follow the same key rules as me
 
   it('a manager naming a readable node or a loc gets only K there; the same loc in an unreadable memory stays hidden', async () => {
     for (const run of [list, async (a: Record<string, unknown>, c: Context) => (await page(a, c)).items]) {
-      expect(ids(await run({ appKey: keyK, nodeId: nodeA.id }, asUser(mgr)))).toEqual([kOnA]);
+      expect(ids(await run({ appKey: keyK, nodeRef: nodeA.id }, asUser(mgr)))).toEqual([kOnA]);
       expect(ids(await run({ appKey: keyK, loc: 'u2944:n' }, asUser(mgr)))).toEqual([kOnA]);
     }
     expect((await page({ appKey: keyK, loc: 'u2944:n' }, asUser(mgr))).total).toBe(1);
@@ -242,9 +242,9 @@ describe('#2944 blind P3 (#3714): nodeId and loc follow the same key rules as me
       catch (e) { return { error: (e as Error).message.replace(ref, '<ref>') }; }
     };
     for (const ref of [nodeB.id, missing]) {
-      expect(await outcome({ appKey: keyK, nodeId: ref }, ref)).toEqual(await outcome({ nodeId: ref }, ref));
+      expect(await outcome({ appKey: keyK, nodeRef: ref }, ref)).toEqual(await outcome({ nodeRef: ref }, ref));
     }
-    expect(await outcome({ appKey: keyK, nodeId: nodeB.id }, nodeB.id)).toEqual({ rows: [] });
+    expect(await outcome({ appKey: keyK, nodeRef: nodeB.id }, nodeB.id)).toEqual({ rows: [] });
   });
 
   // #3732 (Garth's optional P3 on #3714): K filtering by ITSELF while naming a resource it cannot read, or one that
@@ -264,8 +264,8 @@ describe('#2944 blind P3 (#3714): nodeId and loc follow the same key rules as me
   it('K naming a memory it cannot read answers exactly as a missing memory, on both surfaces (#3732 pin 1)', async () => {
     const missing = generateId();
     for (const [, run] of surfaces) {
-      const unreadable = await outcomeAs(run, { appKey: keyK, memoryId: memB.id }, asKey(keyK), memB.id);
-      expect(unreadable).toEqual(await outcomeAs(run, { appKey: keyK, memoryId: missing }, asKey(keyK), missing));
+      const unreadable = await outcomeAs(run, { appKey: keyK, memoryRef: memB.id }, asKey(keyK), memB.id);
+      expect(unreadable).toEqual(await outcomeAs(run, { appKey: keyK, memoryRef: missing }, asKey(keyK), missing));
       expect(unreadable).toEqual({ error: 'MEMORY_NOT_FOUND: <ref>', code: 'MEMORY_NOT_FOUND' });
       expect(unreadable).not.toHaveProperty('rows');
     }
@@ -273,8 +273,8 @@ describe('#2944 blind P3 (#3714): nodeId and loc follow the same key rules as me
 
   it('K naming a node in a memory it cannot read: the key filter adds no row and changes nothing, on both surfaces (#3732 pin 2)', async () => {
     for (const [, run] of surfaces) {
-      const keyed = await outcomeAs(run, { appKey: keyK, nodeId: nodeB.id }, asKey(keyK), nodeB.id);
-      expect(keyed).toEqual(await outcomeAs(run, { nodeId: nodeB.id }, asKey(keyK), nodeB.id));
+      const keyed = await outcomeAs(run, { appKey: keyK, nodeRef: nodeB.id }, asKey(keyK), nodeB.id);
+      expect(keyed).toEqual(await outcomeAs(run, { nodeRef: nodeB.id }, asKey(keyK), nodeB.id));
       expect(keyed).not.toEqual({ rows: [kOnB] });
       if ('rows' in keyed) expect(keyed.rows).toEqual([]);
     }
@@ -283,8 +283,8 @@ describe('#2944 blind P3 (#3714): nodeId and loc follow the same key rules as me
   it('K naming a missing node: the key filter changes nothing about the answer, on both surfaces (#3732 pin 3)', async () => {
     const missing = generateId();
     for (const [, run] of surfaces) {
-      const keyed = await outcomeAs(run, { appKey: keyK, nodeId: missing }, asKey(keyK), missing);
-      expect(keyed).toEqual(await outcomeAs(run, { nodeId: missing }, asKey(keyK), missing));
+      const keyed = await outcomeAs(run, { appKey: keyK, nodeRef: missing }, asKey(keyK), missing);
+      expect(keyed).toEqual(await outcomeAs(run, { nodeRef: missing }, asKey(keyK), missing));
       if ('rows' in keyed) expect(keyed.rows).toEqual([]);
     }
   });
@@ -302,11 +302,11 @@ describe('#2944 blind P3 (#3714): nodeId and loc follow the same key rules as me
   it('a refused key answers APP_KEY_NOT_FOUND before any node or loc is resolved, on both surfaces', async () => {
     const expected = { message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND', id: keyK } };
     for (const run of [list, page]) {
-      expect(await unknownKeyAnswer(run({ appKey: keyK, nodeId: nodeA.id }, asUser(plainMember)))).toEqual(expected);
-      expect(await unknownKeyAnswer(run({ appKey: keyK, nodeId: nodeB.id }, asUser(plainMember)))).toEqual(expected);
-      expect(await unknownKeyAnswer(run({ appKey: keyK, nodeId: generateId() }, asUser(plainMember)))).toEqual(expected);
+      expect(await unknownKeyAnswer(run({ appKey: keyK, nodeRef: nodeA.id }, asUser(plainMember)))).toEqual(expected);
+      expect(await unknownKeyAnswer(run({ appKey: keyK, nodeRef: nodeB.id }, asUser(plainMember)))).toEqual(expected);
+      expect(await unknownKeyAnswer(run({ appKey: keyK, nodeRef: generateId() }, asUser(plainMember)))).toEqual(expected);
       expect(await unknownKeyAnswer(run({ appKey: keyK, loc: 'u2944:n' }, asUser(plainMember)))).toEqual(expected);
-      expect(await unknownKeyAnswer(run({ appKey: keyK, nodeId: nodeA.id }, asKey(keyK2)))).toEqual(expected);
+      expect(await unknownKeyAnswer(run({ appKey: keyK, nodeRef: nodeA.id }, asKey(keyK2)))).toEqual(expected);
     }
   });
 });
@@ -343,13 +343,13 @@ describe('#2944 item 5: K filtering by itself sees its own events', () => {
       { ...ev({ id: keyless, memoryId: appMem.id, nodeId: node.id, nodeLoc: 'u2944:self' }), appId: app.id },
     ] });
     for (const run of [list, async (a: Record<string, unknown>, c: Context) => (await page(a, c)).items]) {
-      expect(ids(await run({ appKey: keyK, nodeId: node.id }, asKey(keyK)))).toEqual([mine]);
+      expect(ids(await run({ appKey: keyK, nodeRef: node.id }, asKey(keyK)))).toEqual([mine]);
       expect(ids(await run({ appKey: keyK, loc: 'u2944:self' }, asKey(keyK)))).toEqual([mine]);
-      expect(ids(await run({ appKey: keyK, memoryId: appMem.id }, asKey(keyK)))).toEqual([mine]);
+      expect(ids(await run({ appKey: keyK, memoryRef: appMem.id }, asKey(keyK)))).toEqual([mine]);
     }
-    expect((await page({ appKey: keyK, nodeId: node.id }, asKey(keyK))).total).toBe(1);
+    expect((await page({ appKey: keyK, nodeRef: node.id }, asKey(keyK))).total).toBe(1);
     // The sibling key filtering by itself on the same node gets only its own row.
-    expect(ids(await list({ appKey: keyK2, nodeId: node.id }, asKey(keyK2)))).toEqual([sibling]);
+    expect(ids(await list({ appKey: keyK2, nodeRef: node.id }, asKey(keyK2)))).toEqual([sibling]);
   });
 });
 
@@ -378,8 +378,8 @@ describe('#2944 item 3: a key the caller may not filter by answers exactly as a 
 
   it('the key is judged before any memory is resolved, so a refused key never reveals a memory', async () => {
     const expected = { message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND', id: keyK } };
-    expect(await unknownKeyAnswer(list({ appKey: keyK, memoryId: memA.id }, asUser(plainMember)))).toEqual(expected);
-    expect(await unknownKeyAnswer(list({ appKey: keyK, memoryId: generateId() }, asUser(plainMember)))).toEqual(expected);
+    expect(await unknownKeyAnswer(list({ appKey: keyK, memoryRef: memA.id }, asUser(plainMember)))).toEqual(expected);
+    expect(await unknownKeyAnswer(list({ appKey: keyK, memoryRef: generateId() }, asUser(plainMember)))).toEqual(expected);
   });
 
   it('an impersonation session stays refused as today (Forbidden), before the key is looked at', async () => {

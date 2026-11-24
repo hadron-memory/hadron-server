@@ -84,6 +84,25 @@ describe('#4003 a superseded writer\'s client after its version is purged', () =
     expect(bystander).not.toBe('SECRET_READ_CLIENT_SUPERSEDED');
   });
 
+  // #4573 (#4553 §10 F3, mutants I2 and I3): the bystander never wrote. Any other event of theirs, or a write that did not happen, proves nothing.
+  it.each([
+    ['another kind', { kind: 'PURGE', outcome: 'OK' }],
+    ['a refused store', { kind: 'STORE', outcome: 'REFUSED' }],
+    ['a refused version', { kind: 'VERSION', outcome: 'REFUSED' }],
+  ])('%s naming the caller is no proof of authorship', async (_n, event) => {
+    await purgeOld();
+    const add = (e: { kind: string; outcome: string }) => db.secretEvent.create({
+      data: { ownerType: 'app', ownerId: appId, secretId, secretName: 'tok', versionNo: 1, actorUserId: bystanderId, ...e },
+    });
+    const plain = await code(issueAs(bystanderId));
+    await add(event);
+    expect(await code(issueAs(bystanderId))).toBe(plain);
+    expect(plain).not.toBe('SECRET_READ_CLIENT_SUPERSEDED');
+    // Control: the same row with a write kind and an OK outcome IS the proof, so the assertion above is not vacuous.
+    await add({ kind: 'VERSION', outcome: 'OK' });
+    expect(await code(issueAs(bystanderId))).toBe('SECRET_READ_CLIENT_SUPERSEDED');
+  });
+
   it('a version a worker wrote proves nothing for its driver after the purge', async () => {
     // The member drives a worker that writes version 3 (a worker write has no person writer, Q21); the owner then writes 4.
     await runAsActor({ workerId, agentId: null }, () => resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'v3' }, ctxOf(bystanderId)));

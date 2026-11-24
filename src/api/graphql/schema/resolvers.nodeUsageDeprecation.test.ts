@@ -1,5 +1,5 @@
 /**
- * #802 — nodeUsage is deprecated in favour of usageEvents(nodeId:).
+ * #802 — nodeUsage is deprecated in favour of usageEvents(nodeRef:).
  *
  * A deprecation is a promise to clients: "this other field does the same thing".
  * Two ways that promise rots silently, both guarded here:
@@ -60,9 +60,9 @@ describe('nodeUsage deprecation (#802)', () => {
     expect(args).toContain('loc');
     expect(args).toContain('limit');
     // The superset the notice advertises as the reason to migrate.
-    expect(args).toContain('nodeId');
+    expect(args).toContain('nodeRef');
     expect(args).toContain('type');
-    expect(args).toContain('memoryId');
+    expect(args).toContain('memoryRef');
     expect(args).toContain('offset');
   });
 

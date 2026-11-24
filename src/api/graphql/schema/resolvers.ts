@@ -30,6 +30,7 @@ export type { Context };
 import { dateTimeScalar } from './dateTimeScalar.js';
 import { typeResolvers } from './resolvers.types.js';
 
+import { nodeAuthoringCheckQueries } from './resolvers.nodeAuthoringCheck.js';
 import { nodeQueries } from './resolvers.query.node.js';
 import { recoveryQueries, recoveryMutations, recoveryFieldResolvers } from './resolvers.recovery.js';
 import { skillQueries } from './resolvers.query.skill.js';
@@ -83,7 +84,7 @@ import { compileBootPromptMutations } from './resolvers.mutation.compileBootProm
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamSpecQueries } from './resolvers.teamSpec.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
-import { teamAttentionMutations } from './resolvers.teamAttention.js';
+import { ownWorkerSessionsMutations } from './resolvers.ownWorkerSessions.js';
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
 import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolvers.ticker.js';
@@ -210,6 +211,7 @@ export const resolvers = {
     ...passkeyQueries,
     ...recoveryQueries,
     ...nodeQueries,
+    ...nodeAuthoringCheckQueries,
     ...specCorpusQueries,
     ...specDocumentQueries,
     ...nodeApprovalQueries,
@@ -313,7 +315,7 @@ export const resolvers = {
     ...compileBootPromptMutations,
     ...teamRoleMutations,
     ...teamChatMutations,
-    ...teamAttentionMutations,
+    ...ownWorkerSessionsMutations,
     ...teamWorkMutations,
     ...agentTaskMutations,
     ...prProtocolMutations,

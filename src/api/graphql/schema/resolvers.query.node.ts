@@ -30,7 +30,7 @@ import {
   isEmbeddingConfigured,
 } from '../../../lib/embedding/index.js';
 import { certifiedHybridRanking, hybridKeywordCandidates } from '../../../lib/retrieval/hybrid.js';
-import { vectorSearchTimeoutMs } from '../../../services/embedding/vectors.js';
+import { isStatementTimeout, vectorSearchTimeoutMs } from '../../../services/embedding/vectors.js';
 import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from '../../../lib/retrieval/defaultNodeTypes.js';
@@ -1081,7 +1081,7 @@ export const nodeQueries = {
         }
         case 'agenttask': {
           // #3878 (hrn:node:hadronmemory.com:specs:cor:urn:010:01; ruling 0278): hrn:agenttask:<root>:<app-slug>:<handle>,
-          // the URN AgentTask.urn emits (handle in lower case), read in either case. The leaf is the HANDLE only: the
+          // the URN AgentTask.urn emits (handle in lower case); the HANDLE is read in either case, the App part as written. The leaf is the HANDLE only: the
           // task-id leaf was never built and no qualified task-id URN resolves (cor:urn:010:01), so the wider task
           // reference form (targetHasKindForm) is not inherited. The App is resolved by reference, so a renamed App's
           // old spelling still resolves; then Query.agentTask's own gate decides (withReadableTask: a participant, the
@@ -1090,6 +1090,8 @@ export const nodeQueries = {
           try {
             const parsed = parseUrnV2(baseUrn); // fixed 'agenttask' arity: [app-slug, leaf]
             const leaf = parseTaskHandle(parsed.segments[1]);
+            // Deliberate guard: a single URN segment cannot carry the colon an App-qualified handle needs, so
+            // appUrn is null here today; refuse anything else rather than trust that.
             if (!leaf || leaf.appUrn !== null) return null;
             qualified = `hrn:agenttask:${parsed.root}:${parsed.segments[0]!}:${leaf.handle}`;
           } catch (error) {
@@ -1101,7 +1103,7 @@ export const nodeQueries = {
               ctx,
               qualified,
               async (_c, { task, app }) => ({ kind: 'agenttask', id: task.id, organizationId: app.organizationId }),
-              true,
+              true, // allowRun: a run in the task's own App may read it
             );
           } catch (error) {
             // A name-resolution outcome on the App reference is the uniform refusal; a fault propagates (#2975).
@@ -2099,10 +2101,11 @@ export const nodeQueries = {
       // same bare query. TRUE hybrid (vector present) does NOT relax: the vector
       // half already supplies recall, and relaxing would pollute the RRF inputs
       // and mislabel a vector-found result as `and_relaxed_to_or`.
-      const runKeywordRanked = async (opts: { relax?: boolean; limit?: number } = {}) => {
+      const runKeywordRanked = async (opts: { relax?: boolean; limit?: number; statementTimeoutMs?: number } = {}) => {
         const args = {
           db: ctx.db, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter,
           includeDeleted: !!f.includeDeleted, sort: 'relevance' as const, offset: 0, limit: opts.limit ?? fetchN,
+          statementTimeoutMs: opts.statementTimeoutMs,
         };
         const result = await hybridKeywordCandidates(q, query => provider.lexicalSearch({ ...args, query }), !!opts.relax);
         lexicalDegraded = result.degraded;
@@ -2276,7 +2279,16 @@ export const nodeQueries = {
           } else if (r.kwUncertain && dk < kwCeiling && Date.now() < vectorDeadlineAt) {
             // BLIND F3 (Elena): the widening spends the request's one budget too; past its deadline the page stops early.
             dk = Math.min(dk * 2, kwCeiling);
-            kwHits = await runKeywordRanked({ limit: dk });
+            // #4938 N3 (Elena): and its statement runs under what is LEFT of that budget, so a widening started just before
+            // the deadline cannot run unbounded. A cut is the early stop: the page keeps the ranking it had, flagged below,
+            // never a short page (cor:api:090:04).
+            try {
+              kwHits = await runKeywordRanked({ limit: dk, statementTimeoutMs: Math.max(1, Math.trunc(vectorDeadlineAt - Date.now())) });
+            } catch (e) {
+              if (!isStatementTimeout(e)) throw e;
+              rankingIncomplete = true;
+              return { fused: r.ranked, vecHits, exhausted: false };
+            }
             continue;
           }
           rankingIncomplete = true; // the order up to the page could not be certified inside the budget / ceiling
@@ -2290,7 +2302,7 @@ export const nodeQueries = {
        * still short it is flagged `stopped_early` (cor:api:090:04 Proposed: "whenever the page is incomplete"; Vera, team chat
        * #140476), never returned as a silently short page.
        */
-      const rankedPage = async (pageN: number) => {
+      const rankedPage = async (pageN: number, certifiedPrefixOnly = false) => {
         const stats = { dropped: 0, pageCount: 0, consumed: 0 };
         if (effectiveMode === 'vector') {
           const vecHits = await runVector((limit, onWindow) => provider.vectorSearch({ ...vectorOpts, limit, onWindow }), pageN);
@@ -2306,7 +2318,15 @@ export const nodeQueries = {
         // separately on `vector.similarity` (simById below).
         const { fused, vecHits, exhausted } = await hybridRanking(pageN);
         const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
-        const built = await buildResult(fused.map((r) => ({ nodeId: r.nodeId, score: r.score })), simById, null, mergeDegraded(null), stats);
+        // #4938 F6 (Elena, BLIND on #4928 at 5ad0665b): the re-ranking pages ONLY the prefix it was certified for. Past
+        // `pageN` the fused order is not certified, so a re-ranked page that hydration drops would fill from there could hold
+        // the wrong rows, or the right rows in the wrong order, which stopped_early (a SHORT page) does not describe. There
+        // is no further re-ranking to catch it, so such a page is left short and flagged instead. (A first attempt that fills
+        // past its depth is already caught: it triggers the re-ranking and is never served in its place, BLIND F1.) With
+        // BOTH legs exhausted every fused term is exact, so the whole list is the true order and nothing is cut: cutting it
+        // there would leave a silently short page (incomplete() never flags an exhausted ranking).
+        const ranked = certifiedPrefixOnly && !exhausted ? fused.slice(0, pageN) : fused;
+        const built = await buildResult(ranked.map((r) => ({ nodeId: r.nodeId, score: r.score })), simById, null, mergeDegraded(null), stats);
         return { built, stats, exhausted };
       };
       /**
@@ -2323,7 +2343,7 @@ export const nodeQueries = {
         rankingIncomplete = false; // the second attempt's ranking replaces the first's, flags included
         // BLIND N1 (Elena): deep enough to cover where the first page actually reached, not only page + the drops counted.
         const depth = Math.max(page + first.stats.dropped, first.stats.consumed);
-        attempt = await rankedPage(depth);
+        attempt = await rankedPage(depth, true);
         if (incomplete(attempt, depth)) rankingIncomplete = true;
         // LOCAL F1 (Abigail): a re-ranking that stopped early (e.g. it started past the request deadline) and came back with
         // a smaller page must not replace the usable first page; keep the first, flagged incomplete as it already was.
@@ -2707,7 +2727,7 @@ export const nodeQueries = {
      * the same verbatim semantics as `usageEvents(loc: <loc>)`, bounded to
      * the memories the caller may read. It is a filter, not a lookup: an
      * unknown loc yields `[]` rather than NODE_NOT_FOUND. A bare loc cannot
-     * disambiguate the same loc in two memories; `usageEvents(nodeId: <PK|URN>)`
+     * disambiguate the same loc in two memories; `usageEvents(nodeRef: <PK|URN>)`
      * is the memory-precise form.
      *
      * Access control (#802): this resolver previously had NO gate at all —
@@ -2875,12 +2895,12 @@ export const nodeQueries = {
      */
     memoryLocSegments: async (
       _: unknown,
-      args: { memoryIds: string[]; parentLoc: string; limit?: number | null; after?: string | null },
+      args: { memoryRefs: string[]; parentLoc: string; limit?: number | null; after?: string | null },
       ctx: Context,
     ) => {
       const refuse = (msg: string) => new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
-      if (!Array.isArray(args.memoryIds) || args.memoryIds.length === 0) {
-        throw refuse('memoryLocSegments: memoryIds must name at least one memory.');
+      if (!Array.isArray(args.memoryRefs) || args.memoryRefs.length === 0) {
+        throw refuse('memoryLocSegments: memoryRefs must name at least one memory.');
       }
       if (args.parentLoc.startsWith(':') || args.parentLoc.endsWith(':') || args.parentLoc.includes('::') || args.parentLoc.includes('\0')) {
         throw refuse('memoryLocSegments: parentLoc is not a valid loc.');
@@ -2895,7 +2915,7 @@ export const nodeQueries = {
       const empty = { items: [], hasMore: false, endCursor: null };
       // Each memory is read once however many times (or by which alias) it was named: a repeat would repeat
       // its rows, break the continuation and multiply the walk (#3586 review).
-      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryIds }, null))];
+      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryRefs }, null))];
       if (gated.length === 0) return empty;
       const inheritance = await effectiveScope(ctx.db, gated);
       return readLocSegments(ctx.db, {

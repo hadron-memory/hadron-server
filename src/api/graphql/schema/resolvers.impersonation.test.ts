@@ -772,7 +772,7 @@ describe('#876 — identity-scoped read surfaces are denied under impersonation'
   });
 
   it('3. assets: listing and the presigned download URL refuse', async () => {
-    await expect(q('memoryAssets')({}, { memoryId: 'whatever' }, impCtx)).rejects.toThrow(
+    await expect(q('memoryAssets')({}, { memoryRef: 'whatever' }, impCtx)).rejects.toThrow(
       /Forbidden/,
     );
     await expect(
