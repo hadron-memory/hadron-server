@@ -172,7 +172,11 @@ export const meteringQueries = {
   ) => {
     // A reference that names no organization answers the denial any non-admin gets for an existing one, so the
     // refusal does not tell which organizations exist (and echoes nothing of the ref). A platform admin passes
-    // the gate for every organization, so for them nothing is concealed and the not-found stays.
+    // the gate for every organization, so for them nothing is concealed and the not-found stays. Only the RESPONSE is
+    // equalised, not the work: a missing organization skips the membership lookup an existing one runs, so a timing
+    // difference remains. That is not a secret kept: organizations are listable (the #5008 issue), and the refusal is
+    // identical so this surface does not read as an existence oracle. An App key (no user) is denied by
+    // requireOrgRole with the same authorizationDenied(), so it gets the same answer for either.
     let orgId: string;
     try {
       ({ id: orgId } = await resolveOrgRef(ctx.db, orgRef));

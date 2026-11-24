@@ -89,6 +89,8 @@ export async function aiSpendSummary(db: Db, input: AiSpendInput): Promise<AiSpe
              coalesce(sum(ue.tokens_out), 0) AS tokens_out,
              coalesce(sum(ue.cost_micro_cents), 0) AS cost,
              count(*) FILTER (WHERE ue.cost_micro_cents IS NULL) AS unpriced,
+             -- debitCredits stores a debit negative; the magnitude is summed per row, so a mis-signed row still counts as a
+             -- charge instead of netting against another. This query does not police a debit's sign.
              coalesce(sum(abs(c.amount_micro_cents)), 0) AS charged
       FROM usage_events ue
       ${CHARGE_JOIN}
