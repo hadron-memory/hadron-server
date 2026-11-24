@@ -71,7 +71,7 @@ ALTER TABLE grants ADD CONSTRAINT chk_grants_shape CHECK (
 CREATE OR REPLACE FUNCTION hadron_grant_link_merged(old_id text, new_id text) RETURNS boolean
 LANGUAGE sql STABLE AS $$
   SELECT old_id IS NOT NULL AND new_id IS NOT NULL
-    AND EXISTS (SELECT 1 FROM user_merges m WHERE m.source_user_id = old_id AND m.target_user_id = new_id)
+    AND EXISTS (SELECT 1 FROM public.user_merges m WHERE m.source_user_id = old_id AND m.target_user_id = new_id)
 $$;
 -- #4172: the SQL twin of resolveAppInstallation (src/lib/appInstallations.ts) as the grant guard needs it: does this agent still have an
 -- EFFECTIVE installation in this App? TRUE when EITHER a physical app_agents row exists and the agent is live, OR the agent is
