@@ -179,6 +179,37 @@ describe('#395 an empty section is left out; the title fallback is intact', () =
   });
 });
 
+describe('#395 escaping and scalar values (blind F1, F2, F6)', () => {
+  it('a backslash before a pipe is escaped too, so the pipe cannot end the cell', async () => {
+    await db.node.update({ where: { id: nodeId }, data: { data: { path: 'a\\|b' } } });
+    await exportPdf({ sections: ['DATA'] });
+    // stored `a\|b` (backslash, pipe) prints as `a\\\|b`: the backslash doubled, the pipe escaped
+    expect(printed()).toContain('| path | ' + 'a' + '\\\\' + '\\|' + 'b |');
+  });
+
+  it('an edge name and a metadata value with a pipe or newline stay on one line', async () => {
+    await db.edge.updateMany({ where: { sourceId: nodeId }, data: { name: 'ne|xt', description: 'two\nlines' } });
+    await db.node.update({ where: { id: nodeId }, data: { description: 'one|two\nthree' } });
+    await exportPdf({ sections: ['EDGES', 'METADATA'] });
+    expect(printed()).toContain('- ne\\|xt → guide:more — two lines');
+    expect(printed()).toContain('- Description: one\\|two three');
+  });
+
+  it('a scalar Data value prints as a fenced block and an empty string prints nothing', async () => {
+    await db.node.update({ where: { id: nodeId }, data: { data: 'plain text' } });
+    await exportPdf({ sections: ['DATA'] });
+    expect(printed()).toContain('## Data\n\n```json\n"plain text"\n```');
+    await db.node.update({ where: { id: nodeId }, data: { data: '' } });
+    await exportPdf({ sections: ['DATA'] });
+    expect(printed()).not.toContain('## Data');
+  });
+
+  it('the node name reaches the PDF service as its title option', async () => {
+    await exportPdf();
+    expect(vi.mocked(renderMarkdownToPdf).mock.calls.at(-1)![1]).toMatchObject({ title: 'Intro' });
+  });
+});
+
 describe('#395 the Edges section prints only live targets in memories the caller can read (§10, #781)', () => {
   const edgeTo = async (targetId: string, name: string) =>
     db.edge.create({ data: { id: generateId(), memoryId, sourceId: nodeId, targetId, loc: `guide:intro:${name}:${targetId}`, name } });

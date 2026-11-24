@@ -215,20 +215,22 @@ export function renderSectionedJson(n: ExportNode, sections: Set<NodeExportSecti
  */
 const PDF_SECTION_ORDER: readonly NodeExportSection[] = ['ABSTRACT', 'DATA', 'PROPERTIES', 'EDGES', 'METADATA'];
 
-/** One line of Markdown for a table cell or list value: no newline, no unescaped pipe. */
-function inlineCell(value: unknown): string {
+/** One line of Markdown for a table cell or list value: no newline, and every backslash and pipe escaped, so a value such as `a\\|b` cannot end a cell early. */
+function inlineText(value: unknown): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value) ?? '';
-  return text.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
+  return text.replace(/\r?\n/g, ' ').replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 }
 
 /** Data and Properties: a two-column table for an object, a fenced block for any other non-empty JSON. */
 function jsonSection(heading: string, value: unknown): string | null {
   if (value === null || value === undefined) return null;
+  // An empty string is as empty as `{}` or `[]` (0 and false are values and print).
+  if (typeof value === 'string' && value.trim() === '') return null;
   if (typeof value === 'object' && !Array.isArray(value)) {
     // Keys sorted: jsonb stores an object's keys by length, not insertion, so the table's row order must not depend on it.
     const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
     if (entries.length === 0) return null;
-    const rows = entries.map(([key, v]) => `| ${inlineCell(key)} | ${inlineCell(v)} |`);
+    const rows = entries.map(([key, v]) => `| ${inlineText(key)} | ${inlineText(v)} |`);
     return `## ${heading}\n\n| Key | Value |\n| --- | --- |\n${rows.join('\n')}`;
   }
   if (Array.isArray(value) && value.length === 0) return null;
@@ -244,11 +246,13 @@ function pdfSection(n: ExportNode, section: NodeExportSection): string | null {
     case 'PROPERTIES':
       return jsonSection('Properties', n.properties);
     case 'EDGES': {
+      // An edge with no resolvable target is left out, like any other empty entry (the resolver has already kept
+      // only live targets in readable memories). Only outgoing edges are listed, as in the MD/JSON export.
       const items = n.edges
         .filter((e) => e && e.target)
         .map((e) => {
-          const note = e.description ? ` — ${inlineCell(e.description)}` : '';
-          return `- ${inlineCell(e.name || '(edge)')} → ${inlineCell(e.target.loc || e.target.id)}${note}`;
+          const note = e.description ? ` — ${inlineText(e.description)}` : '';
+          return `- ${inlineText(e.name || '(edge)')} → ${inlineText(e.target.loc || e.target.id)}${note}`;
         });
       return items.length > 0 ? `## Edges\n\n${items.join('\n')}` : null;
     }
@@ -263,7 +267,7 @@ function pdfSection(n: ExportNode, section: NodeExportSection): string | null {
       ];
       const items = fields
         .filter(([, v]) => v !== null && v !== undefined && v !== '')
-        .map(([label, v]) => `- ${label}: ${inlineCell(v)}`);
+        .map(([label, v]) => `- ${label}: ${inlineText(v)}`);
       return items.length > 0 ? `## Metadata\n\n${items.join('\n')}` : null;
     }
     default:

@@ -10341,7 +10341,7 @@ export const typeDefs = `#graphql
       is always printed; the sections you name are ADDED after it (naming
       CONTENT changes nothing), in the fixed order Abstract, Data, Properties,
       Edges, Metadata whatever order you gave: Data and Properties as two-column
-      tables, Edges as a list, Metadata as a list, a section with nothing in it
+      tables (a value that is not an object prints as a fenced JSON block), Edges as a list, Metadata as a list, a section with nothing in it
       left out. No sections named prints the content only. Comments is not a
       section yet.
     Auth: same node-read gate as node(ref:). (HTML + asUrl delivery land
