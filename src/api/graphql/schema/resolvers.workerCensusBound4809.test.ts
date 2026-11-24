@@ -128,9 +128,8 @@ describe('#4809 bounded worker census', () => {
   // past the budget, and the next arm() meets left <= 0. Postgres has nothing to cancel, so only the JS check can refuse. With
   // the check mutated to `return`, the census carries on under the first statement's setting and answers false (no refusal).
   it('the JS deadline between two statements refuses WORKER_CENSUS_INCOMPLETE, with no statement for Postgres to cancel', async () => {
-    process.env.WORKER_CENSUS_TIMEOUT_MS = '250';
+    process.env.WORKER_CENSUS_TIMEOUT_MS = '250'; // reset by the file's afterEach (line 52)
     const worker = { id: f.target.id, memoryId: f.target.memoryId ?? null, heldByUserId: f.target.heldByUserId ?? null };
-    let postgresCancelled = false;
     let elapsed = 0;
     await db.$transaction(async (tx) => {
       const slowAfterFirst = new Proxy(tx, {
@@ -156,11 +155,10 @@ describe('#4809 bounded worker census', () => {
         throw new Error('expected WorkerCensusIncompleteError');
       } catch (e) {
         elapsed = Date.now() - started;
-        postgresCancelled = !(e instanceof WorkerCensusIncompleteError) && /statement timeout|canceling statement/i.test(String((e as Error)?.message));
+        // the class itself is the proof: a Postgres cancellation would surface as a database error, never this class
         expect(e).toBeInstanceOf(WorkerCensusIncompleteError);
       }
     });
-    expect(postgresCancelled).toBe(false);
     expect(elapsed).toBeGreaterThanOrEqual(450); // the idle really happened inside the census; the refusal came after it, from the JS check
   }, 30_000);
 
