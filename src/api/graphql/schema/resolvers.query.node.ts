@@ -1479,7 +1479,17 @@ export const nodeQueries = {
       // printed and the sections the caller names are ADDED after it, in the
       // fixed order, empty ones left out (R8/R9, #395). Delivered BASE64.
       if (fmt === 'PDF') {
-        const markdown = renderPdfMarkdown(exportNode, sections);
+        // §10 (#395): the Edges section prints a target's loc, so it keeps only targets that are live and in a
+        // memory this caller can read (the same readable set the node gate used; #781 gates an edge endpoint on
+        // its own memory). The MD/JSON export prints every outgoing edge and is not changed here.
+        const readableMemoryIds =
+          access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId
+            ? new Set(access.memoryId.in as string[])
+            : null;
+        const readableEdges = node.outgoingEdges.filter(
+          (e) => e.target && !e.target.deletedAt && (readableMemoryIds === null || readableMemoryIds.has(e.target.memoryId)),
+        );
+        const markdown = renderPdfMarkdown({ ...exportNode, edges: readableEdges as unknown as EdgeForGit[] }, sections);
         const { base64, bytes } = await renderMarkdownToPdf(markdown, { title: node.name });
         const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
         recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);

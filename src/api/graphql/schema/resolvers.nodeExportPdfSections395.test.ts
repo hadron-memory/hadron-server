@@ -179,6 +179,56 @@ describe('#395 an empty section is left out; the title fallback is intact', () =
   });
 });
 
+describe('#395 the Edges section prints only live targets in memories the caller can read (§10, #781)', () => {
+  const edgeTo = async (targetId: string, name: string) =>
+    db.edge.create({ data: { id: generateId(), memoryId, sourceId: nodeId, targetId, loc: `guide:intro:${name}:${targetId}`, name } });
+  /** A memory the reader can read (their own org) or cannot ('PRIVATE' here means: an org they are not in). */
+  const otherMemory = async (readable: 'PRIVATE' | 'ORGANIZATION') => {
+    const n = generateId().toLowerCase();
+    const org = readable === 'ORGANIZATION'
+      ? await db.organization.findFirstOrThrow({ where: { urn: 'pdf395' } })
+      : await db.organization.create({ data: { id: generateId(), name: `Foreign ${n}`, urn: `foreign395-${n}` } });
+    return db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:kb-${n}`, name: 'other', class: 'knowledge', visibility: 'ORGANIZATION' },
+    });
+  };
+
+  it('a target in a memory the caller cannot read is not printed', async () => {
+    const hidden = await otherMemory('PRIVATE');
+    const target = await db.node.create({ data: { id: generateId(), memoryId: hidden.id, loc: 'secret:target', name: 'Hidden target', tags: [] } });
+    await edgeTo(target.id, 'peek');
+    await exportPdf({ sections: ['EDGES'] });
+    expect(printed()).toContain('guide:more');
+    expect(printed()).not.toContain('secret:target');
+    expect(printed()).not.toContain(target.id);
+  });
+
+  it('a soft-deleted target is not printed', async () => {
+    const gone = await db.node.create({ data: { id: generateId(), memoryId, loc: 'guide:gone', name: 'Gone', tags: [], deletedAt: new Date() } });
+    await edgeTo(gone.id, 'dead');
+    await exportPdf({ sections: ['EDGES'] });
+    expect(printed()).toContain('guide:more');
+    expect(printed()).not.toContain('guide:gone');
+  });
+
+  it('a target in another memory the caller CAN read is still printed', async () => {
+    const readable = await otherMemory('ORGANIZATION');
+    const target = await db.node.create({ data: { id: generateId(), memoryId: readable.id, loc: 'open:target', name: 'Open target', tags: [] } });
+    await edgeTo(target.id, 'open');
+    await exportPdf({ sections: ['EDGES'] });
+    expect(printed()).toContain('open:target');
+  });
+
+  it('when every edge is filtered the Edges section is left out', async () => {
+    await db.edge.deleteMany({ where: { sourceId: nodeId } });
+    const hidden = await otherMemory('PRIVATE');
+    const target = await db.node.create({ data: { id: generateId(), memoryId: hidden.id, loc: 'secret:only', name: 'Only hidden', tags: [] } });
+    await edgeTo(target.id, 'peek');
+    await exportPdf({ sections: ['EDGES'] });
+    expect(printed()).not.toContain('## Edges');
+  });
+});
+
 describe('#395 `full` is ignored for a PDF; read access is unchanged', () => {
   it('full: true and full: false give the same Markdown', async () => {
     await exportPdf({ sections: ['ABSTRACT', 'DATA'], full: true });
