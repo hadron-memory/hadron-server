@@ -2214,6 +2214,48 @@ export const typeDefs = `#graphql
     balanceMicroCents: String!
   }
 
+  """How aiSpend groups units. Each row's key is the group's value; a unit with no value for the grouping is the row with the empty key."""
+  enum AiSpendGroup {
+    "The UTC date of the unit, YYYY-MM-DD."
+    DAY
+    "The id of the App that spent it. An id only, never an App."
+    APP
+    "provider/model, either half empty when it is not recorded."
+    MODEL
+    "Who held the key that served the call, for example HADRON_SERVER (the platform key) or ORGANIZATION (its own key)."
+    KEY_OWNER
+  }
+
+  """
+  One group of aiSpend. costMicroCents and chargedMicroCents are two figures, never one (hrn:node:hadronmemory.com:specs:cor:dmo:170:04): cost is what the units cost and charge is what was debited for them, so a unit on the organization's own key has a cost and no charge. costMicroCents sums the PRICED units only and unpricedEvents counts the rest, so a group with unpriced units is never read as complete and a group of unpriced units is not a cost of zero.
+  """
+  type AiSpendRow {
+    key: String!
+    "Units in the group, priced or not."
+    events: Int!
+    tokensIn: String!
+    tokensOut: String!
+    "Sum of the cost of the priced units, in micro-cents. Units with no price are not in it; see unpricedEvents."
+    costMicroCents: String!
+    "Units with no recorded price: shown as unpriced, never as a zero cost."
+    unpricedEvents: Int!
+    "The absolute sum of the debits of the units, in micro-cents. A separate figure from cost."
+    chargedMicroCents: String!
+  }
+
+  type AiSpendSummary {
+    "The range start as read, ISO 8601 UTC, inclusive."
+    from: String!
+    "The range end as read, ISO 8601 UTC, exclusive."
+    to: String!
+    "At most 500 groups, largest charge first, then cost, events and key."
+    rows: [AiSpendRow!]!
+    "True when more groups exist than rows returned."
+    truncated: Boolean!
+    "The exact number of groups, so a short list is never read as the whole one."
+    totalGroups: Int!
+  }
+
   input SetAiModelPriceInput {
     provider: String!
     model: String!
@@ -12331,6 +12373,10 @@ export const typeDefs = `#graphql
     creditLedgerEntries(orgRef: String!, limit: Int, offset: Int): CreditLedgerEntryList!
     "One org's credit balance - SUM over the append-only ledger (spec 046). Org-ADMIN."
     creditBalance(orgRef: String!): CreditBalance!
+    """
+    One organization's AI spend for [from, to), grouped one way (#5008, hrn:node:hadronmemory.com:specs:cor:dmo:170:04). Org-ADMIN, the gate of creditBalance, answered before the range is read. from is inclusive and to exclusive; both are ISO 8601 dates or date-times, a value with no offset is UTC and a date alone is midnight UTC. The range is at most 366 days. At most 500 rows are returned, largest charge first; truncated says more groups exist and totalGroups is the exact number of groups. Only token-bearing units of the organization count, soft-deleted ones are left out.
+    """
+    aiSpend(orgRef: String!, from: String!, to: String!, groupBy: AiSpendGroup!): AiSpendSummary!
   }
 
   """

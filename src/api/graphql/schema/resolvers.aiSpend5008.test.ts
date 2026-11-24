@@ -79,7 +79,7 @@ async function ev(over: EventOver = {}): Promise<string> {
 async function ledger(over: { organizationId?: string; kind?: string; amount: bigint; sourceType?: string | null; sourceId: string | null; deletedAt?: Date | null }) {
   await db.creditLedgerEntry.create({
     data: {
-      organizationId: over.organizationId ?? orgA, kind: over.kind ?? 'debit', amountMicroCents: over.amount,
+      id: generateId(), organizationId: over.organizationId ?? orgA, kind: over.kind ?? 'debit', amountMicroCents: over.amount,
       sourceType: over.sourceType === undefined ? 'usage-event' : over.sourceType, sourceId: over.sourceId, deletedAt: over.deletedAt ?? null,
     },
   });
@@ -231,10 +231,12 @@ describe('#5008 aiSpend — what is left out (pins 5, 6, 11 and the ledger rulin
     expect(rowOf(s, 'HADRON_SERVER')).toMatchObject({ events: 2, tokensIn: '3', tokensOut: '7' });
   });
 
-  it('a grant and a refund adjustment that name a usage event are not charged', async () => {
+  it('a grant, a refund adjustment and a debit of another source type that name a usage event are not charged', async () => {
     const own = await ev({ keyOwnerType: 'ORGANIZATION', costMicroCents: 40n });
     await ledger({ kind: 'grant', amount: 500n, sourceId: own });
     await ledger({ kind: 'adjustment', amount: 77n, sourceType: 'refund', sourceId: own });
+    // a debit-kind row from another source family names the same id: only the usage-event debit is the unit's charge
+    await ledger({ kind: 'debit', amount: -9n, sourceType: 'tool-call', sourceId: own });
     const s = summaryOf(await spend(adminACtx()));
     expect(rowOf(s, 'ORGANIZATION')).toMatchObject({ costMicroCents: '40', chargedMicroCents: '0' });
   });
@@ -337,8 +339,8 @@ describe('#5008 aiSpend — each grouping (pin 9)', () => {
 
   it('the USER grouping is not offered (open ruling R1): the enum has exactly four values', async () => {
     const res = await spend(adminACtx(), { groupBy: 'USER' });
-    expect(res.errors?.[0]?.extensions?.code).toBe('GRAPHQL_VALIDATION_FAILED');
-    const schema = buildASTSchema(parse(typeDefs as unknown as string));
+    expect(res.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+    const schema = buildASTSchema(parse(typeDefs));
     const enumType = schema.getType('AiSpendGroup');
     expect(isEnumType(enumType) && enumType.getValues().map((v) => v.name).sort()).toEqual(['APP', 'DAY', 'KEY_OWNER', 'MODEL']);
   });
@@ -346,19 +348,18 @@ describe('#5008 aiSpend — each grouping (pin 9)', () => {
 
 describe('#5008 aiSpend — ids only, scalars only (pin 10)', () => {
   it('every field of AiSpendRow and AiSpendSummary is a scalar or a list of AiSpendRow: no App or User is reachable', () => {
-    const schema = buildASTSchema(parse(typeDefs as unknown as string));
+    const schema = buildASTSchema(parse(typeDefs));
     const row = schema.getType('AiSpendRow');
     const summary = schema.getType('AiSpendSummary');
-    expect(isObjectType(row) && isObjectType(summary)).toBe(true);
-    for (const f of Object.values((row as never as { getFields(): Record<string, { type: never }> }).getFields())) {
-      expect(isScalarType(getNamedType(f.type)), 'AiSpendRow field').toBe(true);
+    if (!isObjectType(row) || !isObjectType(summary)) throw new Error('AiSpendRow and AiSpendSummary must be object types');
+    for (const [name, f] of Object.entries(row.getFields())) {
+      expect(isScalarType(getNamedType(f.type)), `AiSpendRow.${name}`).toBe(true);
     }
-    for (const [name, f] of Object.entries((summary as never as { getFields(): Record<string, { type: never }> }).getFields())) {
+    for (const [name, f] of Object.entries(summary.getFields())) {
       const named = getNamedType(f.type);
       expect(isScalarType(named) || named.name === 'AiSpendRow', `AiSpendSummary.${name}`).toBe(true);
     }
-    const field = (schema.getQueryType()!.getFields() as Record<string, { type: never }>).aiSpend!;
-    expect(getNamedType(field.type).name).toBe('AiSpendSummary');
+    expect(getNamedType(schema.getQueryType()!.getFields().aiSpend!.type).name).toBe('AiSpendSummary');
   });
 });
 
@@ -367,7 +368,7 @@ describe('#5008 aiSpend — a real debit through the write path (pin 12)', () =>
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     await db.aiModelPrice.create({
       data: {
-        provider: 'anthropic', model: 'claude-spend', tier: 1, inputMicroCentsPerMTok: 30_000_000n, outputMicroCentsPerMTok: 150_000_000n,
+        id: generateId(), provider: 'anthropic', model: 'claude-spend', tier: 1, inputMicroCentsPerMTok: 30_000_000n, outputMicroCentsPerMTok: 150_000_000n,
         markupBasisPoints: 2500, effectiveAt: new Date('2026-01-01T00:00:00Z'), createdBy: platformAdmin,
       },
     });

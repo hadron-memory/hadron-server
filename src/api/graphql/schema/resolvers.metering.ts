@@ -24,6 +24,12 @@ import {
   PRICE_TIER_MAX,
   PRICE_TIER_MIN,
 } from '../../../lib/metering/index.js';
+import {
+  AI_SPEND_MAX_DAYS,
+  aiSpendSummary,
+  parseSpendInstant,
+  type AiSpendGroup,
+} from '../../../lib/metering/spend.js';
 import type { CreditLedgerEntry, AiModelPrice } from '../../../generated/prisma/index.js';
 
 const badInput = (message: string) =>
@@ -150,6 +156,29 @@ export const meteringQueries = {
     await requireOrgRole(ctx, orgId, 'ADMIN');
     const balance = await creditBalance(ctx.db, orgId);
     return { organizationId: orgId, balanceMicroCents: balance.toString() };
+  },
+
+  /**
+   * #5008 (Billing A2): the organization's AI spend for [from, to), one grouping. Org-ADMIN, the gate of `creditBalance`
+   * and answered first, so a caller who may not read gets FORBIDDEN whatever the range says. Rows are scalars: `APP` keys
+   * are ids, never an App object (cor:dmo:170:04 keeps cost and charge apart; see the SDL).
+   */
+  aiSpend: async (
+    _: unknown,
+    { orgRef, from, to, groupBy }: { orgRef: string; from: string; to: string; groupBy: AiSpendGroup },
+    ctx: Context,
+  ) => {
+    const { id: orgId } = await resolveOrgRef(ctx.db, orgRef);
+    await requireOrgRole(ctx, orgId, 'ADMIN');
+    const fromAt = parseSpendInstant(from);
+    const toAt = parseSpendInstant(to);
+    if (!fromAt || !toAt) throw badInput('from and to must be ISO 8601 dates or date-times (a value with no offset is UTC).');
+    if (fromAt.getTime() >= toAt.getTime()) throw badInput('from must be before to.');
+    if (toAt.getTime() - fromAt.getTime() > AI_SPEND_MAX_DAYS * 86_400_000) {
+      throw badInput(`The range may span at most ${AI_SPEND_MAX_DAYS} days.`);
+    }
+    const summary = await aiSpendSummary(ctx.db, { organizationId: orgId, from: fromAt, to: toAt, groupBy });
+    return { from: fromAt.toISOString(), to: toAt.toISOString(), ...summary };
   },
 };
 
