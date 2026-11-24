@@ -8,6 +8,7 @@ import { beforeEach, afterAll, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { mergeUsers } from '../../test/mergeConsent.js';
+import { inFreshRolledBackSession, shadowTable } from '../../test/freshSession5089.js';
 import { deleteUserAccount } from '../../controller/operations/deleteUser.js';
 import { dropTestActions, insertEvent, insertGrant, insertGrantUnguarded, seedWorld, type World } from './grantFixtures3668.js';
 
@@ -41,6 +42,17 @@ describe('mergeUsers', () => {
     await mergeUsers(db, { sourceUserId: w.userId, targetUserId: w.user2Id });
     expect(await read(mine)).toMatchObject({ user_id: w.user2Id, issuer_user_id: w.user2Id, requested_by_user_id: w.user2Id, revoked_by: w.user2Id, verified_by: w.user2Id, app_id: w.appId });
     expect(await read(others)).toMatchObject({ user_id: third.id, issuer_user_id: third.id, requested_by_user_id: third.id, revoked_by: third.id, verified_by: third.id });
+  });
+  it('#5089: a session temp table named user_merges cannot forge the merge proof for a person link', async () => {
+    const g = await insertGrantUnguarded(w, { user_id: w.userId, issuer_user_id: w.userId, requested_by_user_id: w.userId, revoked_at: new Date('2026-01-01'), revoked_by: w.userId, activated_at: new Date('2026-01-01'), verified_by: w.userId });
+    for (const col of ['revoked_by', 'issuer_user_id', 'requested_by_user_id', 'verified_by', 'user_id']) {
+      await expect(inFreshRolledBackSession(async (c) => {
+        await shadowTable(c, 'user_merges');
+        await c.query('INSERT INTO pg_temp.user_merges (source_user_id, target_user_id) VALUES ($1, $2)', [w.userId, w.user2Id]);
+        await c.query(`UPDATE grants SET ${col} = $2 WHERE id = $1`, [g, w.user2Id]);
+      }), col).rejects.toThrow(/grants are append-only/);
+    }
+    expect(await read(g)).toMatchObject({ user_id: w.userId, issuer_user_id: w.userId, requested_by_user_id: w.userId, revoked_by: w.userId, verified_by: w.userId });
   });
   it('never moves a row to another App, and leaves the row\'s terms alone', async () => {
     const id = await insertGrant(w, { user_id: w.userId, reason: 'same words' });

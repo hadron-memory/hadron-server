@@ -6,6 +6,7 @@ import { Prisma, type PrismaClient, type User } from '../../generated/prisma/ind
 import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js';
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { waitForSerializationRetry } from '../../lib/serializableRetry.js';
+import { logUserRolesChanged } from '../../lib/auth/userRolesChanged.js';
 
 // Non-conflicting ownership, attribution, credential, and history links. An optional third element names a
 // lineage column: rows that carry one stay put (see the #1897 note in mergeUsers).
@@ -297,7 +298,14 @@ export async function mergeUsers(
   let aborted = false;
   for (let attempt = 1; ; attempt++) {
     try {
-      return await runMergeTxn(db, { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles, consentProof });
+      const rolesBefore: { roles?: readonly string[] } = {};
+      const merged = await runMergeTxn(db, { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles, consentProof }, rolesBefore);
+      // #5012 (gate ruling 10.5): a role-unioning merge changes the target's platform roles, so it writes the same
+      // `user.roles.changed` line as updateUserRoles, after commit (the helper skips an unchanged set).
+      if (rolesBefore.roles) {
+        logUserRolesChanged({ actor: actorUserId ?? 'unknown', target: targetUserId, before: rolesBefore.roles, after: merged.roles });
+      }
+      return merged;
     } catch (e) {
       const serialization = isSerializationAbort(e);
       aborted ||= serialization;
@@ -401,6 +409,8 @@ async function assertSourceActorRowsFresh(
 async function runMergeTxn(
   db: PrismaClient,
   { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles = false, consentProof }: MergeUsersArgs,
+  /** #5012: filled with the target's platform roles before a role-unioning merge, for the audit line. */
+  rolesBefore: { roles?: readonly string[] },
 ): Promise<User> {
   return db.$transaction(async (tx) => {
     // Serialize two merges involving either account. Ref resolution happens
@@ -460,6 +470,8 @@ async function runMergeTxn(
     // Tombstone the #692 pool principal (name reserved forever; the user→principal link stays).
     if (source.principalId) await releasePrincipal(tx, source.principalId);
 
+    // #5012: the target's platform roles before a role-unioning merge, for the audit line written after commit.
+    if (mergeGlobalRoles) rolesBefore.roles = target.roles;
     await tx.user.update({
       where: { id: targetUserId },
       data: {

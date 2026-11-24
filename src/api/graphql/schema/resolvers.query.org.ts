@@ -1,4 +1,5 @@
 // orgQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
+import { thresholdRoles } from '../../../lib/auth/billingRole.js';
 import { parseUrnInput } from '../../../lib/urn.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -247,14 +248,15 @@ export const orgQueries = {
       // case stays gated by callerCanAudit exactly as before.
       if (
         !auditsSelf &&
-        !(await callerCanAudit(ctx.db, { userId: ctx.userId, roles: ctx.roles }, resolved))
+        !(await callerCanAudit(ctx.db, { userId: ctx.userId, roles: thresholdRoles(ctx.roles) }, resolved))
       ) {
         throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
       }
 
       const result = await computeEffectiveAccess(
         ctx.db,
-        { id: subjectUser.id, roles: subjectUser.roles },
+        // #5012: BILLING grants no effective access; the shared Subject type names the four threshold roles.
+        { id: subjectUser.id, roles: thresholdRoles(subjectUser.roles) ?? [] },
         resolved,
         ctx.impersonation ? { restrictOrgId: ctx.impersonation.orgId } : undefined,
       );

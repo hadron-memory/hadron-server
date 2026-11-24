@@ -37,6 +37,12 @@ export const typeDefs = `#graphql
     ADMIN
     CONTRIBUTOR
     READER
+    """
+    A platform role for a payment service (#5012): it may write credit grants and adjustments (grantCredits,
+    adjustCredits) and nothing else. Refused (BAD_USER_INPUT) as an organization member's, a memory subscription's
+    or an invitation's role, and never combined with another platform role on one user.
+    """
+    BILLING
   }
 
   enum SubscriptionType {
@@ -11726,7 +11732,7 @@ export const typeDefs = `#graphql
     unless the caller manages the selected source.
 
     Auth: scoped to one App's chat context. A non-admin caller MUST pass an
-    appRef, be a member of that App, and (when an agentRef is given) the Agent
+    appRef, be a member of that App (or the owner of a personal App), and (when an agentRef is given) the Agent
     must be installed and live-licensed in that App. Because the result is
     masked (no key material), App membership — not org admin — is the bar, unlike
     resolveAIConfig and the aiServiceConfigs management list. Platform
@@ -11739,7 +11745,7 @@ export const typeDefs = `#graphql
     """
     #3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): what a chat of this App may choose from — the App's OWN enabled AI configs plus one
     \`default\` entry, which resolves through the App -> Agent -> Org -> Host walk at turn time (a person's App reaches only its own and its Agent's configurations, #5075). Send an entry's
-    \`value\` back as the chat's aiConfigChoice. Never a key, key preview, params or endpoint. Any App member may
+    \`value\` back as the chat's aiConfigChoice. Never a key, key preview, params or endpoint. Any App member, or the owner of a personal App, may
     call it (a platform admin too); anyone else, a missing App and a request that is not a signed-in person get
     the same APP_NOT_FOUND answer.
     """
@@ -13981,9 +13987,9 @@ export const typeDefs = `#graphql
     setQuotaLimit(input: SetQuotaLimitInput!): QuotaCounter!
     "Append an effective-dated provider rate row (spec 046). PLATFORM ADMIN - org admins must never set the prices they are billed at."
     setAiModelPrice(input: SetAiModelPriceInput!): AiModelPrice!
-    "Mint credits for an org - a positive grant ledger row (spec 046). PLATFORM ADMIN ONLY (self-grant risk); processor top-ups land here later."
+    "Mint credits for an org - a positive grant ledger row (spec 046). PLATFORM ADMIN or the BILLING platform role only (self-grant risk; #5012); processor top-ups land here."
     grantCredits(input: GrantCreditsInput!): CreditLedgerEntry!
-    "Write a signed adjustment entry on an org's credit ledger, e.g. a refund (hrn:node:hadronmemory.com:specs:cor:dmo:170:03; a correction is a new entry, hrn:node:hadronmemory.com:specs:cor:dmo:170:08). PLATFORM ADMIN ONLY. Idempotent on (sourceType, sourceId); a different account, amount or kind on that pair is IDEMPOTENCY_CONFLICT."
+    "Write a signed adjustment entry on an org's credit ledger, e.g. a refund (hrn:node:hadronmemory.com:specs:cor:dmo:170:03; a correction is a new entry, hrn:node:hadronmemory.com:specs:cor:dmo:170:08). PLATFORM ADMIN or the BILLING platform role only (#5012). Idempotent on (sourceType, sourceId); a different account, amount or kind on that pair is IDEMPOTENCY_CONFLICT."
     adjustCredits(input: AdjustCreditsInput!): CreditLedgerEntry!
     "Author YOUR user-layer action-policy link (cor:acl:040:02, #510). Null clears (= no restriction)."
     updateMyPolicy(policy: JSON): User!
@@ -14180,6 +14186,7 @@ export const typeDefs = `#graphql
     or cleared by this call.
     """
     updateMyProfile(name: String, handle: String, email: String): User!
+    "Set a user's platform roles (platform ADMIN). BILLING stands alone: a list holding it with any other role is BAD_USER_INPUT (#5012)."
     updateUserRoles(userId: ID!, roles: [Role!]!): User!
     """
     Consolidate a duplicate account into a surviving user. Source-only

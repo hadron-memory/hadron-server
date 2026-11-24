@@ -218,10 +218,15 @@ psql postgresql://holger@localhost:5432/hadron -v ON_ERROR_STOP=1 -f prisma/post
 PROD_DATABASE_URL='postgresql://…prod…' pnpm db:dev-from-prod
 
 # Mint the FIRST hdr_user_* token for a portal-less server (issue #300,
-# Option 3 — no browser, no IdP). Requires an EXISTING user; never creates
-# one. Identify by exactly one of --email / --user-id / --handle. Runs against
-# DATABASE_URL; raw key printed once. After this, `hadron auth token create`
-# (hadron-cli#68) covers the rest. Core logic: src/admin/mint-bootstrap-token.ts.
+# Option 3 — no browser, no IdP). A selector requires an EXISTING user and
+# never creates one: exactly one of --email / --user-id / --handle. The one
+# exception is --create-service-user <handle> (#5012): it CREATES a service
+# user (no email, no identity provider) whose only platform role is BILLING
+# (it may write credit grants and adjustments and nothing else), refuses a
+# taken handle (a user's or an organization's name), and mints its key
+# (label `billing-service` unless --label). Runs against DATABASE_URL; raw key
+# printed once. After this, `hadron auth token create` (hadron-cli#68) covers
+# the rest. Core logic: src/admin/mint-bootstrap-token.ts.
 pnpm admin:mint-token --email you@example.com
 ```
 

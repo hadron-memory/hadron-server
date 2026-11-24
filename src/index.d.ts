@@ -107,7 +107,7 @@ export interface User {
   maxReferrals: number | null;
 }
 
-export type Role = 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER';
+export type Role = 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER' | 'BILLING';
 export type AppMembershipRole = 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER';
 export type AppType = 'WORKSTATION' | 'CHATBOT' | 'AGENT' | 'AUTOMATION' | 'CLOUD' | 'IOT';
 export type IdentityProvider = 'GITHUB';

@@ -1,5 +1,5 @@
 -- #3668 (S1a): the database half of the grant row, its events and the actions table. One source; the newest migration to
--- carry it (today 20261121200000_grant_agent_withdrawal) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
+-- carry it (today 20261124180000_qualify_grant_merge_proof) ends with it verbatim (pinned by src/lib/grants/grantRow3668.test.ts), and
 -- post-push.sql applies it.
 --
 -- GRANTS. Exactly one holder (a user, an agent, a worker or an App); the CHECK cannot pass on NULL, because
@@ -71,7 +71,7 @@ ALTER TABLE grants ADD CONSTRAINT chk_grants_shape CHECK (
 CREATE OR REPLACE FUNCTION hadron_grant_link_merged(old_id text, new_id text) RETURNS boolean
 LANGUAGE sql STABLE AS $$
   SELECT old_id IS NOT NULL AND new_id IS NOT NULL
-    AND EXISTS (SELECT 1 FROM user_merges m WHERE m.source_user_id = old_id AND m.target_user_id = new_id)
+    AND EXISTS (SELECT 1 FROM public.user_merges m WHERE m.source_user_id = old_id AND m.target_user_id = new_id)
 $$;
 -- #4172: the SQL twin of resolveAppInstallation (src/lib/appInstallations.ts) as the grant guard needs it: does this agent still have an
 -- EFFECTIVE installation in this App? TRUE when EITHER a physical app_agents row exists and the agent is live, OR the agent is
