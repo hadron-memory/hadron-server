@@ -233,6 +233,20 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('<![CDATA[ x ]> y')).toBe('&lt;![CDATA[ x ]> y');
     expect(escapeUnterminatedHtml('<![CDATA[ x ]]> y')).toBe('<![CDATA[ x ]]> y');
   });
+  it('CDATA and a processing instruction end for the browser at the first `>`, so what follows them is still read', () => {
+    expect(escapeUnterminatedHtml('<?><style>?>')).toBe('<?>&lt;style>?>');
+    expect(escapeUnterminatedHtml('<![CDATA[ a > b <style> ]]>')).toBe('<![CDATA[ a > b &lt;style> ]]>');
+    expect(escapeUnterminatedHtml('<?xml version="1.0"?> <b>x</b>')).toBe('<?xml version="1.0"?> <b>x</b>');
+  });
+  it('a template is open until its own end tag, and its content is read as usual', () => {
+    expect(escapeUnterminatedHtml('a <template>x</template>')).toBe('a <template>x</template>');
+    expect(escapeUnterminatedHtml('a <template><template>x</template>')).toBe('a &lt;template><template>x</template>');
+    expect(escapeUnterminatedHtml('a <template><style></template>')).toBe('a &lt;template>&lt;style></template>');
+  });
+  it('an end tag is `</name` and a blank or `>`: `</name/` closes nothing', () => {
+    expect(escapeUnterminatedHtml('a <textarea>x</textarea/>')).toBe('a &lt;textarea>x</textarea/>');
+    expect(escapeUnterminatedHtml('a <textarea>x</textarea >')).toBe('a <textarea>x</textarea >');
+  });
   it('stays linear on a body of thousands of stray `<a`', () => {
     const body = '<a '.repeat(40000);
     const t0 = Date.now();

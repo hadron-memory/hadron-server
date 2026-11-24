@@ -11,24 +11,35 @@
  * text reads exactly as authored in HTML and in Markdown, and the construct never opens. Nothing else is touched, and a text
  * with no unterminated construct comes back as the same string.
  *
+ * Reader model (BLIND P2): the document is "one Markdown string" (cor:spc:030:02); the CLI prints it and the portal renders
+ * it, so a Markdown pass sits between this renderer and the browser. Where that pass keeps a construct as text (code, fences,
+ * a backslash escape) nothing is escaped. Where it passes the construct through as HTML, an HTML5 parser reads it and this
+ * pass must have closed it. A reader that parses the raw string as HTML (the filing's) is stricter than any Markdown renderer
+ * and is the acceptance oracle for everything the tokenizer reads; the Markdown-level rules below are pinned on the scanner.
+ *
  * What counts as a construct (an approximation of the HTML5 tokenizer plus the CommonMark HTML blocks, strict where the two
  * differ so that neither reader is left open):
  *  - a start or end tag with no closing `>` (a quote opens a value only right after `=`; an unquoted value ends at a blank);
+ *  - `</` and anything but a letter or `>`: a bogus comment, which runs to the next `>`;
  *  - a raw-text element (`script style textarea title xmp iframe noembed noframes noscript`) with no end tag of its own, and
- *    `plaintext`, which has none;
- *  - a `pre` that opens a line (CommonMark type 1) with none of `</pre>`, `</script>`, `</style>`, `</textarea>` after it;
- *  - a comment with no `-->`, a CDATA section with no `]]>`, a processing instruction with no `?>`, a declaration with no `>`.
- * Not read: fenced code, indented code, inline code spans and a backslash-escaped `<` (Markdown shows those as text, and a
- * character reference is not decoded inside code, so escaping there would change what a code sample shows). A four-space
- * continuation of a list item is read as indented code, so an unterminated construct in one is left as written.
+ *    `plaintext`, which has none; a `template` with no end tag (its content is read as usual, but the anchor would sit in it) An end tag with no `>` leaves the element open. In the middle of a line the
+ *    element is inline HTML, so only an end tag outside code, a fence and a backslash escape closes it; at the head of a line
+ *    (script, style, textarea) it is a CommonMark type 1 block that ends at the first line holding the end tag, code or not;
+ *  - a `pre` at the head of a line (CommonMark type 1) with none of `</pre>`, `</script>`, `</style>`, `</textarea>` after it;
+ *  - a comment with no `-->`, a CDATA section with no `]]>`, a processing instruction with no `?>`, a declaration with no `>`
+ *    (CDATA and a processing instruction end for the browser at the first `>`, which is where the scan goes on).
+ * Not read: fenced code, indented code (also inside a block quote), inline code spans and a backslash-escaped `<` (Markdown
+ * shows those as text, and a character reference is not decoded inside code, so escaping there would change what a code
+ * sample shows). A four-space continuation of a list item is read as indented code, so an unterminated construct in one is
+ * left as written. Line breaks are read as `\n`, as the rest of the renderer reads them.
  *
  * Cost: one linear scan per escape. Each escape restarts the scan just after the `<` it escaped (a construct that was open
  * may have hidden a second one), at most {@link MAX_RESTARTS} times; a text that needs more has every remaining `<` escaped.
  */
 import { stepFence, type OpenFence } from './fences.js';
 
-/** Elements whose content is text up to their own end tag (`template`: its content is inert, so the anchor would sit unreachable inside it). */
-const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'template']);
+/** Elements whose content is text up to their own end tag. */
+const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript']);
 const MAX_RESTARTS = 32;
 
 const isLetter = (c: string | undefined): boolean => c !== undefined && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
@@ -90,6 +101,8 @@ function firstUnterminated(text: string, from: number): number {
   // that Markdown also reads as HTML (outside code, a fence and a backslash escape) closes it. -1 when none is open.
   let rawStart = -1;
   let rawName = '';
+  // Open `<template>` elements: their content is tokenized as usual, but the anchor of the next block would sit in the inert content.
+  const templates: number[] = [];
   // A backtick run of length N that found no closer in its paragraph: no later run of N in the same paragraph has one either.
   const noCloser = new Map<number, number>();
   let i = from;
@@ -131,7 +144,7 @@ function firstUnterminated(text: string, from: number): number {
 
     if (rawStart !== -1) {
       // Inside an inline raw-text element: the only markup is its own end tag.
-      if (text[i + 1] === '/' && text.slice(i + 2, i + 2 + rawName.length).toLowerCase() === rawName && /[\s/>]/.test(text[i + 2 + rawName.length] ?? 'x')) {
+      if (text[i + 1] === '/' && text.slice(i + 2, i + 2 + rawName.length).toLowerCase() === rawName && /[\s>]/.test(text[i + 2 + rawName.length] ?? 'x')) {
         const end = tagEndOf(text, i, i + 2);
         if (end === -1) return rawStart;
         rawStart = -1;
@@ -147,16 +160,18 @@ function firstUnterminated(text: string, from: number): number {
       i = close + 3;
       continue;
     }
+    // CDATA and a processing instruction: Markdown ends the block at `]]>` / `?>` (both must be there), but the browser reads
+    // either as a bogus comment that ends at the FIRST `>`, so the scan goes on from there.
     if (text.startsWith('<![CDATA[', i)) {
-      const close = text.indexOf(']]>', i + 9);
-      if (close === -1) return i;
-      i = close + 3;
+      const first = text.indexOf('>', i + 2);
+      if (first === -1 || text.indexOf(']]>', i + 9) === -1) return i;
+      i = first + 1;
       continue;
     }
     if (text.startsWith('<?', i)) {
-      const close = text.indexOf('?>', i + 2);
-      if (close === -1) return i;
-      i = close + 2;
+      const first = text.indexOf('>', i + 2);
+      if (first === -1 || text.indexOf('?>', i + 1) === -1) return i;
+      i = first + 1;
       continue;
     }
     if (text.startsWith('<!', i)) {
@@ -179,16 +194,21 @@ function firstUnterminated(text: string, from: number): number {
     const nameStart = i + (isEnd ? 2 : 1);
     const tagEnd = tagEndOf(text, i, nameStart);
     if (tagEnd === -1) return i;
-    if (isEnd) { i = tagEnd; continue; }
     let nameEnd = nameStart;
     while (nameEnd < n && !isBlank(text[nameEnd]) && text[nameEnd] !== '/' && text[nameEnd] !== '>') nameEnd += 1;
     const name = text.slice(nameStart, nameEnd).toLowerCase();
+    if (isEnd) {
+      if (name === 'template') templates.pop();
+      i = tagEnd;
+      continue;
+    }
+    if (name === 'template') templates.push(i);
 
     if (name === 'plaintext') return i;
     if (RAW_TEXT.has(name)) {
       if (startsLine(text, i) && (name === 'script' || name === 'style' || name === 'textarea')) {
         // CommonMark type 1: the block runs raw to the first line that holds an end tag, code or not.
-        const closer = new RegExp(`</${name}(?=[\\s/>])`, 'gi');
+        const closer = new RegExp(`</${name}(?=[\\s>])`, 'gi');
         closer.lastIndex = tagEnd;
         const m = closer.exec(text);
         if (!m) return i;
@@ -210,7 +230,8 @@ function firstUnterminated(text: string, from: number): number {
     }
     i = tagEnd;
   }
-  return rawStart;
+  const open = [rawStart, ...templates.slice(0, 1)].filter((x) => x !== -1);
+  return open.length === 0 ? -1 : Math.min(...open);
 }
 
 /** `text` with the opening `<` of every unterminated raw-HTML construct written as `&lt;`; the same string when there is none. */
