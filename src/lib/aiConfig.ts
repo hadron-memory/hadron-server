@@ -239,11 +239,12 @@ function resolved(config: AiServiceConfig, ownerType: AiConfigOwnerType): Resolv
  *   1. an App that exists and a person owns: that person, and nothing else is consulted;
  *   2. else an explicit organization (jobs scoped to one; it is always the App's own organization): that organization;
  *   3. else the owner of the work (the App's owner, else the Agent's);
- *   4. else null (a server context).
+ *   4. else UNOWNED when an App or Agent row exists but names no owner (the platform level stays closed), else the
+ *      server's own context (no App or Agent row: a platform job, or an id with no row, as before).
  * An organization's App running another party's Agent stays the organization's tenant, so every organization context
  * answers as before.
  */
-export type AiConfigTenant = OwnerRef | null;
+export type AiConfigTenant = OwnerRef | { server: true } | { unowned: true };
 
 export function aiConfigTenantFor(input: {
   app: OwnedRow | null;
@@ -252,16 +253,21 @@ export function aiConfigTenantFor(input: {
 }): AiConfigTenant {
   if (input.app?.ownerUserId != null) return { userId: input.app.ownerUserId };
   if (input.organizationId) return { organizationId: input.organizationId };
-  return ownerOfWork(input.app, input.agent);
+  const owner = ownerOfWork(input.app, input.agent);
+  if (owner) return owner;
+  // No owner. A row that exists but names no owner (an impossible row under the owner XOR invariant) is UNOWNED and
+  // closes the platform level; a context with no App or Agent row at all (a platform job, or an id with no row) is the
+  // server's own context.
+  return input.app || input.agent ? { unowned: true } : { server: true };
 }
 
 /**
  * Whether the walk may consult the HadronServer level: the platform's configuration answers for a server context and for
- * an organization, never for a person (their App or their own Agent brings its own key). A8 (#5025) opens it for a
- * person by changing this one line.
+ * an organization, never for a person and never for an unowned row (their App or their own Agent brings its own key).
+ * A8 (#5025) opens it for a person by changing this one line.
  */
 function platformLevelOpen(tenant: AiConfigTenant): boolean {
-  return tenant === null || 'organizationId' in tenant;
+  return 'server' in tenant || 'organizationId' in tenant;
 }
 
 /**
@@ -305,7 +311,7 @@ export async function resolveAiConfig(
 
   const tenant = aiConfigTenantFor({ app, agent, organizationId: ctx.organizationId ?? null });
 
-  if (tenant && 'organizationId' in tenant) {
+  if ('organizationId' in tenant) {
     const config = await db.aiServiceConfig.findFirst({
       where: { organizationId: tenant.organizationId, name, enabled: true },
     });
@@ -380,7 +386,7 @@ export async function resolveAiConfigs(
 
   const tenant = aiConfigTenantFor({ app, agent, organizationId: ctx.organizationId ?? null });
 
-  if (tenant && 'organizationId' in tenant) {
+  if ('organizationId' in tenant) {
     collect(
       await db.aiServiceConfig.findMany({ where: { organizationId: tenant.organizationId, enabled: true } }),
       'ORGANIZATION',

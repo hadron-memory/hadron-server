@@ -17,8 +17,8 @@ export type OwnedRow = { organizationId: string | null; ownerUserId: string | nu
  */
 export function ownerRefOf(row: OwnedRow | null | undefined): OwnerRef | null {
   if (!row) return null;
-  if (row.ownerUserId !== null) return { userId: row.ownerUserId };
-  if (row.organizationId !== null) return { organizationId: row.organizationId };
+  if (row.ownerUserId != null) return { userId: row.ownerUserId };
+  if (row.organizationId != null) return { organizationId: row.organizationId };
   return null;
 }
 

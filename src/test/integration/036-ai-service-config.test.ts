@@ -1634,6 +1634,12 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
     expect((await resolveAiConfig(db, 'default', { organizationId: org.id }))?.ownerType).toBe('ORGANIZATION');
   });
 
+  it('a missing App id is no App (as before): the platform level stays open; an ownerless Agent row closes it', async () => {
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-5075' });
+    expect((await resolveAiConfig(db, 'default', { appId: generateId() }))?.ownerType).toBe('HADRON_SERVER');
+    // An Agent row that names no owner cannot be written (owner XOR), so the unowned arm is pinned in owner5075.test.ts.
+  });
+
   it('P3 on the run path: the same answers through makeProdRunDeps(db).resolveConfig', async () => {
     await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org-5075' });
     await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-5075' });
