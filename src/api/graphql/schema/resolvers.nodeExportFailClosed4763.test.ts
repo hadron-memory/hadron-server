@@ -1,5 +1,5 @@
 /**
- * #4763 (blind P3-1 / local review): the node-content read gate shared by node(ref:) and nodeExport fails
+ * #4763: the node-content read gate shared by node(ref:) and nodeExport fails
  * CLOSED on a filter shape without an in-list. `memoryAccessFilter` always returns `{ memoryId: { in: ids } }`
  * for every principal kind (pinned at its source in resolvers.nodeExportRef4139.test.ts), so this branch is
  * defence in depth and unreachable today — which is exactly why it is pinned by MOCKING the one producer:
@@ -16,11 +16,17 @@ import { resolvers, type Context } from './resolvers.js';
 // memoryId object without an `in` list. Both must refuse, on both surfaces, for a ref that IS readable
 // under the real filter (the control test proves it, so the refusals below cannot pass for another reason).
 let brokenFilterShape: Record<string, unknown> | null = null;
+// Every call that reached the (possibly mocked) producer, so a refusal can be proven to have come
+// THROUGH it rather than via some other path the mock does not intercept.
+const filterCalls: Context[] = [];
 vi.mock('./resolvers.helpers.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./resolvers.helpers.js')>();
   return {
     ...actual,
-    memoryAccessFilter: async (ctx: Context) => (brokenFilterShape ?? actual.memoryAccessFilter(ctx)),
+    memoryAccessFilter: async (ctx: Context) => {
+      filterCalls.push(ctx);
+      return brokenFilterShape ?? actual.memoryAccessFilter(ctx);
+    },
   };
 });
 
@@ -36,7 +42,8 @@ async function fixture() {
     data: { name: 'pub', urn: `${org.urn}:pub`, class: 'knowledge', visibility: 'PUBLIC', organizationId: org.id },
   });
   const node = await db.node.create({ data: { memoryId: m.id, loc: LOC, name: 'n', content: 'secret pub', nodeType: 'record' } });
-  const admin = await db.user.create({ data: { id: generateId(), githubId: 47631, githubUsername: 'admin4763' } });
+  // The row CARRIES the role: node(ref:)'s reconciled read demotes a context that merely asserts it.
+  const admin = await db.user.create({ data: { id: generateId(), githubId: 47631, githubUsername: 'admin4763', roles: ['ADMIN'] } });
   const adminCtx = { db, roles: ['ADMIN'], userId: admin.id } as Context;
   return { pub: { ...m, nodeId: node.id }, adminCtx };
 }
@@ -47,7 +54,7 @@ async function rejection(p: Promise<unknown>) {
   }
 }
 
-beforeEach(async () => { await cleanDb(db); f = await fixture(); });
+beforeEach(async () => { filterCalls.length = 0; await cleanDb(db); f = await fixture(); });
 
 describe('#4763 the shared read gate fails closed on a non-list filter shape', () => {
   it('control: with the real filter, both surfaces read the node', async () => {
@@ -68,5 +75,7 @@ describe('#4763 the shared read gate fails closed on a non-list filter shape', (
     } finally {
       brokenFilterShape = null;
     }
+    // The mock was reached: the refusals above came through the mocked producer, not around it.
+    expect(filterCalls.length).toBeGreaterThan(0);
   });
 });

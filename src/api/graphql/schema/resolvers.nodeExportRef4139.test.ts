@@ -4,14 +4,14 @@
  * (cor:acl:010:01, cor:dmo:150:03), a re-authorization event (cor:api:140:01). Refusals are NODE_NOT_FOUND
  * (cor:api:140:03), one identical answer for every miss.
  *
- * Ruling on the breaking contract change (blind P2-2, restated here because a diff-only read cannot see the PR
+ * Ruling on the breaking contract change (restated here because a diff-only read cannot see the PR
  * body): the `id` → `ref` hard rename and the `NOT_FOUND` → `NODE_NOT_FOUND` refusal rename are by design
  * (Holger's #775 rulings; Bruce, coordinator, team chat #134801, restated #135959 — the same ordered hard break
  * as entity-refs S1-S3, precedent 0274): no deprecated old-name alias, and the callers are the named lockstep
  * companions hadron-cli#2899 and hadron-portal#2472. A grep of this repo found no other `nodeExport` call site,
  * so the absence of caller changes in this diff is the ruled design, not an omission.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildSchema, GraphQLObjectType } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../../../test/helpers.js';
@@ -45,12 +45,12 @@ async function fixture() {
   const orgVisible = await memory('orgvis', { visibility: 'ORGANIZATION' });
   const { app: otherApp } = await createDbAppWithKey(db, 'other4139', orgB.id);
   const appScoped = await memory('appscoped', { appId: otherApp.id }); // PUBLIC knowledge, but another App's
-  // #4763 blind P2-1: a PUBLIC node with an edge and an include tag into a memory the userless caller cannot read.
+  // #4763: a PUBLIC node with an edge and an include tag into a memory the userless caller cannot read.
   const hub = await db.node.create({
     data: { memoryId: pub.id, loc: 'docs:hub', name: 'hub', nodeType: 'record', content: 'hub body' },
   });
   // No nodeType on purpose: INCLUDE_LITERAL_NODE_TYPES (e.g. 'record') serve content as stored, so the include tag would never
-  // resolve and the include pins below would pass vacuously (blind P2-A). The positive control below proves it resolves.
+  // resolve and the include pins below would pass vacuously. The positive control below proves it resolves.
   const inc = await db.node.create({
     data: { memoryId: pub.id, loc: 'docs:inc', name: 'inc', content: 'before {{> ' + `hrn:node:${orgVisible.urn}:${LOC}` + '}} after' },
   });
@@ -118,7 +118,7 @@ describe('#4139 nodeExport(ref:)', () => {
       const refused = await Promise.all([urn(f.orgVisible), f.orgVisible.nodeId].map(ref => rejection(Q.nodeExport({}, { ref }, f[who]))));
       expect(unknown).toMatchObject({ code: 'NODE_NOT_FOUND' });
       for (const r of refused) expect(r).toMatchObject({ code: 'NODE_NOT_FOUND', message: expect.any(String) });
-      // The message is the typed error's own text for THAT ref: nothing else varies (blind P3-4).
+      // The message is the typed error's own text for THAT ref: nothing else varies.
       const refs = [urn(f.orgVisible), f.orgVisible.nodeId];
       refused.forEach((r, i) => expect(r!.message).toEqual(new NodeNotFoundError(refs[i]!).message));
     });
@@ -184,7 +184,7 @@ describe('#4139 nodeExport(ref:)', () => {
       }
     });
     // The invariant the fail-closed helper (nodeReadMemoryAllowed, resolvers.query.node.ts) rests on, stated here so a diff-only
-    // reader sees it (blind P2-C / N-1): memoryAccessFilter returns { memoryId: { in: ids } } for EVERY caller, ADMIN included,
+    // reader sees it: memoryAccessFilter returns { memoryId: { in: ids } } for EVERY caller, ADMIN included,
     // and never an unrestricted shape. So a shape that is not an in-list is not a case that exists, and failing closed on it denies nobody.
     it('ADMIN is not denied by the fail-closed gate: an ADMIN caller reads and exports both the PUBLIC and the org-visible memory', async () => {
       // The ADMIN context is a platform ADMIN in its own right, not an org member: pinned here so the export above
@@ -222,8 +222,36 @@ describe('#4139 nodeExport(ref:)', () => {
       const out = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:hub'), format: 'JSON' }, f.ownerCtx);
       expect(out.data).toContain(f.orgVisible.nodeId);
     });
+    // The loop's null-target guard. Edge.target is a REQUIRED relation with onDelete: Cascade
+    // (prisma/schema.prisma), so a hydrated edge with no target row cannot occur — the guard is
+    // defensive. Pinned by doctoring the export's own hydration include to carry one, so the
+    // export SKIPS it (never renders it, never crashes on it) while the real readable edges stay.
+    it('an edge with no target row is skipped, not rendered (defensive: the required FK makes the shape impossible)', async () => {
+      const hub = await db.node.findUniqueOrThrow({ where: { id: f.hub.id } });
+      const doctored = {
+        ...hub,
+        outgoingEdges: [
+          { id: 'edge-null-target', memoryId: f.pub.id, sourceId: f.hub.id, loc: 'docs:hub:phantom-edge', name: 'phantom', priority: 3, target: null },
+        ],
+      };
+      const original = db.node.findUnique.bind(db.node);
+      const spy = vi.spyOn(db.node, 'findUnique').mockImplementation((async (args: { include?: { outgoingEdges?: unknown }; where?: { id?: string } }) => {
+        // Only the export's own hydration query carries the outgoingEdges include; every other
+        // findUnique in the flow (ref resolution) sees the real client.
+        if (args?.include?.outgoingEdges && args.where?.id === f.hub.id) return doctored;
+        return original(args as never);
+      }) as never);
+      try {
+        const out = await Q.nodeExport({}, { ref: f.hub.id, format: 'JSON' }, f.ownerCtx);
+        expect(out.data).not.toContain('phantom');
+        expect(out.data).not.toContain('edge-null-target');
+        expect(out.data).toContain('docs:hub'); // the node itself rendered
+      } finally {
+        spy.mockRestore();
+      }
+    });
     it.each(['keyPrincipal', 'runPrincipal'] as const)('%s: an include tag into an unreadable memory does not export that memory\'s text (full:false resolves, full:true keeps the tag)', async who => {
-      // Positive controls (blind P2-A): a reader of both memories DOES get the text on full:false, and the raw tag on full:true,
+      // Positive controls: a reader of both memories DOES get the text on full:false, and the raw tag on full:true,
       // so the negatives below cannot pass because the tag never resolves or full is mapped differently.
       const control = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:inc'), format: 'MD', full: false }, f.ownerCtx);
       expect(control.data).toContain('secret orgvis');
@@ -231,13 +259,13 @@ describe('#4139 nodeExport(ref:)', () => {
       expect(rawControl.data).toContain('{{> ');
       const resolved = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:inc'), format: 'MD', full: false }, f[who]);
       expect(resolved.data).not.toContain('secret orgvis');
-      // Policy (blind P3-D): full:true is the restore export, so it keeps the PUBLIC author's OWN tag, which names the target's
+      // Policy: full:true is the restore export, so it keeps the PUBLIC author's OWN tag, which names the target's
       // URN and loc; node(ref:) shows the same stored text to the same caller. What must not leave is the TARGET's text.
       const raw = await Q.nodeExport({}, { ref: urn(f.pub, 'docs:inc'), format: 'MD', full: true }, f[who]);
       expect(raw.data).not.toContain('secret orgvis');
     });
-    // UsageEvent is attributed by memoryId only (no organization column), so attribution is asserted by memory (blind P2-B).
-    // A PUBLIC memory that is not knowledge cannot exist (chk_memory_group_visibility), so the other-App PUBLIC case stands in (P3-3).
+    // UsageEvent is attributed by memoryId only (no organization column), so attribution is asserted by memory.
+    // A PUBLIC memory that is not knowledge cannot exist (chk_memory_group_visibility), so the other-App PUBLIC case stands in.
     it.each(['keyPrincipal', 'runPrincipal'] as const)('%s: the export records the same read usage event node(ref:) does (none lost, none to another memory)', async who => {
       const count = (memoryId: string) => db.usageEvent.count({ where: { memoryId } });
       const scope = { memoryId: { in: [f.pub.id, f.orgVisible.id] } };

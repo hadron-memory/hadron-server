@@ -1438,10 +1438,16 @@ export const nodeQueries = {
       if (!node || node.deletedAt || !(await nodeReadMemoryAllowed(ctx, access, node.memoryId))) {
         throw new NodeNotFoundError(ref);
       }
-      // #4763 blind P2-1 / #781: an edge whose TARGET sits in another memory is shown only when the
+      // #4763 / #781: an edge whose TARGET sits in another memory is shown only when the
       // caller can read that memory (the Edge.target rule, denied ≡ absent). The export rendered raw
       // rows, so without this a userless caller reading PUBLIC knowledge would learn the targetId and
       // targetLoc of an edge into a memory it cannot read.
+      // This makes a partial-access export LOSSY by design: the file omits such edges (and an
+      // edge with no target row — the required, cascading FK makes that shape impossible, so that
+      // guard is defensive). The omission is not destructive on restore: `hadron node import
+      // --with-edges` is additive (it wires the edges the file carries and never deletes an edge
+      // the file lacks — cli internal/cmd/node/import_edges.go wireEdges), so an omitted edge
+      // survives a restore into a memory that still has it.
       const edgeTargetReadable = new Map<string, boolean>([[node.memoryId, true]]);
       const exportEdges = [];
       for (const edge of node.outgoingEdges) {
