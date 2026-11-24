@@ -12,6 +12,8 @@ import {
   toISO,
 } from './resolvers.helpers.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { OrganizationNotFoundError } from '../../../lib/entityRef/errors.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { generateId } from '../../../lib/id.js';
 import {
   clearPriceCache,
@@ -168,7 +170,16 @@ export const meteringQueries = {
     { orgRef, from, to, groupBy }: { orgRef: string; from: string; to: string; groupBy: AiSpendGroup },
     ctx: Context,
   ) => {
-    const { id: orgId } = await resolveOrgRef(ctx.db, orgRef);
+    // A reference that names no organization answers the denial any non-admin gets for an existing one, so the
+    // refusal does not tell which organizations exist (and echoes nothing of the ref). A platform admin passes
+    // the gate for every organization, so for them nothing is concealed and the not-found stays.
+    let orgId: string;
+    try {
+      ({ id: orgId } = await resolveOrgRef(ctx.db, orgRef));
+    } catch (e) {
+      if (e instanceof OrganizationNotFoundError && !isPlatformAdmin(ctx)) throw authorizationDenied();
+      throw e;
+    }
     await requireOrgRole(ctx, orgId, 'ADMIN');
     const fromAt = parseSpendInstant(from);
     const toAt = parseSpendInstant(to);

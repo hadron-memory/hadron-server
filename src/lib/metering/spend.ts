@@ -57,7 +57,7 @@ export type AiSpendRowData = {
   /** Sum over the PRICED units only; `unpricedEvents` counts the rest (cor:dmo:170:04). */
   costMicroCents: string;
   unpricedEvents: number;
-  /** The absolute sum of the units' debits: a separate figure from cost. */
+  /** The sum of the magnitudes of the units' debits: a separate figure from cost. */
   chargedMicroCents: string;
 };
 
@@ -78,7 +78,8 @@ type RawRow = {
 type Db = Pick<PrismaClient, '$queryRaw'>;
 
 export async function aiSpendSummary(db: Db, input: AiSpendInput): Promise<AiSpendResult> {
-  const keyExpr = GROUP_KEY[input.groupBy];
+  // Own keys only: an inherited one (`constructor`, `__proto__`) is not a grouping, whatever a caller sends.
+  const keyExpr = Object.hasOwn(GROUP_KEY, input.groupBy) ? GROUP_KEY[input.groupBy] : undefined;
   if (!keyExpr) throw new Error(`aiSpendSummary: unknown grouping ${String(input.groupBy)}`);
   const rows = await db.$queryRaw<RawRow[]>`
     WITH g AS (
@@ -88,7 +89,7 @@ export async function aiSpendSummary(db: Db, input: AiSpendInput): Promise<AiSpe
              coalesce(sum(ue.tokens_out), 0) AS tokens_out,
              coalesce(sum(ue.cost_micro_cents), 0) AS cost,
              count(*) FILTER (WHERE ue.cost_micro_cents IS NULL) AS unpriced,
-             coalesce(abs(sum(c.amount_micro_cents)), 0) AS charged
+             coalesce(sum(abs(c.amount_micro_cents)), 0) AS charged
       FROM usage_events ue
       ${CHARGE_JOIN}
       WHERE ${ownerPredicate(input)}
