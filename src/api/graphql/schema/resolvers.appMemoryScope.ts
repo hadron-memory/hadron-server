@@ -275,6 +275,17 @@ export type AppScopedMemoryRow = {
 };
 
 /**
+ * The page order of `appMemoryScope`: canonical memory URN, then id. The stored `urn` is unique but the canonical form
+ * is not injective (`org:kb` and `org::kb` both emit `hrn:mem:org:kb`), so equal keys are real and the id is what makes
+ * the order total, and so stable between page requests (#4980).
+ */
+export function compareScopeKeys(a: { memoryUrn: string; id: string }, b: { memoryUrn: string; id: string }): number {
+  if (a.memoryUrn !== b.memoryUrn) return a.memoryUrn < b.memoryUrn ? -1 : 1;
+  if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+  return 0;
+}
+
+/**
  * `appMemoryScope(appRef, limit, offset)`: the caller's App memory scope, one page,
  * ordered by memory URN (unique, so pages never drop or repeat a row). Paged
  * per cor:api:120:04 with the shared list clamp. `viewerCanWrite` runs the
@@ -304,7 +315,7 @@ export async function appMemoryScopePage(
   });
   const ordered = keys
     .map((m) => ({ id: m.id, memoryUrn: safeCanonicalUrn('memory', m.urn) }))
-    .sort((a, b) => (a.memoryUrn < b.memoryUrn ? -1 : a.memoryUrn > b.memoryUrn ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    .sort(compareScopeKeys);
   const skip = Math.max(0, offset ?? 0);
   const pageKeys = ordered.slice(skip, skip + clampListTake(limit));
   if (pageKeys.length === 0) return { items: [], total: ordered.length };
