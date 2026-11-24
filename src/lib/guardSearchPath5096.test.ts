@@ -28,6 +28,25 @@ describe('the shared source', () => {
   });
 });
 
+describe('a migration newer than the loop cannot leave a function unpinned in the migrate-built image', () => {
+  // The catalog pin below sees the post-push-built test database, which always ends with the loop; a production database is
+  // migrate-built, so a function a LATER migration creates stays unpinned there unless the migration says otherwise (SEC10 P3-1).
+  it('each CREATE FUNCTION in a newer migration carries its own SET search_path, or the migration re-runs the loop', () => {
+    const dirs = readdirSync(new URL('../../prisma/migrations/', import.meta.url)).filter((d) => /^\d{14}_/.test(d)).sort();
+    const carriers = dirs.filter((d) => prisma(`migrations/${d}/migration.sql`).includes(MARKER));
+    const newest = carriers[carriers.length - 1];
+    const offenders: string[] = [];
+    for (const d of dirs.filter((x) => x > newest)) {
+      const sql = prisma(`migrations/${d}/migration.sql`);
+      if (sql.includes(MARKER)) continue;
+      const creates = (sql.match(/CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s/gi) ?? []).length;
+      const sets = (sql.match(/SET\s+search_path\s*=\s*public\s*,\s*pg_temp/gi) ?? []).length;
+      if (creates > sets) offenders.push(`${d}: ${creates} CREATE FUNCTION, ${sets} SET search_path = public, pg_temp`);
+    }
+    expect(offenders, 'give each function `SET search_path = public, pg_temp` in its CREATE, or re-run prisma/guard-search-path-invariants.sql in that migration').toEqual([]);
+  });
+});
+
 describe('every function pins its search path', () => {
   it('no application function in public lacks search_path = public, pg_temp', async () => {
     const rows = await db.$queryRawUnsafe<Array<{ sig: string }>>(`
