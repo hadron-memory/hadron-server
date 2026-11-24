@@ -12,6 +12,8 @@ import {
   toISO,
 } from './resolvers.helpers.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { OrganizationNotFoundError } from '../../../lib/entityRef/errors.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { generateId } from '../../../lib/id.js';
 import {
   clearPriceCache,
@@ -24,6 +26,12 @@ import {
   PRICE_TIER_MAX,
   PRICE_TIER_MIN,
 } from '../../../lib/metering/index.js';
+import {
+  AI_SPEND_MAX_DAYS,
+  aiSpendSummary,
+  parseSpendInstant,
+  type AiSpendGroup,
+} from '../../../lib/metering/spend.js';
 import type { CreditLedgerEntry, AiModelPrice } from '../../../generated/prisma/index.js';
 
 const badInput = (message: string) =>
@@ -150,6 +158,42 @@ export const meteringQueries = {
     await requireOrgRole(ctx, orgId, 'ADMIN');
     const balance = await creditBalance(ctx.db, orgId);
     return { organizationId: orgId, balanceMicroCents: balance.toString() };
+  },
+
+  /**
+   * #5008 (Billing A2): the organization's AI spend for [from, to), one grouping. Org-ADMIN, the gate of `creditBalance`
+   * and answered first, so a caller who may not read gets FORBIDDEN whatever the range says. Rows are scalars: `APP` keys
+   * are ids, never an App object (cor:dmo:170:04 keeps cost and charge apart; see the SDL).
+   */
+  aiSpend: async (
+    _: unknown,
+    { orgRef, from, to, groupBy }: { orgRef: string; from: string; to: string; groupBy: AiSpendGroup },
+    ctx: Context,
+  ) => {
+    // A reference that names no organization answers the denial any non-admin gets for an existing one, so the
+    // refusal does not tell which organizations exist (and echoes nothing of the ref). A platform admin passes
+    // the gate for every organization, so for them nothing is concealed and the not-found stays. Only the RESPONSE is
+    // equalised, not the work: a missing organization skips the membership lookup an existing one runs, so a timing
+    // difference remains. That is not a secret kept: organizations are listable (the #5008 issue), and the refusal is
+    // identical so this surface does not read as an existence oracle. An App key (no user) is denied by
+    // requireOrgRole with the same authorizationDenied(), so it gets the same answer for either.
+    let orgId: string;
+    try {
+      ({ id: orgId } = await resolveOrgRef(ctx.db, orgRef));
+    } catch (e) {
+      if (e instanceof OrganizationNotFoundError && !isPlatformAdmin(ctx)) throw authorizationDenied();
+      throw e;
+    }
+    await requireOrgRole(ctx, orgId, 'ADMIN');
+    const fromAt = parseSpendInstant(from);
+    const toAt = parseSpendInstant(to);
+    if (!fromAt || !toAt) throw badInput('from and to must be ISO 8601 dates or date-times (a value with no offset is UTC).');
+    if (fromAt.getTime() >= toAt.getTime()) throw badInput('from must be before to.');
+    if (toAt.getTime() - fromAt.getTime() > AI_SPEND_MAX_DAYS * 86_400_000) {
+      throw badInput(`The range may span at most ${AI_SPEND_MAX_DAYS} days.`);
+    }
+    const summary = await aiSpendSummary(ctx.db, { organizationId: orgId, from: fromAt, to: toAt, groupBy });
+    return { from: fromAt.toISOString(), to: toAt.toISOString(), ...summary };
   },
 };
 

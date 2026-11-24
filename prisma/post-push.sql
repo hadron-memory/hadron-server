@@ -780,6 +780,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir agent-task-number-backfill.sql
 \ir agent-task-number-invariants.sql
 
+-- #4997: the project marker is permanent and AT0 is never marked. One source, shared verbatim with migration
+-- 20261124150000_agent_task_is_project (pinned by src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-project-marker-invariants.sql
+
 -- #2651: a task's latest hand-back (code, optional text, time). One source, shared verbatim with migration
 -- 20261101090000_agent_task_hand_back (pinned by src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-hand-back-invariants.sql
