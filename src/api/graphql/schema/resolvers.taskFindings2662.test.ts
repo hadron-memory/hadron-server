@@ -11,7 +11,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 const R = resolvers as any, M = R.Mutation;
 let app: any, owner: any, assignee: any, task: any;
 const ctx = (userId = assignee.id) => ({ db, userId, roles: ['READER'] });
-const finish = (findings?: unknown, extra = {}) => M.finishAgentTask({}, { taskId: task.id, result: { outcome: 'succeeded', summary: 'S', evidence: 'E', ...(findings === undefined ? {} : { findings }), ...extra } }, ctx());
+const finish = (findings?: unknown, extra = {}) => M.finishAgentTask({}, { taskRef: task.id, result: { outcome: 'succeeded', summary: 'S', evidence: 'E', ...(findings === undefined ? {} : { findings }), ...extra } }, ctx());
 const stored = () => db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
 const events = () => db.agentTeamEvent.findMany({ where: { taskId: task.id, type: 'task.finished' } });
 const read = async (args = {}) => R.AgentTaskResult.findings(R.AgentTask.result(await stored()), args, ctx());
@@ -22,7 +22,7 @@ beforeEach(async () => {
  app = await db.app.create({data:{organizationId:org.id,name:'Findings',urn:`${org.urn}:findings`}});
  for(const u of [owner,assignee]) await db.appMember.create({data:{appId:app.id,userId:u.id,role:'member'}});
  task = await M.createAgentTask({}, {input:{appRef:app.id,title:'T',source:'s',assignee:{user:assignee.id}}}, ctx(owner.id));
- await M.startAgentTask({}, {taskId:task.id}, ctx());
+ await M.startAgentTask({}, {taskRef:task.id}, ctx());
 });
 describe('#2662 findings on finish', () => {
  it('generates ids in order, preserves text, round-trips each severity and pages', async () => {
@@ -72,10 +72,10 @@ describe('#2662 findings on finish', () => {
   expect(await stored()).toEqual(before);expect(await events()).toHaveLength(1);
  });
  it('retains the existing assignee and read gates',async()=>{
-  await expect(M.finishAgentTask({}, {taskId:task.id,result:{outcome:'done',findings:[{severity:'P1',text:'x'}]}},ctx(owner.id))).rejects.toMatchObject({extensions:{code:'TASK_NOT_ASSIGNEE'}});
+  await expect(M.finishAgentTask({}, {taskRef:task.id,result:{outcome:'done',findings:[{severity:'P1',text:'x'}]}},ctx(owner.id))).rejects.toMatchObject({extensions:{code:'TASK_NOT_ASSIGNEE'}});
   await finish([{severity:'note',text:'private'}]);
   const outsider=await db.user.create({data:{handle:'outsider'}});
-  expect(await R.Query.agentTask({}, {id:task.id}, ctx(outsider.id))).toBeNull();
+  expect(await R.Query.agentTask({}, {ref:task.id}, ctx(outsider.id))).toBeNull();
  });
  it('publishes only a paginated findings field on the result and a bounded input list',()=>{
   const schema=buildSchema(typeDefs);expect(schema.getType('AgentTaskFindingPage')).toBeDefined();
@@ -88,9 +88,9 @@ it('GraphQL finish and paged read expose the typed findings; invalid severity wr
  const schema=buildSchema(typeDefs);
  const fieldResolver=(parent:any,args:any,c:any,info:any)=>{const fn=R[info.parentType.name]?.[info.fieldName];return typeof fn==='function'?fn(parent,args,c,info):defaultFieldResolver(parent,args,c,info);};
  const before=await stored();
- const bad=await graphql({schema,source:'mutation($id:ID!){finishAgentTask(taskId:$id,result:{outcome:"done",findings:[{severity:critical,text:"x"}]}){id}}',variableValues:{id:task.id},contextValue:ctx(),fieldResolver});
+ const bad=await graphql({schema,source:'mutation($id:ID!){finishAgentTask(taskRef:$id,result:{outcome:"done",findings:[{severity:critical,text:"x"}]}){id}}',variableValues:{id:task.id},contextValue:ctx(),fieldResolver});
  expect(bad.errors).toBeDefined();expect(await stored()).toEqual(before);expect(await events()).toHaveLength(0);
- const good=await graphql({schema,source:'mutation($id:ID!){finishAgentTask(taskId:$id,result:{outcome:"done",findings:[{severity:P2,text:"wire text"}]}){result{outcome findings(limit:1){total hasMore items{id severity text}}}}}',variableValues:{id:task.id},contextValue:ctx(),fieldResolver});
+ const good=await graphql({schema,source:'mutation($id:ID!){finishAgentTask(taskRef:$id,result:{outcome:"done",findings:[{severity:P2,text:"wire text"}]}){result{outcome findings(limit:1){total hasMore items{id severity text}}}}}',variableValues:{id:task.id},contextValue:ctx(),fieldResolver});
  expect(good.errors).toBeUndefined();expect(good.data).toEqual({finishAgentTask:{result:{outcome:'done',findings:{total:1,hasMore:false,items:[{id:'F1',severity:'P2',text:'wire text'}]}}}});
 });
 it('database refuses findings on an open task and replacement after finish',async()=>{

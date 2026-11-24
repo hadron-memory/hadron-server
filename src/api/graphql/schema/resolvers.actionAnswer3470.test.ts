@@ -73,7 +73,7 @@ beforeEach(async () => {
   roleAgent = await db.agent.create({ data: { name: 'Caller', urn: `${app.urn}:caller-agent`, systemMemoryId: roleMemory.id, ownerUserId: author.id } });
   await db.node.create({ data: { id: generateId(), memoryId: roleMemory.id, loc: 'tasks:review', name: 'Caller task', isRunnable: true } });
   worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: roleAgent.id, name: 'Author', slug: 'author', heldByUserId: author.id } });
-  await M.reassignAgentTask!({}, { taskId: build.id, assignee: { worker: worker.id } }, ctx());
+  await M.reassignAgentTask!({}, { taskRef: build.id, assignee: { worker: worker.id } }, ctx());
 });
 
 describe('one disclosure threshold and fault state for every action answer', () => {

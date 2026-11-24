@@ -148,7 +148,7 @@ describe('#3878 resolveUrn agenttask arm', () => {
     const runCtx: Context = { db, appId: appX.id, organizationId: org.id, clientId: 'run:r1', roles: [] };
     for (const granted of [true, false]) {
       runGrant.value = granted;
-      const direct = await Q.agentTask({}, { id: nested.id }, runCtx);
+      const direct = await Q.agentTask({}, { ref: nested.id }, runCtx);
       const byUrn = await resolve(`hrn:agenttask:${org.urn}:x:at1.1`, runCtx);
       expect(direct?.id ?? null).toBe(granted ? nested.id : null);
       expect(byUrn?.id ?? null).toBe(granted ? nested.id : null);
@@ -191,7 +191,7 @@ describe('#3878 resolveUrn agenttask arm', () => {
     await db.appMember.create({ data: { appId: legacy.id, userId: alice.id, role: 'member' } });
     const t: any = await M.createAgentTask({}, { input: { appRef: legacy.id, title: 'legacy' } }, as(alice));
     // Positive control: the task is readable to alice by id, so the null below is the arity rule, not the gate.
-    expect((await Q.agentTask({}, { id: t.id }, as(alice)))?.id).toBe(t.id);
+    expect((await Q.agentTask({}, { ref: t.id }, as(alice)))?.id).toBe(t.id);
     expect(await urnOf(t)).toBeNull();
     expect(await resolve(`hrn:agenttask:${org.urn}:x:extra:at0.1`, as(alice))).toBeNull();
   });
@@ -257,7 +257,7 @@ describe('#3878 a legacy App urn, and the hint texts\' placeholder spelling', ()
 
   it('the qualify refusal and the SDL show the lower-case form', async () => {
     let e: GraphQLError | undefined;
-    try { await Q.agentTask({}, { id: 'AT0.1' }, as(alice)); } catch (err) { e = err as GraphQLError; }
+    try { await Q.agentTask({}, { ref: 'AT0.1' }, as(alice)); } catch (err) { e = err as GraphQLError; }
     expect(e?.extensions?.code).toBe('TASK_HANDLE_QUALIFY');
     expect(e?.message).toContain('hrn:agenttask:<app-urn>:at<number>');
     expect(typeDefs).not.toMatch(/hrn:agenttask:<app-urn>:AT/);

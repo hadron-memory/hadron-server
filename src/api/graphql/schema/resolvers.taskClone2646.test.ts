@@ -17,12 +17,12 @@ const ctx = (userId: string) => ({ db, userId, roles: ['READER'] });
 const code = (c: string) => ({ extensions: { code: c } });
 const stored = (id: string) => db.agentTask.findUniqueOrThrow({ where: { id } }) as Promise<any>;
 const created = (id: string) => db.agentTeamEvent.findMany({ where: { taskId: id, type: 'task.created' } });
-const clone = (taskId: string, input: any = {}, userId = owner.id) => M.cloneAgentTask({}, { taskId, input }, ctx(userId));
+const clone = (taskId: string, input: any = {}, userId = owner.id) => M.cloneAgentTask({}, { taskRef: taskId, input }, ctx(userId));
 const eventCount = (id: string) => db.agentTeamEvent.count({ where: { taskId: id } });
 
 async function finish(taskId: string, userId: string) {
-  await M.startAgentTask({}, { taskId }, ctx(userId));
-  await M.finishAgentTask({}, { taskId, result: { outcome: 'succeeded', summary: 'done', evidence: 'e' } }, ctx(userId));
+  await M.startAgentTask({}, { taskRef: taskId }, ctx(userId));
+  await M.finishAgentTask({}, { taskRef: taskId, result: { outcome: 'succeeded', summary: 'done', evidence: 'e' } }, ctx(userId));
 }
 
 let source: any;
@@ -185,7 +185,7 @@ describe('parent, root and project', () => {
   describe('a child task', () => {
     let child: any;
     beforeEach(async () => {
-      await M.startAgentTask({}, { taskId: source.id }, ctx(assignee.id));
+      await M.startAgentTask({}, { taskRef: source.id }, ctx(assignee.id));
       child = await M.createAgentTask({}, { input: { parentTaskId: source.id, title: 'Child', source: 's' } }, ctx(assignee.id));
     });
 
@@ -203,8 +203,8 @@ describe('parent, root and project', () => {
     });
 
     it('goes under AT0 when its parent has ended', async () => {
-      await M.cancelAgentTask({}, { taskId: child.id }, ctx(assignee.id));
-      await M.finishAgentTask({}, { taskId: source.id, result: { outcome: 'succeeded' } }, ctx(assignee.id));
+      await M.cancelAgentTask({}, { taskRef: child.id }, ctx(assignee.id));
+      await M.finishAgentTask({}, { taskRef: source.id, result: { outcome: 'succeeded' } }, ctx(assignee.id));
       const c = await clone(child.id, {}, sibling.id);
       const at0 = await db.agentTask.findFirstOrThrow({ where: { appId: app.id, handle: 'AT0' } });
       expect((await stored(c.id)).parentTaskId).toBe(at0.id);
@@ -237,7 +237,7 @@ describe('copied requirements still pass the create gates', () => {
 describe('no reopen', () => {
   it('an ended task still never moves again', async () => {
     await finish(source.id, assignee.id);
-    await expect(M.cancelAgentTask({}, { taskId: source.id }, ctx(owner.id))).rejects.toMatchObject(code('TASK_ENDED'));
+    await expect(M.cancelAgentTask({}, { taskRef: source.id }, ctx(owner.id))).rejects.toMatchObject(code('TASK_ENDED'));
     await clone(source.id);
     expect((await stored(source.id)).status).toBe('finished');
   });

@@ -175,7 +175,7 @@ describe('#4300 (b) — a no-progress episode opened by reassigning a started ta
       data: { appId: app.id, title: 'Real', ownerWorkerId: ada.id, assigneeWorkerId: rook.id, assignedAt: new Date(Date.now() - 120 * MIN), status: 'started', startedAt: new Date(Date.now() - 120 * MIN) },
       select: { id: true },
     });
-    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: anne.id } }, ctx(admin.id));
+    await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: anne.id } }, ctx(admin.id));
     const row = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
     const reassigned = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: t.id, type: 'task.reassigned' } });
     expect(reassigned.createdAt.getTime()).toBeGreaterThanOrEqual(row.assignedAt!.getTime()); // the event is never before the stamp

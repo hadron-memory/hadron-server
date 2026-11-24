@@ -225,8 +225,8 @@ describe('cor:agt:050:09 — a worker directs the tasks of the workers that repo
   /** A root task owned by worker Dan, assigned to Liam. */
   const dansTask = () => asWorker(dan, () => M.createAgentTask({}, { input: { appRef: app.id, title: 'Fix it', assignee: { worker: liam.id } } }, ctx(member.id)));
   const reassign = (by: { id: string }, taskId: string, to: { id: string }) =>
-    asWorker(by, () => M.reassignAgentTask({}, { taskId, assignee: { worker: to.id } }, ctx(member.id)));
-  const cancel = (by: { id: string }, taskId: string) => asWorker(by, () => M.cancelAgentTask({}, { taskId }, ctx(member.id)));
+    asWorker(by, () => M.reassignAgentTask({}, { taskRef: taskId, assignee: { worker: to.id } }, ctx(member.id)));
+  const cancel = (by: { id: string }, taskId: string) => asWorker(by, () => M.cancelAgentTask({}, { taskRef: taskId }, ctx(member.id)));
 
   it('the worker the owner reports to reassigns and cancels; any other worker is refused', async () => {
     await set(ctx(admin.id), dan.id, ada.id);
@@ -423,7 +423,7 @@ describe('#1737 review — anchored authority and one lock protocol (Rook P2-1, 
     }).then(() => undefined));
     await graph.isReady;
     const observed = observeTransactionBackend(db);
-    const reassigning = codeOf(asWorker(ada, () => M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: marco.id } }, ctx(member.id, { db: observed.db }))));
+    const reassigning = codeOf(asWorker(ada, () => M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: marco.id } }, ctx(member.id, { db: observed.db }))));
     let adaFree = false;
     try {
       const pid = await observed.backendFor(reassigning);
