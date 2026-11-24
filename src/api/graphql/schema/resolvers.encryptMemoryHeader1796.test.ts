@@ -441,26 +441,35 @@ describe('#1796 the owner keeps every answer the header gave before this change'
   });
 });
 
-describe('#1796 completion with the header and an argument both present (argument deprecated)', () => {
-  // Not exclusive, unlike first encryption: there is a verifier, so both channels prove themselves
-  // and a mismatch can't pass. Step 2 deletes the argument and the case with it.
+describe('#1796 step 2: encryptMemory has no secret argument', () => {
   beforeEach(async () => {
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true, keyVerifier: makeKeyVerifier(parseDataKey(dataKey)) } });
   });
-  const COMPLETE = 'mutation($id: ID!, $key: String) { encryptMemory(memoryRef: $id, dataKey: $key) { id isEncrypted } }';
 
-  it('the same key in both completes', async () => {
-    const reply = await send(COMPLETE, { id: memory.id, key: dataKey }, { keys: [{ memory: memory.id, dataKey }] });
+  it('a request that names dataKey or passphrase is refused as an unknown argument, before any resolver runs', async () => {
+    for (const [argument, value] of [['dataKey', dataKey], ['passphrase', passphrase]] as const) {
+      const reply = await send(
+        `mutation($id: ID!, $s: String) { encryptMemory(memoryRef: $id, ${argument}: $s) { id } }`,
+        { id: memory.id, s: value },
+        { keys: [{ memory: memory.id, dataKey }] },
+      );
+      expect(reply.errors?.[0]?.message).toMatch(new RegExp(`Unknown argument "${argument}" on field "Mutation.encryptMemory"`));
+      expect(reply.data ?? null).toBeNull();
+      const node = await db.node.findFirstOrThrow({ where: { memoryId: memory.id } });
+      expect(isCiphertext(node.content)).toBe(false);
+    }
+  });
+
+  it('the schema declares only memoryRef on encryptMemory', () => {
+    const args = buildSchema(typeDefs).getMutationType()!.getFields().encryptMemory.args;
+    expect(args.map((a) => a.name)).toEqual(['memoryRef']);
+  });
+
+  it('completion through the header alone still works', async () => {
+    const reply = await send(ENCRYPT, { id: memory.id }, { keys: [{ memory: memory.id, dataKey }] });
     expect(reply.errors).toBeUndefined();
-    expect(reply.data.encryptMemory).toEqual({ id: memory.id, isEncrypted: true });
     const node = await db.node.findFirstOrThrow({ where: { memoryId: memory.id } });
     expect(isCiphertext(node.content)).toBe(true);
-  });
-  it('a verified header does not excuse a wrong argument', async () => {
-    const reply = await send(COMPLETE, { id: memory.id, key: wrongKey }, { keys: [{ memory: memory.id, dataKey }] });
-    expect(code(reply)).toBe('WRONG_KEY');
-    const node = await db.node.findFirstOrThrow({ where: { memoryId: memory.id } });
-    expect(isCiphertext(node.content)).toBe(false);
   });
 });
 
@@ -470,14 +479,5 @@ describe('#1796 the entry stays with its request', () => {
     expect(sessionKeyCache.getByMemoryId(memory.id)).toBeFalsy();
     const again = await send(ENCRYPT, { id: memory.id });
     expect(code(again)).toBe('BAD_UNLOCK_INPUT');
-  });
-});
-
-describe('#1796 acceptance 1: the deprecation window', () => {
-  it('encryptMemory.dataKey and .passphrase are deprecated while they remain', () => {
-    const args = buildSchema(typeDefs).getMutationType()!.getFields().encryptMemory.args;
-    for (const name of ['dataKey', 'passphrase']) {
-      expect(args.find((a) => a.name === name)?.deprecationReason).toMatch(/x-hadron-memory-keys/);
-    }
   });
 });
