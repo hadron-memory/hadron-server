@@ -7203,7 +7203,10 @@ export const typeDefs = `#graphql
     READABLE
     UNAVAILABLE
   }
-  "How to load the author task, per surface. graphql always has a route and is never null; mcp and cli are null when the task has no URN to name."
+  """
+  How to load the author task, per surface. graphql always has a route and is never null; mcp and cli are null when the
+  task has no URN to name.
+  """
   type AuthoringCheckLoad {
     graphql: String!
     mcp: String

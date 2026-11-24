@@ -256,6 +256,7 @@ describe('#5034 the input names the node one way', () => {
     ['loc only', () => ({ loc: 'doc' })],
     ['a ref and a loc', () => ({ ref: nodeId, loc: 'doc' })],
     ['a ref and a memoryId', () => ({ ref: nodeId, memoryId })],
+    ['null memoryId and null loc (null is absent)', () => ({ memoryId: null, loc: null })],
   ];
   it.each(cases)('%s is BAD_USER_INPUT, before anything is read', async (_label, input) => {
     expect(await code(check(person(ann), { ...input(), role: 'guide' }))).toBe('BAD_USER_INPUT');
@@ -263,6 +264,16 @@ describe('#5034 the input names the node one way', () => {
 });
 
 describe('#5034 a create is always an authored change', () => {
+  // `changesAuthoredContent` is an input of the CHECK only: neither CreateNodeInput nor UpdateNodeInput has it (an update's
+  // authored change is derived from what it changes, a create is authored by construction). So there is nothing to hand the
+  // real createNode; the pin below proves the write refuses the same create with no such excuse available.
+  it('the write has no changesAuthoredContent input to excuse a create with', () => {
+    const block = (name: string) => typeDefs.slice(typeDefs.indexOf(`input ${name} {`), typeDefs.indexOf('}', typeDefs.indexOf(`input ${name} {`)));
+    expect(block('NodeAuthoringCheckInput')).toMatch(/changesAuthoredContent/);
+    expect(block('CreateNodeInput')).not.toMatch(/changesAuthoredContent/);
+    expect(block('UpdateNodeInput')).not.toMatch(/changesAuthoredContent/);
+  });
+
   it('changesAuthoredContent: false does not excuse a create: REFUSED, as the write refuses it, and nothing is written', async () => {
     const verdict = await check(person(ann), { memoryId, loc: 'brand-new', role: 'guide', changesAuthoredContent: false });
     expect(verdict).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
@@ -284,6 +295,8 @@ describe('#5034 a trusted portal human is judged as the write judges them', () =
   it('a portal signal naming another user is no trust', async () => {
     const other = { ...person(ann), portalHumanUserId: ben } as Context;
     expect(await check(other, { ref: nodeId, role: 'guide' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
+    const refused = await refusedWrite(M.updateNode({}, { input: { id: nodeId, role: 'guide', content: 'not trusted' } }, other));
+    expect(refused?.extensions?.code).toBe('AUTHORING_ATTESTATION_MISSING');
   });
 });
 
@@ -297,6 +310,26 @@ describe('#5034 by memory and loc, a soft-deleted node is no node', () => {
     // The control: the same node, live, is judged by its own role.
     await db.node.update({ where: { id: gone }, data: { deletedAt: null } });
     expect(await check(person(ann), { memoryId, loc: 'gone' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
+  });
+});
+
+describe('#5034 the write agrees on a soft-deleted loc', () => {
+  const softDeleted = (loc: string) => db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, content: 'x', role: 'guide', deletedAt: new Date() } });
+  it('with a claim, the check passes and createNode at that loc is accepted', async () => {
+    await softDeleted('gone-claimed');
+    const authoredWith = { task: taskId, revision: 4 };
+    expect(await check(person(ann), { memoryId, loc: 'gone-claimed', role: 'guide', authoredWith })).toMatchObject({ state: 'PASS' });
+    const written = await M.createNode({}, { input: { memoryId, loc: 'gone-claimed', name: 'again', content: 'new', role: 'guide', authoredWith } }, person(ann));
+    expect(written.id).toBeTruthy();
+    expect(await db.node.count({ where: { memoryId, loc: 'gone-claimed', deletedAt: null } })).toBe(1);
+  });
+
+  it('with no claim, the check refuses as for a new node and createNode refuses the same way', async () => {
+    await softDeleted('gone-bare');
+    expect(await check(person(ann), { memoryId, loc: 'gone-bare', role: 'guide' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
+    const refused = await refusedWrite(M.createNode({}, { input: { memoryId, loc: 'gone-bare', name: 'again', content: 'new', role: 'guide' } }, person(ann)));
+    expect(refused?.extensions?.code).toBe('AUTHORING_ATTESTATION_MISSING');
+    expect(await db.node.count({ where: { memoryId, loc: 'gone-bare', deletedAt: null } })).toBe(0);
   });
 });
 
@@ -322,6 +355,7 @@ describe('#5034 the not-found answers compare with the write\'s', () => {
     const missing = await grab(check(person(carol), { ref: missingId, role: 'guide' }));
     expect(hidden.cls).toBe(missing.cls);
     expect(hidden.code).toBe(missing.code);
+    expect(hidden.code).toBe('NODE_NOT_FOUND');
     expect(hidden.message.split(nodeId).join('<ref>')).toBe(missing.message.split(missingId).join('<ref>'));
     // The write's code for the same unreadable node. Its wording differs today (the check throws the typed
     // NodeNotFoundError, the write a GraphQLError), so the code is the contract pinned here.
@@ -338,7 +372,7 @@ describe('#5034 the text says what the check does', () => {
   });
 
   it('AuthoringCheckLoad says graphql always has a route', () => {
-    expect(typeDefs).toMatch(/graphql always has a route and is never null; mcp and cli are null when the task has no URN to name/);
+    expect(typeDefs).toMatch(/graphql always has a route and is never null; mcp and cli are null when the\s+task has no URN to name/);
   });
 
   it('the PASS description says the answer covers the authoring attestation check and not the rest of the write\'s validation', () => {
