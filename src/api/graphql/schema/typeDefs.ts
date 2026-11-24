@@ -7096,6 +7096,78 @@ export const typeDefs = `#graphql
   }
 
   """
+  #4168 (hrn:node:hadronmemory.com:specs:cor:dmo:060:17): the verdict of a proposed write's authoring
+  attestation check. PASS: the write would pass. REFUSED: the write would be refused, with the code,
+  the governed role, the prose and the recovery the write returns. UNAVAILABLE: the caller reads the
+  memory but does not write it, one answer for every node and role, so it shows nothing about the
+  memory's rules. A preview, never a reservation, and a pass is never proof the procedure was followed.
+  """
+  enum NodeAuthoringCheckState {
+    PASS
+    REFUSED
+    UNAVAILABLE
+  }
+  "The four refusals of the authoring attestation check, as a write returns them."
+  enum AuthoringCheckRefusalCode {
+    AUTHORING_ATTESTATION_MISSING
+    AUTHORING_ATTESTATION_WRONG_TASK
+    AUTHORING_ATTESTATION_STALE
+    AUTHOR_TASK_BROKEN
+  }
+  enum AuthoringCheckTaskAccess {
+    READABLE
+    UNAVAILABLE
+  }
+  "How to load the author task, per surface. A surface with no route is null."
+  type AuthoringCheckLoad {
+    graphql: String!
+    mcp: String
+    cli: String
+  }
+  """
+  What a refusal tells the writer about the required task, exactly as the write does (#1329). A task
+  the caller cannot read, a deleted task and an unrunnable one are all UNAVAILABLE with nulls: no id,
+  reference, revision or count.
+  """
+  type AuthoringCheckRecovery {
+    taskAccess: AuthoringCheckTaskAccess!
+    task: String
+    taskId: ID
+    taskRevision: Int
+    load: AuthoringCheckLoad
+  }
+  type NodeAuthoringCheck {
+    state: NodeAuthoringCheckState!
+    "Set when state is REFUSED."
+    code: AuthoringCheckRefusalCode
+    "The governed role whose rule refused. Set when state is REFUSED."
+    role: String
+    "The write's refusal prose. Set when state is REFUSED."
+    message: String
+    "Set when state is REFUSED."
+    recovery: AuthoringCheckRecovery
+  }
+  """
+  A proposed write to check. Name the node by ref (PK or URN of an existing node), or by memoryId and
+  loc together (an existing node at that loc is judged as itself; otherwise a new node).
+  """
+  input NodeAuthoringCheckInput {
+    "An existing node: PK or fully-qualified node URN. XOR with memoryId+loc."
+    ref: String
+    "With loc: the memory (ID or fully-qualified URN). XOR with ref."
+    memoryId: String
+    loc: String
+    "The role the write would leave the node with. Omit to keep the node's own; null to clear. A new node starts with none."
+    role: String
+    "Whether the write would leave the node runnable. Omit to keep the node's own."
+    isRunnable: Boolean
+    "The claim the write would carry, or omit for none."
+    authoredWith: AuthoredWithInput
+    "Whether the write changes authored content. Default true; a write that changes none needs no claim. A create always does."
+    changesAuthoredContent: Boolean = true
+  }
+
+  """
   #1328 — an authoring attestation. The writer states which task it worked from
   and that task's current revision (Node.revSeq). The server compares both with
   the rule and refuses a mismatch: AUTHORING_ATTESTATION_MISSING,
@@ -10150,6 +10222,16 @@ export const typeDefs = `#graphql
     boot prompts are excluded. An unscoped bare loc does not search inheritance.
     """
     node(ref: ID!, memoryRef: ID, raw: Boolean): Node
+
+    """
+    Check, without writing, whether a proposed node write and its authoredWith claim would pass the
+    authoring attestation check (hrn:node:hadronmemory.com:specs:cor:dmo:060:17). The answer is the
+    verdict the write would give for the same caller, node, role and claim: it is computed by the write's
+    own check. A caller who cannot read the node gets the node read's not-found (NODE_NOT_FOUND by ref,
+    MEMORY_NOT_FOUND by memory); a reader who does not write the memory gets UNAVAILABLE on every node.
+    Shows no rule list, writers level or validator setting. Writes nothing.
+    """
+    nodeAuthoringCheck(input: NodeAuthoringCheckInput!): NodeAuthoringCheck!
 
     """
     Render one node to a portable, self-contained file (spec cor:api).

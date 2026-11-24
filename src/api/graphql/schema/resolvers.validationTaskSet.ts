@@ -20,7 +20,7 @@ import { isAuthorizationDenial, isMemoryReadableCached, requireMemoryWriteAccess
 const UNAVAILABLE: ValidationTaskSet = { state: 'UNAVAILABLE', tasks: [] };
 
 /** Whether this caller may record at all, by the recorder's gates in the recorder's order. */
-async function mayRecordIn(ctx: Context, memoryId: string): Promise<boolean> {
+export async function mayRecordIn(ctx: Context, memoryId: string): Promise<boolean> {
   if (ctx.impersonation || ctx.sessionBindingRefused) return false;
   try {
     // The recorder's pre-flight. A pooled decision is honoured only where nothing is written unfenced;
