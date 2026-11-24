@@ -132,14 +132,27 @@ describe('#4512 review probes: no live assigned id', () => {
     const named = new Set(['fx-110-a.b_c']);
     const r = (t: string): string => neutraliseAssignedIds(t, named);
     expect(r('<a id="fx-110-a&period;b&lowbar;c">')).toBe('<a data-id="fx-110-a&period;b&lowbar;c">');
-    expect(r('<a id="fx&hyphen;110&dash;a.b&UnderBar;c">')).toBe('<a data-id="fx&hyphen;110&dash;a.b&UnderBar;c">');
+    expect(r('<a id="fx-110-a.b&UnderBar;c">')).toBe('<a data-id="fx-110-a.b&UnderBar;c">');
+    // &hyphen; and &dash; are U+2010, not the ASCII hyphen an anchor holds, so they must NOT decode to one.
+    expect(r('<a id="fx&hyphen;110&dash;a.b_c">')).toBe('<a id="fx&hyphen;110&dash;a.b_c">');
     expect(r('<a id="fx&#00000045;110-a.b_c">')).toBe('<a data-id="fx&#00000045;110-a.b_c">');
+  });
+  it('J1 (local delta): &fjlig; is the two letters f and j, so an anchor holding fj matches', () => {
+    const fj = new Set(['fx-fj-a']);
+    expect(neutraliseAssignedIds('<a id="fx-&fjlig;-a">', fj)).toBe('<a data-id="fx-&fjlig;-a">');
+    const out = renderSpecDocument(doc([part('fx:fj:a', '<a id="fx-&fjlig;-a"></a>')], part('fx:fj', 'F', 'Feature: F')));
+    expect(count(out, ' id="fx-fj-a"')).toBe(1);
+  });
+  it('an authored NUL in a name or a loc is replaced, not kept', () => {
+    const out = renderSpecDocument(doc([part('fx:110:a', 'x', 'Rule: R\u0000S')]));
+    expect(out).toContain('## Rule: R\uFFFDS [fx:110:a]');
+    expect(out).not.toContain('\u0000R');
   });
   it('H2 (local full): two authored pieces joined by a blank line cannot form a live id between them', () => {
     const feature = part('fx:110', 'Head.\n\n---\n\n="fx-110-a">tail</pre>', 'Feature: F');
     const out = renderSpecDocument(doc([part('fx:110:a', 'text <pre id')], feature));
     expect(count(out, ' id="fx-110-a"')).toBe(1);
-    expect(out).toContain('<pre data-id\n\n="fx-110-a">tail</pre>'.replace('data-id\n\n="fx', 'data-id\n\n="fx'));
+    expect(out).toContain('<pre data-id\n\n="fx-110-a">tail</pre>');
   });
   it('an authored NUL cannot forge the server anchor mark', () => {
     const out = renderSpecDocument(doc([part('fx:110:a', 'x \u0000forged\u0000 y')]));
