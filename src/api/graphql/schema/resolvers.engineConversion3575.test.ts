@@ -19,20 +19,28 @@ import { withTestOperationKey } from '../../../test/operationKey.js';
 import { formatGraphQLError } from '../formatError.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { encryptWithSecret, withEncryptionSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
 const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
 type Answer = { data: unknown; error: { message: string; extensions: Record<string, unknown> } | null };
 async function ask(contextValue: Context, query: string, variables: Record<string, unknown> = {}): Promise<Answer> {
-  const res = await server.executeOperation({ query, variables }, { contextValue });
+  // #1796 step 2: the key is no argument. A fixture that names `k` hands it over as the request's
+  // first-encryption entry, as `x-hadron-memory-keys` does over HTTP.
+  const { k, ...operationVariables } = variables;
+  if (k !== undefined && typeof operationVariables.m !== 'string') throw new Error('ask: a key `k` needs a string memory `m`');
+  const execute = () => server.executeOperation({ query, variables: operationVariables }, { contextValue });
+  const res = typeof k === 'string'
+    ? await withEncryptionSecret(operationVariables.m as string, { dataKey: k }, contextValue, execute)
+    : await execute();
   if (res.body.kind !== 'single') throw new Error('unexpected incremental response');
   const { data, errors } = res.body.singleResult;
   const e = errors?.[0];
   const { stacktrace: _drop, ...extensions } = (e?.extensions ?? {}) as Record<string, unknown>;
   return { data: data ? Object.values(data)[0] ?? null : null, error: e ? { message: e.message, extensions } : null };
 }
-const ENCRYPT = `mutation($m: ID!, $k: String) { encryptMemory(memoryRef: $m, dataKey: $k) { id isEncrypted } }`;
+const ENCRYPT = `mutation($m: ID!) { encryptMemory(memoryRef: $m) { id isEncrypted } }`;
 
 let orgId: string, userId: string, agentId: string, ctx: Context, memoryId: string;
 const stored = (id: string) => db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: id } });
@@ -94,7 +102,7 @@ describe('#3575 encryptMemory continues past an unauthenticated engine envelope,
     const { healthy, blocked } = await privateMemory({ healthy: 2, blocked: 1 });
     const key = generateDataKey();
     const before = await stored(blocked[0]!.id);
-    await expect(resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey: keyText(key) }, ctx)).rejects.toMatchObject({ extensions: { code: 'ENCRYPTION_INCOMPLETE' } });
+    await expect(encryptWithSecret({}, { memoryRef: memoryId, dataKey: keyText(key) }, ctx)).rejects.toMatchObject({ extensions: { code: 'ENCRYPTION_INCOMPLETE' } });
     for (const h of healthy) expect(isAuthenticatedDataEnvelope((await stored(h.id)).state, key)).toBe(true);
     expect(await stored(blocked[0]!.id)).toEqual(before); // never rewrapped, cleared, repaired or reseeded
     const root = await db.node.findUniqueOrThrow({ where: { id: blocked[0]!.id } });
@@ -330,7 +338,7 @@ describe('#4724 pins for the conversion edge cases #4710 deferred', () => {
       await db.node.create({ data: { id: generateId(), memoryId, loc: `fresh:${fresh++}`, name: 'fresh', nodeType: 'record', content: 'PLAIN', data: {} } });
     }, args => !args.cursor);
     try {
-      const err = await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey: keyText(generateDataKey()) }, { ...ctx, db: churning } as Context).catch((e: any) => e);
+      const err = await encryptWithSecret({}, { memoryRef: memoryId, dataKey: keyText(generateDataKey()) }, { ...ctx, db: churning } as Context).catch((e: any) => e);
       expect(fresh).toBe(5);
       expect(err.extensions).toMatchObject({ code: 'ENCRYPTION_INCOMPLETE', phase: 'CHAT_ENGINE_STATE', blockedEngineStateCount: null, blockedEngineStateRootIds: [blocked[0]!.id], progressCommitted: true });
     } finally { error.mockRestore(); }
@@ -357,7 +365,7 @@ describe('#4724 pins for the conversion edge cases #4710 deferred', () => {
     const churning = withPassHook('nodeRevision', async () => {
       await db.nodeRevision.create({ data: { nodeId: anyNode!.id, memoryId, loc: anyNode!.loc, name: 'x', content: 'PLAIN-HISTORY', revNo: revNo++ } });
     }, args => !args.where?.id);
-    const err = await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey: keyText(key) }, { ...ctx, db: churning } as Context).catch((e: any) => e);
+    const err = await encryptWithSecret({}, { memoryRef: memoryId, dataKey: keyText(key) }, { ...ctx, db: churning } as Context).catch((e: any) => e);
     expect(err.extensions).toEqual({ code: 'ENCRYPTION_INCOMPLETE', memoryId });
     expect(revNo).toBe(20_005);
   });

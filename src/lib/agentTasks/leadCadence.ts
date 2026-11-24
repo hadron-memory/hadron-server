@@ -33,7 +33,7 @@
  * Free for work is the shared helper's `free` (cor:agt:060:05), the one the matcher and the roster read, minus every
  * pool worker a live stop signal covers at any level (ruling 0123, alarm-only exclusion).
  *
- * EPISODES. The alarm stream is append-only and `agent_team_events_episode_uniq` does not dedupe a NULL task id, so the
+ * EPISODES. The alarm stream is append-only and `agent_team_events_episode_app_uniq` does not dedupe a NULL task id, so the
  * episode is a row in `lead_cadence_episodes` whose partial unique index admits one OPEN row per lead, inserted in
  * the same SERIALIZABLE transaction as the event. The loser of a race rolls back and raises nothing. An episode ends in
  * exactly two ways. (1) At the lead's next counted assignment: neither a shortage of free workers nor a pause ends it, so

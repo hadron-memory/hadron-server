@@ -2521,17 +2521,14 @@ export const memoryMutations = {
     },
 
     // Spec 041 (D-2026-07-06-B): convert a plaintext PRIVATE memory to
-    // encrypted. Caller supplies exactly one of dataKey / passphrase; the
-    // passphrase path stores KDF salt+params, and BOTH paths store a
-    // keyVerifier so later unlocks detect a wrong key without touching
-    // node rows. The server never persists the key itself.
+    // encrypted. The secret is exactly one of a dataKey / passphrase entry
+    // beside the operation (x-hadron-memory-keys, #1796). The passphrase path
+    // stores KDF salt+params, and BOTH paths store a keyVerifier so later
+    // unlocks detect a wrong key without touching node rows. The server never
+    // persists the key itself.
     encryptMemory: async (
       _: unknown,
-      {
-        memoryRef,
-        dataKey: dataKeyArgument,
-        passphrase: passphraseArgument,
-      }: { memoryRef: string; dataKey?: string | null; passphrase?: string | null },
+      { memoryRef }: { memoryRef: string },
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: memoryRef may be ID, bare URN, or prefixed URN.
@@ -2540,11 +2537,11 @@ export const memoryMutations = {
       // #1796 (cor:sec:040:04): the secret travels beside the operation. A first encryption's entry
       // comes from x-hadron-memory-keys, unverified because no verifier exists yet. A completion's key
       // is either that header's verified staged key or the owning App's x-hadron-operation-key. The
-      // arguments stay for the deprecation window. Claiming the operation key waits for the encrypted
+      // operation takes no secret argument (step 2 of #1796 deleted them). Claiming the operation key waits for the encrypted
       // branch: it is single-use, and nothing else here needs it.
       const headerEntry = takeRequestFirstEncryption(resolvedMemoryId);
-      const dataKey = headerEntry ? headerEntry.dataKey : dataKeyArgument;
-      const passphrase = headerEntry ? headerEntry.passphrase : passphraseArgument;
+      const dataKey = headerEntry?.dataKey;
+      const passphrase = headerEntry?.passphrase;
       const stagedKey = getRequestKey(resolvedMemoryId);
       const operationKeySupplied = hasRequestOperationKey();
       // #1644: first encryption requires the strict owner. Holger's ruling
@@ -2561,11 +2558,6 @@ export const memoryMutations = {
           });
         }
       });
-      if (headerEntry && (dataKeyArgument || passphraseArgument)) {
-        throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
-          extensions: { code: 'BAD_UNLOCK_INPUT' },
-        });
-      }
       // Class gate (D-2026-07-06-B, #516 resolved): 'private' is the ONLY
       // encryptable class — no exceptions. Tier 2.5's SECRET-mode memories are
       // now born class='private' (resolvers.mutation.session.ts) and the anon→
@@ -2605,7 +2597,8 @@ export const memoryMutations = {
         try {
           // Beside the operation, not an argument. Every supplied key must prove itself against the
           // verifier, so a mismatch between channels can't pass: an operation key is verified here,
-          // the staged key was verified at staging, and an argument below.
+          // the staged key was verified at staging, and a first-encryption entry is verified by
+          // resolveSuppliedKey below.
           const operationKey = operationKeySupplied ? getRequestOperationKey() : null;
           if (operationKey && !verifyDataKey(memory.keyVerifier as string, operationKey)) {
             throw new MemoryUnlockError('Wrong passphrase or data key for this memory.', 'WRONG_KEY');
@@ -2622,7 +2615,7 @@ export const memoryMutations = {
         }
       } else if (passphrase) {
         if (dataKey) {
-          throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
+          throw new GraphQLError('Send exactly one of dataKey or passphrase in the x-hadron-memory-keys entry.', {
             extensions: { code: 'BAD_USER_INPUT' },
           });
         }
@@ -2640,7 +2633,7 @@ export const memoryMutations = {
           });
         }
       } else {
-        throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
+        throw new GraphQLError('Send a dataKey or passphrase entry for this memory in x-hadron-memory-keys.', {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }

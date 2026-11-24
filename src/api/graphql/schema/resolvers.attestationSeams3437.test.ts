@@ -47,6 +47,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
 import { testRunAgentId } from '../../../test/runAgent.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<Record<string, unknown>>>;
 const ORG = 'seams-3437';
@@ -330,7 +331,7 @@ describe('#3437 item 7: an encrypted no-op, on real ciphertext', () => {
       await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role, authorTaskId: privateTask, authorTaskRequired: true } });
       await db.node.create({ data: { id: generateId(), memoryId: privateId, loc, name: loc, content: 'cat', role, ...stamp } });
     }
-    await resolvers.Mutation.encryptMemory(null, { memoryRef: privateId, dataKey }, ctx());
+    await encryptWithSecret(null, { memoryRef: privateId, dataKey }, ctx());
     sessionKeyCache.set('seams-3437', privateId, key);
   });
 

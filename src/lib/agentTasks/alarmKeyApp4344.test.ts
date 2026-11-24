@@ -64,68 +64,60 @@ beforeEach(async () => {
   taskB = (await db.agentTask.create({ data: { appId: appB, title: 'T', createdAt: at('09:00'), ownerWorkerId: b.worker, assigneeWorkerId: b.worker, assignedAt: at('10:00') }, select: { id: true } })).id;
 });
 
-/** The post-contract state: the three-column index dropped. Always restored, so the worker's database stays as it was. */
-async function withOldIndexDropped<T>(body: () => Promise<T>): Promise<T> {
-  const [{ def }] = await db.$queryRaw<{ def: string }[]>`SELECT indexdef AS def FROM pg_indexes WHERE indexname = ${OLD_INDEX}`;
-  await db.$executeRawUnsafe(`DROP INDEX ${OLD_INDEX}`);
-  try {
-    return await body();
-  } finally {
-    // Both alarms (the foreign one and App B's) share the three columns, so the index cannot come back over them: the
-    // rows go first (the events table is append-only, so cleanDb is the way), then the index as it was.
-    await cleanDb(db);
-    await db.$executeRawUnsafe(def);
-  }
-}
-
 describe('#4344 — a foreign alarm row does not block App B\'s real alarm', () => {
   it('with the App in the key, the pass raises App B\'s alarm beside the foreign row', async () => {
-    await withOldIndexDropped(async () => {
-      const ep = await episodeOf(at('10:15'));
-      await plantForeign(ep);
-      const raised = await evaluateStalls(db, at('10:15'));
-      expect(raised).toHaveLength(1);
-      expect(await alarmsOfB()).toHaveLength(1);
-    });
+    const ep = await episodeOf(at('10:15'));
+    await plantForeign(ep);
+    const raised = await evaluateStalls(db, at('10:15'));
+    expect(raised).toHaveLength(1);
+    expect(await alarmsOfB()).toHaveLength(1);
   });
 
   it('control: the same episode of the same App is still one alarm (a second pass inserts nothing)', async () => {
-    await withOldIndexDropped(async () => {
-      const ep = await episodeOf(at('10:15'));
-      await plantForeign(ep);
-      expect(await evaluateStalls(db, at('10:15'))).toHaveLength(1);
-      expect(await evaluateStalls(db, at('10:16'))).toHaveLength(0);
-      expect(await alarmsOfB()).toHaveLength(1);
-    });
+    const ep = await episodeOf(at('10:15'));
+    await plantForeign(ep);
+    expect(await evaluateStalls(db, at('10:15'))).toHaveLength(1);
+    expect(await evaluateStalls(db, at('10:16'))).toHaveLength(0);
+    expect(await alarmsOfB()).toHaveLength(1);
   });
 });
 
-describe('#4344 — the migration is an expand', () => {
-  it('the four-column unique index exists with the App first, beside the kept three-column one', async () => {
+describe('#4344 — the contract migration', () => {
+  it('only the four-column unique index remains, with the App first', async () => {
     const rows = await db.$queryRaw<{ indexname: string; indexdef: string }[]>`SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'agent_team_events' AND indexdef ILIKE '%UNIQUE%' AND indexname LIKE 'agent_team_events_episode%'`;
     const byName = new Map(rows.map((r) => [r.indexname, r.indexdef]));
-    expect(byName.get(OLD_INDEX)).toMatch(/\(task_id, type, episode_start\)/);
+    expect(byName.has(OLD_INDEX)).toBe(false);
+    const [{ n }] = await db.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'agent_team_events' AND indexname = 'agent_team_events_task_id_type_idx'`;
+    expect(Number(n), 'the (task_id, type) index the progress/queued reads use').toBe(1);
+    const [{ m }] = await db.$queryRaw<{ m: bigint }[]>`SELECT count(*) AS m FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'agent_team_events' AND indexname = 'agent_team_events_task_id_idx'`;
+    expect(Number(m), 'the redundant single-column index is gone').toBe(0);
     expect(byName.get('agent_team_events_episode_app_uniq')).toMatch(/\(app_id, task_id, type, episode_start\)/);
   });
 
-  it('the migration adds the new index and does not drop the old one (an old image still writes the three-column target)', () => {
+  it('the expand migration only adds; a LATER migration drops the three-column index', () => {
     const dir = new URL('../../../prisma/migrations/', import.meta.url);
-    const name = readdirSync(dir).find((d) => d.endsWith('_agent_team_events_episode_app_key'));
-    expect(name, 'the expand migration').toBeTruthy();
-    const sql = readFileSync(new URL(`${name}/migration.sql`, dir), 'utf8');
-    expect(sql).toMatch(/CREATE UNIQUE INDEX "agent_team_events_episode_app_uniq"[^;]*\("app_id", "task_id", "type", "episode_start"\)/);
-    expect(sql).not.toMatch(/DROP INDEX[^;]*agent_team_events_episode_uniq/);
+    const names = readdirSync(dir).sort();
+    const expand = names.find((d) => d.endsWith('_agent_team_events_episode_app_key'));
+    const contract = names.find((d) => d.endsWith('_agent_team_events_episode_contract'));
+    expect(expand, 'the expand migration').toBeTruthy();
+    expect(contract, 'the contract migration').toBeTruthy();
+    expect(contract! > expand!).toBe(true);
+    expect(readFileSync(new URL(`${expand}/migration.sql`, dir), 'utf8')).not.toMatch(/DROP INDEX[^;]*agent_team_events_episode_uniq/);
+    expect(readFileSync(new URL(`${contract}/migration.sql`, dir), 'utf8')).toMatch(/DROP INDEX CONCURRENTLY IF EXISTS "agent_team_events_episode_uniq";/);
+    // Each CONCURRENTLY file holds exactly one statement (a multi-statement file runs in one transaction and refuses).
+    const concurrent = names.filter((d) => /_agent_team_events_(task_type_idx|episode_contract|task_id_idx_drop)$/.test(d));
+    expect(concurrent.map((d) => d.replace(/^\d+_/, '')).sort(), 'all three CONCURRENTLY migrations were found, so none is skipped').toEqual(['agent_team_events_episode_contract', 'agent_team_events_task_id_idx_drop', 'agent_team_events_task_type_idx']);
+    for (const n of concurrent) {
+      const sql = readFileSync(new URL(`${n}/migration.sql`, dir), 'utf8').split('\n').filter((l) => !l.startsWith('--')).join('\n');
+      expect(sql.match(/;/g), n).toHaveLength(1);
+      expect(sql, n).toMatch(/CONCURRENTLY/);
+    }
   });
 
-  it('transitional control: while the old index stays, the foreign row still refuses App B\'s insert (the contract migration lifts it)', async () => {
+  it('the foreign row no longer refuses App B\'s insert', async () => {
     const ep = await episodeOf(at('10:15'));
     await plantForeign(ep);
-    const err = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    try {
-      expect(await evaluateStalls(db, at('10:15'))).toHaveLength(0);
-      expect(await alarmsOfB()).toHaveLength(0);
-    } finally {
-      err.mockRestore();
-    }
+    expect(await evaluateStalls(db, at('10:15'))).toHaveLength(1);
+    expect(await alarmsOfB()).toHaveLength(1);
   });
 });
