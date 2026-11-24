@@ -428,6 +428,8 @@ describe('#4967 — pins the first review left open', () => {
   const FINAL = 'BODY\n\nTAIL';
   const hashOf = async (id: string) => (await db.node.findUniqueOrThrow({ where: { id } })).abstractOriginHash;
 
+  // Pins the DOCUMENTED hazard (the abstractStillAccurate CONCURRENCY text): the flag certifies whatever abstract is stored under the
+  // lock, including one this caller never read. The test fixes that behaviour so a change to it is deliberate.
   it('abstractStillAccurate reads the abstract UNDER THE LOCK: one a concurrent writer first set between the probe and the transaction is fingerprinted', async () => {
     const node = await seed('lockabs:set');
     writeJustBeforeNextTransaction(() => db.node.update({ where: { id: node.id }, data: { abstract: 'late summary' } }));
@@ -466,7 +468,7 @@ describe('#4967 — pins the first review left open', () => {
     expect(await bodyOf(node.id)).toBe('OTHER');
   });
 
-  for (const [label, extra] of [['prependContent', { prependContent: 'HEAD' }], ['prependContent', { prependContent: 'HEAD', separator: ' | ' }]] as const) {
+  for (const [label, extra] of [['appendContent', { appendContent: 'TAIL' }], ['prependContent', { prependContent: 'HEAD' }], ['prependContent', { prependContent: 'HEAD', separator: ' | ' }]] as const) {
     it(`install with ${label} ${JSON.stringify(extra)}: refused before forwarding`, async () => {
       const text = await mcp().callToolText('hadron_update_node', {
         urn: 'prompts:lane', install: { app: generateId(), agent: generateId() }, ...extra,
