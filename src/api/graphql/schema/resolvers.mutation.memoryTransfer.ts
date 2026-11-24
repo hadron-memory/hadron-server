@@ -1,4 +1,6 @@
 import { GraphQLError } from 'graphql';
+import { ownerHeadroomRefusals, requireOwnerHeadroomMany } from '../../../lib/ownerLimits/gate.js';
+import { memoryCountsAgainstOwner } from '../../../lib/ownerLimits/keys.js';
 import { Prisma, type Memory } from '../../../generated/prisma/index.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -106,6 +108,15 @@ function targetClassOf(memory: Memory, requested: TransferClass | null | undefin
   return requested ?? current;
 }
 
+/** What the receiving owner takes on: the memory itself when its target class counts, and its live nodes. */
+async function transferLimitChecks(tx: TransferDb, memory: Memory, targetClass: TransferClass) {
+  const live = BigInt(await tx.node.count({ where: { memoryId: memory.id, deletedAt: null } }));
+  return [
+    { key: 'memories' as const, amount: memoryCountsAgainstOwner({ class: targetClass, appId: memory.appId, isInstallMemory: memory.isInstallMemory }) ? 1n : 0n },
+    { key: 'nodes' as const, amount: live },
+  ];
+}
+
 async function transferPreview(
   tx: TransferDb,
   memory: Memory,
@@ -113,6 +124,7 @@ async function transferPreview(
   requestedClass: TransferClass | null | undefined,
   resetGroupMembers: boolean | null | undefined,
   actorUserId: string | undefined,
+  showLimits = false,
 ) {
   const oldRoot = memory.urn.slice(0, memory.urn.indexOf(':'));
   const desiredSlug = memory.urn.slice(memory.urn.lastIndexOf(':') + 1);
@@ -224,6 +236,15 @@ async function transferPreview(
       (destination.kind === 'user' && memory.ownerUserId === destination.id)) {
     blockers.unshift({ code: 'MEMORY_TRANSFER_SAME_OWNER', message: 'The memory already belongs to that owner.' });
   }
+  // #5016 (ruling 4): a `dryRun` shows an owner limit as one more blocker, in the caller's own form. The apply path judges it under
+  // the lock instead (`transferLimitChecks`), so this read is advisory.
+  if (showLimits && !blockers.some((b) => b.code === 'MEMORY_TRANSFER_SAME_OWNER')) {
+    const refusals = await ownerHeadroomRefusals(tx as Prisma.TransactionClient, {
+      owner: destination.kind === 'organization' ? { organizationId: destination.id } : { userId: destination.id },
+      checks: await transferLimitChecks(tx, memory, targetClass), caller: actorUserId ? { userId: actorUserId } : null,
+    });
+    for (const r of refusals) blockers.push({ code: 'OWNER_LIMIT_REACHED', message: r.message });
+  }
   return {
     memoryId: id, oldUrn: memory.urn, newUrn,
     fromOwner: memory.organizationId ?? memory.ownerUserId!,
@@ -240,7 +261,7 @@ export const memoryTransferMutations = {
     const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
     await authorizeSource(ctx, memory, input.memoryRef);
     const destination = await resolveDestination(ctx, input, memory);
-    if (input.dryRun === true) return transferPreview(ctx.db as TransferDb, memory, destination, input.targetClass, input.resetGroupMembers, ctx.userId);
+    if (input.dryRun === true) return transferPreview(ctx.db as TransferDb, memory, destination, input.targetClass, input.resetGroupMembers, ctx.userId, true);
 
     try {
       let current: Memory;
@@ -273,6 +294,12 @@ export const memoryTransferMutations = {
         if (input.expectedNewUrn != null && input.expectedNewUrn !== plan.newUrn) {
           throw refusal('STALE_TRANSFER_PREVIEW', 'The target URN changed since the preview; run a new dryRun.');
         }
+        // #5016: the receiving owner takes on the memory and its live nodes; the owner differs here (a same-owner transfer is a blocker above).
+        // Under the lock the destination root lock above already took, and before the first write; the refusal leaves the source unchanged.
+        await requireOwnerHeadroomMany(tx, {
+          owner: currentDestination.kind === 'organization' ? { organizationId: currentDestination.id } : { userId: currentDestination.id },
+          checks: await transferLimitChecks(tx, current, plan.targetClass), caller: ctx.userId ? { userId: ctx.userId } : null,
+        });
         if (current.class === 'group' && input.resetGroupMembers === true) {
           await tx.memoryMember.deleteMany({ where: { memoryId: id } });
         }
