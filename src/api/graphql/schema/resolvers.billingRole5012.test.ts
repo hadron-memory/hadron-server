@@ -171,9 +171,16 @@ describe('R4: BILLING never reaches the ledger through an impersonated session o
     expect(await db.creditLedgerEntry.count()).toBe(0);
   });
 
-  it('an App-key context carrying BILLING is FORBIDDEN', async () => {
-    const ctx: Partial<Context> = { appId: generateId(), appKeyId: generateId(), roles: ['BILLING'] };
+  // #5090 SEC10 P3-1: each context carries the BILLING user's id, so `!ctx.userId` cannot refuse it and each App arm of
+  // mayWriteLedger is the only thing that does.
+  it.each([
+    ['a selected App and an App key', { appId: generateId(), appKeyId: generateId() }],
+    ['a selected App only', { appId: generateId() }],
+    ['an App key only', { appKeyId: generateId() }],
+  ] as const)('a BILLING user context with %s is FORBIDDEN', async (_label, app) => {
+    const ctx: Partial<Context> = { userId: billingUser, roles: ['BILLING'], ...app };
     expect(code(await gql(GRANT, ctx, { input: grantInput() }))).toBe('FORBIDDEN');
+    expect(code(await gql(ADJUST, ctx, { input: adjustInput() }))).toBe('FORBIDDEN');
     expect(await db.creditLedgerEntry.count()).toBe(0);
   });
 });
