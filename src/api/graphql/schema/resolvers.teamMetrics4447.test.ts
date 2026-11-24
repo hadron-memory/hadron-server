@@ -396,7 +396,7 @@ describe('#4447 SDL', () => {
     for (const t of ['TeamMetrics', 'TeamMetricsCount', 'TeamMetricsWorkers', 'TeamMetricsFlow']) {
       expect(assertObjectType(schema.getType(t)).description, `${t} is described`).toBeTruthy();
     }
-    expect(Object.keys(assertObjectType(schema.getType('TeamMetricsCount')).getFields()).sort()).toEqual(['ids', 'total', 'truncated']);
+    expect(Object.keys(assertObjectType(schema.getType('TeamMetricsCount')).getFields()).sort()).toEqual(['ids', 'named', 'total', 'truncated']);
   });
 });
 
