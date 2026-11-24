@@ -1,0 +1,31 @@
+import { GraphQLError } from 'graphql';
+import { ownerId, ownerType, type OwnerRef } from '../owner.js';
+import { OWNER_LIMIT_KEYS, type OwnerLimitKey } from './keys.js';
+
+/**
+ * An owner has reached a limit (#5009). Three forms, so a caller learns only what they may:
+ * - the limited person, or an OWNER or ADMIN of the limited organization: the owner's id and the limit;
+ * - anyone else, or no caller: neither, and no number in the message. A level is defined by its limit, so the number would tell a
+ *   writer in someone else's memory which level its owner is on.
+ * Registered in `CLIENT_ERROR_MAPPINGS` (formatError.ts). The extensions are the contract the CLI and the portal read.
+ */
+export class OwnerLimitReachedError extends GraphQLError {
+  constructor(args: { key: OwnerLimitKey; owner: OwnerRef; limit: bigint; callerCanManageOwner: boolean }) {
+    const type = ownerType(args.owner);
+    const noun = OWNER_LIMIT_KEYS[args.key].unitNoun;
+    const amount = `${args.limit} ${args.limit === 1n ? noun.one : noun.many}`;
+    const message = !args.callerCanManageOwner
+      ? 'The owner of this memory has reached a limit of their account.'
+      : `${type === 'user' ? 'Your account' : 'This organization'} has reached its limit of ${amount}.`;
+    super(message, {
+      extensions: {
+        code: 'OWNER_LIMIT_REACHED',
+        limitKey: args.key,
+        ownerType: type,
+        callerCanManageOwner: args.callerCanManageOwner,
+        ...(args.callerCanManageOwner ? { ownerId: ownerId(args.owner), limit: args.limit.toString() } : {}),
+      },
+    });
+    this.name = 'OwnerLimitReachedError';
+  }
+}

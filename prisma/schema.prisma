@@ -507,6 +507,7 @@ model User {
   principal                     Principal?                  @relation("UserPrincipal", fields: [principalId], references: [id], onDelete: SetNull)
   /// #1325 — MemoryConfig templates this user owns (user-owned owner branch).
   memoryConfigTemplates         MemoryConfigTemplate[]      @relation("MemoryConfigTemplateOwnerUser")
+  ownerLimits                   OwnerLimit[]                @relation("OwnerLimitUser")
   /// #1715 — this account's merge into another, if it was merged away.
   mergedInto                    UserMerge?                  @relation("UserMergeSource")
   /// #1715 — accounts merged into this one.
@@ -739,6 +740,7 @@ model Organization {
   // 046-usage-metering: billing back-relations.
   usageEvents            UsageEvent[]
   creditLedgerEntries    CreditLedgerEntry[]
+  ownerLimits            OwnerLimit[]
   apps                   App[]
   agentOrgGrants         AgentOrgGrant[]
   aiServiceConfigs       AiServiceConfig[]
@@ -6394,6 +6396,40 @@ model CreditLedgerEntry {
   @@unique([sourceType, sourceId])
   @@index([organizationId, createdAt])
   @@map("credit_ledger_entries")
+}
+
+/// How much of one measure an owner may hold: nodes, memories, agents or apps. The keys are src/lib/ownerLimits/keys.ts.
+///
+/// Relationships: belongs to exactly one Organization or one User (`chk_owner_limits_one_owner`).
+///
+/// Behaviour:
+/// - The limit in force for an owner and key is this row when one exists, else the deployment default for the owner's
+///   kind (`OWNER_DEFAULT_LIMITS`), else unlimited. A null `limitValue` means unlimited and lifts the default.
+/// - A row is a setting, not a record: it is deleted when cleared, with its owner, and for the merged-away person of an
+///   account merge. The `owner.limits.changed` log line is the record.
+/// - `sourceType` and `sourceId` say what set it. `note` must not hold personal data.
+/// - Two nullable uniques, not one: a NULL never collides, so each covers only its own kind of owner.
+model OwnerLimit {
+  id             String   @id
+  organizationId String?  @map("organization_id")
+  ownerUserId    String?  @map("owner_user_id")
+  key            String
+  /// Null means unlimited. 64-bit, because a later key counts bytes.
+  limitValue     BigInt?  @map("limit_value")
+  sourceType     String   @map("source_type")
+  sourceId       String   @map("source_id")
+  note           String
+  createdAt      DateTime @default(now()) @map("created_at")
+  createdBy      String?  @map("created_by")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  updatedBy      String?  @map("updated_by")
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ownerUser    User?         @relation("OwnerLimitUser", fields: [ownerUserId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, key])
+  @@unique([ownerUserId, key])
+  @@map("owner_limits")
 }
 
 /// A trigger that starts a headless run when an outside system calls a URL. Each accepted call creates one AppRun.

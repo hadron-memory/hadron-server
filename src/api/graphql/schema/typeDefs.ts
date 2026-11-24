@@ -2221,6 +2221,60 @@ export const typeDefs = `#graphql
     balanceMicroCents: String!
   }
 
+  """
+  One owner limit of an organization or a person (hadron-server issue 5009): what may be held and how much of it is held now.
+  """
+  type OwnerLimitUsage {
+    "Which measure this is."
+    key: String!
+    "The limit in force, a base-10 integer string: the owner's own limit, else the deployment default for that kind of owner. Null means unlimited."
+    limit: String
+    "How much the owner holds now, a base-10 integer string, counted when asked for. A total only."
+    used: String!
+  }
+
+  input OwnerLimitInput {
+    key: String!
+    "A non-negative base-10 integer string. Null or omitted means unlimited, which lifts the deployment default."
+    limit: String
+  }
+
+  input SetOwnerLimitsInput {
+    "The organization, an id or a URN. Exactly one of orgRef and userRef."
+    orgRef: String
+    "The person, an id or a URN. Exactly one of orgRef and userRef."
+    userRef: ID
+    "The limits to write. Each key at most once."
+    limits: [OwnerLimitInput!]!
+    "When true, also delete the owner's limits for keys not named here."
+    replace: Boolean
+    "Narrows the deletion of replace to limits written with this source type. Refused without replace."
+    onlySourceType: String
+    "What set these limits, for example manual. Must not hold personal data: it is logged."
+    sourceType: String!
+    "Which one. Must not hold personal data: it is logged."
+    sourceId: String!
+    "Why. Must not hold personal data."
+    note: String!
+  }
+
+  input ClearOwnerLimitsInput {
+    "The organization, an id or a URN. Exactly one of orgRef and userRef."
+    orgRef: String
+    "The person, an id or a URN. Exactly one of orgRef and userRef."
+    userRef: ID
+    "The keys to clear. Omit for every key; an empty list is refused."
+    keys: [String!]
+    "Clear only limits written with this source type."
+    onlySourceType: String
+    "What cleared these limits. Must not hold personal data: it is logged."
+    sourceType: String!
+    "Which one. Must not hold personal data: it is logged."
+    sourceId: String!
+    "Why. Not stored, since the row is deleted. Must not hold personal data."
+    note: String!
+  }
+
   """How aiSpend groups units. Each row's key is the group's value; a unit with no value for the grouping is the row with the empty key."""
   enum AiSpendGroup {
     "The UTC date of the unit, YYYY-MM-DD."
@@ -4015,6 +4069,8 @@ export const typeDefs = `#graphql
     scopes: [AppKeyScope!]!
     "#1709 — what this key did as a host, newest first (hrn:node:hadronmemory.com:specs:cor:agt:070:07: every use is recorded). Whoever manages the App only."
     hostUses(first: Int): [HostKeyUse!]!
+    "#5061 — what this key did as a host, one page, newest first (usedAt, then id): the paged sibling of hostUses (hrn:node:hadronmemory.com:specs:cor:api:120:04, hrn:node:hadronmemory.com:specs:cor:agt:070:07). Whoever manages the App only, refused exactly as hostUses is, before anything is counted. limit omitted is 20, 0 is count-only, a negative limit is 0, a limit over 200 is served as 200 (never a refusal); a negative offset is 0. Continue with offset; hasMore says whether rows remain past this page."
+    hostUsesPage(limit: Int, offset: Int): HostKeyUsePage!
   }
 
   "#1749 — a scope an App key holds. A closed list: attention:deliver, and (#1709) host:operate."
@@ -4049,6 +4105,13 @@ export const typeDefs = `#graphql
     "#1881 — the refusal code when the server refused this use (e.g. APP_KEY_SCOPE_REQUIRED); null for a use that succeeded. A refused use is recorded too (hrn:node:hadronmemory.com:specs:cor:agt:070:07: every use)."
     refusedCode: String
     usedAt: DateTime!
+  }
+
+  "#5061 — one page of a host key's uses (AppKey.hostUsesPage). total counts every use of the key; hasMore is whether rows remain past this page."
+  type HostKeyUsePage {
+    items: [HostKeyUse!]!
+    total: Int!
+    hasMore: Boolean!
   }
 
   """
@@ -6670,6 +6733,8 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
     """Expiry time."""
     expiresAt: DateTime!
+    """The server-hosted ceremony page where the requester completes or declines this change with a passkey (hrn:node:hadronmemory.com:specs:cor:sec:070:02): the server origin plus /secret-changes/<id>, with no token. The same link SECRET_PROTECTED_NEEDS_PASSKEY carries in its ceremonyUrl extension. Copy it verbatim; never compose it. Served on every state, because it is a stable address: an ended request's page only explains that it ended. Read through the same requester-only gate as the rest of this type."""
+    ceremonyUrl: String!
   }
 
   "How a secret read client is used: REVEAL hands the value to a person or worker, USE injects it by reference into a run's web request."
@@ -12443,6 +12508,8 @@ export const typeDefs = `#graphql
     creditLedgerEntries(orgRef: String!, limit: Int, offset: Int): CreditLedgerEntryList!
     "One org's credit balance - SUM over the append-only ledger (spec 046). Org-ADMIN."
     creditBalance(orgRef: String!): CreditBalance!
+    "The owner limits of an organization or a person, one row per measure (hadron-server issue 5009). Give exactly one ref. An organization's: its ADMIN or OWNER. A person's: that person in their own session. A platform admin reads any."
+    ownerLimits(orgRef: String, userRef: ID): [OwnerLimitUsage!]!
     """
     One organization's AI spend for [from, to), grouped one way (#5008, hrn:node:hadronmemory.com:specs:cor:dmo:170:04). Org-ADMIN, the gate of creditBalance, answered before the range is read. from is inclusive and to exclusive; both are ISO 8601 dates or date-times, a value with no offset is UTC and a date alone is midnight UTC. The range is at most 366 days. At most 500 rows are returned, largest charge first; truncated says more groups exist and totalGroups is the exact number of groups. Only token-bearing units of the organization count, soft-deleted ones are left out.
     """
@@ -13994,6 +14061,10 @@ export const typeDefs = `#graphql
     setAiModelPrice(input: SetAiModelPriceInput!): AiModelPrice!
     "Mint credits for an org - a positive grant ledger row (spec 046). PLATFORM ADMIN or the BILLING platform role only (self-grant risk; #5012); processor top-ups land here."
     grantCredits(input: GrantCreditsInput!): CreditLedgerEntry!
+    "Set an owner's limits (hadron-server issue 5009). PLATFORM ADMIN ONLY. Returns the owner's limits after the change."
+    setOwnerLimits(input: SetOwnerLimitsInput!): [OwnerLimitUsage!]!
+    "Delete an owner's limits, so the deployment default applies again (hadron-server issue 5009). PLATFORM ADMIN ONLY. Returns the owner's limits after the change."
+    clearOwnerLimits(input: ClearOwnerLimitsInput!): [OwnerLimitUsage!]!
     "Write a signed adjustment entry on an org's credit ledger, e.g. a refund (hrn:node:hadronmemory.com:specs:cor:dmo:170:03; a correction is a new entry, hrn:node:hadronmemory.com:specs:cor:dmo:170:08). PLATFORM ADMIN or the BILLING platform role only (#5012). Idempotent on (sourceType, sourceId); a different account, amount or kind on that pair is IDEMPOTENCY_CONFLICT."
     adjustCredits(input: AdjustCreditsInput!): CreditLedgerEntry!
     "Author YOUR user-layer action-policy link (cor:acl:040:02, #510). Null clears (= no restriction)."
