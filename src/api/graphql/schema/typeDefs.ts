@@ -8314,7 +8314,7 @@ export const typeDefs = `#graphql
   "Usage-vs-limit for one scope x action window (#510). The stored limit is the enforced value; env defaults only seed first touch."
   type QuotaCounter {
     id: ID!
-    "app or org."
+    "app, org or user. A user row is the person's shared counter for their Apps; it is read and set now and enforced once a person's App can run (F3a)."
     scopeKind: String!
     scopeId: String!
     "run.execute, llm.tokens, sms.send, or email.send."
@@ -8327,10 +8327,12 @@ export const typeDefs = `#graphql
   }
 
   input SetQuotaLimitInput {
-    "Org - ref: PK or URN."
-    orgRef: String!
-    "Optional app scope - ref: PK or URN; must belong to the org. Omit to set the org-level limit."
+    "Org - ref: PK or URN. Alone: the organization's limit; with appRef: that App's. Omit with appRef alone (an App of an organization or of a person) or with userRef alone."
+    orgRef: String
+    "App scope - ref: PK or URN. With orgRef it must belong to the org; alone it names an organization's App (the org-ADMIN callers) or a person's App (its owner, owner-role members, a platform admin). Every denial answers NOT_FOUND, as for an unknown ref."
     appRef: String
+    "A person (user id): that person's own counters. The person as themself or a platform admin; never with orgRef or appRef (BAD_USER_INPUT)."
+    userRef: ID
     "run.execute, llm.tokens, sms.send, or email.send."
     action: String!
     "Non-negative integer; 0 pauses the scope (every launch denies QUOTA_EXCEEDED)."
@@ -12417,8 +12419,8 @@ export const typeDefs = `#graphql
     principalGrant(ref: ID!): PrincipalGrant
     "Action grants. Default: the caller's own (self-audit is never gated). An org admin passing orgRef sees that org's grants, optionally narrowed by userRef."
     principalGrants(orgRef: String, userRef: String, limit: Int, offset: Int): PrincipalGrantsPage!
-    "Usage-vs-limit counters for an org (+ one app when appRef given). Org-ADMIN. Rows materialize on first view, seeded with platform defaults (#510)."
-    quotaCounters(orgRef: String!, appRef: String): [QuotaCounter!]!
+    "Usage-vs-limit counters (#510, #5074, hrn:node:hadronmemory.com:specs:cor:acl:050:04). orgRef: the org's (+ one app with appRef), org-ADMIN. appRef alone: the App's and its organization's, or for a person's App the App's and, for its owner or a platform admin, the owner's user counters; every denial is NOT_FOUND. userRef alone: that person's, the person or a platform admin (FORBIDDEN otherwise). No ref, or userRef with another ref: BAD_USER_INPUT. Rows materialize on first view, seeded with platform defaults."
+    quotaCounters(orgRef: String, appRef: String, userRef: ID): [QuotaCounter!]!
     "Explain the standing policy chain (org / user / app) for one action - which layer denies it (#510, cor:acl:040:02). Org-ADMIN on the app's org."
     effectiveActionPolicy(appRef: String!, action: String!, userRef: String): EffectiveActionPolicy!
     "One provider rate row by id (spec 046). Authenticated read - rates are not a secret."

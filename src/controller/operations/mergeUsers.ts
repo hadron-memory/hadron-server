@@ -575,6 +575,10 @@ async function runMergeTxn(
         AND s.organization_id = t.organization_id`;
     await tx.$executeRaw`UPDATE org_members SET user_id = ${targetUserId} WHERE user_id = ${sourceUserId}`;
 
+    // #5074: the merged-away person's own daily counters are not carried over (the survivor's stay). Their Apps, and so
+    // their `app` rows, move by App id. The table has no foreign key, so nothing cascades.
+    await tx.quotaCounter.deleteMany({ where: { scopeKind: 'user', scopeId: sourceUserId } });
+
     await tx.$executeRaw`DELETE FROM app_members s USING app_members t
       WHERE s.user_id = ${sourceUserId} AND t.user_id = ${targetUserId} AND s.app_id = t.app_id`;
     await tx.$executeRaw`UPDATE app_members SET user_id = ${targetUserId} WHERE user_id = ${sourceUserId}`;
