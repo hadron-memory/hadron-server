@@ -275,6 +275,31 @@ describe('escapeUnterminatedHtml', () => {
     // One paragraph with no interrupting line is still one span: the construct inside it is code.
     expect(escapeUnterminatedHtml("a `x\n<b x='\ny` w")).toBe("a `x\n<b x='\ny` w");
   });
+  it('a construct that Markdown reads as text because it would cross a block boundary is unterminated, and cannot skip a fence opener (BLIND delta P2)', () => {
+    const FENCED = (open: string, inner: string): string => `a ${open}\n\`\`\`\n${inner}\n\`\`\`\nq <textarea>z`;
+    for (const [open, inner] of [['<?x', '?>'], ['<![CDATA[x', ']]>'], ['<!-- x', '-->'], ['<!DOCTYPE x', '>'], ['</ x', '>'], ['<b y="', '">']] as const) {
+      const out = escapeUnterminatedHtml(FENCED(open, inner));
+      expect(out, open).toContain('&lt;textarea>');
+      expect(out, open).toContain(`a &lt;${open.slice(1)}`);
+      expect(escapeUnterminatedHtml(out), open).toBe(out);
+    }
+    // At the head of a line the HTML block of type 2 to 5 is not bounded by a block boundary: it runs to its closer.
+    expect(escapeUnterminatedHtml('<!-- x\n\n```\n-->')).toBe('<!-- x\n\n```\n-->');
+    expect(escapeUnterminatedHtml('<?x\n\n```\n?>')).toBe('<?x\n\n```\n?>');
+    // A paragraph that runs on keeps a multi-line construct whole.
+    expect(escapeUnterminatedHtml('a <!-- x\ny --> b')).toBe('a <!-- x\ny --> b');
+    expect(escapeUnterminatedHtml('a <b\n  y="z"\n  w>')).toBe('a <b\n  y="z"\n  w>');
+  });
+  it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag (BLIND delta pin)', () => {
+    expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');
+    expect(escapeUnterminatedHtml('<b y= <template>')).toBe('<b y= <template>'); // one complete tag: the value is `<template`
+  });
+  it('only a non-empty bullet or a list that starts at 1 ends a paragraph', () => {
+    // An empty bullet, and an ordered list not starting at 1, cannot interrupt a paragraph, so the span runs on and the `<` is code.
+    expect(escapeUnterminatedHtml("a `x\n-\n<b x='\ny` w")).toBe("a `x\n-\n<b x='\ny` w");
+    expect(escapeUnterminatedHtml("a `x\n2. t\n<b x='\ny` w")).toBe("a `x\n2. t\n<b x='\ny` w");
+    expect(escapeUnterminatedHtml("a `x\n1. t\n<b x='\ny` w")).toBe("a `x\n1. t\n&lt;b x='\ny` w");
+  });
   it('stays linear on a body of thousands of stray `<a`', () => {
     const body = '<a '.repeat(40000);
     const t0 = Date.now();
