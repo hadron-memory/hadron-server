@@ -104,6 +104,9 @@ import { existsSync } from 'fs';
 
 const tick = async (now = new Date()) => (await import('./sweepGitMirrorObligations.js')).gitMirrorSweepTick(db, now);
 const old = () => new Date(Date.now()-24*60*60*1000);
+/** #3444: `count` fresh node ids in ascending order, whatever millisecond they were made in (UUIDv7 ids made in one millisecond sort by random bits). */
+const orderedNodeIds = (count: number) => Array.from({ length: count }, () => generateId()).sort();
+const makeNodeWithId = (id: string, loc: string) => db.node.create({ data: { id, memoryId, loc, name: loc, content: 'current content', tags: [] } });
 const makeNode = (loc='topic') => db.node.create({data:{id:generateId(),memoryId,loc,name:loc,content:'current content',tags:[]}});
 const owe = async (nodeId:string,extra:Record<string,unknown>={}) => db.gitMirrorObligation.create({data:{memoryId,nodeId,kind:'WRITE',removeLoc:'',state:'FAILED',errorClass:'PUSH_FAILED',attempts:1,attemptSeq:await takeAttemptSeq(db),lastAttemptAt:old(),...extra} as any});
 const rows = () => db.gitMirrorObligation.findMany({where:{memoryId}});
@@ -447,7 +450,12 @@ describe('#3056 shared row budget', () => {
 describe('#3151 second-refresh settlement', () => {
  it('a throwing second refresh settles its own TREE_WRITE attempt and lets the next due row proceed', async () => {
   const startedAt=Date.now(); // #3444: the one baseline clock read the diagnostic's elapsedMs needs
-  const first=await makeNode('refresh-fails'), next=await makeNode('next'), later=await makeNode('later');
+  // #3444: the fixture's node ids are ordered on purpose (see orderedNodeIds). The in-lock re-read of the due rows has no
+  // ORDER BY and returns them by primary key, so which row is read first depends on the ids; two UUIDv7 ids made in
+  // the same millisecond sort by their random bits, and a `next` id below the `first` id made `next` the first row
+  // read, so the second-read throw hit the wrong row and `first` was settled and deleted.
+  const [firstId,nextId,laterId]=orderedNodeIds(3);
+  const first=await makeNodeWithId(firstId,'refresh-fails'), next=await makeNodeWithId(nextId,'next'), later=await makeNodeWithId(laterId,'later');
   const firstDebt=await owe(first.id,{lastAttemptAt:new Date(old().getTime()-1000)});
   const nextDebt=await owe(next.id);
   const untouched=await owe(later.id,{lastAttemptAt:new Date(Date.now()+7*24*60*60_000)});
@@ -480,6 +488,20 @@ describe('#3151 second-refresh settlement', () => {
   expect(commands.filter(a=>a[0]==='push')).toHaveLength(1);
   expect(await db.gitMirrorObligation.findFirstOrThrow({where:{memoryId,nodeId:later.id}})).toEqual(untouched);
   expect(()=>remoteFile('refresh-fails')).toThrow();
+ });
+});
+
+describe('#3444 the second-refresh fixture orders its node ids', () => {
+ it('orderedNodeIds is ascending even when every id is made in the same millisecond', () => {
+  const now = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+  try {
+   for (let round = 0; round < 50; round++) {
+    const ids = orderedNodeIds(3);
+    expect(ids).toEqual([...ids].sort());
+    expect(new Set(ids).size).toBe(3);
+   }
+  } finally { clock.mockRestore(); }
  });
 });
 
