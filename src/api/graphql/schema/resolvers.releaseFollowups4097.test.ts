@@ -48,7 +48,7 @@ const create = (input: Record<string, unknown>, appRef: string = app.id) =>
   M.createAgentTask({}, { input: { appRef, title: 'T', ...input } }, ctx());
 const list = (args: Record<string, unknown>, appRef: string = app.id) =>
   Q.agentTasks(null, { appRef, ...args }, ctx());
-const release = (taskId: string) => M.releaseAgentTaskExternalId({}, { taskId }, ctx());
+const release = (taskId: string) => M.releaseAgentTaskExternalId({}, { taskRef: taskId }, ctx());
 const stored = (id: string) => db.agentTask.findUniqueOrThrow({ where: { id } });
 const releaseEvents = (taskId: string) => db.agentTeamEvent.findMany({ where: { taskId, type: 'task.external-id-released' } });
 

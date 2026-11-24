@@ -140,11 +140,11 @@ async function finishedWithFindings(
     },
     userCtx(),
   );
-  await mutation.startAgentTask({}, { taskId: t.id }, userCtx());
+  await mutation.startAgentTask({}, { taskRef: t.id }, userCtx());
   await mutation.finishAgentTask(
     {},
     {
-      taskId: t.id,
+      taskRef: t.id,
       result: { outcome: "succeeded", summary: "S", evidence: "E", findings },
     },
     userCtx(),
@@ -201,14 +201,14 @@ describe("#3506 reading a finished task's findings through the lazy path", () =>
     );
     const clone = await mutation.cloneAgentTask(
       {},
-      { taskId: parent.id, input: { assignee: { user: member.id } } },
+      { taskRef: parent.id, input: { assignee: { user: member.id } } },
       userCtx(),
     );
-    await mutation.startAgentTask({}, { taskId: clone.id }, userCtx());
+    await mutation.startAgentTask({}, { taskRef: clone.id }, userCtx());
     await mutation.finishAgentTask(
       {},
       {
-        taskId: clone.id,
+        taskRef: clone.id,
         result: {
           outcome: "succeeded",
           summary: "CS",
@@ -301,7 +301,7 @@ describe("#3506 no findings through the lazy path for a caller the direct read r
         "lazy result",
       ).toBeNull();
       expect(
-        await query.agentTask({}, { id: t.id }, refusedCtx()),
+        await query.agentTask({}, { ref: t.id }, refusedCtx()),
         "direct read",
       ).toBeNull();
     },
@@ -319,7 +319,7 @@ describe("#3506 no findings through the lazy path for a caller the direct read r
       "lazy result after revocation",
     ).toBeNull();
     expect(
-      await query.agentTask({}, { id: t.id }, keyXCtx()),
+      await query.agentTask({}, { ref: t.id }, keyXCtx()),
       "direct read after revocation",
     ).toBeNull();
   });
@@ -332,14 +332,14 @@ describe("#3506 no findings through the lazy path for a caller the direct read r
     );
     const clone = await mutation.cloneAgentTask(
       {},
-      { taskId: parent.id, input: { assignee: { user: member.id } } },
+      { taskRef: parent.id, input: { assignee: { user: member.id } } },
       userCtx(),
     );
-    await mutation.startAgentTask({}, { taskId: clone.id }, userCtx());
+    await mutation.startAgentTask({}, { taskRef: clone.id }, userCtx());
     await mutation.finishAgentTask(
       {},
       {
-        taskId: clone.id,
+        taskRef: clone.id,
         result: {
           outcome: "succeeded",
           summary: "CS",
@@ -361,7 +361,7 @@ describe("#3506 no findings through the lazy path for a caller the direct read r
       "lazy result, relation row",
     ).toBeNull();
     expect(
-      await query.agentTask({}, { id: clone.id }, keyYCtx()),
+      await query.agentTask({}, { ref: clone.id }, keyYCtx()),
       "direct read",
     ).toBeNull();
   });
@@ -384,7 +384,7 @@ describe("#3506 no findings through the lazy path for a caller the direct read r
       "lazy result",
     ).toBeNull();
     expect(
-      await query.agentTask({}, { id: t.id }, ctx),
+      await query.agentTask({}, { ref: t.id }, ctx),
       "direct read",
     ).toBeNull();
   });

@@ -280,9 +280,15 @@ describe('#949 — audit + repair of an already-broken row', () => {
     const corpus = await db.memory.create({
       data: {
         id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:agent-team-system`, name: 'corpus',
-        class: 'knowledge', corpusDraft: false, corpusMintedAt: new Date(Date.now() - 60_000), deletedAt: new Date(),
+        class: 'knowledge', deletedAt: new Date(),
       },
     });
+    const mintedAt = new Date(Date.now() - 60_000);
+    await db.node.create({ data: {
+      id: generateId(), memoryId: corpus.id, loc: 'zz:mint-marker', name: 'zz:mint-marker',
+      content: 'minted elsewhere; tombstoned', role: null, tags: [],
+      mintedAt, mintedByInfo: 'test', deletedAt: mintedAt,
+    } });
     await db.node.create({ data: { id: generateId(), memoryId: corpus.id, loc: 'pas:010', name: 'pas:010', tags: ['spec'] } });
     await expectCode(
       M.repairAgentSystemMemory(null, { agentRef: agent.id }, ctx(platformAdmin.id, ['ADMIN'])),

@@ -31,8 +31,8 @@ beforeEach(async()=>{
  head=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:agent.id,name:'Head',slug:'head',heldByUserId:owner.id}});
  worker=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:agent.id,name:'Worker',slug:'worker',heldByUserId:owner.id,reportsToWorkerId:head.id}});
  task=await M.createAgentTask({}, {input:{appRef:app.id,title:'T',assignee:{user:assignee.id}}},ctx());
- await M.startAgentTask({}, {taskId:task.id},ctx(assignee.id));
- await M.finishAgentTask({}, {taskId:task.id,result:{outcome:'done',summary:'immutable',evidence:'original',findings:[{severity:'P1',text:'secret one'},{severity:'note',text:'secret two'}]}},ctx(assignee.id));
+ await M.startAgentTask({}, {taskRef:task.id},ctx(assignee.id));
+ await M.finishAgentTask({}, {taskRef:task.id,result:{outcome:'done',summary:'immutable',evidence:'original',findings:[{severity:'P1',text:'secret one'},{severity:'note',text:'secret two'}]}},ctx(assignee.id));
 });
 describe('#2663 disposition write',()=>{
  it.each(['fixed','accepted','deferred','rejected'])('%s resolves a finding, preserving result bytes',async d=>{
@@ -60,7 +60,7 @@ describe('#2663 disposition write',()=>{
  });
  it('allows an App manager after finish and refuses ordinary assignment after finish',async()=>{
   await dispose('accepted','F1',undefined,ctx(manager.id));
-  await expect(M.assignAgentTask({}, {taskId:task.id,assignee:{user:sibling.id}},ctx())).rejects.toMatchObject(code('TASK_ENDED'));
+  await expect(M.assignAgentTask({}, {taskRef:task.id,assignee:{user:sibling.id}},ctx())).rejects.toMatchObject(code('TASK_ENDED'));
  });
  it('allows an up-chain worker while holding the existing reports-to graph protocol',async()=>{
   await db.agentTask.update({where:{id:task.id},data:{ownerUserId:null,ownerWorkerId:worker.id}});
@@ -93,8 +93,8 @@ describe('#2663 disposition write',()=>{
  });
  it.each(['pending','started','cancelled'])('refuses %s tasks',async status=>{
   const t=await M.createAgentTask({}, {input:{appRef:app.id,title:'No result',assignee:{user:assignee.id}}},ctx());
-  if(status==='started') await M.startAgentTask({}, {taskId:t.id},ctx(assignee.id));
-  if(status==='cancelled') await M.cancelAgentTask({}, {taskId:t.id},ctx());
+  if(status==='started') await M.startAgentTask({}, {taskRef:t.id},ctx(assignee.id));
+  if(status==='cancelled') await M.cancelAgentTask({}, {taskRef:t.id},ctx());
   await expect(dispose('fixed','F1',undefined,ctx(),t.id)).rejects.toMatchObject(code('TASK_NOT_FINISHED'));
  });
  it('serializes concurrent dispositions without losing either finding or event',async()=>{
@@ -125,8 +125,8 @@ describe('#2663 disposition write',()=>{
 });
 it('unresolved filter runs before paging, composes other filters and keeps App read scope',async()=>{
  const other=await M.createAgentTask({}, {input:{appRef:app.id,title:'Newer no findings',assignee:{user:assignee.id}}},ctx());
- await M.startAgentTask({}, {taskId:other.id},ctx(assignee.id));
- await M.finishAgentTask({}, {taskId:other.id,result:{outcome:'done'}},ctx(assignee.id));
+ await M.startAgentTask({}, {taskRef:other.id},ctx(assignee.id));
+ await M.finishAgentTask({}, {taskRef:other.id,result:{outcome:'done'}},ctx(assignee.id));
  expect((await list({limit:1})).map((t:any)=>t.id)).toEqual([task.id]);expect(await list({offset:1})).toEqual([]);
  expect(await list({status:['STARTED']})).toEqual([]);expect((await list({unresolvedFindings:false})).map((t:any)=>t.id)).toContain(other.id);
  const a=await list({},ctx(outsider.id)).catch((e:any)=>e),b=await list({unresolvedFindings:false},ctx(outsider.id)).catch((e:any)=>e);
@@ -160,7 +160,7 @@ it('wide task rows read disposition pages in finding order without loading the i
 });
 it('cloning a finished task copies neither findings nor dispositions and leaves its source unchanged',async()=>{
  await dispose('fixed','F1');const before=await stored();
- const cloned=await M.cloneAgentTask({}, {taskId:task.id},ctx());
+ const cloned=await M.cloneAgentTask({}, {taskRef:task.id},ctx());
  const row=await stored(cloned.id);
  expect(row.clonedFromId).toBe(task.id);expect(row.status).toBe('pending');
  expect(row.resultFindings).toBeNull();expect(row.findingDispositions).toEqual([]);expect(row.unresolvedFindingIds).toEqual([]);
@@ -177,8 +177,8 @@ it('post-push backfills pre-existing findings and preserves their current dispos
   await client.query('DROP TRIGGER agent_task_dispositions ON agent_tasks');
   await db.agentTask.update({where:{id:task.id},data:{unresolvedFindingIds:[]}});
   const legacy=await M.createAgentTask({}, {input:{appRef:app.id,title:'Before post-push',assignee:{user:assignee.id}}},ctx());
-  await M.startAgentTask({}, {taskId:legacy.id},ctx(assignee.id));
-  await M.finishAgentTask({}, {taskId:legacy.id,result:{outcome:'done',findings:[{severity:'note',text:'legacy finding'}]}},ctx(assignee.id));
+  await M.startAgentTask({}, {taskRef:legacy.id},ctx(assignee.id));
+  await M.finishAgentTask({}, {taskRef:legacy.id,result:{outcome:'done',findings:[{severity:'note',text:'legacy finding'}]}},ctx(assignee.id));
   expect((await stored(legacy.id) as any).unresolvedFindingIds).toEqual([]); // establish the old-row state
   await client.query(sql);
   expect((await stored() as any).unresolvedFindingIds).toEqual(['F2']);
@@ -188,8 +188,8 @@ it('post-push backfills pre-existing findings and preserves their current dispos
   // A second post-push must not rewrite either open, fully disposed, or empty-result rows.
   await dispose('rejected','F2');
   const empty=await M.createAgentTask({}, {input:{appRef:app.id,title:'No findings',assignee:{user:assignee.id}}},ctx());
-  await M.startAgentTask({}, {taskId:empty.id},ctx(assignee.id));
-  await M.finishAgentTask({}, {taskId:empty.id,result:{outcome:'done',findings:[]}},ctx(assignee.id));
+  await M.startAgentTask({}, {taskRef:empty.id},ctx(assignee.id));
+  await M.finishAgentTask({}, {taskRef:empty.id,result:{outcome:'done',findings:[]}},ctx(assignee.id));
   const snapshot=()=>client.query('SELECT id, ctid::text AS tuple, finding_dispositions, unresolved_finding_ids, result_findings FROM agent_tasks ORDER BY id');
   const before=(await snapshot()).rows;
   await client.query(sql);
@@ -248,8 +248,8 @@ describe('#3325 targeted findingDisposition',()=>{
  });
  it('scopes to the task: a duplicate local id on another task never leaks',async()=>{
   const t2=await M.createAgentTask({}, {input:{appRef:app.id,title:'T2',assignee:{user:assignee.id}}},ctx());
-  await M.startAgentTask({}, {taskId:t2.id},ctx(assignee.id));
-  await M.finishAgentTask({}, {taskId:t2.id,result:{outcome:'done',findings:[{severity:'P1',text:'other'}]}},ctx(assignee.id));
+  await M.startAgentTask({}, {taskRef:t2.id},ctx(assignee.id));
+  await M.finishAgentTask({}, {taskRef:t2.id,result:{outcome:'done',findings:[{severity:'P1',text:'other'}]}},ctx(assignee.id));
   await dispose('rejected','F1',undefined,ctx(),t2.id);
   expect(await one('F1')).toBeNull();
   expect(await one('F1',await stored(t2.id))).toMatchObject({findingId:'F1',disposition:'rejected'});
@@ -261,7 +261,7 @@ describe('#3325 targeted findingDisposition',()=>{
   const t=await stored();
   expect(t.findingDispositions).toEqual([]);
   for(const id of ['F1','F2','nope']) expect(await one(id,t)).toBeNull();
-  const q=await gql('query($id:ID!){agentTask(id:$id){findingDisposition(findingId:"F1"){findingId}}}');
+  const q=await gql('query($id:ID!){agentTask(ref:$id){findingDisposition(findingId:"F1"){findingId}}}');
   expect(q.errors).toBeUndefined();expect(q.data).toEqual({agentTask:{findingDisposition:null}});
  });
  it('read emits no event and changes no stored bytes',async()=>{
@@ -273,18 +273,18 @@ describe('#3325 targeted findingDisposition',()=>{
   const m=await gql('mutation($id:ID!){disposeAgentTaskFinding(taskRef:$id,findingId:"F1",disposition:accepted){id findingDisposition(findingId:"F1"){findingId disposition reference{kind target label}}}}');
   expect(m.errors).toBeUndefined();
   expect(m.data).toEqual({disposeAgentTaskFinding:{id:task.id,findingDisposition:{findingId:'F1',disposition:'accepted',reference:null}}});
-  const q=await gql('query($id:ID!){agentTask(id:$id){findingDisposition(findingId:"F2"){findingId}}}');
+  const q=await gql('query($id:ID!){agentTask(ref:$id){findingDisposition(findingId:"F2"){findingId}}}');
   expect(q.errors).toBeUndefined();expect(q.data).toEqual({agentTask:{findingDisposition:null}});
   expect(JSON.stringify(m)).not.toContain('secret');
-  const bad=await gql('query($id:ID!){agentTask(id:$id){findingDisposition{findingId}}}');
+  const bad=await gql('query($id:ID!){agentTask(ref:$id){findingDisposition{findingId}}}');
   expect(bad.errors?.length).toBeGreaterThan(0);
  });
  it('non-reader gets the same refusal as the task read, hidden vs absent indistinguishable',async()=>{
   const shape=(r:any)=>({data:r.data,errors:r.errors?.map((e:any)=>({m:e.message.replace(/[0-9a-f]{32}/g,'ID'),c:e.extensions?.code}))});
-  const q='query($id:ID!){agentTask(id:$id){findingDisposition(findingId:"F1"){findingId}}}';
+  const q='query($id:ID!){agentTask(ref:$id){findingDisposition(findingId:"F1"){findingId}}}';
   const hidden=shape(await gql(q,ctx(outsider.id)));const absent=shape(await gql(q,ctx(outsider.id),{id:generateId()}));
   expect(hidden).toEqual(absent);
-  const plain=shape(await gql('query($id:ID!){agentTask(id:$id){id}}',ctx(outsider.id)));
+  const plain=shape(await gql('query($id:ID!){agentTask(ref:$id){id}}',ctx(outsider.id)));
   expect(hidden.errors?.[0]?.c).toBe(plain.errors?.[0]?.c);
  });
  it('write refusals unchanged: unknown finding still TASK_FINDING_NOT_FOUND',async()=>{

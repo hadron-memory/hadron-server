@@ -107,12 +107,12 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
     return { family: r.appliedFamily, model: r.appliedModel, effort: r.appliedEffort };
   };
   const NONE = { family: null, model: null, effort: null };
-  const reassign = (id: string, assignee: Record<string, string>) => M.reassignAgentTask({}, { taskId: id, assignee }, ctx(admin.id));
+  const reassign = (id: string, assignee: Record<string, string>) => M.reassignAgentTask({}, { taskRef: id, assignee }, ctx(admin.id));
   /** Kit, bound as claude, holds a task it has started. */
   async function startedByKit() {
     const s = await bindAs(kit, CLAUDE);
     const t = await assignTo(kit);
-    await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+    await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskRef: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
     expect(await applied(t.id)).toEqual(CLAUDE);
     return { t, s };
   }
@@ -226,7 +226,7 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
       const s = await bindAs(kit, CLAUDE);
       for (let i = 0; i < 3; i++) {
         const t = await assignTo(kit);
-        await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+        await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskRef: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
         expect((await row(t.id)).status).toBe('started');
         const open = await db.session.findMany({ where: { workerId: sam.id, endedAt: null } });
         for (const o of open) await M.endSession({}, { id: o.id }, ctx(bo.id));

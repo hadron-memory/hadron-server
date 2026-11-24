@@ -364,8 +364,8 @@ describe('cost (graphql-query-complexity), enforce', () => {
   });
 
   it('#2662 findings admission charges the clamped page for literals and variables', () => {
-    const q = (n: string) => `{ agentTask(id: "x") { result { findings(limit: ${n}) { items { id severity text } total hasMore } } } }`;
-    const variables = 'query($n:Int){agentTask(id:"x"){result{findings(limit:$n){items{id severity text} total hasMore}}}}';
+    const q = (n: string) => `{ agentTask(ref: "x") { result { findings(limit: ${n}) { items { id severity text } total hasMore } } } }`;
+    const variables = 'query($n:Int){agentTask(ref:"x"){result{findings(limit:$n){items{id severity text} total hasMore}}}}';
     expect(cost(q('2147483647'))).toBe(cost(q('200')));
     expect(cost(variables, {n:2147483647})).toBe(cost(q('200')));
     expect(cost(q('0'))).toBeLessThan(cost(q('200')));

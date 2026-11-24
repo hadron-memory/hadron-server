@@ -111,8 +111,8 @@ describe('searchReplaceInSpecNodes', () => {
       .rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_PLAN_STALE' } });
     expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).content).toBe('cat revised');
 
-    // Minting is not exposed by #1451 yet; flip only this disposable fixture.
-    await db.memory.update({ where: { id: draft.id }, data: { corpusDraft: false } });
+    // Minting is not exposed by #1451 yet; mint only this disposable fixture's node.
+    await db.node.update({ where: { id: spec.id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
     await expect(call(request([spec.id], { dryRun: false, expectedPlan: preview.plan })))
       .rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_PLAN_STALE' } });
   });

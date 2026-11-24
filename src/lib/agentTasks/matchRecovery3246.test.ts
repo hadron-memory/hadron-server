@@ -100,14 +100,14 @@ it('a task that was never reserved is byte-identical: queued stays queued, and o
 it('a cleared reservation is never swept: parked then ready, assigned by hand, or cancelled', async () => {
   const w = await worker();
   const parked = await interrupted({}, T0);
-  await M.parkAgentTask({}, { taskId: parked.id }, ctx);
+  await M.parkAgentTask({}, { taskRef: parked.id }, ctx);
   expect(await recoverInterruptedMatches(db, at(BOUND * 2))).toBe(0); // backlog: not pending
-  await M.makeAgentTaskReady({}, { taskId: parked.id }, ctx);
+  await M.makeAgentTaskReady({}, { taskRef: parked.id }, ctx);
   expect((await row(parked.id)).matchPending).toBe(false); // ready clears it
   const manual = await interrupted();
-  await M.assignAgentTask({}, { taskId: manual.id, assignee: { worker: w.id } }, ctx);
+  await M.assignAgentTask({}, { taskRef: manual.id, assignee: { worker: w.id } }, ctx);
   const cancelled = await interrupted();
-  await M.cancelAgentTask({}, { taskId: cancelled.id }, ctx);
+  await M.cancelAgentTask({}, { taskRef: cancelled.id }, ctx);
   expect(await recoverInterruptedMatches(db, at(BOUND * 2))).toBe(0);
   expect((await row(manual.id)).assigneeWorkerId).toBe(w.id);
   expect((await row(cancelled.id)).status).toBe('cancelled');

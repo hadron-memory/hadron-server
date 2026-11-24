@@ -436,8 +436,10 @@ describe('protection (S4)', () => {
       where: { loc_memoryId: { loc: 'chats:team:messages', memoryId: appMem.id } },
     });
     await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
-    await db.memory.update({ where: { id: appMem.id }, data: {
-      corpusMintedAt: new Date('2026-09-01T00:00:00Z'),
+    await db.node.create({ data: {
+      id: generateId(), memoryId: appMem.id, loc: 'zz:mint-marker', name: 'zz:mint-marker',
+      content: 'minted elsewhere; tombstoned', role: null, tags: [],
+      mintedAt: new Date('2026-09-01T00:00:00Z'), mintedByInfo: 'test', deletedAt: new Date('2026-09-01T00:00:00Z'),
     } });
     await db.node.update({ where: { id: oldMessages.id }, data: {
       tags: ['spec'], deletedAt: new Date('2026-09-02T00:00:00Z'),
@@ -462,8 +464,10 @@ describe('protection (S4)', () => {
     await db.node.update({ where: { id: oldMessages.id }, data: {
       tags: ['spec'], deletedAt: new Date('2026-08-31T00:00:00Z'),
     } });
-    await db.memory.update({ where: { id: appMem.id }, data: {
-      corpusMintedAt: new Date('2026-09-01T00:00:00Z'),
+    await db.node.create({ data: {
+      id: generateId(), memoryId: appMem.id, loc: 'zz:mint-marker', name: 'zz:mint-marker',
+      content: 'minted elsewhere; tombstoned', role: null, tags: [],
+      mintedAt: new Date('2026-09-01T00:00:00Z'), mintedByInfo: 'test', deletedAt: new Date('2026-09-01T00:00:00Z'),
     } });
 
     await ensureChannelWithRoot(db, {
