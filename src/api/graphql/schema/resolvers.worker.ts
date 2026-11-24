@@ -58,6 +58,7 @@ import { lintWorkerFields, pageLintWarnings } from '../../../lib/bootPromptLint.
 import { normalizeUrnForLookup, hasSchemePrefix, parseUrnV2 } from '../../../lib/urn.js';
 import { RESERVED_WORKER_MENTION_TOKENS, mentionTokenOf } from '../../../lib/mentionToken.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { refHasUnstorableChars } from '../../../lib/entityRef/refNamesNothing.js';
 import { nextFreeWorkerSlug } from '../../../lib/workerSlug.js';
 import {
   resolveWorkerRef as resolveWorkerRefId,
@@ -463,6 +464,9 @@ export async function resolveWorkerIdByName(
 ): Promise<string | null> {
   const trimmed = name.trim();
   if (trimmed === '') return null; // blank is absent (cor:agt:020:02)
+  // #4971: a NUL or lone surrogate names nothing (no stored name holds one); Postgres would reject it as a
+  // query parameter and the lookup would surface as a driver fault instead of the absent answer.
+  if (refHasUnstorableChars(trimmed)) return null;
   const rows = await db.$queryRaw<{ id: string }[]>`
     SELECT id FROM workers
     WHERE app_id = ${appId} AND lower(name) = lower(${trimmed})

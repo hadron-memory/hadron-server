@@ -335,14 +335,15 @@ describe('#4893 createGrant worker arm: the scoped lookup folds what it can reac
  * worker-row read) without firing the App resolution on the way in.
  */
 function resolutionFaultDb(...extraMarkers: string[]) {
-  const markers = [MISSING, ...extraMarkers];
-  const hits = (args: unknown) => {
+  // #4971 (NEW-13): the extra markers belong to the WORKER-row read alone. Applied to every model they could
+  // also fire on the App lookup, and a row meant to fault the later worker read would fault on the way in.
+  const hits = (markers: string[], args: unknown) => {
     const where = JSON.stringify((args as { where?: unknown } | undefined)?.where ?? {});
     return markers.some((m) => where.includes(m));
   };
-  const wrap = (model: object, methods: string[]) => new Proxy(model, {
+  const wrap = (model: object, methods: string[], markers: string[] = [MISSING]) => new Proxy(model, {
     get: (t, k) => (methods.includes(k as string)
-      ? (args: unknown) => { if (hits(args)) throw new Error('resolution-reached fault'); return (t as any)[k](args); }
+      ? (args: unknown) => { if (hits(markers, args)) throw new Error('resolution-reached fault'); return (t as any)[k](args); }
       : (t as any)[k]),
   });
   return new Proxy(db, {
@@ -350,7 +351,7 @@ function resolutionFaultDb(...extraMarkers: string[]) {
       if (k === 'app') return wrap((t as any).app, ['findFirst', 'findMany']);
       if (k === 'memory') return wrap((t as any).memory, ['findFirst']);
       if (k === 'urnAlias') return wrap((t as any).urnAlias, ['findMany']);
-      if (k === 'worker') return wrap((t as any).worker, ['findFirst']);
+      if (k === 'worker') return wrap((t as any).worker, ['findFirst'], [MISSING, ...extraMarkers]);
       return (t as any)[k];
     },
   }) as any;
