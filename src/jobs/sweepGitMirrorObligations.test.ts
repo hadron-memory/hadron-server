@@ -448,7 +448,10 @@ describe('#3056 shared row budget', () => {
 
 
 describe('#3151 second-refresh settlement', () => {
- it('a throwing second refresh settles its own TREE_WRITE attempt and lets the next due row proceed', async () => {
+ // #3444: the in-lock re-read (gitMirrorCheckout.ts, no orderBy) returns rows in physical order, so which row meets beforeGit's
+ // readiness read is not fixed. The pin therefore runs under both insertion orders and throws on `first` by identity on its
+ // first refresh AFTER preparation (any load other than the very first call), wherever `first` sits in the batch.
+ it.each([['first before next',false],['next before first',true]])('a throwing second refresh settles its own TREE_WRITE attempt and lets the next due row proceed (%s)', async (_label,nextInsertedFirst) => {
   const startedAt=Date.now(); // #3444: the one baseline clock read the diagnostic's elapsedMs needs
   // #3444: the fixture's node ids are ordered on purpose (see orderedNodeIds). The in-lock re-read of the due rows has no
   // ORDER BY and returns them by primary key, so which row is read first depends on the ids; two UUIDv7 ids made in
@@ -456,15 +459,18 @@ describe('#3151 second-refresh settlement', () => {
   // read, so the second-read throw hit the wrong row and `first` was settled and deleted.
   const [firstId,nextId,laterId]=orderedNodeIds(3);
   const first=await makeNodeWithId(firstId,'refresh-fails'), next=await makeNodeWithId(nextId,'next'), later=await makeNodeWithId(laterId,'later');
-  const firstDebt=await owe(first.id,{lastAttemptAt:new Date(old().getTime()-1000)});
-  const nextDebt=await owe(next.id);
+  const firstAt={lastAttemptAt:new Date(old().getTime()-1000)};
+  let firstDebt: Awaited<ReturnType<typeof owe>>, nextDebt: Awaited<ReturnType<typeof owe>>;
+  if(nextInsertedFirst){ nextDebt=await owe(next.id); firstDebt=await owe(first.id,firstAt); }
+  else { firstDebt=await owe(first.id,firstAt); nextDebt=await owe(next.id); }
   const untouched=await owe(later.id,{lastAttemptAt:new Date(Date.now()+7*24*60*60_000)});
   const seqs=vi.spyOn(mirrorDebt,'tryTakeAttemptSeq');
   const load=nodeLoader.loadNodeForGit;
-  let firstReads=0, nextReads=0;
+  let firstReads=0, nextReads=0, loads=0, thrown=false;
   let nextAtEntry: typeof nextDebt | undefined;
   vi.spyOn(nodeLoader,'loadNodeForGit').mockImplementation(async (...args) => {
-   if(args[1].nodeId===first.id && ++firstReads===2) throw new Error('synthetic second-refresh failure');
+   const priorLoads=loads++;
+   if(args[1].nodeId===first.id) { firstReads++; if(priorLoads>0 && !thrown) { thrown=true; throw new Error('synthetic second-refresh failure'); } }
    if(args[1].nodeId===next.id && ++nextReads===1) {
     // The first row's failure must not consume, clear or restamp the next row.
     nextAtEntry=await db.gitMirrorObligation.findFirstOrThrow({where:{memoryId,nodeId:next.id}});
@@ -476,13 +482,13 @@ describe('#3151 second-refresh settlement', () => {
    labels:{[first.id]:'first',[next.id]:'next',[later.id]:'later'}, startedAt,
    counters:()=>({firstReads,nextReads,nextAtEntry:nextAtEntry!==undefined,attemptSeqCalls:seqs.mock.calls.length}),
   });
-  expect(firstReads).toBe(2);
+  expect(thrown).toBe(true);
   expect(failed).toMatchObject({state:'FAILED',errorClass:'TREE_WRITE',attempts:2});
   expect(failed.lastAttemptAt.getTime()).toBeGreaterThan(firstDebt.lastAttemptAt.getTime());
   expect(seqs.mock.calls.length).toBe(1); // one checkout/fence for the admitted branch group
   expect(failed.attemptSeq).toBe(await seqs.mock.results[0].value);
   expect(nextAtEntry).toEqual(nextDebt);
-  expect(nextReads).toBe(1); // readiness short-circuits at first work; healthy payload loads after Git preparation
+  expect(nextReads).toBeGreaterThanOrEqual(1); // one read when after first (healthy payload after Git preparation), two when it also meets the readiness check
   expect(await db.gitMirrorObligation.findFirst({where:{memoryId,nodeId:next.id}})).toBeNull();
   expect(remoteFile('next')).toContain('current content');
   expect(commands.filter(a=>a[0]==='push')).toHaveLength(1);
