@@ -21,7 +21,13 @@
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
 import { ownerOrganizationId, type OwnerRef } from '../owner.js';
-import { GRANT_EXPIRY_SOURCE_TYPE, replayLedger, replayWindowStart, type ReplayResult } from './expiry.js';
+import {
+  GRANT_EXPIRY_SOURCE_TYPE,
+  replayLedger,
+  replayWindowStart,
+  type ReplayEntry,
+  type ReplayResult,
+} from './expiry.js';
 
 /** Ruling 10.1: how long after its expiry a grant is first written settled. */
 export const SETTLE_DELAY_MS = 60_000;
@@ -52,9 +58,10 @@ export async function databaseNow(db: PrismaClient): Promise<Date> {
 /**
  * The probe: does the organization hold a live grant that expired at or before `cutoff` and has no settlement? One
  * range on the partial index `credit_ledger_entries_expiring_grants_idx` plus the unique pair index. The pair is
- * checked whatever its row's deletedAt: a taken pair is settled (the writer could never write it again).
+ * checked whatever its row's deletedAt: a taken pair is settled (the writer could never write it again). Internal:
+ * exported for the M1 measurement, not for other callers.
  */
-async function hasUnsettledExpiredGrant(db: PrismaClient, organizationId: string, cutoff: Date): Promise<boolean> {
+export async function hasUnsettledExpiredGrant(db: PrismaClient, organizationId: string, cutoff: Date): Promise<boolean> {
   const rows = await db.$queryRaw<{ one: number }[]>(Prisma.sql`
     SELECT 1 AS one
       FROM credit_ledger_entries g
@@ -71,12 +78,19 @@ async function hasUnsettledExpiredGrant(db: PrismaClient, organizationId: string
   return rows.length > 0;
 }
 
+/** What the replay of one organization reads: its window's entries, the opening figure and the taken pairs. */
+export interface ReplayWindow {
+  entries: ReplayEntry[];
+  opening: bigint;
+  settled: Set<string>;
+}
+
 /**
- * Replay the organization's ledger at `now` through the window rule (expiry.ts `replayWindowStart`): every live expiring
- * grant and every taken settlement pair, one opening figure for the entries before the window, the live entries from
- * it to `now`. Null when the organization holds no unsettled expiring grant.
+ * Read the organization's window at `now` (expiry.ts `replayWindowStart`): every live expiring grant and every taken
+ * settlement pair, one opening figure for the entries before the window, the live entries from it to `now`. Null when
+ * the organization holds no unsettled expiring grant. Internal: exported for the M1 measurement.
  */
-async function replayOwner(db: PrismaClient, organizationId: string, now: Date): Promise<ReplayResult | null> {
+export async function readReplayWindow(db: PrismaClient, organizationId: string, now: Date): Promise<ReplayWindow | null> {
   const grants = await db.creditLedgerEntry.findMany({
     where: { organizationId, kind: 'grant', expiresAt: { not: null }, deletedAt: null },
     select: { id: true, createdAt: true, expiresAt: true },
@@ -110,7 +124,14 @@ async function replayOwner(db: PrismaClient, organizationId: string, now: Date):
       },
     }),
   ]);
-  return replayLedger(entries, now, { opening: opening._sum.amountMicroCents ?? 0n, settled });
+  return { entries, opening: opening._sum.amountMicroCents ?? 0n, settled };
+}
+
+/** Replay the organization's ledger at `now` through its window; null when there is nothing to replay. */
+async function replayOwner(db: PrismaClient, organizationId: string, now: Date): Promise<ReplayResult | null> {
+  const window = await readReplayWindow(db, organizationId, now);
+  if (window === null) return null;
+  return replayLedger(window.entries, now, { opening: window.opening, settled: window.settled });
 }
 
 /**
