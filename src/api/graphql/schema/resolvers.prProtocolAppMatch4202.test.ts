@@ -83,7 +83,7 @@ describe('#4202 the protocol facts of a task (taskEvents): frozen head, schedule
     await schedule(); await freeze();
     const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: 'not a seat', assignee: { user: reviewer.id }, source: 'synthetic' } }, ctx(author.id));
     await plant(foreign.id, t.id, 'review.seat.assigned', { slot: 'local', head: H, supersedes: null });
-    await M.startAgentTask!({}, { taskId: t.id }, ctx(reviewer.id));
+    await M.startAgentTask!({}, { taskRef: t.id }, ctx(reviewer.id));
     await expect(verdict(t, 'APPROVE')).rejects.toMatchObject(error('REVIEW_SEAT_UNASSIGNED'));
     expect(await eventsOf(t.id, 'review.verdict')).toEqual([]);
   });
@@ -108,7 +108,7 @@ describe('#4202 the negative-verdict reads', () => {
   it('a negative review.verdict of another App by another actor does not stop the seat\'s holder recording its verdict (the prior-verdict read)', async () => {
     await schedule(); await freeze();
     const t = await seat('local');
-    await M.startAgentTask!({}, { taskId: t.id }, ctx(reviewer.id));
+    await M.startAgentTask!({}, { taskRef: t.id }, ctx(reviewer.id));
     await plant(foreign.id, t.id, 'review.verdict', { slot: 'local', head: H, verdict: 'FAIL' }, other.id);
     await verdict(t, 'APPROVE');
     expect(await eventsOf(t.id, 'review.verdict')).toEqual(expect.arrayContaining([{ appId: app.id }]));
@@ -117,7 +117,7 @@ describe('#4202 the negative-verdict reads', () => {
   it('control: the same prior verdict in the seat\'s own App does stop another actor', async () => {
     await schedule(); await freeze();
     const t = await seat('local');
-    await M.startAgentTask!({}, { taskId: t.id }, ctx(reviewer.id));
+    await M.startAgentTask!({}, { taskRef: t.id }, ctx(reviewer.id));
     await plant(app.id, t.id, 'review.verdict', { slot: 'local', head: H, verdict: 'FAIL' }, other.id);
     await expect(verdict(t, 'APPROVE')).rejects.toMatchObject(error('REVIEW_SEAT_NOT_SUPERSEDABLE'));
   });

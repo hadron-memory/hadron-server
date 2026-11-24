@@ -80,7 +80,7 @@ describe('a claim in flight is waited for', () => {
     const hold = holdOpen(async (tx) => {
       expect((await claimContextReset(tx, host(), s.resetId, 0, PROC, new Date())).refused).toBeNull();
     });
-    const out = await race(hold, () => M.assignAgentTask({}, { taskId: free.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id)), free.id);
+    const out = await race(hold, () => M.assignAgentTask({}, { taskRef: free.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id)), free.id);
     expect(errCode(out)).toBe('WORKER_RESETTING');
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: free.id } })).assigneeWorkerId).toBeNull();
   });
@@ -167,7 +167,7 @@ describe('the matcher and a hand assign share the order', () => {
     });
     await hold.locked;
     let settled = false;
-    const p = M.assignAgentTask({}, { taskId: free.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id))
+    const p = M.assignAgentTask({}, { taskRef: free.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id))
       .then((v: unknown) => v, (e: unknown) => e).finally(() => { settled = true; });
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1);

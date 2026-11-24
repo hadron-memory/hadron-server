@@ -18,7 +18,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 const R = resolvers as any, M = R.Mutation;
 let org: any, app: any, owner: any, assignee: any, outsider: any, task: any, mem: any, hidden: any;
 const ctx = (userId = assignee.id) => ({ db, userId, roles: ['READER'] });
-const finish = (refs?: unknown, c = ctx()) => M.finishAgentTask({}, { taskId: task.id, result: { outcome: 'succeeded', summary: 'S', evidence: 'E', ...(refs === undefined ? {} : { workedFromRoleTaskRefs: refs }) } }, c);
+const finish = (refs?: unknown, c = ctx()) => M.finishAgentTask({}, { taskRef: task.id, result: { outcome: 'succeeded', summary: 'S', evidence: 'E', ...(refs === undefined ? {} : { workedFromRoleTaskRefs: refs }) } }, c);
 const stored = () => db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
 const events = () => db.agentTeamEvent.findMany({ where: { taskId: task.id, type: 'task.finished' } });
 const node = (m: any, loc: string, extra: Record<string, unknown> = {}) => db.node.create({ data: { id: generateId(), memoryId: m.id, loc, name: loc, isRunnable: true, ...extra } });
@@ -38,7 +38,7 @@ beforeEach(async () => {
   mem = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:roles`, name: 'roles', class: 'knowledge' } });
   hidden = await db.memory.create({ data: { id: generateId(), organizationId: other.id, urn: `${other.urn}:secret`, name: 'secret', class: 'knowledge' } });
   task = await M.createAgentTask({}, { input: { appRef: app.id, title: 'T', source: 's', assignee: { user: assignee.id } } }, ctx(owner.id));
-  await M.startAgentTask({}, { taskId: task.id }, ctx());
+  await M.startAgentTask({}, { taskRef: task.id }, ctx());
 });
 
 describe('#4414 workedFromRoleTaskRefs on finish', () => {
@@ -127,8 +127,8 @@ describe('#4414 workedFromRoleTaskRefs on finish', () => {
   });
   it('is read by whoever may read the task, and not by an outsider', async () => {
     const a = await node(mem, 'tasks:alpha'); await finish([a.id]);
-    expect(await R.Query.agentTask({}, { id: task.id }, ctx(outsider.id))).toBeNull();
-    const seen = await R.Query.agentTask({}, { id: task.id }, ctx(owner.id));
+    expect(await R.Query.agentTask({}, { ref: task.id }, ctx(outsider.id))).toBeNull();
+    const seen = await R.Query.agentTask({}, { ref: task.id }, ctx(owner.id));
     expect(R.AgentTask.result(seen).workedFromRoleTaskRefs).toHaveLength(1);
   });
   it('a second finish cannot replace the list', async () => {
@@ -146,10 +146,10 @@ it('GraphQL: the input takes [ID!], the result returns the typed list; a bad ref
   expect((schema.getType('AgentTaskResult') as any).getFields().workedFromRoleTaskRefs.type.toString()).toBe('[AgentTaskRoleTaskRef!]');
   const fieldResolver = (parent: any, args: any, c: any, info: any) => { const fn = R[info.parentType.name]?.[info.fieldName]; return typeof fn === 'function' ? fn(parent, args, c, info) : defaultFieldResolver(parent, args, c, info); };
   const before = await stored();
-  const bad = await graphql({ schema, source: 'mutation($id:ID!,$r:[ID!]){finishAgentTask(taskId:$id,result:{outcome:"done",workedFromRoleTaskRefs:$r}){id}}', variableValues: { id: task.id, r: [generateId()] }, contextValue: ctx(), fieldResolver });
+  const bad = await graphql({ schema, source: 'mutation($id:ID!,$r:[ID!]){finishAgentTask(taskRef:$id,result:{outcome:"done",workedFromRoleTaskRefs:$r}){id}}', variableValues: { id: task.id, r: [generateId()] }, contextValue: ctx(), fieldResolver });
   expect(bad.errors?.[0]?.extensions?.code).toBe('TASK_ROLE_TASK_REFS_INVALID'); expect(await stored()).toEqual(before);
   const a = await node(mem, 'tasks:alpha');
-  const good = await graphql({ schema, source: 'mutation($id:ID!,$r:[ID!]){finishAgentTask(taskId:$id,result:{outcome:"done",workedFromRoleTaskRefs:$r}){result{outcome workedFromRoleTaskRefs{nodeId urn revision}}}}', variableValues: { id: task.id, r: [a.id] }, contextValue: ctx(), fieldResolver });
+  const good = await graphql({ schema, source: 'mutation($id:ID!,$r:[ID!]){finishAgentTask(taskRef:$id,result:{outcome:"done",workedFromRoleTaskRefs:$r}){result{outcome workedFromRoleTaskRefs{nodeId urn revision}}}}', variableValues: { id: task.id, r: [a.id] }, contextValue: ctx(), fieldResolver });
   expect(good.errors).toBeUndefined();
   expect(good.data).toEqual({ finishAgentTask: { result: { outcome: 'done', workedFromRoleTaskRefs: [{ nodeId: a.id, urn: urnOf(mem, a), revision: 1 }] } } });
 });

@@ -126,7 +126,7 @@ it('an enabled own-App run reads tasks without becoming an actor; other Apps rem
   const page = await Q.agentTasks({}, { appRef: appId }, principal);
   expect(page.map((t: { id: string }) => t.id)).toContain(taskId);
   await denied(Q.agentTasks({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
-  expect(await Q.agentTask({}, { id: taskId }, principal)).toMatchObject({ id: taskId });
+  expect(await Q.agentTask({}, { ref: taskId }, principal)).toMatchObject({ id: taskId });
 });
 it('an opted-in foreign App remains concealed on every run team read', async () => {
   await enable();
@@ -138,16 +138,16 @@ it('an opted-in foreign App remains concealed on every run team read', async () 
   await denied(Q.agentTasks({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
   await denied(Q.teamRoster({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
   await denied(Q.workers({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
-  expect(await Q.agentTask({}, { id: foreign.id }, principal)).toBeNull();
-  expect(await Q.agentTask({}, { id: `hrn:agenttask:${foreignApp.urn}:${foreign.handle}` }, principal)).toBeNull();
+  expect(await Q.agentTask({}, { ref: foreign.id }, principal)).toBeNull();
+  expect(await Q.agentTask({}, { ref: `hrn:agenttask:${foreignApp.urn}:${foreign.handle}` }, principal)).toBeNull();
 });
 it('a userless run cannot use the new read arm for generic create/update/assign writes', async () => {
   await enable();
   const principal = runContext(db, await mintRun());
   const before = await db.agentTask.count();
   await denied(M.createAgentTask({}, { input: { appRef: appId, title: 'forged' } }, principal), 'APP_NOT_FOUND');
-  await denied(M.updateAgentTask({}, { taskId, input: { title: 'forged' } }, principal), 'TASK_NOT_FOUND');
-  await denied(M.assignAgentTask({}, { taskId, assignee: { worker: workerId } }, principal), 'TASK_NOT_FOUND');
+  await denied(M.updateAgentTask({}, { taskRef: taskId, input: { title: 'forged' } }, principal), 'TASK_NOT_FOUND');
+  await denied(M.assignAgentTask({}, { taskRef: taskId, assignee: { worker: workerId } }, principal), 'TASK_NOT_FOUND');
   expect(await db.agentTask.count()).toBe(before);
   expect(await db.agentTask.findUniqueOrThrow({ where: { id: taskId } })).toMatchObject({ title: 'Existing task', assigneeWorkerId: null });
 });
@@ -319,14 +319,14 @@ it('preserves a user-backed run’s existing TaskActor, task write and S3b scope
   expect(await resolveTaskActor(principal, (await loadApp(principal, appId))!)).toMatchObject({ kind: 'user', userId: manager });
   expect(await mayReadAppTasks(principal, appId)).toBe(true); // default-off is not a new denial on its legacy person arm.
   expect((await Q.agentTasks({}, { appRef: appId }, principal)).map((task: { id: string }) => task.id)).toContain(taskId);
-  expect(await Q.agentTask({}, { id: taskId }, principal)).toMatchObject({ id: taskId });
+  expect(await Q.agentTask({}, { ref: taskId }, principal)).toMatchObject({ id: taskId });
   const transact = vi.spyOn(db, '$transaction');
   try {
     await Q.teamRoster({}, { appRef: appId }, principal);
     expect(transact).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ isolationLevel: 'RepeatableRead' }));
   } finally { transact.mockRestore(); }
   const created = await M.createAgentTask({}, { input: { appRef: appId, title: 'Legacy user-backed write' } }, principal);
-  await M.updateAgentTask({}, { taskId: created.id, input: { title: 'Legacy edit' } }, principal);
+  await M.updateAgentTask({}, { taskRef: created.id, input: { title: 'Legacy edit' } }, principal);
   expect((await db.agentTask.findUniqueOrThrow({ where: { id: created.id } })).title).toBe('Legacy edit');
   await M.grantAppKeyScope({}, { id: keyId, scope: 'attention:deliver' }, ctx(manager));
   await M.revokeAppKeyScope({}, { id: keyId, scope: 'attention:deliver' }, principal);

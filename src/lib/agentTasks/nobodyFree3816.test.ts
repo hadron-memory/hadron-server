@@ -31,7 +31,7 @@ async function worker(name: string, role = 'reviewer', opts: { family?: string; 
 const create = (input: any = {}) => M.createAgentTask({}, { input: { appRef: app.id, title: 'Match', match: true, requirements: { role: 'reviewer' }, ...input } }, ctx);
 const hold = async (workerId: string) => {
   const t = await M.createAgentTask({}, { input: { appRef: app.id, title: 'busy' } }, ctx);
-  await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: workerId } }, ctx);
+  await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: workerId } }, ctx);
 };
 const unavailable = (workerId: string, reason = 'out-of-tokens') => db.workerAvailability.create({
   data: { workerId, state: 'unavailable', reason, until: reason === 'stalled' ? null : new Date(Date.now() + 3600_000), setAt: new Date(), setBy: reason === 'stalled' ? 'stall-rule' : 'holder', setByUserId: reason === 'stalled' ? null : owner.id } });

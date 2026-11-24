@@ -113,7 +113,7 @@ const ROWS = (): Row[] => [
   // The handle grammar admits digits only, so the unstorable code point can only ride in the qualified
   // handle's App part, which resolveAppRef already guards: a regression pin for a door that cannot reach the
   // lookup with one (the control uses a valid App and an absent handle, which does reach `agentTask`).
-  { door: 'agentTask(id:) [taskRef arm]', call: (r, c) => Q.agentTask({}, { id: r }, c), who: memberCtx,
+  { door: 'agentTask(ref:) [taskRef arm]', call: (r, c) => Q.agentTask({}, { ref: r }, c), who: memberCtx,
     bad: (u) => `hrn:agenttask:${org.urn}:te${u}am:at99`, miss: `hrn:agenttask:${app.urn}:at99`, table: 'agentTask' },
   // KEEP door (resolvers.query.node.ts: "a malformed input propagates as UrnNotQualifiedError rather than masking as
   // not-found"): the typed contract is preserved, never folded to null.

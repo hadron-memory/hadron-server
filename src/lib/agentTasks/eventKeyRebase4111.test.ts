@@ -102,7 +102,7 @@ const servingOrder = async () =>
 const X = (n: number) => `https://github.com/hadron-memory/hadron-server/issues/${7000 + n}`;
 const createTask = (app: any, n: number) =>
   M.createAgentTask({}, { input: { appRef: app.id, title: `T${n}`, externalId: X(n) } }, ctx());
-const release = (taskId: string) => M.releaseAgentTaskExternalId({}, { taskId }, ctx());
+const release = (taskId: string) => M.releaseAgentTaskExternalId({}, { taskRef: taskId }, ctx());
 /** An ASSIGNED change on the task stamped `offset` from the database clock; `txId` forces a key (a legacy '0'). */
 const assignment = (app: any, taskId: string, offset: string, txId?: string) =>
   txId === undefined
