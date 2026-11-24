@@ -367,6 +367,11 @@ describe('#4375 the alarm watches every lead (rulings 0270, 0271)', () => {
     await evaluateLeadCadence(db, NOW);
     const [a] = await alarms('Ada');
     expect((await db.leadCadenceEpisode.findUniqueOrThrow({ where: { eventId: a.id } })).endedAt).toBeNull();
+    // Control (#4987): a later pass, with Ada still a lead, leaves her episode open and raises nothing new, so the end
+    // below comes from her retirement and not from the passage of time.
+    await evaluateLeadCadence(db, later(1));
+    expect((await db.leadCadenceEpisode.findUniqueOrThrow({ where: { eventId: a.id } })).endedAt).toBeNull();
+    expect(await alarms('Ada')).toHaveLength(1);
     // Ada retires; Liam's reportsTo still names her, so she is no longer a lead (a retired worker leads nobody).
     await db.worker.update({ where: { id: w.Ada.id }, data: { retiredAt: later(1) } });
     expect((await db.worker.findUniqueOrThrow({ where: { id: w.Liam.id } })).reportsToWorkerId).toBe(w.Ada.id);

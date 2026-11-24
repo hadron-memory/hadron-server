@@ -54,7 +54,7 @@ describe('transferMemoryOwnership', () => {
     await locked;
 
     const share = resolvers.Mutation.createMemoryShare(null, {
-      memoryId: memory.id, granteeId: receiver.id, role: 'reader',
+      memoryRef: memory.id, granteeRef: receiver.id, role: 'reader',
     }, ctx(owner.id));
     try {
       await waitForLockWaitersOfType(db, 'transactionid', 1);

@@ -143,7 +143,24 @@ it('fails open to code-only guidance when register lookup throws', async () => {
   const out = await due();
   expect(action(out, w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
   expect(out.wakes[0].proof).toBeTruthy();
-  expect(out.wakes[0].tickText).toBe('tick Shared: resolve your task for tick.shared yourself');
+  expect(out.wakes[0].tickText).toBe('tick Shared: task lookup withheld; if you have a task for tick.shared, resolve it yourself');
+});
+
+// #4999: the fallthrough serves every action state that is not MAPPED, UNMAPPED or UNRESOLVED, and the renderer cannot know the
+// worker has no task, so the sentence must not presume one: a no-action pass is a correct answer to a routine tick.
+it.each([['UNKNOWN', { code: 'tick.shared', state: 'UNKNOWN' as const }], ['none', undefined]])(
+  'the fallthrough for a %s action does not presume a task (#4999)', (_label, action) => {
+    const wake = { reasons: [{ kind: 'TICK' as const, tickerId: 'a', k: 1, ...(action ? { action } : {}) }], channels: [], unread: 0, unreadMentions: 0, exempt: false };
+    const text = renderTickText(wake as never, new Map([['a', { name: 'Shared' }]]));
+    expect(text).not.toContain('resolve your task');
+    expect(text).toBe('tick Shared: if you have a task for ' + (action?.code ?? 'tick.unknown') + ', resolve it yourself');
+  });
+
+it('the MAPPED, UNMAPPED and UNRESOLVED texts are unchanged (#4999)', () => {
+  const t = (action: object) => renderTickText({ reasons: [{ kind: 'TICK' as const, tickerId: 'a', k: 1, action }], channels: [], unread: 0, unreadMentions: 0, exempt: false } as never, new Map([['a', { name: 'Shared' }]]));
+  expect(t({ code: 'tick.shared', state: 'MAPPED', taskUrn: 'hrn:node:example.org:role:tasks:on-tick' })).toBe('tick Shared: run hrn:node:example.org:role:tasks:on-tick');
+  expect(t({ code: 'tick.shared', state: 'UNMAPPED' })).toBe('tick Shared: no task is mapped for tick.shared');
+  expect(t({ code: 'tick.shared', state: 'UNRESOLVED', taskLoc: 'tasks:x' })).toBe('tick Shared: no task found at tasks:x for tick.shared');
 });
 
 it('formats in ticker-name order, deduplicates tasks and flattens control characters', () => {
