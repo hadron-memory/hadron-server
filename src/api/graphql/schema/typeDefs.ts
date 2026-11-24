@@ -7181,7 +7181,8 @@ export const typeDefs = `#graphql
 
   """
   #4168 (hrn:node:hadronmemory.com:specs:cor:dmo:060:17): the verdict of a proposed write's authoring
-  attestation check. PASS: the write would pass. REFUSED: the write would be refused, with the code,
+  attestation check. PASS: the write would pass the authoring attestation check; the answer covers that check and not the
+  rest of the write's validation. REFUSED: the write would be refused, with the code,
   the governed role, the prose and the recovery the write returns. UNAVAILABLE: the caller reads the
   memory but does not write it, one answer for every node and role, so it shows nothing about the
   memory's rules. A preview, never a reservation, and a pass is never proof the procedure was followed.
@@ -7202,7 +7203,7 @@ export const typeDefs = `#graphql
     READABLE
     UNAVAILABLE
   }
-  "How to load the author task, per surface. A surface with no route is null."
+  "How to load the author task, per surface. graphql always has a route and is never null; mcp and cli are null when the task has no URN to name."
   type AuthoringCheckLoad {
     graphql: String!
     mcp: String
