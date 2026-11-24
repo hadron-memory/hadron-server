@@ -7187,7 +7187,8 @@ export const typeDefs = `#graphql
 
   """
   #4168 (hrn:node:hadronmemory.com:specs:cor:dmo:060:17): the verdict of a proposed write's authoring
-  attestation check. PASS: the write would pass. REFUSED: the write would be refused, with the code,
+  attestation check. PASS: the write would pass the authoring attestation check; the answer covers that check and not the
+  rest of the write's validation. REFUSED: the write would be refused, with the code,
   the governed role, the prose and the recovery the write returns. UNAVAILABLE: the caller reads the
   memory but does not write it, one answer for every node and role, so it shows nothing about the
   memory's rules. A preview, never a reservation, and a pass is never proof the procedure was followed.
@@ -7208,7 +7209,10 @@ export const typeDefs = `#graphql
     READABLE
     UNAVAILABLE
   }
-  "How to load the author task, per surface. A surface with no route is null."
+  """
+  How to load the author task, per surface. graphql always has a route and is never null; mcp and cli are null when the
+  task has no URN to name.
+  """
   type AuthoringCheckLoad {
     graphql: String!
     mcp: String
@@ -10344,16 +10348,26 @@ export const typeDefs = `#graphql
       "hadron node import". Requires MD or JSON; sections is ignored.
     full: false returns a PRESENTATION render of the selected sections
       (default: all); not guaranteed round-trippable.
+    format: PDF is always a presentation render and \`full\` does not apply
+      (hrn:node:hadronmemory.com:specs:cor:int:020:02, #395). The node's content
+      is always printed; the sections you name are ADDED after it (naming
+      CONTENT changes nothing), in the fixed order Abstract, Data, Properties,
+      Edges, Metadata whatever order you gave: Data and Properties as two-column
+      tables (a value that is not an object prints as a fenced JSON block), Edges as a list, Metadata as a list, a section with nothing in it
+      left out. No sections named prints the content only. Comments is not a
+      section yet.
     Edges: an outgoing edge is exported only when the caller can read its
     TARGET's memory (the Edge.target rule, denied ≡ absent), so a
     partial-access caller's file — full: true included — omits those edges.
     The round trip is additive: "hadron node import --with-edges" wires the
     edges the file carries and never deletes an edge the file lacks, so an
-    omitted edge survives a restore into a memory that still has it.
+    omitted edge survives a restore into a memory that still has it. The
+    PDF's Edges section applies the same readability rule and additionally
+    drops soft-deleted targets (it prints locs, so it keeps only live ones).
     ref: the node's PK or URN (hrn:node:hadronmemory.com:specs:cor:api:140). Auth: the same node-read gate as
     node(ref:), including read-only PUBLIC knowledge for an App key or userless
     run (hrn:node:hadronmemory.com:specs:cor:acl:010:01). A node the caller can't read, a missing ref and a
-    soft-deleted node all refuse as NODE_NOT_FOUND. (HTML/PDF + asUrl delivery land
+    soft-deleted node all refuse as NODE_NOT_FOUND. (HTML + asUrl delivery land
     later; the result shape is forward-compatible.)
     """
     nodeExport(

@@ -16,6 +16,8 @@ import { decodeLocSegmentsCursor, normalizeLocSegmentsLimit, readLocSegments } f
 import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, retainEffective, stillInherited, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import {
   renderNodeExport,
+  renderPdfMarkdown,
+  type ExportNode,
   type NodeExportFormat,
   type NodeExportSection,
 } from '../../../lib/nodeExport.js';
@@ -1479,13 +1481,50 @@ export const nodeQueries = {
         ? await resolveNodeContent(ctx, node, { mode: 'includes', surface: 'export' })
         : node.content;
 
+      // The node as the exporters see it. Built once, before the format branches, so the PDF's added
+      // sections (#395) and the MD/JSON renders read the same projection.
+      const exportNode: ExportNode = {
+        id: node.id,
+        memoryUrn: memory?.urn ?? '',
+        loc: node.loc,
+        name: node.name,
+        nodeType: node.nodeType,
+        objectType: node.objectType,
+        alias: node.alias,
+        description: node.description,
+        abstract: node.abstract,
+        abstractOriginHash: node.abstractOriginHash,
+        content: exportContent,
+        tags: deserializeTags(node.tags) as string[],
+        seq: node.seq,
+        role: node.role,
+        isRunnable: node.isRunnable,
+        data: node.data,
+        properties: node.properties,
+        // #4763: the MD/JSON renders carry the READABILITY-filtered edges (the loop
+        // above); the PDF branch below overrides with its own live-and-readable set.
+        edges: exportEdges as unknown as EdgeForGit[],
+      };
+
       // PDF is a presentation render produced by the external hadrontool-pdf
-      // service from the node's (already-decrypted) Markdown content. Unlike
-      // MD/JSON it is not the canonical round-trippable file, so `full` /
-      // `sections` do not apply. Delivered BASE64.
+      // service. Unlike MD/JSON it is not the canonical round-trippable file,
+      // so `full` does not apply (cor:int:020:02 Q2 (a)): the content is always
+      // printed and the sections the caller names are ADDED after it, in the
+      // fixed order, empty ones left out (R8/R9, #395). Delivered BASE64.
       if (fmt === 'PDF') {
-        const markdown =
-          exportContent && exportContent.trim().length > 0 ? exportContent : `# ${node.name}`;
+        // §10 (#395): the Edges section prints a target's loc, so it keeps only targets that are live and in a
+        // memory this caller can read (the same readable set the node gate used; #781 gates an edge endpoint on
+        // its own memory). The MD/JSON export (#4763) applies the same #781 readability rule through the edge
+        // loop above, with one deliberate difference: it keeps a SOFT-DELETED target in a readable memory
+        // (the file is a restore artifact), while this presentation section drops it with the dead ones.
+        const readableMemoryIds =
+          access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId
+            ? new Set(access.memoryId.in as string[])
+            : null;
+        const readableEdges = node.outgoingEdges.filter(
+          (e) => e.target && !e.target.deletedAt && (readableMemoryIds === null || readableMemoryIds.has(e.target.memoryId)),
+        );
+        const markdown = renderPdfMarkdown({ ...exportNode, edges: readableEdges as unknown as EdgeForGit[] }, sections);
         const { base64, bytes } = await renderMarkdownToPdf(markdown, { title: node.name });
         const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
         recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
@@ -1500,29 +1539,9 @@ export const nodeQueries = {
       }
 
       const { mimeType, data } = renderNodeExport(
-        {
-          id: node.id,
-          memoryUrn: memory?.urn ?? '',
-          loc: node.loc,
-          name: node.name,
-          nodeType: node.nodeType,
-          objectType: node.objectType,
-          alias: node.alias,
-          description: node.description,
-          abstract: node.abstract,
-          abstractOriginHash: node.abstractOriginHash,
-          content: exportContent,
-          tags: deserializeTags(node.tags) as string[],
-          seq: node.seq,
-          role: node.role,
-          isRunnable: node.isRunnable,
-          data: node.data,
-          properties: node.properties,
-          edges: exportEdges as unknown as EdgeForGit[],
-        },
+        exportNode,
         { format: fmt, full: full !== false, sections: sections ?? null },
       );
-
       const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
       recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
       return {
