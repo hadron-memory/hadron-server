@@ -461,6 +461,15 @@ export const typeDefs = `#graphql
     play, exactly as Memory.description serves it.
     """
     description: String
+    """
+    #5003: the memory's visibility, carried only where THIS caller could read it through Memory.visibility — the same
+    record gate as description (canReadMemoryRecord, the one Query.memory applies), never the row's own admission.
+    Null means EITHER withheld (the record gate would refuse the caller; the row is still listed, only this field is
+    hidden) OR not applicable: only knowledge and group memories carry a visibility, and a knowledge memory may have
+    none. The two are not distinguishable here, so a client must not read a null as a reason. The memory record is never
+    enciphered, so an encrypted memory's visibility is carried with no key in play. The leaf stays a leaf.
+    """
+    visibility: MemoryVisibility
     "Every reason this memory is in scope. Never empty. Ordered by kind (AGENT_SYSTEM, AGENT_LINK, INHERITED_BASE, TEAM_SPACE, APP_MEMORY), then by agent install order."
     sources: [AppMemorySource!]!
     """
@@ -13728,8 +13737,13 @@ export const typeDefs = `#graphql
     deleteAgentSchedule(id: ID!): Boolean!
     "Run an entry node now (MANUAL trigger) — same launch gate + kernel as a schedule."
     triggerAppRun(input: TriggerAppRunInput!): AppRun!
-    "The kill switch manual handle: PENDING/RUNNING to CANCELLED (cor:agt:010:02)."
-    cancelAppRun(id: ID!): AppRun!
+    """
+    The kill switch manual handle: PENDING/RUNNING to CANCELLED (hrn:node:hadronmemory.com:specs:cor:agt:010:02).
+    'ref' is the run's id or its hrn:apprun URN (renamed from 'id', #4141).
+    A ref that cannot name a run is BAD_USER_INPUT; an unknown run answers
+    NOT_FOUND "Run not found."; a non-admin keeps FORBIDDEN.
+    """
+    cancelAppRun(ref: ID!): AppRun!
 
     "Create a webhook trigger — returns the URL path + platform token ONCE (D-2026-05-02)."
     createAgentWebhook(input: CreateAgentWebhookInput!): AgentWebhookCredentials!
@@ -16575,9 +16589,16 @@ export const typeDefs = `#graphql
     after the new session commits; USER_ID mode rejects key supply.
     Only one key-consuming operation may use the header in a request;
     a second attempt is BAD_UNLOCK_INPUT.
+    'agentRef' is the Agent's id or its hrn:agent URN (renamed from 'agentId',
+    #4141). An Agent that does not exist, is deleted, or is not installed in
+    this App all answer the one FORBIDDEN "App is not allowed to operate this
+    agent". A ref that is neither an id nor a qualified hrn:agent URN (a
+    relative URN, a malformed ref, another entity's URN) is refused as
+    URN_NOT_QUALIFIED; cancelAppRun answers the same kind of ref with
+    BAD_USER_INPUT, its own door's existing shape code.
     """
     startAgentSession(
-      agentId: ID!
+      agentRef: ID!
       externalUserId: String
       sessionTimeoutSeconds: Int
     ): Session!

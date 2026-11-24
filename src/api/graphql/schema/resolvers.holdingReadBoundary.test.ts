@@ -97,7 +97,7 @@ describe('creator holdings preserve the current read boundary', () => {
     const { app: sessionApp, appKey } = await createDbAppWithKey(db, 'session-app', org.id);
     await createDbAppAgent(db, sessionApp.id, installed.id);
     const key: Context = { db, appId: sessionApp.id, appKeyId: appKey.id, roles: [] };
-    const session = await resolvers.Mutation.startAgentSession(null, { agentId: installed.id }, key);
+    const session = await resolvers.Mutation.startAgentSession(null, { agentRef: installed.id }, key);
     const bound = (): Context => ({ ...key, sessionId: session.id });
     const memory = await db.memory.findUniqueOrThrow({ where: { id: session.memoryId! } });
     expect(memory.class).toBe('app');

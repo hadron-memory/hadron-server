@@ -16,6 +16,7 @@
  */
 
 import { GraphQLError } from 'graphql';
+import type { MemoryVisibility } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { effectiveScope, type EffectiveScope } from '../../../lib/effectiveSystemMemory.js';
 import { getAppMemoryCandidates, filterReadableMemoryIds, type AgentProvenance } from '../../../mcp/access-control.js';
@@ -258,7 +259,8 @@ export async function resolveAppNodeScope(ctx: Context, appRef: string): Promise
  * own audience (scope admission, which `name` rides) is WIDER than the record
  * gate, and handing `description` the row's audience would be the #552
  * widening class. A row the record gate refuses is still listed; only its
- * description is withheld.
+ * description is withheld. `visibility` (#5003) rides the same gate and is
+ * withheld with it.
  */
 export type AppScopedMemoryRow = {
   memoryId: string;
@@ -266,6 +268,8 @@ export type AppScopedMemoryRow = {
   name: string;
   class: string;
   description: string | null;
+  /** #5003: the memory's visibility on the same record gate as `description`; null when withheld OR not applicable to the class. */
+  visibility: MemoryVisibility | null;
   sources: AppMemorySource[];
   viewerCanWrite: boolean;
 };
@@ -312,7 +316,7 @@ export async function appMemoryScopePage(
     // own select does not get that protection. `deletedAt` is added because
     // `Query.memory` answers null for a soft-deleted record: its description
     // is withheld too.
-    select: { ...MEMORY_RECORD_GATE_SELECT, name: true, description: true, deletedAt: true },
+    select: { ...MEMORY_RECORD_GATE_SELECT, name: true, description: true, visibility: true, deletedAt: true },
   });
   const byId = new Map(pageRows.map((m) => [m.id, m]));
   // A row hard-deleted between the two reads has nothing to show and is
@@ -338,6 +342,10 @@ export async function appMemoryScopePage(
       name: m.name,
       class: m.class,
       description: readableIds.has(m.id) ? m.description : null,
+      // #5003: the same record gate as `description`, never the row's own audience. Null means withheld by the gate OR
+      // not applicable (only knowledge and group memories carry one, chk_memory_visibility_class); a knowledge memory
+      // may also have none. The row is still listed either way.
+      visibility: readableIds.has(m.id) ? m.visibility : null,
       sources: scope.sources.get(m.id)!,
       viewerCanWrite: await viewerCanWrite(ctx, m.id),
     });
