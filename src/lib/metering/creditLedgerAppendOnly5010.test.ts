@@ -1,0 +1,142 @@
+/**
+ * #5010 (billing A12, cor:dmo:170:08): a credit ledger entry is never edited and never deleted, not even by an operator.
+ * The database enforces it: the owner relation is RESTRICT, a trigger refuses every UPDATE except the two the slice names
+ * (the owner link to NULL; audit user ids along a recorded account merge) and every DELETE, and a CHECK keeps soft
+ * delete retired. Pins 4, 7 and 8 pass on main (guards for the exceptions and the product path); the rest are red there.
+ */
+import { Client } from 'pg';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { ApolloServer } from '@apollo/server';
+import { db } from '../../integrations/db/client.js';
+import { cleanDb } from '../../test/helpers.js';
+import { generateId } from '../id.js';
+import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
+import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { creditBalance, grantCredits } from './index.js';
+
+let pg: Client;
+beforeAll(async () => {
+  pg = new Client({ connectionString: process.env.DATABASE_URL });
+  await pg.connect();
+});
+afterAll(async () => { await pg.end(); });
+
+let orgId: string;
+let entryId: string;
+let userS: string;
+let userT: string;
+let admin: string;
+
+async function code(sql: string, params: unknown[] = []): Promise<string | null> {
+  try { await pg.query(sql, params); return null; } catch (e) { return (e as { code?: string }).code ?? 'unknown'; }
+}
+async function entryRow() {
+  return (await pg.query('SELECT * FROM credit_ledger_entries WHERE id = $1', [entryId])).rows[0];
+}
+
+beforeEach(async () => {
+  await cleanDb(db);
+  orgId = (await db.organization.create({ data: { id: generateId(), name: 'ledger-org', urn: `ledger-${generateId()}` } })).id;
+  userS = (await db.user.create({ data: { id: generateId(), githubId: 50101, githubUsername: 'ledger-s' } })).id;
+  userT = (await db.user.create({ data: { id: generateId(), githubId: 50102, githubUsername: 'ledger-t' } })).id;
+  admin = (await db.user.create({ data: { id: generateId(), githubId: 50103, githubUsername: 'ledger-admin', roles: ['ADMIN'] } })).id;
+  entryId = generateId();
+  await pg.query(
+    `INSERT INTO credit_ledger_entries (id, organization_id, kind, amount_micro_cents, note, created_by, updated_by, source_type, source_id)
+     VALUES ($1, $2, 'grant', 5000000, 'seed', $3, $3, 'admin', 'seed')`,
+    [entryId, orgId, userS],
+  );
+});
+
+describe('#5010 restrict, not cascade', () => {
+  it('pin 1: a hard delete of an organization with entries is refused and the entries remain', async () => {
+    await grantCredits(db, { organizationId: orgId, amountMicroCents: 1n, sourceType: 'admin', sourceId: 'second' });
+    expect(await code('DELETE FROM organizations WHERE id = $1', [orgId])).toBe('23503');
+    await expect(db.organization.delete({ where: { id: orgId } })).rejects.toThrow();
+    expect((await pg.query('SELECT count(*)::int AS n FROM credit_ledger_entries WHERE organization_id = $1', [orgId])).rows[0].n).toBe(2);
+  });
+
+  it('pin 8 (guard): deleteOrganization, the product path, keeps every entry and the balance', async () => {
+    const server = new ApolloServer<Context>({ typeDefs, resolvers });
+    const before = await creditBalance(db, orgId);
+    const res = await server.executeOperation(
+      { query: 'mutation($ref: ID!) { deleteOrganization(ref: $ref) }', variables: { ref: orgId } },
+      { contextValue: { db, userId: admin, roles: ['ADMIN'] } as Context },
+    );
+    if (res.body.kind !== 'single') throw new Error('unexpected');
+    expect(res.body.singleResult.errors).toBeUndefined();
+    expect((await pg.query('SELECT count(*)::int AS n FROM credit_ledger_entries WHERE organization_id = $1', [orgId])).rows[0].n).toBe(1);
+    expect(await creditBalance(db, orgId)).toBe(before);
+  });
+});
+
+describe('#5010 the trigger refuses every edit and delete', () => {
+  const changes: Array<[string, string, unknown]> = [
+    ['amount_micro_cents', 'amount_micro_cents = $2', 9n.toString()],
+    ['kind', 'kind = $2', 'debit'],
+    ['source_type', 'source_type = $2', 'other'],
+    ['source_id', 'source_id = $2', 'other'],
+    ['expires_at', 'expires_at = $2', new Date('2030-01-01T00:00:00Z')],
+    ['note', 'note = $2', 'changed'],
+    ['created_at', 'created_at = $2', new Date('2001-01-01T00:00:00Z')],
+    ['updated_at', 'updated_at = $2', new Date('2001-01-01T00:00:00Z')],
+    ['deleted_at', 'deleted_at = $2', new Date('2030-01-01T00:00:00Z')],
+    ['id', 'id = $2', 'changed-id'],
+  ];
+  it.each(changes)('pin 2: UPDATE of %s is refused with 23514 and the row is unchanged', async (_c, set, value) => {
+    const before = await entryRow();
+    expect(await code(`UPDATE credit_ledger_entries SET ${set} WHERE id = $1`, [entryId, value])).toBe('23514');
+    expect(await entryRow()).toEqual(before);
+  });
+
+  it('pin 3: DELETE is refused and the row remains', async () => {
+    expect(await code('DELETE FROM credit_ledger_entries WHERE id = $1', [entryId])).toBe('23514');
+    expect(await entryRow()).toBeTruthy();
+  });
+
+  it('pin 6: moving an entry to another organization is refused', async () => {
+    const other = (await db.organization.create({ data: { id: generateId(), name: 'ledger-b', urn: `ledger-b-${generateId()}` } })).id;
+    expect(await code('UPDATE credit_ledger_entries SET organization_id = $2 WHERE id = $1', [entryId, other])).toBe('23514');
+    expect((await entryRow()).organization_id).toBe(orgId);
+  });
+
+  it('pin 7 (guard): organization_id to NULL passes the trigger and meets NOT NULL (23502), not 23514', async () => {
+    expect(await code('UPDATE credit_ledger_entries SET organization_id = NULL WHERE id = $1', [entryId])).toBe('23502');
+  });
+
+  it('pin 13: an entry that arrives soft-deleted is refused', async () => {
+    expect(await code(
+      `INSERT INTO credit_ledger_entries (id, organization_id, kind, amount_micro_cents, deleted_at) VALUES ($1, $2, 'grant', 1, now())`,
+      [generateId(), orgId],
+    )).toBe('23514');
+  });
+});
+
+describe('#5010 audit user ids move only along a recorded merge', () => {
+  it('pin 4 (guard): with the merge recorded, created_by and updated_by follow it and nothing else changes', async () => {
+    await db.userMerge.create({ data: { sourceUserId: userS, targetUserId: userT, mergedBy: userT } });
+    const before = await entryRow();
+    expect(await code(
+      'UPDATE credit_ledger_entries SET created_by = $2, updated_by = $2 WHERE id = $1', [entryId, userT])).toBeNull();
+    const after = await entryRow();
+    expect([after.created_by, after.updated_by]).toEqual([userT, userT]);
+    expect({ ...after, created_by: null, updated_by: null }).toEqual({ ...before, created_by: null, updated_by: null });
+  });
+
+  it('pin 5: with no merge recorded, re-pointing an audit id is refused', async () => {
+    expect(await code('UPDATE credit_ledger_entries SET created_by = $2 WHERE id = $1', [entryId, userT])).toBe('23514');
+    expect((await entryRow()).created_by).toBe(userS);
+  });
+
+  it('pin 5b: a merge recorded the other way round does not authorise it', async () => {
+    await db.userMerge.create({ data: { sourceUserId: userT, targetUserId: userS, mergedBy: userS } });
+    expect(await code('UPDATE credit_ledger_entries SET created_by = $2 WHERE id = $1', [entryId, userT])).toBe('23514');
+  });
+});
+
+describe('#5010 test reset', () => {
+  it('pin 12: cleanDb empties the ledger though the trigger refuses a DELETE', async () => {
+    await cleanDb(db);
+    expect((await pg.query('SELECT count(*)::int AS n FROM credit_ledger_entries')).rows[0].n).toBe(0);
+  });
+});
