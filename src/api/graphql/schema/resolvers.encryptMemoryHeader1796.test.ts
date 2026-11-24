@@ -237,16 +237,6 @@ describe('#1796 acceptance 3: the header refuses as the argument does', () => {
     expect((await row(memory.id)).isEncrypted).toBe(false);
   });
 
-  it('on a first encryption, a header entry and an argument together are refused: one secret, one channel', async () => {
-    const reply = await send(
-      'mutation($id: ID!, $k: String) { encryptMemory(memoryRef: $id, dataKey: $k) { id } }',
-      { id: memory.id, k: dataKey },
-      { keys: [{ memory: memory.id, dataKey }] },
-    );
-    expect(code(reply)).toBe('BAD_UNLOCK_INPUT');
-    expect((await row(memory.id)).isEncrypted).toBe(false);
-  });
-
   it('two entries for the same memory are refused, not last-one-wins', async () => {
     const reply = await send(ENCRYPT, { id: memory.id }, { keys: [{ memory: memory.id, dataKey }, { memory: memory.urn, dataKey: wrongKey }] });
     expect(code(reply)).toBe('BAD_UNLOCK_INPUT');

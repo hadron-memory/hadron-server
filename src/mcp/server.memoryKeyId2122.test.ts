@@ -8,6 +8,7 @@ import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
 import { recordUrnRename } from '../lib/urnAlias.js';
+import { encryptWithSecret } from '../test/encryptMemoryWithSecret.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -34,7 +35,7 @@ beforeEach(async () => {
   memoryId = generateId();
   await db.memory.create({ data: { id: memoryId, organizationId: orgId, name: 'Vault', urn: URN, class: 'private', userId: ownerId } });
   await db.node.create({ data: { memoryId, loc: 'secret', name: 'Secret', content: 'key2122 plaintext' } });
-  await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, passphrase: PASS }, { db, roles: ['ADMIN'], userId: ownerId } as Context);
+  await encryptWithSecret({}, { memoryRef: memoryId, passphrase: PASS }, { db, roles: ['ADMIN'], userId: ownerId } as Context);
 });
 afterEach(() => sessionKeyCache.clear());
 

@@ -10,6 +10,7 @@ import { isAuthenticatedStringEnvelope } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { memoryMutations } from './resolvers.mutation.memory.js';
 import { generateId } from '../../../lib/id.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 let orgId: string;
 let ownerId: string;
@@ -71,7 +72,7 @@ describe('#1644 encryption authority', () => {
       'impersonated owner': ownerCtx({ impersonation: { orgId, actorUserId: otherId } as Context['impersonation'] }),
     };
     const before = await snapshot();
-    await expect(resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, callers[kind]))
+    await expect(encryptWithSecret({}, { memoryRef: memoryId, dataKey }, callers[kind]))
       .rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
     expect(await snapshot()).toEqual(before);
     expect(sessionKeyCache.getByMemoryId(memoryId)).toBeNull();
@@ -79,7 +80,7 @@ describe('#1644 encryption authority', () => {
 
   it.each(['plain owner', 'owner with App selection', 'owner with platform role'])('%s can encrypt and complete history under the same key', async kind => {
     const ctx = ownerCtx(kind === 'owner with App selection' ? { appId: otherAppId } : kind === 'owner with platform role' ? { roles: ['ADMIN'] } : {});
-    const result = await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ctx);
+    const result = await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ctx);
     expect(result).toMatchObject({ userId: ownerId, isEncrypted: true });
     const key = parseDataKey(dataKey);
     const after = await snapshot();
@@ -87,20 +88,20 @@ describe('#1644 encryption authority', () => {
     expect(isAuthenticatedStringEnvelope(after.node.abstract, key)).toBe(true);
     for (const revision of after.revisions) expect(isAuthenticatedStringEnvelope(revision.content, key)).toBe(true);
     const beforeCompletion = await snapshot();
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ctx);
+    await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ctx);
     expect(await snapshot()).toEqual(beforeCompletion);
   });
 
   it('an App key cannot complete a free-standing encrypted holding even with the correct key', async () => {
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     const before = await snapshot();
-    await expect(resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, { db, appId, roles: [] }))
+    await expect(encryptWithSecret({}, { memoryRef: memoryId, dataKey }, { db, appId, roles: [] }))
       .rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
     expect(await snapshot()).toEqual(before);
   });
 
   it.each([false, true])('owner changes after preflight; locked encryption recheck refuses (already encrypted=%s)', async encrypted => {
-    if (encrypted) await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+    if (encrypted) await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     const before = await snapshot();
     const original = db.memory.findUniqueOrThrow.bind(db.memory);
     let changed = false;
@@ -113,7 +114,7 @@ describe('#1644 encryption authority', () => {
       return row;
     }) as typeof db.memory.findUniqueOrThrow);
     try {
-      await expect(resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx())).rejects.toThrow();
+      await expect(encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx())).rejects.toThrow();
     } finally { read.mockRestore(); }
     expect(changed).toBe(true);
     const after = await snapshot();
@@ -161,7 +162,7 @@ describe('#1644 encryption authority', () => {
       return rows;
     }) as typeof db.node.findMany);
     try {
-      await expect(resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, change === 'App' ? { db, appId, roles: [] } : ownerCtx())).rejects.toThrow();
+      await expect(encryptWithSecret({}, { memoryRef: memoryId, dataKey }, change === 'App' ? { db, appId, roles: [] } : ownerCtx())).rejects.toThrow();
     } finally { scan.mockRestore(); }
     expect(changed).toBe(true);
     const after = await snapshot();
@@ -277,7 +278,7 @@ describe('#1644 encryption authority', () => {
       ...(kind === 'user selecting App' ? { userId: otherId } : {}),
       ...(kind === 'impersonation' ? { impersonation: { orgId, actorUserId: otherId } as Context['impersonation'] } : {}),
     };
-    const call = resolvers.Mutation.encryptMemory({}, kind === 'passphrase' ? { memoryRef: memoryId, passphrase: 'app-key-must-use-existing-data-key' } : { memoryRef: memoryId, dataKey: kind === 'wrong key' ? generateDataKey().raw.toString('base64') : dataKey }, ctx);
+    const call = encryptWithSecret({}, kind === 'passphrase' ? { memoryRef: memoryId, passphrase: 'app-key-must-use-existing-data-key' } : { memoryRef: memoryId, dataKey: kind === 'wrong key' ? generateDataKey().raw.toString('base64') : dataKey }, ctx);
     if (kind === 'owning App') {
       await call;
       const after = await snapshot();
@@ -297,7 +298,7 @@ describe('#1644 encryption authority', () => {
       keyVerifier: encrypted ? makeKeyVerifier(parseDataKey(dataKey)) : null,
     } });
     const before = await snapshot();
-    await expect(resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx()))
+    await expect(encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx()))
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     expect(await snapshot()).toEqual(before);
   });
@@ -305,7 +306,7 @@ describe('#1644 encryption authority', () => {
   it.each([undefined, null, ''])('a missing or empty user identity never owns an ownerless memory (%s)', async userId => {
     await db.memory.update({ where: { id: memoryId }, data: { class: 'knowledge', userId: null } });
     const before = await snapshot();
-    await expect(resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, { db, userId, roles: [] } as Context))
+    await expect(encryptWithSecret({}, { memoryRef: memoryId, dataKey }, { db, userId, roles: [] } as Context))
       .rejects.toThrow();
     expect(await snapshot()).toEqual(before);
   });
@@ -323,7 +324,7 @@ describe('#1644 encryption authority', () => {
 
   it('an ownerless anonymous memory never grants public encryption to an App key', async () => {
     const anon = await db.memory.create({ data: { name: 'Ownerless', urn: 'enc-owner.test:ownerless', organizationId: orgId, appId, class: 'app' } });
-    await expect(resolvers.Mutation.encryptMemory({}, { memoryRef: anon.id, dataKey }, { db, appId, roles: [] }))
+    await expect(encryptWithSecret({}, { memoryRef: anon.id, dataKey }, { db, appId, roles: [] }))
       .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
     expect(await db.memory.findUniqueOrThrow({ where: { id: anon.id } })).toEqual(anon);
   });
@@ -342,7 +343,7 @@ describe('#1644 encryption authority', () => {
     await expect(withTestOperationKey(dataKey, ({ db, appId, roles: [] }).appId, () => resolvers.Mutation.linkMemoryToUser({}, { memoryRef: memoryId, externalUserId: 'recovery-owner' }, { db, appId, roles: [] })))
       .rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
     expect(await snapshot()).toEqual(claimed);
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, { db, appId, roles: [] });
+    await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, { db, appId, roles: [] });
     const recovered = await snapshot();
     for (const revision of recovered.revisions) expect(isAuthenticatedStringEnvelope(revision.content, parseDataKey(dataKey))).toBe(true);
   });

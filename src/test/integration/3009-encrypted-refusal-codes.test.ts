@@ -11,6 +11,7 @@ import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { FR_026_DISCLOSURE } from '../../lib/entityRef/errors.js';
 import { sessionKeyCache } from '../../lib/sessionKeyCache.js';
 import { closeServerIfStarted, createServerOnCleanDb } from '../startServerFixture.js';
+import { encryptWithSecret } from '../encryptMemoryWithSecret.js';
 
 vi.mock('@sentry/node', async (original) => ({
   ...await original<typeof import('@sentry/node')>(),
@@ -39,7 +40,7 @@ beforeEach(async () => {
   memory = await db.memory.create({
     data: { name: 'Private', urn: `enc-${n}:private`, class: 'private', userId: user.id, ownerUserId: user.id, vectorIndexEnabled: false },
   });
-  await resolvers.Mutation.encryptMemory({}, { memoryRef: memory.id, passphrase: 'synthetic-test-passphrase' }, {
+  await encryptWithSecret({}, { memoryRef: memory.id, passphrase: 'synthetic-test-passphrase' }, {
     db, userId: user.id, roles: ['READER'],
   });
   sessionKeyCache.clear(); // Neither HTTP request supplies x-hadron-memory-keys.
