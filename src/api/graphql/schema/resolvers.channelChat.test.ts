@@ -378,7 +378,7 @@ describe('#1540 — authoring through a live session keeps it live', () => {
 
     it('is refused when the caller does not hold the name', async () => {
       const session = await lapsedSession();
-      await expect(post(session.id, 'not mine to resume')).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+      await expect(post(session.id, 'not mine to resume')).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE', reason: 'NOT_OWNER' } }); // #5000: the refusal names its condition
       expect(await heartbeat(session.id)).toBeLessThan(Date.now() - 24 * H);
     });
 
@@ -386,7 +386,7 @@ describe('#1540 — authoring through a live session keeps it live', () => {
       await hold();
       const session = await lapsedSession();
       await bindAt(new Date()); // a second, live stint on the same worker
-      await expect(post(session.id, 'two at once')).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
+      await expect(post(session.id, 'two at once')).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE', reason: 'OTHER_SESSION_LIVE' } });
     });
 
     it('never extends a hard expiry promised at session start', async () => {

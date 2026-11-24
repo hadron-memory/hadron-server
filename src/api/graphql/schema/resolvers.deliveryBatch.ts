@@ -12,7 +12,7 @@
 import type { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
-import { mayStillDriveWorkerApp } from '../../../lib/ownWorkerSessions.js';
+import { mayStillDriveWorkerApp, lapsedResumeDecision, tryResumeOwnLapsedSessionInTx, type ResumeRefusalReason } from '../../../lib/ownWorkerSessions.js';
 import { ownsSession, appPrincipalMayWriteSession } from '../../../lib/sessionOwnership.js';
 import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
 import { loadApp, taskError, type TaskApp } from './resolvers.agentTask.js';
@@ -91,12 +91,34 @@ export async function batchKeyEntry(ctx: Context, appRef: string): Promise<{ app
   };
 }
 
+/**
+ * #5000: a session past its idle window is LAPSED, not ended (cor:agt:020:03, :13): its holder's own read resumes it
+ * with the same id. `resume` says how this call treats one: 'check' (the entry check, no write) admits it when the
+ * lock-free verdict says the read would resume it, and 'in-tx' (the locked pass of the read itself) resumes it inside
+ * the read's transaction. A refusal is SESSION_NOT_LIVE carrying `reason`, a code naming the failed condition.
+ */
+export type BatchResume = 'check' | 'in-tx';
+
+const batchNotLive = (reason: ResumeRefusalReason) =>
+  taskError('SESSION_NOT_LIVE', reason === 'DORMANT'
+    ? 'Session is DORMANT: nothing has driven it for longer than its App\'s dormancy threshold, so no read resumes it. Its holder starts a new session for this worker.'
+    : `Session is not live and was not resumed (${reason}).`, { reason });
+
 /** R57: identity comes from the validated request binding, never a requested worker or an admin role. */
-export async function ownBatchSession(ctx: Context, expectedAppId?: string, lock = false) {
+export async function ownBatchSession(ctx: Context, expectedAppId?: string, lock = false, resume?: BatchResume) {
   if (!ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
   const initial = await ctx.db.session.findUnique({ where: { id: ctx.sessionId } });
   if (!initial || initial.deletedAt || !ownsSession(ctx, initial)) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
   if (expectedAppId && initial.appId !== expectedAppId) throw taskError('APP_NOT_FOUND', 'App not found.');
+  // 'in-tx' resumes BEFORE the shared locks below: the resume takes the Worker row FOR UPDATE, which must never be an
+  // upgrade of a SHARE this transaction already holds (the same order every bind and post-resume uses: App, Worker).
+  if (resume === 'in-tx' && !initial.endedAt) {
+    const before = await loadLastEventBySession(ctx.db as never, [initial.id]);
+    if (!isSessionLive(initial, before.get(initial.id), new Date())) {
+      const refused = await tryResumeOwnLapsedSessionInTx(ctx, ctx.db as unknown as Prisma.TransactionClient, initial.id);
+      if (refused) throw batchNotLive(refused);
+    }
+  }
   if (lock) {
     if (ctx.userId && initial.appId) await ctx.db.$queryRaw`SELECT user_id FROM app_members WHERE app_id = ${initial.appId} AND user_id = ${ctx.userId} FOR SHARE`;
     // Existing session protocol: authority/App, then Worker, then Session. End/rebind that wins is re-read below.
@@ -113,7 +135,12 @@ export async function ownBatchSession(ctx: Context, expectedAppId?: string, lock
     }
   }
   const events = await loadLastEventBySession(ctx.db as never, [session.id]);
-  if (!isSessionLive(session, events.get(session.id), new Date())) throw taskError('SESSION_NOT_LIVE', 'Session is not live.');
+  if (!isSessionLive(session, events.get(session.id), new Date())) {
+    // 'check' names why the read would not resume it; every other call keeps the plain refusal it always had.
+    if (resume !== 'check') throw taskError('SESSION_NOT_LIVE', 'Session is not live.');
+    const decision = await lapsedResumeDecision(ctx, session.id);
+    if (decision.verdict !== 'OK') throw batchNotLive(decision.reason);
+  }
   const worker = session.workerId ? await ctx.db.worker.findUnique({ where: { id: session.workerId } }) : null;
   if (!worker || worker.retiredAt || worker.appId !== session.appId) throw taskError('WORKER_NOT_FOUND', 'Worker not found.');
   if (!(await mayStillDriveWorkerApp(ctx, worker.appId))) throw taskError('APP_NOT_FOUND', 'App not found.');
@@ -121,7 +148,7 @@ export async function ownBatchSession(ctx: Context, expectedAppId?: string, lock
 }
 
 async function selfBatches(ctx: Context, a: { appRef: string; workerRefs?: string[] | null }) {
-  const initial = await ownBatchSession(ctx);
+  const initial = await ownBatchSession(ctx, undefined, false, 'check');
   let appId: string;
   try { appId = (await resolveAppRef(ctx.db, a.appRef)).id; } catch (e) { if (!isAppRefResolutionFailure(e)) throw e; throw taskError('APP_NOT_FOUND', 'App not found.'); }
   if (appId !== initial.session.appId) throw taskError('APP_NOT_FOUND', 'App not found.');
@@ -135,7 +162,7 @@ async function selfBatches(ctx: Context, a: { appRef: string; workerRefs?: strin
   }
   let noTeamStamp: string | null = null;
   const result = await withAuthorizedTx(ctx, appAnchors(app), async () => undefined, async (tx, txCtx) => {
-    const { session, worker } = await ownBatchSession(txCtx, app.id, true);
+    const { session, worker } = await ownBatchSession(txCtx, app.id, true, 'in-tx');
     if (worker.id !== initial.worker.id) throw taskError('WORKER_NOT_FOUND', 'Worker not found.');
     const now = new Date();
     const page = await loadDeliveryBatches({ ctx: txCtx, app, hostId: null, workerIds: [worker.id], now });
