@@ -4069,6 +4069,8 @@ export const typeDefs = `#graphql
     scopes: [AppKeyScope!]!
     "#1709 — what this key did as a host, newest first (hrn:node:hadronmemory.com:specs:cor:agt:070:07: every use is recorded). Whoever manages the App only."
     hostUses(first: Int): [HostKeyUse!]!
+    "#5061 — what this key did as a host, one page, newest first (usedAt, then id): the paged sibling of hostUses (hrn:node:hadronmemory.com:specs:cor:api:120:04, hrn:node:hadronmemory.com:specs:cor:agt:070:07). Whoever manages the App only, refused exactly as hostUses is, before anything is counted. limit omitted is 20, 0 is count-only, a negative limit is 0, a limit over 200 is served as 200 (never a refusal); a negative offset is 0. Continue with offset; hasMore says whether rows remain past this page."
+    hostUsesPage(limit: Int, offset: Int): HostKeyUsePage!
   }
 
   "#1749 — a scope an App key holds. A closed list: attention:deliver, and (#1709) host:operate."
@@ -4103,6 +4105,13 @@ export const typeDefs = `#graphql
     "#1881 — the refusal code when the server refused this use (e.g. APP_KEY_SCOPE_REQUIRED); null for a use that succeeded. A refused use is recorded too (hrn:node:hadronmemory.com:specs:cor:agt:070:07: every use)."
     refusedCode: String
     usedAt: DateTime!
+  }
+
+  "#5061 — one page of a host key's uses (AppKey.hostUsesPage). total counts every use of the key; hasMore is whether rows remain past this page."
+  type HostKeyUsePage {
+    items: [HostKeyUse!]!
+    total: Int!
+    hasMore: Boolean!
   }
 
   """
