@@ -251,6 +251,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // like flakes because they depend on which file ran first.
   await db.asset.deleteMany();
   await db.memory.deleteMany();
+  // #5009: an organization or user holds its limit rows (cascade), cleared explicitly so the order does not matter.
+  await db.ownerLimit.deleteMany();
   await db.organization.deleteMany();
   // Spec 025-oauth-for-mcp credential models. AuthCode FKs to both
   // OAuthClient and User with onDelete: Cascade; UserApiKey FKs to

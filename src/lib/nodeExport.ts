@@ -19,9 +19,9 @@ import { computeContentHash } from './contentHash.js';
  */
 
 // PDF is a valid export format at the API boundary, but it is NOT rendered
-// here — it is produced by the external hadrontool-pdf service from the node's
-// Markdown content (see renderMarkdownToPdf). renderNodeExport below handles
-// only the text formats (MD/JSON) and rejects PDF defensively.
+// here — it is produced by the external hadrontool-pdf service from the
+// Markdown renderPdfMarkdown builds (see renderMarkdownToPdf). renderNodeExport
+// below handles only the text formats (MD/JSON) and rejects PDF defensively.
 export type NodeExportFormat = 'MD' | 'JSON' | 'PDF';
 export type NodeExportSection =
   | 'METADATA'
@@ -206,6 +206,89 @@ export function renderSectionedJson(n: ExportNode, sections: Set<NodeExportSecti
     if (sections.has(JSON_KEY_SECTION[key])) out[key] = value;
   }
   return JSON.stringify(out, null, 2) + '\n';
+}
+
+/**
+ * The fixed order a PDF prints its ADDED sections in, whatever order the caller named them (cor:int:020:02,
+ * Holger R9, #395). Comments belongs between Edges and Metadata and is scoped out until the spec's Q1
+ * (which comments) is answered, so it is not an enum value and not printed.
+ */
+const PDF_SECTION_ORDER: readonly NodeExportSection[] = ['ABSTRACT', 'DATA', 'PROPERTIES', 'EDGES', 'METADATA'];
+
+/** One line of Markdown for a table cell or list value: no newline, and every backslash and pipe escaped, so a value such as `a\\|b` cannot end a cell early. */
+function inlineText(value: unknown): string {
+  const text = typeof value === 'string' ? value : JSON.stringify(value) ?? '';
+  return text.replace(/\r?\n/g, ' ').replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+}
+
+/** Data and Properties: a two-column table for an object, a fenced block for any other non-empty JSON. */
+function jsonSection(heading: string, value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  // An empty string is as empty as `{}` or `[]` (0 and false are values and print).
+  if (typeof value === 'string' && value.trim() === '') return null;
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    // Keys sorted: jsonb stores an object's keys by length, not insertion, so the table's row order must not depend on it.
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    if (entries.length === 0) return null;
+    const rows = entries.map(([key, v]) => `| ${inlineText(key)} | ${inlineText(v)} |`);
+    return `## ${heading}\n\n| Key | Value |\n| --- | --- |\n${rows.join('\n')}`;
+  }
+  if (Array.isArray(value) && value.length === 0) return null;
+  return `## ${heading}\n\n\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``;
+}
+
+function pdfSection(n: ExportNode, section: NodeExportSection): string | null {
+  switch (section) {
+    case 'ABSTRACT':
+      return n.abstract && n.abstract.trim() ? `## Abstract\n\n${n.abstract}` : null;
+    case 'DATA':
+      return jsonSection('Data', n.data);
+    case 'PROPERTIES':
+      return jsonSection('Properties', n.properties);
+    case 'EDGES': {
+      // An edge with no resolvable target is left out, like any other empty entry (the resolver has already kept
+      // only live targets in readable memories). Only outgoing edges are listed, as in the MD/JSON export.
+      const items = n.edges
+        .filter((e) => e && e.target)
+        .map((e) => {
+          const note = e.description ? ` — ${inlineText(e.description)}` : '';
+          return `- ${inlineText(e.name || '(edge)')} → ${inlineText(e.target.loc || e.target.id)}${note}`;
+        });
+      return items.length > 0 ? `## Edges\n\n${items.join('\n')}` : null;
+    }
+    case 'METADATA': {
+      const fields: Array<[string, unknown]> = [
+        ['ID', n.id], ['Loc', n.loc], ['Memory', n.memoryUrn],
+        ['Type', n.nodeType], ['Object type', n.objectType], ['Alias', n.alias],
+        ['Description', n.description],
+        ['Tags', n.tags && n.tags.length > 0 ? n.tags.join(', ') : null],
+        ['Seq', n.seq], ['Role', n.role],
+        ['Runnable', typeof n.isRunnable === 'boolean' ? String(n.isRunnable) : null],
+      ];
+      const items = fields
+        .filter(([, v]) => v !== null && v !== undefined && v !== '')
+        .map(([label, v]) => `- ${label}: ${inlineText(v)}`);
+      return items.length > 0 ? `## Metadata\n\n${items.join('\n')}` : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * The Markdown a PDF is rendered from (cor:int:020:02 R8/R9, #395). The content is ALWAYS printed (the
+ * title as `# <name>` when it is empty, as before), and the sections the caller names are ADDED after it, in
+ * {@link PDF_SECTION_ORDER}, each under its own `##` heading; a section with nothing in it is left out, and a
+ * section named twice prints once. Unlike the text formats, where the selection is the exact set rendered,
+ * naming CONTENT here changes nothing. `full` does not apply: a PDF is never the canonical file.
+ */
+export function renderPdfMarkdown(n: ExportNode, sections?: readonly NodeExportSection[] | null): string {
+  const selected = new Set(sections ?? []);
+  const content = n.content && n.content.trim().length > 0 ? n.content : `# ${n.name}`;
+  const added = PDF_SECTION_ORDER.filter((section) => selected.has(section))
+    .map((section) => pdfSection(n, section))
+    .filter((block): block is string => block !== null);
+  return [content, ...added].join('\n\n');
 }
 
 export interface RenderedExport {
