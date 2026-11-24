@@ -95,8 +95,8 @@ export async function listChatAiConfigChoices(db: Db, appId: string): Promise<Ch
  * #4042: the tool-choice decision of the config a chat turn would use, resolved in the turn's own order — the chat's
  * stored choice, else `App.chatbotAiConfigId` ({@link pinnedConfigFor}), else the well-known `default` walk
  * App -> Agent -> Org -> Host — and judged by the ONE predicate (`chatToolChoiceFor`, cor:dmo:050:10). Null only when
- * nothing resolves (the turn would raise `NoAiConfigAvailableError`, and so does a user-owned App's walk that lands
- * on the platform's config, which `resolveAIConfig` refuses the same way). Returns the decision only: no id, name,
+ * nothing resolves (the turn would raise `NoAiConfigAvailableError`; the walk itself closes the organization and
+ * platform levels to a person's App, #5075, so there is no separate refusal here). Returns the decision only: no id, name,
  * provider, model or key.
  */
 export async function effectiveChatToolChoice(
@@ -107,10 +107,6 @@ export async function effectiveChatToolChoice(
   if (pinned) return chatToolChoiceFor(pinned.provider, pinned.model);
   try {
     const walked = await resolveAiConfigWithFallback(db, DEFAULT_AI_CONFIG_NAME, { appId: chat.appId, agentId: chat.agentId });
-    if (walked.ownerType === 'HADRON_SERVER' && chat.appId) {
-      const app = await db.app.findUnique({ where: { id: chat.appId }, select: { ownerUserId: true } });
-      if (app?.ownerUserId != null) return null;
-    }
     return walked.toolChoice;
   } catch (e) {
     if (e instanceof NoAiConfigAvailableError) return null;

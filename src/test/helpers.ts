@@ -9,7 +9,7 @@ import { tmpdir } from 'os';
 import { stringify } from 'yaml';
 import { createHash, randomBytes } from 'crypto';
 import { APP_KEY_PREFIX } from '../middleware/auth.js';
-import type { PrismaClient } from '../generated/prisma/index.js';
+import type { PrismaClient, Role } from '../generated/prisma/index.js';
 import { drainNodeUsage } from '../lib/usageRecorder.js';
 
 /** Build a deterministic test App key with the canonical `hdr_app_` prefix. */
@@ -215,7 +215,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // fires no row triggers. #1706: agent_team_alarm_schedule references the events, so it is
   // truncated with them. #1708: so is worker_delivery_task_events, for the same reason.
   // #2022: a task's stop holds go with it.
-  await db.$executeRawUnsafe('TRUNCATE alarm_escalation_ends, dark_worker_episodes, lead_cadence_episodes, lead_cadence_clocks, post_limit_episodes, host_sweep_episodes, saturation_episodes, host_sweep_runs, start_failing_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, secret_read_clients, grant_events, grant_signatures, grant_signing_requests, grants, agent_task_stop_holds, agent_match_outcomes, agent_task_counters, agent_task_blockers, agent_tasks');
+  await db.$executeRawUnsafe('TRUNCATE alarm_escalation_ends, dark_worker_episodes, lead_cadence_episodes, lead_cadence_clocks, post_limit_episodes, host_sweep_episodes, saturation_episodes, team_dark_episodes, host_sweep_runs, start_failing_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, secret_read_clients, grant_events, grant_signatures, grant_signing_requests, grants, agent_task_stop_holds, agent_match_outcomes, agent_task_counters, agent_task_blockers, agent_tasks');
   // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
   await db.worker.deleteMany();
   await db.node.deleteMany();
@@ -250,6 +250,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // like flakes because they depend on which file ran first.
   await db.asset.deleteMany();
   await db.memory.deleteMany();
+  // #5009: an organization or user holds its limit rows (cascade), cleared explicitly so the order does not matter.
+  await db.ownerLimit.deleteMany();
   await db.organization.deleteMany();
   // Spec 025-oauth-for-mcp credential models. AuthCode FKs to both
   // OAuthClient and User with onDelete: Cascade; UserApiKey FKs to
@@ -747,5 +749,5 @@ export async function createDbRunConsentPrincipal(db: PrismaClient, organization
   const id = generateId();
   const user = await db.user.create({ data: { id, handle: `consent-${id}`, githubUsername: `consent-${id}` } });
   await db.orgMember.create({ data: { organizationId, userId: user.id, role: 'READER' } });
-  return { userId: user.id, appId, organizationId, roles: [] as Array<'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER'> };
+  return { userId: user.id, appId, organizationId, roles: [] as Role[] };
 }

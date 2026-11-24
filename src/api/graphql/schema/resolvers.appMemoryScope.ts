@@ -16,6 +16,7 @@
  */
 
 import { GraphQLError } from 'graphql';
+import type { MemoryVisibility } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { effectiveScope, type EffectiveScope } from '../../../lib/effectiveSystemMemory.js';
 import { getAppMemoryCandidates, filterReadableMemoryIds, type AgentProvenance } from '../../../mcp/access-control.js';
@@ -258,7 +259,8 @@ export async function resolveAppNodeScope(ctx: Context, appRef: string): Promise
  * own audience (scope admission, which `name` rides) is WIDER than the record
  * gate, and handing `description` the row's audience would be the #552
  * widening class. A row the record gate refuses is still listed; only its
- * description is withheld.
+ * description is withheld. `visibility` (#5003) rides the same gate and is
+ * withheld with it.
  */
 export type AppScopedMemoryRow = {
   memoryId: string;
@@ -266,9 +268,22 @@ export type AppScopedMemoryRow = {
   name: string;
   class: string;
   description: string | null;
+  /** #5003: the memory's visibility on the same record gate as `description`; null when withheld OR not applicable to the class. */
+  visibility: MemoryVisibility | null;
   sources: AppMemorySource[];
   viewerCanWrite: boolean;
 };
+
+/**
+ * The page order of `appMemoryScope`: canonical memory URN, then id. The stored `urn` is unique but the canonical form
+ * is not injective (`org:kb` and `org::kb` both emit `hrn:mem:org:kb`), so equal keys are real and the id is what makes
+ * the order total, and so stable between page requests (#4980).
+ */
+export function compareScopeKeys(a: { memoryUrn: string; id: string }, b: { memoryUrn: string; id: string }): number {
+  if (a.memoryUrn !== b.memoryUrn) return a.memoryUrn < b.memoryUrn ? -1 : 1;
+  if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+  return 0;
+}
 
 /**
  * `appMemoryScope(appRef, limit, offset)`: the caller's App memory scope, one page,
@@ -300,7 +315,7 @@ export async function appMemoryScopePage(
   });
   const ordered = keys
     .map((m) => ({ id: m.id, memoryUrn: safeCanonicalUrn('memory', m.urn) }))
-    .sort((a, b) => (a.memoryUrn < b.memoryUrn ? -1 : a.memoryUrn > b.memoryUrn ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    .sort(compareScopeKeys);
   const skip = Math.max(0, offset ?? 0);
   const pageKeys = ordered.slice(skip, skip + clampListTake(limit));
   if (pageKeys.length === 0) return { items: [], total: ordered.length };
@@ -312,7 +327,7 @@ export async function appMemoryScopePage(
     // own select does not get that protection. `deletedAt` is added because
     // `Query.memory` answers null for a soft-deleted record: its description
     // is withheld too.
-    select: { ...MEMORY_RECORD_GATE_SELECT, name: true, description: true, deletedAt: true },
+    select: { ...MEMORY_RECORD_GATE_SELECT, name: true, description: true, visibility: true, deletedAt: true },
   });
   const byId = new Map(pageRows.map((m) => [m.id, m]));
   // A row hard-deleted between the two reads has nothing to show and is
@@ -338,6 +353,10 @@ export async function appMemoryScopePage(
       name: m.name,
       class: m.class,
       description: readableIds.has(m.id) ? m.description : null,
+      // #5003: the same record gate as `description`, never the row's own audience. Null means withheld by the gate OR
+      // not applicable (only knowledge and group memories carry one, chk_memory_visibility_class); a knowledge memory
+      // may also have none. The row is still listed either way.
+      visibility: readableIds.has(m.id) ? m.visibility : null,
       sources: scope.sources.get(m.id)!,
       viewerCanWrite: await viewerCanWrite(ctx, m.id),
     });

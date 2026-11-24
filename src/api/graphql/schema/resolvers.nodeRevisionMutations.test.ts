@@ -1,11 +1,11 @@
 /**
  * Integration tests for the node revision-history write surface (#617):
- *   - deleteNodeRevision(revisionId): delete one snapshot; NOT_FOUND on miss.
+ *   - deleteNodeRevision(nodeRevRef): delete one snapshot; NOT_FOUND on miss.
  *   - clearNodeHistory(nodeRef): delete all snapshots, return the count.
- *   - restoreNodeRevision(revisionId, truncate): the new truncate branch —
+ *   - restoreNodeRevision(nodeRevRef, truncate): the new truncate branch —
  *     restore + collapse newer history in one transaction, no pre-restore
  *     snapshot; the selected row is kept (exclusive boundary).
- *   - nodeRevision(revisionId): single-snapshot read (Display), access-gated.
+ *   - nodeRevision(nodeRevRef): single-snapshot read (Display), access-gated.
  *
  * Auth: reads gate on the node's memory READ access, writes on WRITE access
  * (same shape as nodeRevisions / restoreNodeRevision). A non-member is denied.
@@ -16,6 +16,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { composeNodeRevUrn } from '../../../lib/entityRef/nodeRevRef.js';
 
 let org: { id: string; urn: string };
 let memory: { id: string; urn: string };
@@ -59,10 +60,10 @@ beforeEach(async () => {
     data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v1', content: 'body-1', createdAt: T1 },
   });
   v2 = await db.nodeRevision.create({
-    data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v2', content: 'body-2', createdAt: T2 },
+    data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', revNo: 20, name: 'v2', content: 'body-2', createdAt: T2 },
   });
   v3 = await db.nodeRevision.create({
-    data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', name: 'v3', content: 'body-3', createdAt: T3 },
+    data: { id: generateId(), nodeId: node.id, memoryId: memory.id, loc: 'guide', revNo: 30, name: 'v3', content: 'body-3', createdAt: T3 },
   });
 
   userMember = await db.user.create({ data: { githubId: 7201, githubUsername: 'nvm-mem', roles: ['READER'] } });
@@ -72,24 +73,64 @@ beforeEach(async () => {
 
 describe('deleteNodeRevision (#617)', () => {
   it('deletes a single snapshot and returns true', async () => {
-    const ok = await resolvers.Mutation.deleteNodeRevision(null, { revisionId: v2.id }, adminCtx());
+    const ok = await resolvers.Mutation.deleteNodeRevision(null, { nodeRevRef: v2.id }, adminCtx());
     expect(ok).toBe(true);
     const remaining = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
     expect(remaining.map((r) => r.id).sort()).toEqual([v1.id, v3.id].sort());
   });
 
-  it('throws NOT_FOUND for an unknown revisionId', async () => {
+  it('throws NOT_FOUND for an unknown nodeRevRef', async () => {
     await expect(
-      resolvers.Mutation.deleteNodeRevision(null, { revisionId: 'cnope00000000000000000000' }, adminCtx()),
+      resolvers.Mutation.deleteNodeRevision(null, { nodeRevRef: 'cnope00000000000000000000' }, adminCtx()),
     ).rejects.toThrow('Node revision not found');
   });
 
-  it('denies a non-member (no write access)', async () => {
-    await expect(
-      resolvers.Mutation.deleteNodeRevision(null, { revisionId: v2.id }, outsiderCtx()),
-    ).rejects.toThrow('Forbidden');
-    // No row was deleted.
+  it('a legacy revision with no captured memory falls back to the node\'s memory for the read gate (#4138)', async () => {
+    // Rows from before #602 carry no memoryId; every door reads `revision.memoryId ?? node.memoryId`.
+    const legacy = await db.nodeRevision.create({
+      data: { id: generateId(), nodeId: node.id, memoryId: null, loc: 'guide', revNo: 40, name: 'v4', content: 'body-4', createdAt: T3 },
+    });
+    // A caller who cannot read the node's memory gets the missing-ref answer and nothing is deleted.
+    await expect(resolvers.Mutation.deleteNodeRevision(null, { nodeRevRef: legacy.id }, outsiderCtx())).rejects.toMatchObject({
+      message: 'Node revision not found', extensions: { code: 'NOT_FOUND' },
+    });
+    expect(await db.nodeRevision.count({ where: { id: legacy.id } })).toBe(1);
+    // One who can read and write the node's memory deletes it.
+    expect(await resolvers.Mutation.deleteNodeRevision(null, { nodeRevRef: legacy.id }, adminCtx())).toBe(true);
+    expect(await db.nodeRevision.count({ where: { id: legacy.id } })).toBe(0);
+  });
+
+  it('conceals an existing revision from a non-reader as a missing one (#4138: guessable URN, no existence oracle)', async () => {
+    const existingUrn = composeNodeRevUrn(memory.urn, node.loc, 20);
+    const missingUrn = composeNodeRevUrn(memory.urn, node.loc, 99);
+    const deleteAsOutsider = async (ref: string) => {
+      try {
+        await resolvers.Mutation.deleteNodeRevision(null, { nodeRevRef: ref }, outsiderCtx());
+        return null;
+      } catch (e) {
+        const err = e as { message: string; extensions?: Record<string, unknown> };
+        return { message: err.message, code: err.extensions?.code };
+      }
+    };
+    // The URN is real: it reads as the revision for a caller who can read the memory (so the concealment is not a miss).
+    expect((await resolvers.Query.nodeRevision(null, { nodeRevRef: existingUrn }, memberCtx()))?.id).toBe(v2.id);
+    const existingAnswer = await deleteAsOutsider(existingUrn);
+    const missingAnswer = await deleteAsOutsider(missingUrn);
+    expect(existingAnswer).toEqual({ message: 'Node revision not found', code: 'NOT_FOUND' });
+    expect(existingAnswer?.message).toBe(missingAnswer?.message);
+    expect(existingAnswer?.code).toBe(missingAnswer?.code);
+    // The by-id form is concealed the same way, and no row was deleted.
+    expect(await deleteAsOutsider(v2.id)).toEqual(existingAnswer);
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(3);
+  });
+
+  it('a reader who cannot write still gets Forbidden, and the revision stays (the concealment is for non-readers only)', async () => {
+    for (const ref of [composeNodeRevUrn(memory.urn, node.loc, 20), v2.id]) {
+      await expect(
+        resolvers.Mutation.deleteNodeRevision(null, { nodeRevRef: ref }, memberCtx()),
+      ).rejects.toThrow('Forbidden');
+    }
+    expect(await db.nodeRevision.count({ where: { id: v2.id } })).toBe(1);
   });
 });
 
@@ -133,7 +174,7 @@ describe('clearNodeHistory (#617)', () => {
 describe('restoreNodeRevision truncate (#617)', () => {
   it('truncate:true restores + deletes NEWER snapshots, keeps the selected row and older', async () => {
     const restored = await resolvers.Mutation.restoreNodeRevision(
-      null, { revisionId: v2.id, truncate: true }, adminCtx(),
+      null, { nodeRevRef: v2.id, truncate: true }, adminCtx(),
     );
     // Node restored to v2.
     expect(restored.name).toBe('v2');
@@ -147,7 +188,7 @@ describe('restoreNodeRevision truncate (#617)', () => {
 
   it('truncate:false (default) restores AND adds a pre-restore snapshot', async () => {
     const restored = await resolvers.Mutation.restoreNodeRevision(
-      null, { revisionId: v2.id }, adminCtx(),
+      null, { nodeRevRef: v2.id }, adminCtx(),
     );
     expect(restored.name).toBe('v2');
     // 3 originals + 1 snapshot of the pre-restore ("Current") state = 4.
@@ -157,7 +198,7 @@ describe('restoreNodeRevision truncate (#617)', () => {
   });
 
   it('truncate on the NEWEST revision deletes nothing newer (selected kept)', async () => {
-    await resolvers.Mutation.restoreNodeRevision(null, { revisionId: v3.id, truncate: true }, adminCtx());
+    await resolvers.Mutation.restoreNodeRevision(null, { nodeRevRef: v3.id, truncate: true }, adminCtx());
     const remaining = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
     // All three kept (none is newer than v3), no pre-restore snapshot.
     expect(remaining).toHaveLength(3);
@@ -166,24 +207,24 @@ describe('restoreNodeRevision truncate (#617)', () => {
 
 describe('nodeRevision query (#617 Display)', () => {
   it('returns a single snapshot by id for a reader', async () => {
-    const v = await resolvers.Query.nodeRevision(null, { revisionId: v2.id }, memberCtx());
+    const v = await resolvers.Query.nodeRevision(null, { nodeRevRef: v2.id }, memberCtx());
     expect(v?.id).toBe(v2.id);
     expect(v?.name).toBe('v2');
   });
 
-  it('returns null for an unknown revisionId (no existence disclosure)', async () => {
-    const v = await resolvers.Query.nodeRevision(null, { revisionId: 'cnope00000000000000000000' }, adminCtx());
+  it('returns null for an unknown nodeRevRef (no existence disclosure)', async () => {
+    const v = await resolvers.Query.nodeRevision(null, { nodeRevRef: 'cnope00000000000000000000' }, adminCtx());
     expect(v).toBeNull();
   });
 
   it('returns null for a non-member (no existence leak)', async () => {
-    const v = await resolvers.Query.nodeRevision(null, { revisionId: v2.id }, outsiderCtx());
+    const v = await resolvers.Query.nodeRevision(null, { nodeRevRef: v2.id }, outsiderCtx());
     expect(v).toBeNull();
   });
 
   it('returns null when the node is soft-deleted (no tombstoned-history leak)', async () => {
     await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } });
-    const v = await resolvers.Query.nodeRevision(null, { revisionId: v2.id }, memberCtx());
+    const v = await resolvers.Query.nodeRevision(null, { nodeRevRef: v2.id }, memberCtx());
     expect(v).toBeNull();
   });
 
@@ -227,7 +268,7 @@ describe('nodeRevision query (#617 Display)', () => {
       data: { id: generateId(), nodeId: node.id, memoryId: restrictedMem.id, loc: 'guide', name: 'secret-era' },
     });
     // Member can read the node's current memory but not the snapshot's memory.
-    const v = await resolvers.Query.nodeRevision(null, { revisionId: secretSnap.id }, memberCtx());
+    const v = await resolvers.Query.nodeRevision(null, { nodeRevRef: secretSnap.id }, memberCtx());
     expect(v).toBeNull();
   });
 });

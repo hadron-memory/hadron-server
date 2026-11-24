@@ -2809,7 +2809,6 @@ describe('#1477 Git placeholder marker', () => {
   const stored = () => db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'pas:010:01', memoryId: dbGraphId } } });
 
   it('recreates a reserved citation from an incremental mirror file', async () => {
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusDraft: true } });
     const id = generateId();
     const reserved = await db.node.create({ data: {
       id, memoryId: dbGraphId, loc: 'pas:010:01', name: 'Reserved',
@@ -2826,7 +2825,6 @@ describe('#1477 Git placeholder marker', () => {
   });
 
   it('restores a blank spec reservation in a draft, including a dotted spec role', async () => {
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusDraft: true } });
     file({ name: 'Reserved', role: 'spec.rule', placeholder: true });
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
     expect(await stored()).toMatchObject({ role: 'spec.rule', content: null, isPlaceholder: true });
@@ -2853,8 +2851,7 @@ describe('#1477 Git placeholder marker', () => {
     ['non-spec role', true, 'review', undefined],
     ['lookalike role', true, 'special', undefined],
     ['written body', true, 'spec', 'The rule.'],
-  ] as const)('ignores and reports a marker in a %s while syncing the node', async (_case, draft, role, content) => {
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusDraft: draft } });
+  ] as const)('ignores and reports a marker in a %s while syncing the node', async (_case, _draft, role, content) => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       file({ name: 'Still imported', role, placeholder: true }, content);
@@ -2867,7 +2864,6 @@ describe('#1477 Git placeholder marker', () => {
   });
 
   it('preserves an old mirrored placeholder when the key is absent and clears it when the file writes content', async () => {
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusDraft: true } });
     const id = generateId();
     await db.node.create({ data: {
       id, memoryId: dbGraphId, loc: 'pas:010:01', name: 'Reserved',
@@ -2905,12 +2901,28 @@ describe('#1468 — git sync pruning and minted specs', () => {
   const writeNote = (loc: string) =>
     writeFrontmatterNode(join(repoRoot(), `${loc}.md`), { name: loc }, 'Note.');
 
+  /**
+   * The mint record the re-keyed guards read (#5063): a tombstoned, non-spec
+   * node with `minted_at` set (owner-info only). No ownerRepo, so the repo
+   * prune never considers it; tombstoned, so no live-loc assertion sees it.
+   */
+  const mintCorpus = () => {
+    const mintedAt = new Date();
+    return db.node.create({
+      data: {
+        id: generateId(), memoryId: dbGraphId, loc: 'zz:mint-marker', name: 'zz:mint-marker',
+        content: 'minted elsewhere; tombstoned', role: null, tags: [],
+        mintedAt, mintedByInfo: 'test', deletedAt: mintedAt,
+      },
+    });
+  };
+
   it('keeps a minted spec whose file is gone, warns, and still prunes the rest', async () => {
     writeSpec('pas:010');
     writeSpec('pas:020');
     writeNote('notes');
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    await mintCorpus();
 
     rmSync(join(repoRoot(), 'pas:010.md'));
     rmSync(join(repoRoot(), 'notes.md'));
@@ -2926,7 +2938,7 @@ describe('#1468 — git sync pruning and minted specs', () => {
     writeSpec('pas:010');
     writeNote('notes');
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    await mintCorpus();
     const other = await db.memory.create({
       data: { id: generateId(), organizationId: dbOrgId, urn: 'test-org:other', name: 'other', class: 'knowledge' },
     });
@@ -2945,7 +2957,7 @@ describe('#1468 — git sync pruning and minted specs', () => {
   it('keeps the spec marker when a file drops it from a minted spec, and applies the rest (#4403)', async () => {
     writeSpec('pas:010');
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    await mintCorpus();
 
     writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { name: 'pas:010', tags: ['other'] }, 'Edited rule text.');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -2971,7 +2983,7 @@ describe('#1468 — git sync pruning and minted specs', () => {
     const noteId = 'bbbb146800000000000000000000000002';
     await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo' } });
     await db.node.create({ data: { id: noteId, memoryId: dbGraphId, loc: 'notes', name: 'note', ownerRepo: 'test/repo' } });
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    await mintCorpus();
     writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { id: noteId, name: 'note' }, 'Note.');
 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -2993,7 +3005,7 @@ describe('#1468 — git sync pruning and minted specs', () => {
       db.channel.update({ where: { id: channel.id }, data: { deletedAt } }),
       db.node.update({ where: { id: rootId }, data: { deletedAt } }),
     ]);
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    await mintCorpus();
     mkdirSync(join(repoRoot(), 'chats', 'dead', 'messages'), { recursive: true });
     writeFrontmatterNode(join(repoRoot(), 'chats', 'dead', 'messages', 'kept.md'), { id: specId, name: 'spec', tags: ['spec'] }, 'Rule text.');
     writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { id: noteId, name: 'note' }, 'Note.');
@@ -3010,7 +3022,7 @@ describe('#1468 — git sync pruning and minted specs', () => {
     const bId = 'bbbb146800000000000000000000000010';
     await db.node.create({ data: { id: aId, memoryId: dbGraphId, loc: 'pas:010', name: 'a', tags: ['spec'], ownerRepo: 'test/repo' } });
     await db.node.create({ data: { id: bId, memoryId: dbGraphId, loc: 'pas:020', name: 'b', tags: ['spec'], ownerRepo: 'test/repo' } });
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    await mintCorpus();
     writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { id: bId, name: 'b', tags: ['spec'] }, 'B.');
     writeFrontmatterNode(join(repoRoot(), 'pas:020.md'), { id: aId, name: 'a', tags: ['spec'] }, 'A.');
 
@@ -3029,7 +3041,7 @@ describe('#1468 — git sync pruning and minted specs', () => {
     await db.node.create({ data: { id: aId, memoryId: dbGraphId, loc: 'a', name: 'a', ownerRepo: 'test/repo' } });
     await db.node.create({ data: { id: bId, memoryId: dbGraphId, loc: 'b', name: 'b', ownerRepo: 'test/repo' } });
     await db.node.create({ data: { id: cId, memoryId: dbGraphId, loc: 'pas:010', name: 'c', tags: ['spec'], ownerRepo: 'test/repo' } });
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    await mintCorpus();
     // File order puts A's move (onto b) before B's (onto the minted spec).
     writeFrontmatterNode(join(repoRoot(), 'b.md'), { id: aId, name: 'a' }, 'A.');
     writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { id: bId, name: 'b' }, 'B.');
@@ -3046,7 +3058,7 @@ describe('#1468 — git sync pruning and minted specs', () => {
     const noteId = 'bbbb146800000000000000000000000015';
     await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo' } });
     await db.node.create({ data: { id: noteId, memoryId: dbGraphId, loc: 'notes', name: 'note', ownerRepo: 'test/repo' } });
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    await mintCorpus();
     writeFrontmatterNode(join(repoRoot(), 'target.md'), { name: 'target' }, 'Target.');
     writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { id: noteId, name: 'note' }, 'Note.', [{ target: 'target', rel: 'cites' }]);
 
@@ -3088,7 +3100,7 @@ describe('#1468 — git sync pruning and minted specs', () => {
     const noteId = 'bbbb146800000000000000000000000019';
     await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo' } });
     await db.node.create({ data: { id: noteId, memoryId: dbGraphId, loc: 'notes', name: 'note', ownerRepo: 'test/repo' } });
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
+    await mintCorpus();
     writeFrontmatterNode(join(repoRoot(), 'pas:010.md'), { id: noteId, name: 'note' }, 'Note.');
     writeFrontmatterNode(join(repoRoot(), 'citer.md'), { name: 'citer' }, 'Cites the note.', [{ target: 'x', id: noteId, rel: 'uses' }]);
 
@@ -3115,7 +3127,6 @@ describe('#1468 — git sync pruning and minted specs', () => {
     const specId = 'aaaa146800000000000000000000000005';
     // #1591: a minted node's old address is published, so its rename leaves an alias.
     await db.node.create({ data: { id: specId, memoryId: dbGraphId, loc: 'pas:010', name: 'spec', tags: ['spec'], ownerRepo: 'test/repo', mintedAt: new Date(), mintedByInfo: 'test' } });
-    await db.memory.update({ where: { id: dbGraphId }, data: { corpusMintedAt: new Date() } });
     writeFrontmatterNode(join(repoRoot(), 'pas:099.md'), { id: specId, name: 'spec', tags: ['spec'] }, 'Rule text.');
     expect((await syncGraphFromGithub(makeGraph())).error).toBeUndefined();
     expect(await db.node.findUniqueOrThrow({ where: { id: specId } })).toMatchObject({ loc: 'pas:099' });

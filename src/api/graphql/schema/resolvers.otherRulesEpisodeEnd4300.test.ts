@@ -62,13 +62,14 @@ beforeEach(async () => {
 type Ev = { id: string; escalationEndedAt: string | null };
 async function events(args = ''): Promise<Ev[]> {
   const r = await server.executeOperation(
-    { query: `{ agentTeamEvents(appRef: "${app.id}", alarmsOnly: true ${args}) { id escalationEndedAt } }` },
+    { query: `{ agentTeamEvents(appRef: "${app.id}", alarmsOnly: true ${args}) { id escalationEndedAt type } }` },
     { contextValue: ctx(admin.id) },
   );
   if (r.body.kind !== 'single') throw new Error('single response required');
   const s = r.body.singleResult;
   if (s.errors) throw new Error(JSON.stringify(s.errors));
-  return (s.data as any).agentTeamEvents;
+  // #4531: these pins are about the stall rules' alarms; an App with queued work and nobody driven also raises team.dark.
+  return ((s.data as any).agentTeamEvents as { type: string }[]).filter((e) => e.type !== 'team.dark') as any;
 }
 const inEffect = async () => (await events('alarmsInEffect: true')).map((e) => e.id);
 const record = (hhmm: string) => recordEndedEscalations(db, at(hhmm));
@@ -174,7 +175,7 @@ describe('#4300 (b) — a no-progress episode opened by reassigning a started ta
       data: { appId: app.id, title: 'Real', ownerWorkerId: ada.id, assigneeWorkerId: rook.id, assignedAt: new Date(Date.now() - 120 * MIN), status: 'started', startedAt: new Date(Date.now() - 120 * MIN) },
       select: { id: true },
     });
-    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: anne.id } }, ctx(admin.id));
+    await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: anne.id } }, ctx(admin.id));
     const row = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
     const reassigned = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: t.id, type: 'task.reassigned' } });
     expect(reassigned.createdAt.getTime()).toBeGreaterThanOrEqual(row.assignedAt!.getTime()); // the event is never before the stamp

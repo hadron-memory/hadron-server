@@ -14,7 +14,9 @@
  * Pinned from 92ff99df; #2249 amended exactly three entries (hadron_task_create / _assign / _reassign), whose text states the
  * closeSessionWhenDone default. #863 amended exactly two (hadron_run_action / hadron_run_task), whose text states what
  * the render returns since it is the prompt runTask executes. #909 (a) amended exactly two (hadron_create_node / hadron_update_node), whose
- * nodeType text now prints the canonical list from src/lib/nodeTypes.ts and the four platform kinds. The SDK 2.x upgrade
+ * nodeType text now prints the canonical list from src/lib/nodeTypes.ts and the four platform kinds.
+ * #4967 amended exactly one (hadron_update_node), whose abstractStillAccurate / appendContent / prependContent text states
+ * the join-under-lock concurrency and that an append is not idempotent. The SDK 2.x upgrade
  * (#2605 step 1, @modelcontextprotocol/server 2.4.0) amended EVERY entry, for two reasons only, measured by diffing
  * `tools/list` under 1.32.0 and 2.4.0 for the same principal: each tool's `inputSchema.$schema` is now JSON Schema 2020-12
  * (was draft-07), and the tool-level `execution: { taskSupport: 'forbidden' }` is no longer emitted. Names, order,

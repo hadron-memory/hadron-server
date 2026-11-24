@@ -85,7 +85,7 @@ beforeEach(async () => {
 /** A task owned by Mia, assigned to Anne; started unless `start: false`. */
 async function anneTask(opts: { start?: boolean } = {}) {
   const t = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Fix the widget', assignee: { worker: anne.id } } }, ctx(mia.id));
-  if (opts.start !== false) await asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(mia.id)));
+  if (opts.start !== false) await asWorker(anne, () => M.startAgentTask({}, { taskRef: t.id }, ctx(mia.id)));
   return t as { id: string };
 }
 
@@ -154,7 +154,7 @@ describe('acceptance 1: the assignee hands back a started task (S1)', () => {
 
   it('a person who hands a task back is not excluded (the platform assigns only workers)', async () => {
     const t = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Read the contract', assignee: { user: mia.id } } }, ctx(mia.id));
-    await M.startAgentTask({}, { taskId: t.id }, ctx(mia.id));
+    await M.startAgentTask({}, { taskRef: t.id }, ctx(mia.id));
     const out = await handBack(t.id, { code: 'OUT_OF_SCOPE' });
     expect(out).toMatchObject({ status: 'pending', assigneeUserId: null });
     expect(out.requirements ?? null).toBeNull();
@@ -164,8 +164,8 @@ describe('acceptance 1: the assignee hands back a started task (S1)', () => {
   it('a later hand-back replaces the code and text; the earlier code stays in the events', async () => {
     const t = await anneTask();
     await asWorker(anne, () => handBack(t.id, { code: 'MISSING_INPUT', text: 'first' }));
-    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: liam.id } }, ctx(mia.id));
-    await asWorker(liam, () => M.startAgentTask({}, { taskId: t.id }, ctx(mia.id)));
+    await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: liam.id } }, ctx(mia.id));
+    await asWorker(liam, () => M.startAgentTask({}, { taskRef: t.id }, ctx(mia.id)));
     await asWorker(liam, () => handBack(t.id, { code: 'DUPLICATE' }));
     const after = await row(t.id);
     expect(F.AgentTask.handBack(after)).toMatchObject({ code: 'DUPLICATE', text: null });
@@ -229,7 +229,7 @@ describe('acceptance 3: refused, nothing changed', () => {
 
   it('a finished task', async () => {
     const t = await anneTask();
-    await asWorker(anne, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(mia.id)));
+    await asWorker(anne, () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, ctx(mia.id)));
     const before = await snapshot(t.id);
     await expectCode(asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO' })), 'TASK_ENDED');
     expect(await snapshot(t.id)).toEqual(before);
@@ -237,7 +237,7 @@ describe('acceptance 3: refused, nothing changed', () => {
 
   it('a cancelled task', async () => {
     const t = await anneTask();
-    await M.cancelAgentTask({}, { taskId: t.id }, ctx(mia.id));
+    await M.cancelAgentTask({}, { taskRef: t.id }, ctx(mia.id));
     const before = await snapshot(t.id);
     await expectCode(asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO' })), 'TASK_ENDED');
     expect(await snapshot(t.id)).toEqual(before);
@@ -330,7 +330,7 @@ describe('acceptance 5: a concurrent hand-back and finish, exactly one wins', ()
     }, { timeout: 30_000 });
     await isLocked;
     const hb = () => asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO' }));
-    const fin = () => asWorker(anne, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(mia.id)));
+    const fin = () => asWorker(anne, () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, ctx(mia.id)));
     const first = order === 'hand-back first' ? hb() : fin();
     await waitForRowLockWaiters(1);
     const second = order === 'hand-back first' ? fin() : hb();

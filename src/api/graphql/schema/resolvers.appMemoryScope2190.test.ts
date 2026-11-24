@@ -21,6 +21,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
+import { compareScopeKeys } from './resolvers.appMemoryScope.js';
 
 const Q = resolvers.Query as any;
 
@@ -88,6 +89,28 @@ const passthroughBound = (target: object, prop: string | symbol) => {
   const value = Reflect.get(target, prop, target);
   return typeof value === 'function' ? value.bind(target) : value;
 };
+
+type MemoryFindManyArgs = { where?: { id?: { in?: string[] } }; select?: Record<string, boolean | undefined> };
+
+/**
+ * One spy for every test that watches or races `memory.findMany` (#4980 item 3): a context whose `db.memory.findMany` runs
+ * `around(args, run)`, where `run()` performs the real read. Everything else passes through bound to the real client.
+ */
+const spyOnMemory = (
+  who: string,
+  around: (args: MemoryFindManyArgs, run: () => Promise<unknown>) => Promise<unknown>,
+): Context => {
+  const memory = new Proxy(db.memory, {
+    get: (target, prop) => (prop === 'findMany'
+      ? (args: MemoryFindManyArgs) => around(args, () => target.findMany(args as never))
+      : passthroughBound(target, prop)),
+  });
+  return { ...ctx(who), db: new Proxy(db, { get: (t, p) => (p === 'memory' ? memory : passthroughBound(t, p)) }) as typeof db };
+};
+
+// The two reads `appMemoryScopePage` makes on `memory` by id: the order key (id, urn) and the page (description is its marker).
+const isKeyRead = (a: MemoryFindManyArgs) => Array.isArray(a?.where?.id?.in) && a.select?.urn === true;
+const isPageRead = (a: MemoryFindManyArgs) => Array.isArray(a?.where?.id?.in) && a.select?.description === true;
 
 const keyOf = (id: string) => Object.entries(mem).find(([, v]) => v === id)?.[0] ?? id;
 const keysOf = (rows: Row[]) => rows.map((r) => keyOf(r.memoryId)).sort();
@@ -267,7 +290,10 @@ describe('#4890 — description rides the record gate, not the row\'s audience',
   });
 
   it('a readable row with no description, or an empty one, returns null and the empty string as stored', async () => {
-    await db.memory.update({ where: { id: mem.KnowShared! }, data: { description: null } });
+    // The fixture seeds KnowShared and KnowB with NO description (null). This test changes one of them and leaves the other,
+    // and says so: KnowShared stays null (asserted, not assumed), KnowB becomes ''. beforeEach runs cleanDb and reseeds, so
+    // neither change reaches another test.
+    expect((await db.memory.findUniqueOrThrow({ where: { id: mem.KnowShared! }, select: { description: true } })).description).toBeNull();
     await db.memory.update({ where: { id: mem.KnowB! }, data: { description: '' } });
     const rows = await scopeAll('admin');
     const by = (k: string) => rows.find((r) => r.memoryId === mem[k])!;
@@ -278,54 +304,51 @@ describe('#4890 — description rides the record gate, not the row\'s audience',
   });
 
   it('reads descriptions and gate fields for the page\'s ids only, one read, not the whole scope', async () => {
-    const calls: Array<{ ids: number; withDescription: boolean }> = [];
-    const spied = new Proxy(db.memory, {
-      get: (target, prop) => (prop === 'findMany'
-        ? (args: { where?: { id?: { in?: string[] } }; select?: { description?: boolean } }) => {
-            if (Array.isArray(args?.where?.id?.in)) calls.push({ ids: args.where!.id!.in!.length, withDescription: args.select?.description === true });
-            return target.findMany(args as never);
-          }
-        : passthroughBound(target, prop)),
-    });
-    const page = await Q.appMemoryScope({}, { appRef: appId, limit: 2, offset: 0 }, {
-      ...ctx('admin'),
-      db: new Proxy(db, { get: (t, p) => (p === 'memory' ? spied : passthroughBound(t, p)) }) as typeof db,
-    });
+    const keyReads: MemoryFindManyArgs[] = [];
+    const pageReads: MemoryFindManyArgs[] = [];
+    const page = await Q.appMemoryScope({}, { appRef: appId, limit: 2, offset: 0 }, spyOnMemory('admin', (args, run) => {
+      if (isKeyRead(args)) keyReads.push(args);
+      if (isPageRead(args)) pageReads.push(args);
+      return run();
+    }));
     expect(page.items).toHaveLength(2);
-    expect(page.total).toBeGreaterThan(2);
-    const described = calls.filter((c) => c.withDescription);
-    expect(described).toHaveLength(1);
-    expect(described[0]!.ids).toBe(2);
+    expect(page.total).toBeGreaterThan(page.items.length);
+    expect(pageReads).toHaveLength(1);
+    expect(pageReads[0]!.where!.id!.in).toHaveLength(page.items.length);
+    // #4980 item 3: the order-key read carries the id and the URN and nothing else, no description or gate field.
+    expect(keyReads).toHaveLength(1);
+    expect(keyReads[0]!.select).toEqual({ id: true, urn: true });
   });
 
   it('a row hard-deleted between the key read and the page read is dropped; total still counts it', async () => {
     const before = await Q.appMemoryScope({}, { appRef: appId }, ctx('admin'));
     let fired = false;
-    const spied = new Proxy(db.memory, {
-      get: (target, prop) => (prop === 'findMany'
-        ? async (args: { where?: { id?: { in?: string[] } }; select?: { description?: boolean } }) => {
-            if (!fired && args?.select?.description === true) {
-              fired = true;
-              // The page read: remove one of the ids it is about to fetch.
-              await db.memory.delete({ where: { id: args.where!.id!.in![0]! } });
-            }
-            return target.findMany(args as never);
-          }
-        : passthroughBound(target, prop)),
-    });
-    const raced = await Q.appMemoryScope({}, { appRef: appId }, {
-      ...ctx('admin'),
-      db: new Proxy(db, { get: (t, p) => (p === 'memory' ? spied : passthroughBound(t, p)) }) as typeof db,
-    });
+    const raced = await Q.appMemoryScope({}, { appRef: appId }, spyOnMemory('admin', async (args, run) => {
+      if (!fired && isPageRead(args)) {
+        fired = true;
+        // The page read: remove one of the ids it is about to fetch.
+        await db.memory.delete({ where: { id: args.where!.id!.in![0]! } });
+      }
+      return run();
+    }));
     expect(fired).toBe(true);
     expect(raced.total).toBe(before.total);
     expect(raced.items).toHaveLength(before.items.length - 1);
   });
 
   it('an offset past the end returns no items and reads no page rows', async () => {
-    const page = await Q.appMemoryScope({}, { appRef: appId, limit: 5, offset: 1000 }, ctx('admin'));
+    let keyReads = 0;
+    let pageReads = 0;
+    const page = await Q.appMemoryScope({}, { appRef: appId, limit: 5, offset: 1000 }, spyOnMemory('admin', (args, run) => {
+      if (isKeyRead(args)) keyReads += 1;
+      if (isPageRead(args)) pageReads += 1;
+      return run();
+    }));
     expect(page.items).toEqual([]);
     expect(page.total).toBeGreaterThan(0);
+    // #4980 item 1: the key read happened (total comes from it) and the page read did not.
+    expect(keyReads).toBe(1);
+    expect(pageReads).toBe(0);
   });
 
   it('a memory soft-deleted between the scope snapshot and the page read stays listed, with description null', async () => {
@@ -337,21 +360,15 @@ describe('#4890 — description rides the record gate, not the row\'s audience',
     // id only, where OR appId, no class filter — distinct from every other
     // memory query in the walk) to soft-delete KnowA right after it admits
     // the row, before the page read fetches it.
-    const racedMemory = new Proxy(db.memory, {
-      get: (target, prop) => (prop === 'findMany'
-        ? async (args: { select?: { id?: boolean; urn?: boolean }; where?: { OR?: unknown; class?: unknown } }) => {
-            const rows = await target.findMany(args as never);
-            if (args?.select?.id === true && !args?.select?.urn && args?.where?.OR && !args?.where?.class) {
-              await db.memory.update({ where: { id: mem.KnowA! }, data: { deletedAt: new Date() } });
-            }
-            return rows;
-          }
-        : passthroughBound(target, prop)),
-    });
-    const raced = await Q.appMemoryScope({}, { appRef: appId }, {
-      ...ctx('member'),
-      db: new Proxy(db, { get: (t, p) => (p === 'memory' ? racedMemory : passthroughBound(t, p)) }) as typeof db,
-    });
+    const raced = await Q.appMemoryScope({}, { appRef: appId }, spyOnMemory('member', async (args, run) => {
+      const rows = await run();
+      // The snapshot read: select id only, where OR appId, no class filter.
+      const a = args as { select?: { id?: boolean; urn?: boolean }; where?: { OR?: unknown; class?: unknown } };
+      if (a?.select?.id === true && !a?.select?.urn && a?.where?.OR && !a?.where?.class) {
+        await db.memory.update({ where: { id: mem.KnowA! }, data: { deletedAt: new Date() } });
+      }
+      return rows;
+    }));
     const row = (raced.items as Row[]).find((r) => r.memoryId === mem.KnowA);
     expect(row).toBeDefined();
     expect(row!.description).toBeNull();
@@ -433,6 +450,36 @@ describe('#2190 — paging (cor:api:120:04)', () => {
     const page = await Q.appMemoryScope({}, { appRef: appId, limit: 2, offset: 100 }, ctx('member'));
     expect(page.items).toEqual([]);
     expect(page.total).toBe(9);
+  });
+
+  it('compareScopeKeys: equal canonical URNs fall back to the id, in both directions', () => {
+    const a = { memoryUrn: 'hrn:mem:o:kb', id: 'a1' };
+    const b = { memoryUrn: 'hrn:mem:o:kb', id: 'b2' };
+    expect(compareScopeKeys(a, b)).toBeLessThan(0);
+    expect(compareScopeKeys(b, a)).toBeGreaterThan(0);
+    expect(compareScopeKeys(a, { ...a })).toBe(0);
+    // the URN still decides first, whatever the ids say
+    expect(compareScopeKeys({ memoryUrn: 'hrn:mem:o:a', id: 'z9' }, { memoryUrn: 'hrn:mem:o:b', id: 'a1' })).toBeLessThan(0);
+    const shuffled = [b, { memoryUrn: 'hrn:mem:o:a', id: 'z9' }, a].sort(compareScopeKeys);
+    expect(shuffled.map((k) => k.id)).toEqual(['z9', 'a1', 'b2']);
+  });
+
+  it('#4980: two memories whose stored URNs differ but emit the same canonical URN page in id order, one at a time', async () => {
+    // `org:tie` and `org::tie` are distinct unique stored values and both emit `hrn:mem:org:tie`.
+    const ids: string[] = [];
+    for (const raw of [`${org.urn}:tie`, `${org.urn}::tie`]) {
+      const m = await db.memory.create({ data: { class: 'knowledge', organizationId: org.id, name: 'Tie', urn: raw } });
+      await db.node.create({ data: { memoryId: m.id, loc: 'notes:tie', name: 'Tie', content: 'tie' } });
+      await db.agentMemoryItem.create({ data: { agentId: agent.Alpha!, memoryId: m.id, role: 'read' } });
+      ids.push(m.id);
+    }
+    const full = (await Q.appMemoryScope({}, { appRef: appId, limit: 100 }, ctx('admin'))).items as Row[];
+    const tied = full.filter((r) => ids.includes(r.memoryId));
+    expect(tied).toHaveLength(2);
+    expect(tied[0]!.memoryUrn).toBe(tied[1]!.memoryUrn);
+    expect(tied.map((r) => r.memoryId)).toEqual([...ids].sort());
+    const oneByOne = await scopeAll('admin', 1);
+    expect(oneByOne.map((r) => r.memoryId)).toEqual(full.map((r) => r.memoryId));
   });
 
   it('a limit over the cap returns a page of the cap, never a refusal', async () => {

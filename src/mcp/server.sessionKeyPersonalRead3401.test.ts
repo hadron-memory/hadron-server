@@ -71,7 +71,7 @@ async function gql(query: string, variables: Record<string, unknown>, opts: { se
 
 async function startSession(user: string, operationKey?: string) {
   const out = await gql(
-    'mutation($a: ID!, $u: String) { startAgentSession(agentId: $a, externalUserId: $u) { id memoryId } }',
+    'mutation($a: ID!, $u: String) { startAgentSession(agentRef: $a, externalUserId: $u) { id memoryId } }',
     { a: agentId, u: user }, { operationKey },
   );
   expect(out.errors).toBeUndefined();

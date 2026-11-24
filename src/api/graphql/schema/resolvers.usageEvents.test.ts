@@ -112,7 +112,7 @@ beforeEach(async () => {
 
 describe('usageEvents memoryId filter', () => {
   it('scopes events to the memory\'s nodes only — input by ID (collision-proof)', async () => {
-    const result = await resolvers.Query.usageEvents(null, { memoryId: memory.id }, ctx());
+    const result = await resolvers.Query.usageEvents(null, { memoryRef: memory.id }, ctx());
     // 4 events across memory's alpha(3)+beta(1). Crucially, otherMemory's alpha
     // event (same loc, different memory) is excluded — the FK relation filter is
     // collision-proof where a nodeLoc-IN filter would have leaked it (→ 5).
@@ -126,28 +126,28 @@ describe('usageEvents memoryId filter', () => {
   });
 
   it('accepts a bare URN as memoryId — identical effect to ID', async () => {
-    const result = await resolvers.Query.usageEvents(null, { memoryId: memory.urn }, ctx());
+    const result = await resolvers.Query.usageEvents(null, { memoryRef: memory.urn }, ctx());
     expect(result).toHaveLength(4);
   });
 
   it('accepts a prefixed URN (urn:memory:...) as memoryId', async () => {
     const result = await resolvers.Query.usageEvents(
       null,
-      { memoryId: `urn:memory:${memory.urn}` },
+      { memoryRef: `urn:memory:${memory.urn}` },
       ctx(),
     );
     expect(result).toHaveLength(4);
   });
 
   it('returns an empty array for a memory with no nodes', async () => {
-    const result = await resolvers.Query.usageEvents(null, { memoryId: emptyMemory.id }, ctx());
+    const result = await resolvers.Query.usageEvents(null, { memoryRef: emptyMemory.id }, ctx());
     expect(result).toEqual([]);
   });
 
   it('combines memoryId with type', async () => {
     const result = await resolvers.Query.usageEvents(
       null,
-      { memoryId: memory.id, type: 'write' },
+      { memoryRef: memory.id, type: 'write' },
       ctx(),
     );
     expect(result).toHaveLength(1);
@@ -159,7 +159,7 @@ describe('usageEvents memoryId filter', () => {
     // memoryId scopes to the memory, nodeId='beta' exact-matches the loc within.
     const result = await resolvers.Query.usageEvents(
       null,
-      { memoryId: memory.id, nodeId: 'beta' },
+      { memoryRef: memory.id, nodeRef: 'beta' },
       ctx(),
     );
     expect(result).toHaveLength(1);
@@ -171,7 +171,7 @@ describe('usageEvents memoryId filter', () => {
     // these fixture events carry no user, so they are nobody's own activity.
     expect(await resolvers.Query.usageEvents(null, {}, ctx())).toEqual([]);
     // All 6 events stay reachable through the resource scope of each memory.
-    const perMemory = await Promise.all([memory.id, otherMemory.id].map(memoryId => resolvers.Query.usageEvents(null, { memoryId }, ctx())));
+    const perMemory = await Promise.all([memory.id, otherMemory.id].map(memoryId => resolvers.Query.usageEvents(null, { memoryRef: memoryId }, ctx())));
     expect(perMemory.flat()).toHaveLength(6);
   });
 
@@ -180,7 +180,7 @@ describe('usageEvents memoryId filter', () => {
       resolvers.Query.usageEvents(
         null,
         // 25-char cuid-shaped string that doesn't exist in DB.
-        { memoryId: 'cnonexistentnonexistent12' },
+        { memoryRef: 'cnonexistentnonexistent12' },
         ctx(),
       ),
     ).rejects.toThrow(/MEMORY_NOT_FOUND/);
@@ -189,7 +189,7 @@ describe('usageEvents memoryId filter', () => {
 
 describe('usageEvents nodeId filter', () => {
   it('scopes events to a single node — input by node PK (no memoryId)', async () => {
-    const result = await resolvers.Query.usageEvents(null, { nodeId: alphaNode.id }, ctx());
+    const result = await resolvers.Query.usageEvents(null, { nodeRef: alphaNode.id }, ctx());
     // alpha has 3 events; beta/gamma excluded.
     expect(result).toHaveLength(3);
     const locs = new Set(result.map((e: { nodeLoc: string | null }) => e.nodeLoc));
@@ -199,7 +199,7 @@ describe('usageEvents nodeId filter', () => {
   it('accepts a bare node URN (<memory-urn>:<loc>) — identical effect to PK', async () => {
     const result = await resolvers.Query.usageEvents(
       null,
-      { nodeId: `${memory.urn}:alpha` },
+      { nodeRef: `${memory.urn}:alpha` },
       ctx(),
     );
     expect(result).toHaveLength(3);
@@ -208,7 +208,7 @@ describe('usageEvents nodeId filter', () => {
   it('accepts a prefixed node URN (urn:node:...)', async () => {
     const result = await resolvers.Query.usageEvents(
       null,
-      { nodeId: `urn:node:${memory.urn}:alpha` },
+      { nodeRef: `urn:node:${memory.urn}:alpha` },
       ctx(),
     );
     expect(result).toHaveLength(3);
@@ -217,7 +217,7 @@ describe('usageEvents nodeId filter', () => {
   it('combines nodeId with type', async () => {
     const result = await resolvers.Query.usageEvents(
       null,
-      { nodeId: alphaNode.id, type: 'write' },
+      { nodeRef: alphaNode.id, type: 'write' },
       ctx(),
     );
     expect(result).toHaveLength(1);
@@ -227,7 +227,7 @@ describe('usageEvents nodeId filter', () => {
   it('PK is memory-precise even when the loc collides across memories', async () => {
     // `alpha` exists in both memory and otherMemory. Addressing by PK returns
     // ONLY memory's alpha events (3), not otherMemory's alpha event.
-    const result = await resolvers.Query.usageEvents(null, { nodeId: alphaNode.id }, ctx());
+    const result = await resolvers.Query.usageEvents(null, { nodeRef: alphaNode.id }, ctx());
     expect(result).toHaveLength(3);
     // Read the exposed memoryId: nodeId is no SDL field, so another principal's row does not carry it (#3693).
     const memories = new Set(result.map((e: { memoryId: string | null }) => e.memoryId));
@@ -237,7 +237,7 @@ describe('usageEvents nodeId filter', () => {
   it('bare loc spans memories where PK does not — same collision, different intent', async () => {
     // Contrast with the PK test above: the bare loc `alpha` matches the loc in
     // BOTH memories (3 in memory + 1 in otherMemory = 4).
-    const result = await resolvers.Query.usageEvents(null, { nodeId: 'alpha' }, ctx());
+    const result = await resolvers.Query.usageEvents(null, { nodeRef: 'alpha' }, ctx());
     expect(result).toHaveLength(4);
     const memories = new Set(result.map((e: { memoryId: string | null }) => e.memoryId));
     expect(memories).toEqual(new Set([memory.id, otherMemory.id]));
@@ -247,7 +247,7 @@ describe('usageEvents nodeId filter', () => {
     await expect(
       resolvers.Query.usageEvents(
         null,
-        { nodeId: 'cnonexistentnonexistent12' },
+        { nodeRef: 'cnonexistentnonexistent12' },
         ctx(),
       ),
     ).rejects.toThrow(/NODE_NOT_FOUND/);
@@ -259,7 +259,7 @@ describe('usageEvents nodeId filter', () => {
     await expect(
       resolvers.Query.usageEvents(
         null,
-        { nodeId: `urn:memory:${memory.urn}` },
+        { nodeRef: `urn:memory:${memory.urn}` },
         ctx(),
       ),
     ).rejects.toThrow(/NODE_NOT_FOUND/);
@@ -268,7 +268,7 @@ describe('usageEvents nodeId filter', () => {
   // Bare-loc form: nodeId that isn't a PK or a fully-qualified node URN is
   // treated as a loc and exact-matched against nodeLoc (like nodeUsage).
   it('accepts a bare loc as nodeId — exact nodeLoc match', async () => {
-    const result = await resolvers.Query.usageEvents(null, { nodeId: 'beta' }, ctx());
+    const result = await resolvers.Query.usageEvents(null, { nodeRef: 'beta' }, ctx());
     expect(result).toHaveLength(1);
     expect(result[0].nodeLoc).toBe('beta');
   });
@@ -276,7 +276,7 @@ describe('usageEvents nodeId filter', () => {
   it('bare-loc nodeId combines with type', async () => {
     const result = await resolvers.Query.usageEvents(
       null,
-      { nodeId: 'alpha', type: 'read' },
+      { nodeRef: 'alpha', type: 'read' },
       ctx(),
     );
     // alpha reads: 2 in memory + 1 in otherMemory = 3 (the alpha write excluded).
@@ -284,7 +284,7 @@ describe('usageEvents nodeId filter', () => {
   });
 
   it('bare-loc nodeId is a filter, not a lookup — unknown loc yields [] (no throw)', async () => {
-    const result = await resolvers.Query.usageEvents(null, { nodeId: 'no-such-loc' }, ctx());
+    const result = await resolvers.Query.usageEvents(null, { nodeRef: 'no-such-loc' }, ctx());
     expect(result).toEqual([]);
   });
 });

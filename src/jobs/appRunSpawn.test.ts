@@ -239,7 +239,7 @@ describe('spawn completion — callbacks (D-SP-4)', () => {
   });
 });
 
-describe('appRuns(parentRunId:) — the run-tree filter (#548)', () => {
+describe('appRuns(parentRunRef:) — the run-tree filter (#548)', () => {
   it('returns exactly one fan-out\'s children (+ its coordination runs), org-scoped', async () => {
     const { resolvers } = await import('../api/graphql/schema/resolvers.js');
     const admin = await db.user.create({
@@ -256,7 +256,7 @@ describe('appRuns(parentRunId:) — the run-tree filter (#548)', () => {
 
     const page = (await resolvers.Query.appRuns(
       {},
-      { appRef: appId, parentRunId: parentA.id },
+      { appRef: appId, parentRunRef: parentA.id },
       ctx,
     )) as { items: Array<{ parentRunId: string | null }>; total: number };
     expect(page.total).toBe(4); // 3 children + the callback run

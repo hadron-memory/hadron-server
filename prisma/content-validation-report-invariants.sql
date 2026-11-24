@@ -40,7 +40,7 @@ BEGIN
   IF NEW."reporter_user_id" IS DISTINCT FROM OLD."reporter_user_id" AND NOT (
     OLD."reporter_kind" = 'PERSON' AND OLD."reporter_user_id" IS NOT NULL AND NEW."reporter_user_id" IS NOT NULL
     AND EXISTS (
-      SELECT 1 FROM "user_merges" m
+      SELECT 1 FROM public."user_merges" m
       WHERE m."source_user_id" = OLD."reporter_user_id" AND m."target_user_id" = NEW."reporter_user_id"
     )
   ) THEN

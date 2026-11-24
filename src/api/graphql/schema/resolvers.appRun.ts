@@ -17,6 +17,7 @@ import {
   RunLaunchDeniedError,
   setQuotaLimit as setQuotaLimitKernel,
   ensureQuotaRowsForScope,
+  type QuotaScopeKind,
 } from '../../../jobs/appRuns.js';
 import { mintWebhookPlatformToken, generateWebhookSecret } from '../../webhooks.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -34,18 +35,23 @@ import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveAppRunRef, composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { AppRunNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { assertAppRunRefShape } from '../../../lib/entityRef/appRunRefShape.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { admitWorkerTrigger, workerBoundActor, workerTriggerGrantEnforced, workerTriggerWouldBeAdmitted } from '../../../lib/grants/triggerGrant.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
-import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import { authorizationDenied, AUTHORIZATION_DENIED_CODE } from '../../../lib/auth/authorizationDenied.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
+import { refHasUnstorableChars } from '../../../lib/entityRef/refNamesNothing.js';
+import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 
 /** Orderable columns on the appRuns list (#833). Mirrors the SDL enum. */
-export type AppRunSortField = 'createdAt' | 'startedAt' | 'finishedAt' | 'status';
+export type AppRunSortField = 'createdAt' | 'startedAt' | 'finishedAt' | 'status' | 'duration';
 
 /**
  * #836 — the status filter, widened from one value to a disjunction.
@@ -105,6 +111,10 @@ export function buildAppRunOrderBy(
       return [{ finishedAt: { sort: dir, nulls: 'last' } }, tiebreak];
     case 'status':
       return [{ status: dir }, tiebreak];
+    case 'duration':
+      // #855: the stored generated app_runs.duration_ms (finished_at - started_at). NULL (unstarted or unfinished) last
+      // in both directions, like the timestamps; negative (clock skew) as stored.
+      return [{ durationMs: { sort: dir, nulls: 'last' } }, tiebreak];
     case 'createdAt':
     default:
       return [{ createdAt: dir }, tiebreak];
@@ -148,6 +158,94 @@ async function resolveAppRefOrNotFound(ctx: Context, ref: string): Promise<strin
     if (isAppRefResolutionFailure(e)) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
     throw e;
   }
+}
+
+type QuotaScopeRef = { scopeKind: QuotaScopeKind; scopeId: string };
+
+/**
+ * #5074: the counter scopes a quota door reads or sets, after its access gate (cor:acl:050:04, cor:dmo:050:12).
+ *  - `orgRef` (with or without `appRef`): the organization's ADMIN gate, unchanged.
+ *  - `appRef` alone: an organization's App takes the same callers as the `orgRef` form; a person's App takes the owner,
+ *    owner-role members and a platform admin. Every denial (and a refused principal on a person's App) answers the
+ *    bytes of an unknown ref, so the door does not tell a caller which Apps exist (cor:api:120:01).
+ *  - `userRef` alone: that person as themself, or a platform admin; a refused principal is FORBIDDEN.
+ * `target` is the one scope a limit is set for; `scopes` is every scope a read shows.
+ */
+async function resolveQuotaScopes(
+  ctx: Context,
+  refs: { orgRef?: string | null; appRef?: string | null; userRef?: string | null },
+): Promise<{ scopes: QuotaScopeRef[]; target: QuotaScopeRef }> {
+  const has = (v?: string | null) => v != null && v.trim() !== '';
+  const orgRef = has(refs.orgRef) ? refs.orgRef! : null;
+  const appRef = has(refs.appRef) ? refs.appRef! : null;
+  const userRef = has(refs.userRef) ? refs.userRef! : null;
+  if ((!orgRef && !appRef && !userRef) || (userRef && (orgRef || appRef))) {
+    throw new GraphQLError('Give orgRef, orgRef with appRef, appRef alone, or userRef alone.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  const notFound = () => new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+
+  if (userRef) {
+    if (isRefusedPrincipal(ctx)) throw authorizationDenied();
+    const self = ctx.userId === userRef;
+    if (!self && !isPlatformAdmin(ctx)) throw authorizationDenied();
+    if (!self) {
+      // A ref no row can hold names nothing (a NUL or lone surrogate would fail in the driver, not as NOT_FOUND).
+      if (refHasUnstorableChars(userRef)) throw new GraphQLError('User not found.', { extensions: { code: 'NOT_FOUND' } });
+      const live = await ctx.db.user.findFirst({ where: { id: userRef, deletedAt: null }, select: { id: true } });
+      if (!live) throw new GraphQLError('User not found.', { extensions: { code: 'NOT_FOUND' } });
+    }
+    const t: QuotaScopeRef = { scopeKind: 'user', scopeId: userRef };
+    return { scopes: [t], target: t };
+  }
+
+  if (orgRef) {
+    const { id: organizationId } = await resolveOrgRef(ctx.db, orgRef);
+    await requireOrgRole(ctx, organizationId, 'ADMIN');
+    const org: QuotaScopeRef = { scopeKind: 'org', scopeId: organizationId };
+    if (!appRef) return { scopes: [org], target: org };
+    const id = await resolveAppRefOrNotFound(ctx, appRef);
+    const app = await ctx.db.app.findFirst({ where: { id, organizationId, deletedAt: null }, select: { id: true } });
+    if (!app) throw notFound();
+    const a: QuotaScopeRef = { scopeKind: 'app', scopeId: app.id };
+    return { scopes: [org, a], target: a };
+  }
+
+  // appRef alone.
+  const id = await resolveAppRefOrNotFound(ctx, appRef!);
+  const app = await ctx.db.app.findFirst({
+    where: { id, deletedAt: null },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  if (!app) throw notFound();
+  const a: QuotaScopeRef = { scopeKind: 'app', scopeId: app.id };
+  if (app.ownerUserId === null && app.organizationId !== null) {
+    try {
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+    } catch (e) {
+      // Only the gate's ACCESS refusal folds into the unknown-ref answer (cor:api:120:01); any other error is a fault and
+      // propagates.
+      if (e instanceof GraphQLError && e.extensions?.code === AUTHORIZATION_DENIED_CODE) throw notFound();
+      throw e;
+    }
+    // An App of a deleted organization answers as the orgRef form does not (it refuses the organization): not found.
+    const liveOrg = await ctx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } });
+    if (!liveOrg) throw notFound();
+    const org: QuotaScopeRef = { scopeKind: 'org', scopeId: app.organizationId };
+    return { scopes: [org, a], target: a };
+  }
+  if (app.ownerUserId === null) throw notFound();
+  // A person's App: never an App key, an impersonated session or a run.
+  if (isRefusedPrincipal(ctx)) throw notFound();
+  const admin = isPlatformAdmin(ctx);
+  if (!admin && !(await managesApp(ctx, app))) throw notFound();
+  // The owner's own account counters are the owner's (or a platform admin's), not the App manager's.
+  const ownerRows = admin || ctx.userId === app.ownerUserId;
+  return {
+    scopes: ownerRows ? [a, { scopeKind: 'user', scopeId: app.ownerUserId }] : [a],
+    target: a,
+  };
 }
 
 /** Resolve the App ref (PK or URN), require it live, and require org-ADMIN on its org. */
@@ -299,6 +397,24 @@ export async function canReadAppRun(
     return true;
   } catch (err) {
     if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') return false;
+    throw err;
+  }
+}
+
+/**
+ * #5037: a caller with no standing over a schedule or webhook (not even an org READER) is answered exactly as for an id that
+ * names nothing, so the door is not an existence oracle for another org's id (the run-door concealment convention, #1577).
+ * A caller who can read it keeps the door's own FORBIDDEN. Only the FORBIDDEN code is folded: any other error propagates.
+ */
+async function concealUnlessOrgReader(ctx: Context, entity: { organizationId: string; appId: string }, notFound: string): Promise<void> {
+  // An App key of the entity's own App has standing over it (it is the entity's own principal): its refusal stays the door's.
+  if (ctx.appId && ctx.appId === entity.appId) return;
+  try {
+    await requireOrgRole(ctx, entity.organizationId, 'READER');
+  } catch (err) {
+    if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') {
+      throw new GraphQLError(notFound, { extensions: { code: 'NOT_FOUND' } });
+    }
     throw err;
   }
 }
@@ -641,6 +757,7 @@ export const appRunMutations = {
       where: { id, deletedAt: null },
     });
     if (!observed) throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
+    await concealUnlessOrgReader(ctx, observed, 'Schedule not found.');
     await requireOrgRole(ctx, observed.organizationId, 'ADMIN');
     // The adjudicated stop-only exception cannot carry any authority-changing field.
     const disableOnly = input.enabled === false && Object.keys(input).every(key => key === 'enabled');
@@ -760,6 +877,7 @@ export const appRunMutations = {
   deleteAgentSchedule: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentSchedule.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
+    await concealUnlessOrgReader(ctx, existing, 'Schedule not found.');
     await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
     await ctx.db.agentSchedule.update({
       where: { id },
@@ -789,9 +907,22 @@ export const appRunMutations = {
   ) => triggerManualRun(ctx, input),
 
   /** The kill switch's manual handle (cor:agt:010:02). */
-  cancelAppRun: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+  cancelAppRun: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+    // #4141: PK or URN. The shape check is local to this door (a ref that cannot name a run is a caller error); a
+    // well-shaped miss, an ambiguous legacy ref and a run that does not exist all answer today's NOT_FOUND. Only a
+    // resolver miss is folded: a database fault propagates. The RESOLVED id feeds every statement below.
+    assertAppRunRefShape(ref);
+    let id: string;
+    try {
+      ({ id } = await resolveAppRunRef(ctx.db, ref));
+    } catch (error) {
+      if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+      throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
+    }
     const run = await ctx.db.appRun.findUnique({ where: { id } });
     if (!run) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
+    // #5037: a caller who cannot read the run is answered as for a run that does not exist.
+    if (!(await canReadAppRun(ctx, run))) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
     await requireOrgRole(ctx, run.organizationId, 'ADMIN');
     const cancelled = await ctx.db.appRun.updateMany({
       where: { id, status: { in: ['PENDING', 'RUNNING'] } },
@@ -909,6 +1040,8 @@ export const appRunMutations = {
   rotateAgentWebhook: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
+    // #5037: before the person-only refusal below, so no caller class tells a foreign id from a missing one.
+    await concealUnlessOrgReader(ctx, existing, 'Webhook not found.');
     // #3511 (ruling 0177, cor:dmo:050:12 r40): person-only, decided before any secret or token is minted, with the
     // door's existing non-admin refusal.
     await requirePersonOnlyAct(ctx, 'agent-webhook.rotate', authorizationDenied);
@@ -942,6 +1075,7 @@ export const appRunMutations = {
   deleteAgentWebhook: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
+    await concealUnlessOrgReader(ctx, existing, 'Webhook not found.');
     await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
     await withAuthorizedTx(
       ctx,
@@ -1032,12 +1166,11 @@ export const appRunMutations = {
     {
       input,
     }: {
-      input: { orgRef: string; appRef?: string | null; action: string; limit: number };
+      input: { orgRef?: string | null; appRef?: string | null; userRef?: string | null; action: string; limit: number };
     },
     ctx: Context,
   ) => {
-    const { id: organizationId } = await resolveOrgRef(ctx.db, input.orgRef);
-    await requireOrgRole(ctx, organizationId, 'ADMIN');
+    const { target } = await resolveQuotaScopes(ctx, input);
     if (
       input.action !== 'run.execute' &&
       input.action !== 'llm.tokens' &&
@@ -1055,19 +1188,24 @@ export const appRunMutations = {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
-    let scopeKind: 'app' | 'org' = 'org';
-    let scopeId = organizationId;
-    if (input.appRef && input.appRef.trim() !== '') {
-      const id = await resolveAppRefOrNotFound(ctx, input.appRef);
-      const app = await ctx.db.app.findFirst({
-        where: { id, organizationId, deletedAt: null },
-        select: { id: true },
-      });
-      if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
-      scopeKind = 'app';
-      scopeId = app.id;
-    }
+    const { scopeKind, scopeId } = target;
+    const before = await ctx.db.quotaCounter.findFirst({
+      where: { scopeKind, scopeId, action: input.action, window: 'day' },
+      select: { limit: true },
+    });
     await setQuotaLimitKernel(ctx.db, scopeKind, scopeId, input.action, input.limit);
+    // Ids and numbers only.
+    console.info(
+      JSON.stringify({
+        event: 'quota.limit.changed',
+        actor: ctx.userId ?? null,
+        scopeKind,
+        scopeId,
+        action: input.action,
+        oldLimit: before?.limit ?? null,
+        newLimit: input.limit,
+      }),
+    );
     return ctx.db.quotaCounter.findFirstOrThrow({
       where: { scopeKind, scopeId, action: input.action, window: 'day' },
     });
@@ -1163,7 +1301,7 @@ export const appRunQueries = {
       orgRef,
       status,
       statuses,
-      parentRunId,
+      parentRunRef,
       sortBy,
       sortDir,
       limit,
@@ -1174,7 +1312,7 @@ export const appRunQueries = {
       /** @deprecated #836 — superseded by `statuses`; still accepted for one release. */
       status?: string | null;
       statuses?: string[] | null;
-      parentRunId?: string | null;
+      parentRunRef?: string | null;
       sortBy?: AppRunSortField | null;
       sortDir?: 'asc' | 'desc' | null;
       limit?: number | null;
@@ -1209,14 +1347,27 @@ export const appRunQueries = {
         throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
       }
     }
+    // #4141: `parentRunRef` is a run PK or an hrn:apprun URN, resolved AFTER the org READER gate. Tri-state kept:
+    // omitted = no filter, null = top-level runs only, a ref = that run's children. A ref that cannot name a run is a
+    // shape error (BAD_USER_INPUT, pure and local: no run is looked up); a well-shaped ref that names no run, an
+    // ambiguous legacy ref and a run outside this scope all answer the SAME exactly-empty page. Only a resolver miss
+    // folds: a database fault propagates. The RESOLVED id feeds the filter, never the URN.
+    let parentRunId = parentRunRef; // undefined and null pass through; a ref is replaced by the id it resolves to
+    if (parentRunRef !== undefined && parentRunRef !== null) {
+      assertAppRunRefShape(parentRunRef);
+      try {
+        parentRunId = (await resolveAppRunRef(ctx.db, parentRunRef)).id;
+      } catch (error) {
+        if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+        return { items: [], total: 0 };
+      }
+    }
     const where = {
       organizationId,
       ...(appId ? { appId } : {}),
       ...buildStatusFilter(status, statuses),
       // Fan-out children of one parent (#548; index from PR-547). Rides the
       // same org/app authorization — the org scope already applies above.
-      // Explicit null = top-level runs only; omitted = no filter (PR-550
-      // review, Gemini).
       ...(parentRunId !== undefined ? { parentRunId } : {}),
     };
     const take = Math.min(Math.max(limit ?? 20, 1), 200);
@@ -1330,23 +1481,10 @@ export const appRunQueries = {
    */
   quotaCounters: async (
     _: unknown,
-    { orgRef, appRef }: { orgRef: string; appRef?: string | null },
+    { orgRef, appRef, userRef }: { orgRef?: string | null; appRef?: string | null; userRef?: string | null },
     ctx: Context,
   ) => {
-    const { id: organizationId } = await resolveOrgRef(ctx.db, orgRef);
-    await requireOrgRole(ctx, organizationId, 'ADMIN');
-    const scopes: Array<{ scopeKind: 'app' | 'org'; scopeId: string }> = [
-      { scopeKind: 'org', scopeId: organizationId },
-    ];
-    if (appRef && appRef.trim() !== '') {
-      const id = await resolveAppRefOrNotFound(ctx, appRef);
-      const app = await ctx.db.app.findFirst({
-        where: { id, organizationId, deletedAt: null },
-        select: { id: true },
-      });
-      if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
-      scopes.push({ scopeKind: 'app', scopeId: app.id });
-    }
+    const { scopes } = await resolveQuotaScopes(ctx, { orgRef, appRef, userRef });
     await Promise.all(scopes.map((s) => ensureQuotaRowsForScope(ctx.db, s.scopeKind, s.scopeId)));
     return ctx.db.quotaCounter.findMany({
       where: { OR: scopes.map((s) => ({ scopeKind: s.scopeKind, scopeId: s.scopeId })) },

@@ -270,15 +270,15 @@ describe('nodeUsage ≡ usageEvents(loc: <loc>) — the #802 deprecation promise
       data: { id: generateId(), type: 'read', nodeLoc: specLoc, nodeId: nA.id, memoryId: memA.id },
     });
     await expect(
-      resolvers.Query.usageEvents(null, { nodeId: specLoc }, asMember()),
+      resolvers.Query.usageEvents(null, { nodeRef: specLoc }, asMember()),
     ).rejects.toThrow();
     expect(await resolvers.Query.usageEvents(null, { loc: specLoc }, asMember())).toHaveLength(1);
   });
 
   it('rejects nodeId and loc together (BAD_USER_INPUT, before any lookup)', async () => {
     await expect(
-      resolvers.Query.usageEvents(null, { nodeId: SHARED_LOC, loc: SHARED_LOC }, asMember()),
-    ).rejects.toThrow('Provide either nodeId or loc, not both');
+      resolvers.Query.usageEvents(null, { nodeRef: SHARED_LOC, loc: SHARED_LOC }, asMember()),
+    ).rejects.toThrow('Provide either nodeRef or loc, not both');
   });
 });
 

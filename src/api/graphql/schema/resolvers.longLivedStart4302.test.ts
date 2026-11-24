@@ -109,7 +109,7 @@ describe('#4302: from the assignment through the emitted start args, for both li
     expect(args).toMatchObject({ ...CODEX, taskId: t.id });
     expect(args).not.toHaveProperty('tier');
     const s = await bindFromStart(kit);
-    await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+    await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskRef: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
     const row = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
     expect(T.runSettings(row)).toEqual({ ...OVERRIDE, tier: null });
     expect(T.appliedRunSettings(row)).toEqual(CODEX);
@@ -158,7 +158,7 @@ describe('#4302: from the assignment through the emitted start args, for both li
     expect(await assigneeOf(t.id)).toBe(sam.id);
     expect((await startArgs(sam))[0]).toMatchObject({ ...OVERRIDE, taskId: t.id });
     const s = await bindFromStart(sam);
-    await runAsActor({ workerId: sam.id, agentId: shortAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+    await runAsActor({ workerId: sam.id, agentId: shortAgent }, () => M.startAgentTask({}, { taskRef: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
     expect(T.appliedRunSettings(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))).toEqual(OVERRIDE);
     expect(await recordOf(sam)).toEqual(OVERRIDE);
   });

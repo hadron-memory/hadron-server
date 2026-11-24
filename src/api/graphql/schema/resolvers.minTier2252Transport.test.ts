@@ -40,8 +40,8 @@ async function post(query: string, variables: Record<string, unknown>) {
   return response.json() as Promise<any>;
 }
 const CREATE = 'mutation($i: CreateAgentTaskInput!) { createAgentTask(input: $i) { id requirements { role minTier familyIn } } }';
-const UPDATE = 'mutation($id: ID!, $i: UpdateAgentTaskInput!) { updateAgentTask(taskId: $id, input: $i) { id requirements { role minTier familyIn } } }';
-const READ = 'query($id: ID!) { agentTask(id: $id) { requirements { role minTier } } }';
+const UPDATE = 'mutation($id: ID!, $i: UpdateAgentTaskInput!) { updateAgentTask(taskRef: $id, input: $i) { id requirements { role minTier familyIn } } }';
+const READ = 'query($id: ID!) { agentTask(ref: $id) { requirements { role minTier } } }';
 const eventCount = () => db.agentTeamEvent.count({ where: { appId } });
 
 it('GraphQL stores minTier in the requirements JSON and returns it on create, update and read', async () => {
@@ -83,6 +83,6 @@ it('GraphQL has no maxTier: input is refused by validation, output has no such f
   expect(edit.errors?.length).toBeGreaterThan(0);
   expect((await db.agentTask.findUniqueOrThrow({ where: { id } })).requirements).toEqual({ minTier: 'low' });
   expect(await eventCount()).toBe(events);
-  const output = await post('query($id: ID!) { agentTask(id: $id) { requirements { maxTier } } }', { id });
+  const output = await post('query($id: ID!) { agentTask(ref: $id) { requirements { maxTier } } }', { id });
   expect(output.errors?.length).toBeGreaterThan(0);
 });

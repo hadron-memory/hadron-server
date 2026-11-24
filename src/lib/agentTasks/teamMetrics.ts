@@ -10,8 +10,12 @@
  *
  * Orderings (#4850), so a cut list is always the same prefix: every `ids` list is by creation (`created_at`, then `id`);
  * report 1's owners by task count descending, then owner worker id, then owner user id (NULLs last); an owner's projects by
- * task count descending, then project handle; report 2's projects by project number. A task's `handle` is NOT NULL in the
- * database (prisma/agent-task-number-invariants.sql), so every project segment is a string.
+ * task count descending, then project handle; report 2's projects by creation (`created_at`, then `id`). A task's `handle`
+ * is NOT NULL in the database (prisma/agent-task-number-invariants.sql), so every project handle is a string.
+ *
+ * #4997 (hrn:node:hadronmemory.com:specs:cor:agt:150 A project, R2 and R4): a project is a task that carries the project
+ * marker (`is_project`), at any depth; being top-level makes a task nothing. Every task is placed once, under its NEAREST
+ * marked proper ancestor ({@link nearestProjectSql}), or in the visible "No project" bucket (AT0) when it has none.
  */
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { loadTeamRoster } from './roster.js';
@@ -23,10 +27,13 @@ import { METRICS_DEFAULT_WINDOW_MS, METRICS_GROUP_CAP, METRICS_IDS_CAP, METRICS_
 /** Operational dials (Holger, 2026-11-18, R2: A), in one import-free module so the SDL states the same numbers (#4850). */
 export { METRICS_DEFAULT_WINDOW_MS, METRICS_GROUP_CAP, METRICS_IDS_CAP, METRICS_MAX_WINDOW_MS } from './teamMetricsCaps.js';
 
-export type MetricsCount = { total: number; ids: string[]; truncated: boolean };
+/** An id with its name; `name` is null until {@link attachMetricNames} reads one, and stays null when none is readable (#4992). */
+export type MetricsNamedId = { id: string; name: string | null };
+export type MetricsCount = { total: number; ids: string[]; truncated: boolean; named: MetricsNamedId[] };
+/** `named` starts with every name null, so a count that is never named leaks nothing: a name is only ever ADDED by {@link attachMetricNames}. */
 const count = (total: number, ids: string[] | null): MetricsCount => {
   const kept = (ids ?? []).slice(0, METRICS_IDS_CAP);
-  return { total, ids: kept, truncated: total > kept.length };
+  return { total, ids: kept, truncated: total > kept.length, named: kept.map((id) => ({ id, name: null })) };
 };
 
 export class MetricsWindowError extends Error {}
@@ -63,27 +70,45 @@ const STATUSES = ['BACKLOG', 'PENDING', 'STARTED', 'FINISHED', 'CANCELLED'] as c
 const PROJECT_ZERO = 'AT0';
 
 /**
+ * #4997 (cor:agt:150, What a project counts; R4 "count once, nearest marked ancestor"): a LATERAL subquery yielding the
+ * handle and id of the nearest marked ancestor of the row aliased `t`, or no row when it has none. A handle is the dotted
+ * path of its ancestors (fixed at creation, at most 16 levels), so each prefix of `t.handle` is exactly one ancestor; each
+ * is an index lookup on the (app_id, handle) unique, deepest first, in `t`'s own App. `self` says whether `t` itself counts:
+ * report 1 asks which project a task belongs to, and a project belongs to itself (as S1 placed a top-level project under its
+ * own row); report 2 counts the tasks under a project, and a project is never counted under itself.
+ */
+const nearestProjectSql = (self: boolean) => Prisma.sql`LATERAL (
+  SELECT m.id, m.handle FROM generate_series(cardinality(string_to_array(t.handle, '.')) - ${self ? 0 : 1}::int, 1, -1) AS d(n)
+  JOIN agent_tasks m ON m.app_id = t.app_id AND m.is_project AND m.handle = array_to_string((string_to_array(t.handle, '.'))[1:d.n], '.')
+  ORDER BY d.n DESC LIMIT 1
+) np ON true`;
+
+/**
  * Report 1 (cor:agt:150:01): STARTED owned tasks, grouped by the task's OWNER (never its assignee; the owner's role is
  * not consulted) and by project. An owned task names an issue reference or source, so a STARTED task that tracks no
- * external work is not counted. A task's project is the top-level segment of its handle; `AT0` is the visible "No project".
+ * external work is not counted. A task's project is the nearest marked task among itself and its ancestors (#4997); with
+ * none it is in `AT0`, the visible "No project".
  */
 export async function loadStartedOwned(db: Db, appId: string): Promise<MetricsStartedOwned> {
-  const owned = Prisma.sql`app_id = ${appId} AND status = 'started' AND (COALESCE(btrim(source), '') <> '' OR external_id IS NOT NULL)`;
+  const owned = Prisma.sql`t.app_id = ${appId} AND t.status = 'started' AND (COALESCE(btrim(t.source), '') <> '' OR t.external_id IS NOT NULL)`;
   const cap = METRICS_IDS_CAP;
   const [all, owners, cells] = await Promise.all([
     db.$queryRaw<{ total: number; ids: string[] | null }[]>(Prisma.sql`
-      SELECT count(*)::int AS total, (array_agg(id ORDER BY created_at, id))[1:${cap}] AS ids FROM agent_tasks WHERE ${owned}`),
+      SELECT count(*)::int AS total, (array_agg(t.id ORDER BY t.created_at, t.id))[1:${cap}] AS ids FROM agent_tasks t WHERE ${owned}`),
     db.$queryRaw<{ workerId: string | null; userId: string | null; total: number; ids: string[] }[]>(Prisma.sql`
-      SELECT owner_worker_id AS "workerId", owner_user_id AS "userId", count(*)::int AS total,
-             (array_agg(id ORDER BY created_at, id))[1:${cap}] AS ids
-      FROM agent_tasks WHERE ${owned} GROUP BY owner_worker_id, owner_user_id
+      SELECT t.owner_worker_id AS "workerId", t.owner_user_id AS "userId", count(*)::int AS total,
+             (array_agg(t.id ORDER BY t.created_at, t.id))[1:${cap}] AS ids
+      FROM agent_tasks t WHERE ${owned} GROUP BY t.owner_worker_id, t.owner_user_id
       ORDER BY total DESC, owner_worker_id NULLS LAST, owner_user_id NULLS LAST LIMIT ${METRICS_GROUP_CAP + 1}`),
     db.$queryRaw<{ workerId: string | null; userId: string | null; project: string; total: number; ids: string[] }[]>(Prisma.sql`
       SELECT "workerId", "userId", project, total, ids FROM (
-        SELECT owner_worker_id AS "workerId", owner_user_id AS "userId", split_part(handle, '.', 1) AS project, count(*)::int AS total,
+        SELECT "workerId", "userId", project, count(*)::int AS total,
                (array_agg(id ORDER BY created_at, id))[1:${cap}] AS ids,
-               row_number() OVER (PARTITION BY owner_worker_id, owner_user_id ORDER BY count(*) DESC, split_part(handle, '.', 1)) AS rn
-        FROM agent_tasks WHERE ${owned} GROUP BY owner_worker_id, owner_user_id, split_part(handle, '.', 1)
+               row_number() OVER (PARTITION BY "workerId", "userId" ORDER BY count(*) DESC, project) AS rn
+        FROM (
+          SELECT t.id, t.created_at, t.owner_worker_id AS "workerId", t.owner_user_id AS "userId", COALESCE(np.handle, ${PROJECT_ZERO}) AS project
+          FROM agent_tasks t LEFT JOIN ${nearestProjectSql(true)} WHERE ${owned}
+        ) placed GROUP BY "workerId", "userId", project
       ) g WHERE rn <= ${METRICS_GROUP_CAP + 1} ORDER BY "workerId" NULLS LAST, "userId" NULLS LAST, rn`),
   ]);
   const shown = owners.slice(0, METRICS_GROUP_CAP);
@@ -97,7 +122,10 @@ export async function loadStartedOwned(db: Db, appId: string): Promise<MetricsSt
   }
   const handles = [...new Set(shown.flatMap((o) => (cellsByOwner.get(keyOf(o)) ?? []).map((c) => c.project)))];
   const projectRows = handles.length
-    ? await db.agentTask.findMany({ where: { appId, parentTaskId: null, handle: { in: handles } }, select: { id: true, handle: true, title: true } })
+    ? await db.agentTask.findMany({
+        where: { appId, handle: { in: handles }, OR: [{ isProject: true }, { handle: PROJECT_ZERO, parentTaskId: null }] },
+        select: { id: true, handle: true, title: true },
+      })
     : [];
   const projects = new Map(projectRows.map((p) => [p.handle as string, p]));
   const refOf = (handle: string): MetricsProjectRef => {
@@ -119,19 +147,26 @@ export async function loadStartedOwned(db: Db, appId: string): Promise<MetricsSt
 }
 
 /**
- * Report 2: STARTED projects, each with its direct children counted by every status. A project is a top-level task other
- * than AT0 (cor:agt:050:01, :02; R3): no new marker, flag or special treatment.
+ * Report 2: STARTED projects, each with the tasks counted under it by every status. A project is a task carrying the
+ * project marker, at any depth (#4997; cor:agt:050:01 Project marker, cor:agt:150 A project). Its tasks are exactly those
+ * whose nearest marked proper ancestor it is, at any depth (R4): a nested marked task is one of them, and the tasks below
+ * that one count under it instead, never twice.
  */
 export async function loadStartedProjects(db: Db, appId: string): Promise<MetricsProjects> {
   const rows = await db.agentTask.findMany({
-    where: { appId, parentTaskId: null, status: 'started', taskNumber: { gt: 0 } },
-    select: { id: true, handle: true, title: true }, orderBy: [{ taskNumber: 'asc' }], take: METRICS_GROUP_CAP + 1,
+    where: { appId, isProject: true, status: 'started' },
+    select: { id: true, handle: true, title: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: METRICS_GROUP_CAP + 1,
   });
   const shown = rows.slice(0, METRICS_GROUP_CAP);
+  // Candidates are the tasks below a shown project (a handle prefix); each is then placed under its nearest marked
+  // ancestor, which may be a nested project rather than the shown one, and kept only when that ancestor is shown.
   const children = shown.length
     ? await db.$queryRaw<{ parentId: string; status: string; total: number; ids: string[] }[]>(Prisma.sql`
-        SELECT parent_task_id AS "parentId", status, count(*)::int AS total, (array_agg(id ORDER BY created_at, id))[1:${METRICS_IDS_CAP}] AS ids
-        FROM agent_tasks WHERE app_id = ${appId} AND parent_task_id = ANY(${shown.map((p) => p.id)}::text[]) GROUP BY parent_task_id, status`)
+        SELECT np.id AS "parentId", t.status, count(*)::int AS total, (array_agg(t.id ORDER BY t.created_at, t.id))[1:${METRICS_IDS_CAP}] AS ids
+        FROM agent_tasks t JOIN ${nearestProjectSql(false)}
+        WHERE t.app_id = ${appId} AND t.handle LIKE ANY(${shown.map((p) => `${p.handle as string}.%`)}::text[])
+          AND np.id = ANY(${shown.map((p) => p.id)}::text[])
+        GROUP BY np.id, t.status`)
     : [];
   return {
     truncated: rows.length > METRICS_GROUP_CAP,
@@ -195,4 +230,45 @@ export async function loadFlow(db: Db, appId: string, since: Date, until: Date):
   };
   const [completed, started] = await Promise.all([read(bound('finishedAt', { status: 'finished' })), read(bound('startedAt', {}))]);
   return { completed, started };
+}
+
+/** Every count in a metrics report, wherever it sits (the report shapes above). */
+function* countsOf(v: unknown): Generator<MetricsCount> {
+  if (!v || typeof v !== 'object') return;
+  if (Array.isArray(v)) { for (const x of v) yield* countsOf(x); return; }
+  const o = v as Record<string, unknown>;
+  if (Array.isArray(o.ids) && Array.isArray(o.named) && 'total' in o) { yield o as unknown as MetricsCount; return; }
+  for (const x of Object.values(o)) yield* countsOf(x);
+}
+
+/**
+ * #4992 (Refs hadron-portal#2535 item 3): names every id the counts hold, so a client drills down with no read per id.
+ * ONE batch for the whole response: at most one statement for the distinct task ids (their titles) and one for the
+ * distinct worker ids (their names), however many counts, owners or ids there are; a response holds at most
+ * {@link METRICS_IDS_CAP} ids per count, so the batch is bounded the same way.
+ *
+ * GATE: a name rides the gate of the count it sits in. The caller passes only the reports the reader may see: the task
+ * reports (1, 2, 4) only when the reader may read the App's tasks (cor:agt:050:21), the worker report on the roster audience.
+ * A report that is not passed is null and is never read. Both statements are bound to `appId`, so an id of another App
+ * reads as a missing one: its name stays null. The name is the task title or the worker name and nothing else.
+ */
+export async function attachMetricNames(db: Db, appId: string, reports: { tasks?: unknown[]; workers?: unknown[] }): Promise<void> {
+  const taskCounts = [...countsOf(reports.tasks ?? [])];
+  const workerCounts = [...countsOf(reports.workers ?? [])];
+  const distinct = (cs: MetricsCount[]) => [...new Set(cs.flatMap((c) => c.ids))];
+  const taskIds = distinct(taskCounts);
+  const workerIds = distinct(workerCounts);
+  const [titles, names] = await Promise.all([
+    taskIds.length
+      ? db.$queryRaw<{ id: string; title: string }[]>(Prisma.sql`SELECT id, title FROM agent_tasks WHERE app_id = ${appId} AND id = ANY(${taskIds}::text[])`)
+      : [],
+    workerIds.length
+      ? db.$queryRaw<{ id: string; name: string }[]>(Prisma.sql`SELECT id, name FROM workers WHERE app_id = ${appId} AND id = ANY(${workerIds}::text[])`)
+      : [],
+  ]);
+  const fill = (cs: MetricsCount[], by: Map<string, string>) => {
+    for (const c of cs) for (const n of c.named) n.name = by.get(n.id) ?? null;
+  };
+  fill(taskCounts, new Map(titles.map((r) => [r.id, r.title])));
+  fill(workerCounts, new Map(names.map((r) => [r.id, r.name])));
 }

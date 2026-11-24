@@ -26,6 +26,7 @@ const REVIEWED_PAGED_FIELDS = [
   "AgentTask.findingDispositions", // #2663: pageArgs default20/cap200.
   "AgentTaskResult.findings", // #2662: pageArgs default20/cap200; result itself is bounded at100 findings.
   "AppKey.hostUses",
+  "AppKey.hostUsesPage", // #5061: pageArgs, default 20, cap 200 (PAGE_ARGS_FIELDS).
   "Chat.servedPrompts",
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
   "Mutation.collectHostOperations",
@@ -364,8 +365,8 @@ describe('cost (graphql-query-complexity), enforce', () => {
   });
 
   it('#2662 findings admission charges the clamped page for literals and variables', () => {
-    const q = (n: string) => `{ agentTask(id: "x") { result { findings(limit: ${n}) { items { id severity text } total hasMore } } } }`;
-    const variables = 'query($n:Int){agentTask(id:"x"){result{findings(limit:$n){items{id severity text} total hasMore}}}}';
+    const q = (n: string) => `{ agentTask(ref: "x") { result { findings(limit: ${n}) { items { id severity text } total hasMore } } } }`;
+    const variables = 'query($n:Int){agentTask(ref:"x"){result{findings(limit:$n){items{id severity text} total hasMore}}}}';
     expect(cost(q('2147483647'))).toBe(cost(q('200')));
     expect(cost(variables, {n:2147483647})).toBe(cost(q('200')));
     expect(cost(q('0'))).toBeLessThan(cost(q('200')));

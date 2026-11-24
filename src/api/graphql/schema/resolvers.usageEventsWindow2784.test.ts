@@ -39,8 +39,8 @@ beforeEach(async () => {
 async function read(field: string, variables: Record<string, unknown> = {}, ctx = principal) {
   const selection = field === 'usageEvents' ? '{ id }' : '{ items { id } total hasMore }';
   const result = await server.executeOperation({
-    query: `query($memoryId: ID, $nodeId: ID, $since: DateTime, $until: DateTime, $limit: Int, $offset: Int) {
-      ${field}(memoryId: $memoryId, nodeId: $nodeId, since: $since, until: $until, limit: $limit, offset: $offset) ${selection}
+    query: `query($memoryRef: ID, $nodeRef: ID, $since: DateTime, $until: DateTime, $limit: Int, $offset: Int) {
+      ${field}(memoryRef: $memoryRef, nodeRef: $nodeRef, since: $since, until: $until, limit: $limit, offset: $offset) ${selection}
     }`,
     variables,
   }, { contextValue: ctx });
@@ -57,7 +57,7 @@ it.each(['usageEvents', 'usageEventsPage'])('%s implements the half-open window 
     [{}, [...eventIds].reverse()],
     [{ since: null, until: null }, [...eventIds].reverse()],
   ] as const) {
-    const result = await read(field, { memoryId, ...window });
+    const result = await read(field, { memoryRef: memoryId, ...window });
     expect(result.errors).toBeUndefined();
     const value = result.data![field] as any;
     expect((field === 'usageEvents' ? value : value.items).map((row: any) => row.id)).toEqual(expected);
@@ -68,7 +68,7 @@ it.each(['usageEvents', 'usageEventsPage'])('%s implements the half-open window 
 it.each(['usageEvents', 'usageEventsPage'])('%s validates range order before memory access', async field => {
   for (const until of [times[1], times[0]]) {
     const errors = [];
-    for (const resource of [{ memoryId }, { memoryId: foreignId }, { memoryId: generateId() }, { nodeId: generateId() }]) {
+    for (const resource of [{ memoryRef: memoryId }, { memoryRef: foreignId }, { memoryRef: generateId() }, { nodeRef: generateId() }]) {
       const result = await read(field, { ...resource, since: times[1], until });
       expect(result.errors).toHaveLength(1);
       expect(result.errors![0].extensions?.code).toBe('BAD_USER_INPUT');
@@ -83,7 +83,7 @@ it('page total is windowed before offset and keeps the existing cap', async () =
   await db.usageEvent.createMany({ data: Array.from({ length: 210 }, () => ({
     id: generateId(), type: 'read', memoryId, createdAt: new Date(times[1]),
   })) });
-  const result = await read('usageEventsPage', { memoryId, since: times[1], until: times[2], limit: 5000, offset: 1 });
+  const result = await read('usageEventsPage', { memoryRef: memoryId, since: times[1], until: times[2], limit: 5000, offset: 1 });
   expect(result.errors).toBeUndefined();
   expect(result.data!.usageEventsPage).toMatchObject({ total: 211, hasMore: true });
   expect((result.data!.usageEventsPage as any).items).toHaveLength(200);
@@ -101,8 +101,8 @@ it.each(['usageEvents', 'usageEventsPage'])('%s preserves missing/unreadable-mem
   // An hdr_app_ key context carries the key's own id (middleware/auth.ts resolveAppKey; #2817).
   const appKey: Context = { db, appId: generateId(), appKeyId: generateId(), roles: [] };
   for (const [resource, ctx] of [
-    [{ memoryId: foreignId }, principal],
-    [{ memoryId: generateId() }, principal],
+    [{ memoryRef: foreignId }, principal],
+    [{ memoryRef: generateId() }, principal],
     [{}, appKey],
   ] as const) {
     const unwindowed = await read(field, resource, ctx);
@@ -145,8 +145,8 @@ it.each(['usageEvents', 'usageEventsPage'])('%s keeps its own default and reques
   for (const limit of [undefined, null, 0, 5000]) {
     // A window encompassing every fixture row must preserve exact row order and
     // count-only semantics. #2817 (cor:api:120:04): the legacy list is now capped like the page.
-    const all = await read(field, { memoryId, limit });
-    const windowed = await read(field, { memoryId, limit, since: times[0], until: '2026-10-04T00:00:00Z' });
+    const all = await read(field, { memoryRef: memoryId, limit });
+    const windowed = await read(field, { memoryRef: memoryId, limit, since: times[0], until: '2026-10-04T00:00:00Z' });
     expect(all.errors).toBeUndefined();
     expect(windowed.errors).toBeUndefined();
     const value = windowed.data![field] as any;
@@ -170,7 +170,7 @@ it.each(['usageEvents', 'usageEventsPage'])('%s requires explicit-offset ISO ins
   for (const bound of ['since', 'until']) {
     for (const value of ['10/02/2026', '2026-10-02', '2026-10-02T00:00:00', '2026-02-30T00:00:00Z', 'not-a-date']) {
       const messages = [];
-      for (const resource of [{ memoryId }, { memoryId: foreignId }, { memoryId: generateId() }, { nodeId: generateId() }]) {
+      for (const resource of [{ memoryRef: memoryId }, { memoryRef: foreignId }, { memoryRef: generateId() }, { nodeRef: generateId() }]) {
         const result = await read(field, { ...resource, [bound]: value });
         expect(result.errors, `${field} ${bound}=${value}`).toHaveLength(1);
         expect(result.errors![0].extensions?.code).toBe('BAD_USER_INPUT');
@@ -185,13 +185,13 @@ it.each(['usageEvents', 'usageEventsPage'])('%s validates inline bounds as insta
   const selection = field === 'usageEvents' ? '{ id }' : '{ items { id } total }';
   for (const bound of ['since', 'until']) {
     for (const value of ['10/02/2026', '2026-10-02', '2026-10-02T00:00:00', '2026-02-30T00:00:00Z']) {
-      const result = await server.executeOperation({ query: `{ ${field}(memoryId: "${memoryId}", ${bound}: "${value}") ${selection} }` }, { contextValue: principal });
+      const result = await server.executeOperation({ query: `{ ${field}(memoryRef: "${memoryId}", ${bound}: "${value}") ${selection} }` }, { contextValue: principal });
       if (result.body.kind !== 'single') throw new Error('Expected a single response');
       expect(result.body.singleResult.errors, `${bound}=${value}`).toHaveLength(1);
       expect(result.body.singleResult.errors![0].extensions?.code).toBe('BAD_USER_INPUT');
     }
   }
-  const result = await server.executeOperation({ query: `{ ${field}(memoryId: "${memoryId}", since: "2026-10-02T02:00:00+02:00", until: "${times[2]}") ${selection} }` }, { contextValue: principal });
+  const result = await server.executeOperation({ query: `{ ${field}(memoryRef: "${memoryId}", since: "2026-10-02T02:00:00+02:00", until: "${times[2]}") ${selection} }` }, { contextValue: principal });
   if (result.body.kind !== 'single') throw new Error('Expected a single response');
   expect(result.body.singleResult.errors).toBeUndefined();
   const value = result.body.singleResult.data![field] as any;

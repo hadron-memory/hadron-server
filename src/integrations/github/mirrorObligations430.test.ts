@@ -49,6 +49,30 @@ import { withMirrorCheckout } from './gitMirrorCheckout.js';
 import { writeNodeToGit } from './writeNodeToGit.js';
 import { settleMirrorObligations, takeAttemptSeq, type MirrorObligationRef } from './mirrorObligations.js';
 
+/** libpq's PG* variables for a postgres URL (#4978). Only the authority, user, password and database are read: the query string never is. */
+function psqlEnvFromUrl(raw: string): Record<string, string> {
+  const u = new URL(raw);
+  const out: Record<string, string> = {};
+  if (u.hostname) out.PGHOST = decodeURIComponent(u.hostname);
+  if (u.port) out.PGPORT = u.port;
+  if (u.username) out.PGUSER = decodeURIComponent(u.username);
+  if (u.password) out.PGPASSWORD = decodeURIComponent(u.password);
+  const dbName = decodeURIComponent(u.pathname.replace(/^\//, ''));
+  if (dbName) out.PGDATABASE = dbName;
+  return out;
+}
+
+describe('psqlEnvFromUrl (#4978)', () => {
+  it('moves the credentials into PG* variables and ignores every query parameter', () => {
+    expect(psqlEnvFromUrl('postgresql://u%40x:p%2Fw%3Ad@db.example:6543/my%20db?schema=public&connection_limit=5&pool_timeout=3')).toEqual({
+      PGHOST: 'db.example', PGPORT: '6543', PGUSER: 'u@x', PGPASSWORD: 'p/w:d', PGDATABASE: 'my db',
+    });
+  });
+  it('omits what the URL does not carry', () => {
+    expect(psqlEnvFromUrl('postgresql://holger@localhost:5432/hadron')).toEqual({ PGHOST: 'localhost', PGPORT: '5432', PGUSER: 'holger', PGDATABASE: 'hadron' });
+  });
+});
+
 const SOURCE = 'https://github.com/acme/repo.git';
 const IDENT = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 const git = (cwd: string, ...args: string[]) =>
@@ -403,13 +427,13 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
   });
 
   // One SQL file through psql the way `prisma migrate deploy` and the globalSetup run it (one file, ON_ERROR_STOP).
+  // The connection goes in PG* environment variables, never in argv: an execFile failure prints the whole command line,
+  // and a URL argument would put the password in the CI log. Query parameters are never read, so Prisma-only ones
+  // (connection_limit, pool_timeout, schema, ...) cannot reach libpq.
   const runPsqlFile = async (file: string) => {
-    const url = new URL(process.env.DATABASE_URL!); // the per-worker URL — never TEST_DATABASE_URL
-    // Prisma-only pool parameters ride along on DATABASE_URL (#448); libpq rejects unknown query parameters.
-    url.searchParams.delete('connection_limit');
-    url.searchParams.delete('pool_timeout');
-    await promisify(execFileCb)('psql', [url.toString(), '-q', '-v', 'ON_ERROR_STOP=1', '-f', file],
-      { cwd: fileURLToPath(new URL('../../..', import.meta.url)), maxBuffer: 64 * 1024 * 1024 });
+    const pg = psqlEnvFromUrl(process.env.DATABASE_URL!); // the per-worker URL — never TEST_DATABASE_URL
+    await promisify(execFileCb)('psql', ['-q', '-v', 'ON_ERROR_STOP=1', '-f', file],
+      { cwd: fileURLToPath(new URL('../../..', import.meta.url)), maxBuffer: 64 * 1024 * 1024, env: { ...process.env, ...pg } });
   };
 
   const INVARIANTS_FILE = 'prisma/git-mirror-obligation-invariants.sql';

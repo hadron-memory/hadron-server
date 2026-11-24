@@ -16,6 +16,8 @@ import { decodeLocSegmentsCursor, normalizeLocSegmentsLimit, readLocSegments } f
 import { effectiveScope, findEffectiveNodeIdByLoc, markInherited, retainEffective, stillInherited, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import {
   renderNodeExport,
+  renderPdfMarkdown,
+  type ExportNode,
   type NodeExportFormat,
   type NodeExportSection,
 } from '../../../lib/nodeExport.js';
@@ -81,7 +83,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { recoveryMemoryIds } from './resolvers.recovery.js';
-import { AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError, NodeRevisionNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { refHasUnstorableChars, refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
@@ -108,6 +110,7 @@ import {
   CONTENT_RAW_DEFAULT,
   readAiServiceConfigByUrn,
   aiConfigOwnerOf,
+  nonNegativeTake,
 } from './resolvers.helpers.js';
 import { loadAiConfigOwners, aiConfigOwnerKey } from '../../../lib/aiConfigOwner.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
@@ -1447,13 +1450,46 @@ export const nodeQueries = {
         ? await resolveNodeContent(ctx, node, { mode: 'includes', surface: 'export' })
         : node.content;
 
+      // The node as the exporters see it. Built once, before the format branches, so the PDF's added
+      // sections (#395) and the MD/JSON renders read the same projection.
+      const exportNode: ExportNode = {
+        id: node.id,
+        memoryUrn: memory?.urn ?? '',
+        loc: node.loc,
+        name: node.name,
+        nodeType: node.nodeType,
+        objectType: node.objectType,
+        alias: node.alias,
+        description: node.description,
+        abstract: node.abstract,
+        abstractOriginHash: node.abstractOriginHash,
+        content: exportContent,
+        tags: deserializeTags(node.tags) as string[],
+        seq: node.seq,
+        role: node.role,
+        isRunnable: node.isRunnable,
+        data: node.data,
+        properties: node.properties,
+        edges: node.outgoingEdges as unknown as EdgeForGit[],
+      };
+
       // PDF is a presentation render produced by the external hadrontool-pdf
-      // service from the node's (already-decrypted) Markdown content. Unlike
-      // MD/JSON it is not the canonical round-trippable file, so `full` /
-      // `sections` do not apply. Delivered BASE64.
+      // service. Unlike MD/JSON it is not the canonical round-trippable file,
+      // so `full` does not apply (cor:int:020:02 Q2 (a)): the content is always
+      // printed and the sections the caller names are ADDED after it, in the
+      // fixed order, empty ones left out (R8/R9, #395). Delivered BASE64.
       if (fmt === 'PDF') {
-        const markdown =
-          exportContent && exportContent.trim().length > 0 ? exportContent : `# ${node.name}`;
+        // §10 (#395): the Edges section prints a target's loc, so it keeps only targets that are live and in a
+        // memory this caller can read (the same readable set the node gate used; #781 gates an edge endpoint on
+        // its own memory). The MD/JSON export prints every outgoing edge and is not changed here.
+        const readableMemoryIds =
+          access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId
+            ? new Set(access.memoryId.in as string[])
+            : null;
+        const readableEdges = node.outgoingEdges.filter(
+          (e) => e.target && !e.target.deletedAt && (readableMemoryIds === null || readableMemoryIds.has(e.target.memoryId)),
+        );
+        const markdown = renderPdfMarkdown({ ...exportNode, edges: readableEdges as unknown as EdgeForGit[] }, sections);
         const { base64, bytes } = await renderMarkdownToPdf(markdown, { title: node.name });
         const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
         recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
@@ -1468,29 +1504,9 @@ export const nodeQueries = {
       }
 
       const { mimeType, data } = renderNodeExport(
-        {
-          id: node.id,
-          memoryUrn: memory?.urn ?? '',
-          loc: node.loc,
-          name: node.name,
-          nodeType: node.nodeType,
-          objectType: node.objectType,
-          alias: node.alias,
-          description: node.description,
-          abstract: node.abstract,
-          abstractOriginHash: node.abstractOriginHash,
-          content: exportContent,
-          tags: deserializeTags(node.tags) as string[],
-          seq: node.seq,
-          role: node.role,
-          isRunnable: node.isRunnable,
-          data: node.data,
-          properties: node.properties,
-          edges: node.outgoingEdges as unknown as EdgeForGit[],
-        },
+        exportNode,
         { format: fmt, full: full !== false, sections: sections ?? null },
       );
-
       const leaf = node.loc ? node.loc.split(':').pop() || node.loc : node.name || 'node';
       recordNodeRead(ctx.db, toUsageNodeRef(node), ctx);
       return {
@@ -2727,7 +2743,7 @@ export const nodeQueries = {
      * the same verbatim semantics as `usageEvents(loc: <loc>)`, bounded to
      * the memories the caller may read. It is a filter, not a lookup: an
      * unknown loc yields `[]` rather than NODE_NOT_FOUND. A bare loc cannot
-     * disambiguate the same loc in two memories; `usageEvents(nodeId: <PK|URN>)`
+     * disambiguate the same loc in two memories; `usageEvents(nodeRef: <PK|URN>)`
      * is the memory-precise form.
      *
      * Access control (#802): this resolver previously had NO gate at all —
@@ -2762,7 +2778,7 @@ export const nodeQueries = {
           memoryId: { in: accessibleMemoryIds },
         },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        take: limit ?? 20,
+        take: nonNegativeTake(limit),
       });
       // #3688: a loc names a resource, so other principals' rows are volumes only (cor:acl:090:01, ruling 0246).
       return projectUsageRowsFor(ctx, rows);
@@ -2776,7 +2792,7 @@ export const nodeQueries = {
       const rows = await ctx.db.nodeEdgeRemoval.findMany({
         where: { sourceId: scope.nodeId, memoryId: { in: scope.accessible } },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        take: limit ?? 20,
+        take: nonNegativeTake(limit),
       });
       // The deleted target's address is another node's identity, and the edge's own loc is derived from both
       // endpoints: show neither where the target's memory is not readable.
@@ -2793,7 +2809,7 @@ export const nodeQueries = {
       const revisions = await ctx.db.nodeRevision.findMany({
         where: { nodeId },
         orderBy: { createdAt: 'desc' },
-        take: limit ?? 20,
+        take: nonNegativeTake(limit),
       });
       // Drop snapshots captured while the node lived in a memory the caller
       // can't read. Legacy rows (memoryId NULL) fall back to the node's current
@@ -2833,8 +2849,16 @@ export const nodeQueries = {
     // current memory AND on the snapshot's own memory (per-snapshot gating —
     // a moved node keeps its id, so a snapshot may live in a memory the caller
     // can't read). Any miss collapses to null (no existence disclosure).
-    nodeRevision: async (_: unknown, { revisionId }: { revisionId: string }, ctx: Context) => {
+    nodeRevision: async (_: unknown, { nodeRevRef }: { nodeRevRef: string }, ctx: Context) => {
       requireRole(ctx, 'READER');
+      // #4138 (cor:api:140:00): a revision URN or PK, resolved once; an unknown or malformed ref is null, as an unknown PK was.
+      let revisionId: string;
+      try {
+        ({ id: revisionId } = await resolveNodeRevRef(ctx.db, nodeRevRef));
+      } catch (err) {
+        if (err instanceof NodeRevisionNotFoundError) return null;
+        throw err;
+      }
       const revision = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
       if (!revision) return null;
       const node = await ctx.db.node.findUnique({
@@ -2887,12 +2911,12 @@ export const nodeQueries = {
      */
     memoryLocSegments: async (
       _: unknown,
-      args: { memoryIds: string[]; parentLoc: string; limit?: number | null; after?: string | null },
+      args: { memoryRefs: string[]; parentLoc: string; limit?: number | null; after?: string | null },
       ctx: Context,
     ) => {
       const refuse = (msg: string) => new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
-      if (!Array.isArray(args.memoryIds) || args.memoryIds.length === 0) {
-        throw refuse('memoryLocSegments: memoryIds must name at least one memory.');
+      if (!Array.isArray(args.memoryRefs) || args.memoryRefs.length === 0) {
+        throw refuse('memoryLocSegments: memoryRefs must name at least one memory.');
       }
       if (args.parentLoc.startsWith(':') || args.parentLoc.endsWith(':') || args.parentLoc.includes('::') || args.parentLoc.includes('\0')) {
         throw refuse('memoryLocSegments: parentLoc is not a valid loc.');
@@ -2907,7 +2931,7 @@ export const nodeQueries = {
       const empty = { items: [], hasMore: false, endCursor: null };
       // Each memory is read once however many times (or by which alias) it was named: a repeat would repeat
       // its rows, break the continuation and multiply the walk (#3586 review).
-      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryIds }, null))];
+      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryRefs }, null))];
       if (gated.length === 0) return empty;
       const inheritance = await effectiveScope(ctx.db, gated);
       return readLocSegments(ctx.db, {

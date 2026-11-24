@@ -278,7 +278,7 @@ describe('3 — a registration that adds a worker while a host halt is set (regi
 describe('4 — assigning a task to Dan by hand while a pause on Dan is set (inTaskWriteTx shared fence + TASK_STOPPED)', () => {
   let taskId: string;
   beforeEach(async () => { taskId = (await db.agentTask.create({ data: { appId: app.id, title: 'Hand', ownerUserId: max.id }, select: { id: true } })).id; });
-  const assign = (c: Context) => M.assignAgentTask({}, { taskId, assignee: { worker: 'Dan' } }, c);
+  const assign = (c: Context) => M.assignAgentTask({}, { taskRef: taskId, assignee: { worker: 'Dan' } }, c);
   const assignee = async () => (await db.agentTask.findUniqueOrThrow({ where: { id: taskId } })).assigneeWorkerId;
 
   it('the assignment holds the fence first: the set waits; the task is Dan\'s and the pause is live', async () => {

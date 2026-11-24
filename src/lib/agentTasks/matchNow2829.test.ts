@@ -55,9 +55,9 @@ it('failed match is marked, filtered, skipped after availability changes, cleare
   const inputs=await loadStallInputs(db,{id:t.id},now);
   expect(stallCandidates(inputs[0],effectiveWindows(null),now).filter(x=>x.rule==='unassignable')).toEqual([]);
   const cancelled=await create({match:true,requirements:{role:'missing'}});
-  await M.cancelAgentTask({}, {taskId:cancelled.id},ctx);
+  await M.cancelAgentTask({}, {taskRef:cancelled.id},ctx);
   expect(await row(cancelled.id)).toMatchObject({matchFailedAt:null,matchFailedReason:null});
-  await M.assignAgentTask({}, {taskId:t.id,assignee:{worker:w.id}},ctx);
+  await M.assignAgentTask({}, {taskRef:t.id,assignee:{worker:w.id}},ctx);
   expect(await row(t.id)).toMatchObject({matchFailedAt:null,matchFailedReason:null,assigneeWorkerId:w.id});
   expect((await Q.agentTasks({}, {appRef:app.id,matchFailed:true},ctx)).map((x:any)=>x.id)).toEqual([]);
 });
@@ -184,16 +184,16 @@ it('match now refuses an open blocker atomically but accepts ended blockers', as
   const before = await db.agentTask.count();
   await expect(create({ match: true, blockedBy: [blocker.id] })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   expect(await db.agentTask.count()).toBe(before);
-  await M.cancelAgentTask({}, { taskId: blocker.id }, ctx);
+  await M.cancelAgentTask({}, { taskRef: blocker.id }, ctx);
   expect((await create({ match: true, blockedBy: [blocker.id] })).assigneeWorkerId).toBe(w.id);
 });
 
 it.each(['failed', 'held'])('park then ready clears %s matching state and restores regular matching', async (state) => {
   const task = await create({ match: true, requirements: { role: 'reviewer' } });
   if (state === 'held') await db.agentTask.update({ where: { id: task.id }, data: { matchPending: true, matchFailedAt: null, matchFailedReason: null } });
-  await M.parkAgentTask({}, { taskId: task.id }, ctx);
+  await M.parkAgentTask({}, { taskRef: task.id }, ctx);
   const w = await worker();
-  await M.makeAgentTaskReady({}, { taskId: task.id }, ctx);
+  await M.makeAgentTaskReady({}, { taskRef: task.id }, ctx);
   expect(await row(task.id)).toMatchObject({ matchPending: false, matchFailedAt: null, matchFailedReason: null, assigneeWorkerId: null });
   expect((await Q.agentTasks({}, { appRef: app.id, matchFailed: false }, ctx)).map((t: any) => t.id)).toContain(task.id);
   await matchQueuedTasks(db, new Date(), { appId: app.id });
@@ -235,7 +235,7 @@ it('batch match-now accepts an ended existing blocker and applies single-input r
     expect(await db.agentTask.count()).toBe(before);
   }
   const ended = await create();
-  await M.cancelAgentTask({}, { taskId: ended.id }, ctx);
+  await M.cancelAgentTask({}, { taskRef: ended.id }, ctx);
   const tasks = await M.createAgentTasks({}, { appRef: app.id, tasks: [
     { task: { title: 'Ready', match: true, blockedBy: [ended.id] } },
   ] }, ctx);
@@ -259,7 +259,7 @@ it('a clone keeps normalized role/team requirements but starts without the sourc
   const lead = await worker('Lead', 'manager');
   const source = await create({ match: true, requirements: { roles: ['missing'], team: lead.id } });
   expect(source.matchFailedReason).toBe('NO_ROLE');
-  const cloned = await M.cloneAgentTask({}, { taskId: source.id, input: {} }, ctx);
+  const cloned = await M.cloneAgentTask({}, { taskRef: source.id, input: {} }, ctx);
   expect(cloned).toMatchObject({ clonedFromId: source.id, status: 'pending', assigneeWorkerId: null, matchPending: false, matchFailedAt: null, matchFailedReason: null });
   expect(cloned.requirements).toEqual(source.requirements);
   expect((await row(source.id)).matchFailedReason).toBe('NO_ROLE');

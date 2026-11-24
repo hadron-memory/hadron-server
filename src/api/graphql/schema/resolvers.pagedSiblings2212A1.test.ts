@@ -257,17 +257,17 @@ describe('usageEventsPage', () => {
     expect(after.total).toBe(5);
     expect(ids(after.items)).toEqual(ids(before.items));
     // the resource scope of a readable memory counts that memory only
-    expect((await Q.usageEventsPage({}, { memoryId: memA.id, limit: 50 }, c)).total).toBe(5);
+    expect((await Q.usageEventsPage({}, { memoryRef: memA.id, limit: 50 }, c)).total).toBe(5);
     // asking for the unreadable memory answers exactly as the old field does
-    const oldErr = await Q.usageEvents({}, { memoryId: memB.id }, c).catch((e: any) => e);
-    const newErr = await Q.usageEventsPage({}, { memoryId: memB.id }, c).catch((e: any) => e);
+    const oldErr = await Q.usageEvents({}, { memoryRef: memB.id }, c).catch((e: any) => e);
+    const newErr = await Q.usageEventsPage({}, { memoryRef: memB.id }, c).catch((e: any) => e);
     expect(newErr).toBeInstanceOf(Error);
     expect(newErr.extensions?.code).toBe(oldErr.extensions?.code);
   });
 
   it('loc and nodeId together are refused as the old field refuses', async () => {
     const c = asUser(member.id);
-    const err = await Q.usageEventsPage({}, { loc: 'x', nodeId: 'y' }, c).catch((e: any) => e);
+    const err = await Q.usageEventsPage({}, { loc: 'x', nodeRef: 'y' }, c).catch((e: any) => e);
     expect(err.extensions?.code).toBe('BAD_USER_INPUT');
   });
 

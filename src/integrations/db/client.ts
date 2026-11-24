@@ -30,7 +30,13 @@ const datasourceUrl = poolDatasourceUrl(process.env.DATABASE_URL, process.env);
  */
 const basePrisma = new PrismaClient({
   ...(datasourceUrl === undefined ? {} : { datasourceUrl }),
-  omit: { secretVersion: { valueEncrypted: true }, secretChangeRequest: { stagedValueEncrypted: true } },
+  omit: {
+    secretVersion: { valueEncrypted: true },
+    secretChangeRequest: { stagedValueEncrypted: true },
+    // #855: the stored GENERATED duration_ms is read-only (Postgres refuses a write to it) and a BigInt (JSON.stringify of a
+    // whole row throws), so no default read carries it; the appRuns sort orders by it without selecting it.
+    appRun: { durationMs: true },
+  },
 });
 
 type NodeData = Record<string, unknown>;

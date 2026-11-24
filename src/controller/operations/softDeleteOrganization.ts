@@ -1,5 +1,6 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { deleteSecretsForOwner } from '../../lib/secrets.js';
+import { deleteOwnerLimits, type OwnerLimitChange } from '../../lib/ownerLimits/changes.js';
 import { revokeAllOrgInvitations } from '../../lib/auth/revokeOrgInvitations.js';
 import { softDeleteChatToolConnections, type ChatToolTeardown } from '../../lib/chatToolTeardown.js';
 
@@ -22,11 +23,13 @@ import { softDeleteChatToolConnections, type ChatToolTeardown } from '../../lib/
  * deleteOrganization historically records none and passes nothing).
  */
 export async function softDeleteOrganizationCore(
-  db: Pick<PrismaClient, 'organization' | 'secret' | 'userInvitation' | 'orgMemberInvitation' | '$queryRaw'>,
+  db: Pick<PrismaClient, 'organization' | 'secret' | 'userInvitation' | 'orgMemberInvitation' | 'ownerLimit' | '$queryRaw'>,
   orgId: string,
   deletedBy?: string | null,
   /** Who the removed chat tool connections are recorded as deleted by; defaults to `deletedBy` (deleteOrganization stamps none on the org row, but knows its actor). */
   connectionDeletedBy?: string | null,
+  /** #5009: collects the limit rows removed here; the CALLER logs them after its commit. */
+  limitChanges?: OwnerLimitChange[],
 ): Promise<ChatToolTeardown[]> {
   await db.organization.updateMany({
     where: { id: orgId, deletedAt: null },
@@ -34,6 +37,9 @@ export async function softDeleteOrganizationCore(
   });
   await revokeAllOrgInvitations(db, orgId, deletedBy ?? null);
   await deleteSecretsForOwner(db, 'org', orgId);
+  // #5009: a limit is a setting and goes with its owner; the row is kept, so the FK cascade never fires.
+  const removedLimits = await deleteOwnerLimits(db, { organizationId: orgId }, 'owner-deleted');
+  limitChanges?.push(...removedLimits);
   // #4828: the organization's Telegram and Slack registrations go in the same transaction; the CALLER asks the tools to drop their
   // side after the commit (dispatchChatToolTeardown). A row already deleted is not returned, so a repeat asks nothing.
   return softDeleteChatToolConnections(db, { organizationId: orgId }, connectionDeletedBy ?? deletedBy ?? null);
