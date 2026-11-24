@@ -12351,10 +12351,12 @@ function ageOf(at: Date, now: Date = new Date()): string {
       if (!memory) return refusalResult('Memory not found.');
       // Import and call syncGraphFromGithub
       const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
-      const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
+      const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0], { ownerLimitCaller: ownerLimitCaller(auth) });
       if (result.notAttemptedReason) return refusalResult(`[${SYNC_NOT_ATTEMPTED}] ${syncNotAttemptedMessage(result.notAttemptedReason)}`);
 
       if (result.fault) throw new Error(result.error ?? 'sync fault');
+      // #5015 — the owner-limit refusal in this caller's own form, as the trusted refusal its GraphQL twin throws.
+      if (result.ownerLimitError) return refusalResult(`[owner_limit_reached] ${result.ownerLimitError.message}`);
       if (result.error) return refusalResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);
       // #1061 — one write per node the sync actually wrote. This tool is the
       // ONE entry point to a git sync that has a principal to attribute to; the

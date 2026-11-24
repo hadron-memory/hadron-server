@@ -29,7 +29,7 @@ export function ownerLimitCaller(ctx: { userId?: string | null; impersonation?: 
  * `transferMemoryOwnership` takes it FOR UPDATE, so the owner read here is the one that holds the memory when the write
  * commits (finding `node-write-owner-transfer-race`).
  */
-export async function memoryOwnerInTx(tx: Prisma.TransactionClient, memoryId: string): Promise<OwnerRef | null> {
+export async function memoryOwnerInTx(tx: Pick<Prisma.TransactionClient, 'memory'>, memoryId: string): Promise<OwnerRef | null> {
   const row = await tx.memory.findUnique({ where: { id: memoryId }, select: { organizationId: true, ownerUserId: true } });
   return ownerRefOf(row);
 }
@@ -41,16 +41,20 @@ export async function memoryOwnerInTx(tx: Prisma.TransactionClient, memoryId: st
  */
 export async function requireNodeHeadroom(
   tx: Prisma.TransactionClient,
-  { memoryId, amount = 1n, caller }: { memoryId: string; amount?: bigint; caller: { userId: string } | null },
+  { memoryId, amount = 1n, caller, alreadyWritten }: {
+    memoryId: string; amount?: bigint; caller: { userId: string } | null;
+    /** See `requireOwnerHeadroom`: only the GitHub sync, which judges its net at the end of its one transaction. */
+    alreadyWritten?: bigint;
+  },
 ): Promise<void> {
   if (amount <= 0n) return;
   const owner = await memoryOwnerInTx(tx, memoryId);
   if (!owner) return;
-  await requireOwnerHeadroom(tx, { owner, key: 'nodes', amount, caller });
+  await requireOwnerHeadroom(tx, { owner, key: 'nodes', amount, caller, alreadyWritten });
 }
 
 /** Two memories have the same owner: a move or merge between them adds nothing to either owner. */
-export async function sameMemoryOwner(tx: Prisma.TransactionClient, a: string, b: string): Promise<boolean> {
+export async function sameMemoryOwner(tx: Pick<Prisma.TransactionClient, 'memory'>, a: string, b: string): Promise<boolean> {
   if (a === b) return true;
   const oa = await memoryOwnerInTx(tx, a);
   const ob = await memoryOwnerInTx(tx, b);

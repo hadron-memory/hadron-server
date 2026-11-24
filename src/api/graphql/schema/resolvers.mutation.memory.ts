@@ -2227,7 +2227,7 @@ export const memoryMutations = {
       });
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory, 'CONTRIBUTOR'));
 
-      const result = await syncGraphFromGithub(memory);
+      const result = await syncGraphFromGithub(memory, { ownerLimitCaller: ownerLimitCaller(ctx) });
       if (result.notAttemptedReason) {
         throw new GraphQLError(syncNotAttemptedMessage(result.notAttemptedReason), {
           extensions: { code: SYNC_NOT_ATTEMPTED, reason: result.notAttemptedReason },
@@ -2236,6 +2236,8 @@ export const memoryMutations = {
       // `fault` is judged on its own: an exception with an empty message must not read as success.
       if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) {
+        // #5015 — the owner-limit refusal in this caller's own form, extensions included (the stored record keeps the no-number form).
+        if (result.ownerLimitError) throw result.ownerLimitError;
         if (result.errorCode) throw new GraphQLError(result.error, { extensions: { code: result.errorCode } });
         // #1789: the text is the stored `Memory.syncError` the caller can already read, so it keeps its text; it needs a code
         // of its own to be a typed refusal rather than a fault.

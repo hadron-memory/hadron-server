@@ -47,9 +47,18 @@ export async function lockOwnerLimitKeys(tx: Prisma.TransactionClient, owner: Ow
  */
 export async function requireOwnerHeadroom(
   tx: Prisma.TransactionClient,
-  { owner, key, amount = 1n, caller }: { owner: OwnerRef; key: OwnerLimitKey; amount?: bigint; caller: { userId: string } | null },
+  { owner, key, amount = 1n, caller, alreadyWritten = 0n }: {
+    owner: OwnerRef; key: OwnerLimitKey; amount?: bigint; caller: { userId: string } | null;
+    /**
+     * #5015: how many of `amount` this transaction has ALREADY written, and so are in the count. Only a door that cannot know
+     * its amount before it writes passes it (the GitHub sync, whose net is known once its loop and cleanup ran): it judges
+     * once, at the end of its one transaction, and a refusal rolls back everything. Never more than `amount`.
+     */
+    alreadyWritten?: bigint;
+  },
 ): Promise<void> {
   if (amount < 0n) throw new Error('requireOwnerHeadroom: amount must not be negative');
+  if (alreadyWritten < 0n || alreadyWritten > amount) throw new Error('requireOwnerHeadroom: alreadyWritten must be between 0 and amount');
   // Adding nothing is never refused, also for an owner already over the limit.
   if (amount === 0n) return;
   if ((await readLimit(tx, owner, key)) === null) return;
@@ -62,7 +71,7 @@ export async function requireOwnerHeadroom(
   const limit = await readLimit(tx, owner, key);
   if (limit === null) return;
   const used = await OWNER_LIMIT_KEYS[key].count(tx, owner);
-  if (used + amount > limit) {
+  if (used - alreadyWritten + amount > limit) {
     throw new OwnerLimitReachedError({ key, owner, limit, callerCanManageOwner: await canManageOwner(tx, owner, caller) });
   }
 }

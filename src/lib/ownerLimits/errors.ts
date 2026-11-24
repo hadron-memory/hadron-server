@@ -2,6 +2,9 @@ import { GraphQLError } from 'graphql';
 import { ownerId, ownerType, type OwnerRef } from '../owner.js';
 import { OWNER_LIMIT_KEYS, type OwnerLimitKey } from './keys.js';
 
+/** The message of the form that names no owner and no number (#5009); also the text a stored record keeps (#5015). */
+export const OWNER_LIMIT_NO_NUMBER_MESSAGE = 'The owner of this memory has reached a limit of their account.';
+
 /**
  * An owner has reached a limit (#5009). Three forms, so a caller learns only what they may:
  * - the limited person, or an OWNER or ADMIN of the limited organization: the owner's id and the limit;
@@ -15,7 +18,7 @@ export class OwnerLimitReachedError extends GraphQLError {
     const noun = OWNER_LIMIT_KEYS[args.key].unitNoun;
     const amount = `${args.limit} ${args.limit === 1n ? noun.one : noun.many}`;
     const message = !args.callerCanManageOwner
-      ? 'The owner of this memory has reached a limit of their account.'
+      ? OWNER_LIMIT_NO_NUMBER_MESSAGE
       : `${type === 'user' ? 'Your account' : 'This organization'} has reached its limit of ${amount}.`;
     super(message, {
       extensions: {

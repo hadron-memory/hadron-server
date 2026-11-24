@@ -471,12 +471,12 @@ async function runMerge(
   // #5015 (gate ruling 4, option b) — a merge across owners is judged for the whole relocation before the first batch,
   // so the usual case refuses with nothing written; each relocate batch judges itself again under its own locks, so a
   // race (a node created in the source, a transfer of either memory) still cannot take the target's owner past its cap.
-  if (relocatingLive > 0n) {
-    await db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM memories WHERE id IN (${sourceMemoryId}, ${targetMemoryId}) ORDER BY id FOR SHARE`;
-      if (await sameMemoryOwner(tx, sourceMemoryId, targetMemoryId)) return;
-      await requireNodeHeadroom(tx, { memoryId: targetMemoryId, amount: relocatingLive, caller: args.ownerLimitCaller });
-    });
+  // Fail-fast like the preflights above: it takes no memory row lock (a merge's batches take those in their own order),
+  // so an owner read here can be stale; the batch's check under its locks is the authoritative one. A merge inside one
+  // owner opens no transaction for it.
+  if (relocatingLive > 0n && !(await sameMemoryOwner(db, sourceMemoryId, targetMemoryId))) {
+    await db.$transaction((tx) =>
+      requireNodeHeadroom(tx, { memoryId: targetMemoryId, amount: relocatingLive, caller: args.ownerLimitCaller }));
   }
 
   // === Phase 1: classify + relocate, in one keyset-paged scan. ===
