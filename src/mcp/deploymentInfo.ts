@@ -238,7 +238,14 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // granted without one fails at run time (its document still validates, because the SDL field types are unchanged).
 // The server-written source types are refused, and a mismatched replay answers one fixed IDEMPOTENCY_CONFLICT sentence
 // instead of naming the stored entry. (0.36.0 is #5066, #1796, merged first.)
-export const HADRON_SERVER_VERSION = '0.37.0';
+//
+// 0.39.0 — SEMANTICS BREAK, Billing A4 (#5011): free credit now expires. `creditBalance` settles the owner's expired
+// grants (one `adjustment` entry each, source pair ('grant-expiry', <grant id>)) before it sums, and never answers a
+// balance holding credit whose expiry has passed, so a balance drops at an expiry with no write by the client. New
+// field `CreditBalance.expiring: [ExpiringCredit!]!` (what is left of each unexpired grant, soonest first) and type
+// `ExpiringCredit`. `grantCredits` refuses an `expiresAt` not later than now with BAD_USER_INPUT (it was accepted).
+// Additive SDL; a lagging client still validates. (0.38.0 is held by #4782; whichever merges second renumbers.)
+export const HADRON_SERVER_VERSION = '0.39.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
