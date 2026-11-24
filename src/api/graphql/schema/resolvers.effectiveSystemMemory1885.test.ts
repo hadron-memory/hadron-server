@@ -254,6 +254,8 @@ describe('an inherited node shows its content and none of the base tenant\'s rec
       'embeddingPendingAt', 'embeddingFailedAt', 'embeddingError', 'embeddingAttempts', 'indexTruncated', 'content', 'tokens',
       'tags', 'properties', 'data', 'seq', 'ownerRepo', 'isRunnable', 'role', 'llmModel', 'aiAgent',
       'createdAt', 'updatedAt',
+      // specLint (#5109) is a pure function of the node's own content, role, tags, loc and name, all shown above: no record or person.
+      'specLint',
     ];
     const unclassified = fields.filter((f) => !CONTENT.includes(f) && !INHERITED_PROJECTION_FIELDS.includes(f));
     expect(unclassified).toEqual([]);
