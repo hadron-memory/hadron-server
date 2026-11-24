@@ -88,6 +88,10 @@ describe('everyone else is refused exactly as today', () => {
     expect(await code(picker(run(owner)))).toBe('FORBIDDEN');
     expect(await code(choices(run(owner)))).toBe('APP_NOT_FOUND');
   });
+  it('a session whose binding was refused is not admitted to the picker as the owner', async () => {
+    const c = { ...ctx(owner), sessionBindingRefused: true } as unknown as Context;
+    expect(await code(picker(c))).toBe('FORBIDDEN');
+  });
   it('a worker-bound request refuses the choices', async () => {
     expect(await code(asWorker(() => choices(ctx(owner))))).toBe('APP_NOT_FOUND');
   });

@@ -2199,7 +2199,7 @@ export async function readAiServiceConfigByUrn(ctx: Context, ref: string) {
  * is scoped to ONE App's chat context, so for a non-admin caller all three of
  * these are required:
  *   1. an `appId` (the picker is meaningless without an installation),
- *   2. membership of that App, and
+ *   2. membership of that App, or (#5076) being the owner of a person's App acting as themself, and
  *   3. the named Agent (if any) must be installed and licensed in that App.
  *
  * All three matter because the walk returns the App's configs AND the named
