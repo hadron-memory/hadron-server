@@ -6,6 +6,9 @@ import { ownerDefaultLimit } from './defaults.js';
 import { OwnerLimitReachedError } from './errors.js';
 import { OWNER_LIMIT_KEYS, type OwnerLimitKey } from './keys.js';
 
+/** The one comparison the write and the `dryRun` preview share: adding `amount` to `used` would pass `limit`. */
+const exceedsLimit = (used: bigint, amount: bigint, limit: bigint): boolean => used + amount > limit;
+
 /** The `owner_limits` predicate of an owner. */
 export const ownerLimitWhere = (owner: OwnerRef) =>
   'organizationId' in owner ? { organizationId: owner.organizationId } : { ownerUserId: owner.userId };
@@ -62,7 +65,7 @@ export async function requireOwnerHeadroom(
   const limit = await readLimit(tx, owner, key);
   if (limit === null) return;
   const used = await OWNER_LIMIT_KEYS[key].count(tx, owner);
-  if (used + amount > limit) {
+  if (exceedsLimit(used, amount, limit)) {
     throw new OwnerLimitReachedError({ key, owner, limit, callerCanManageOwner: await canManageOwner(tx, owner, caller) });
   }
 }
@@ -99,7 +102,7 @@ export async function ownerHeadroomRefusals(
     if (c.amount <= 0n) continue;
     const limit = await readLimit(db, owner, c.key);
     if (limit === null) continue;
-    if ((await OWNER_LIMIT_KEYS[c.key].count(db, owner)) + c.amount > limit) {
+    if (exceedsLimit(await OWNER_LIMIT_KEYS[c.key].count(db, owner), c.amount, limit)) {
       out.push(new OwnerLimitReachedError({ key: c.key, owner, limit, callerCanManageOwner: await canManageOwner(db, owner, caller) }));
     }
   }
@@ -107,7 +110,7 @@ export async function ownerHeadroomRefusals(
 }
 
 /** The caller is the limited person, or a live OWNER or ADMIN of the limited organization. A platform role alone does not count. */
-export async function canManageOwner(
+async function canManageOwner(
   tx: Pick<Prisma.TransactionClient, 'orgMember'>,
   owner: OwnerRef,
   caller: { userId: string } | null,

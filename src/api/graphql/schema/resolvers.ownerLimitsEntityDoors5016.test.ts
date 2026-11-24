@@ -130,6 +130,19 @@ describe('#5016 createApp', () => {
   });
 });
 
+describe('#5016 createApp reuses an existing dependency App', () => {
+  it('asks only for the App itself when every dependency already has an App in the organization', async () => {
+    const parent = await call('createAgent', { orgRef: org.id, name: 'parent2' });
+    const dep = await call('createAgent', { orgRef: org.id, name: 'dep2' });
+    await db.agentOrgGrant.create({ data: { orgId: org.id, agentId: dep.id, activatedAt: new Date() } });
+    await db.agentImport.create({ data: { parentAgentId: parent.id, importedAgentId: dep.id, position: 100, required: true, agentOrgGrantOrgId: org.id, agentOrgGrantAgentId: dep.id } });
+    await call('createApp', { orgRef: org.id, agentRef: dep.id, name: 'dep-app', urn: 'dep-app' });
+    defaults({ organization: { apps: 2 } });
+    await expect(call('createApp', { orgRef: org.id, agentRef: parent.id, name: 'parent-app', urn: 'parent-app' })).resolves.toBeTruthy();
+    expect(await db.app.count({ where: { organizationId: org.id, deletedAt: null } })).toBe(2);
+  });
+});
+
 describe('#5016 cloneMemory and cloneAgent', () => {
   it('cloneMemory into an organization at memories: 1 is refused and writes no memory', async () => {
     const src = await orgMemory();
