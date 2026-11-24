@@ -19,6 +19,7 @@ import {
   debitCredits,
   getAiModelPrice,
   grantCredits,
+  type GrantCreditsParams,
   IdempotencyConflictError,
   InvalidLedgerAmountError,
   recordLlmUsage,
@@ -248,7 +249,12 @@ describe('recordLlmUsage', () => {
 
 describe('credit ledger primitives', () => {
   it('grants are positive, debits negated, balance is the running sum', async () => {
-    await grantCredits(db, { organizationId: orgId, amountMicroCents: 500_000n });
+    await grantCredits(db, {
+      organizationId: orgId,
+      amountMicroCents: 500_000n,
+      sourceType: 'stripe-checkout',
+      sourceId: 'cs_sum',
+    });
     await debitCredits(db, { organizationId: orgId, amountMicroCents: 125_000n });
     expect(await creditBalance(db, orgId)).toBe(375_000n);
     const kinds = (await db.creditLedgerEntry.findMany({ orderBy: { createdAt: 'asc' } })).map(
@@ -286,9 +292,15 @@ describe('credit ledger primitives', () => {
     expect(await creditBalance(db, orgId)).toBe(4_000_000_000n);
   });
 
-  it('source-less grants are never deduped against each other', async () => {
-    await grantCredits(db, { organizationId: orgId, amountMicroCents: 100n });
-    await grantCredits(db, { organizationId: orgId, amountMicroCents: 100n });
+  // #5007 (hrn:node:hadronmemory.com:specs:cor:dmo:170:03, every entry names
+  // its source): a source-less grant, which used to be written and never
+  // deduped, is now refused; grants with distinct sources are never deduped.
+  it('a grant without a source is refused; distinct sources are never deduped', async () => {
+    await expect(
+      grantCredits(db, { organizationId: orgId, amountMicroCents: 100n } as GrantCreditsParams),
+    ).rejects.toBeInstanceOf(InvalidLedgerAmountError);
+    await grantCredits(db, { organizationId: orgId, amountMicroCents: 100n, sourceType: 'manual', sourceId: 'a' });
+    await grantCredits(db, { organizationId: orgId, amountMicroCents: 100n, sourceType: 'manual', sourceId: 'b' });
     expect(await db.creditLedgerEntry.count()).toBe(2);
   });
 
@@ -330,20 +342,25 @@ describe('credit ledger primitives', () => {
         organizationId: orgId,
         amountMicroCents: 100n,
         sourceType: 'stripe-checkout',
-      }),
+      } as GrantCreditsParams),
     ).rejects.toBeInstanceOf(InvalidLedgerAmountError);
     await expect(
       grantCredits(db, {
         organizationId: orgId,
         amountMicroCents: 100n,
         sourceId: 'cs_orphan',
-      }),
+      } as GrantCreditsParams),
     ).rejects.toBeInstanceOf(InvalidLedgerAmountError);
   });
 
   it('rejects non-positive amounts', async () => {
     await expect(
-      grantCredits(db, { organizationId: orgId, amountMicroCents: 0n }),
+      grantCredits(db, {
+        organizationId: orgId,
+        amountMicroCents: 0n,
+        sourceType: 'stripe-checkout',
+        sourceId: 'cs_zero',
+      }),
     ).rejects.toBeInstanceOf(InvalidLedgerAmountError);
     await expect(
       debitCredits(db, { organizationId: orgId, amountMicroCents: -5n }),
