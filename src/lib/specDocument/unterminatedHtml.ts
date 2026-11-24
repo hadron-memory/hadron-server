@@ -33,8 +33,9 @@
  * sample shows). A four-space continuation of a list item is read as indented code, so an unterminated construct in one is
  * left as written. Line breaks are read as `\n`, as the rest of the renderer reads them.
  *
- * Cost: one linear scan per escape. Each escape restarts the scan just after the `<` it escaped (a construct that was open
- * may have hidden a second one), at most {@link MAX_RESTARTS} times; a text that needs more has every remaining `<` escaped.
+ * Cost: one linear scan per escape, each from the start of the escaped text (an open construct may hide another, and an open
+ * `<template>` stays open after a later construct is escaped), at most {@link MAX_RESTARTS} times; a text that needs more has
+ * every `<` in it escaped (a body that hides more than that many constructs behind one another is not an authoring case).
  */
 import { stepFence, type OpenFence } from './fences.js';
 
@@ -234,21 +235,19 @@ function firstUnterminated(text: string, from: number): number {
   return open.length === 0 ? -1 : Math.min(...open);
 }
 
-/** `text` with the opening `<` of every unterminated raw-HTML construct written as `&lt;`; the same string when there is none. */
+/**
+ * `text` with the opening `<` of every unterminated raw-HTML construct written as `&lt;`; the same string when there is none.
+ * Each escape rescans the whole escaped text from the start: a construct that was open may have hidden another, and a `<template>`
+ * opened before the construct just escaped is still open after it, so no scan state is carried over. The result is a fixed point.
+ */
 export function escapeUnterminatedHtml(text: string): string {
   if (!text.includes('<')) return text;
-  let out = '';
-  let copied = 0;
-  let from = 0;
+  let cur = text;
   for (let k = 0; ; k += 1) {
-    const at = firstUnterminated(text, from);
-    if (at === -1) return copied === 0 ? text : out + text.slice(copied);
-    if (k === MAX_RESTARTS) {
-      // A text that keeps hiding another construct behind the one just escaped: close the question for all that is left.
-      return `${out}${text.slice(copied, at)}${text.slice(at).replace(/</g, '&lt;')}`;
-    }
-    out += `${text.slice(copied, at)}&lt;`;
-    copied = at + 1;
-    from = at + 1;
+    const at = firstUnterminated(cur, 0);
+    if (at === -1) return cur;
+    // A text that keeps hiding another construct behind the one just escaped: close the question for every `<` it holds.
+    if (k === MAX_RESTARTS) return cur.replace(/</g, '&lt;');
+    cur = `${cur.slice(0, at)}&lt;${cur.slice(at + 1)}`;
   }
 }
