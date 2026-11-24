@@ -95,12 +95,12 @@ describe('#3587 P8 — concealment for a readable, non-ADMIN caller', () => {
   });
 });
 
-describe('#3587 P2s — a retirement that commits after the auto-save and before the check (leaf, seam-driven)', () => {
-  // ORDERING proof inside the restore, not endpoint proof: the pause is a test-only seam in restoreRevision between the
+describe('#3587 P2s — a retirement that lands after the auto-save and before the check (leaf, seam-driven)', () => {
+  // Proofs inside the restore, not endpoint proofs: the pause is a test-only seam in restoreRevision between the
   // auto-save write and the row-locked check. The endpoint races are P2b and P3b in resolvers.restoreUnretire3587.test.ts.
   afterEach(() => { setRestorePauseBeforeRetirementCheckForTests(null); });
 
-  it('the restore paused there sees the committed retirement under its row lock and refuses, leaving no auto-save', async () => {
+  it('ordering: a retirement COMMITTED in that window is seen (the check reads after the auto-save), and the restore refuses with no auto-save', async () => {
     const spec = await mk('specs:l', mintedFields); // a leaf: no snapshot loc lies under it, so A never holds key(specs:l)
     await mk('notes:other');
     const rev = await save();
@@ -122,6 +122,49 @@ describe('#3587 P2s — a retirement that commits after the auto-save and before
     expect(e?.extensions?.locs).toEqual(['specs:l']);
     expect(await revCount()).toBe(revs);
     expect((await rowOf('specs:l')).tags).toEqual(['superseded']);
+  }, 30_000);
+
+  it('row lock: a retirement HELD OPEN in that window makes the check wait for it, then refuse (a non-locking read would see the old tags and restore)', async () => {
+    const spec = await mk('specs:w', mintedFields);
+    await mk('notes:other');
+    const rev = await save();
+    const revs = await revCount();
+    let reached!: () => void;
+    const atPause = new Promise<void>((r) => { reached = r; });
+    let resumeA!: () => void;
+    const resume = new Promise<void>((r) => { resumeA = r; });
+    setRestorePauseBeforeRetirementCheckForTests(async () => { reached(); await resume; });
+    const a = restore(rev).then(() => null, (e: any) => e);
+    let releaseB!: () => void;
+    const hold = new Promise<void>((r) => { releaseB = r; });
+    let bPid = 0;
+    let b: Promise<unknown> = Promise.resolve();
+    try {
+      await atPause;
+      // B: the retirement's row write, held open on a second connection (an UPDATE takes the row's NO KEY UPDATE lock).
+      b = db.$transaction(async (tx) => {
+        bPid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid;
+        await tx.$executeRaw`UPDATE nodes SET tags = ARRAY['superseded']::text[] WHERE id = ${spec.id}`;
+        await hold;
+      }, { timeout: 20_000 });
+      await waitFor(async () => bPid > 0 && (await db.$queryRaw<Array<{ n: bigint }>>`
+        SELECT count(*) AS n FROM pg_locks WHERE pid = ${bPid}::int AND locktype = 'transactionid' AND granted`)[0].n > 0n, 'B to hold its update');
+      resumeA();
+      // A waits on B. Without the check's row lock A would still wait, at a later locked write, but its check would
+      // already have read the old tags and the restore would succeed: the refusal below is what pins the lock.
+      await waitFor(async () => (await db.$queryRaw<Array<{ n: bigint }>>`
+        SELECT count(*) AS n FROM pg_stat_activity WHERE ${bPid}::int = ANY(pg_blocking_pids(pid)) AND query ILIKE '%FOR NO KEY UPDATE%'`)[0].n > 0n,
+        'the retirement check to wait on B');
+    } finally {
+      resumeA();
+      releaseB();
+      await b;
+    }
+    const e = await a;
+    expect(e?.extensions?.code).toBe('RESTORE_WOULD_UNRETIRE_SPEC');
+    expect(e?.extensions?.locs).toEqual(['specs:w']);
+    expect(await revCount()).toBe(revs);
+    expect((await rowOf('specs:w')).tags).toEqual(['superseded']);
   }, 30_000);
 });
 
@@ -192,9 +235,7 @@ describe('#3587 D5 — a competing `revisions` insert that takes no `revisions` 
     const revs = await revCount();
     const { b, release, waitsOnB } = await competingParentInsert();
     const a = restore(rev).then(() => null, (e: any) => e);
-    await waitsOnB();
-    release();
-    await b;
+    try { await waitsOnB(); } finally { release(); await b; }
     const e = await a;
     expect(e ? `${e.code ?? ''} ${e.message}` : null).toBeNull();
     expect(await revCount()).toBe(revs + 1);
@@ -207,9 +248,7 @@ describe('#3587 D5 — a competing `revisions` insert that takes no `revisions` 
     const revs = await revCount();
     const { b, release, waitsOnB } = await competingParentInsert();
     const a = M.createRevision({}, { agentRef: agentId }, ctx).then(() => null, (e: any) => e);
-    await waitsOnB();
-    release();
-    await b;
+    try { await waitsOnB(); } finally { release(); await b; }
     const e = await a;
     expect(e ? `${e.code ?? ''} ${e.message}` : null).toBeNull();
     expect(await revCount()).toBe(revs + 1);

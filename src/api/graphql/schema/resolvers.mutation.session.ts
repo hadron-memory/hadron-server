@@ -572,12 +572,14 @@ export async function writeSessionHandoff(
 const STANDALONE_REVISION_TX_TIMEOUT_MS = 35_000;
 
 /**
- * Test seam (#3587 P2s): awaited inside `restoreRevision`'s transaction between the auto-save write and the
- * retirement check, so a test can commit a retirement in that window and pin that the check reads under its own row
- * lock. Ordering proof only; null (the default) skips it.
+ * Test seam (#3587 gate item P2s, "a retirement between the auto-save and the check"): awaited inside
+ * `restoreRevision`'s transaction between the auto-save write and the retirement check, so a test can land a
+ * retirement in that window: committed (the check reads after the auto-save, not a stale earlier read) or held open
+ * (the check waits on the retirement's row lock). Null (the default) skips it; setting it outside NODE_ENV=test throws.
  */
 let restorePauseBeforeRetirementCheck: (() => Promise<void>) | null = null;
 export function setRestorePauseBeforeRetirementCheckForTests(fn: (() => Promise<void>) | null): void {
+  if (fn && process.env.NODE_ENV !== 'test') throw new Error('restore pause seam is test-only');
   restorePauseBeforeRetirementCheck = fn;
 }
 
