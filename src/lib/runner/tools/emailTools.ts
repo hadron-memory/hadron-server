@@ -23,6 +23,7 @@ import {
   consumeActionTicket,
   consumeQuota,
   defaultQuotaLimit,
+  type QuotaScopeKind,
 } from '../../../jobs/appRuns.js';
 import { isResendToolConfigured, maskEmailAddress, sendResendEmail } from '../../resendToolClient.js';
 import { decryptResendCredentials, isPlatformResendAllowed } from '../../resendSenders.js';

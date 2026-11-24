@@ -36,6 +36,7 @@ import {
   consumeQuota,
   consumeActionTicket,
   defaultQuotaLimit,
+  type QuotaScopeKind,
 } from '../../../jobs/appRuns.js';
 import { isSmsConfigured, sendSms } from '../../smsClient.js';
 import type { RunToolDef } from './types.js';

@@ -54,7 +54,7 @@ describe('the person-owned App door (appRef alone)', () => {
     const user = r.filter((x: { scopeKind: string }) => x.scopeKind === 'user');
     expect(user).toHaveLength(4);
     expect(user.every((x: { scopeId: string }) => x.scopeId === owner.id)).toBe(true);
-    expect(user.find((x: { action: string }) => x.action === 'run.execute').limit).toBe(1000);
+    expect(user.find((x: { action: string }) => x.action === 'run.execute')?.limit).toBe(1000);
     const s = await set(ctxOf(owner), { appRef: personApp.id, action: 'run.execute', limit: 5 });
     expect(s).toMatchObject({ scopeKind: 'app', scopeId: personApp.id, limit: 5 });
   });
