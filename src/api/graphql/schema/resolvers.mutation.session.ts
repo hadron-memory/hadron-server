@@ -573,6 +573,18 @@ export async function writeSessionHandoff(
 // own transaction (the auto-save then rolls back with a refused or failed restore).
 const STANDALONE_REVISION_TX_TIMEOUT_MS = 35_000;
 
+/**
+ * Test seam (#3587 gate item P2s, "a retirement between the auto-save and the check"): awaited inside
+ * `restoreRevision`'s transaction between the auto-save write and the retirement check, so a test can land a
+ * retirement in that window: committed (the check reads after the auto-save, not a stale earlier read) or held open
+ * (the check waits on the retirement's row lock). Null (the default) skips it; setting it outside NODE_ENV=test throws.
+ */
+let restorePauseBeforeRetirementCheck: (() => Promise<void>) | null = null;
+export function setRestorePauseBeforeRetirementCheckForTests(fn: (() => Promise<void>) | null): void {
+  if (fn && process.env.NODE_ENV !== 'test') throw new Error('restore pause seam is test-only');
+  restorePauseBeforeRetirementCheck = fn;
+}
+
 type RevisionSnapshotRead = {
   nodes: Array<Record<string, unknown>>;
   edges: Array<Record<string, unknown>>;
@@ -2683,6 +2695,7 @@ export const sessionMutations = {
           await writeRevisionRow(
             tx, sysMemId, await readRevisionSnapshot(tx, sysMemId), `Auto-save before restoring ${revisionLoc}`, ctx.userId ?? null,
           );
+          if (restorePauseBeforeRetirementCheck) await restorePauseBeforeRetirementCheck();
           // #3587 (ruling 0220): the authoritative check, under the row locks and before the soft-delete.
           await assertRestoreKeepsRetirement(tx, {
             memoryId: sysMemId, revisionLoc, snapshotNodes: snapshot.nodes, isEncrypted: sysMem?.isEncrypted ?? false,
