@@ -213,7 +213,12 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `nodeRevision(revisionId)`, `restoreNodeRevision(revisionId)`, `updateNodeRevision(revisionId)` and the
 // delete-revision mutation (`revisionId` → `nodeRevRef: String!`, a revision URN or id). A lagging client's old name is an UNKNOWN
 // argument and GraphQL refuses the whole operation.
-export const HADRON_SERVER_VERSION = '0.33.0';
+//
+// 0.34.0 — BREAKING, entity refs (#4368): `setAgentAssetUploadEnabled(input.agentUrn)` → `input.agentRef`, no alias.
+// A lagging client's old name is an UNKNOWN input field and GraphQL refuses the whole operation. The gate, the
+// refusals and what the field accepts (an id or a URN) are unchanged. `beginAssetUpload` and `agentAssets`, the
+// deprecated v1 calls, keep `agentUrn` until they are retired.
+export const HADRON_SERVER_VERSION = '0.34.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

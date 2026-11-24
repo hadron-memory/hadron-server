@@ -22,7 +22,7 @@ async function toggle(userId: string, agentUrn: string, enabled = true): Promise
   const res = await graphql.executeOperation(
     {
       query: 'mutation($i: SetAgentAssetUploadEnabledInput!) { setAgentAssetUploadEnabled(input: $i) { id } }',
-      variables: { i: { agentUrn, enabled } },
+      variables: { i: { agentRef: agentUrn, enabled } },
     },
     { contextValue: { db, userId, roles: ['READER'] } as Context },
   );
