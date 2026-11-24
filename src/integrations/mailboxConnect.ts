@@ -11,6 +11,7 @@
  * (authorize URL, redirect URI) and the emailClient dispatch key — the
  * provider tool holds the client secret and does the code exchange.
  */
+import type { Role } from '../generated/prisma/index.js';
 import crypto from 'crypto';
 import { buildAuthRateAdmission } from '../auth/authRate.js';
 import express, { type Express, type Response } from 'express';
@@ -196,7 +197,7 @@ export async function issueConnectStart(
   cfg: MailboxConnectConfig,
   args: {
     userId: string;
-    roles: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] | undefined;
+    roles: Role[] | undefined;
     orgId: string;
     redirect: string;
     origin: ExchangeStartOrigin;
@@ -353,7 +354,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       return;
     }
     let userId: string;
-    let roles: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] | undefined;
+    let roles: Role[] | undefined;
     try {
       const payload = await verifyAuthenticatedJwt(authHeader.slice(7), db);
       // Admin impersonation: read-only sessions cannot start a mailbox
@@ -445,7 +446,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     if (!initiator || !org) return null;
     try {
       await requireOrgRole(
-        { db, userId: started.userId, roles: initiator.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] },
+        { db, userId: started.userId, roles: initiator.roles },
         started.orgId,
         'ADMIN',
       );
@@ -619,7 +620,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         {
           db,
           userId: pending.userId,
-          roles: initiator?.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] | undefined,
+          roles: initiator?.roles,
         },
         pending.orgId,
         'ADMIN',

@@ -18,6 +18,7 @@ import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { stageRequestMemoryKeys } from '../../../lib/memoryUnlock.js';
 import { requestKeyStorage } from '../../../lib/requestKeys.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -81,7 +82,7 @@ afterEach(() => sessionKeyCache.clear());
 
 describe('encryptMemory — passphrase path (spec 041)', () => {
   it('owner encrypts with a passphrase: rows become ciphertext (incl. abstract), verifier+salt stored', async () => {
-    const mem = await resolvers.Mutation.encryptMemory(
+    const mem = await encryptWithSecret(
       {},
       { memoryRef: memoryId, passphrase: 'correct horse battery staple' },
       ownerCtx(),
@@ -103,11 +104,11 @@ describe('encryptMemory — passphrase path (spec 041)', () => {
     // exact user-facing boundary: personal does NOT encrypt, private does.
     await db.memory.update({ where: { id: memoryId }, data: { class: 'personal' } });
     await expect(
-      resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, passphrase: 'pw' }, ownerCtx()),
+      encryptWithSecret({}, { memoryRef: memoryId, passphrase: 'pw' }, ownerCtx()),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     await db.memory.update({ where: { id: memoryId }, data: { class: 'private' } });
     await expect(
-      resolvers.Mutation.encryptMemory(
+      encryptWithSecret(
         {},
         { memoryRef: memoryId, passphrase: 'pw' },
         { db, roles: ['READER'], userId: stranger.id } as Context,
@@ -119,10 +120,10 @@ describe('encryptMemory — passphrase path (spec 041)', () => {
 
   it('rejects both-or-neither key inputs', async () => {
     await expect(
-      resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId }, ownerCtx()),
+      encryptWithSecret({}, { memoryRef: memoryId }, ownerCtx()),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     await expect(
-      resolvers.Mutation.encryptMemory(
+      encryptWithSecret(
         {},
         { memoryRef: memoryId, passphrase: 'pw', dataKey: Buffer.alloc(32).toString('base64') },
         ownerCtx(),
@@ -131,7 +132,7 @@ describe('encryptMemory — passphrase path (spec 041)', () => {
   });
 
   it('full loop: passphrase unlock via header staging decrypts what encryptMemory wrote', async () => {
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, passphrase: 'open sesame' }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, passphrase: 'open sesame' }, ownerCtx());
     await requestKeyStorage.run(new Map(), async () => {
       // Wrong passphrase → typed WRONG_KEY at staging time.
       await expect(
@@ -164,7 +165,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     let pending: ReturnType<typeof resolvers.Mutation.encryptMemory> | undefined;
     await db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
-      pending = resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+      pending = encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
       await waitForLockWaiters(db);
       await tx.memory.update({ where: { id: memoryId }, data: {
         organizationId: destination.id, userId: null, class: 'knowledge',
@@ -179,7 +180,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
   });
 
   it('converts old plaintext history in a memory encrypted before this fix', async () => {
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     const before = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
     const old = await db.nodeRevision.create({
       data: {
@@ -188,16 +189,16 @@ describe('encryptMemory — locked conversion (#1346)', () => {
         data: { secret: 'old stored data' }, nodeType: 'info',
       },
     });
-    expect(await resolvers.Query.nodeRevision({}, { revisionId: old.id }, ownerCtx()))
+    expect(await resolvers.Query.nodeRevision({}, { nodeRevRef: old.id }, ownerCtx()))
       .toMatchObject({ content: null, abstract: null, data: null });
     const wrongKey = Buffer.alloc(32, 8).toString('base64');
-    await expect(resolvers.Mutation.encryptMemory(
+    await expect(encryptWithSecret(
       {}, { memoryRef: memoryId, dataKey: wrongKey }, ownerCtx(),
     )).rejects.toMatchObject({ extensions: { code: 'WRONG_KEY', memoryId } });
     expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: old.id } })).content)
       .toBe('old stored secret');
 
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     const stored = await db.nodeRevision.findUniqueOrThrow({ where: { id: old.id } });
     expect(isCiphertext(stored.content)).toBe(true);
     expect(isCiphertext(stored.abstract)).toBe(true);
@@ -206,7 +207,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       content: 'old stored secret', abstract: 'old stored abstract',
       data: { secret: 'old stored data' },
     });
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     const repeated = await db.nodeRevision.findUniqueOrThrow({ where: { id: old.id } });
     expect([repeated.content, repeated.abstract, repeated.data])
       .toEqual([stored.content, stored.abstract, stored.data]);
@@ -232,7 +233,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       return rows;
     }) as typeof db.nodeRevision.findMany);
     try {
-      await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+      await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     } finally {
       scan.mockRestore();
     }
@@ -262,7 +263,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
         {}, { input: { id: nodeId, content: 'late plaintext update' } } as never, ownerCtx(),
       );
       await atOldFlag;
-      await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+      await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
       release();
       await expect(writer).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
     } finally {
@@ -277,14 +278,14 @@ describe('encryptMemory — locked conversion (#1346)', () => {
 
   it('derives the stored passphrase key but refuses verifier-less legacy completion', async () => {
     const passphrase = 'existing encryption passphrase';
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, passphrase }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, passphrase }, ownerCtx());
     const prior = await db.nodeRevision.create({
       data: {
         id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'Entry 1',
         content: 'old passphrase secret',
       },
     });
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, passphrase }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, passphrase }, ownerCtx());
     expect(isCiphertext((await db.nodeRevision.findUniqueOrThrow({ where: { id: prior.id } })).content))
       .toBe(true);
 
@@ -295,10 +296,10 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       },
     });
     await db.memory.update({ where: { id: memoryId }, data: { keyVerifier: null } });
-    await expect(resolvers.Mutation.encryptMemory(
+    await expect(encryptWithSecret(
       {}, { memoryRef: memoryId, passphrase: 'wrong passphrase' }, ownerCtx(),
     )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId } });
-    await expect(resolvers.Mutation.encryptMemory(
+    await expect(encryptWithSecret(
       {}, { memoryRef: memoryId, passphrase }, ownerCtx(),
     )).rejects.toMatchObject({ extensions: { code: 'BAD_UNLOCK_INPUT', memoryId } });
     expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: noVerifier.id } })).content)
@@ -334,7 +335,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       }),
     ]);
 
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
 
     for (const [revision, content, abstract, data] of [
       [historical[0]!, 'prior content', 'prior abstract', { secret: 'prior' }],
@@ -361,15 +362,15 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       expect(unlocked.find((revision) => revision.id === historical[0]!.id)).toMatchObject({
         content: 'prior content', abstract: 'prior abstract', data: { secret: 'prior' },
       });
-      expect(await resolvers.Query.nodeRevision({}, { revisionId: historical[0]!.id }, ownerCtx()))
+      expect(await resolvers.Query.nodeRevision({}, { nodeRevRef: historical[0]!.id }, ownerCtx()))
         .toMatchObject({ content: 'prior content', abstract: 'prior abstract' });
       expect(await resolvers.Mutation.updateNodeRevision(
-        {}, { revisionId: historical[0]!.id, revLabel: 'readable' }, ownerCtx(),
+        {}, { nodeRevRef: historical[0]!.id, revLabel: 'readable' }, ownerCtx(),
       )).toMatchObject({ content: 'prior content', abstract: 'prior abstract' });
     });
     await requestKeyStorage.run(new Map([[memoryId, parseDataKey(dataKey)]]), async () => {
       await resolvers.Mutation.restoreNodeRevision(
-        {}, { revisionId: historical[0]!.id }, ownerCtx(),
+        {}, { nodeRevRef: historical[0]!.id }, ownerCtx(),
       );
     });
     const restored = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
@@ -386,17 +387,17 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       data: { id: generateId(), nodeId, memoryId, loc: 'entry-1', name: 'Entry 1', content, abstract, data },
     });
     const dataKey = Buffer.alloc(32, 37).toString('base64');
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
 
     const live = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     const stored = await db.nodeRevision.findUniqueOrThrow({ where: { id: prior.id } });
     const key = parseDataKey(dataKey);
     expect(decryptNodeFieldsWithKey({ ...live }, key)).toMatchObject({ content, abstract, data });
     expect(decryptNodeFieldsWithKey({ ...stored }, key)).toMatchObject({ content, abstract, data });
-    const locked = await resolvers.Query.nodeRevision({}, { revisionId: prior.id }, ownerCtx());
+    const locked = await resolvers.Query.nodeRevision({}, { nodeRevRef: prior.id }, ownerCtx());
     expect(locked).toMatchObject({ content: null, abstract: null, data: null });
     await requestKeyStorage.run(new Map([[memoryId, key]]), async () => {
-      const unlocked = await resolvers.Query.nodeRevision({}, { revisionId: prior.id }, ownerCtx());
+      const unlocked = await resolvers.Query.nodeRevision({}, { nodeRevRef: prior.id }, ownerCtx());
       expect(unlocked).toMatchObject({ content, abstract, data });
     });
   });
@@ -417,11 +418,11 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       },
     });
     await requestKeyStorage.run(new Map([[memoryId, wrongKey]]), async () => {
-      await expect(resolvers.Query.nodeRevision({}, { revisionId: revision.id }, ownerCtx()))
+      await expect(resolvers.Query.nodeRevision({}, { nodeRevRef: revision.id }, ownerCtx()))
         .rejects.toThrow();
     });
     await requestKeyStorage.run(new Map([[memoryId, key]]), async () => {
-      expect(await resolvers.Query.nodeRevision({}, { revisionId: revision.id }, ownerCtx()))
+      expect(await resolvers.Query.nodeRevision({}, { nodeRevRef: revision.id }, ownerCtx()))
         .toMatchObject({ content: 'history secret', abstract: 'history abstract', data: { secret: true } });
     });
   });
@@ -448,7 +449,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     }));
     await db.nodeRevision.createMany({ data: history });
 
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
 
     const rows = await db.nodeRevision.findMany({ where: { id: { in: history.map((r) => r.id) } } });
     expect(rows).toHaveLength(snapshotCount);
@@ -483,7 +484,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       return rows;
     }) as never);
     try {
-      await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+      await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     } finally {
       scan.mockRestore();
     }
@@ -524,7 +525,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       return rows;
     }) as never);
     try {
-      await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+      await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     } finally {
       scan.mockRestore();
     }
@@ -550,14 +551,14 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       },
     });
     await db.node.update({ where: { id: nodeId }, data: { memoryId: destination.id } });
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     const encryptedHistory = await db.nodeRevision.findUniqueOrThrow({ where: { id: prior.id } });
     expect(isCiphertext(encryptedHistory.content)).toBe(true);
 
     await requestKeyStorage.run(new Map([[memoryId, parseDataKey(dataKey)]]), async () => {
-      expect(await resolvers.Query.nodeRevision({}, { revisionId: prior.id }, ownerCtx()))
+      expect(await resolvers.Query.nodeRevision({}, { nodeRevRef: prior.id }, ownerCtx()))
         .toMatchObject({ content: 'source historical secret' });
-      await resolvers.Mutation.restoreNodeRevision({}, { revisionId: prior.id }, ownerCtx());
+      await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: prior.id }, ownerCtx());
     });
     const restored = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     expect([restored.content, restored.abstract, restored.data]).toEqual([
@@ -581,22 +582,22 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       },
     });
     await db.node.update({ where: { id: nodeId }, data: { memoryId: destination.id } });
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: destination.id, dataKey: destinationKey }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: destination.id, dataKey: destinationKey }, ownerCtx());
 
     await expect(resolvers.Mutation.restoreNodeRevision(
-      {}, { revisionId: prior.id }, ownerCtx(),
+      {}, { nodeRevRef: prior.id }, ownerCtx(),
     )).rejects.toMatchObject({ extensions: { code: 'SESSION_EXPIRED', memoryId } });
     await requestKeyStorage.run(new Map([[memoryId, parseDataKey(dataKey)]]), async () => {
       await expect(resolvers.Mutation.restoreNodeRevision(
-        {}, { revisionId: prior.id }, ownerCtx(),
+        {}, { nodeRevRef: prior.id }, ownerCtx(),
       )).rejects.toMatchObject({ extensions: { code: 'SESSION_EXPIRED', memoryId: destination.id } });
     });
     await requestKeyStorage.run(new Map([
       [memoryId, parseDataKey(dataKey)],
       [destination.id, parseDataKey(destinationKey)],
     ]), async () => {
-      const response = await resolvers.Mutation.restoreNodeRevision({}, { revisionId: prior.id }, ownerCtx());
+      const response = await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: prior.id }, ownerCtx());
       expect(response).toMatchObject({
         content: 'source snapshot secret', abstract: 'source snapshot abstract',
         data: { secret: 'source snapshot data' },
@@ -620,9 +621,9 @@ describe('encryptMemory — locked conversion (#1346)', () => {
         data: { mood: 'good' }, nodeType: 'info',
       },
     });
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     await requestKeyStorage.run(new Map([[memoryId, parseDataKey(dataKey)]]), async () => {
-      await resolvers.Mutation.restoreNodeRevision({}, { revisionId: prior.id }, ownerCtx());
+      await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: prior.id }, ownerCtx());
     });
     const beforeRestore = await db.nodeRevision.findFirstOrThrow({
       where: { nodeId, id: { not: prior.id } }, orderBy: { createdAt: 'desc' },
@@ -648,7 +649,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     await db.node.update({ where: { id: nodeId }, data: { memoryId: destination.id } });
 
     await expect(resolvers.Mutation.restoreNodeRevision(
-      {}, { revisionId: prior.id },
+      {}, { nodeRevRef: prior.id },
       { db, roles: ['READER'], userId: stranger.id } as Context,
     )).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
     expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content)
@@ -673,7 +674,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       return rows;
     }) as never);
     try {
-      await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+      await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     } finally {
       scan.mockRestore();
     }
@@ -692,7 +693,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
   });
 
   it('keeps a clean conversion at revision 1 without a fabricated reconcile', async () => {
-    await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+    await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     const live = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     expect(decryptNodeFieldsWithKey(live, parseDataKey(dataKey)).content).toBe('my secret plaintext');
     expect(live.revSeq).toBe(1);
@@ -717,7 +718,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       return rows;
     }) as never);
     try {
-      await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+      await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     } finally {
       scan.mockRestore();
     }
@@ -760,7 +761,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
       return rows;
     }) as never);
     try {
-      await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+      await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
     } finally {
       scan.mockRestore();
     }
@@ -800,8 +801,8 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     let results: PromiseSettledResult<unknown>[];
     try {
       results = await Promise.allSettled([
-        resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx()),
-        resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey: otherKey }, ownerCtx()),
+        encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx()),
+        encryptWithSecret({}, { memoryRef: memoryId, dataKey: otherKey }, ownerCtx()),
       ]);
     } finally {
       read.mockRestore();

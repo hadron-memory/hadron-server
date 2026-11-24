@@ -54,6 +54,7 @@ import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { foreignIdentityScopedMemoryFilter } from '../../../lib/auth/memoryOwnership.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
+import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
   formatCanonicalUrn,
@@ -93,6 +94,7 @@ import {
   Prisma,
   type Agent,
   type PrismaClient,
+  type Role,
 } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
@@ -167,7 +169,7 @@ export interface Context {
   sessionId?: string;      // Session.id — set when operating inside an active session
   /** #1705 — a named X-Hadron-Session failed validation (see AuthContext.sessionBindingRefused). */
   sessionBindingRefused?: boolean;
-  roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
+  roles?: Role[];          // #5012: the generated enum (BILLING included); thresholds stay four-valued
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)
   signInId?: string;       // #1897: the factor-protected sign-in this credential descends from (JWT sid or key root)
@@ -1502,6 +1504,22 @@ export function isPlatformAdmin(ctx: Context): boolean {
 }
 
 /**
+ * May this caller write the credit ledger (`grantCredits`, `adjustCredits`)? A platform ADMIN or OWNER, or a user
+ * holding the BILLING platform role (#5012, Billing A5; hrn:node:hadronmemory.com:specs:cor:api:010:01, Proposed
+ * line). BILLING admits these two writes and nothing else: it is not in `ROLE_ORDER` (so it fails every
+ * `requireRole` / `requireOrgRole` threshold) and `isPlatformAdmin` does not name it.
+ *
+ * The BILLING branch needs an ordinary user principal: never an impersonated session (whose roles are the target's,
+ * and are `[]` by construction anyway) and never an App key (which carries no platform roles). Use it on those two
+ * mutations only; every other admin surface keeps `isPlatformAdmin`.
+ */
+export function mayWriteLedger(ctx: Context): boolean {
+  if (isPlatformAdmin(ctx)) return true;
+  if (!ctx.userId || ctx.impersonation || ctx.appId || ctx.appKeyId) return false;
+  return ctx.roles?.includes('BILLING') === true;
+}
+
+/**
  * Owner-or-org access gate for an entity that may be **user-owned** or
  * **org-owned** (spec 047: App / Agent / Memory carry
  * `organizationId`-XOR-`ownerUserId`). The keystone gate that replaces bare
@@ -2198,7 +2216,7 @@ export async function readAiServiceConfigByUrn(ctx: Context, ref: string) {
  * is scoped to ONE App's chat context, so for a non-admin caller all three of
  * these are required:
  *   1. an `appId` (the picker is meaningless without an installation),
- *   2. membership of that App, and
+ *   2. membership of that App, or (#5076) being the owner of a person's App acting as themself, and
  *   3. the named Agent (if any) must be installed and licensed in that App.
  *
  * All three matter because the walk returns the App's configs AND the named
@@ -2221,7 +2239,14 @@ export async function requireAiConfigPickerAccess(
   const member = await ctx.db.appMember.findUnique({
     where: { appId_userId: { appId, userId: ctx.userId } },
   });
-  if (!member) throw authorizationDenied();
+  if (!member) {
+    // #5076 (cor:dmo:050:10, cor:acl:010:01): the owner of a person's App is a participant even with no member row (the
+    // owner is added as a member only when the Agent offers an `owner` role). Narrow on purpose: the owner acting as
+    // themself, not an organization CONTRIBUTOR (`isAppParticipant`), an App key, an impersonated session or a run.
+    // `ownerUserId === null` (an organization App) never compares two nulls: `isStrictOwner` needs a non-empty userId.
+    const app = await ctx.db.app.findUnique({ where: { id: appId }, select: { ownerUserId: true } });
+    if (!app || isRefusedPrincipal(ctx) || !isStrictOwner(ctx, app.ownerUserId)) throw authorizationDenied();
+  }
   // The named Agent must be installed in this App, or the walk could be
   // pointed at an unrelated Agent's (masked) configs.
   if (agentId && !(await isAgentInstalledAndLicensed(ctx.db, appId, agentId))) {
@@ -2278,6 +2303,16 @@ export const LIST_PAGE_MAX = 200;
 export function clampListTake(limit?: number | null): number {
   if (limit == null) return LIST_PAGE_DEFAULT;
   return Math.min(LIST_PAGE_MAX, Math.max(0, limit));
+}
+
+/**
+ * #5062 (S4a of #2213) — the `take` of a bare list field that has no ceiling yet: omitted or null reads as the default of 20, a
+ * negative limit reads as 0 (an empty list, like `clampListTake` and every `<field>Page` sibling), and anything else is
+ * passed through, with NO upper bound (a ceiling needs client companions first, cor:api:120:04). Prisma reads a negative
+ * `take` from the far end of the order, so an unguarded `limit ?? 20` returned the oldest rows.
+ */
+export function nonNegativeTake(limit?: number | null): number {
+  return limit == null ? LIST_PAGE_DEFAULT : Math.max(0, limit);
 }
 
 /**
@@ -3336,14 +3371,42 @@ export async function requireMemoryMemberOwner(
  */
 export async function resolveMemoryRefForMemberGate(
   ctx: Context,
-  args: { ref?: string | null; id?: string | null },
+  ref: string,
 ): Promise<string> {
+  return resolveMemoryRefConcealed(ctx, ref, memoryMemberForbidden);
+}
+
+/**
+ * The shared memory-ref resolution for the existence-hiding mutations
+ * (cor:api:140:02): the memory resolves BEFORE its gate, so every expected
+ * resolution refusal that depends on what exists folds into the gate's uniform
+ * FORBIDDEN, classified by TYPE (#3275, never by words in a message): an unknown or
+ * soft-deleted memory, and an ambiguous legacy URN (`Memory.legacyUrn` is
+ * non-unique by design, so one legacy ref can name two rows; #4761 section 10
+ * P2-1). A blank ref or a relative URN depends only on the input's shape, never on
+ * existence, so it propagates as `BAD_USER_INPUT` / `URN_NOT_QUALIFIED`
+ * (cor:api:140:01).
+ *
+ * The folded set is CLOSED: `resolveMemoryRef` (src/lib/entityRef/memoryRef.ts) throws
+ * only `MemoryNotFoundError` (unknown or soft-deleted), `AmbiguousLegacyUrnError`
+ * (`resolveLegacyAlias`, more than one live legacy match) and the shape errors
+ * (`UrnNotQualifiedError`, `UrnParseError`), never a `GraphQLError` for a miss. The
+ * class of each is pinned in resolvers.memoryShareRefs4137.test.ts (#4761 blind P2-1).
+ */
+export async function resolveMemoryRefConcealed(
+  ctx: Context,
+  ref: string,
+  forbidden: () => GraphQLError,
+  options?: { includeDeleted?: boolean },
+): Promise<string> {
+  const chosen = ref?.trim();
+  if (!chosen) {
+    throw new GraphQLError('memoryRef is required.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
   try {
-    return await resolveMemoryRefArg(ctx.db, args);
+    return (await resolveMemoryRef(ctx.db, chosen, options)).id;
   } catch (e) {
-    if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') {
-      throw memoryMemberForbidden();
-    }
+    if (e instanceof MemoryNotFoundError || e instanceof AmbiguousLegacyUrnError) throw forbidden();
     throw e;
   }
 }
@@ -3357,14 +3420,19 @@ export async function resolveMemoryRefForMemberGate(
  */
 export async function resolveSelfUserRefForMemberGate(
   ctx: Context,
-  args: { ref?: string | null; id?: string | null },
+  ref: string,
 ): Promise<string> {
+  const chosen = ref?.trim();
+  if (!chosen) {
+    throw new GraphQLError('userRef is required.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
   try {
-    return await resolveUserRefArg(ctx.db, args);
+    return (await resolveUserRefOrEmail(ctx.db, chosen)).id;
   } catch (e) {
-    if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') {
-      throw memoryMemberForbidden();
-    }
+    // By type (#3275): an unknown user and two accounts differing only by email
+    // case both fold, or the ambiguity would tell a non-owner the user exists
+    // (#4761 section 10 P3-1). A relative URN is shape-only and propagates.
+    if (e instanceof UserNotFoundError || e instanceof AmbiguousUserRefError) throw memoryMemberForbidden();
     throw e;
   }
 }

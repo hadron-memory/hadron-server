@@ -144,7 +144,14 @@ describe('aiModelPrices read', () => {
 describe('grantCredits', () => {
   it('platform admin mints a grant', async () => {
     const res = await gql(GRANT, platformCtx(), {
-      input: { orgRef: orgId, amountMicroCents: '500000', note: 'pilot goodwill' },
+      // #5007: a grant names its source (hrn:node:hadronmemory.com:specs:cor:dmo:170:03).
+      input: {
+        orgRef: orgId,
+        amountMicroCents: '500000',
+        sourceType: 'goodwill',
+        sourceId: 'pilot-1',
+        note: 'pilot goodwill',
+      },
     });
     expect(res.errors).toBeUndefined();
     const row = (res.data as Record<string, Record<string, string>>).grantCredits;
@@ -161,7 +168,8 @@ describe('grantCredits', () => {
 
   it('rejects a zero amount', async () => {
     const res = await gql(GRANT, platformCtx(), {
-      input: { orgRef: orgId, amountMicroCents: '0' },
+      // #5007: with a valid source, so the zero check is what refuses.
+      input: { orgRef: orgId, amountMicroCents: '0', sourceType: 'goodwill', sourceId: 'zero' },
     });
     expect(res.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
   });
@@ -202,13 +210,22 @@ describe('grantCredits', () => {
       input: { ...input, amountMicroCents: '999' },
     });
     expect(conflict.errors?.[0]?.extensions?.code).toBe('IDEMPOTENCY_CONFLICT');
+    // #5007 ruling 4: one fixed sentence, nothing about the stored entry.
+    expect(conflict.errors?.[0]?.message).toBe(
+      'This source is already recorded on the ledger with a different account, amount or kind.',
+    );
     expect(await db.creditLedgerEntry.count()).toBe(1);
   });
 });
 
 describe('ledger reads', () => {
   beforeEach(async () => {
-    await gql(GRANT, platformCtx(), { input: { orgRef: orgId, amountMicroCents: '500000' } });
+    // #5007: a grant names its source; checked, so the reads below never run
+    // against a ledger the grant silently failed to write.
+    const grant = await gql(GRANT, platformCtx(), {
+      input: { orgRef: orgId, amountMicroCents: '500000', sourceType: 'goodwill', sourceId: 'reads-1' },
+    });
+    expect(grant.errors).toBeUndefined();
     await db.creditLedgerEntry.create({
       data: {
         id: generateId(),

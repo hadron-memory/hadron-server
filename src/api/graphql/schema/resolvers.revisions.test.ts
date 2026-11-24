@@ -503,7 +503,17 @@ describe('Editor lock', () => {
 describe('#1468 — minted specs in an agent system memory', () => {
   const permanent = (e: unknown) =>
     (e as { extensions?: { code?: string } }).extensions?.code === 'SPEC_MINTED_PERMANENT';
-  const stamp = () => db.memory.update({ where: { id: systemMemory.id }, data: { corpusDraft: false, corpusMintedAt: new Date() } });
+  /** The mint record the re-keyed guard reads (#5063): a tombstoned, non-spec marker node. */
+  const stamp = () => {
+    const mintedAt = new Date();
+    return db.node.create({
+      data: {
+        id: generateId(), memoryId: systemMemory.id, loc: 'zz:mint-marker', name: 'zz:mint-marker',
+        content: 'minted elsewhere; tombstoned', role: null, tags: [],
+        mintedAt, mintedByInfo: 'test', deletedAt: mintedAt,
+      },
+    });
+  };
 
   it('restoreRevision refuses a snapshot that would drop a live minted spec', async () => {
     await resolvers.Mutation.createRevision({}, { agentRef: agent.id, description: 'before the spec' }, adminCtx());

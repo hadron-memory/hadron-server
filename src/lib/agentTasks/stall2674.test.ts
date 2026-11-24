@@ -42,7 +42,7 @@ it('#2674 title and tags edits preserve the pending assignment episode and deadl
   expect(before.episodeStart).toEqual(assignedAt);
   expect(before.dueAt).toEqual(new Date(assignedAt.getTime() + effectiveWindows(null).notStartedMinutes * 60_000));
 
-  await M.updateAgentTask({}, { taskId: task.id, input: { title: 'Edited', tags: ['new'] } }, ctx);
+  await M.updateAgentTask({}, { taskRef: task.id, input: { title: 'Edited', tags: ['new'] } }, ctx);
   expect(await db.agentTask.findUniqueOrThrow({ where: { id: task.id } })).toMatchObject({
     status: 'pending', title: 'Edited', tags: ['new'], assignedAt, startBy: null,
   });

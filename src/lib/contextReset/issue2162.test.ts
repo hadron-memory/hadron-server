@@ -63,14 +63,14 @@ describe('a reset is requested when a started task ends (cor:agt:050:27 §1)', (
 
   it('a task started by another worker and then reassigned to Kit: nothing (R117)', async () => {
     const t = await f.startedTask({ assignee: f.ada });
-    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id));
+    await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id));
     await f.finish(t.id);
     expect(await resetOf(t.id)).toBeNull();
   });
 
   it('#4202: a task.started event of ANOTHER App naming the task, with Kit as its actor, is not Kit\'s start: still nothing (R117)', async () => {
     const t = await f.startedTask({ assignee: f.ada });
-    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id));
+    await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id));
     // agent_team_events.task_id has no foreign key, so a legacy or hand-made row of another App can name this task.
     const { appId } = await db.agentTask.findUniqueOrThrow({ where: { id: t.id }, select: { appId: true } });
     const { organizationId } = await db.app.findUniqueOrThrow({ where: { id: appId }, select: { organizationId: true } });

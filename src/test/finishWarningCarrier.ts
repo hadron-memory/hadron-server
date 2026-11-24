@@ -18,7 +18,7 @@ export async function finishableParents(
 ): Promise<string[]> {
   return Promise.all(Array.from({ length: n }, async (_, i) => {
     const parent = await M.createAgentTask({}, { input: { appRef, title: `parent ${i}`, assignee } }, ctx);
-    await as(() => M.startAgentTask({}, { taskId: parent.id }, ctx));
+    await as(() => M.startAgentTask({}, { taskRef: parent.id }, ctx));
     await as(() => M.createAgentTask({}, { input: { parentTaskId: parent.id, title: `child ${i}` } }, ctx));
     return parent.id as string;
   }));
@@ -26,4 +26,4 @@ export async function finishableParents(
 
 /** One aliased finish: raises `task.finish.open-children` while the task has an open child. */
 export const finishField = (alias: string, taskId: string) =>
-  `${alias}: finishAgentTask(taskId: "${taskId}", result: { outcome: "succeeded" }) { id }`;
+  `${alias}: finishAgentTask(taskRef: "${taskId}", result: { outcome: "succeeded" }) { id }`;

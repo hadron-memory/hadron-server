@@ -123,13 +123,13 @@ describe('#1326 content provenance reads', () => {
     });
 
     const same = await legacy('body', -2);
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: same.id }, admin);
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: same.id }, admin);
     expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
       content: 'body', authorshipKind: 'TASK', authoredByTask: taskId,
     });
 
     const older = await legacy('an older body', -1);
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: older.id }, admin);
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: older.id }, admin);
     expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
       content: 'an older body', authorshipKind: null, authoredByTask: null,
       authoredByRevision: null, authoredByHuman: null, authoredAt: null,

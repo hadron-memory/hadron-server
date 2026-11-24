@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildSchema, GraphQLObjectType } from 'graphql';
+import { buildSchema, GraphQLObjectType, GraphQLInputObjectType } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 
 /** The expected reference-argument names, per cor:api:140. */
@@ -32,6 +32,10 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   addMemoryToAgent: ['agentRef', 'memoryRef'],
   updateAgentMemoryRole: ['agentRef', 'memoryRef'],
   removeMemoryFromAgent: ['agentRef', 'memoryRef'],
+  // #4138 (S2): the node-revision mutations take a revision ref (URN or PK); Query.nodeRevision is in EXPECTED_QUERY_REF_ARGS.
+  restoreNodeRevision: ['nodeRevRef'],
+  deleteNodeRevision: ['nodeRevRef'],
+  updateNodeRevision: ['nodeRevRef'],
   updateApp: ['ref'],
   deleteApp: ['ref'],
   regenerateAppKey: ['appRef'],
@@ -101,6 +105,26 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   addOrgMember: ['orgRef', 'userRef'],
   updateOrgMember: ['orgRef', 'userRef'],
   removeOrgMember: ['orgRef', 'userRef'],
+  // #4137 (S1): the memory share/member mutations — memoryId, granteeId and
+  // userId gone with no alias.
+  createMemoryShare: ['memoryRef', 'granteeRef'],
+  updateMemoryShareRole: ['memoryRef', 'granteeRef'],
+  deleteMemoryShare: ['memoryRef', 'granteeRef'],
+  addMemoryMember: ['memoryRef', 'userRef'],
+  updateMemoryMemberRole: ['memoryRef', 'userRef'],
+  removeMemoryMember: ['memoryRef', 'userRef'],
+  // #4148 (S7): the agent-task family's own-task argument is `taskRef` (gate pin 1; the family precedent).
+  updateAgentTask: ['taskRef'],
+  assignAgentTask: ['taskRef'],
+  reassignAgentTask: ['taskRef'],
+  startAgentTask: ['taskRef'],
+  recordAgentTaskProgress: ['taskRef'],
+  finishAgentTask: ['taskRef'],
+  cancelAgentTask: ['taskRef'],
+  releaseAgentTaskExternalId: ['taskRef'],
+  parkAgentTask: ['taskRef'],
+  cloneAgentTask: ['taskRef'],
+  makeAgentTaskReady: ['taskRef'],
 };
 
 /**
@@ -115,6 +139,7 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   agent: ['ref'],
   appRun: ['ref'],
   nodeRevisions: ['nodeRef'],
+  nodeRevision: ['nodeRevRef'], // #4138 (S2)
   appRuns: ['appRef', 'orgRef', 'parentRunRef'],
   // #4139 (S3): nodeExport takes the node's ref (PK or URN).
   nodeExport: ['ref'],
@@ -123,6 +148,12 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   usageEventsPage: ['memoryRef', 'nodeRef'],
   memoryAssets: ['memoryRef'],
   memoryLocSegments: ['memoryRefs'],
+  // #4148 (S7): the agent-task family (gate pin 1: `ref` for the field's own subject, `parentTaskRef` / `taskRef`).
+  agentTask: ['ref'],
+  agentTasks: ['appRef', 'parentTaskRef'],
+  agentTasksPage: ['appRef', 'parentTaskRef'], // shares agentTasks' ListArgs (Bridget's LOCAL P2-1)
+  agentTeamEvents: ['appRef', 'taskRef'],
+  agentTeamEventsPage: ['appRef', 'taskRef'],
 };
 
 /**
@@ -148,6 +179,10 @@ const ALLOWED_ID_ARGS = new Set([
   // App's IdP; the Hadron memory is named by memoryRef.
   'linkMemoryToUser.externalUserId',
   // #4136 (S0): Query fields are keyed `Query.<field>.<arg>` so a Query field can never share a Mutation field's allowance.
+  // #4148 (S7): agentTasks.externalId is an external-system label (an outside item's id, e.g. an issue URL; cor:agt:120:02),
+  // not a Hadron entity reference, so it keeps its name per the convention ("external-system labels" stay `<x>Id`).
+  'Query.agentTasks.externalId',
+  'Query.agentTasksPage.externalId',
 ]);
 
 /** The legacy-`Id` check, one (field, arg) at a time, against a per-field allow-list. */
@@ -227,6 +262,20 @@ describe('#4136 (S0) — the same guard over Query fields', () => {
 
   it('none of the listed Query fields still declares a legacy <entity>Id reference arg', () => {
     expect(strayIdProblems('Query', EXPECTED_QUERY_REF_ARGS)).toEqual([]);
+  });
+});
+
+/**
+ * #4368: an input-object field that names an entity takes `<entity>Ref` too. `setAgentAssetUploadEnabled` carries its ref in
+ * `input`, which the argument tables above never see. The two deprecated v1 asset calls (beginAssetUpload, agentAssets) keep
+ * `agentUrn` until their deprecation window ends (gate decision, #4368).
+ */
+describe('#4368 — setAgentAssetUploadEnabled names its Agent with agentRef', () => {
+  const input = buildSchema(typeDefs).getType('SetAgentAssetUploadEnabledInput') as GraphQLInputObjectType;
+  it('declares agentRef (required) and no agentUrn alias', () => {
+    const f = input.getFields();
+    expect(f.agentRef?.type.toString()).toBe('String!');
+    expect(f.agentUrn).toBeUndefined();
   });
 });
 

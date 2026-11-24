@@ -24,6 +24,7 @@ import { autoDeleteLimitRefusal, deleteLockedAppSecret } from '../../../lib/secr
 export { autoDeleteLimitRefusal } from '../../../lib/secrets/autoDelete.js';
 import { GraphQLError } from 'graphql';
 import { assertOneRevealPerOperation, type RevealOperationInfo } from '../../../lib/secrets/revealOperationGuard.js';
+import { AUTHORIZATION_DENIED_CODE } from '../../../lib/auth/authorizationDenied.js';
 import { pageArgs, pageEnvelope, type Context } from './resolvers.helpers.js';
 import {
   clampListTake,
@@ -649,7 +650,7 @@ export const secretQueries = {
       // is not the caller's answers the same page below, at canSeeSecretOwner. Anything else —
       // argument validation, a database fault — is none of those and propagates: the bare catch
       // that used to swallow it made a dead database indistinguishable from an empty owner.
-      if ((e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN') || refNamesNothing(e, { ambiguousNamesNothing: true })) {
+      if ((e instanceof GraphQLError && e.extensions?.code === AUTHORIZATION_DENIED_CODE) || refNamesNothing(e, { ambiguousNamesNothing: true })) {
         return { items: [], total: 0 };
       }
       throw e;

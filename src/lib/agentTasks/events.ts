@@ -334,8 +334,8 @@ export type AlarmPayload = {
 
 /**
  * Append one stall alarm, once per episode (cor:agt:050:13). The episode's key
- * is (task, type, episodeStart) under the unique index
- * agent_team_events_episode_uniq, so a second insert of the same episode —
+ * is (app, task, type, episodeStart) under the unique index
+ * agent_team_events_episode_app_uniq, so a second insert of the same episode —
  * a re-run, or a concurrent evaluator pass on another instance — does
  * nothing: `ON CONFLICT DO NOTHING`, never a read-then-write. A concurrent
  * insert of the same key waits for the first to commit and then conflicts.

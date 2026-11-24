@@ -40,10 +40,10 @@ async function seat(slot: string, head = H, who = reviewer.id, supersedes?: stri
   return t;
 }
 async function verdict(t: any, value: string, head = H, who = reviewer.id) {
-  await M.startAgentTask!({}, { taskId: t.id }, ctx(who));
+  await M.startAgentTask!({}, { taskRef: t.id }, ctx(who));
   return M.recordReviewVerdict!({}, { taskRef: t.id, head, verdict: value, receipt: RECEIPT }, ctx(who));
 }
-const finish = (t: any, who = reviewer.id) => M.finishAgentTask!({}, { taskId: t.id, result: { outcome: 'reviewed' } }, ctx(who));
+const finish = (t: any, who = reviewer.id) => M.finishAgentTask!({}, { taskRef: t.id, result: { outcome: 'reviewed' } }, ctx(who));
 const withdraw = (t: any, c: Context, head = H, extra: Record<string, unknown> = {}) =>
   M.withdrawReviewVerdict!({}, { taskRef: t.id, head, receipt: RECEIPT, ...extra }, c);
 const withdrawals = (t: any) => db.agentTeamEvent.findMany({ where: { taskId: t.id, type: 'review.verdict.withdrawn' }, orderBy: { createdAt: 'asc' } });
@@ -159,7 +159,7 @@ describe('#4441 the withdraw verb: who, on what, and the record', () => {
 
   it('a seat with no verdict, and a task that is not a bound seat, are refused', async () => {
     await schedule(); await freeze();
-    const blind = await seat('blind', H, other.id); await M.startAgentTask!({}, { taskId: blind.id }, ctx(other.id)); await finish(blind, other.id);
+    const blind = await seat('blind', H, other.id); await M.startAgentTask!({}, { taskRef: blind.id }, ctx(other.id)); await finish(blind, other.id);
     expect(await code(withdraw(blind, ctx(other.id)))).toBe('REVIEW_VERDICT_NOT_NEGATIVE');
     expect(await code(withdraw(build, ctx(manager.id)))).toBe('REVIEW_SEAT_UNASSIGNED');
   });
@@ -169,9 +169,9 @@ describe('#4441 the withdraw verb: who, on what, and the record', () => {
 async function workerNegative(w: any, slot = 'blind') {
   const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: slot, assignee: { worker: w.id }, source: 'synthetic' } }, ctx(author.id));
   await M.assignReviewSeat!({}, { taskRef: t.id, slot, head: H }, ctx(author.id));
-  await asWorker(w, (c) => M.startAgentTask!({}, { taskId: t.id }, c));
+  await asWorker(w, (c) => M.startAgentTask!({}, { taskRef: t.id }, c));
   await asWorker(w, (c) => M.recordReviewVerdict!({}, { taskRef: t.id, head: H, verdict: 'CHANGES_REQUESTED', receipt: RECEIPT }, c));
-  await asWorker(w, (c) => M.finishAgentTask!({}, { taskId: t.id, result: { outcome: 'reviewed' } }, c));
+  await asWorker(w, (c) => M.finishAgentTask!({}, { taskRef: t.id, result: { outcome: 'reviewed' } }, c));
   return t;
 }
 

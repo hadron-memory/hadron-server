@@ -62,6 +62,7 @@ import { MemoryMemberRole } from '../src/generated/prisma/index.js';
 import { AI_PROVIDER_ENDPOINTS, usesProcessCredential } from '../src/lib/aiEndpoint.js';
 import { WORK_KINDS } from '../src/lib/workRef.js';
 import { VALID_SCOPE_PREFIXES, VALID_BUILTINS } from '../src/lib/edge-conditions/operators.js';
+import { SERVER_WRITTEN_SOURCE_TYPES } from '../src/lib/metering/index.js';
 
 /**
  * The sets this gate watches.
@@ -155,6 +156,14 @@ const WATCHED_SETS = [
     // These curated lists end at the first period/semicolon; keep abbreviations
     // with dots outside the list, or revise this capture with the description.
     enumerationPattern: /kind\s+must\s+be\s+one\s+of\s+([^.;]+)/i,
+  },
+  {
+    // #5007 (Billing A1): the ledger source types the grantCredits and
+    // adjustCredits mutations refuse. Hyphenated identifiers, never ordinary
+    // words, so admissible by this file's criterion.
+    name: 'SERVER_WRITTEN_SOURCE_TYPES',
+    source: 'src/lib/metering/index.ts',
+    members: SERVER_WRITTEN_SOURCE_TYPES,
   },
   {
     name: 'CONNECTION_GRANT_SCOPES',

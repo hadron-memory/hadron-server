@@ -1,29 +1,43 @@
 // Metering resolvers — AiModelPrice rates + the org credit ledger (spec 046,
-// AI-credit billing Phase 0). Rates and grants are PLATFORM-ADMIN writes:
-// an org admin must never set the prices they are billed at, and grantCredits
-// is minting money — the org-ADMIN bar of setQuotaLimit does NOT carry over
-// (self-grant risk). Ledger reads are org-ADMIN (requireOrgRole).
+// AI-credit billing Phase 0). Rates, grants and adjustments (#5007) are
+// PLATFORM-ADMIN writes: an org admin must never set the prices they are billed
+// at, and grantCredits / adjustCredits move money — the org-ADMIN bar of
+// setQuotaLimit does NOT carry over (self-grant risk). The two ledger writes also
+// admit the BILLING platform role (#5012, mayWriteLedger); rates do not. Ledger
+// reads are org-ADMIN (requireOrgRole).
 import { GraphQLError } from 'graphql';
 import {
   type Context,
   clampListTake,
   isPlatformAdmin,
+  mayWriteLedger,
   requireOrgRole,
   toISO,
 } from './resolvers.helpers.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { OrganizationNotFoundError } from '../../../lib/entityRef/errors.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { generateId } from '../../../lib/id.js';
 import {
+  adjustCredits,
   clearPriceCache,
   creditBalance,
   grantCredits,
   HOST_PRICED_PROVIDERS,
   IdempotencyConflictError,
   InvalidLedgerAmountError,
+  isServerWrittenSourceType,
+  LEDGER_SOURCE_CONFLICT_MESSAGE,
   PRICE_TIER_DEFAULT,
   PRICE_TIER_MAX,
   PRICE_TIER_MIN,
 } from '../../../lib/metering/index.js';
+import {
+  AI_SPEND_MAX_DAYS,
+  aiSpendSummary,
+  parseSpendInstant,
+  type AiSpendGroup,
+} from '../../../lib/metering/spend.js';
 import type { CreditLedgerEntry, AiModelPrice } from '../../../generated/prisma/index.js';
 
 const badInput = (message: string) =>
@@ -31,16 +45,66 @@ const badInput = (message: string) =>
 
 const forbidden = () => new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
 
+/** The Postgres int8 range every money column is stored in. */
+const INT8_MIN = -(2n ** 63n);
+const INT8_MAX = 2n ** 63n - 1n;
+
 /**
  * Parse a GraphQL String money field into non-negative bigint micro-cents.
  * BigInt travels as String on this schema (no custom scalar — plan §GraphQL);
- * rejects anything that isn't a plain base-10 integer.
+ * rejects anything that isn't a plain base-10 integer, or that falls outside
+ * int8 (#5007: an out-of-range value used to reach Prisma and surface as a
+ * concealed INTERNAL_SERVER_ERROR).
  */
 function parseMicroCents(raw: string, field: string): bigint {
   if (!/^\d+$/.test(raw)) {
     throw badInput(`${field} must be a base-10 integer string of micro-cents.`);
   }
-  return BigInt(raw);
+  const value = BigInt(raw);
+  if (value > INT8_MAX) throw badInput(`${field} is out of range.`);
+  return value;
+}
+
+/**
+ * The signed counterpart for adjustments (#5007): an optional leading minus,
+ * base-10 digits, within int8. No plus sign, no fraction, no exponent.
+ */
+function parseSignedMicroCents(raw: string, field: string): bigint {
+  if (!/^-?\d+$/.test(raw)) {
+    throw badInput(`${field} must be a signed base-10 integer string of micro-cents.`);
+  }
+  const value = BigInt(raw);
+  if (value < INT8_MIN || value > INT8_MAX) throw badInput(`${field} is out of range.`);
+  return value;
+}
+
+/**
+ * The mutation-level source rule shared by grantCredits and adjustCredits
+ * (#5007 ruling 3): never a type the server writes itself, matched trimmed and
+ * case-insensitively. Judged before the write. A missing or blank pair, a zero
+ * amount and a blank note are the library's refusals (also judged before its
+ * insert, mapped to BAD_USER_INPUT by {@link ledgerRefusal}), kept in ONE layer
+ * so each guard has a single place a test can see it fail.
+ */
+function refuseServerWrittenSource(sourceType: string | null | undefined): void {
+  if (sourceType != null && isServerWrittenSourceType(sourceType)) {
+    throw badInput('sourceType names a source type the server writes itself.');
+  }
+}
+
+/** Map the ledger library's typed refusals; anything else propagates. */
+function ledgerRefusal(err: unknown): never {
+  if (err instanceof InvalidLedgerAmountError) throw badInput(err.message);
+  // Mismatched replay of an existing (sourceType, sourceId): a typed,
+  // NON-retryable error. The caller (a payment service) must stop redelivering
+  // and reconcile manually (PR-624 review, Gemini high). One fixed sentence,
+  // nothing about the stored entry (#5007 ruling 4).
+  if (err instanceof IdempotencyConflictError) {
+    throw new GraphQLError(LEDGER_SOURCE_CONFLICT_MESSAGE, {
+      extensions: { code: 'IDEMPOTENCY_CONFLICT' },
+    });
+  }
+  throw err;
 }
 
 /** GraphQL projection — bigint stringified, dates ISO. */
@@ -151,6 +215,42 @@ export const meteringQueries = {
     const balance = await creditBalance(ctx.db, orgId);
     return { organizationId: orgId, balanceMicroCents: balance.toString() };
   },
+
+  /**
+   * #5008 (Billing A2): the organization's AI spend for [from, to), one grouping. Org-ADMIN, the gate of `creditBalance`
+   * and answered first, so a caller who may not read gets FORBIDDEN whatever the range says. Rows are scalars: `APP` keys
+   * are ids, never an App object (cor:dmo:170:04 keeps cost and charge apart; see the SDL).
+   */
+  aiSpend: async (
+    _: unknown,
+    { orgRef, from, to, groupBy }: { orgRef: string; from: string; to: string; groupBy: AiSpendGroup },
+    ctx: Context,
+  ) => {
+    // A reference that names no organization answers the denial any non-admin gets for an existing one, so the
+    // refusal does not tell which organizations exist (and echoes nothing of the ref). A platform admin passes
+    // the gate for every organization, so for them nothing is concealed and the not-found stays. Only the RESPONSE is
+    // equalised, not the work: a missing organization skips the membership lookup an existing one runs, so a timing
+    // difference remains. That is not a secret kept: organizations are listable (the #5008 issue), and the refusal is
+    // identical so this surface does not read as an existence oracle. An App key (no user) is denied by
+    // requireOrgRole with the same authorizationDenied(), so it gets the same answer for either.
+    let orgId: string;
+    try {
+      ({ id: orgId } = await resolveOrgRef(ctx.db, orgRef));
+    } catch (e) {
+      if (e instanceof OrganizationNotFoundError && !isPlatformAdmin(ctx)) throw authorizationDenied();
+      throw e;
+    }
+    await requireOrgRole(ctx, orgId, 'ADMIN');
+    const fromAt = parseSpendInstant(from);
+    const toAt = parseSpendInstant(to);
+    if (!fromAt || !toAt) throw badInput('from and to must be ISO 8601 dates or date-times (a value with no offset is UTC).');
+    if (fromAt.getTime() >= toAt.getTime()) throw badInput('from must be before to.');
+    if (toAt.getTime() - fromAt.getTime() > AI_SPEND_MAX_DAYS * 86_400_000) {
+      throw badInput(`The range may span at most ${AI_SPEND_MAX_DAYS} days.`);
+    }
+    const summary = await aiSpendSummary(ctx.db, { organizationId: orgId, from: fromAt, to: toAt, groupBy });
+    return { from: fromAt.toISOString(), to: toAt.toISOString(), ...summary };
+  },
 };
 
 export const meteringMutations = {
@@ -229,11 +329,12 @@ export const meteringMutations = {
 
   /**
    * Mint credits for an org (positive `grant` row). PLATFORM ADMIN ONLY —
-   * this creates money; org admins must not self-grant. Payment-processor
-   * top-ups (hadrontool-billing) land here with sourceType 'stripe-checkout'
-   * + the Checkout session id: (sourceType, sourceId) is ledger-unique and
-   * the mutation is IDEMPOTENT on it — a webhook redelivery returns the
-   * existing grant instead of double-crediting.
+   * this creates money; org admins must not self-grant. Top-ups from a payment
+   * service land here with sourceType 'stripe-checkout' + the Checkout session
+   * id: (sourceType, sourceId) is ledger-unique and the mutation is IDEMPOTENT
+   * on it — a webhook redelivery returns the existing grant instead of
+   * double-crediting. Since #5007 the pair is required, and the source types
+   * the server writes itself are refused.
    */
   grantCredits: async (
     _: unknown,
@@ -251,38 +352,75 @@ export const meteringMutations = {
     },
     ctx: Context,
   ) => {
-    if (!isPlatformAdmin(ctx)) throw forbidden();
+    // #5012: a platform admin or the BILLING role (mayWriteLedger), judged before the organization resolves.
+    if (!mayWriteLedger(ctx)) throw forbidden();
     const { id: orgId } = await resolveOrgRef(ctx.db, input.orgRef);
     const amount = parseMicroCents(input.amountMicroCents, 'amountMicroCents');
     const expiresAt = input.expiresAt ? new Date(input.expiresAt) : null;
     if (expiresAt && Number.isNaN(expiresAt.getTime())) {
       throw badInput('expiresAt is not a valid date.');
     }
-    // The pair travels together: a sourceId without a type (or vice versa)
-    // would silently lose idempotency protection.
-    if (!!input.sourceType !== !!input.sourceId) {
-      throw badInput('sourceType and sourceId must be provided together.');
-    }
+    refuseServerWrittenSource(input.sourceType);
     try {
       const entry = await grantCredits(ctx.db, {
         organizationId: orgId,
         amountMicroCents: amount,
         expiresAt,
-        sourceType: input.sourceType ?? null,
-        sourceId: input.sourceId ?? null,
+        // Missing reaches the library as blank, which refuses it (#5007 ruling 1).
+        sourceType: input.sourceType ?? '',
+        sourceId: input.sourceId ?? '',
         note: input.note ?? null,
         createdBy: ctx.userId ?? null,
       });
       return projectLedgerEntry(entry);
     } catch (err) {
-      if (err instanceof InvalidLedgerAmountError) throw badInput(err.message);
-      // Mismatched replay of an existing (sourceType, sourceId): a typed,
-      // NON-retryable error — callers (hadrontool-billing) must stop
-      // redelivering and reconcile manually (PR-624 review, Gemini high).
-      if (err instanceof IdempotencyConflictError) {
-        throw new GraphQLError(err.message, { extensions: { code: 'IDEMPOTENCY_CONFLICT' } });
-      }
-      throw err;
+      ledgerRefusal(err);
+    }
+  },
+
+  /**
+   * Write a signed correction on an org's ledger (an `adjustment` row), such as
+   * a refund (#5007; hrn:node:hadronmemory.com:specs:cor:dmo:170:03). A
+   * correction is a new entry, never an edit
+   * (hrn:node:hadronmemory.com:specs:cor:dmo:170:08). PLATFORM ADMIN ONLY, the
+   * same single gate as grantCredits (A5 widens both). Every refusal is judged
+   * before the write: a signed int8 amount here, a server-written source type
+   * here, and a zero amount, a blank source half or a blank note in the
+   * library before its insert. Idempotent on the pair
+   * exactly as grantCredits is, kind included.
+   */
+  adjustCredits: async (
+    _: unknown,
+    {
+      input,
+    }: {
+      input: {
+        orgRef: string;
+        amountMicroCents: string;
+        sourceType: string;
+        sourceId: string;
+        note: string;
+      };
+    },
+    ctx: Context,
+  ) => {
+    // #5012: a platform admin or the BILLING role (mayWriteLedger), judged before the organization resolves.
+    if (!mayWriteLedger(ctx)) throw forbidden();
+    const { id: orgId } = await resolveOrgRef(ctx.db, input.orgRef);
+    const amount = parseSignedMicroCents(input.amountMicroCents, 'amountMicroCents');
+    refuseServerWrittenSource(input.sourceType);
+    try {
+      const entry = await adjustCredits(ctx.db, {
+        organizationId: orgId,
+        amountMicroCents: amount,
+        sourceType: input.sourceType,
+        sourceId: input.sourceId,
+        note: input.note,
+        createdBy: ctx.userId ?? null,
+      });
+      return projectLedgerEntry(entry);
+    } catch (err) {
+      ledgerRefusal(err);
     }
   },
 };

@@ -81,7 +81,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { recoveryMemoryIds } from './resolvers.recovery.js';
-import { AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError, NodeRevisionNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { refHasUnstorableChars, refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
@@ -108,6 +108,7 @@ import {
   CONTENT_RAW_DEFAULT,
   readAiServiceConfigByUrn,
   aiConfigOwnerOf,
+  nonNegativeTake,
 } from './resolvers.helpers.js';
 import { loadAiConfigOwners, aiConfigOwnerKey } from '../../../lib/aiConfigOwner.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
@@ -2787,7 +2788,7 @@ export const nodeQueries = {
           memoryId: { in: accessibleMemoryIds },
         },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        take: limit ?? 20,
+        take: nonNegativeTake(limit),
       });
       // #3688: a loc names a resource, so other principals' rows are volumes only (cor:acl:090:01, ruling 0246).
       return projectUsageRowsFor(ctx, rows);
@@ -2801,7 +2802,7 @@ export const nodeQueries = {
       const rows = await ctx.db.nodeEdgeRemoval.findMany({
         where: { sourceId: scope.nodeId, memoryId: { in: scope.accessible } },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        take: limit ?? 20,
+        take: nonNegativeTake(limit),
       });
       // The deleted target's address is another node's identity, and the edge's own loc is derived from both
       // endpoints: show neither where the target's memory is not readable.
@@ -2818,7 +2819,7 @@ export const nodeQueries = {
       const revisions = await ctx.db.nodeRevision.findMany({
         where: { nodeId },
         orderBy: { createdAt: 'desc' },
-        take: limit ?? 20,
+        take: nonNegativeTake(limit),
       });
       // Drop snapshots captured while the node lived in a memory the caller
       // can't read. Legacy rows (memoryId NULL) fall back to the node's current
@@ -2858,8 +2859,16 @@ export const nodeQueries = {
     // current memory AND on the snapshot's own memory (per-snapshot gating —
     // a moved node keeps its id, so a snapshot may live in a memory the caller
     // can't read). Any miss collapses to null (no existence disclosure).
-    nodeRevision: async (_: unknown, { revisionId }: { revisionId: string }, ctx: Context) => {
+    nodeRevision: async (_: unknown, { nodeRevRef }: { nodeRevRef: string }, ctx: Context) => {
       requireRole(ctx, 'READER');
+      // #4138 (cor:api:140:00): a revision URN or PK, resolved once; an unknown or malformed ref is null, as an unknown PK was.
+      let revisionId: string;
+      try {
+        ({ id: revisionId } = await resolveNodeRevRef(ctx.db, nodeRevRef));
+      } catch (err) {
+        if (err instanceof NodeRevisionNotFoundError) return null;
+        throw err;
+      }
       const revision = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
       if (!revision) return null;
       const node = await ctx.db.node.findUnique({

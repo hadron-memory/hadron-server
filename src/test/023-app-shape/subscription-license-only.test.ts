@@ -211,7 +211,7 @@ describe('US5: AgentSubscription is a license, not a memory grant', () => {
   it('personal — adding a MemoryShare unlocks access for the same subscriber', async () => {
     await resolvers.Mutation.createMemoryShare(
       {},
-      { memoryId: fx.memSoloId, granteeId: fx.uId, role: 'reader' },
+      { memoryRef: fx.memSoloId, granteeRef: fx.uId, role: 'reader' },
       userCtx(fx.aliceId),
     );
     const result = await authorize(fx.memSoloId, fx.uId);
@@ -223,7 +223,7 @@ describe('US5: AgentSubscription is a license, not a memory grant', () => {
     // license itself.
     await resolvers.Mutation.createMemoryShare(
       {},
-      { memoryId: fx.memSoloId, granteeId: fx.uId, role: 'reader' },
+      { memoryRef: fx.memSoloId, granteeRef: fx.uId, role: 'reader' },
       userCtx(fx.aliceId),
     );
     // Confirm baseline: share + active subscription = allowed.

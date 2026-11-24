@@ -1482,7 +1482,7 @@ async function handleAuthorizeEmailCodePost(req: Request, res: Response): Promis
 
     const jwt = await signJwt({
       sub: user.id,
-      roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+      roles: user.roles,
       ...(user.email ? { email: user.email } : {}),
     });
     const { exp } = decodeJwt(jwt);

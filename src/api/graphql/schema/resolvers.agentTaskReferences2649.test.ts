@@ -32,7 +32,7 @@ const three = [
 const create = (input: Record<string, unknown>, userId: string = owner.id) =>
   M.createAgentTask({}, { input: { appRef: app.id, title: 'T', ...input } }, ctx(userId));
 const edit = (taskId: string, input: Record<string, unknown>, userId: string = owner.id) =>
-  M.updateAgentTask({}, { taskId, input }, ctx(userId));
+  M.updateAgentTask({}, { taskRef: taskId, input }, ctx(userId));
 const list = (args: Record<string, unknown>, userId: string = owner.id, appRef: string = app.id) =>
   Q.agentTasks(null, { appRef, ...args }, ctx(userId));
 const edited = (taskId: string) => db.agentTeamEvent.findMany({ where: { taskId, type: 'task.edited' } });
@@ -69,7 +69,7 @@ describe('references round-trip (#2649)', () => {
     ]);
     await api.start();
     try {
-      const r = await gql('query($id:ID!){agentTask(id:$id){references{kind target label}}}', { id: t.id });
+      const r = await gql('query($id:ID!){agentTask(ref:$id){references{kind target label}}}', { id: t.id });
       expect(r.errors).toBeUndefined();
       expect(r.data.agentTask.references).toEqual([
         { kind: 'PULL_REQUEST', target: PR, label: 'the PR' },
@@ -78,7 +78,7 @@ describe('references round-trip (#2649)', () => {
       ]);
       // A task with none reads an empty list, never null.
       const bare = await create({});
-      const b = await gql('query($id:ID!){agentTask(id:$id){references{kind}}}', { id: bare.id });
+      const b = await gql('query($id:ID!){agentTask(ref:$id){references{kind}}}', { id: bare.id });
       expect(b.data.agentTask.references).toEqual([]);
     } finally { await api.stop(); }
   });
@@ -100,7 +100,7 @@ describe('references round-trip (#2649)', () => {
         { i: { appRef: app.id, title: 'SDL', references: [{ kind: 'TASK', target: TASK, label: 'parent' }] } });
       expect(c.errors).toBeUndefined();
       expect(c.data.createAgentTask.references).toEqual([{ kind: 'TASK', target: TASK, label: 'parent' }]);
-      const u = await gql(`mutation($id:ID!,$i:UpdateAgentTaskInput!){updateAgentTask(taskId:$id,input:$i){references{kind target}}}`,
+      const u = await gql(`mutation($id:ID!,$i:UpdateAgentTaskInput!){updateAgentTask(taskRef:$id,input:$i){references{kind target}}}`,
         { id: c.data.createAgentTask.id, i: { references: [{ kind: 'URL', target: URL_REF }, { kind: 'ISSUE', target: ISSUE }] } });
       expect(u.errors).toBeUndefined();
       expect(u.data.updateAgentTask.references).toEqual([{ kind: 'URL', target: URL_REF }, { kind: 'ISSUE', target: ISSUE }]);
@@ -365,7 +365,7 @@ describe('a reference leaks nothing beyond its string (#2649)', () => {
     const t = await create({ references: refs });
     await api.start();
     try {
-      const r = await gql('query($id:ID!){agentTask(id:$id){references{kind target label}}}', { id: t.id }, member.id);
+      const r = await gql('query($id:ID!){agentTask(ref:$id){references{kind target label}}}', { id: t.id }, member.id);
       expect(r.errors).toBeUndefined();
       expect(r.data.agentTask.references).toEqual(refs.map(x => ({ ...x, label: null })));
       expect(JSON.stringify(r)).not.toMatch(/SECRET/);

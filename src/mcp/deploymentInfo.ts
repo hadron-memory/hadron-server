@@ -208,7 +208,46 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // A lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation. Nothing else
 // changes: every field already resolved an ID or URN and keeps its gate and its refusals byte-identical; the
 // usage "provide either nodeId or loc" refusal now names `nodeRef`.
-export const HADRON_SERVER_VERSION = '0.32.0';
+//
+// 0.33.0 — BREAKING, entity refs S2 (#4138): the node-revision operations take `nodeRevRef`, no alias.
+// `nodeRevision(revisionId)`, `restoreNodeRevision(revisionId)`, `updateNodeRevision(revisionId)` and the
+// delete-revision mutation (`revisionId` → `nodeRevRef: String!`, a revision URN or id). A lagging client's old name is an UNKNOWN
+// argument and GraphQL refuses the whole operation.
+//
+// 0.34.0 — BREAKING, entity refs (#4368): `setAgentAssetUploadEnabled(input.agentUrn)` → `input.agentRef`, no alias.
+// A lagging client's old name is an UNKNOWN input field and GraphQL refuses the whole operation. The gate, the
+// refusals and what the field accepts (an id or a URN) are unchanged. `beginAssetUpload` and `agentAssets`, the
+// deprecated v1 calls, keep `agentUrn` until they are retired.
+//
+// 0.35.0 — BREAKING, entity refs S1 (#4137): the six memory share/member mutations take refs and nothing else, no alias.
+// `createMemoryShare` / `updateMemoryShareRole` (`memoryId` -> `memoryRef: ID!`, `granteeRef: ID!`), `deleteMemoryShare`
+// (`granteeRef: String`, omitted = the caller's own share) and `addMemoryMember` / `updateMemoryMemberRole` /
+// `removeMemoryMember` (`memoryRef: ID!`, `userRef: ID!`). The deprecated `granteeId`, `memoryId` and `userId` arguments are
+// removed, and the surviving refs are now required `ID!` (were optional `String`). A lagging client's old name is an UNKNOWN
+// argument and GraphQL refuses the whole operation. The existence-hiding order is unchanged: memory resolved, principal gate,
+// counterparty resolved. (0.34.0 is #5046, #4368, merged first.)
+//
+// 0.36.0 — BREAKING, #1796 step 2: `encryptMemory(memoryRef)` no longer accepts `dataKey` or `passphrase`, no alias.
+// A document naming either is refused as an unknown argument before any resolver runs. The secret travels only in
+// `x-hadron-memory-keys` (strict owner) or `x-hadron-operation-key` (owning App completion). CLI floor: hadron-cli
+// v0.56.0.
+//
+// 0.37.0 — SEMANTICS BREAK, Billing A1 (#5007): new mutation `adjustCredits(input: AdjustCreditsInput!)` (a signed
+// ledger correction, platform admin only). `grantCredits` changes behaviour: a grant without a source pair
+// (`sourceType`, `sourceId`) is now refused with BAD_USER_INPUT when the mutation runs, so a lagging client that
+// granted without one fails at run time (its document still validates, because the SDL field types are unchanged).
+// The server-written source types are refused, and a mismatched replay answers one fixed IDEMPOTENCY_CONFLICT sentence
+// instead of naming the stored entry. (0.36.0 is #5066, #1796, merged first.)
+//
+// 0.38.0 — BREAKING, entity refs S7 (#4148): the agent-task family takes refs, no alias. The eleven own-task mutations
+// (`updateAgentTask`, `assignAgentTask`, `reassignAgentTask`, `startAgentTask`, `recordAgentTaskProgress`,
+// `finishAgentTask`, `cancelAgentTask`, `releaseAgentTaskExternalId`, `parkAgentTask`, `cloneAgentTask`,
+// `makeAgentTaskReady`) take `taskRef: ID!` (was `taskId`); `agentTask(id)` → `agentTask(ref)`; `agentTasks` /
+// `agentTasksPage(parentTaskId)` → `parentTaskRef`; `agentTeamEvents` / `agentTeamEventsPage(taskId)` → `taskRef`. A
+// lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation (ship order per precedent
+// 0274: notices, server, companions). Gates and refusals are unchanged; `agentTasks(externalId)` keeps its name (an
+// external-system label). (0.36.0 is #5066, #1796, and 0.37.0 is #5064, Billing A1, both merged first.)
+export const HADRON_SERVER_VERSION = '0.38.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

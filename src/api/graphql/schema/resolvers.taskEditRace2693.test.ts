@@ -23,7 +23,7 @@ let app: any, owner: any, manager: any, assignee: any, outsider: any, agent: any
 const ctx = (userId=owner.id) => ({db,userId,roles:['READER']});
 async function edit(input: Record<string,unknown>, userId=owner.id) {
  expect(M.updateAgentTask, 'the one task edit mutation is implemented').toBeTypeOf('function');
- return M.updateAgentTask({}, {taskId:task.id,input}, ctx(userId));
+ return M.updateAgentTask({}, {taskRef:task.id,input}, ctx(userId));
 }
 const edited = () => db.agentTeamEvent.findMany({where:{taskId:task.id,type:'task.edited'},orderBy:{createdAt:'asc'}});
 beforeEach(async()=>{
