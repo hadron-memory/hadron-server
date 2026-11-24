@@ -25,7 +25,7 @@ async function read(id: string, as: string) {
   return r.body.singleResult;
 }
 async function stage() {
-  const e = await resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'staged' }, ctxOf(userId)).then(() => { throw new Error('expected refusal'); }, (x) => x);
+  const e = await resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'staged' }, ctxOf(userId)).then(() => { throw new Error('expected refusal'); }, (x: unknown) => x as { extensions: { requestId: string; ceremonyUrl: string } });
   return { id: e.extensions.requestId as string, url: e.extensions.ceremonyUrl as string };
 }
 
