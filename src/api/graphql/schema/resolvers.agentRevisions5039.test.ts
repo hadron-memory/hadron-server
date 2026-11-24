@@ -19,27 +19,41 @@ let manager: { id: string };
 let agent: { id: string; systemMemoryId: string | null };
 const ctx = (over?: Partial<Context>): Context => ({ db, roles: ['READER'], userId: manager.id, ...over });
 const save = () => resolvers.Mutation.createRevision({}, { agentRef: agent.id }, ctx());
-const publish = (loc: string) => resolvers.Mutation.publishRevision({}, { agentRef: agent.id, revisionLoc: loc }, ctx());
 const softDelete = () => db.agent.update({ where: { id: agent.id }, data: { deletedAt: new Date() } });
 
-/** What a refusal looks like on the wire: its class name, message and extensions. */
+/** What a refusal looks like on the wire: its class name, message and extensions (compared raw, not normalised). */
 async function refusal(p: Promise<unknown>) {
   const e = await p.then(() => null, (err: unknown) => err as Error & { extensions?: unknown });
   if (!e) throw new Error('expected a refusal, got a result');
-  return { name: e.name, message: e.message, extensions: JSON.parse(JSON.stringify(e.extensions ?? null)) };
+  return { name: e.name, message: e.message, extensions: e.extensions };
 }
 
 /**
  * A ctx.db whose snapshot transaction first runs `before` on the real client: the window between the resolver's read
- * gate and the snapshot's own Agent re-read. One-shot, so the gate's reads (none of which open a transaction) are untouched.
+ * gate and the snapshot's own Agent re-read. One-shot. It also counts the gate's reads of this Agent that returned the
+ * LIVE row, and records that count when the hook fires: a nonzero count proves the gate read and passed the live Agent
+ * before the delete landed, so the refusal can only come from the snapshot's re-read (#5107 F1).
  */
-function dbWithHookBeforeSnapshot(before: () => Promise<unknown>) {
-  const state = { ran: false };
+function dbWithHookBeforeSnapshot(agentId: string, before: () => Promise<unknown>) {
+  const state = { ran: false, liveGateReads: 0, liveGateReadsAtHook: -1 };
+  const agentDelegate = new Proxy(db.agent, {
+    get(target, prop, receiver) {
+      if (prop === 'findUnique') {
+        return async (args: Parameters<typeof db.agent.findUnique>[0]) => {
+          const row = await target.findUnique(args);
+          if (row && (row as { id?: string }).id === agentId && (row as { deletedAt?: Date | null }).deletedAt === null) state.liveGateReads++;
+          return row;
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
   const proxy = new Proxy(db, {
     get(target, prop, receiver) {
+      if (prop === 'agent') return agentDelegate;
       if (prop === '$transaction') {
         return async (...args: unknown[]) => {
-          if (!state.ran) { state.ran = true; await before(); }
+          if (!state.ran) { state.ran = true; state.liveGateReadsAtHook = state.liveGateReads; await before(); }
           return (target.$transaction as (...a: unknown[]) => unknown)(...args);
         };
       }
@@ -67,9 +81,10 @@ describe('#5039 item 1: the snapshot re-read gates the served row', () => {
 
   it('an Agent deleted between the gate and the snapshot gets the read gate\'s own refusal, byte for byte', async () => {
     await save();
-    const { proxy, state } = dbWithHookBeforeSnapshot(softDelete);
+    const { proxy, state } = dbWithHookBeforeSnapshot(agent.id, softDelete);
     const raced = await refusal(resolvers.Query.agentRevisions({}, { agentRef: agent.id }, ctx({ db: proxy })));
-    expect(state.ran).toBe(true); // the delete really landed after the gate
+    expect(state.ran).toBe(true); // the snapshot transaction opened, so the gate (and ADMIN) passed
+    expect(state.liveGateReadsAtHook).toBeGreaterThanOrEqual(1); // the gate read the LIVE row before the delete landed
     // The same Agent, now deleted, refused by the read gate itself (no window needed).
     const gated = await refusal(resolvers.Query.agentRevisions({}, { agentRef: agent.id }, ctx()));
     expect(gated.name).toBe('AgentNotFoundError');
@@ -81,11 +96,16 @@ describe('#5039 item 1: the snapshot re-read gates the served row', () => {
   });
 });
 
-describe('#5039 item 2/4: no system memory is its own result', () => {
+describe('#5039 item 2: no system memory is its own result', () => {
   it('a live Agent with no system memory reads as no-system-memory, distinct from absent, and keeps today\'s message', async () => {
     await db.agent.update({ where: { id: agent.id }, data: { systemMemoryId: null } });
     expect(await readAgentRevisionList(db, agent.id)).toEqual({ kind: 'no-system-memory' });
     await expect(resolvers.Query.agentRevisions({}, { agentRef: agent.id }, ctx())).rejects.toThrow('Agent has no system memory');
+  });
+
+  it('a soft-deleted Agent with no system memory is absent: absent wins over no-system-memory', async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { systemMemoryId: null, deletedAt: new Date() } });
+    expect(await readAgentRevisionList(db, agent.id)).toEqual({ kind: 'absent' });
   });
 });
 
