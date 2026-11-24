@@ -12,9 +12,9 @@ import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { createServerOnCleanDb } from '../test/startServerFixture.js';
 import { generateId } from '../lib/id.js';
 import { signJwt } from '../auth/jwt.js';
 import { OWNER_LIMIT_NO_NUMBER_MESSAGE, OwnerLimitReachedError } from '../lib/ownerLimits/errors.js';
@@ -33,7 +33,7 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', async (importOriginal) 
 let server: Server;
 let base: string;
 beforeAll(async () => {
-  server = httpServer(await createServer());
+  server = httpServer(await createServerOnCleanDb());
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
