@@ -89,6 +89,16 @@ describe('#5015 run tools at the owner\'s nodes limit', () => {
     expect(out.error).toMatchObject({ code: 'OWNER_LIMIT_REACHED', callerCanManageOwner: true, ownerId: orgId, limit: '1' });
   });
 
+  it('hadron_create_node in a run with no on-behalf-of user returns the form with no owner and no number', async () => {
+    reloadOwnerDefaultLimitsForTests({ OWNER_DEFAULT_LIMITS: JSON.stringify({ organization: { nodes: 1 } }) });
+    const out = await call(hadronCreateNode, await mintRun(null), { urn: `hrn:node:${ORG_URN}:runmem:fresh`, name: 'fresh' });
+    expect(out.error).toEqual({
+      code: 'OWNER_LIMIT_REACHED', limitKey: 'nodes', ownerType: 'organization', callerCanManageOwner: false,
+      message: OWNER_LIMIT_NO_NUMBER_MESSAGE,
+    });
+    expect(await db.node.count({ where: { memoryId, loc: 'fresh' } })).toBe(0);
+  });
+
   it('hadron_create_node still creates below the limit', async () => {
     reloadOwnerDefaultLimitsForTests({ OWNER_DEFAULT_LIMITS: JSON.stringify({ organization: { nodes: 2 } }) });
     const out = await call(hadronCreateNode, await mintRun(writerId), { urn: `hrn:node:${ORG_URN}:runmem:fresh`, name: 'fresh' });

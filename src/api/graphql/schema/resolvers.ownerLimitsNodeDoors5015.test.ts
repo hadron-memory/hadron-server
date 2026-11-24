@@ -40,6 +40,7 @@ const MERGE = `mutation($input: MergeMemoriesInput!) { mergeMemories(input: $inp
 const CLONE_MEMORY = `mutation($ref: ID!, $urn: String!) { cloneMemory(ref: $ref, targetUrn: $urn) { id } }`;
 const EXTRACT = `mutation($ref: ID!, $urn: String!, $move: Boolean) { extractParentNodeToMemory(parentRef: $ref, targetUrn: $urn, move: $move) { id } }`;
 
+const M = resolvers.Mutation as any;
 const ctxOf = (userId: string): Partial<Context> => ({ userId, roles: ['READER'] as never });
 const err = (r: Result) => r.errors?.[0];
 const code = (r: Result) => err(r)?.extensions?.code ?? null;
@@ -137,6 +138,19 @@ describe('#5015 createNode at the owner\'s nodes limit', () => {
   });
 });
 
+describe('#5015 the refusal under impersonation', () => {
+  it('names no owner and no number when a platform admin acts as the limited person (A7a: the caller is null)', async () => {
+    defaults({ user: { nodes: 2 } });
+    const imp = { sessionId: generateId(), actorUserId: w, orgId: null, expiresAt: new Date(Date.now() + 3_600_000) };
+    const r = await gql(CREATE, { ...asU(), impersonation: imp } as Partial<Context>, { input: { memoryId: mU1, loc: 'c', name: 'c' } });
+    expect(code(r)).toBe('OWNER_LIMIT_REACHED');
+    expect(err(r)?.extensions).toMatchObject({ callerCanManageOwner: false });
+    expect(err(r)?.extensions).not.toHaveProperty('ownerId');
+    expect(err(r)?.extensions).not.toHaveProperty('limit');
+    expect(await db.node.count({ where: { memoryId: mU1, loc: 'c' } })).toBe(0);
+  });
+});
+
 describe('#5015 restoreNode', () => {
   it('refuses to restore a deleted node at the cap', async () => {
     const t = await node(mU1, 't', { deletedAt: new Date() });
@@ -163,6 +177,17 @@ describe('#5015 moveNode and cloneNode', () => {
     const r = await gql(MOVE, asU(), { src: x.id, to: mU1 });
     expect(code(r)).toBe('OWNER_LIMIT_REACHED');
     expect(await db.node.count({ where: { memoryId: mO, deletedAt: null } })).toBe(2);
+  });
+
+  it('refuses a subtree move whose nodes fit the headroom but whose carried comment thread does not', async () => {
+    const x = await node(mO, 'x');
+    await node(mO, 'x:child');
+    await M.createComment({}, { targetRef: x.id, body: 'a thread carried with the move' }, { db, userId: u, roles: ['READER'] } as Context);
+    const at = await capAtCurrent({ userId: u });
+    await db.ownerLimit.updateMany({ where: { ownerUserId: u, key: 'nodes' }, data: { limitValue: at + 2n } });
+    const r = await gql(MOVE, asU(), { src: x.id, to: mU1 });
+    expect(code(r)).toBe('OWNER_LIMIT_REACHED');
+    expect(await db.node.count({ where: { memoryId: mO, loc: { in: ['x', 'x:child'] }, deletedAt: null } })).toBe(2);
   });
 
   it('succeeds at the cap: a move between two memories of the same owner', async () => {
@@ -205,6 +230,17 @@ describe('#5015 cloneMemory and extractParentNodeToMemory', () => {
     await node(mO, 'x');
     await node(mO, 'y');
     await capAtCurrent({ organizationId: orgId });
+    const before = await db.memory.count();
+    const r = await gql(CLONE_MEMORY, ctxOf(orgAdmin), { ref: mO, urn: `hrn:mem:${orgUrn}:o-copy` });
+    expect(code(r)).toBe('OWNER_LIMIT_REACHED');
+    expect(await db.memory.count()).toBe(before);
+  });
+
+  it('refuses a clone of two nodes into an organization one below its limit (the batch is judged whole, not as one)', async () => {
+    await node(mO, 'x');
+    await node(mO, 'y');
+    const at = await capAtCurrent({ organizationId: orgId });
+    await db.ownerLimit.updateMany({ where: { organizationId: orgId, key: 'nodes' }, data: { limitValue: at + 1n } });
     const before = await db.memory.count();
     const r = await gql(CLONE_MEMORY, ctxOf(orgAdmin), { ref: mO, urn: `hrn:mem:${orgUrn}:o-copy` });
     expect(code(r)).toBe('OWNER_LIMIT_REACHED');
