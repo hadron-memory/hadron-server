@@ -232,15 +232,15 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `x-hadron-memory-keys` (strict owner) or `x-hadron-operation-key` (owning App completion). CLI floor: hadron-cli
 // v0.56.0.
 //
-// 0.37.0 — BREAKING, entity refs S7 (#4148): the agent-task family takes refs, no alias. The eleven own-task mutations
+// 0.38.0 — BREAKING, entity refs S7 (#4148): the agent-task family takes refs, no alias. The eleven own-task mutations
 // (`updateAgentTask`, `assignAgentTask`, `reassignAgentTask`, `startAgentTask`, `recordAgentTaskProgress`,
 // `finishAgentTask`, `cancelAgentTask`, `releaseAgentTaskExternalId`, `parkAgentTask`, `cloneAgentTask`,
 // `makeAgentTaskReady`) take `taskRef: ID!` (was `taskId`); `agentTask(id)` → `agentTask(ref)`; `agentTasks` /
 // `agentTasksPage(parentTaskId)` → `parentTaskRef`; `agentTeamEvents` / `agentTeamEventsPage(taskId)` → `taskRef`. A
 // lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation (ship order per precedent
 // 0274: notices, server, companions). Gates and refusals are unchanged; `agentTasks(externalId)` keeps its name (an
-// external-system label). (0.36.0 is #5066, #1796, merged first.)
-export const HADRON_SERVER_VERSION = '0.37.0';
+// external-system label). (0.36.0 is #5066, #1796, merged first; 0.37.0 is #5064, Billing A1, frozen first.)
+export const HADRON_SERVER_VERSION = '0.38.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
