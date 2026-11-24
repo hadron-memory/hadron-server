@@ -69,7 +69,8 @@ describe('every function pins its search path', () => {
       SELECT p.proname, p.proconfig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
        WHERE n.nspname = 'public' AND p.proname = ANY (${[...names]})`;
     expect(rows.length, 'most of the named functions exist in the test database').toBeGreaterThan(80);
-    for (const r of rows) expect(r.proconfig, r.proname).toContain('search_path=public, pg_temp');
+    // A test that replays an old migration on the shared worker database must restore the pins afterwards (resolvers.comments1869.test.ts does).
+    for (const r of rows) expect(r.proconfig ?? [], `${r.proname} has no pinned search_path: a test left the worker database unpinned`).toContain('search_path=public, pg_temp');
   });
   it('there are no procedures or aggregates in public to be left out of the loop', async () => {
     const rows = await db.$queryRawUnsafe<Array<{ sig: string }>>(`
@@ -117,13 +118,14 @@ describe('the premise that makes the pin behaviour-neutral: every guard resolves
       expect(await config(c, 'zz5096_immutable')).toContain('search_path=public, pg_temp');
     });
   });
-  it('re-running the loop on a pinned schema changes nothing', async () => {
+  it('running the loop a second time changes nothing', async () => {
     const src = prisma('guard-search-path-invariants.sql');
-    const before = await db.$queryRawUnsafe<Array<{ n: bigint }>>(`SELECT count(*) AS n FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proconfig IS NOT NULL`);
+    const pinned = (c: import('pg').Client) => c.query(`SELECT count(*)::int AS n FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND 'search_path=public, pg_temp' = ANY (proconfig)`);
     await inFreshRolledBackSession(async (c) => {
       await c.query(src);
-      const after = await c.query(`SELECT count(*)::int AS n FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proconfig IS NOT NULL`);
-      expect(after.rows[0].n).toBe(Number(before[0].n));
+      const first = (await pinned(c)).rows[0].n;
+      await c.query(src);
+      expect((await pinned(c)).rows[0].n).toBe(first);
     });
   });
 });

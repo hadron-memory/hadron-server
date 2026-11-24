@@ -23,6 +23,8 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
 const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8');
 const MIGRATION = read('../../../../prisma/migrations/20261013180000_encrypted_anchor_hash_scrub/migration.sql');
 const INVARIANTS = read('../../../../prisma/comment-invariants.sql');
+// #5096: the replay re-creates functions without their pinned search_path; restoring the invariants restores the functions, so the pinning loop is re-run too.
+const GUARD_SEARCH_PATH = read('../../../../prisma/guard-search-path-invariants.sql');
 
 let admin: { id: string };
 let orgId: string;
@@ -64,6 +66,7 @@ const migrate = async (): Promise<number> => {
     // current ones, as the later migrations do in prod, so no later test file
     // on this worker's database runs against a stale check (#1935).
     await client.query(INVARIANTS);
+    await client.query(GUARD_SEARCH_PATH);
     const updates = results.filter((r) => r.command === 'UPDATE');
     expect(updates).toHaveLength(1);
     return updates[0].rowCount ?? 0;
