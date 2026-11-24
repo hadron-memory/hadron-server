@@ -91,11 +91,11 @@ async function sessionsWhere(
 const usageWindowInstant = z.string().datetime({ offset: true });
 
 /**
- * The `where` shared by `usageEvents` and `usageEventsPage` (#2212 A1): the principal gate, the loc/nodeId
+ * The `where` shared by `usageEvents` and `usageEventsPage` (#2212 A1): the principal gate, the loc/nodeRef
  * addressing rules and the scope, all resolved before any query.
  *
  * #2817 — the two scopes of hrn:node:hadronmemory.com:specs:cor:acl:090:01 (ruling 0244 items 1 and 2):
- *   - no resource named (no `memoryId`, `nodeId` or `loc`) → OWN ACTIVITY: the events attributed to the
+ *   - no resource named (no `memoryRef`, `nodeRef` or `loc`) → OWN ACTIVITY: the events attributed to the
  *     calling user (`UsageEvent.userId`), in any memory or none. A principal with no user identity (an App
  *     key, a userless run) has no own activity and gets an empty result, not an error.
  *   - a resource named → RESOURCE SCOPE: every principal's events there, bounded by the memory READ gate
@@ -128,8 +128,9 @@ async function admitUsageKeyFilter(ctx: Context, ref: string): Promise<{ id: str
 
 async function usageEventsWhere(
   ctx: Context,
-  { type, memoryId, nodeId, loc, since, until, appKey }: {
-    type?: string; memoryId?: string; nodeId?: string; loc?: string;
+  // #4142 (S6 chunk A): the args are `memoryRef` / `nodeRef` on the wire; the locals keep the resolved-entity names.
+  { type, memoryRef: memoryId, nodeRef: nodeId, loc, since, until, appKey }: {
+    type?: string; memoryRef?: string; nodeRef?: string; loc?: string;
     since?: string | null; until?: string | null; appKey?: string | null;
   },
 ): Promise<Prisma.UsageEventWhereInput> {
@@ -149,11 +150,11 @@ async function usageEventsWhere(
         throw new GraphQLError('since must be earlier than until', { extensions: { code: 'BAD_USER_INPUT' } });
       }
 
-      // `loc` and `nodeId` are two different addressing modes for the same
+      // `loc` and `nodeRef` are two different addressing modes for the same
       // filter slot — a verbatim loc filter vs a shape-classified node token.
       // Passing both is a contradiction we refuse rather than pick a winner.
       if (loc !== undefined && nodeId !== undefined) {
-        throw new GraphQLError('Provide either nodeId or loc, not both', {
+        throw new GraphQLError('Provide either nodeRef or loc, not both', {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
@@ -368,7 +369,7 @@ export const sessionQueries = {
 
     usageEvents: async (
       _: unknown,
-      args: { type?: string; memoryId?: string; nodeId?: string; loc?: string; since?: string | null; until?: string | null; appKey?: string | null; limit?: number; offset?: number },
+      args: { type?: string; memoryRef?: string; nodeRef?: string; loc?: string; since?: string | null; until?: string | null; appKey?: string | null; limit?: number; offset?: number },
       ctx: Context,
     ) => {
       const where = await usageEventsWhere(ctx, args);
@@ -386,7 +387,7 @@ export const sessionQueries = {
     /** #2212 A1 — `usageEvents` as a page: the same gate and scope (one shared `where`), a stable `id` tiebreak, the real total. */
     usageEventsPage: async (
       _: unknown,
-      args: { type?: string; memoryId?: string; nodeId?: string; loc?: string; since?: string | null; until?: string | null; appKey?: string | null; limit?: number | null; offset?: number | null },
+      args: { type?: string; memoryRef?: string; nodeRef?: string; loc?: string; since?: string | null; until?: string | null; appKey?: string | null; limit?: number | null; offset?: number | null },
       ctx: Context,
     ) => {
       const where = await usageEventsWhere(ctx, args);

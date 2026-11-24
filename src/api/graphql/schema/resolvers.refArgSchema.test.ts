@@ -116,6 +116,11 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   appRun: ['ref'],
   nodeRevisions: ['nodeRef'],
   appRuns: ['appRef', 'orgRef', 'parentRunRef'],
+  // #4142 (S6 chunk A): the memory reads.
+  usageEvents: ['memoryRef', 'nodeRef'],
+  usageEventsPage: ['memoryRef', 'nodeRef'],
+  memoryAssets: ['memoryRef'],
+  memoryLocSegments: ['memoryRefs'],
 };
 
 /**
