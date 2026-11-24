@@ -160,6 +160,17 @@ describe('#5010 the other audit columns, a mixed edit, and the real merge path',
     expect((await entryRow()).created_by).toBe(userS);
   });
 
+  it('pin 16: a session temp table named user_merges cannot forge the merge proof', async () => {
+    await pg.query('CREATE TEMP TABLE user_merges (LIKE public.user_merges INCLUDING DEFAULTS)');
+    try {
+      await pg.query('INSERT INTO pg_temp.user_merges (source_user_id, target_user_id, merged_by) VALUES ($1, $2, $2)', [userS, userT]);
+      expect(await code('UPDATE credit_ledger_entries SET created_by = $2, updated_by = $2 WHERE id = $1', [entryId, userT])).toBe('23514');
+      expect((await entryRow()).created_by).toBe(userS);
+    } finally {
+      await pg.query('DROP TABLE pg_temp.user_merges');
+    }
+  });
+
   it('pin 14: the real mergeUsers path succeeds for an owner of entries, and a chained merge A->B->C follows', async () => {
     const userU = (await db.user.create({ data: { id: generateId(), githubId: 50104, githubUsername: 'ledger-u' } })).id;
     await mergeUsers(db, { sourceUserId: userS, targetUserId: userT, actorUserId: admin });
