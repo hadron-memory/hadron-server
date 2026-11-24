@@ -632,9 +632,9 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
     }
     const revs = await db.nodeRevision.findMany({ where: { nodeId: d.row.id } });
     expect(revs).toHaveLength(3);
-    expect(await codeOf(M.deleteNodeRevision(null, { revisionId: revs[0].id }, as()))).toBe('QUESTION_CONTAINED');
+    expect(await codeOf(M.deleteNodeRevision(null, { nodeRevRef: revs[0].id }, as()))).toBe('QUESTION_CONTAINED');
     expect(await codeOf(M.clearNodeHistory(null, { nodeRef: d.row.id }, as()))).toBe('QUESTION_CONTAINED');
-    expect(await codeOf(M.restoreNodeRevision(null, { revisionId: revs[0].id }, as()))).toBe('ROLE_GOVERNED');
+    expect(await codeOf(M.restoreNodeRevision(null, { nodeRevRef: revs[0].id }, as()))).toBe('ROLE_GOVERNED');
     expect(await db.nodeRevision.count({ where: { nodeId: d.row.id } })).toBe(3);
   });
 
@@ -681,7 +681,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
       await messageOf(M.approveNode(null, { nodeRef: log.row.id }, as(holger.id))),
       await messageOf(M.approveNode(null, { nodeRef: d.row.id }, as(holger.id))),
       await messageOf(M.clearNodeHistory(null, { nodeRef: d.row.id }, as())),
-      await messageOf(M.deleteNodeRevision(null, { revisionId: rev.id }, as())),
+      await messageOf(M.deleteNodeRevision(null, { nodeRevRef: rev.id }, as())),
     ];
     expect(msgs[0]).toBe('A question log holds settings, not a question; it is never approved.');
     expect(msgs[1]).toBe(`${(d.row.data as { code: string }).code} has no standing answer to approve.`);
@@ -695,7 +695,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
     const d = await ask(log.row.id);
     await M.amendQuestion(null, { ref: d.row.id, input: { title: 'Title 1' }, expectedRevision: 1, reason: 'r1' }, as(writer.id));
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: d.row.id } });
-    const e = await errorOf(M.updateNodeRevision(null, { revisionId: rev.id, revLabel: 'x' }, as()));
+    const e = await errorOf(M.updateNodeRevision(null, { nodeRevRef: rev.id, revLabel: 'x' }, as()));
     expect(e.extensions.code).toBe('QUESTION_CONTAINED');
     expect(e.message).toContain("Editing a question's history");
   });

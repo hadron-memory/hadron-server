@@ -32,6 +32,10 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   addMemoryToAgent: ['agentRef', 'memoryRef'],
   updateAgentMemoryRole: ['agentRef', 'memoryRef'],
   removeMemoryFromAgent: ['agentRef', 'memoryRef'],
+  // #4138 (S2): the node-revision mutations take a revision ref (URN or PK); Query.nodeRevision is in EXPECTED_QUERY_REF_ARGS.
+  restoreNodeRevision: ['nodeRevRef'],
+  deleteNodeRevision: ['nodeRevRef'],
+  updateNodeRevision: ['nodeRevRef'],
   updateApp: ['ref'],
   deleteApp: ['ref'],
   regenerateAppKey: ['appRef'],
@@ -115,6 +119,7 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   agent: ['ref'],
   appRun: ['ref'],
   nodeRevisions: ['nodeRef'],
+  nodeRevision: ['nodeRevRef'], // #4138 (S2)
   appRuns: ['appRef', 'orgRef', 'parentRunRef'],
   // #4142 (S6 chunk A): the memory reads.
   usageEvents: ['memoryRef', 'nodeRef'],

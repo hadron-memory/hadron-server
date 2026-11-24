@@ -170,7 +170,7 @@ describe('#1339 review — drift is reconciled first on upsert, controller creat
     await writeNodeCore({ memoryId, loc: node.loc, content: 'v2' }, ctx(), 'update', { authoring: attestedAuthoring(null) }); // r1 = v1, live 2
     const r1 = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: node.id, revNo: 1 } });
     await db.node.update({ where: { id: node.id }, data: { content: 'changed by a raw writer' } });
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: r1.id } as never, ctx());
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: r1.id } as never, ctx());
     const history = await db.nodeRevision.findMany({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
     // r1 (v1), r2 = the reconcile of the raw write, r3 = restore's own pre-restore snapshot.
     expect(history.map((r) => r.revNo)).toEqual([1, 2, 3]);

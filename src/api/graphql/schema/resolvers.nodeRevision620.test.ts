@@ -299,7 +299,7 @@ describe('restoreNodeRevision round-trip (#620)', () => {
     );
     const [v1snap] = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
 
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: v1snap.id }, ctx());
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: v1snap.id }, ctx());
 
     const restored = await db.node.findUniqueOrThrow({ where: { id: n.id } });
     expect(restored.content).toBe('v1');
@@ -336,7 +336,7 @@ describe('restoreNodeRevision round-trip (#620)', () => {
       },
     });
 
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: legacy.id }, ctx());
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: legacy.id }, ctx());
 
     const restored = await db.node.findUniqueOrThrow({ where: { id: n.id } });
     // Captured fields restore…
@@ -362,25 +362,25 @@ describe('updateNodeRevision (#620 revLabel)', () => {
 
   it('sets and clears the label', async () => {
     const labeled = await resolvers.Mutation.updateNodeRevision(
-      {}, { revisionId, revLabel: 'the good one' }, ctx(),
+      {}, { nodeRevRef: revisionId, revLabel: 'the good one' }, ctx(),
     );
     expect(labeled.revLabel).toBe('the good one');
 
     const cleared = await resolvers.Mutation.updateNodeRevision(
-      {}, { revisionId, revLabel: null }, ctx(),
+      {}, { nodeRevRef: revisionId, revLabel: null }, ctx(),
     );
     expect(cleared.revLabel).toBeNull();
   });
 
   it('omitting revLabel preserves the existing label (omit-means-preserve)', async () => {
-    await resolvers.Mutation.updateNodeRevision({}, { revisionId, revLabel: 'keep me' }, ctx());
-    const untouched = await resolvers.Mutation.updateNodeRevision({}, { revisionId }, ctx());
+    await resolvers.Mutation.updateNodeRevision({}, { nodeRevRef: revisionId, revLabel: 'keep me' }, ctx());
+    const untouched = await resolvers.Mutation.updateNodeRevision({}, { nodeRevRef: revisionId }, ctx());
     expect(untouched.revLabel).toBe('keep me');
   });
 
   it('rejects a label over the 500-char cap', async () => {
     await expect(
-      resolvers.Mutation.updateNodeRevision({}, { revisionId, revLabel: 'x'.repeat(501) }, ctx()),
+      resolvers.Mutation.updateNodeRevision({}, { nodeRevRef: revisionId, revLabel: 'x'.repeat(501) }, ctx()),
     ).rejects.toThrow('500-character cap');
   });
 
@@ -388,7 +388,7 @@ describe('updateNodeRevision (#620 revLabel)', () => {
     const revision = await db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } });
     await db.node.update({ where: { id: revision.nodeId }, data: { deletedAt: new Date() } });
     await expect(
-      resolvers.Mutation.updateNodeRevision({}, { revisionId, revLabel: 'x' }, ctx()),
+      resolvers.Mutation.updateNodeRevision({}, { nodeRevRef: revisionId, revLabel: 'x' }, ctx()),
     ).rejects.toThrow('Node revision not found');
   });
 
@@ -415,15 +415,15 @@ describe('updateNodeRevision (#620 revLabel)', () => {
     // org role, but no read on the other org's memory.
     await expect(
       resolvers.Mutation.updateNodeRevision(
-        {}, { revisionId: secretSnap.id, revLabel: 'x' },
+        {}, { nodeRevRef: secretSnap.id, revLabel: 'x' },
         { db, roles: [], userId: admin.id } as never,
       ),
     ).rejects.toThrow('Node revision not found');
   });
 
-  it('throws NOT_FOUND for an unknown revisionId', async () => {
+  it('throws NOT_FOUND for an unknown nodeRevRef', async () => {
     await expect(
-      resolvers.Mutation.updateNodeRevision({}, { revisionId: 'nope', revLabel: 'x' }, ctx()),
+      resolvers.Mutation.updateNodeRevision({}, { nodeRevRef: 'nope', revLabel: 'x' }, ctx()),
     ).rejects.toThrow('Node revision not found');
   });
 
@@ -433,7 +433,7 @@ describe('updateNodeRevision (#620 revLabel)', () => {
     });
     await expect(
       resolvers.Mutation.updateNodeRevision(
-        {}, { revisionId, revLabel: 'x' }, ctx({ roles: ['READER'], userId: outsider.id }),
+        {}, { nodeRevRef: revisionId, revLabel: 'x' }, ctx({ roles: ['READER'], userId: outsider.id }),
       ),
     ).rejects.toThrow();
   });

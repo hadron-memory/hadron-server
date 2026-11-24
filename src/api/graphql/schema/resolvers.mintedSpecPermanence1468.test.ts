@@ -300,7 +300,7 @@ describe('#1468 — the spec marker stays on a minted spec (Vera #4403)', () => 
     const n = await node(minted.id, 'pas:010');
     await update(n.id, { tags: ['spec'] });
     const before = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id, tags: { isEmpty: true } } });
-    await expect(resolvers.Mutation.restoreNodeRevision({}, { revisionId: before.id }, ctx()))
+    await expect(resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: before.id }, ctx()))
       .rejects.toSatisfy(refusedPermanent);
     expect(await tagsOf(n.id)).toEqual(['spec']);
   });

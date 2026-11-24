@@ -518,7 +518,7 @@ describe('the bypasses review found — each was a way in the gate did not cover
     // changed is that replaying it needs a door, and no door has a restore
     // variant yet (#1204).
     await expect(
-      resolvers.Mutation.restoreNodeRevision({}, { revisionId: rev.id } as never, ctx()),
+      resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: rev.id } as never, ctx()),
     ).rejects.toThrow();
     expect((await db.node.findFirstOrThrow({ where: { id } })).role).toBe('review');
   });
