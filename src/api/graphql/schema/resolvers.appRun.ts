@@ -402,6 +402,24 @@ export async function canReadAppRun(
 }
 
 /**
+ * #5037: a caller with no standing over a schedule or webhook (not even an org READER) is answered exactly as for an id that
+ * names nothing, so the door is not an existence oracle for another org's id (the run-door concealment convention, #1577).
+ * A caller who can read it keeps the door's own FORBIDDEN. Only the FORBIDDEN code is folded: any other error propagates.
+ */
+async function concealUnlessOrgReader(ctx: Context, entity: { organizationId: string; appId: string }, notFound: string): Promise<void> {
+  // An App key of the entity's own App has standing over it (it is the entity's own principal): its refusal stays the door's.
+  if (ctx.appId && ctx.appId === entity.appId) return;
+  try {
+    await requireOrgRole(ctx, entity.organizationId, 'READER');
+  } catch (err) {
+    if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') {
+      throw new GraphQLError(notFound, { extensions: { code: 'NOT_FOUND' } });
+    }
+    throw err;
+  }
+}
+
+/**
  * Interactive / import MANUAL-run gate (#530, cor:acl). Ad-hoc runs
  * (`triggerAppRun`, `runTask(appRef:)`, `importNode(taskRef:)`) are the
  * end-user features these paths exist for, so — unlike schedules and webhooks,
@@ -739,6 +757,7 @@ export const appRunMutations = {
       where: { id, deletedAt: null },
     });
     if (!observed) throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
+    await concealUnlessOrgReader(ctx, observed, 'Schedule not found.');
     await requireOrgRole(ctx, observed.organizationId, 'ADMIN');
     // The adjudicated stop-only exception cannot carry any authority-changing field.
     const disableOnly = input.enabled === false && Object.keys(input).every(key => key === 'enabled');
@@ -858,6 +877,7 @@ export const appRunMutations = {
   deleteAgentSchedule: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentSchedule.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
+    await concealUnlessOrgReader(ctx, existing, 'Schedule not found.');
     await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
     await ctx.db.agentSchedule.update({
       where: { id },
@@ -901,6 +921,8 @@ export const appRunMutations = {
     }
     const run = await ctx.db.appRun.findUnique({ where: { id } });
     if (!run) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
+    // #5037: a caller who cannot read the run is answered as for a run that does not exist.
+    if (!(await canReadAppRun(ctx, run))) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
     await requireOrgRole(ctx, run.organizationId, 'ADMIN');
     const cancelled = await ctx.db.appRun.updateMany({
       where: { id, status: { in: ['PENDING', 'RUNNING'] } },
@@ -1018,6 +1040,8 @@ export const appRunMutations = {
   rotateAgentWebhook: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
+    // #5037: before the person-only refusal below, so no caller class tells a foreign id from a missing one.
+    await concealUnlessOrgReader(ctx, existing, 'Webhook not found.');
     // #3511 (ruling 0177, cor:dmo:050:12 r40): person-only, decided before any secret or token is minted, with the
     // door's existing non-admin refusal.
     await requirePersonOnlyAct(ctx, 'agent-webhook.rotate', authorizationDenied);
@@ -1051,6 +1075,7 @@ export const appRunMutations = {
   deleteAgentWebhook: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
+    await concealUnlessOrgReader(ctx, existing, 'Webhook not found.');
     await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
     await withAuthorizedTx(
       ctx,
