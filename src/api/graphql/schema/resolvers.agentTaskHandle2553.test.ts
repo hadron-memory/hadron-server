@@ -126,7 +126,7 @@ describe('numbering', () => {
 
   it('a committed number is permanent: cancelling does not free it, a rolled-back create returns it', async () => {
     const a: any = await mk(appX, 'a');
-    await M.cancelAgentTask({}, { taskId: a.id }, as(alice));
+    await M.cancelAgentTask({}, { taskRef: a.id }, as(alice));
     expect(handleOf(await mk(appX, 'b'))).toBe('AT0.2');
     await expect(db.$transaction(async (tx) => {
       await tx.agentTask.create({ data: { appId: appX.id, title: 'doomed', ownerUserId: alice.id, parentTaskId: a.parentTaskId } });
@@ -247,7 +247,7 @@ describe('numbering', () => {
     const blockedCreate = mk(appX, 'waits on the counter').then((r: any) => { createDone = true; return r; });
     await waitForLockWaiters(db, 1);
     // A write to another task of the same App is not stuck behind the create: the App row is only an anchor.
-    const cancelled = await M.cancelAgentTask({}, { taskId: t.id }, as(alice));
+    const cancelled = await M.cancelAgentTask({}, { taskRef: t.id }, as(alice));
     expect(cancelled.status).toBe('cancelled');
     expect(createDone).toBe(false);
     release();
@@ -258,7 +258,7 @@ describe('numbering', () => {
   it('a create racing task writes in the same App neither deadlocks nor duplicates a number', async () => {
     const seeded: any[] = await Promise.all(Array.from({ length: 4 }, (_, i) => mk(appX, `s${i}`)));
     const results = await Promise.all([
-      ...seeded.map((t: any) => M.cancelAgentTask({}, { taskId: t.id }, as(alice))),
+      ...seeded.map((t: any) => M.cancelAgentTask({}, { taskRef: t.id }, as(alice))),
       ...Array.from({ length: 4 }, (_, i) => mk(appX, `n${i}`)),
     ]);
     expect(results).toHaveLength(8);
@@ -271,12 +271,12 @@ describe('AT0 is the platform\'s own row (rev 6)', () => {
   it('reads by id or handle but never lists; `parentTaskId: AT0` and rootsOnly list the tasks with no project', async () => {
     const t: any = await mk(appX, 'no project');
     const pr: any = await project(appX, 'a project');
-    const zero = await Q.agentTask({}, { id: 'AT0' }, as(bob));
+    const zero = await Q.agentTask({}, { ref: 'AT0' }, as(bob));
     expect(zero).toMatchObject({ title: 'No project', status: 'backlog' });
     expect(await T.handle!(zero, {}, as(bob))).toBe('AT0');
     const all = await Q.agentTasks({}, { appRef: appX.id }, as(alice));
     expect(all.map((r: any) => r.id).sort()).toEqual([t.id, pr.id].sort());
-    const under = await Q.agentTasks({}, { appRef: appX.id, parentTaskId: 'AT0' }, as(alice));
+    const under = await Q.agentTasks({}, { appRef: appX.id, parentTaskRef: 'AT0' }, as(alice));
     expect(under.map((r: any) => r.id)).toEqual([t.id]);
     const roots = await Q.agentTasks({}, { appRef: appX.id, rootsOnly: true }, as(alice));
     expect(roots.map((r: any) => r.id).sort()).toEqual([t.id, pr.id].sort());
@@ -293,13 +293,13 @@ describe('AT0 is the platform\'s own row (rev 6)', () => {
     await mk(appX, 'a', bob);
     const snap = async () => JSON.stringify(await db.agentTask.findFirstOrThrow({ where: { appId: appX.id, handle: 'AT0' } }), (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
     const before = await snap();
-    const args = { taskId: 'AT0', assignee: { user: bob.id }, result: { outcome: 'succeeded', summary: 's' } };
+    const args = { taskRef: 'AT0', assignee: { user: bob.id }, result: { outcome: 'succeeded', summary: 's' } };
     // Every mutation that takes a task, by the handle and by the qualified handle: one refusal code for all of them.
     const ops = ['assignAgentTask', 'parkAgentTask', 'makeAgentTaskReady', 'reassignAgentTask', 'startAgentTask', 'recordAgentTaskProgress', 'finishAgentTask', 'cancelAgentTask'];
     expect(ops.every((n) => typeof M[n] === 'function')).toBe(true);
     for (const name of ops) {
       for (const taskId of ['AT0', `hrn:agenttask:${appX.urn}:AT0`]) {
-        expect((await refusal(M[name]({}, { ...args, taskId }, as(bob)))).extensions?.code, name).toBe('TASK_PROJECT_ZERO_FIXED');
+        expect((await refusal(M[name]({}, { ...args, taskRef: taskId }, as(bob)))).extensions?.code, name).toBe('TASK_PROJECT_ZERO_FIXED');
       }
     }
     expect(await snap()).toBe(before);
@@ -452,9 +452,9 @@ describe('the migration', () => {
 describe('resolution (item 3, 4, 5)', () => {
   it('a person in exactly one App reads by bare handle, case-insensitively; id still works', async () => {
     const t: any = await mk(appX, 'x1', bob);
-    expect((await Q.agentTask({}, { id: 'AT0.1' }, as(bob)))?.id).toBe(t.id);
-    expect((await Q.agentTask({}, { id: 'at0.1' }, as(bob)))?.id).toBe(t.id);
-    expect((await Q.agentTask({}, { id: t.id }, as(bob)))?.id).toBe(t.id);
+    expect((await Q.agentTask({}, { ref: 'AT0.1' }, as(bob)))?.id).toBe(t.id);
+    expect((await Q.agentTask({}, { ref: 'at0.1' }, as(bob)))?.id).toBe(t.id);
+    expect((await Q.agentTask({}, { ref: t.id }, as(bob)))?.id).toBe(t.id);
   });
 
   it('every task operation takes the handle', async () => {
@@ -463,11 +463,11 @@ describe('resolution (item 3, 4, 5)', () => {
     expect((await Q.agentTaskTree({}, { root: 'AT0.1' }, as(bob)))?.map((r: any) => r.id)).toEqual([t.id]);
     const child: any = await M.createAgentTask({}, { input: { parentTaskId: 'AT0.1', title: 'child' } }, as(bob));
     expect(child.parentTaskId).toBe(t.id);
-    expect((await Q.agentTasks({}, { appRef: appX.id, parentTaskId: 'AT0.1' }, as(bob))).map((r: any) => r.id)).toEqual([child.id]);
-    const events = await Q.agentTeamEvents({}, { appRef: appX.id, taskId: 'AT0.1.1' }, as(bob));
+    expect((await Q.agentTasks({}, { appRef: appX.id, parentTaskRef: 'AT0.1' }, as(bob))).map((r: any) => r.id)).toEqual([child.id]);
+    const events = await Q.agentTeamEvents({}, { appRef: appX.id, taskRef: 'AT0.1.1' }, as(bob));
     expect(events.length).toBeGreaterThan(0);
     expect(events.every((e: any) => e.taskId === child.id)).toBe(true);
-    const cancelled = await M.cancelAgentTask({}, { taskId: 'AT0.1.1' }, as(bob));
+    const cancelled = await M.cancelAgentTask({}, { taskRef: 'AT0.1.1' }, as(bob));
     expect(cancelled.id).toBe(child.id);
     expect(cancelled.status).toBe('cancelled');
   });
@@ -475,37 +475,37 @@ describe('resolution (item 3, 4, 5)', () => {
   it('an App key reads by bare handle within its own App only', async () => {
     const x: any = await mk(appX, 'x1');
     await mk(appY, 'y1');
-    expect((await Q.agentTask({}, { id: 'AT0.1' }, keyCtx()))?.id).toBe(x.id);
-    expect(await Q.agentTask({}, { id: 'AT0.2' }, keyCtx())).toBeNull();
+    expect((await Q.agentTask({}, { ref: 'AT0.1' }, keyCtx()))?.id).toBe(x.id);
+    expect(await Q.agentTask({}, { ref: 'AT0.2' }, keyCtx())).toBeNull();
   });
 
   it('a worker session resolves a bare handle in the session\'s App', async () => {
     const x: any = await mk(appX, 'x1');
     const y: any = await mk(appY, 'y1');
     await mk(appY, 'y2');
-    const got = await runAsActor({ workerId: anne.id, agentId }, () => Q.agentTask({}, { id: 'AT0.1' }, as(alice)));
+    const got = await runAsActor({ workerId: anne.id, agentId }, () => Q.agentTask({}, { ref: 'AT0.1' }, as(alice)));
     expect(got?.id).toBe(x.id);
     expect(got?.id).not.toBe(y.id);
-    expect(await runAsActor({ workerId: anne.id, agentId }, () => Q.agentTask({}, { id: 'AT0.2' }, as(alice)))).toBeNull();
+    expect(await runAsActor({ workerId: anne.id, agentId }, () => Q.agentTask({}, { ref: 'AT0.2' }, as(alice)))).toBeNull();
   });
 
   it('a person in several Apps: a bare handle is refused "qualify it", the same whether or not the number exists', async () => {
     await mk(appX, 'x1');
-    const exists = await refusal(Q.agentTask({}, { id: 'AT0.1' }, as(alice)));
-    const absent = await refusal(Q.agentTask({}, { id: 'AT0.999' }, as(alice)));
+    const exists = await refusal(Q.agentTask({}, { ref: 'AT0.1' }, as(alice)));
+    const absent = await refusal(Q.agentTask({}, { ref: 'AT0.999' }, as(alice)));
     expect(exists.extensions?.code).toBe('TASK_HANDLE_QUALIFY');
     expect(absent.extensions?.code).toBe('TASK_HANDLE_QUALIFY');
     expect(exists.message).toBe(absent.message);
     expect({ ...exists.extensions, taskId: null }).toEqual({ ...absent.extensions, taskId: null });
-    const mutation = await refusal(M.cancelAgentTask({}, { taskId: 'AT0.1' }, as(alice)));
+    const mutation = await refusal(M.cancelAgentTask({}, { taskRef: 'AT0.1' }, as(alice)));
     expect(mutation.extensions?.code).toBe('TASK_HANDLE_QUALIFY');
   });
 
   it('the qualified form names the App by its URN, and resolves for a person in several Apps', async () => {
     const y: any = await mk(appY, 'y1');
     await mk(appX, 'x1');
-    expect((await Q.agentTask({}, { id: `hrn:agenttask:${appY.urn}:AT0.1` }, as(alice)))?.id).toBe(y.id);
-    expect((await Q.agentTask({}, { id: `hrn:agenttask:${appX.urn}:at0.1` }, as(alice)))?.id).not.toBe(y.id);
+    expect((await Q.agentTask({}, { ref: `hrn:agenttask:${appY.urn}:AT0.1` }, as(alice)))?.id).toBe(y.id);
+    expect((await Q.agentTask({}, { ref: `hrn:agenttask:${appX.urn}:at0.1` }, as(alice)))?.id).not.toBe(y.id);
   });
 
   it('unknown, foreign-App and unreadable-App handles answer byte-identically to an unknown id, echo included', async () => {
@@ -522,27 +522,27 @@ describe('resolution (item 3, 4, 5)', () => {
     ];
     for (const who of [bob]) {
       for (const p of probes) {
-        const e = await refusal(M.cancelAgentTask({}, { taskId: p.input }, as(who)));
+        const e = await refusal(M.cancelAgentTask({}, { taskRef: p.input }, as(who)));
         expect(e.extensions?.code).toBe('TASK_NOT_FOUND');
         expect(e.message).toBe('Task not found.');
         expect(e.extensions?.taskId).toBe(p.input);
         expect(Object.keys(e.extensions ?? {}).sort()).toEqual(['code', 'taskId']);
-        expect(await Q.agentTask({}, { id: p.input }, as(who))).toBeNull();
+        expect(await Q.agentTask({}, { ref: p.input }, as(who))).toBeNull();
       }
     }
     // The same for a person in no App, for a key asking about another App, and for a worker session.
     for (const p of probes) {
-      expect(await Q.agentTask({}, { id: p.input }, as(eve))).toBeNull();
-      expect(await Q.agentTask({}, { id: p.input }, keyCtx())).toBeNull();
-      expect(await runAsActor({ workerId: anne.id, agentId }, () => Q.agentTask({}, { id: p.input }, as(alice)))).toBeNull();
+      expect(await Q.agentTask({}, { ref: p.input }, as(eve))).toBeNull();
+      expect(await Q.agentTask({}, { ref: p.input }, keyCtx())).toBeNull();
+      expect(await runAsActor({ workerId: anne.id, agentId }, () => Q.agentTask({}, { ref: p.input }, as(alice)))).toBeNull();
     }
-    expect((await refusal(M.cancelAgentTask({}, { taskId: 'AT0.1' }, as(eve)))).extensions?.code).toBe('TASK_NOT_FOUND');
+    expect((await refusal(M.cancelAgentTask({}, { taskRef: 'AT0.1' }, as(eve)))).extensions?.code).toBe('TASK_NOT_FOUND');
   });
 
   it('a person who belongs to no App is told nothing a stranger would not hear', async () => {
     await mk(appX, 'x1');
-    const e = await refusal(M.cancelAgentTask({}, { taskId: 'AT0.1' }, as(eve)));
-    const f = await refusal(M.cancelAgentTask({}, { taskId: 'AT0.777' }, as(eve)));
+    const e = await refusal(M.cancelAgentTask({}, { taskRef: 'AT0.1' }, as(eve)));
+    const f = await refusal(M.cancelAgentTask({}, { taskRef: 'AT0.777' }, as(eve)));
     expect(e.extensions).toEqual({ code: 'TASK_NOT_FOUND', taskId: 'AT0.1' });
     expect(f.extensions).toEqual({ code: 'TASK_NOT_FOUND', taskId: 'AT0.777' });
   });
@@ -551,16 +551,16 @@ describe('resolution (item 3, 4, 5)', () => {
     'a malformed handle %j falls through to the unknown-id answer',
     async (bad) => {
       await mk(appX, 'x1', bob);
-      expect(await Q.agentTask({}, { id: bad }, as(bob))).toBeNull();
-      expect((await refusal(M.cancelAgentTask({}, { taskId: bad }, as(bob)))).extensions).toEqual({ code: 'TASK_NOT_FOUND', taskId: bad });
+      expect(await Q.agentTask({}, { ref: bad }, as(bob))).toBeNull();
+      expect((await refusal(M.cancelAgentTask({}, { taskRef: bad }, as(bob)))).extensions).toEqual({ code: 'TASK_NOT_FOUND', taskId: bad });
     },
   );
 
   it('AT0 and AT0.<n> are valid handles; a valid handle for no task is unknown, never an error', async () => {
     await mk(appX, 'x1', bob);
-    expect((await Q.agentTask({}, { id: 'AT0' }, as(bob)))?.title).toBe('No project');
+    expect((await Q.agentTask({}, { ref: 'AT0' }, as(bob)))?.title).toBe('No project');
     for (const unknown of ['AT0.388', 'AT3.12', 'AT9223372036854775807', 'AT1.9223372036854775807']) {
-      expect(await Q.agentTask({}, { id: unknown }, as(bob))).toBeNull();
+      expect(await Q.agentTask({}, { ref: unknown }, as(bob))).toBeNull();
     }
   });
 

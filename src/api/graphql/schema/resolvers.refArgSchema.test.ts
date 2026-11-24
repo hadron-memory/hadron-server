@@ -113,6 +113,18 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   addMemoryMember: ['memoryRef', 'userRef'],
   updateMemoryMemberRole: ['memoryRef', 'userRef'],
   removeMemoryMember: ['memoryRef', 'userRef'],
+  // #4148 (S7): the agent-task family's own-task argument is `taskRef` (gate pin 1; the family precedent).
+  updateAgentTask: ['taskRef'],
+  assignAgentTask: ['taskRef'],
+  reassignAgentTask: ['taskRef'],
+  startAgentTask: ['taskRef'],
+  recordAgentTaskProgress: ['taskRef'],
+  finishAgentTask: ['taskRef'],
+  cancelAgentTask: ['taskRef'],
+  releaseAgentTaskExternalId: ['taskRef'],
+  parkAgentTask: ['taskRef'],
+  cloneAgentTask: ['taskRef'],
+  makeAgentTaskReady: ['taskRef'],
 };
 
 /**
@@ -134,6 +146,12 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   usageEventsPage: ['memoryRef', 'nodeRef'],
   memoryAssets: ['memoryRef'],
   memoryLocSegments: ['memoryRefs'],
+  // #4148 (S7): the agent-task family (gate pin 1: `ref` for the field's own subject, `parentTaskRef` / `taskRef`).
+  agentTask: ['ref'],
+  agentTasks: ['appRef', 'parentTaskRef'],
+  agentTasksPage: ['appRef', 'parentTaskRef'], // shares agentTasks' ListArgs (Bridget's LOCAL P2-1)
+  agentTeamEvents: ['appRef', 'taskRef'],
+  agentTeamEventsPage: ['appRef', 'taskRef'],
 };
 
 /**
@@ -159,6 +177,10 @@ const ALLOWED_ID_ARGS = new Set([
   // App's IdP; the Hadron memory is named by memoryRef.
   'linkMemoryToUser.externalUserId',
   // #4136 (S0): Query fields are keyed `Query.<field>.<arg>` so a Query field can never share a Mutation field's allowance.
+  // #4148 (S7): agentTasks.externalId is an external-system label (an outside item's id, e.g. an issue URL; cor:agt:120:02),
+  // not a Hadron entity reference, so it keeps its name per the convention ("external-system labels" stay `<x>Id`).
+  'Query.agentTasks.externalId',
+  'Query.agentTasksPage.externalId',
 ]);
 
 /** The legacy-`Id` check, one (field, arg) at a time, against a per-field allow-list. */

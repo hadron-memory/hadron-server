@@ -36,7 +36,7 @@ const registerCodexOnly = () =>
 async function handAssignedDuringPause(): Promise<string> {
   await M.setTeamPause({}, { appRef: f.app.id, paused: true }, ctx(f.manager.id));
   const t = await db.agentTask.create({ data: { appId: f.app.id, title: 'Do it', ownerUserId: f.manager.id, closeSessionWhenDone: false }, select: { id: true } });
-  await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id));
+  await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: f.kit.id } }, ctx(f.manager.id));
   return t.id;
 }
 

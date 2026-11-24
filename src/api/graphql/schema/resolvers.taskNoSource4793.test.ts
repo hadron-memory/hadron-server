@@ -68,7 +68,7 @@ describe('#4793 the retired code stays on the closed lists and stays readable in
     const task = await create(ctx(member.id), {});
     await db.$transaction((tx) => appendTaskEvent(tx, { appId: app.id, taskId: task.id,
       actor: { userId: member.id, workerId: null, agentId: null }, event: { type: 'task.warning', code: 'task.create.no-source' } }));
-    const rows = await Q.agentTeamEvents({}, { appRef: app.id, types: ['task.warning'], taskId: task.id }, ctx(member.id));
+    const rows = await Q.agentTeamEvents({}, { appRef: app.id, types: ['task.warning'], taskRef: task.id }, ctx(member.id));
     expect(rows.map((r: any) => r.payload)).toEqual([{ code: 'task.create.no-source' }]);
   });
 });

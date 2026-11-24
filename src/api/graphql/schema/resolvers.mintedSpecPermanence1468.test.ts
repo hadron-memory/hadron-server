@@ -1,11 +1,12 @@
 /**
  * #1468 — a spec in a mint-stamped corpus is permanent: no path may remove it.
  *
- * Only a corpus stamped by `mintSpecCorpus` (`corpusMintedAt` set) is
- * protected (Holger, team chat #4370). Draft corpora, and never-stamped
- * non-draft memories such as the live platform specs corpus, keep today's
- * behaviour. A spec is anything with the spec marker: a `spec` tag or a
- * `spec`/`spec.*` role.
+ * Only a corpus holding a mint record is protected (Holger, team chat #4370):
+ * since the #5063 re-key that is "any node of the memory has `minted_at` set,
+ * tombstones included" (was the legacy `Memory.corpusMintedAt` stamp). Draft
+ * corpora, and never-stamped non-draft memories such as the live platform
+ * specs corpus, keep today's behaviour. A spec is anything with the spec
+ * marker: a `spec` tag or a `spec`/`spec.*` role.
  */
 import { describe, it, expect, beforeEach, vi, beforeAll, afterAll } from 'vitest';
 import { GraphQLError } from 'graphql';
@@ -42,12 +43,34 @@ const auth = (): AuthContext => ({ userId: admin.id, roles: ['ADMIN'], clientId:
 const refusedPermanent = (e: unknown) =>
   e instanceof GraphQLError && e.extensions.code === SPEC_MINTED_PERMANENT && /[Ss]upersede/.test(e.message);
 
-async function memory(name: string, state: { corpusDraft?: boolean; corpusMintedAt?: Date | null; deletedAt?: Date | null }) {
-  return db.memory.create({
-    data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:${name}`, name, class: 'knowledge', ...state },
+async function memory(name: string, state: { mintedAt?: Date; deletedAt?: Date | null } = {}) {
+  const { mintedAt, ...rest } = state;
+  const m = await db.memory.create({
+    data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:${name}`, name, class: 'knowledge', ...rest },
     select: { id: true, urn: true },
   });
+  if (mintedAt) await marker(m.id, `${name}:mint-marker`, mintedAt);
+  return m;
 }
+
+/**
+ * The mint record the re-keyed guard reads (#5063): a tombstoned, non-spec
+ * node with `minted_at` set, owner-info only — the shape
+ * `chk_node_mint_complete` admits for a backfilled marker. Tombstoned so no
+ * live-loc assertion in this suite sees it.
+ */
+async function marker(memoryId: string, loc: string, mintedAt: Date) {
+  return db.node.create({
+    data: {
+      id: generateId(), memoryId, loc, name: loc, content: 'minted elsewhere; tombstoned',
+      role: null, tags: [], mintedAt, mintedByInfo: 'test', deletedAt: mintedAt,
+    },
+  });
+}
+
+/** The mint stamp the guard now derives: MAX(nodes.minted_at), tombstones included. */
+const mintedAtOf = async (memoryId: string) =>
+  (await db.node.aggregate({ where: { memoryId }, _max: { mintedAt: true } }))._max.mintedAt!;
 
 async function node(
   memoryId: string,
@@ -70,9 +93,9 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { id: generateId(), name: 'mp-org', urn: 'mp-org' } });
   admin = await db.user.create({ data: { githubId: 14680, githubUsername: 'mp-admin', handle: 'mp-admin', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
-  minted = await memory('minted', { corpusDraft: false, corpusMintedAt: new Date() });
-  draft = await memory('draft', { corpusDraft: true });
-  unstamped = await memory('unstamped', { corpusDraft: false, corpusMintedAt: null });
+  minted = await memory('minted', { mintedAt: new Date() });
+  draft = await memory('draft');
+  unstamped = await memory('unstamped');
 });
 
 describe('#1468 — GraphQL deleteNode', () => {
@@ -306,7 +329,7 @@ describe('#1468 — the spec marker stays on a minted spec (Vera #4403)', () => 
   });
 
   it('createNode over a post-mint spec tombstone refuses to revive it unmarked, GraphQL and MCP', async () => {
-    const mintedAt = (await db.memory.findUniqueOrThrow({ where: { id: minted.id } })).corpusMintedAt!;
+    const mintedAt = await mintedAtOf(minted.id);
     const tomb = await node(minted.id, 'pas:010', { tags: ['spec'], deletedAt: new Date(mintedAt.getTime() + 1000) });
     await expect(resolvers.Mutation.createNode({}, {
       input: { memoryId: minted.id, loc: 'pas:010', name: 'n', content: 'x', tags: ['other'] },
@@ -322,7 +345,7 @@ describe('#1468 — the spec marker stays on a minted spec (Vera #4403)', () => 
   });
 
   it('MCP hadron_create_parent_node refuses unmarking a post-mint spec tombstone it re-saves (Codex P1)', async () => {
-    const mintedAt = (await db.memory.findUniqueOrThrow({ where: { id: minted.id } })).corpusMintedAt!;
+    const mintedAt = await mintedAtOf(minted.id);
     const tomb = await node(minted.id, 'pas', { tags: ['spec'], deletedAt: new Date(mintedAt.getTime() + 1000) });
     const text = await createTestableMcpServer(auth()).callToolText('hadron_create_parent_node', {
       urn: `hrn:node:${minted.urn}:pas`, description: 'the pas module',
@@ -350,7 +373,7 @@ describe('#1468 — the spec marker stays on a minted spec (Vera #4403)', () => 
     });
 
     it('protects a post-mint tombstone, but not one deleted before the mint', async () => {
-      const mintedAt = (await db.memory.findUniqueOrThrow({ where: { id: minted.id } })).corpusMintedAt!;
+      const mintedAt = await mintedAtOf(minted.id);
       const late = await node(minted.id, 'pas:010', { tags: ['spec'], deletedAt: new Date(mintedAt.getTime() + 1000) });
       const early = await node(minted.id, 'pas:020', { tags: ['spec'], deletedAt: new Date(mintedAt.getTime() - 1000) });
       await expect(check(late.id, { tags: [] })).rejects.toSatisfy(refusedPermanent);
@@ -379,7 +402,7 @@ describe('#1468 — mergeMemories', () => {
 
 describe('#1468 — tombstones: only post-mint ones are protected', () => {
   it('hard-deletes a spec tombstone deleted BEFORE the mint (a draft-era deletion)', async () => {
-    const mintedAt = (await db.memory.findUniqueOrThrow({ where: { id: minted.id } })).corpusMintedAt!;
+    const mintedAt = await mintedAtOf(minted.id);
     const draftEra = await node(minted.id, 'pas:050', { tags: ['spec'], deletedAt: new Date(mintedAt.getTime() - 86_400_000) });
     expect(await resolvers.Mutation.deleteNode({}, { nodeRef: draftEra.id, hard: true }, ctx())).toBe(true);
     expect(await db.node.findUnique({ where: { id: draftEra.id } })).toBeNull();
@@ -409,7 +432,7 @@ describe('#1468 — whole-corpus removal', () => {
   });
 
   it('createMemory refuses to reclaim the URN of a deleted minted corpus that still holds a spec', async () => {
-    const dead = await memory('reuse', { corpusMintedAt: new Date(), deletedAt: new Date() });
+    const dead = await memory('reuse', { mintedAt: new Date(), deletedAt: new Date() });
     await node(dead.id, 'pas:010', { tags: ['spec'] });
     await expect(resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse' } as never, ctx()))
       .rejects.toSatisfy(refusedPermanent);
@@ -417,7 +440,7 @@ describe('#1468 — whole-corpus removal', () => {
   });
 
   it('control: createMemory still reclaims a deleted draft corpus', async () => {
-    const dead = await memory('reuse', { corpusDraft: true, deletedAt: new Date() });
+    const dead = await memory('reuse', { deletedAt: new Date() });
     await node(dead.id, 'pas:010', { tags: ['spec'] });
     await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse' } as never, ctx());
     expect(await db.memory.findUnique({ where: { id: dead.id } })).toBeNull();
@@ -435,8 +458,9 @@ describe('#1468 — cascades: App reclaim, account erasure, anonymous expiry', (
       data: { id: generateId(), organizationId: org.id, name: 'Suite', urn: `${org.urn}:suite`, deletedAt: new Date() },
     });
     const appMem = await db.memory.create({
-      data: { id: generateId(), organizationId: org.id, appId: retired.id, urn: `${org.urn}:suite-mem`, name: 'suite-mem', class: 'app', corpusMintedAt: new Date() },
+      data: { id: generateId(), organizationId: org.id, appId: retired.id, urn: `${org.urn}:suite-mem`, name: 'suite-mem', class: 'app' },
     });
+    await marker(appMem.id, 'suite-mem:mint-marker', new Date());
     await node(appMem.id, 'pas:010', { tags: ['spec'] });
     await expect(resolvers.Mutation.createApp({}, { orgRef: org.id, agentRef: a.id, name: 'Suite' } as never, ctx()))
       .rejects.toSatisfy(refusedPermanent);
@@ -447,8 +471,9 @@ describe('#1468 — cascades: App reclaim, account erasure, anonymous expiry', (
   it('account erasure refuses while the user owns a minted corpus holding a spec, naming the handoff', async () => {
     const user = await db.user.create({ data: { id: generateId(), handle: 'mp-leaver', email: 'mp-leaver@example.com', roles: ['READER'] } });
     const owned = await db.memory.create({
-      data: { id: generateId(), userId: user.id, ownerUserId: user.id, urn: 'mp-leaver:corpus', name: 'corpus', class: 'private', corpusMintedAt: new Date() },
+      data: { id: generateId(), userId: user.id, ownerUserId: user.id, urn: 'mp-leaver:corpus', name: 'corpus', class: 'private' },
     });
+    await marker(owned.id, 'corpus:mint-marker', new Date());
     await node(owned.id, 'pas:010', { tags: ['spec'] });
     const leaver = { db, userId: user.id, roles: ['READER'] } as Context;
     await expect(resolvers.Mutation.deleteUser({}, {}, leaver)).rejects.toSatisfy(
@@ -457,8 +482,8 @@ describe('#1468 — cascades: App reclaim, account erasure, anonymous expiry', (
     expect(await db.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ deletedAt: null });
     expect(await db.memory.findUnique({ where: { id: owned.id } })).not.toBeNull();
 
-    // Control: without the stamp, erasure proceeds and takes the memory.
-    await db.memory.update({ where: { id: owned.id }, data: { corpusMintedAt: null } });
+    // Control: without a mint record, erasure proceeds and takes the memory.
+    await db.node.deleteMany({ where: { memoryId: owned.id, mintedAt: { not: null } } });
     expect(await resolvers.Mutation.deleteUser({}, {}, leaver)).toBe(true);
     expect(await db.memory.findUnique({ where: { id: owned.id } })).toBeNull();
   });
@@ -468,12 +493,16 @@ describe('#1468 — cascades: App reclaim, account erasure, anonymous expiry', (
     const a = await agent('anon-host');
     const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Anon', urn: `${org.urn}:anon` } });
     const expired = new Date(Date.now() - 60_000);
-    const mk = (slug: string, stamped: boolean) => db.memory.create({
-      data: {
-        id: generateId(), organizationId: org.id, appId: app.id, userMemoryOfAgentId: a.id, urn: `${org.urn}:${slug}`,
-        name: slug, class: 'app', anonymousExpiresAt: expired, corpusMintedAt: stamped ? new Date() : null,
-      },
-    });
+    const mk = async (slug: string, stamped: boolean) => {
+      const m = await db.memory.create({
+        data: {
+          id: generateId(), organizationId: org.id, appId: app.id, userMemoryOfAgentId: a.id, urn: `${org.urn}:${slug}`,
+          name: slug, class: 'app', anonymousExpiresAt: expired,
+        },
+      });
+      if (stamped) await marker(m.id, `${slug}:mint-marker`, new Date());
+      return m;
+    };
     const stamped = await mk('anon-stamped', true);
     const plain = await mk('anon-plain', false);
     expect(await cleanupAnonymousMemories(db)).toBe(2);
@@ -486,10 +515,10 @@ describe('#1468 — address reclaims that erase a deleted minted corpus (Codex P
   async function deletedCorpusAt(urn: string) {
     const corpus = await db.memory.create({
       data: {
-        id: generateId(), organizationId: org.id, urn, name: 'corpus', class: 'knowledge',
-        corpusDraft: false, corpusMintedAt: new Date(Date.now() - 60_000), deletedAt: new Date(),
+        id: generateId(), organizationId: org.id, urn, name: 'corpus', class: 'knowledge', deletedAt: new Date(),
       },
     });
+    await marker(corpus.id, 'corpus:mint-marker', new Date(Date.now() - 60_000));
     await node(corpus.id, 'pas:010', { tags: ['spec'] });
     return corpus;
   }
@@ -503,7 +532,7 @@ describe('#1468 — address reclaims that erase a deleted minted corpus (Codex P
   });
 
   it('control: createAgent still reclaims a deleted draft memory at its -system address', async () => {
-    await memory('draft-bot-system', { corpusDraft: true, deletedAt: new Date() });
+    await memory('draft-bot-system', { deletedAt: new Date() });
     const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Draft Bot' } as never, ctx());
     expect(agent).toMatchObject({ urn: `${org.urn}:draft-bot` });
   });
@@ -514,9 +543,10 @@ describe('#1468 — address reclaims that erase a deleted minted corpus (Codex P
     const corpus = await db.memory.create({
       data: {
         id: generateId(), ownerUserId: admin.id, userId: admin.id, urn: 'mp-u2:corpus', name: 'corpus',
-        class: 'personal', corpusDraft: false, corpusMintedAt: new Date(Date.now() - 60_000), deletedAt: new Date(),
+        class: 'personal', deletedAt: new Date(),
       },
     });
+    await marker(corpus.id, 'corpus:mint-marker', new Date(Date.now() - 60_000));
     await node(corpus.id, 'pas:010', { tags: ['spec'] });
     await expect(resolvers.Mutation.updateMyProfile({}, { handle: 'mp-u2' }, ctx())).rejects.toSatisfy(
       (e: unknown) => e instanceof GraphQLError && e.extensions.code === SPEC_MINTED_PERMANENT,
@@ -644,18 +674,26 @@ describe('#1468 — a whole-corpus delete cannot race the first spec (Codex P1)'
 
 describe('#1468 — race against a concurrent mint', () => {
   it('a delete waiting on a mint in flight reads the stamp after it commits, and refuses', async () => {
-    const racing = await memory('racing', { corpusDraft: true });
+    const racing = await memory('racing');
     const spec = await node(racing.id, 'pas:010', { tags: ['spec'] });
 
-    // Stand-in for mintSpecCorpus's fence + flip: the memory row FOR UPDATE,
-    // the stamp written, and the transaction held open.
+    // Stand-in for the mint's fence + stamp: the memory row FOR UPDATE, the
+    // mint record written (a node gains minted_at, #5063 re-key), and the
+    // transaction held open.
     let release!: () => void;
     let flipped!: () => void;
     const hold = new Promise<void>((r) => { release = r; });
     const isFlipped = new Promise<void>((r) => { flipped = r; });
     const mint = db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${racing.id} FOR UPDATE`;
-      await tx.memory.update({ where: { id: racing.id }, data: { corpusDraft: false, corpusMintedAt: new Date() } });
+      const now = new Date();
+      await tx.node.create({
+        data: {
+          id: generateId(), memoryId: racing.id, loc: 'racing:mint-marker', name: 'racing:mint-marker',
+          content: 'minted elsewhere; tombstoned', role: null, tags: [],
+          mintedAt: now, mintedByInfo: 'test', deletedAt: now,
+        },
+      });
       flipped();
       await hold;
     }, { timeout: 20_000 });

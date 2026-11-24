@@ -223,8 +223,8 @@ describe('#4280: the link itself', () => {
   });
 
   it('a merged (finished) PR task can be linked', async () => {
-    await M.startAgentTask!({}, { taskId: f.build.id }, person(f.member.id));
-    await M.finishAgentTask!({}, { taskId: f.build.id, result: { outcome: 'merged' } }, person(f.member.id));
+    await M.startAgentTask!({}, { taskRef: f.build.id }, person(f.member.id));
+    await M.finishAgentTask!({}, { taskRef: f.build.id, result: { outcome: 'merged' } }, person(f.member.id));
     expect((await link(asWorker(f.colin))).created).toBe(true);
   });
 

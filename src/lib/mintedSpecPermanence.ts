@@ -7,10 +7,18 @@
  * NO removal protection (hrn:node:hadronmemory.com:specs:cor:dmo:120:09).
  *
  * The retained implementation below is the OLD policy, exercised by its own
- * tests only while the switch is enabled. It keys on Memory.corpusMintedAt,
- * now a compatibility stamp of the latest mint in any memory. It must not be
- * re-enabled unchanged: that would protect specs beyond the individually
- * minted nodes. Future protection needs a new decision and per-node checks.
+ * tests only while the switch is enabled. Since the #5063 re-key it is keyed
+ * like every other reader: a memory counts as minted when any of its nodes
+ * carries `minted_at` (tombstones included; the mint time is MAX(minted_at)
+ * over all rows), not by the legacy `Memory.corpusMintedAt` stamp. It must
+ * not be re-enabled unchanged — the memory-keyed policy cor:dmo:120:09
+ * (minting adds no removal protection) is what forbids returning it as-is,
+ * and future protection needs a new decision and per-node checks. The mint
+ * record is not memory-local the way the stamp was, either: `minted_at`
+ * travels with a relocated node (mergeMemories' cross-memory move), so a
+ * merge can make the source stop counting as minted and the destination
+ * start — a divergence from the old never-moved stamp, live today only in
+ * the harmless newlyMarked conflict branch (permanence off, #1591).
  *
  * The legacy implementation selects anything carrying the spec marker (`hasSpecMarker` — a `spec`
  * tag or a `spec`/`spec.*` role; both are plaintext at rest even in encrypted
@@ -25,7 +33,7 @@
  * that turns into a retryable `SPEC_CORPUS_BUSY` (`fenceCorpusForMint`). This
  * guard takes the opposite, cooperating order that node writers use: the
  * scope's node rows `FOR NO KEY UPDATE` (sorted by id), THEN the memory row
- * `FOR SHARE`, and reads `corpus_minted_at` under that lock. Either the mint
+ * `FOR SHARE`, and reads the mint records under that lock. Either the mint
  * committed first (the guard sees the stamp and refuses), or the guard holds
  * rows the mint needs (the mint times out and retries after this removal —
  * which was then a legitimate draft removal), or the guard holds the memory
@@ -58,9 +66,9 @@ import { questionContainedError, memoryHoldsQuestions } from './questions/index.
  * Holger, 2026-10-01 (#1591): no minted spec is permanent for now, including
  * the corpora this guard protected since #1468. Every guard below answers
  * "nothing protected" while this is false. The guard is retained for a later
- * policy decision; its own tests run with it on. Note that it
- * still keys on the legacy `Memory.corpusMintedAt` stamp, so re-enabling it
- * under per-node minting needs a decision on which nodes it covers.
+ * policy decision; its own tests run with it on. Since the #5063 re-key it
+ * keys on the per-node mint records, so re-enabling it still needs a decision
+ * on which nodes it covers (cor:dmo:120:09 says none today).
  */
 let permanenceEnforced = false;
 
@@ -132,10 +140,17 @@ export async function lockMintedSpecsIn(
   const specs = rows.filter((r) => hasSpecMarker({ tags: r.tags ?? [], role: r.role }));
   // No spec in scope: nothing this guard protects, and no memory lock taken.
   if (specs.length === 0) return [];
-  const [memory] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
-    SELECT corpus_minted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
-  if (!memory || memory.corpus_minted_at === null) return [];
-  const mintedAt = memory.corpus_minted_at;
+  const [memory] = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
+  if (!memory) return [];
+  // #5063 re-key: the mint record is the nodes' own `minted_at` — any row of
+  // the memory, tombstones included — read under the memory lock, where a
+  // concurrent mint (which holds the memory FOR UPDATE before fencing nodes)
+  // cannot interleave.
+  const [stamp] = await tx.$queryRaw<Array<{ minted_at: Date | null }>>`
+    SELECT MAX(minted_at) AS minted_at FROM nodes WHERE memory_id = ${memoryId}`;
+  if (!stamp || stamp.minted_at === null) return [];
+  const mintedAt = stamp.minted_at;
   return specs
     .filter((s) => isProtectedAfterMint(s.deleted_at, mintedAt))
     .map((s) => ({ id: s.id, loc: s.loc }))
@@ -218,14 +233,15 @@ export async function lockMintedSpecUnmarks(
   // two commits first and the other sees it.
   const newlyMarked = rows.some((r) => !markedBefore(r) && markedAfter(r));
   if (unmarked.length === 0 && !newlyMarked) return [];
-  // Unlocked stamp probe first, so ordinary spec edits in never-stamped
-  // memories take no memory lock. It is stable for these rows: the mint must
+  // Unlocked mint probe first, so ordinary spec edits in never-minted
+  // memories take no memory lock: does any node of the memory carry a mint
+  // record (tombstones included)? It is stable for these rows: the mint must
   // lock them FOR UPDATE, which waits on (or times out behind) ours.
-  const [probe] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
-    SELECT corpus_minted_at FROM memories WHERE id = ${memoryId}`;
-  if (!probe || probe.corpus_minted_at === null) return [];
-  const [memory] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null; deleted_at: Date | null }>>`
-    SELECT corpus_minted_at, deleted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
+  const [probe] = await tx.$queryRaw<Array<{ minted: boolean }>>`
+    SELECT EXISTS(SELECT 1 FROM nodes WHERE memory_id = ${memoryId} AND minted_at IS NOT NULL) AS minted`;
+  if (!probe || !probe.minted) return [];
+  const [memory] = await tx.$queryRaw<Array<{ deleted_at: Date | null }>>`
+    SELECT deleted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
   // The opposite order (Codex on #1475): a whole-corpus delete took the row
   // first, this lock waited for it, and the corpus is now deleted. Marking a
   // spec into it would report success for a spec that is already
@@ -237,8 +253,13 @@ export async function lockMintedSpecUnmarks(
       { extensions: { code: 'NODE_WRITE_CONFLICT', memoryId } },
     );
   }
-  if (!memory || memory.corpus_minted_at === null || unmarked.length === 0) return [];
-  const mintedAt = memory.corpus_minted_at;
+  if (!memory || unmarked.length === 0) return [];
+  // #5063 re-key: the mint time is MAX(nodes.minted_at) over all rows, read
+  // under the memory lock taken above.
+  const [stamp] = await tx.$queryRaw<Array<{ minted_at: Date | null }>>`
+    SELECT MAX(minted_at) AS minted_at FROM nodes WHERE memory_id = ${memoryId}`;
+  if (!stamp || stamp.minted_at === null) return [];
+  const mintedAt = stamp.minted_at;
   return unmarked
     .filter((r) => isProtectedAfterMint(r.deleted_at, mintedAt))
     .map((r) => ({ id: r.id, loc: r.loc }))
@@ -300,14 +321,19 @@ export async function mintedSpecLocsIn(
   opts: { includeTombstones: boolean },
 ): Promise<string[]> {
   if (!isMintedSpecPermanenceEnforced()) return [];
-  const memory = await db.memory.findUnique({ where: { id: memoryId }, select: { corpusMintedAt: true } });
-  if (!memory?.corpusMintedAt) return [];
+  // #5063 re-key: the memory counts as minted when any of its nodes carries
+  // `minted_at` (tombstones included — a soft delete never clears the mint
+  // record), with MAX as the mint time; the named locs stay as they were
+  // (live, plus protected tombstones for hard removals).
+  const stamp = await db.node.aggregate({ where: { memoryId }, _max: { mintedAt: true } });
+  const mintedAt = stamp._max.mintedAt;
+  if (!mintedAt) return [];
   const specs = await db.node.findMany({
     where: {
       memoryId,
       // See isProtectedAfterMint: a tombstone counts only if deleted after the mint.
       ...(opts.includeTombstones
-        ? { OR: [{ deletedAt: null }, { deletedAt: { gte: memory.corpusMintedAt } }] }
+        ? { OR: [{ deletedAt: null }, { deletedAt: { gte: mintedAt } }] }
         : { deletedAt: null }),
       AND: [SPEC_MARKER_WHERE],
     },
@@ -357,9 +383,12 @@ export async function assertNoMintedCorpusRemoval(
   // SHARE), so no log can appear after this scan.
   if (await memoryHoldsQuestions(tx, memoryId)) throw questionContainedError(`Removing this memory (${op})`);
   if (!isMintedSpecPermanenceEnforced()) return;
-  const [memory] = await tx.$queryRaw<Array<{ corpus_minted_at: Date | null }>>`
-    SELECT corpus_minted_at FROM memories WHERE id = ${memoryId} FOR SHARE`;
-  if (!memory || memory.corpus_minted_at === null) return;
+  // The FOR SHARE re-entry keeps the cooperating order (the caller holds the
+  // row FOR UPDATE); the minted-or-not question now lives on the node rows
+  // (#5063 re-key) and is answered by mintedSpecLocsIn below.
+  const [memory] = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
+  if (!memory) return;
   const locs = await mintedSpecLocsIn(tx, memoryId, opts);
   if (locs.length > 0) throw mintedSpecRemovalError(memoryId, locs, op, opts.remedy);
 }

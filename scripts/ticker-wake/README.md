@@ -116,7 +116,7 @@ subscriber read stops the pass, as a failed `dueWakes` read does.
   so a re-offer never names the same task twice to the same receiver. A stall
   `ALARM` or a `CHILD_FINISHED` (#1704) is delivered the same way. An alarm
   names its task and its stall rule, which the script reads from the alarm
-  itself with `agentTeamEvents(taskId, alarmsOnly)`, paging by the last event
+  itself with `agentTeamEvents(taskRef, alarmsOnly)`, paging by the last event
   read until the exact id turns up or the history ends (the history is oldest
   first and keeps acknowledged alarms, George's #2160 P2). If a page fails, the
   cursor stalls or 50 pages pass, the wake is held. If that read fails, the

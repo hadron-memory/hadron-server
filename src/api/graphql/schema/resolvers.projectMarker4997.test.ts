@@ -95,7 +95,7 @@ describe('#4997 create sets the marker (cor:agt:050:01 Project marker)', () => {
 });
 
 describe('#4997 a clone keeps the marker unless overridden (cor:agt:050:02)', () => {
-  const clone = (taskId: string, input: Record<string, unknown> = {}) => M.cloneAgentTask({}, { taskId, input }, as(alice));
+  const clone = (taskId: string, input: Record<string, unknown> = {}) => M.cloneAgentTask({}, { taskRef: taskId, input }, as(alice));
 
   it('a marked source makes a marked clone; an unmarked nested source makes an unmarked clone', async () => {
     const markedTop = await create({ title: 'Marked', project: true });
