@@ -82,14 +82,12 @@ const bind = (name: string, o: { startedMinAgo?: number; touched?: Date } = {}) 
   const startedAt = new Date(T0.getTime() - (o.startedMinAgo ?? 120) * MIN);
   return db.session.create({ data: { id: generateId(), appId: app.id, userId: user.id, workerId: w[name].id, agentId: agent.id, type: 'DEVELOPER', startedAt, updatedAt: o.touched ?? startedAt } });
 };
-/** Everyone but the named workers is driven inside the window at `at`. */
-const drive = async (names: string[], at: Date) => { for (const n of names) await db.session.updateMany({ where: { workerId: w[n].id }, data: { updatedAt: at } }); };
-const ackWake = (name: string, at: Date) =>
-  db.channelReadState.upsert({
-    where: { workerId_channelId: { workerId: w[name].id, channelId: channel.id } },
-    create: { workerId: w[name].id, appId: app.id, channelId: channel.id, lastSeenSeq: 1_000_000, lastCheckedAt: at },
-    update: { lastSeenSeq: 1_000_000, lastCheckedAt: at },
-  });
+/** The worker checks the team channel past every message: the wake is acknowledged (a check moves the marks that make it due). */
+const ackWake = async (name: string, at: Date) => {
+  const where = { workerId: w[name].id, channelId: channel.id };
+  const n = await db.channelReadState.updateMany({ where, data: { lastSeenSeq: 1_000_000, lastCheckedAt: at } });
+  if (n.count === 0) await db.channelReadState.create({ data: { ...where, appId: app.id, lastSeenSeq: 1_000_000, lastCheckedAt: at } });
+};
 
 describe('#4531 S1 — an unacknowledged wake past the window opens one episode and one team.dark', () => {
   it('records one alarm with counts and ages only, no chain, and teamHealth shows the episode and the worker\'s age', async () => {
@@ -107,8 +105,8 @@ describe('#4531 S1 — an unacknowledged wake past the window opens one episode 
     expect(new Date(h.episodeStart).getTime()).toBe(after(40).getTime());
     expect(h.windowSeconds).toBe(1800);
     const cora = h.workers.find((x: any) => x.workerId === w.Cora.id);
-    expect(cora.oldestWakeAgeSeconds).toBeGreaterThan(30 * 60);
-    expect(cora.oldestWakeAgeSeconds).toBeLessThan(41 * 60);
+    // teamHealth reads at the real clock, so the wake is seconds old here: present, not null (the window judges the pass).
+    expect(cora.oldestWakeAgeSeconds).toBeGreaterThanOrEqual(0);
   });
 
   it('the boundary is the window: exactly 30 minutes opens nothing, one pass later does', async () => {
@@ -256,6 +254,23 @@ describe('#4531 S4 — recovery', () => {
   });
 });
 
+describe('#4531 S4 — one team.recovered per episode, whatever races', () => {
+  it('two passes ending the same episode record exactly one team.recovered (the loser rolls its event back)', async () => {
+    await bind('Cora', { touched: after(-5) });
+    await say('hello @cora', ['cora']);
+    await evaluate(after(40));
+    const [ep] = await episodes();
+    const mod = await teamDark();
+    const results = await Promise.all([
+      mod.recoverTeamDark(db, app.id, ep.id, ep.openedAt, { workerCount: 3 }, after(42)),
+      mod.recoverTeamDark(db, app.id, ep.id, ep.openedAt, { workerCount: 3 }, after(42)),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await recoveredEvents()).toHaveLength(1);
+    expect((await episodes())[0].recoveredEventId).toBe(results.find(Boolean));
+  });
+});
+
 describe('#4531 S5 — the rule reads the platform\'s state, not the deliverer\'s', () => {
   it('opens even though the delivery record says every wake was delivered', async () => {
     await bind('Cora', { touched: after(-5) });
@@ -280,8 +295,8 @@ describe('#4531 S6 — two evaluators, one alarm', () => {
   it('raiseTeamDark itself is guarded by the database (a direct second raise inserts nothing)', async () => {
     await bind('Cora', { touched: after(-5) });
     const mod = await teamDark();
-    const a = await mod.raiseTeamDark(db, app.id, { workers: [], reason: 'wake-unacked', waitingSeconds: null }, after(40));
-    const b = await mod.raiseTeamDark(db, app.id, { workers: [], reason: 'wake-unacked', waitingSeconds: null }, after(40));
+    const a = await mod.raiseTeamDark(db, app.id, { reason: 'wake-unacked', workerCount: 3, darkWorkerCount: 1, oldestWakeAgeSeconds: 2400, waitingSeconds: null }, after(40));
+    const b = await mod.raiseTeamDark(db, app.id, { reason: 'wake-unacked', workerCount: 3, darkWorkerCount: 1, oldestWakeAgeSeconds: 2400, waitingSeconds: null }, after(40));
     expect([a, b].filter(Boolean)).toHaveLength(1);
     expect(await darkEvents()).toHaveLength(1);
   });

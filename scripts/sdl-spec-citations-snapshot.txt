@@ -1,5 +1,5 @@
 # Written spec citations in hadronmemory.com:specs: what scripts/check-sdl-spec-citations.mjs checks SDL citations against (#4508).
-# Source: hadron spec list + describe, run 2026-11-20; newest node updatedAt 2026-11-20T07:57:18.613Z; 655 citations; 0 placeholder(s) excluded.
+# Source: hadron spec list + describe, run 2026-11-24; newest node updatedAt 2026-11-24T02:23:15.445Z; 674 citations; 0 placeholder(s) excluded.
 # GENERATED. Do not edit by hand: node scripts/refresh-sdl-spec-citation-snapshot.mjs (needs the hadron CLI and a token).
 cor:acl:000
 cor:acl:010
@@ -80,6 +80,7 @@ cor:agt:010:01
 cor:agt:010:02
 cor:agt:010:03
 cor:agt:010:04
+cor:agt:010:05
 cor:agt:020
 cor:agt:020:00
 cor:agt:020:01
@@ -158,6 +159,8 @@ cor:agt:050:30
 cor:agt:050:31
 cor:agt:050:32
 cor:agt:050:33
+cor:agt:050:34
+cor:agt:050:35
 cor:agt:060
 cor:agt:060:01
 cor:agt:060:02
@@ -351,12 +354,14 @@ cor:api:240:01
 cor:api:240:02
 cor:api:260
 cor:api:260:01
+cor:api:260:02
 cor:api:270
 cor:api:270:01
 cor:api:280
 cor:api:280:01
 cor:api:290
 cor:api:290:01
+cor:api:290:02
 cor:aut:000
 cor:aut:010
 cor:aut:010:01
@@ -452,6 +457,7 @@ cor:dmo:050:19
 cor:dmo:050:20
 cor:dmo:050:21
 cor:dmo:050:22
+cor:dmo:050:23
 cor:dmo:060
 cor:dmo:060:01
 cor:dmo:060:02
@@ -562,6 +568,18 @@ cor:dmo:150:08
 cor:dmo:160
 cor:dmo:160:01
 cor:dmo:160:02
+cor:dmo:170
+cor:dmo:170:01
+cor:dmo:170:02
+cor:dmo:170:03
+cor:dmo:170:04
+cor:dmo:170:05
+cor:dmo:170:06
+cor:dmo:170:07
+cor:dmo:170:08
+cor:dmo:170:09
+cor:dmo:170:10
+cor:dmo:170:11
 cor:int:010
 cor:int:010:01
 cor:int:020
@@ -570,6 +588,7 @@ cor:int:020:02
 cor:int:030
 cor:int:030:01
 cor:int:030:02
+cor:int:030:03
 cor:int:040
 cor:int:040:01
 cor:pdf:000

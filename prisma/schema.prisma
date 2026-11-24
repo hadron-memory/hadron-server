@@ -4163,6 +4163,7 @@ model App {
   hostSweepRuns           HostSweepRun[]
   hostSweepEpisodes       HostSweepEpisode[]
   saturationEpisodes      SaturationEpisode[]
+  teamDarkEpisodes        TeamDarkEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
   memoryWriteGrants       AppMemoryWriteGrant[]
@@ -7783,6 +7784,8 @@ model AgentTeamEvent {
   startFailingEpisode StartFailingEpisode?
   hostSweepEpisode HostSweepEpisode?
   saturationEpisode SaturationEpisode?
+  teamDarkEpisode TeamDarkEpisode? @relation("TeamDarkRaised")
+  teamDarkRecovered TeamDarkEpisode? @relation("TeamDarkRecovered")
   /// #3934 (V77): the recorded end of this alarm's escalation, written once by the evaluator pass or the acknowledgement.
   escalationEnd AlarmEscalationEnd?
 
@@ -8230,6 +8233,35 @@ model SaturationEpisode {
 
   @@index([appId, endedAt])
   @@map("saturation_episodes")
+}
+
+/// #4531 (hrn:node:hadronmemory.com:specs:cor:agt:050:34, Proposed) — one dark-team episode of an App: the team as a whole
+/// went silent past the dark window. Written only by the stall evaluator (src/lib/agentTasks/teamDark.ts).
+///
+/// Relationships: belongs to an App. `eventId` is the one `team.dark` alarm the episode raised, written in the transaction
+/// that opened it; `recoveredEventId` is the one `team.recovered` event written in the transaction that ended it, null
+/// while the episode is open.
+///
+/// Behaviour:
+/// - The alarm stream is append-only, so an episode's end lives here, not on the alarm.
+/// - Exactly one OPEN row per App (partial unique index, raw SQL in prisma/team-dark-invariants.sql): the race between two
+///   passes or two server instances is decided by that index, so a second pass records no second alarm.
+/// - `endedAt` is never before `openedAt` (CHECK `chk_team_dark_episodes_shape`), and an ended episode names its
+///   `team.recovered` event.
+model TeamDarkEpisode {
+  id               String    @id @default(cuid())
+  appId            String    @map("app_id")
+  eventId          String    @unique @map("event_id")
+  recoveredEventId String?   @unique @map("recovered_event_id")
+  openedAt         DateTime  @map("opened_at")
+  endedAt          DateTime? @map("ended_at")
+
+  app            App             @relation(fields: [appId], references: [id], onDelete: Cascade)
+  event          AgentTeamEvent  @relation("TeamDarkRaised", fields: [eventId], references: [id], onDelete: Cascade)
+  recoveredEvent AgentTeamEvent? @relation("TeamDarkRecovered", fields: [recoveredEventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("team_dark_episodes")
 }
 
 /// Whether one worker is available for work, and if not, why and until when. It is one of the inputs to

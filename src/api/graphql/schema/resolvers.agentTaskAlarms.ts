@@ -75,6 +75,7 @@ import { cancelLiveReset, holdForStopLease } from '../../../lib/contextReset/con
 import { effectiveWindows, STALL_WINDOW_DEFAULTS, type StallWindows } from '../../../lib/agentTasks/stall.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import { APP_ROLE_PURPOSES, isAppRolePurpose, normalizeRoleList, type AppRoleListsView } from '../../../lib/agentTasks/appRoleLists.js';
+import { TEAM_DARK_EVENT_TYPE, teamHealthView } from '../../../lib/agentTasks/teamDark.js';
 import { normalizeWakeRoles, SATURATION_EVENT_TYPE, SATURATION_WAKE_ROLE_MAX_LENGTH, SATURATION_WAKE_ROLES_MAX } from '../../../lib/agentTasks/saturation.js';
 import { withRosterAppRead } from './resolvers.agentTaskMatching.js';
 import {
@@ -233,6 +234,11 @@ export const agentTaskAlarmMutations = {
       if (!row || row.appId !== freshApp.id) throw alarmNotFound(id);
       if (row.severity !== 'alarm') {
         throw taskError('NOT_AN_ALARM', 'This event is not an alarm; only an alarm is acknowledged.', { eventId: id });
+      }
+      // #4531 (cor:agt:050:34): a team.dark alarm has no chain and nobody to escalate to; it ends only when the condition
+      // clears. Refused before the membership check, so no caller learns anything from which gate answered.
+      if (row.type === TEAM_DARK_EVENT_TYPE) {
+        throw taskError('ALARM_NOT_ACKNOWLEDGEABLE', 'A dark-team alarm is not acknowledged; it ends when the team is no longer dark (cor:agt:050:34).', { eventId: id });
       }
       // Membership is checked against the chain ON THE LOCKED ROW (Rook P3-2).
       // cor:agt:050:24 (#1762): an owner in the chain, or whoever manages the App, for any alarm in it.
@@ -690,6 +696,14 @@ export const agentTaskAlarmQueries = {
    * #4921 slice A: the App's three role lists, for whoever may read its roster, through the roster's gate and its
    * refusal byte for byte (cor:agt:050:21, :23), as `saturationAlarmWakeRoles` does.
    */
+  /**
+   * #4531 (hrn:node:hadronmemory.com:specs:cor:agt:050:34): whether the App's team is dark, the episode's start, and each
+   * worker's oldest unacknowledged wake age, for whoever may read the App's tasks and events, through the roster's gate and
+   * its refusal byte for byte (cor:agt:050:21, :23): anyone else is answered as for an App that does not exist.
+   */
+  teamHealth: (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
+    withRosterAppRead(ctx, appRef, (readCtx, app) => teamHealthView(readCtx.db as never, app)),
+
   appRoleLists: (_: unknown, { appRef }: { appRef: string }, ctx: Context) =>
     withRosterAppRead(ctx, appRef, (readCtx, app) => appRoleListsView(readCtx.db, app.id)),
 
