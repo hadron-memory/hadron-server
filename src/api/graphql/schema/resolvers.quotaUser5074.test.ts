@@ -5,6 +5,7 @@
  * `setQuotaLimit` with `appRef` alone or `userRef` alone; every denial on the `appRef`-alone door answers the bytes of an
  * unknown ref (cor:api:120:01); `userRef` is FORBIDDEN with one message; the organization forms are unchanged.
  */
+import { GraphQLError } from 'graphql';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -203,7 +204,7 @@ describe('review pins (#5074 LOCAL F1-F3, BLIND P2-2)', () => {
   });
 
   it('a non-refusal error on the organization-App gate propagates, it is not folded into the unknown-ref answer', async () => {
-    const boom = new Error('db fault');
+    const boom = new GraphQLError('upstream fault', { extensions: { code: 'INTERNAL_SERVER_ERROR' } });
     const faulty = Object.create(db, { orgMember: { value: { findFirst: async () => { throw boom; } } } });
     const c = { ...ctxOf(ordinary), db: faulty } as Context;
     await expect(rows(c, { appRef: orgApp.id })).rejects.toBe(boom);
