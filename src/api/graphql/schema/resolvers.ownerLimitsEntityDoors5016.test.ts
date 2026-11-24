@@ -64,9 +64,9 @@ describe('#5016 createMemory', () => {
   it('shows the number to an organization admin and none to a contributor creating a personal memory', async () => {
     defaults({ organization: { memories: 1 } });
     await orgMemory();
-    const asAdmin = await orgMemory().catch((e) => e);
+    const asAdmin = await orgMemory().catch((e: unknown) => e as { extensions: Record<string, unknown>; message: string });
     expect(asAdmin.extensions).toMatchObject({ code: 'OWNER_LIMIT_REACHED', callerCanManageOwner: true, limit: '1', ownerId: org.id });
-    const asContributor = await call('createMemory', { orgRef: org.id, name: 'cm', memoryClass: 'personal' }, contributor.id).catch((e) => e);
+    const asContributor = await call('createMemory', { orgRef: org.id, name: 'cm', memoryClass: 'personal' }, contributor.id).catch((e: unknown) => e as { extensions: Record<string, unknown>; message: string });
     expect(asContributor.extensions).toMatchObject({ code: 'OWNER_LIMIT_REACHED', callerCanManageOwner: false });
     expect(asContributor.extensions).not.toHaveProperty('limit');
     expect(asContributor.extensions).not.toHaveProperty('ownerId');
