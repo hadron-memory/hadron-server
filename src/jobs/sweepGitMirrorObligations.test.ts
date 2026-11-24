@@ -105,9 +105,9 @@ import { existsSync } from 'fs';
 const tick = async (now = new Date()) => (await import('./sweepGitMirrorObligations.js')).gitMirrorSweepTick(db, now);
 const old = () => new Date(Date.now()-24*60*60*1000);
 /** #3444: `count` fresh node ids in ascending order, whatever millisecond they were made in (UUIDv7 ids made in one millisecond sort by random bits). */
-const orderedNodeIds = (count: number) => Array.from({ length: count }, () => generateId()).sort();
+const orderedNodeIds = (count: number, make: () => string = generateId) => Array.from({ length: count }, () => make()).sort();
 const makeNodeWithId = (id: string, loc: string) => db.node.create({ data: { id, memoryId, loc, name: loc, content: 'current content', tags: [] } });
-const makeNode = (loc='topic') => db.node.create({data:{id:generateId(),memoryId,loc,name:loc,content:'current content',tags:[]}});
+const makeNode = (loc='topic') => makeNodeWithId(generateId(),loc);
 const owe = async (nodeId:string,extra:Record<string,unknown>={}) => db.gitMirrorObligation.create({data:{memoryId,nodeId,kind:'WRITE',removeLoc:'',state:'FAILED',errorClass:'PUSH_FAILED',attempts:1,attemptSeq:await takeAttemptSeq(db),lastAttemptAt:old(),...extra} as any});
 const rows = () => db.gitMirrorObligation.findMany({where:{memoryId}});
 const remoteFile = (loc='topic') => git(env.bare,'show',`refs/heads/hadron-updates:${loc}.md`);
@@ -491,17 +491,10 @@ describe('#3151 second-refresh settlement', () => {
  });
 });
 
-describe('#3444 the second-refresh fixture orders its node ids', () => {
- it('orderedNodeIds is ascending even when every id is made in the same millisecond', () => {
-  const now = Date.now();
-  const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
-  try {
-   for (let round = 0; round < 50; round++) {
-    const ids = orderedNodeIds(3);
-    expect(ids).toEqual([...ids].sort());
-    expect(new Set(ids).size).toBe(3);
-   }
-  } finally { clock.mockRestore(); }
+describe('#3444 orderedNodeIds', () => {
+ it('sorts whatever order the generator yields (a descending generator comes out ascending)', () => {
+  const descending = ['c3', 'b2', 'a1'];
+  expect(orderedNodeIds(3, () => descending.shift()!)).toEqual(['a1', 'b2', 'c3']);
  });
 });
 
