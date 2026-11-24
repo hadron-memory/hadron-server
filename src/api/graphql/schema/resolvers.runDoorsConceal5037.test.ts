@@ -83,11 +83,22 @@ describe.each(DOORS)('#5037 $name', ({ call, id, notFound }) => {
   it('control: the org ADMIN is admitted', async () => {
     const got = await answer(call(id(), ctxOf(adminA)));
     expect(got).toHaveProperty('admitted');
+    expect((got as { admitted: string }).admitted).not.toContain('error');
   });
 
-  it('a fault in the readability check propagates (never reads as not-found)', async () => {
-    const faulty = { ...ctxOf(plain), db: db.$extends({ query: { orgMember: { findFirst() { throw new Error('fixture-fault-5037'); } } } }) } as unknown as Context;
+  it('a fault in the readability check propagates as the fault itself (never reads as not-found)', async () => {
+    let hits = 0;
+    const faulty = { ...ctxOf(plain), db: db.$extends({ query: { orgMember: { findFirst() { hits++; throw new Error('fixture-fault-5037'); } } } }) } as unknown as Context;
     const got = await answer(call(id(), faulty));
+    expect(hits).toBeGreaterThan(0);
+    expect(got).toMatchObject({ message: expect.stringContaining('fixture-fault-5037') });
     expect(got).not.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('a caller with no identity at all is answered as for an id that names nothing', async () => {
+    const anon = { db, roles: [] } as unknown as Context;
+    const nothing = await answer(call(missing(), anon));
+    expect(await answer(call(id(), anon))).toEqual(nothing);
+    await untouched();
   });
 });
