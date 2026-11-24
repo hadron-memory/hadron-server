@@ -268,6 +268,7 @@ describe('escapeUnterminatedHtml', () => {
       ['a quote', 'a `x\n> q\n<b x=\'\ny`'],
       ['a list item', 'a `x\n- item\n<b x=\'\ny`'],
       ['a thematic break', 'a `x\n***\n<b x=\'\ny`'],
+      ['a span opened inside a heading line', '## a `b\n<c x=\'\nd` w'],
       ['a CRLF blank line', 'a `x\r\n\r\n<b x=\'\r\ny`'],
     ];
     for (const [label, body] of cases) expect(escapeUnterminatedHtml(body), label).toBe(body.replace('<b x=', '&lt;b x='));
