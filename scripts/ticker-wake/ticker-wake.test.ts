@@ -1007,44 +1007,56 @@ describe('CLI entry and single instance', () => {
   const spawnLateIdentity = (): ChildProcess => spawn('sh', ['-c',
     `sleep 0.5; exec node -e "process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)" "$HOLDER_MARKER"`,
   ], { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, HOLDER_MARKER: 'ticker-wake' } });
-  /** An error that carries the holder's snapshot as a field, so a test reads it instead of parsing the message (#4949 F2). */
-  const holderError = (message: string, snapshot: HolderSnapshot): Error & { snapshot: HolderSnapshot } =>
-    Object.assign(new Error(`${message}: ${JSON.stringify(snapshot)}`), { snapshot });
+  /** An error that carries the holder's snapshot as a field, so a test reads it instead of parsing the message. */
+  class HolderError extends Error {
+    constructor(message: string, readonly snapshot: HolderSnapshot) { super(`${message}: ${JSON.stringify(snapshot)}`); }
+  }
   /**
    * A synthetic live holder, handed out only once it is RECOGNIZABLE: it reported ready (its exec finished and it runs),
    * and /proc shows it alive with `marker` in its cmdline. A pid from spawn() alone is not enough (#4297: see the
    * late-identity pin below), so every lock test takes its holder from here. `launch` replaces the default holder
    * process; it must pipe stdout and print a line on it once it runs. A holder that never qualifies is killed, not leaked.
-   * `readyTimeoutMs` (default 3 s, under Vitest's 5 s test timeout so the diagnostic below is reachable) is injectable.
-   * `stop()` resolves once the holder has exited (bounded, so a stuck holder cannot hang a test).
+   * `readyTimeoutMs` (default 3 s) and `stopBoundMs` (default 1 s) are injectable; the worst case is 3 s ready wait + 1 s
+   * SIGTERM grace + 0.5 s after SIGKILL, under Vitest's 5 s test timeout, so the diagnostics below stay reachable.
+   * `stop()` sends SIGTERM and resolves once the holder has exited; past `stopBoundMs` it sends SIGKILL, and it throws
+   * if the holder still has not exited, so a stuck holder can neither hang a test nor leak silently.
    */
   async function startLockHolder(
-    marker: string, launch?: () => ChildProcess, readyTimeoutMs = 3_000,
+    marker: string, launch?: () => ChildProcess, readyTimeoutMs = 3_000, stopBoundMs = 1_000,
   ): Promise<{ pid: number; stop: () => Promise<void> }> {
     const holder = launch ? launch()
       : spawn('node', ['-e', "process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)", marker], { stdio: ['ignore', 'pipe', 'ignore'] });
+    // A failed spawn emits 'error' and never 'exit', so 'error' settles `exited` as well.
     const exited = new Promise<void>((resolve) => {
-      if (holder.exitCode !== null || holder.signalCode !== null) resolve(); else holder.once('exit', () => resolve());
+      if (holder.exitCode !== null || holder.signalCode !== null) resolve();
+      else { holder.once('exit', () => resolve()); holder.once('error', () => resolve()); }
     });
+    const waitFor = async (ms: number): Promise<boolean> => {
+      let t: NodeJS.Timeout | undefined;
+      const won = await Promise.race([exited.then(() => true), new Promise<boolean>((resolve) => { t = setTimeout(() => resolve(false), ms); })]);
+      clearTimeout(t);
+      return won;
+    };
     const stop = async (): Promise<void> => {
       holder.kill();
-      let t: NodeJS.Timeout | undefined;
-      await Promise.race([exited, new Promise<void>((resolve) => { t = setTimeout(resolve, 2_000); })]);
-      clearTimeout(t);
+      if (await waitFor(stopBoundMs)) return;
+      holder.kill('SIGKILL');
+      if (!(await waitFor(500))) throw new Error(`startLockHolder: the holder (pid ${holder.pid}) did not exit after SIGKILL`);
     };
     try {
       const out = holder.stdout;
       if (!out) throw new Error('startLockHolder contract: the launcher must pipe stdout (stdio[1] = "pipe")');
       await new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(holderError('holder never reported ready', snapshotOf(holder.pid))), readyTimeoutMs);
+        const t = setTimeout(() => reject(new HolderError('holder never reported ready', snapshotOf(holder.pid))), readyTimeoutMs);
         holder.once('error', (e) => { clearTimeout(t); reject(e); });
         out.once('data', () => { clearTimeout(t); resolve(); });
       });
       const snap = snapshotOf(holder.pid);
-      if (!snap.alive || !snap.cmdline.includes(marker)) throw holderError(`holder ready but not recognizable as ${marker}`, snap);
+      if (!snap.alive || !snap.cmdline.includes(marker)) throw new HolderError(`holder ready but not recognizable as ${marker}`, snap);
     } catch (e) { await stop(); throw e; }
     return { pid: holder.pid!, stop };
   }
+  const holderPid = (e: unknown): number => (e as HolderError).snapshot.pid!;
   const writeLockFor = (pid: number): void => {
     const stateDir = join(dir, 'ticker-wake');
     mkdirSync(stateDir, { recursive: true });
@@ -1113,7 +1125,7 @@ describe('CLI entry and single instance', () => {
   });
 
   // One body for both takeover-race tests: a stale lock, a recognizable first contender, and a nested contender that
-  // arrives at the decision (#4949 F7). `launch` picks the holder's process.
+  // arrives at the decision. `launch` picks the holder's process.
   async function takeoverRace(launch?: () => ChildProcess): Promise<void> {
     const stateDir = join(dir, 'ticker-wake');
     mkdirSync(stateDir, { recursive: true });
@@ -1146,25 +1158,68 @@ describe('CLI entry and single instance', () => {
     const err = await startLockHolder('ticker-wake', () => spawn('node', ['-e', "process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)", 'some-other-tool'],
       { stdio: ['ignore', 'pipe', 'ignore'] })).then(() => null, (e: Error) => e);
     expect(err?.message).toContain('not recognizable as ticker-wake');
-    const pid = (err as Error & { snapshot?: HolderSnapshot }).snapshot?.pid;
+    const pid = holderPid(err);
     expect(pid).toBeGreaterThan(0);
     for (let i = 0; i < 50 && snapshotOf(pid).alive; i++) await new Promise((r) => setTimeout(r, 20));
     expect(snapshotOf(pid).alive).toBe(false); // not leaked
   });
 
-  it('the holder fixture kills a holder that never reports ready, with the ready diagnostic (#4949 F1, F6)', async () => {
-    const err = await startLockHolder('ticker-wake', () => spawn('node', ['-e', 'setTimeout(() => {}, 20000)', 'ticker-wake'],
-      { stdio: ['ignore', 'pipe', 'ignore'] }), 200).then(() => null, (e: Error) => e);
+  // A holder that survives SIGTERM for a while, as a real daemon draining its work does. Without the ready-path stop()
+  // awaiting the exit, the old pin saw the holder dead only by luck of timing (7 of 15 runs failed once the await was
+  // removed); with a 300 ms exit delay the missing await is caught every time.
+  const slowToExit = (ready: boolean): string =>
+    `process.on('SIGTERM', () => setTimeout(() => process.exit(0), 300)); ${ready ? "process.stdout.write('ready\\n'); " : ''}setTimeout(() => {}, 20000)`;
+
+  it('the holder fixture kills a holder that never reports ready, with the ready diagnostic, and waits for it to exit', async () => {
+    const t0 = Date.now();
+    const err = await startLockHolder('ticker-wake', () => spawn('node', ['-e', slowToExit(false), 'ticker-wake'],
+      { stdio: ['ignore', 'pipe', 'ignore'] }), 600).then(() => null, (e: Error) => e);
     expect(err?.message).toContain('holder never reported ready');
-    const pid = (err as Error & { snapshot?: HolderSnapshot }).snapshot?.pid;
-    expect(pid).toBeGreaterThan(0);
-    expect(snapshotOf(pid).alive).toBe(false); // stop() awaited the exit: killed, not leaked, no polling needed
+    expect(Date.now() - t0, 'the injected 600 ms ready timeout is used, not the 3 s default').toBeLessThan(2_000);
+    expect(holderPid(err)).toBeGreaterThan(0);
+    // stop() awaited the exit (the holder takes ~300 ms to leave after SIGTERM): killed, not leaked, no polling needed
+    expect(snapshotOf(holderPid(err)).alive).toBe(false);
   });
 
-  it('the holder fixture fails fast with a contract message when the launcher does not pipe stdout (#4949 F3)', async () => {
-    const err = await startLockHolder('ticker-wake', () => spawn('node', ['-e', 'setTimeout(() => {}, 20000)', 'ticker-wake'],
-      { stdio: ['ignore', 'ignore', 'ignore'] })).then(() => null, (e: Error) => e);
+  it('the ready timeout is the injected value: a holder that reports ready after 400 ms passes a 2 s timeout and fails a 150 ms one', async () => {
+    const late = (): ChildProcess => spawn('node', ['-e', "setTimeout(() => process.stdout.write('ready\\n'), 400); setTimeout(() => {}, 20000)", 'ticker-wake'],
+      { stdio: ['ignore', 'pipe', 'ignore'] });
+    const ok = await startLockHolder('ticker-wake', late, 2_000);
+    await ok.stop();
+    const t0 = Date.now();
+    const err = await startLockHolder('ticker-wake', late, 150).then(() => null, (e: Error) => e);
+    expect(err?.message).toContain('holder never reported ready');
+    expect(Date.now() - t0).toBeLessThan(1_500);
+  });
+
+  it('stop() escalates to SIGKILL when the holder ignores SIGTERM past the stop bound', async () => {
+    const stubborn = (): ChildProcess => spawn('node', ['-e', "process.on('SIGTERM', () => {}); process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)", 'ticker-wake'],
+      { stdio: ['ignore', 'pipe', 'ignore'] });
+    const h = await startLockHolder('ticker-wake', stubborn, 3_000, 300);
+    const t0 = Date.now();
+    await h.stop();
+    expect(snapshotOf(h.pid).alive, 'killed by SIGKILL after the bound').toBe(false);
+    expect(Date.now() - t0).toBeLessThan(2_000);
+  });
+
+  it('the holder fixture fails fast with a contract message when the launcher does not pipe stdout, and kills the holder', async () => {
+    let pid: number | undefined;
+    const err = await startLockHolder('ticker-wake', () => {
+      const c = spawn('node', ['-e', 'setTimeout(() => {}, 20000)', 'ticker-wake'], { stdio: ['ignore', 'ignore', 'ignore'] });
+      pid = c.pid;
+      return c;
+    }).then(() => null, (e: Error) => e);
     expect(err?.message).toContain('must pipe stdout');
+    expect(pid).toBeGreaterThan(0);
+    expect(snapshotOf(pid!).alive, 'the holder behind a broken launcher is killed, not leaked').toBe(false);
+  });
+
+  it('a holder that fails to spawn rejects with the spawn error and stop() does not wait out its bound', async () => {
+    const t0 = Date.now();
+    const err = await startLockHolder('ticker-wake', () => spawn('/nonexistent/ticker-wake-holder', [], { stdio: ['ignore', 'pipe', 'ignore'] }),
+      3_000, 1_500).then(() => null, (e: Error) => e);
+    expect((err as NodeJS.ErrnoException | null)?.code).toBe('ENOENT');
+    expect(Date.now() - t0, 'spawn failure emits error and never exit; stop() must settle on error too').toBeLessThan(1_000);
   });
 
   it('stale-lock takeover never unlinks a live replacement owner that arrived after the stale judgment', async () => {

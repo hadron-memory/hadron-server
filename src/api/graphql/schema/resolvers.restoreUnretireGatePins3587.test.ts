@@ -309,7 +309,7 @@ describe('#3587 scope — what the rule leaves alone', () => {
     const first = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: spec.id }, orderBy: { revNo: 'asc' } });
     await M.updateNode({}, { input: { id: spec.id, tags: ['superseded'] } }, ctx);
     expect((await rowOf('specs:h')).tags).toEqual(['superseded']);
-    await M.restoreNodeRevision({}, { revisionId: first.id }, ctx);
+    await M.restoreNodeRevision({}, { nodeRevRef: first.id }, ctx);
     expect((await rowOf('specs:h')).tags).not.toContain('superseded');
   });
 });

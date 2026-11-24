@@ -175,7 +175,7 @@ describe('restore (cor:dmo:060:04, 120:04)', () => {
     await update(n.id, { content: 'changed' });
     const original = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id, revNo: 1 } });
     await update(n.id, { content: 'changed again' });
-    await resolvers.Mutation.restoreNodeRevision(null, { revisionId: original.id }, as());
+    await resolvers.Mutation.restoreNodeRevision(null, { nodeRevRef: original.id }, as());
     expect((await rowOf(n.id)).content).toBe('Body a:1');
     expect((await statusOf(n.id)).state).toBe('SUPERSEDED');
   });
@@ -186,7 +186,7 @@ describe('restore (cor:dmo:060:04, 120:04)', () => {
     await update(n.id, { tags: ['x'] });
     await update(n.id, { tags: ['y'] });
     const older = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id, revNo: 1 } });
-    await resolvers.Mutation.restoreNodeRevision(null, { revisionId: older.id }, as());
+    await resolvers.Mutation.restoreNodeRevision(null, { nodeRevRef: older.id }, as());
     expect((await statusOf(n.id)).state).toBe('APPROVED');
   });
 });

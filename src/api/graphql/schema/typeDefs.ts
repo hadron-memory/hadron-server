@@ -10621,7 +10621,7 @@ export const typeDefs = `#graphql
     history drops out of every read surface). Null, never an error, so there
     is no existence disclosure.
     """
-    nodeRevision(revisionId: ID!): NodeRevision
+    nodeRevision(nodeRevRef: String!): NodeRevision
 
     """
     Aggregated usage counts per node and type for a memory.
@@ -13518,13 +13518,16 @@ export const typeDefs = `#graphql
     revision counter still advances monotonically for the restore itself.
     Restore + truncate run in one transaction (atomic).
     """
-    restoreNodeRevision(revisionId: ID!, truncate: Boolean = false): Node!
+    restoreNodeRevision(nodeRevRef: String!, truncate: Boolean = false): Node!
 
     """
-    Delete a single node-revision snapshot by id (#617). Auth: the node's memory
-    write access (as restoreNodeRevision). Throws NOT_FOUND for an unknown id.
+    Delete a single node-revision snapshot by reference (#617, #4138): nodeRevRef is a revision URN
+    (hrn:noderev:...) or a revision id, resolved per hrn:node:hadronmemory.com:specs:cor:api:140:00.
+    Auth: the node's memory write access (as restoreNodeRevision). Throws NOT_FOUND for an unknown,
+    malformed or unreadable reference alike (a non-reader never learns whether it exists), and for a soft-deleted memory;
+    a soft-deleted node's revision is still deletable by id (cleanup, as clearNodeHistory) and is a missing ref by URN.
     """
-    deleteNodeRevision(revisionId: ID!): Boolean!
+    deleteNodeRevision(nodeRevRef: String!): Boolean!
 
     """
     Set or clear the user-facing label on a revision snapshot (#620,
@@ -13534,7 +13537,7 @@ export const typeDefs = `#graphql
     the full snapshot, so a soft-deleted node or a snapshot captured in an
     unreadable memory answers the same NOT_FOUND as an unknown id.
     """
-    updateNodeRevision(revisionId: ID!, revLabel: String): NodeRevision!
+    updateNodeRevision(nodeRevRef: String!, revLabel: String): NodeRevision!
     """
     #1591 — approve the node's CURRENT revision: record who, when, and the
     approval hash of its title/abstract/content. Pass revision to approve only

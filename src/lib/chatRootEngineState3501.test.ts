@@ -240,7 +240,7 @@ it('7: actual revision restore rewinds title, but myChats and the next turn reta
   const revision = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: root.id }, orderBy: { revNo: 'asc' } });
   await updateChatRootData(db, root, enc(), d => ({ ...d, stageName: 'live-stage' }));
   await reconcile();
-  await nodeMutations.restoreNodeRevision(null, { revisionId: revision.id }, ctx);
+  await nodeMutations.restoreNodeRevision(null, { nodeRevRef: revision.id }, ctx);
   expect((await raw()).data).toMatchObject({ title: 'Before' });
   const memory = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
   const list = await chatQueries.myChats(null, { agentRef: memory.userMemoryOfAgentId! }, ctx);

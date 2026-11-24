@@ -160,7 +160,7 @@ describe('a refusal offers only routes that perform the refused operation (@code
     await M.updateSpecNode({}, { input: { id: n.id, content: 'second' } }, ctx());
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id }, orderBy: { createdAt: 'asc' } });
 
-    const r = await refusal(M.restoreNodeRevision({}, { revisionId: rev.id }, ctx()));
+    const r = await refusal(M.restoreNodeRevision({}, { nodeRevRef: rev.id }, ctx()));
     expect(r.code).toBe('ROLE_GOVERNED');
     expect(r.message).toContain('no door restores a revision');
     expect(r.message).not.toMatch(/routes to it by itself|Over MCP|may update/);

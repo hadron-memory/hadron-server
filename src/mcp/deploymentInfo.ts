@@ -208,7 +208,12 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // A lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation. Nothing else
 // changes: every field already resolved an ID or URN and keeps its gate and its refusals byte-identical; the
 // usage "provide either nodeId or loc" refusal now names `nodeRef`.
-export const HADRON_SERVER_VERSION = '0.32.0';
+//
+// 0.33.0 — BREAKING, entity refs S2 (#4138): the node-revision operations take `nodeRevRef`, no alias.
+// `nodeRevision(revisionId)`, `restoreNodeRevision(revisionId)`, `updateNodeRevision(revisionId)` and the
+// delete-revision mutation (`revisionId` → `nodeRevRef: String!`, a revision URN or id). A lagging client's old name is an UNKNOWN
+// argument and GraphQL refuses the whole operation.
+export const HADRON_SERVER_VERSION = '0.33.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
