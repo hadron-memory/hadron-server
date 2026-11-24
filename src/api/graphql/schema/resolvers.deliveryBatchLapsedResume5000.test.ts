@@ -140,25 +140,27 @@ describe('#5000 a refused resume says which condition failed, and resumes nothin
 });
 
 describe('#5000 the resume commits with the read or not at all', () => {
-  it('a read that fails after the resume rolls the resume back: the session stays lapsed, nothing is logged', async () => {
+  // Each failure point comes AFTER the resume (ownBatchSession is the first thing the read does in its transaction): the
+  // channel lookup is the read's last query and the audit row its last write, so neither can be part of the resume itself.
+  it.each([['appLogEntry', 'create'], ['channel', 'findMany']])('a read that fails at %s.%s after the resume rolls the resume back', async (model, method) => {
     const s = await lapsed(43);
     const failing = new Proxy(db, { get(target, property) {
       if (property === '$transaction') return (fn: any, ...rest: any[]) => target.$transaction(async tx => {
         const proxy = new Proxy(tx, { get(t, p) {
-          if (p === 'appLogEntry') return new Proxy(t.appLogEntry, { get(model, method) {
-            if (method === 'create') return async () => { throw new Error('audit unavailable'); };
-            return Reflect.get(model, method);
+          if (p === model) return new Proxy((t as any)[model], { get(m, meth) {
+            if (meth === method) return async () => { throw new Error('read failed after the resume'); };
+            const v = Reflect.get(m, meth); return typeof v === 'function' ? v.bind(m) : v;
           } });
-          return Reflect.get(t, p);
+          const v = Reflect.get(t, p); return typeof v === 'function' ? v.bind(t) : v;
         } });
         return fn(proxy);
       }, ...rest);
       const value = Reflect.get(target, property); return typeof value === 'function' ? value.bind(target) : value;
     } });
-    await expect(Q.deliveryBatches({}, { appRef: app.id }, { ...ctx(holder.id), db: failing, appId: app.id, sessionId: s.id })).rejects.toThrow('audit unavailable');
-    expect((await row(s)).updatedAt).toEqual(s.updatedAt);
+    await expect(Q.deliveryBatches({}, { appRef: app.id }, { ...ctx(holder.id), db: failing, appId: app.id, sessionId: s.id })).rejects.toThrow('read failed after the resume');
+    expect((await row(s)).updatedAt).toEqual(s.updatedAt); // the resume writes updatedAt: unchanged means it rolled back
     expect(await db.appLogEntry.count({ where: { sessionId: s.id } })).toBe(0);
-    // the same read, once the audit works, resumes it
+    // the same read, once nothing fails, resumes it (so the check above is not vacuous: it was lapsed and is resumable)
     expect((await inbox(s)).batches).toEqual([]);
     expect((await row(s)).updatedAt!.getTime()).toBeGreaterThan(Date.now() - 60_000);
   });
