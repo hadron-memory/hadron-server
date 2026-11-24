@@ -11,16 +11,25 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Observe-only: the real acquireLockSet runs; the spy records each call's keys.
+// Observe-only: the real functions run. `lockSetCalls` records each acquireLockSet call's keys; `lockOrder` records,
+// in call order, every loc-key helper the resolver imports, so "nothing took a loc key before the union" is checkable.
 const lockSetCalls = vi.hoisted(() => [] as Array<Array<{ memoryId: string; loc: string }>>);
+const lockOrder = vi.hoisted(() => [] as string[]);
 vi.mock('../../../lib/nodeSubtreeLock.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../../lib/nodeSubtreeLock.js')>();
+  const watch = <F extends (...a: any[]) => any>(name: string, fn: F) =>
+    ((...a: Parameters<F>) => { lockOrder.push(name); return fn(...a); }) as F;
   return {
     ...real,
     acquireLockSet: async (tx: Parameters<typeof real.acquireLockSet>[0], keys: Parameters<typeof real.acquireLockSet>[1]) => {
+      lockOrder.push('acquireLockSet');
       lockSetCalls.push(keys.map((k) => ({ memoryId: k.memoryId, loc: k.loc })));
       return real.acquireLockSet(tx, keys);
     },
+    lockAncestorsForCreate: watch('lockAncestorsForCreate', real.lockAncestorsForCreate),
+    lockAncestorsForCreateMany: watch('lockAncestorsForCreateMany', real.lockAncestorsForCreateMany),
+    lockNodeForDelete: watch('lockNodeForDelete', real.lockNodeForDelete),
+    lockPathForCreateUnder: watch('lockPathForCreateUnder', real.lockPathForCreateUnder),
   };
 });
 
@@ -30,6 +39,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { isMintedSpecPermanenceEnforced } from '../../../lib/mintedSpecPermanence.js';
 import { setRestorePauseBeforeRetirementCheckForTests } from './resolvers.mutation.session.js';
+import { ancestorLocs } from '../../../lib/nodeSubtreeLock.js';
 
 const M = resolvers.Mutation as any;
 let ctx: Context;
@@ -59,6 +69,7 @@ async function waitFor(pred: () => Promise<boolean>, what: string) {
 beforeEach(async () => {
   await cleanDb(db);
   lockSetCalls.length = 0;
+  lockOrder.length = 0;
   const org = await db.organization.create({ data: { name: 'Unretire pins', urn: 'unretire-pins-3587.example' } });
   orgId = org.id;
   const user = await db.user.create({ data: { githubId: 3587101, githubUsername: 'unretire-pins-admin', roles: ['ADMIN'] } });
@@ -111,12 +122,20 @@ describe('#3587 P2s — a retirement that lands after the auto-save and before t
     const resume = new Promise<void>((r) => { release = r; });
     setRestorePauseBeforeRetirementCheckForTests(async () => { reached(); await resume; });
     const a = restore(rev).then(() => null, (e: any) => e);
-    await atPause;
-    // B: a real retirement through updateNode, which commits while A is paused (A holds no key or row it needs).
-    await M.updateNode({}, { input: { id: spec.id, tags: ['superseded'] } }, ctx);
-    // Observed before A resumes: a fresh read sees the committed tag.
-    expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).tags).toEqual(['superseded']);
-    release();
+    let bCommitted = false;
+    try {
+      await atPause;
+      // B: a real retirement through updateNode, which commits while A is paused (A holds no key or row it needs).
+      // Bounded: if A already holds specs:l's row at the pause (the check ran early), B waits on A, and this fails
+      // fast instead of deadlocking until the test timeout; the finally drains both.
+      const b = M.updateNode({}, { input: { id: spec.id, tags: ['superseded'] } }, ctx).then(() => { bCommitted = true; });
+      await Promise.race([b, new Promise((r) => setTimeout(r, 5_000))]);
+      expect(bCommitted, 'the retirement committed while the restore was paused (A held no lock it needs)').toBe(true);
+      // Observed before A resumes: a fresh read sees the committed tag.
+      expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).tags).toEqual(['superseded']);
+    } finally {
+      release();
+    }
     const e = await a;
     expect(e?.extensions?.code).toBe('RESTORE_WOULD_UNRETIRE_SPEC');
     expect(e?.extensions?.locs).toEqual(['specs:l']);
@@ -172,10 +191,14 @@ describe('#3587 D2 — standalone createRevision reads outside its transaction',
   it('the snapshot node and edge reads go through the pool, not the transaction client', async () => {
     await mk('notes:a');
     const poolReads: string[] = [];
-    // Observe-only: every call still reaches the real client; only calls made on the POOL object are recorded.
+    // Observe-only: every call still reaches the real client; calls made on the POOL object are recorded in order,
+    // with the moment `$transaction` is called, so a pool read moved inside the transaction callback is caught.
     const watched = new Proxy(db, {
       get(target, prop) {
         const v = Reflect.get(target, prop, target);
+        if (prop === '$transaction' && typeof v === 'function') {
+          return (...a: unknown[]) => { poolReads.push('$transaction'); return (v as (...x: unknown[]) => unknown).apply(target, a); };
+        }
         if (prop !== 'node' && prop !== 'edge') return typeof v === 'function' ? v.bind(target) : v;
         return new Proxy(v as object, {
           get(m, p) {
@@ -187,7 +210,12 @@ describe('#3587 D2 — standalone createRevision reads outside its transaction',
       },
     }) as typeof db;
     await M.createRevision({}, { agentRef: agentId }, { ...ctx, db: watched });
-    expect(poolReads).toEqual(expect.arrayContaining(['node', 'edge']));
+    const txAt = poolReads.indexOf('$transaction');
+    expect(txAt, 'createRevision opened a transaction on the pool client').toBeGreaterThan(-1);
+    const before = poolReads.slice(0, txAt);
+    expect(before, 'the snapshot node and edge reads ran before the transaction began').toEqual(expect.arrayContaining(['node', 'edge']));
+    expect(poolReads.slice(txAt + 1), 'no pool node/edge read inside or after the transaction').not.toEqual(expect.arrayContaining(['node']));
+    expect(poolReads.slice(txAt + 1)).not.toEqual(expect.arrayContaining(['edge']));
     expect(await revCount()).toBe(1);
   });
 });
@@ -197,14 +225,21 @@ describe('#3587 — the restore takes ONE complete advisory set first', () => {
     await mk('specs:a:b:c');
     await mk('notes:x');
     const rev = await save();
+    // The snapshot is the memory's non-revision rows (createAgent seeds some, e.g. under `boot`).
+    const snapLocs = (await db.node.findMany({ where: { memoryId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } }, select: { loc: true } }))
+      .map((n) => n.loc);
+    const expected = new Set(['revisions', ...snapLocs.flatMap((l) => ancestorLocs(l))]);
+    for (const l of ['specs', 'specs:a', 'specs:a:b', 'notes']) expect(expected.has(l)).toBe(true);
     lockSetCalls.length = 0;
+    lockOrder.length = 0;
     await restore(rev);
-    const first = lockSetCalls.find((keys) => keys.every((k) => k.memoryId === memoryId));
+    // Nothing before it took a loc key: the restore's first loc-key helper call is the union acquireLockSet.
+    expect(lockOrder[0]).toBe('acquireLockSet');
+    const first = lockSetCalls[0];
     expect(first, 'the restore called acquireLockSet').toBeDefined();
-    const locs = new Set(first!.map((k) => k.loc));
-    for (const l of ['revisions', 'specs', 'specs:a', 'specs:a:b', 'notes']) expect(locs.has(l), `holds ${l}`).toBe(true);
-    // It is the restore's first lock-set call: nothing before it in this transaction took a loc key.
-    expect(lockSetCalls.indexOf(first!)).toBe(0);
+    expect(first.every((k) => k.memoryId === memoryId)).toBe(true);
+    // Exactly the union: `revisions` plus every strict ancestor of every snapshot loc, nothing more.
+    expect(new Set(first.map((k) => k.loc))).toEqual(expected);
   });
 });
 
