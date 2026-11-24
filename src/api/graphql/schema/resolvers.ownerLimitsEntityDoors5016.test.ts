@@ -217,30 +217,37 @@ describe('#5016 transferMemoryOwnership', () => {
 });
 
 describe('#5016 the counts-as-a-memory predicate agrees with the SQL count', () => {
-  it('one row of each shape', async () => {
-    const shapes: Array<{ data: Record<string, unknown>; row: { class: string; appId: string | null; isInstallMemory: boolean } }> = [];
-    const app = await db.app.create({ data: { id: generateId(), name: 'p', urn: 'door-org:p', organizationId: org.id } as never });
+  it('shape by shape: each row alone in its own organization counts 1 or 0 exactly as the predicate says', async () => {
+    const holder = await db.app.create({ data: { id: generateId(), name: 'p', urn: 'door-org:p', organizationId: org.id } as never });
+    const created: Array<{ cls: string; withApp: boolean; install: boolean; counts: boolean }> = [];
+    const missing: string[] = [];
     for (const cls of ['knowledge', 'group', 'personal', 'private', 'system', 'app']) {
       const personal = cls === 'personal' || cls === 'private';
-      for (const appId of [null, app.id]) for (const isInstallMemory of [false, true]) {
-        if (cls === 'app' && !appId) continue;
-        shapes.push({ data: { class: cls, appId, isInstallMemory, ...(personal ? { userId: admin.id } : {}) }, row: { class: cls, appId, isInstallMemory } });
+      for (const withApp of [false, true]) for (const install of [false, true]) {
+        const label = `${cls}/app=${withApp}/install=${install}`;
+        const solo = await db.organization.create({ data: { id: generateId(), name: `solo${++seq}`, urn: `solo-${seq}` } });
+        try {
+          await db.memory.create({ data: {
+            id: generateId(), organizationId: solo.id, urn: `solo-${seq}:m`, name: 's', class: cls, isInstallMemory: install,
+            ...(withApp ? { appId: holder.id } : {}), ...(personal ? { userId: admin.id } : {}),
+          } as never });
+        } catch (e) {
+          // Only a shape the database's own CHECK constraints refuse is skipped, and it is named.
+          if ((e as { code?: string }).code !== 'P2010' && !/check constraint/i.test(String((e as Error).message))) throw e;
+          missing.push(label);
+          continue;
+        }
+        const counts = memoryCountsAgainstOwner({ class: cls, appId: withApp ? holder.id : null, isInstallMemory: install });
+        expect(await OWNER_LIMIT_KEYS.memories.count(db, { organizationId: solo.id }), label).toBe(counts ? 1n : 0n);
+        created.push({ cls, withApp, install, counts });
       }
     }
-    let expected = 0n;
-    let refused = 0;
-    for (const s of shapes) {
-      try {
-        await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `door-org:s${++seq}`, name: 's', ...s.data } as never });
-        if (memoryCountsAgainstOwner(s.row)) expected++;
-      } catch (e) {
-        // Only a shape the database's own CHECK constraints refuse is skipped; anything else is a broken test.
-        if (!/check constraint|chk_/i.test(String((e as Error).message))) throw e;
-        refused++;
-      }
-    }
-    expect(refused).toBeLessThan(shapes.length);
-    expect(expected).toBeGreaterThan(2n);
-    expect(await OWNER_LIMIT_KEYS.memories.count(db, { organizationId: org.id })).toBe(expected);
+    // The four counting classes exist as a plain free-standing row, and at least one excluded shape of each reason was really created.
+    for (const cls of ['knowledge', 'group', 'personal', 'private']) expect(created.some((c) => c.cls === cls && !c.withApp && !c.install && c.counts), cls).toBe(true);
+    expect(created.some((c) => c.withApp && !c.counts)).toBe(true);
+    expect(created.some((c) => c.install && !c.counts)).toBe(true);
+    expect(created.some((c) => c.cls === 'system' && !c.counts)).toBe(true);
+    // The rest are shapes the schema itself forbids (listed in the failure message if this ever changes).
+    expect(created.length, `refused by constraints: ${missing.join(', ')}`).toBeGreaterThanOrEqual(9);
   });
 });
