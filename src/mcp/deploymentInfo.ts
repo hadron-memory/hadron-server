@@ -213,7 +213,15 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `nodeRevision(revisionId)`, `restoreNodeRevision(revisionId)`, `updateNodeRevision(revisionId)` and the
 // delete-revision mutation (`revisionId` → `nodeRevRef: String!`, a revision URN or id). A lagging client's old name is an UNKNOWN
 // argument and GraphQL refuses the whole operation.
-export const HADRON_SERVER_VERSION = '0.33.0';
+//
+// 0.35.0 — BREAKING, entity refs S1 (#4137): the six memory share/member mutations take refs and nothing else, no alias.
+// `createMemoryShare` / `updateMemoryShareRole` (`memoryId` -> `memoryRef: ID!`, `granteeRef: ID!`), `deleteMemoryShare`
+// (`granteeRef: String`, omitted = the caller's own share) and `addMemoryMember` / `updateMemoryMemberRole` /
+// `removeMemoryMember` (`memoryRef: ID!`, `userRef: ID!`). The deprecated `granteeId`, `memoryId` and `userId` arguments are
+// removed, and the surviving refs are now required `ID!` (were optional `String`). A lagging client's old name is an UNKNOWN
+// argument and GraphQL refuses the whole operation. The existence-hiding order is unchanged: memory resolved, principal gate,
+// counterparty resolved. (0.34.0 is held by #5046, #4368, which was open when this took the next free number.)
+export const HADRON_SERVER_VERSION = '0.35.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
