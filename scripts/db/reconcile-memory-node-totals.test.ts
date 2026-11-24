@@ -52,6 +52,26 @@ describe('#5078 scripts/db/reconcile-memory-node-totals.ts', () => {
     expect(await run()).toEqual({ code: 0, lines: [`${tag} dry_run drifted=0`] });
   });
 
+  it('left-over pending rows are drift even when the figure is right, also for a memory that is gone, and --apply clears them', async () => {
+    await db.memoryNodeTotal.create({ data: { memoryId: a1.id, liveNodes: -2n } });
+    const tag = 'db.memory_node_totals_reconcile';
+    await db.$executeRaw`ALTER TABLE memory_node_pending DISABLE TRIGGER memory_node_pending_fold`;
+    try {
+      await db.memoryNodePending.createMany({ data: [
+        { id: generateId(), txId: 1n, memoryId: a1.id, delta: 2n }, { id: generateId(), txId: 2n, memoryId: '~gone', delta: 1n },
+      ] });
+    } finally { await db.$executeRaw`ALTER TABLE memory_node_pending ENABLE TRIGGER memory_node_pending_fold`; }
+    const lines = [
+      `${tag}.drift memory=${a1.id} stored=0 counted=0 pending_rows=1`, `${tag}.drift memory=~gone stored=1 counted=0 pending_rows=1`,
+    ].sort();
+    const dry = await run();
+    expect({ code: dry.code, lines: dry.lines.slice(0, 2).sort() }).toEqual({ code: 1, lines });
+    expect((await run('--apply')).code).toBe(0);
+    await expectNodeTotalsExact(db);
+    expect((await run()).code).toBe(0);
+    expect(await db.memoryNodeTotal.findMany({ select: { memoryId: true, liveNodes: true } })).toEqual([{ memoryId: a1.id, liveNodes: 0n }]);
+  });
+
   it('a negative figure never fails a delete and is reported', async () => {
     const n = await node(a1.id, 'n');
     await db.$executeRaw`UPDATE memory_node_totals SET live_nodes = 0 WHERE memory_id = ${a1.id}`;

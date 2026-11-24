@@ -12,7 +12,7 @@
  * Until then `OWNER_NODE_COUNT_SOURCE=on-demand` makes every answer a recount.
  *
  * NO production run, not even the dry run, is granted by this file: it needs its own register grant (CLAUDE.md, "Production
- * database"). Output is memory ids and the two figures only. The dry run is one statement, so it never reports a write in progress.
+ * database"). Output is memory ids and the two figures, plus the number of left-over pending rows. The dry run is one statement, so it never reports a write in progress.
  *
  * `--apply` is safe beside live writers and safe to repeat: each memory is repaired in its own transaction (see `repairMemoryNodeTotal`).
  *
@@ -43,7 +43,7 @@ export async function main(argv: readonly string[], io: ReconcileNodeTotalsIo): 
   try {
     db = new PrismaClient({ datasourceUrl: io.env.DATABASE_URL });
     const drift = await findMemoryNodeTotalDrift(db);
-    for (const d of drift) io.log(`${TAG}.drift memory=${d.memoryId} stored=${d.stored} counted=${d.counted}`);
+    for (const d of drift) io.log(`${TAG}.drift memory=${d.memoryId} stored=${d.stored} counted=${d.counted}${d.pending > 0n ? ` pending_rows=${d.pending}` : ''}`);
     if (apply) for (const d of drift) await repairMemoryNodeTotal(db, d.memoryId);
     io.log(`${TAG} ${apply ? 'applied' : 'dry_run'} drifted=${drift.length}`);
     return drift.length > 0 && !apply ? 1 : 0;
