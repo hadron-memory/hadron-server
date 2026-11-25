@@ -1,4 +1,5 @@
 import { softDeleteChatToolConnections, dispatchChatToolTeardown, type ChatToolTeardown } from '../../../lib/chatToolTeardown.js';
+import { requireOwnerHeadroom } from '../../../lib/ownerLimits/gate.js';
 import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { markNewInstallPayload } from './installationPayload.js';
 import { requireInstructedAct, sameActPrincipal, type StaffActAdmission, type ActInstruction, type ActAdmission } from '../../../lib/auth/instructedAct.js';
@@ -361,6 +362,14 @@ async function removeAppMemberWithAdmission(
   return true;
 }
 
+/** The App a cascade reuses for a dependency Agent in an organization (one per pair). The headroom pre-count (#5016) and the install loop read it through here, so the two cannot drift. */
+async function findExistingDependencyApp(db: Context['db'], organizationId: string, agentId: string) {
+  return db.app.findFirst({
+    where: { organizationId, appAgents: { some: { agentId } }, deletedAt: null },
+    select: { id: true },
+  });
+}
+
 export const appMutations = {
     regenerateAppKey: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
@@ -655,6 +664,14 @@ export const appMutations = {
       // gate re-runs on txCtx: org ADMIN and the #1584 license plan, or the
       // personal owner eligibility rule, including current org membership.
       const licensedAgentIds = [resolvedAgentId, ...selectedImports.map((imp) => imp.importedAgentId)];
+      // #5016: a cascading install adds the App itself plus each dependency that has no App in the organization yet (the loop below reuses
+      // one that has). A personal App never cascades. The main transaction asks for all of them at once; each dependency's own
+      // transaction asks for its one App again, so a call racing in between cannot overshoot.
+      const newDependencyApps = resolvedOrgId
+        ? await Promise.all([...new Set(selectedImports.map((imp) => imp.importedAgentId))].map(async (agentId) =>
+          (await findExistingDependencyApp(ctx.db, resolvedOrgId, agentId)) ? 0n : 1n,
+        )).then((xs) => xs.reduce<bigint>((a, b) => a + b, 0n))
+        : 0n;
       const createdApp = await withAuthorizedTx(
         ctx,
         [
@@ -687,6 +704,7 @@ export const appMutations = {
             await ensureAgentOrgGrant(tx, resolvedOrgId!, id);
           }
           if (personalSubscription) await ensureAgentSubscription(tx, ctx.userId!, resolvedAgentId);
+        await requireOwnerHeadroom(tx, { owner: resolvedOrgId ? { organizationId: resolvedOrgId } : { userId: ownerUserId! }, key: 'apps', amount: 1n + newDependencyApps, caller: ctx.userId ? { userId: ctx.userId } : null });
         const app = await tx.app.create({
           data: {
             organizationId: resolvedOrgId,
@@ -794,14 +812,7 @@ export const appMutations = {
           // Reuse an existing App for the same (org, dep agent) — one App per
           // (org, Agent) pair (v1 doesn't support per-bundle namespacing of
           // dep installations, per spec User Story 3 acceptance scenario 4).
-          const existingDepApp = await ctx.db.app.findFirst({
-            where: {
-              organizationId: resolvedOrgId,
-              appAgents: { some: { agentId: imp.importedAgentId } },
-              deletedAt: null,
-            },
-            select: { id: true },
-          });
+          const existingDepApp = await findExistingDependencyApp(ctx.db, resolvedOrgId, imp.importedAgentId);
           if (existingDepApp) continue;
 
           // Derive a sensible URN for the dep's App. Use the imported
@@ -859,6 +870,7 @@ export const appMutations = {
             },
             async (tx) => {
               if (depAutoGrant) await ensureAgentOrgGrant(tx, resolvedOrgId, imp.importedAgentId);
+              await requireOwnerHeadroom(tx, { owner: { organizationId: resolvedOrgId }, key: 'apps', caller: ctx.userId ? { userId: ctx.userId } : null });
               const cascaded = await tx.app.create({
                 data: {
                   organizationId: resolvedOrgId,

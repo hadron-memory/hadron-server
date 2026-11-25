@@ -22,7 +22,7 @@
 // The one dynamic statement the parser accepts (#4704, reversing the #4691 disposition that post-push refuses DDL built at run
 // time): a DO block's `EXECUTE pg_catalog.format('DROP SEQUENCE|INDEX [IF EXISTS] %s', <regclass cast>)` or the matching
 // `ALTER TABLE %s DROP CONSTRAINT [IF EXISTS] %I`. A drop creates no object, and the template list and the argument shape
-// (see catalogDropSpan) keep every CREATE-shaped dynamic string unrecognized.
+// (see catalogDdlSpan) keep every CREATE-shaped dynamic string unrecognized.
 //
 // One statement can create MORE than one object (`ALTER TABLE t ADD
 // CONSTRAINT a CHECK (…), ADD CONSTRAINT b UNIQUE (…)`), so `classify`
@@ -593,6 +593,7 @@ function balancedClose(text, openAt) {
 }
 
 const REGCLASS_CAST = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*(?:\(.*\))?\s*::\s*(?:pg_catalog\s*\.\s*)?regclass$/is;
+const REGPROCEDURE_CAST = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*::\s*(?:pg_catalog\s*\.\s*)?regprocedure$/i;
 const REGCLASS_CAST_TAIL = /\)\s*::\s*(?:pg_catalog\s*\.\s*)?regclass$/i;
 
 /** An argument that IS a regclass value: a bare (qualified) name or ONE call, cast to regclass. Shape only: the cast itself turns any text into a relation's name or fails. */
@@ -604,11 +605,13 @@ function isRegclassCast(arg) {
 }
 
 /**
- * #4704: the ONE dynamic-DDL shape a DO block may run, because it can create no object: a DROP whose target is
- * resolved from the catalog at run time. Exactly `EXECUTE format('<template>', <args>);` with a plain single-quoted
+ * #4704 / #5096: the closed list of dynamic-DDL shapes a DO block may run, because none can create an object: a DROP whose
+ * target is resolved from the catalog at run time, and (#5096) an ALTER FUNCTION that only sets one function's search_path. Exactly `EXECUTE format('<template>', <args>);` with a plain single-quoted
  * template (no E-string, no concatenation, no USING) from this closed list:
  *   DROP SEQUENCE|INDEX [IF EXISTS] %s                    one arg, `<name or call>::regclass`
  *   ALTER TABLE %s DROP CONSTRAINT [IF EXISTS] %I         arg 1 `<name or call>::regclass`, arg 2 any (%I quotes it)
+ *   ALTER FUNCTION %s SET search_path = public, pg_temp   one arg, a bare (qualified) name cast to regprocedure (#5096: it
+ *                                                         changes one function's configuration, creates no object)
  * The function must be spelled `pg_catalog.format`: a bare `format` resolves by search_path and overload, so a function
  * the closure created as `public.format(text, regclass)` would win and could run anything (blind seat F2, #4800). Nothing
  * in the corpus creates one, but the spelling makes that a property of the text instead of an assumption.
@@ -619,7 +622,7 @@ function isRegclassCast(arg) {
  * every other template, so no CREATE can hide here. Returns the length of the matched span, or 0 when it is not this
  * shape (the caller leaves the EXECUTE standing and the block refuses).
  */
-function catalogDropSpan(text, found) {
+function catalogDdlSpan(text, found) {
   const openAt = found.index + found[0].length - 1;
   const closeAt = balancedClose(text, openAt); // the index OF the matching `)`
   if (closeAt === -1) return 0;
@@ -640,6 +643,7 @@ function catalogDropSpan(text, found) {
   let ok = false;
   if (/^DROP (?:SEQUENCE|INDEX) (?:IF EXISTS )?%s$/i.test(template)) ok = same(['%s']) && args.length === 1 && isRegclassCast(args[0]);
   else if (/^ALTER TABLE %s DROP CONSTRAINT (?:IF EXISTS )?%I$/i.test(template)) ok = same(['%s', '%I']) && args.length === 2 && isRegclassCast(args[0]) && args[1] !== '';
+  else if (/^ALTER FUNCTION %s SET search_path = public, pg_temp$/i.test(template)) ok = same(['%s']) && args.length === 1 && REGPROCEDURE_CAST.test(args[0]);
   if (!ok) return 0; // %I quotes its argument and %s only takes a regclass value, so no argument text can reach the statement as SQL
   return closeAt + 1 + end[0].length - found.index;
 }
@@ -805,11 +809,11 @@ export function classify(stmt) {
     // matched on the comment-stripped body, so a commented-out one cannot count, and it is blanked BY POSITION (same
     // length, so every later index still lines up), never by searching for its text: two identical calls each lose
     // their own span, and a lookalike elsewhere in the body is never cut by mistake. Only a call that
-    // catalogDropSpan accepted WHOLE is blanked: anything else (a CREATE template, a `%s` with a literal, USING, a
+    // catalogDdlSpan accepted WHOLE is blanked: anything else (a CREATE template, a `%s` with a literal, USING, a
     // trailing concatenation, an unqualified `format`) stays standing and the EXECUTE check below refuses the block.
     let remainder = body;
     for (const m of body.matchAll(/\bEXECUTE\s+pg_catalog\s*\.\s*format\s*\(/gi)) {
-      const span = catalogDropSpan(body, m);
+      const span = catalogDdlSpan(body, m);
       if (span > 0) remainder = remainder.slice(0, m.index) + ' '.repeat(span) + remainder.slice(m.index + span);
     }
     for (const m of body.matchAll(/\bEXECUTE\s+\$([A-Za-z_]*)\$([\s\S]*?)\$\1\$/gi)) {

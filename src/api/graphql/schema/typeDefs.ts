@@ -11369,6 +11369,11 @@ export const typeDefs = `#graphql
     An Agent's revisions, newest first, with the slot limit, the highest slot used and the saves left (#4488).
     Read by whoever may restore a revision: the Agent's manager.
 
+    Error codes (extensions.code): AGENT_NOT_FOUND (no such Agent, or one the
+    caller cannot read), FORBIDDEN (a reader who does not manage the Agent),
+    AGENT_HAS_NO_SYSTEM_MEMORY (the Agent has no system memory, so it has no
+    revisions to list).
+
     Accepts the entity's ID or URN.
     """
     agentRevisions(agentRef: ID!): AgentRevisionList!
