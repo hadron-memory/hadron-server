@@ -188,14 +188,29 @@ describe('#744 item 4 — a node write with no key is SESSION_EXPIRED and change
     const countBefore = await db.node.count({ where: { memoryId } });
     await evictKey();
 
-    await expect(createNode(keyless(), { loc: 'c.new', name: 'New', objectType: 'competitor', properties: { name: 'n' } })).rejects.toThrow(/SESSION_EXPIRED/);
-    await expect(updateNode(keyless(), { loc: 'c.k', properties: { name: 'after' } })).rejects.toThrow(/SESSION_EXPIRED/);
-    await expect(updateNodeProperties(keyless(), node.id, { name: 'after' })).rejects.toThrow(/SESSION_EXPIRED/);
+    await expect(createNode(keyless(), { loc: 'c.new', name: 'New', objectType: 'competitor', properties: { name: 'n' } })).rejects.toMatchObject({ extensions: { code: 'SESSION_EXPIRED' } });
+    await expect(updateNode(keyless(), { loc: 'c.k', properties: { name: 'after' } })).rejects.toMatchObject({ extensions: { code: 'SESSION_EXPIRED' } });
+    await expect(updateNodeProperties(keyless(), node.id, { name: 'after' })).rejects.toMatchObject({ extensions: { code: 'SESSION_EXPIRED' } });
 
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
     expect(after.properties).toEqual({ name: 'before' });
     expect(after.updatedAt).toEqual(before.updatedAt);
+    expect(after.content).toEqual(before.content);
+    expect(after.data).toEqual(before.data);
     expect(await db.node.count({ where: { memoryId } })).toBe(countBefore);
+  });
+
+  it('a LIVE session whose cached key is gone is also SESSION_EXPIRED (the missing key, not the missing session, is the cause)', async () => {
+    await updateMemory(keyed());
+    const node = await createNode(keyed(), { loc: 'c.live', name: 'Live', objectType: 'competitor', properties: { name: 'before' } });
+    sessionKeyCache.clear();
+    const session = await db.session.findUniqueOrThrow({ where: { id: sessionId }, select: { endedAt: true } });
+    expect(session.endedAt).toBeNull();
+    await expect(createNode(keyed(), { loc: 'c.live2', name: 'L2', objectType: 'competitor', properties: { name: 'n' } })).rejects.toMatchObject({ extensions: { code: 'SESSION_EXPIRED' } });
+    await expect(updateNode(keyed(), { loc: 'c.live', properties: { name: 'after' } })).rejects.toMatchObject({ extensions: { code: 'SESSION_EXPIRED' } });
+    await expect(updateNodeProperties(keyed(), node.id, { name: 'after' })).rejects.toMatchObject({ extensions: { code: 'SESSION_EXPIRED' } });
+    const raw = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+    expect(raw.properties).toEqual({ name: 'before' });
   });
 
   it('keyed control: the same three writes succeed with a live session', async () => {
@@ -233,12 +248,30 @@ describe('#744 items 5 and 7 — findNodes where/sortProperty without a key', ()
     expect(locsOf(await findNodes(keyed(), { sortProperty: sort }))).toEqual(['c.b', 'c.a', 'c.c']);
   });
 
-  it('where over field data matches nothing on the encrypted memory (data is ciphertext at rest)', async () => {
+  it('where over field data matches nothing on the encrypted memory (data is ciphertext at rest), keyed or not', async () => {
     const dataWhere = { field: 'data', path: ['tools'], contains: 'web_search' };
+    const filter = { memoryIds: [memoryId], where: dataWhere };
+    // Keyed first, while the key is live: the predicate runs in SQL on the stored ciphertext,
+    // so a key does not change the answer.
+    expect(locsOf(await findNodes(keyed(), { filter }))).toEqual([]);
     await evictKey();
-    expect(locsOf(await findNodes(keyless(), { filter: { memoryIds: [memoryId], where: dataWhere } }))).toEqual([]);
-    // Keyed too: the predicate runs in SQL on the stored ciphertext, a key does not change it.
-    expect(locsOf(await findNodes(keyed(), { filter: { memoryIds: [memoryId], where: dataWhere } }))).toEqual([]);
+    expect(locsOf(await findNodes(keyless(), { filter }))).toEqual([]);
+  });
+
+  it('positive control: the same data predicate matches on a PLAINTEXT memory', async () => {
+    const admin = await db.user.create({ data: { githubId: 7441, githubUsername: 'es-admin', roles: ['ADMIN'] } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
+    const adminCtx = { db, roles: ['ADMIN'], userId: admin.id } as Context;
+    const plain = await M.createMemory({}, { orgRef: org.id, name: 'es-plain' }, adminCtx);
+    await db.node.create({
+      data: { id: generateId(), memoryId: plain.id, loc: 'p.a', name: 'PA', data: { tools: ['web_search'] } } as never,
+    });
+    const res = await (resolvers.Query as any).findNodes(
+      null,
+      { filter: { memoryIds: [plain.id], where: { field: 'data', path: ['tools'], contains: 'web_search' } } },
+      adminCtx,
+    );
+    expect(locsOf(res)).toEqual(['p.a']);
   });
 });
 
@@ -246,6 +279,7 @@ describe('#744 item 6 — hadron_validate without a key', () => {
   it('reports a directly inserted non-conforming row and not the conforming one', async () => {
     await updateMemory(keyed());
     await createNode(keyed(), { loc: 'c.fine', name: 'Fine', objectType: 'competitor', properties: { name: 'ok' } });
+    // Simulates a legacy row written outside the write seam, before the schema existed.
     await db.node.create({
       data: { id: generateId(), memoryId, loc: 'c.broken', name: 'Broken', objectType: 'competitor', properties: {} } as never,
     });
@@ -255,6 +289,6 @@ describe('#744 item 6 — hadron_validate without a key', () => {
     const text = await createTestableMcpServer(auth()).callToolText('hadron_validate', { memoryUrn: urn });
     expect(text).toContain('[schema]');
     expect(text).toContain('c.broken');
-    expect(text).not.toMatch(/\[schema\][^\n]*c\.fine/);
+    expect(text).not.toContain('c.fine');
   });
 });
