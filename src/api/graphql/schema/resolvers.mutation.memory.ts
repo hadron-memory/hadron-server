@@ -3175,6 +3175,12 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
+      // A caller without a user is refused before the memory resolves, as on the share doors (cor:api:140:02).
+      if (!ctx.userId) {
+        throw new GraphQLError('Authenticated user required', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
       // #764: memoryRef/userRef accept id/URN/handle/email. Resolve the memory
       // (a miss maps to the uniform member FORBIDDEN — no existence oracle) +
       // run the owner gate FIRST, then resolve the user — so an unauthorized
@@ -3238,6 +3244,12 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
+      // A caller without a user is refused before the memory resolves, as on the share doors (cor:api:140:02).
+      if (!ctx.userId) {
+        throw new GraphQLError('Authenticated user required', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
       // #764: resolve memory (miss → uniform member FORBIDDEN, no existence
       // oracle) + owner-gate FIRST, then resolve the user (auth before
       // revealing user existence — #816 review).
