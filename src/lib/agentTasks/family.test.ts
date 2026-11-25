@@ -205,6 +205,19 @@ describe('startSession family, and Worker.family following the binding', () => {
   });
 });
 
+// #5175 — vendor positioning (Holger 2026-11-25, "Vendor positioning"): flagship high, standard mid, small or fast low.
+// Every placement below is PROPOSED; Holger may overrule one. A model with no entry stays null (TIER_UNKNOWN, R190).
+describe('#5175 tierOf: non-sonnet/opus/haiku roster models (placements Proposed)', () => {
+  it.each([
+    ['claude-fable-5-2', 'high'], ['claude-fable-5-1', 'high'], ['us.anthropic.claude-fable-5-2-v1:0', 'high'],
+    ['glm-5.3', 'mid'], ['GLM-4.6', 'mid'], ['glm-4.5-air', 'low'], ['glm-4.7-flash', 'low'],
+    ['gpt-6-luna', 'mid'], ['gpt-5.1-codex', 'mid'], ['gpt-5-mini', 'low'], ['gpt-5-nano', 'low'],
+    ['deepseek-v4-pro', 'high'], ['deepseek-v4-flash', 'low'],
+  ])('%s is %s', (model, tier) => expect(tierOf(model)).toBe(tier));
+  it.each(['glm-sonnet-1', 'my-glm-5', 'gpt-opus-5', 'deepseek-v4-pro-max', 'deepseek-pro'])('%s stays null', (m) =>
+    expect(tierOf(m)).toBeNull());
+});
+
 describe('#2252 tierOf (R189: one server-owned mapping)', () => {
   it.each([
     ['claude-opus-5-5', 'high'], ['claude-opus-4-6', 'high'], ['Claude-Opus-5-5', 'high'],
@@ -220,11 +233,11 @@ describe('#2252 tierOf (R189: one server-owned mapping)', () => {
   // A tier is a deliberate model-id entry, never a substring: an embedded word, another vendor's name, or a prefix
   // that merely contains a tier word is null (gate 6345905367: unknown mapping returns null).
   it.each([
-    'octopus-v1', 'claude-octopus-1', 'my-sonnet-finetune', 'claude-fable-5-1', 'claude-sonnetx-5', 'claude-opus', 'claude-opus-',
+    'octopus-v1', 'claude-octopus-1', 'my-sonnet-finetune', 'claude-sonnetx-5', 'claude-opus', 'claude-opus-',
     'opus', 'sonnet', 'haiku', 'notclaude-opus-5-5', 'glm-sonnet-1', 'gpt-opus-5', 'claude-haikus-1',
   ])('embedded or partial %j is null', (model) => expect(tierOf(model)).toBeNull());
 
-  it.each(['gpt-5.1-codex', 'glm-4.6', 'gemini-2.5-pro', 'claude-fable-5-1', 'opus-like-glm-5', '', '  ', null, undefined])(
+  it.each(['gemini-2.5-pro', 'opus-like-glm-5', 'glm-sonnet-1', 'glm-', 'gpt-', 'gpt-5-turbo-x', 'deepseek-v4', 'deepseek-v4-pro-max', 'xglm-5.3', '', '  ', null, undefined])(
     'unmapped or unknown %j is null: no guessed tier for another family or an unlisted model', (model) => {
       expect(tierOf(model as string | null | undefined)).toBeNull();
     });
