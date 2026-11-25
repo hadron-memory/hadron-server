@@ -554,11 +554,11 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       read(session, async (ctx) => {
         if (tree) {
           const rows = await Q.agentTaskTree({}, { root: id }, ctx);
-          if (!rows) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
+          if (!rows) return textResult('[task_not_found] Task not found.', true); // #5168: the caller's id is not echoed
           return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset })))).join('\n'));
         }
         const t = await Q.agentTask({}, { ref: id }, ctx);
-        if (!t) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
+        if (!t) return textResult('[task_not_found] Task not found.', true); // #5168: the caller's id is not echoed
         return textResult(await renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset }));
       }),
   );

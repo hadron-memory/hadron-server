@@ -3553,7 +3553,7 @@ export function createMcpServerInstance(
       // #1316: an unreadable memory takes the missing branch, not "Access denied".
       const mem = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!mem) {
-        return refusalResult(`Memory not found: '${memoryUrn}'. Use hadron_list_memories to see what's available.`);
+        return refusalResult(`Memory not found. Use hadron_list_memories to see what's available.`);
       }
 
       // Store the bare URN from the DB row (the canonical form for downstream
@@ -4818,7 +4818,7 @@ export function createMcpServerInstance(
           !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))
         ) {
           return textResult(
-            `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
+            `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
           );
         }
         filterMemoryIds = [mem.id];
@@ -4844,7 +4844,7 @@ export function createMcpServerInstance(
               !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))
             ) {
               return {
-                error: `Memory not found or invalid: '${urn}'. Use hadron_list_memories to see what is available.`,
+                error: `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
               };
             }
             return { id: mem.id };
@@ -6230,14 +6230,14 @@ export function createMcpServerInstance(
           const mem = await resolveMemoryByUrn(memoryUrn);
           if (!mem) {
             return textResult(
-              `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
+              `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
             );
           }
           // #188 (Gemini): canReadMemory gate — same shape as the
           // hadron_find_nodes memoryUrn branch.
           if (!(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
             return textResult(
-              `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
+              `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
             );
           }
           memoryId = mem.id;
@@ -9621,7 +9621,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (matches.length === 0) {
         return {
           done: textResult(
-            `No memory matching "${hint}". Use hadron_list_memories to see what is available.`,
+            `No memory matches. Use hadron_list_memories to see what is available.`,
           ),
         };
       }

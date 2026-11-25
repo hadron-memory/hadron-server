@@ -611,7 +611,7 @@ export async function resolveReportsToTarget(ctx: Context, appId: string, ref: s
   } else {
     id = await resolveWorkerIdByNameGated(ctx, appId, trimmed);
   }
-  if (!id) throw new GraphQLError(`Worker not found in this App: "${trimmed}"`, { extensions: { code: 'WORKER_NOT_FOUND' } });
+  if (!id) throw new GraphQLError('Worker not found in this App', /* #5168: no ref quoted */ { extensions: { code: 'WORKER_NOT_FOUND' } });
   return id;
 }
 

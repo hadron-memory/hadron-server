@@ -142,10 +142,24 @@ describe('#5168 fix head: the wrapper edge and the source-wide class (BLIND P2-1
       /`[A-Z][\w ]* \$\{[^}`]+\} not found\.?`/,
       /No match for [\w ]*"\$\{/,
       /No readable [\w ]*"\$\{/,
+      // QA carry P2 (272a77fd): the single-quoted and "not found or invalid" shapes, and "No <noun> matching".
+      /not found[^`]*['"]\$\{[^}`]+\}['"]/,
+      /not found[^`]*: \$\{[^}`]+\}/,
+      /No \w+ matching ['"]\$\{/,
+    ];
+    /**
+     * Named exceptions, each with its reason. A log line is not a refusal. The loc and memoryId of a node addressed by
+     * (memory, loc) are the PR's declared exception (the NODE_NOT_FOUND `loc`/`memoryId` relay, QA F1). The approval
+     * summary names a partial by its stored URN, server data rather than caller input.
+     */
+    const EXEMPT = [
+      /console\.(warn|log|error)\(/,
+      /Node not found at loc "\$\{input\.loc\}" in memory "\$\{input\.memoryId\}"/,
+      /Instruction partial not found at approval: \$\{p\.urn\}/,
     ];
     const hits = files.flatMap((f) => readFileSync(f, 'utf8').split('\n')
       .map((line, i) => ({ line, at: `${f.slice(root.length)}:${i + 1}` }))
-      .filter(({ line }) => CLASS.some((re) => re.test(line)))
+      .filter(({ line }) => CLASS.some((re) => re.test(line)) && !EXEMPT.some((re) => re.test(line)))
       .map(({ at, line }) => `${at} ${line.trim().slice(0, 120)}`));
     expect(hits).toEqual([]);
   });

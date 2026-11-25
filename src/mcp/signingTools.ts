@@ -81,7 +81,7 @@ export function registerSigningTools(server: McpServer, deps: { db: PrismaClient
       const ctx = ctxOf();
       try {
         const row = await signingQueries.signingRequest({}, { id }, ctx);
-        if (!row) return textResult(`[signing_request_not_found] Signing request not found\nid: ${id}`);
+        if (!row) return textResult('[signing_request_not_found] Signing request not found'); // #5168: the caller's id is not echoed
         return textResult(await renderRequest(row, ctx));
       } catch (e) {
         return commentErrorText(e);
