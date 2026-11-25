@@ -443,8 +443,8 @@ describe('escapeUnterminatedHtml', () => {
     for (const body of ['<mailto:a@b.c?subject=hi>', '<irc:chan?x=1>', '<ftp:host?a=b>', '<https://x?q=1>', '<a=b@c.de>', "<o'brien@x.com>", 'see <mailto:a@b.c?s=1> now', '<tel:+1555>', '<urn:isbn:0451450523>']) {
       expect(escapeUnterminatedHtml(body), body).toBe(body);
     }
-    // Only a complete autolink is exempt: with a blank in it, or no closing `>`, it is a tag or an open construct again.
-    expect(escapeUnterminatedHtml('<mailto:a b=c>')).toBe('&lt;mailto:a b=c>');
+    // Only a complete autolink is exempt: with a blank in it it is a tag again (named `mailto:a`, complete), and with no closing `>` it is open.
+    expect(escapeUnterminatedHtml('<mailto:a b=c>')).toBe('<mailto:a b=c>');
     expect(escapeUnterminatedHtml('<mailto:a@b.c?s=1')).toBe('&lt;mailto:a@b.c?s=1');
     // Names that real pages use are untouched.
     for (const body of ['x <o:p> y', 'x <svg:rect/> y', 'x <my-element a="b"> y', 'x <h1>t</h1>', 'x <a b="c">d</a>']) expect(escapeUnterminatedHtml(body), body).toBe(body);

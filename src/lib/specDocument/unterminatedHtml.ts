@@ -58,6 +58,12 @@ const isAsciiPunct = (c: string | undefined): boolean => c !== undefined && /[!-
  * a quote, a list item, a thematic break or an HTML block of CommonMark's types 1 to 6 (type 7 cannot interrupt a paragraph). A heading is one line, so a span that opens in one ends with it. Where a line only
  * looks like a block start the run is cut short, which means fewer code spans are skipped and more `<` are judged: the safe side.
  */
+/**
+ * A CommonMark autolink (spec 0.31, 6.4): `<scheme:...>` or `<local@domain>` with no blank, `<` or `>` inside. It is not an HTML tag, so `=`, a
+ * quote and the like are legal in it and the tag rules do not apply: it is complete as written.
+ */
+const AUTOLINK = /<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/y;
+
 /** CommonMark HTML block type 6 (spec 0.31): the tag names that start a block (the name may be an opening or a closing tag). */
 const BLOCK6 = 'address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul';
 const BLOCK6_NAMES: ReadonlySet<string> = new Set(BLOCK6.split('|'));
@@ -289,6 +295,12 @@ function firstUnterminated(text: string, from: number): number {
     }
     if (!isLetter(text[i + (isEnd ? 2 : 1)])) { i += 1; continue; }
 
+    // A complete autolink is not a tag: it is inert as written.
+    if (!isEnd) {
+      AUTOLINK.lastIndex = i;
+      const link = AUTOLINK.exec(text);
+      if (link) { i += link[0].length; continue; }
+    }
     // A start or end tag: the name, then attributes up to the `>` outside a quoted value.
     const nameStart = i + (isEnd ? 2 : 1);
     let nameEnd = nameStart;
