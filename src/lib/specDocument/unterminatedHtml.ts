@@ -121,8 +121,9 @@ function firstUnterminated(text: string, from: number): number {
   let fence: OpenFence | null = null;
   let paraEnd = -1;
   // What the previous line was. 'other' is a line of a paragraph (or anything that a following line can continue); every other kind leaves
-  // no paragraph open: after it a four-space line is indented code and a type 7 tag may start an HTML block. 'nonpara' is a heading, a
-  // thematic break, a fence line or the last line of an HTML block.
+  // no paragraph open: after it a four-space line is indented code and a type 7 tag may start an HTML block. 'nonpara' is a heading (ATX, or a setext underline), a
+  // thematic break, a link reference definition, a fence line or the last line of an HTML block. A line that only looks like one of these
+  // is taken for it: an extra raw region means extra escaping, the safe side.
   let prev: LineKind = 'blank';
   // The kind of the line before the one being read (`prev` is already the current line's kind once its head is handled).
   let prevBefore: LineKind = 'blank';
@@ -206,7 +207,7 @@ function firstUnterminated(text: string, from: number): number {
       if (step.fenceLine || wasOpen) { prev = 'nonpara'; i = end + 1; continue; }
       // An indented code block: a line of four spaces or a tab, after a blank line, the start of the text or another such line.
       if (/^(?: {4}|\t)/.test(inner) && inner.trim() !== '' && prev !== 'other') { prev = 'code'; i = end + 1; continue; }
-      prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$)/.test(inner) ? 'nonpara' : 'other';
+      prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|=+[ \t]*$|\[[^\]]+\]:)/.test(inner) ? 'nonpara' : 'other';
     }
     const c = text[i];
     if (c === '\\' && i >= rawUntil) { i += isAsciiPunct(text[i + 1]) ? 2 : 1; continue; }
