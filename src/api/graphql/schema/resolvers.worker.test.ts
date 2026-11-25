@@ -2801,8 +2801,8 @@ describe('#2252 — Worker.model / modelReportedAt / tier', () => {
 
   it('an unmapped model has a model and no tier', async () => {
     const w = await cast({ agentRef: roleAgent.id, name: 'Iris' });
-    await open(w.id, { llmModel: 'gpt-5.1-codex', modelReportedAt: mins(1) });
-    expect(await fields(w.id)).toMatchObject({ model: 'gpt-5.1-codex', tier: null });
+    await open(w.id, { llmModel: 'gemini-2.5-pro', modelReportedAt: mins(1) });
+    expect(await fields(w.id)).toMatchObject({ model: 'gemini-2.5-pro', tier: null });
   });
 
   it('is masked to null for a caller outside the App, on the same gate as family', async () => {

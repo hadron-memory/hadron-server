@@ -71,7 +71,7 @@ describe('#4232 tierOfAssignedModel', () => {
   it('reads aliases and full ids, trimmed and case-folded; nothing else', () => {
     expect(tierOfAssignedModel(' OPUS ')).toBe('high');
     expect(tierOfAssignedModel('Claude-Sonnet-5-5')).toBe('mid');
-    for (const bad of ['', '  ', null, undefined, 'claude-opus', 'octopus', 'gpt-5', 'opus-ish']) expect(tierOfAssignedModel(bad as never), String(bad)).toBeNull();
+    for (const bad of ['', '  ', null, undefined, 'claude-opus', 'octopus', 'gpt-5-turbo-x', 'opus-ish']) expect(tierOfAssignedModel(bad as never), String(bad)).toBeNull();
   });
 });
 
