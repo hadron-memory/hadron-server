@@ -76,17 +76,23 @@ const LEGACY_ID = new RegExp(`^${CLAUDE_ID_PREFIX}\\d+(?:-\\d+)?-(opus|sonnet|ha
 /**
  * #5175 — other vendors' deliberate id shapes, placed by the vendor's own line-up (Holger, 2026-11-25, "Vendor
  * positioning"): flagship `high`, standard `mid`, small or fast `low`. EVERY placement here is PROPOSED and Holger may
- * overrule one. Anchored whole-id shapes like the Claude ones, so a string that merely contains `glm` or `gpt` is null.
- * A model with no entry stays null and `TIER_UNKNOWN` under a floor (R190). Anthropic's `fable` line is `high` above.
+ * overrule one (this PR is the proposal; its pins are expected to change if one is overruled). Anchored whole-id shapes
+ * like the Claude ones, so a string that merely contains `glm` or `gpt` is null. Versions are ENUMERATED, not open: a
+ * model appears here only once someone has placed it, so `glm-6` or `gpt-7` stays null and `TIER_UNKNOWN` under a
+ * floor (R190, cor:agt:060:04) until the server team adds it. Anthropic's `fable` line is `high` above.
  */
+const GLM_VERSIONS = '(?:4\\.5|4\\.6|4\\.7|5|5\\.3)';
+const GPT_VERSIONS = '(?:5|5\\.1|6)';
+const DEEPSEEK_VERSIONS = '(?:4)';
+// The roster reports `deepseek/deepseek-v4-pro-0813`: an optional `deepseek/` router prefix and `-MMDD` release stamp.
+const deepseek = (line: string) => new RegExp(`^(?:deepseek/)?deepseek-v${DEEPSEEK_VERSIONS}-${line}(?:-\\d{4})?$`);
 const VENDOR_TIER_SHAPES: ReadonlyArray<readonly [RegExp, ModelTier]> = [
-  [/^glm-\d+(?:\.\d+)?$/, 'mid'],
-  [/^glm-\d+(?:\.\d+)?-(?:air|flash)$/, 'low'],
-  [/^gpt-\d+(?:\.\d+)?(?:-(?:luna|codex))?$/, 'mid'],
-  [/^gpt-\d+(?:\.\d+)?-(?:mini|nano)$/, 'low'],
-  // The roster reports `deepseek/deepseek-v4-pro-0813`: an optional `deepseek/` router prefix and `-MMDD` release stamp.
-  [/^(?:deepseek\/)?deepseek-v\d+(?:\.\d+)?-pro(?:-\d{4})?$/, 'high'],
-  [/^(?:deepseek\/)?deepseek-v\d+(?:\.\d+)?-flash(?:-\d{4})?$/, 'low'],
+  [new RegExp(`^glm-${GLM_VERSIONS}$`), 'mid'],
+  [new RegExp(`^glm-${GLM_VERSIONS}-(?:air|flash)$`), 'low'],
+  [new RegExp(`^gpt-${GPT_VERSIONS}(?:-(?:luna|codex))?$`), 'mid'],
+  [new RegExp(`^gpt-${GPT_VERSIONS}-(?:mini|nano)$`), 'low'],
+  [deepseek('pro'), 'high'],
+  [deepseek('flash'), 'low'],
 ];
 export function tierOf(llmModel: string | null | undefined): ModelTier | null {
   const model = llmModel?.trim().toLowerCase();
