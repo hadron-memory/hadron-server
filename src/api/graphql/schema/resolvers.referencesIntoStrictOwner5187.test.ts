@@ -85,6 +85,9 @@ async function seed(): Promise<void> {
   const src = await db.node.create({ data: { id: generateId(), memoryId: holder.id, loc: 'src', name: 'Holder Source', content: 'holder body' } });
   const kid = await db.node.create({ data: { id: generateId(), memoryId: holder.id, loc: 'src:kid', name: 'Holder Kid', seq: 1, content: 'kid body' } });
   holderNodeIds = { src: src.id, kid: kid.id };
+  // An ordinary edge inside the holder memory: every reader must still see it, so a listing that came back empty for
+  // a reader cannot pass the concealment checks below.
+  await db.edge.create({ data: { memoryId: holder.id, sourceId: kid.id, targetId: src.id, name: 'ordinary-link', loc: 'src:kid:ordinary-link:src' } });
 
   for (const cls of ['personal', 'private'] as const) {
     const m = await db.memory.create({
@@ -127,6 +130,7 @@ for (const shapeName of SHAPES) {
           const own = await ownSrv.callToolText('hadron_get_node', { urn: kid });
           expect(own, 'owner').toContain(t.name);
           expect(own, 'owner sees the edge').toContain(`into-${cls}`);
+          expect(own, 'owner sees the incoming edge').toContain(`back-${cls}`);
           for (const [form, text] of [
             ['get_nodes refs', await ownSrv.callToolText('hadron_get_nodes', { refs: [kid] })],
             ['get_nodes prefix', await ownSrv.callToolText('hadron_get_nodes', { memoryUrn: holderUrn, locPrefix: 'src' })],
@@ -138,6 +142,7 @@ for (const shapeName of SHAPES) {
             const s = mcp(user);
             const one = await s.callToolText('hadron_get_node', { urn: kid });
             expect(one, label).toContain('Holder Kid');
+            expect(one, `${label} sees the ordinary edge`).toContain('ordinary-link');
             expect(leaks(one, t), `${label} get_node`).toEqual([]);
             expect(one, `${label} edge not listed`).not.toContain(`into-${cls}`);
             expect(one, `${label} incoming edge not listed`).not.toContain(`back-${cls}`);
@@ -166,7 +171,7 @@ for (const shapeName of SHAPES) {
             const node = dataOf(await run(Q, gctx(user), { ref: holderNodeIds.kid }), label).node;
             expect(node.name, label).toBe('Holder Kid');
             expect(leaks(JSON.stringify(node), t), `${label} node edges`).toEqual([]);
-            for (const e of node.outgoingEdges) expect(e.target?.id ?? null, `${label} outgoing far end`).not.toBe(t.nodeId);
+            expect(node.outgoingEdges.find((e: any) => e.name === 'ordinary-link')?.target?.name, `${label} ordinary edge`).toBe('Holder Source');
           }
         });
 
@@ -181,6 +186,7 @@ for (const shapeName of SHAPES) {
           expect(dataOf(await run(One, gctx(alice), { r: edgeRow.id }), 'owner').edge.target?.name, 'owner edge(ref)').toBe(t.name);
           for (const { label, user } of readers) {
             const items = dataOf(await run(Q, gctx(user), { f: { memoryId: holderMemoryId } }), label).edges.items as Array<{ id: string; target: unknown }>;
+            expect((items as any[]).find((i) => i.name === 'ordinary-link')?.target?.name, `${label} ordinary edge`).toBe('Holder Source');
             const row = items.find((i) => i.id === edgeRow.id);
             expect(row?.target ?? null, `${label} list target`).toBeNull();
             expect(leaks(JSON.stringify(items), t), `${label} list`).toEqual([]);
@@ -191,7 +197,7 @@ for (const shapeName of SHAPES) {
       }
 
       // Tracked privately as hadron-internal#74; wired when the fix lands.
-      it.todo('GraphQL and MCP agree on the edge rows a reader who cannot read their holder or far end is shown (hadron-internal#74)');
+      it.todo('tracked privately as hadron-internal#74');
     });
 
     describe('following a node reference into the memory answers as a missing node would (cor:api:140:03)', () => {
