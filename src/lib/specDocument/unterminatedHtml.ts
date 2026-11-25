@@ -139,6 +139,8 @@ function firstUnterminated(text: string, from: number): number {
   // A link reference definition may spread over lines: its destination (and then its title) can sit on the next line. 1: the line before was a
   // label alone (`[a]:`), so this line is the destination; 2: the line before was a definition with a destination, so a title may follow; 3: inside a title that opened on an earlier line.
   let lrd: 0 | 1 | 2 | 3 = 0;
+  // The delimiter that closes the title lrd 3 is inside.
+  let titleClose = '';
   // A raw-text element opened in the middle of a line is inline HTML: Markdown goes on parsing after it, so only an end tag
   // that Markdown also reads as HTML (outside code, a fence and a backslash escape) closes it. -1 when none is open.
   let rawStart = -1;
@@ -222,16 +224,19 @@ function firstUnterminated(text: string, from: number): number {
       if (/^(?: {4}|\t)/.test(inner) && inner.trim() !== '' && prev !== 'other' && prev !== 'marker') { prev = 'code'; lrd = 0; i = end + 1; continue; }
       if (lrd === 3) {
         // Inside a title that opened on an earlier line: still the definition, until the line that closes it (or a blank line, which ends the attempt).
-        if (inner.trim() === '') { prev = 'blank'; lrd = 0; } else { prev = 'nonpara'; lrd = /["')][ \t]*$/.test(inner) ? 0 : 3; }
+        if (inner.trim() === '') { prev = 'blank'; lrd = 0; } else { prev = 'nonpara'; lrd = hasCloser(inner, titleClose) ? 0 : 3; }
       } else if (lrd === 1 && inner.trim() !== '') {
         prev = 'nonpara';
-        lrd = titleOpens(inner) ? 3 : 2;
+        titleClose = titleOpens(inner);
+        lrd = titleClose ? 3 : 2;
       } else if (lrd === 2 && /^ {0,3}["'(]/.test(inner)) {
         prev = 'nonpara';
-        lrd = titleOpens(inner) ? 3 : 0;
+        titleClose = titleOpens(inner);
+        lrd = titleClose ? 3 : 0;
       } else {
         const label = /^ {0,3}\[(?:[^\]\\]|\\.)+\]:([ \t]*)/.exec(inner);
-        lrd = label ? (label[0].length === inner.length ? 1 : titleOpens(inner.slice(label[0].length)) ? 3 : 2) : 0;
+        titleClose = label && label[0].length !== inner.length ? titleOpens(inner.slice(label[0].length)) : '';
+        lrd = label ? (label[0].length === inner.length ? 1 : titleClose ? 3 : 2) : 0;
         prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|=+[ \t]*$)/.test(inner) ? 'nonpara' : /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]*$/.test(inner) ? 'marker' : 'other';
       }
     }
@@ -390,17 +395,26 @@ function firstUnterminated(text: string, from: number): number {
   return open.length === 0 ? -1 : Math.min(...open);
 }
 
-/** Whether a line leaves a link reference definition's title open: a quote or parenthesis that starts a title (at the start or after a blank) with no closing delimiter after it on the line. A false answer only widens the definition, which escapes more. */
-function titleOpens(rest: string): boolean {
+/** The delimiter that closes the title a line leaves open, or '' when it leaves none: a quote or parenthesis that starts a title (at the start or after a blank) with no closing delimiter after it on the line. An empty answer only widens the definition, which escapes more. */
+function titleOpens(rest: string): string {
   const m = /(?:^|[ \t])(["'(])/.exec(rest);
-  if (!m) return false;
+  if (!m) return '';
   const close = m[1] === '(' ? ')' : m[1];
   const after = rest.slice(m.index + m[0].length);
   for (let k = 0; k < after.length; k += 1) {
     if (after[k] === '\\') k += 1;
-    else if (after[k] === close) return false;
+    else if (after[k] === close) return '';
   }
-  return true;
+  return close;
+}
+
+/** Whether a line holds an unescaped `close`: the title that is open ends there (any text after it only makes the definition invalid, which escapes more). */
+function hasCloser(line: string, close: string): boolean {
+  for (let k = 0; k < line.length; k += 1) {
+    if (line[k] === '\\') k += 1;
+    else if (line[k] === close) return true;
+  }
+  return false;
 }
 
 /**
