@@ -23,8 +23,8 @@ let appId: string;
 let sessionId: string;
 const ctx = (client = db): Context => ({ db: client, userId: member, roles: ['READER'] }) as Context;
 const post = (body: string, client = db) => M.createTeamChatMessage({}, { appRef: appId, sessionRef: sessionId, body }, ctx(client));
-const record = (n: number) =>
-  M.recordTeamWork({}, { appRef: appId, sessionRef: sessionId, tool: 'github', kind: 'pr', ref: `o/r#${n}`, action: 'opened' }, ctx());
+const record = (n: number, client = db) =>
+  M.recordTeamWork({}, { appRef: appId, sessionRef: sessionId, tool: 'github', kind: 'pr', ref: `o/r#${n}`, action: 'opened' }, ctx(client));
 const lapse = () => db.$executeRaw`UPDATE sessions SET updated_at = ${new Date(Date.now() - 3 * DAY)}, started_at = ${new Date(Date.now() - 3 * DAY)} WHERE id = ${sessionId}`;
 
 beforeEach(async () => {
@@ -46,34 +46,61 @@ beforeEach(async () => {
   await post('hello');
 });
 
-it('a worklog record and a post that resumes the same lapsed session, crossed, both commit with no deadlock', async () => {
-  await lapse();
-  let reached!: () => void;
-  let release!: () => void;
-  const atRecorded = new Promise<void>((r) => { reached = r; });
-  const released = new Promise<void>((r) => { release = r; });
-  // Stops the worklog door right AFTER its node insert, before its next statement: whatever it has taken so far, it holds.
-  const pausing = new Proxy(db, { get(t, p) {
+/** Wraps `db` so the FIRST `tx.node.create` matching `when` can be held: `onCreated` fires once the row exists (or, with `before`, just before). */
+function holdingNodeCreate(when: (args: any) => boolean, hold: { reached: () => void; released: Promise<void>; before?: boolean }) {
+  return new Proxy(db, { get(t, p) {
     const real = Reflect.get(t, p) as unknown;
     if (p !== '$transaction') return typeof real === 'function' ? real.bind(t) : real;
     return (fn: (tx: unknown) => Promise<unknown>, opts: unknown) => (t.$transaction as any)((tx: any) => fn(new Proxy(tx, { get(x, q) {
       const inner = Reflect.get(x, q) as any;
       if (q !== 'node') return typeof inner === 'function' ? inner.bind(x) : inner;
-      return new Proxy(inner, { get: (n, m) => m !== 'create' ? (n as any)[m].bind(n) : async (args: unknown) => {
+      return new Proxy(inner, { get: (n, m) => typeof (n as any)[m] !== 'function' ? (n as any)[m] : m !== 'create' ? (n as any)[m].bind(n) : async (args: any) => {
+        if (!when(args)) return (n as any).create(args);
+        if (hold.before) { hold.reached(); await hold.released; return (n as any).create(args); }
         const row = await (n as any).create(args);
-        reached();
-        await released;
+        hold.reached();
+        await hold.released;
         return row;
       } });
     } })), opts);
   } });
-  const recorded = M.recordTeamWork({}, { appRef: appId, sessionRef: sessionId, tool: 'github', kind: 'pr', ref: 'o/r#2', action: 'opened' }, ctx(pausing as typeof db))
-    .then(() => 'recorded', (e: unknown) => e);
+}
+const settle = (p: Promise<unknown>) => p.then(() => 'ok', (e: unknown) => (e instanceof Error ? e.message : String(e)));
+const isWorklog = (args: any) => String(args?.data?.loc ?? '').startsWith('worklog');
+const isMessage = (args: any) => args?.data?.nodeType === 'chat-message';
+
+async function expectBothWritten() {
+  expect(await db.session.findUniqueOrThrow({ where: { id: sessionId } }).then((s) => s.prNumber)).toBe(2);
+  expect(await db.node.count({ where: { nodeType: 'record', objectType: { not: null }, name: { contains: 'o/r#2' } } })).toBe(1);
+  expect(await db.node.count({ where: { nodeType: 'chat-message', content: { contains: 'resumes' } } })).toBe(1);
+}
+
+it('the worklog door held right after its node insert, then a post that resumes the same lapsed session: both commit, no deadlock', async () => {
+  await lapse();
+  let reached!: () => void;
+  let release!: () => void;
+  const atRecorded = new Promise<void>((r) => { reached = r; });
+  const released = new Promise<void>((r) => { release = r; });
+  const recorded = settle(record(2, holdingNodeCreate(isWorklog, { reached, released }) as typeof db));
   await atRecorded;
-  const posted = post('resumes').then(() => 'posted', (e: unknown) => e);
+  const posted = settle(post('resumes'));
   await waitForLockWaiters(db, 1);
   release();
-  expect([await recorded, await posted]).toEqual(['recorded', 'posted']);
-  const session = await db.session.findUniqueOrThrow({ where: { id: sessionId } });
-  expect(session.prNumber).toBe(2);
+  expect([await recorded, await posted]).toEqual(['ok', 'ok']);
+  await expectBothWritten();
+});
+
+it('the reverse interleaving: the post held right before its message insert (Session row and fence taken), then the worklog door: both commit, no deadlock', async () => {
+  await lapse();
+  let reached!: () => void;
+  let release!: () => void;
+  const atInsert = new Promise<void>((r) => { reached = r; });
+  const released = new Promise<void>((r) => { release = r; });
+  const posted = settle(post('resumes', holdingNodeCreate(isMessage, { reached, released, before: true }) as typeof db));
+  await atInsert;
+  const recorded = settle(record(2));
+  await waitForLockWaiters(db, 1);
+  release();
+  expect([await posted, await recorded]).toEqual(['ok', 'ok']);
+  await expectBothWritten();
 });
