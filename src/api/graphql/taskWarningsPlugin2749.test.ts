@@ -139,7 +139,7 @@ describe('a field that errors after its write committed, and a rolled-back write
     const effects: Array<() => void> = [];
     try {
       await db.$transaction(async (tx) => {
-        await writeNodeCore({ memoryId, loc: 'nested', name: 'Nested', content: pin() } as never, c, 'create', { ownerLimit: 'refuse', authoring: attestedAuthoring(null),
+        await writeNodeCore({ memoryId, loc: 'nested', name: 'Nested', content: pin() } as never, c, 'create', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null),
           governedContext: 'node-write',
           transaction: { tx, pooledDb: db, afterCommit: (effect) => effects.push(effect) },
         });

@@ -473,6 +473,7 @@ async function decide(
       existing ? 'update' : 'create',
       {
         ownerLimit: 'count-only',
+        sizeCeiling: 'skip',
         authoring: { kind: 'platform', record: 'boot-prompt-compile' },
         transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
         ...(existing ? { targetNodeId: existing.id } : {}),

@@ -123,37 +123,41 @@ const INSERTS: Record<string, InsertVerdict> = {
   'src/lib/agentSkeleton.ts#seedAgentSkeleton': { n: 1, kind: 'counts-not-refused', because: 'an Agent\'s skeleton parents, part of creating the Agent (its own `agents` key is A7c)' },
 };
 
-/** `writeNodeCore(` callers, by `file#function`: the `ownerLimit` literals each states, sorted (`?` = not a literal). */
-const WRITE_NODE_CORE: Record<string, { limits: string[]; because: string }> = {
+/**
+ * `writeNodeCore(` callers, by `file#function`: the `ownerLimit` literals each states, sorted (`?` = not a literal), and
+ * (#5019) the `sizeCeiling` ones: omitted = all `check` (caller content); `skip` = platform-composed, a copy, or a door with
+ * its own limit (cor:dmo:060:19).
+ */
+const WRITE_NODE_CORE: Record<string, { limits: string[]; size?: string[]; because: string }> = {
   [`${G}/resolvers.mutation.node.ts#nodeMutations.createNode`]: { limits: ['refuse'], because: 'createNode' },
   [`${G}/resolvers.mutation.node.ts#nodeMutations`]: { limits: ['refuse'], because: 'the governed-kind create doors, generated from GOVERNED_KINDS' },
   [`${G}/resolvers.mutation.node.ts#createNodeInInstallMemory`]: { limits: ['refuse'], because: 'createNode into an App\'s install memory' },
-  [`${G}/resolvers.mutation.node.ts#nodeMutations.cloneNode`]: { limits: ['refuse'], because: 'cloneNode' },
+  [`${G}/resolvers.mutation.node.ts#nodeMutations.cloneNode`]: { limits: ['refuse'], size: ['skip'], because: 'cloneNode' },
   [`${G}/resolvers.mutation.importNode.ts#importNode.store`]: { limits: ['refuse'], because: 'importNode (update or upsert)' },
   'src/controller/operations/createAssetReferenceNode.ts#createAssetReferenceNode': { limits: ['refuse'], because: 'an asset\'s reference node' },
   'src/lib/runner/tools/nodeTools.ts#hadronCreateNode.execute': { limits: ['refuse'], because: 'run tool create; the refusal is returned to the model (ownerLimitToolError)' },
   'src/lib/runner/tools/storeTools.ts#hadronStoreFile.execute': { limits: ['refuse'], because: 'hadron_store_file\'s reference node; returned to the model, asset row and object removed' },
-  [`${G}/resolvers.specCorpus.ts#specCorpusMutations.reserveSpecCitation`]: { limits: ['refuse'], because: 'a reserved spec citation' },
-  [`${G}/resolvers.specCorpus.ts#specCorpusMutations.allocateSpecNode`]: { limits: ['refuse'], because: 'an allocated spec node' },
-  [`${G}/resolvers.questions.ts#questionMutations.createQuestionLog`]: { limits: ['count-only'], because: 'a question log; asking a question is never refused' },
-  [`${G}/resolvers.questions.ts#questionMutations.askQuestion`]: { limits: ['count-only'], because: 'a question asked; never refused' },
-  [`${G}/resolvers.mutation.session.ts#writeSessionHandoff`]: { limits: ['count-only', 'count-only'], because: 'the session handoff parent and record; never refused' },
-  [`${G}/compileBootPrompt.ts#decide`]: { limits: ['count-only'], because: 'a compiled boot prompt; never refused' },
-  [`${G}/resolvers.teamRole.ts#writeTeamRole`]: { limits: ['?'], because: 'a team role node; its options object is built beside the call and states count-only (asserted below)' },
-  'src/jobs/appRunDeps.ts#makeProdRunDeps.writeOutput': { limits: ['count-only'], because: 'a run\'s output node; never refused' },
+  [`${G}/resolvers.specCorpus.ts#specCorpusMutations.reserveSpecCitation`]: { limits: ['refuse'], size: ['skip'], because: 'a reserved spec citation' },
+  [`${G}/resolvers.specCorpus.ts#specCorpusMutations.allocateSpecNode`]: { limits: ['refuse'], size: ['skip'], because: 'an allocated spec node' },
+  [`${G}/resolvers.questions.ts#questionMutations.createQuestionLog`]: { limits: ['count-only'], size: ['skip'], because: 'a question log; asking a question is never refused' },
+  [`${G}/resolvers.questions.ts#questionMutations.askQuestion`]: { limits: ['count-only'], size: ['skip'], because: 'a question asked; never refused' },
+  [`${G}/resolvers.mutation.session.ts#writeSessionHandoff`]: { limits: ['count-only', 'count-only'], size: ['skip', 'skip'], because: 'the session handoff parent and record; never refused' },
+  [`${G}/compileBootPrompt.ts#decide`]: { limits: ['count-only'], size: ['skip'], because: 'a compiled boot prompt; never refused' },
+  [`${G}/resolvers.teamRole.ts#writeTeamRole`]: { limits: ['?'], size: ['?'], because: 'a team role node; its options object is built beside the call and states count-only (asserted below)' },
+  'src/jobs/appRunDeps.ts#makeProdRunDeps.writeOutput': { limits: ['count-only'], size: ['skip'], because: 'a run\'s output node; never refused' },
   // Update mode: the value is never read (an update adds no node); count-only by convention.
   [`${G}/resolvers.mutation.node.ts#updateNodeCore`]: { limits: ['count-only'], because: 'update only' },
   [`${G}/resolvers.mutation.node.ts#updateNodePropertiesWith`]: { limits: ['count-only'], because: 'update only' },
   [`${G}/resolvers.mutation.node.ts#mergePropertiesAndWrite`]: { limits: ['count-only'], because: 'update only' },
   [`${G}/resolvers.mutation.node.ts#nodeMutations.updateNodeData`]: { limits: ['count-only'], because: 'update only' },
   'src/lib/runner/tools/nodeTools.ts#hadronUpdateNode.execute': { limits: ['count-only'], because: 'update only' },
-  [`${G}/resolvers.specCorpus.ts#rewriteWithRetry`]: { limits: ['count-only'], because: 'update only' },
-  [`${G}/resolvers.mutation.retireSpec.ts#retireSpecDoor`]: { limits: ['count-only'], because: 'update only' },
-  [`${G}/resolvers.questions.ts#questionMutations.amendQuestion`]: { limits: ['count-only'], because: 'update only' },
-  [`${G}/resolvers.questions.ts#questionMutations.withdrawQuestion`]: { limits: ['count-only'], because: 'update only' },
-  [`${G}/resolvers.questions.ts#questionMutations.purgeUnansweredQuestion`]: { limits: ['count-only'], because: 'update only' },
-  [`${G}/resolvers.questions.ts#questionMutations.setQuestionLogDeciders`]: { limits: ['count-only'], because: 'update only' },
-  [`${G}/resolvers.questions.ts#answerAct`]: { limits: ['count-only'], because: 'update only' },
+  [`${G}/resolvers.specCorpus.ts#rewriteWithRetry`]: { limits: ['count-only'], size: ['skip'], because: 'update only' },
+  [`${G}/resolvers.mutation.retireSpec.ts#retireSpecDoor`]: { limits: ['count-only'], size: ['skip'], because: 'update only' },
+  [`${G}/resolvers.questions.ts#questionMutations.amendQuestion`]: { limits: ['count-only'], size: ['skip'], because: 'update only' },
+  [`${G}/resolvers.questions.ts#questionMutations.withdrawQuestion`]: { limits: ['count-only'], size: ['skip'], because: 'update only' },
+  [`${G}/resolvers.questions.ts#questionMutations.purgeUnansweredQuestion`]: { limits: ['count-only'], size: ['skip'], because: 'update only' },
+  [`${G}/resolvers.questions.ts#questionMutations.setQuestionLogDeciders`]: { limits: ['count-only'], size: ['skip'], because: 'update only' },
+  [`${G}/resolvers.questions.ts#answerAct`]: { limits: ['count-only'], size: ['skip'], because: 'update only' },
 };
 
 /**
@@ -196,6 +200,16 @@ describe('#5015 every node write door under src is classified', () => {
     expect(found).toEqual(Object.fromEntries(Object.entries(WRITE_NODE_CORE).map(([k, v]) => [k, [...v.limits].sort()])));
   });
 
+  it('#5019: every writeNodeCore call is listed with the sizeCeiling it states', () => {
+    const found: Record<string, string[]> = {};
+    for (const s of sites) if (s.kind === 'writeNodeCore') (found[keyOf(s)] ??= []).push(s.sizeCeiling!);
+    for (const v of Object.values(found)) v.sort();
+    expect(found).toEqual(Object.fromEntries(Object.entries(WRITE_NODE_CORE).map(([k, v]) => [k, v.size ?? v.limits.map(() => 'check')])));
+    const role = readFileSync(`${G}/resolvers.teamRole.ts`, 'utf8');
+    expect(role.match(/sizeCeiling: 'check'/g)).toHaveLength(2);
+    expect(role).not.toMatch(/sizeCeiling: 'skip'/);
+  });
+
   it('a refusing insert\'s file really calls the helper', () => {
     for (const [k, v] of Object.entries(INSERTS)) {
       if (v.kind !== 'refuses' && v.kind !== 'per-caller') continue;
@@ -232,5 +246,60 @@ describe('#5015/#5016 a door that needs several owner-limit keys takes them in o
     const src = readFileSync(file, 'utf8');
     expect(src.split('requireOwnerHeadroomMany(').length - 1).toBe(many);
     expect(src).not.toMatch(/requireOwnerHeadroom\(|requireNodeHeadroom\(/);
+  });
+});
+
+/**
+ * #5019 (Billing A11, cor:dmo:060:19): every file under `src` that writes a node's row outside `writeNodeCore` is classified at
+ * the size ceiling, by file and count of direct writes (`.node.update|updateMany|upsert|create|createMany(`), so a new content
+ * door cannot land unclassified. `checks` = the number of size-helper calls the file makes; 0 says why.
+ */
+const CONTENT_WRITES: Record<string, { n: number; checks: number; because: string }> = {
+  'src/api/graphql/schema/resolvers.channel.ts': { n: 1, checks: 0, because: 'a channel operation: no caller body through this write' },
+  'src/api/graphql/schema/resolvers.comments.ts': { n: 3, checks: 0, because: 'comments have their own cap, COMMENT_BODY_MAX (gate, section 11 ruling 5)' },
+  'src/api/graphql/schema/resolvers.mutation.chat.ts': { n: 10, checks: 0, because: 'chat roots, messages, replies and summaries: conversation the platform writes (plan decision k)' },
+  'src/api/graphql/schema/resolvers.mutation.memory.ts': { n: 3, checks: 0, because: 'memory-level operations (soft delete, re-encryption of stored rows): no new content' },
+  'src/api/graphql/schema/resolvers.mutation.node.ts': { n: 11, checks: 7, because: 'the core writer (create, revive, update), searchReplaceInNodes, mergeNodes and restoreNodeRevision check; the rest are placeholder fill, revSeq, deletes' },
+  'src/api/graphql/schema/resolvers.mutation.session.ts': { n: 6, checks: 0, because: 'Agent snapshot and its restore (platform copy of nodes, section 11 ruling 7), revision publish and delete' },
+  'src/api/graphql/schema/resolvers.questions.ts': { n: 1, checks: 0, because: 'question text has its own limits (LONG_TEXT_MAX)' },
+  'src/api/graphql/schema/resolvers.recovery.ts': { n: 1, checks: 0, because: 'restoreNode un-deletes a stored node: no new content' },
+  'src/api/graphql/schema/resolvers.searchReplaceSpec.ts': { n: 1, checks: 1, because: 'searchReplaceInSpecNodes: every changed node, before any write' },
+  'src/api/graphql/schema/resolvers.specCorpus.ts': { n: 3, checks: 0, because: 'placeholder marking and renumber bookkeeping: no caller content' },
+  'src/api/graphql/schema/resolvers.teamChat.ts': { n: 1, checks: 0, because: 'team chat and channel posts have their own cap, TEAM_CHAT_BODY_MAX_CHARS' },
+  'src/api/graphql/schema/resolvers.teamWork.ts': { n: 3, checks: 0, because: 'worklog root and records: platform bookkeeping' },
+  'src/controller/operations/cloneMemory.ts': { n: 1, checks: 0, because: 'a copy adds no new content' },
+  'src/controller/operations/createNode.ts': { n: 1, checks: 0, because: 'a new memory\'s root node, composed by the platform' },
+  'src/controller/operations/extractParentNode.ts': { n: 2, checks: 0, because: 'a copy (and the soft delete of the sources): no new content' },
+  'src/controller/operations/mergeMemories.ts': { n: 2, checks: 0, because: 'a memory merge folds and relocates existing nodes (plan: not checked)' },
+  'src/integrations/github/syncGraphFromGithub.ts': { n: 3, checks: 1, because: 'each file is judged before its row is touched; over the ceiling it is skipped and reported' },
+  'src/jobs/embedNodes.ts': { n: 3, checks: 0, because: 'embedding bookkeeping columns only' },
+  'src/lib/agentSkeleton.ts': { n: 1, checks: 0, because: 'an Agent\'s skeleton parents, composed by the platform' },
+  'src/lib/channels.ts': { n: 10, checks: 0, because: 'channel roots and their revival or deletion, composed by the platform' },
+  'src/lib/chatRoot.ts': { n: 3, checks: 0, because: 'a chat\'s engine state, written by the platform' },
+  'src/lib/comments/lifecycle.ts': { n: 2, checks: 0, because: 'comment thread deletion and restore: no content' },
+  'src/lib/comments/merge.ts': { n: 1, checks: 0, because: 'comment threads carried by a merge: no new content' },
+  'src/lib/contextReset/contextReset.ts': { n: 1, checks: 0, because: 'checkpoints have their own cap, CHECKPOINT_CONTENT_MAX_BYTES' },
+  'src/lib/nodeApproval.ts': { n: 2, checks: 0, because: 'approval and mint columns only' },
+  'src/lib/nodeRevisionSnapshot.ts': { n: 3, checks: 0, because: 'revision counters and fingerprints only' },
+  'src/lib/nodeSubtreeMove.ts': { n: 3, checks: 0, because: 'a move changes the address, not the content' },
+  'src/lib/tombstoneArchive.ts': { n: 1, checks: 0, because: 're-addresses a tombstone: no content' },
+  'src/mcp/server.ts': { n: 8, checks: 4, because: 'hadron_create_node, hadron_update_node and both hadron_create_parent_node branches check; the rest are deletes, moves and vector bookkeeping' },
+  'src/services/embedding/obligation.ts': { n: 1, checks: 0, because: 'embedding bookkeeping columns only' },
+  'src/services/embedding/vectors.ts': { n: 1, checks: 0, because: 'embedding bookkeeping columns only' },
+};
+const DIRECT_WRITE = /\.node\.(update|updateMany|updateManyAndReturn|upsert|create|createMany|createManyAndReturn)\(/g;
+const SIZE_CALL = /\b(assertNodeContentSize|assertSizeCeiling|exceedsNodeContentLimit)\(/g;
+
+describe('#5019 every direct node write under src is classified at the size ceiling', () => {
+  it('the table and the source agree, by file, write count and check count', () => {
+    const found: Record<string, { n: number; checks: number }> = {};
+    for (const p of walk('src')) {
+      if (!p.endsWith('.ts') || p.endsWith('.test.ts') || isFixture(p)) continue;
+      const src = readFileSync(p, 'utf8');
+      const n = (src.match(DIRECT_WRITE) ?? []).length;
+      if (n) found[p] = { n, checks: (src.match(SIZE_CALL) ?? []).length };
+    }
+    expect(found).toEqual(Object.fromEntries(Object.entries(CONTENT_WRITES).map(([p, v]) => [p, { n: v.n, checks: v.checks }])));
+    for (const [p, v] of Object.entries(CONTENT_WRITES)) expect(v.because.length, p).toBeGreaterThan(15);
   });
 });

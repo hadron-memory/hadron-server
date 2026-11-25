@@ -161,7 +161,7 @@ export const hadronCreateNode: RunToolDef = {
         } as never,
         ctx.principal,
         'create',
-        { ownerLimit: 'refuse', authoring: runToolAuthoring(ctx, args) },
+        { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: runToolAuthoring(ctx, args) },
       );
       return { created: true, urn, id: written.id };
     } catch (err) {
@@ -206,18 +206,25 @@ export const hadronUpdateNode: RunToolDef = {
           : {};
       fields.data = { ...existing, ...(fields.data as Record<string, unknown>) };
     }
-    const written = await writeNodeCore(
-      {
-        memoryId: memory.id,
-        loc,
-        ...fields,
-        reason: `run tool hadron_update_node (run ${ctx.run.id})`,
-      } as never,
-      ctx.principal,
-      'update',
-      { ownerLimit: 'count-only', authoring: runToolAuthoring(ctx, args), targetNodeId: node.id },
-    );
-    return { updated: true, urn, id: written.id };
+    try {
+      const written = await writeNodeCore(
+        {
+          memoryId: memory.id,
+          loc,
+          ...fields,
+          reason: `run tool hadron_update_node (run ${ctx.run.id})`,
+        } as never,
+        ctx.principal,
+        'update',
+        { ownerLimit: 'count-only', sizeCeiling: 'check', authoring: runToolAuthoring(ctx, args), targetNodeId: node.id },
+      );
+      return { updated: true, urn, id: written.id };
+    } catch (err) {
+      // #5019: a node over the deployment's size ceiling is the model's to shorten, not the end of the run.
+      const refused = ownerLimitToolError(err);
+      if (refused) return { updated: false, urn, ...refused };
+      throw err;
+    }
   },
 };
 
