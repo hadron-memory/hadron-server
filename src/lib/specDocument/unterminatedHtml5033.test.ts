@@ -103,7 +103,7 @@ describe('#5033 the class, not two spellings', () => {
     ['an unclosed template, then an unterminated comment', '<template><!--'],
     ['an unclosed template, then an open tag', '<template> a <b'],
     ['an unclosed template, then an unterminated CDATA', '<template><![CDATA[x'],
-    ['an unclosed template, then an open tag (BLIND delta P1)', 'a <template>x <b y='],
+    ['an unclosed template, then an open tag', 'a <template>x <b y='],
     ['an unclosed template, then an open tag, at the head of the line', '<template><div class='],
   ];
   it.each(OPEN)('%s at a body end keeps the next anchor', (_label, body) => {
@@ -264,7 +264,7 @@ describe('escapeUnterminatedHtml', () => {
       expect(escapeUnterminatedHtml(once), body).toBe(once);
     }
   });
-  it('a code span never crosses a block boundary: a heading, a fence or a quote ends the paragraph (BLIND delta P2)', () => {
+  it('a code span never crosses a block boundary: a heading, a fence or a quote ends the paragraph', () => {
     const cases: Array<[string, string]> = [
       ['a heading', 'a `x\n## H\n<b x=\'\ny`'],
       ['a fence', 'a `x\n```\nc\n```\n<b x=\'\ny`'],
@@ -278,7 +278,7 @@ describe('escapeUnterminatedHtml', () => {
     // One paragraph with no interrupting line is still one span: the construct inside it is code.
     expect(escapeUnterminatedHtml("a `x\n<b x='\ny` w")).toBe("a `x\n<b x='\ny` w");
   });
-  it('a construct that Markdown reads as text because it would cross a block boundary is unterminated, and cannot skip a fence opener (BLIND delta P2)', () => {
+  it('a construct that Markdown reads as text because it would cross a block boundary is unterminated, and cannot skip a fence opener', () => {
     const FENCED = (open: string, inner: string): string => `a ${open}\n\`\`\`\n${inner}\n\`\`\`\nq <textarea>z`;
     for (const [open, inner] of [['<?x', '?>'], ['<![CDATA[x', ']]>'], ['<!-- x', '-->'], ['<!DOCTYPE x', '>'], ['</ x', '>'], ['<b y="', '">']] as const) {
       const out = escapeUnterminatedHtml(FENCED(open, inner));
@@ -300,7 +300,7 @@ describe('escapeUnterminatedHtml', () => {
     expect(out).toContain('&lt;textarea>');
     expect(escapeUnterminatedHtml(out)).toBe(out);
   });
-  it('a line-head HTML block opener ends the paragraph, so a code span cannot close across it (BLIND delta P2, CommonMark types 1 to 6)', () => {
+  it('a line-head HTML block opener ends the paragraph, so a code span cannot close across it', () => {
     const cases: Array<[string, string, string]> = [
       ['textarea', "a `x\n<textarea> y\nz` q", "a `x\n&lt;textarea> y\nz` q"],
       ['script', "a `x\n<script>\nz` q", "a `x\n&lt;script>\nz` q"],
@@ -317,7 +317,7 @@ describe('escapeUnterminatedHtml', () => {
     ['a block end tag (type 6)', "a `x\n</div>\n<b x='\ny` w", "a `x\n</div>\n&lt;b x='\ny` w"],
     ];
     for (const [label, body, want] of cases) expect(escapeUnterminatedHtml(body), label).toBe(want);
-    // An opener may be indented by one to three spaces (LOCAL delta P2); four spaces is a paragraph continuation, not an opener.
+    // An opener may be indented by one to three spaces; four spaces is a paragraph continuation, not an opener.
     for (const sp of [' ', '  ', '   ']) {
       expect(escapeUnterminatedHtml(`see \`a\n${sp}<div> b <pre x= \` c`), `${sp.length} spaces`).toBe(`see \`a\n${sp}<div> b &lt;pre x= \` c`);
       expect(escapeUnterminatedHtml(`see \`a\n${sp}<p> b <b x=' \` c`), `${sp.length} spaces, p`).toBe(`see \`a\n${sp}<p> b &lt;b x=' \` c`);
@@ -327,15 +327,27 @@ describe('escapeUnterminatedHtml', () => {
     // An inline tag that is not a block-level name does not end the paragraph (type 7 cannot interrupt one): the span runs on.
     expect(escapeUnterminatedHtml("a `x\n<span>\n<b x='\ny` w")).toBe("a `x\n<span>\n<b x='\ny` w");
   });
+  it('an end tag that ends in a slash (`</name/>`) is a form the readers disagree on: the element stays open and is escaped, at the head of a line and inline', () => {
+    const lineHead = '<script> a </script/> <textarea> c </script> d [link](#x)';
+    expect(escapeUnterminatedHtml(lineHead)).toBe('&lt;script> a </script/> &lt;textarea> c </script> d [link](#x)');
+    const inline = 'a <script> b </script/> <textarea> c </script> d';
+    expect(escapeUnterminatedHtml(inline)).toBe('a &lt;script> b </script/> &lt;textarea> c </script> d');
+    for (const body of [lineHead, inline]) expect(escapeUnterminatedHtml(escapeUnterminatedHtml(body)), body).toBe(escapeUnterminatedHtml(body));
+    // The ordinary closers are unchanged.
+    expect(escapeUnterminatedHtml('a <script> b </script> c')).toBe('a <script> b </script> c');
+    expect(escapeUnterminatedHtml('<script> a </script > b </script>')).toBe('<script> a </script > b </script>');
+  });
   it('a type 1 block at the head of a line ends only at a literal `</name>`; a partial end tag leaves it open', () => {
-    expect(escapeUnterminatedHtml('<script>\nx\n</script\n```\n>\n```\nq <textarea>z')).toContain('&lt;script>');
+    const partial = '<script>\nx\n</script\n```\n>\n```\nq <textarea>z';
+    expect(escapeUnterminatedHtml(partial)).toBe('&lt;script>\nx\n&lt;/script\n```\n>\n```\nq &lt;textarea>z');
+    expect(escapeUnterminatedHtml(escapeUnterminatedHtml(partial))).toBe(escapeUnterminatedHtml(partial));
     expect(escapeUnterminatedHtml('<script>\nx\n</script >\ny')).toBe('&lt;script>\nx\n</script >\ny');
     expect(escapeUnterminatedHtml('<script>\nx\n</script>\ny')).toBe('<script>\nx\n</script>\ny');
     // The browser ends the element at the first `</script ` and reads what follows as markup, inside the Markdown block (found by fuzz).
     expect(escapeUnterminatedHtml('<script>"</script <plaintext><style></template></script><noscript>')).toBe('<script>"</script <plaintext>&lt;style></template></script>&lt;noscript>');
     expect(escapeUnterminatedHtml('<script></script <pre><!--</title><a</script></textarea')).toBe('<script></script <pre>&lt;!--</title><a</script>&lt;/textarea');
   });
-  it('a tag that would swallow a fence opener is no tag: a line-head end tag or non-block tag cannot span a block boundary (QA delta P2-2)', () => {
+  it('a tag that would swallow a fence opener is no tag: a line-head end tag or non-block tag cannot span a block boundary', () => {
     expect(escapeUnterminatedHtml('<script>\nx\n</script\n```\n>\n```\nq <textarea>z')).toBe('&lt;script>\nx\n&lt;/script\n```\n>\n```\nq &lt;textarea>z');
     expect(escapeUnterminatedHtml('<b\n```\n>\n```\nq <textarea>z')).toBe('&lt;b\n```\n>\n```\nq &lt;textarea>z');
     expect(escapeUnterminatedHtml('x\n</b\n```\n>\n```\nq <textarea>z')).toBe('x\n&lt;/b\n```\n>\n```\nq &lt;textarea>z');
@@ -361,7 +373,7 @@ describe('escapeUnterminatedHtml', () => {
     // After a blank line the block is over and Markdown is back: the fence is a fence again.
     expect(escapeUnterminatedHtml('<div>\n\n```\n<b x=\n```\nz')).toBe('<div>\n\n```\n<b x=\n```\nz');
   });
-  it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag (BLIND delta pin)', () => {
+  it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag', () => {
     expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');
     expect(escapeUnterminatedHtml('<b y= <template>')).toBe('<b y= <template>'); // one complete tag: the value is `<template`
   });
@@ -379,7 +391,7 @@ describe('escapeUnterminatedHtml', () => {
     expect(out).not.toMatch(/<a /);
     expect(out.length).toBe(body.length + 3 * 40000);
   }, 60_000);
-  it('stays linear on one long line of many tags, end tags and comments (LOCAL delta P2-1: line-start tests were O(line))', () => {
+  it('stays linear on one long line of many tags, end tags and comments)', () => {
     for (const unit of ['<b>x', '</b>', '<!-- c -->', '<?p?>', '<![CDATA[c]]>']) {
       const body = unit.repeat(120_000 / unit.length * 4);
       const t0 = Date.now();
