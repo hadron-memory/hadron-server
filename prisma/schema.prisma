@@ -6402,7 +6402,7 @@ model CreditLedgerEntry {
   @@unique([sourceType, sourceId])
   @@index([organizationId, createdAt])
   // #5011: the partial index credit_ledger_entries_expiring_grants_idx (organization_id, expires_at) WHERE expires_at
-  // IS NOT NULL lives in prisma/post-push.sql and migration 20261124210000 (Prisma cannot model a partial index).
+  // IS NOT NULL lives in prisma/post-push.sql and migration 20261125140000 (Prisma cannot model a partial index).
   @@map("credit_ledger_entries")
 }
 
