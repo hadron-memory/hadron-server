@@ -410,6 +410,10 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('[a]: /u\n(ti\ntle)\n<span>\nuse `<pre x=` here')).toBe('[a]: /u\n(ti\ntle)\n<span>\nuse `&lt;pre x=` here');
     expect(escapeUnterminatedHtml('[a]:\n/u\n"ti\nmid\ntle"\n<span>\nuse `<pre x=` here')).toBe('[a]:\n/u\n"ti\nmid\ntle"\n<span>\nuse `&lt;pre x=` here');
     expect(escapeUnterminatedHtml('[a]:\n/u "ti\ntle"\n<span>\nuse `<pre x=` here')).toBe('[a]:\n/u "ti\ntle"\n<span>\nuse `&lt;pre x=` here');
+    // A title closes on its own opener's unescaped closer, never on another delimiter at a line end (Gravitus's BLIND delta; both parsers consume the definition).
+    for (const mid of ["y'", 'x\\"', 'x)']) {
+      expect(escapeUnterminatedHtml(`[a]: /u "ti\n${mid}\nz"\n<span>\nuse \`<pre x=\` here`)).toBe(`[a]: /u "ti\n${mid}\nz"\n<span>\nuse \`&lt;pre x=\` here`);
+    }
     // A bare list marker leaves an empty item and no open paragraph.
     for (const m of ['-', '*', '+', '1.', '2)']) {
       expect(escapeUnterminatedHtml(`${m}\n<span>\nuse \`<pre x=\` here`)).toBe(`${m}\n<span>\nuse \`&lt;pre x=\` here`);
