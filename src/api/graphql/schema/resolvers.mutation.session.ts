@@ -145,6 +145,7 @@ import {
   getConnectProvider,
   issueConnectStart,
 } from '../../../integrations/mailboxConnect.js';
+import { refusalText } from '../../../lib/refEcho.js';
 
 /** `ConnectionProvider` enum value -> the emailClient provider key a connect flow is mounted under (#2897). */
 const CONNECTION_PROVIDER_KEYS: Record<string, string> = {
@@ -244,7 +245,7 @@ const launchGrantInvalid = () =>
 
 /** startSession's answer for a worker ref that names nothing the caller may see: one envelope for absent and unreadable alike. */
 const workerRefNotFound = (workerRef: string) =>
-  new GraphQLError(`Worker not found: ${workerRef}`, { extensions: { code: 'WORKER_NOT_FOUND' } });
+  new GraphQLError('Worker not found', { extensions: { code: 'WORKER_NOT_FOUND' } }); // #5168: no ref quoted
 
 /**
  * #4836 — startSession's appRef refusal judge, PURE so the race arms can be pinned without a database.
@@ -702,7 +703,7 @@ async function writeRevisionRow(
 /** A supplied family must be a valid token; checked before any write (and, on a resume, before the claim is spent). */
 /** #4244: an Agent revision that is not there (unknown or retired loc), refused before any write. */
 function revisionNotFound(revisionLoc: string): GraphQLError {
-  return new GraphQLError(`Revision not found: ${revisionLoc}`, { extensions: { code: 'BAD_USER_INPUT' } });
+  return new GraphQLError('Revision not found', { extensions: { code: 'BAD_USER_INPUT' } });
 }
 
 function explicitFamilyOrThrow(family: string | null | undefined): string | null {
@@ -768,7 +769,7 @@ async function ownSessionForClaim(ctx: Context, sessionId: string) {
     select: { id: true, userId: true, appId: true, workerId: true, endedAt: true, deletedAt: true },
   });
   if (!session || session.deletedAt || !ctx.userId || ctx.impersonation || session.userId !== ctx.userId || !session.appId) {
-    throw new GraphQLError(`Session not found: ${sessionId}`, { extensions: { code: 'BAD_USER_INPUT' } });
+    throw new GraphQLError('Session not found', { extensions: { code: 'BAD_USER_INPUT' } });
   }
   if (!session.workerId) {
     throw new GraphQLError(
@@ -862,7 +863,7 @@ export const sessionMutations = {
           // which masks not-found to null); malformed URNs propagate their
           // own typed error from assertFullyQualifiedUrn.
           if (e instanceof AgentNotFoundError) {
-            throw new GraphQLError(`Agent not found: ${agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+            throw new GraphQLError('Agent not found', { extensions: { code: 'BAD_USER_INPUT' } }); // #5168: no ref quoted
           }
           throw e;
         }
@@ -1858,7 +1859,7 @@ export const sessionMutations = {
     ) => {
       const session = await ctx.db.session.findUnique({ where: { id } });
       if (!session || session.deletedAt) {
-        throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
+        throw new GraphQLError('Session not found', { extensions: { code: 'BAD_USER_INPUT' } });
       }
       await requireSessionWriteAccess(ctx, session);
       // #1931: refresh a binding without guessing a model family from its host.
@@ -1907,7 +1908,7 @@ export const sessionMutations = {
         case 'no_credential':
           throw new GraphQLError('A credential is required', { extensions: { code: 'UNAUTHENTICATED' } });
         case 'not_found':
-          throw new GraphQLError(`Session not found: ${sessionId}`, { extensions: { code: 'BAD_USER_INPUT' } });
+          throw new GraphQLError('Session not found', { extensions: { code: 'BAD_USER_INPUT' } });
         case 'forbidden':
           throw authorizationDenied();
         case 'ok':
@@ -1935,7 +1936,7 @@ export const sessionMutations = {
       // "taken" derives from active sessions post-#928).
       const session = await ctx.db.session.findUnique({ where: { id } });
       if (!session || session.deletedAt) {
-        throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
+        throw new GraphQLError('Session not found', { extensions: { code: 'BAD_USER_INPUT' } });
       }
       await requireSessionWriteAccess(ctx, session);
 
@@ -3472,7 +3473,7 @@ export const sessionMutations = {
           assertFullyQualifiedUrn(targetNodeUrn, 'node');
         } catch (e) {
           if (e instanceof UrnNotQualifiedError) {
-            throw new GraphQLError(e.message, {
+            throw new GraphQLError(refusalText(e), {
               extensions: { code: e.name },
             });
           }
@@ -3501,7 +3502,7 @@ export const sessionMutations = {
         });
 
         if (!memory || !(await canReadMemory(ctx.db, auth, memory.id))) {
-          throw new GraphQLError(`Memory not found: "${resolvedMemoryUrn}".`, {
+          throw new GraphQLError('Memory not found.', {
             extensions: { code: 'NOT_FOUND' },
           });
         }
@@ -3511,7 +3512,7 @@ export const sessionMutations = {
           include: { outgoingEdges: { where: { deletedAt: null, target: { deletedAt: null } }, include: { target: true }, orderBy: edgeRunOrder() } },
         });
         if (!node) {
-          throw new GraphQLError(`Node "${targetNodeUrn}" not found.`, {
+          throw new GraphQLError('Node not found.', {
             extensions: { code: 'NOT_FOUND' },
           });
         }
@@ -3685,7 +3686,7 @@ export const sessionMutations = {
         ({ id: resolvedNodeId } = await resolveNodeRefForCaller(ctx, ref));
       } catch (e) {
         if (e instanceof NodeNotFoundError || e instanceof UrnNotQualifiedError) {
-          throw new GraphQLError(e.message, { extensions: { code: 'NOT_FOUND' } });
+          throw new GraphQLError(refusalText(e), { extensions: { code: 'NOT_FOUND' } });
         }
         throw e;
       }
@@ -3697,7 +3698,7 @@ export const sessionMutations = {
         select: { loc: true, memory: { select: { urn: true } } },
       });
       if (!resolved) {
-        throw new GraphQLError(`Node "${ref}" not found.`, {
+        throw new GraphQLError('Node not found.', {
           extensions: { code: 'NOT_FOUND' },
         });
       }

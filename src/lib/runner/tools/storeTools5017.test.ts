@@ -137,3 +137,18 @@ describe('#5017 hadron_store_file and the assetBytes cap', () => {
     expect(await db.node.count({ where: { memoryId, loc: 'files:parked' } })).toBe(0);
   });
 });
+
+describe('#5160 hadron_store_file at the node-content ceiling', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('the reference node over the ceiling refuses the store as the tool\'s error, and the object and its row are removed', async () => {
+    vi.stubEnv('NODE_CONTENT_MAX_BYTES', '50');
+    const out = await store(await mintRun(writerId), 'ceiling', KB) as Record<string, any>;
+    expect(out).toMatchObject({ stored: false, error: { code: 'NODE_CONTENT_TOO_LARGE', maxBytes: 50 } });
+    expect(putObject).toHaveBeenCalledOnce();
+    expect(deleteObject).toHaveBeenCalledOnce();
+    expect(vi.mocked(deleteObject).mock.calls[0][0]).toBe(vi.mocked(putObject).mock.calls[0][0].key);
+    expect(await db.asset.count({ where: { memoryId } })).toBe(0);
+    expect(await db.node.count({ where: { memoryId } })).toBe(0);
+  });
+});

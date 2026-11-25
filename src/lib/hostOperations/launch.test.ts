@@ -228,7 +228,7 @@ describe('the grant (Holger\'s ruling A, Rook #10734)', () => {
       throw new Error('expected a refusal');
     };
     const real = await env(foreign.id);
-    expect(real).toBe(JSON.stringify({ m: `Worker not found: ${foreign.id}`, x: { code: 'WORKER_NOT_FOUND' } }));
+    expect(real).toBe(JSON.stringify({ m: 'Worker not found', x: { code: 'WORKER_NOT_FOUND' } })); // #5168: no ref quoted
     await db.worker.delete({ where: { id: foreign.id } });
     expect(await env(foreign.id)).toBe(real);
     // A caller's mistake fails nothing: the start stands and the holder still binds the grant's worker.

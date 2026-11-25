@@ -68,7 +68,7 @@ for (const [name, query] of operations) describe(name, () => {
     const result = await gql(keys[user], query, id);
     expect(result.errors).toHaveLength(1);
     expect(result.errors![0].extensions).toEqual({ code: 'CHAT_NOT_FOUND' });
-    expect(result.errors![0].message).toBe(`Chat "${id}" not found`);
+    expect(result.errors![0].message).toBe('Chat not found');
     // #3598: the operation's whole envelope is null, and the refusal adds no message, summary or other child.
     expect(result.data).toBeNull();
     expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toEqual(before);
@@ -93,7 +93,7 @@ it('a root that vanishes after selection has the same typed not-found at the act
   await db.node.delete({ where: { id: nodeId } });
   const callback = vi.fn();
   await expect(withChatRootLock(db, selected, { id: memoryId, isEncrypted: false }, callback))
-    .rejects.toMatchObject({ message: `Chat "${chatId}" not found`, extensions: { code: 'CHAT_NOT_FOUND' } });
+    .rejects.toMatchObject({ message: 'Chat not found', extensions: { code: 'CHAT_NOT_FOUND' } });
   expect(callback).not.toHaveBeenCalled();
 });
 

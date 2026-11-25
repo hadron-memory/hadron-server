@@ -23,9 +23,14 @@
  * `MemoryNotFoundError`) and `entityRef/errors.ts` (which re-exports it) can
  * both extend it without an import cycle.
  *
- * The message format is UNCHANGED and deliberately so: resolver-level tests
- * across the suite match on it, and the point of this change is that nobody
- * should need to.
+ * #5168: the message no longer carries the ref. It was `<CODE>: <ref>`, the
+ * caller's value verbatim (padded if padded), so a token pasted into a ref
+ * argument came back in every terminal and log that printed the refusal. It is
+ * now `<CODE>: nothing found for the given ref.`, the same text for every value, so
+ * the existence posture of every door is what it was (the text never varied by
+ * whether the row exists). The CODE is the contract and is unchanged
+ * (hrn:node:hadronmemory.com:specs:cor:api:140:01, "Typed errors"); `ref` stays
+ * on the instance for server-side logs and is not relayed on the wire.
  */
 
 export abstract class EntityNotFoundError extends Error {
@@ -38,8 +43,12 @@ export abstract class EntityNotFoundError extends Error {
   /** The reference string the caller passed (an id, a bare URN, or a prefixed URN). */
   readonly ref: string;
 
-  constructor(code: string, ref: string) {
-    super(`${code}: ${ref}`);
+  /**
+   * @param detail SERVER-AUTHORED text naming what was looked up (e.g. `template rule "spec" authorTask`), never the
+   *   caller's input: it is the one thing a not-found may say beyond its code.
+   */
+  constructor(code: string, ref: string, detail?: string) {
+    super(`${code}: nothing found for ${detail ?? 'the given ref'}.`);
     this.code = code;
     this.ref = ref;
   }

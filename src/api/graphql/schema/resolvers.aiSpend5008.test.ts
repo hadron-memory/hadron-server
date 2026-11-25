@@ -207,7 +207,7 @@ describe('#5008 aiSpend — a missing organization answers as a denied one (P2 o
   it('a platform admin, who passes the gate for every organization, still learns that the reference names nothing', async () => {
     const res = await spend(platformCtx(), { orgRef: 'no-such-org-slug' });
     expect(res.errors?.[0]?.extensions?.code).not.toBe('FORBIDDEN');
-    expect(res.errors?.[0]?.message).toContain('no-such-org-slug');
+    expect(res.errors?.[0]?.message).not.toContain('no-such-org-slug'); // #5168: the ref is not quoted back
   });
 });
 

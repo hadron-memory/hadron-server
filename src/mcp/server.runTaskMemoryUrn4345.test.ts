@@ -68,7 +68,7 @@ beforeEach(async () => {
   const other = await db.user.create({ data: { githubId: 4347, githubUsername: 'urn-other', roles: [] } });
   foreign = await mkOrgMem('urn-org-b', 'Foreign', other.id);
   // The outsider reads exactly one memory of their own, so a miss answers
-  // `No memory matching` (an empty readable set has its own, older message).
+  // `No memory matches` (an empty readable set has its own, older message).
   await mkOrgMem('urn-org-c', 'Mine', outsider.id);
 });
 
@@ -104,7 +104,8 @@ describe('hadron_run_task memory hint — URN forms (#4345)', () => {
     const missingUrn = 'hrn:mem:no-such-org:no-such-mem';
     const a = await run(asOutsider(), foreignUrn);
     const b = await run(asOutsider(), missingUrn);
-    expect(a).toContain(`No memory matching "${foreignUrn}"`);
+    expect(a).toContain('No memory matches.'); // #5168: the hint is not quoted back
+    expect(a).not.toContain(foreignUrn);
     expect(a.replace(foreignUrn, '<H>')).toBe(b.replace(missingUrn, '<H>'));
     expect(a).not.toContain('Body of Foreign');
   });
@@ -137,7 +138,7 @@ describe('hadron_run_task memory hint — URN forms (#4345)', () => {
       data: { id: generateId(), urn: 'amb-org:amb', entityType: 'MEMORY', entityId: foreign.id, reason: 'RENAME' },
     });
     const text = await run(asAdmin(), 'urn:memory:amb-org:amb');
-    expect(text).toContain('No memory matching "urn:memory:amb-org:amb"');
+    expect(text).toContain('No memory matches.'); // #5168: the hint is not quoted back
     expect(text).not.toContain('Body of');
   });
 
