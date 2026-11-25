@@ -129,7 +129,7 @@ async function transferPreview(
   requestedClass: TransferClass | null | undefined,
   resetGroupMembers: boolean | null | undefined,
   actorUserId: string | undefined,
-  showLimits = false,
+  limits?: { caller: { userId: string } | null },
 ) {
   const oldRoot = memory.urn.slice(0, memory.urn.indexOf(':'));
   const desiredSlug = memory.urn.slice(memory.urn.lastIndexOf(':') + 1);
@@ -243,10 +243,10 @@ async function transferPreview(
   }
   // #5016 (ruling 4): a `dryRun` shows an owner limit as one more blocker, in the caller's own form. The apply path judges it under
   // the lock instead (`transferLimitChecks`), so this read is advisory.
-  if (showLimits && !blockers.some((b) => b.code === 'MEMORY_TRANSFER_SAME_OWNER')) {
+  if (limits && !blockers.some((b) => b.code === 'MEMORY_TRANSFER_SAME_OWNER')) {
     const refusals = await ownerHeadroomRefusals(tx as Prisma.TransactionClient, {
       owner: destination.kind === 'organization' ? { organizationId: destination.id } : { userId: destination.id },
-      checks: await transferLimitChecks(tx, memory, targetClass), caller: actorUserId ? { userId: actorUserId } : null,
+      checks: await transferLimitChecks(tx, memory, targetClass), caller: limits.caller,
     });
     for (const r of refusals) blockers.push({ code: 'OWNER_LIMIT_REACHED', message: r.message });
   }
@@ -266,7 +266,7 @@ export const memoryTransferMutations = {
     const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
     await authorizeSource(ctx, memory, input.memoryRef);
     const destination = await resolveDestination(ctx, input, memory);
-    if (input.dryRun === true) return transferPreview(ctx.db as TransferDb, memory, destination, input.targetClass, input.resetGroupMembers, ctx.userId, true);
+    if (input.dryRun === true) return transferPreview(ctx.db as TransferDb, memory, destination, input.targetClass, input.resetGroupMembers, ctx.userId, { caller: assetLimitCaller({ userId: ctx.userId, impersonation: ctx.impersonation }) });
 
     try {
       let current: Memory;
