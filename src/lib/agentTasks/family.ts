@@ -84,8 +84,9 @@ const VENDOR_TIER_SHAPES: ReadonlyArray<readonly [RegExp, ModelTier]> = [
   [/^glm-\d+(?:\.\d+)?-(?:air|flash)$/, 'low'],
   [/^gpt-\d+(?:\.\d+)?(?:-(?:luna|codex))?$/, 'mid'],
   [/^gpt-\d+(?:\.\d+)?-(?:mini|nano)$/, 'low'],
-  [/^deepseek-v\d+(?:\.\d+)?-pro$/, 'high'],
-  [/^deepseek-v\d+(?:\.\d+)?-flash$/, 'low'],
+  // The roster reports `deepseek/deepseek-v4-pro-0813`: an optional `deepseek/` router prefix and `-MMDD` release stamp.
+  [/^(?:deepseek\/)?deepseek-v\d+(?:\.\d+)?-pro(?:-\d{4})?$/, 'high'],
+  [/^(?:deepseek\/)?deepseek-v\d+(?:\.\d+)?-flash(?:-\d{4})?$/, 'low'],
 ];
 export function tierOf(llmModel: string | null | undefined): ModelTier | null {
   const model = llmModel?.trim().toLowerCase();
