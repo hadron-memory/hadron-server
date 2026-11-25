@@ -93,7 +93,7 @@ describe('request reset', () => {
       if (name === 'createNode') stale = captureIncludePinWarningLifetime(cc);
       return result;
     };
-    const first = await run(CREATE, { i: { memoryId, loc: 'plain', name: 'Plain', content: 'no pins here' } }, c);
+    const first = await run(CREATE, { i: { memoryRef: memoryId, loc: 'plain', name: 'Plain', content: 'no pins here' } }, c);
     expect(first.errors).toBeUndefined();
     expect(first.extensions?.warnings).toBeUndefined();
     expect(stale).toBeDefined();
@@ -126,7 +126,7 @@ describe('a field that errors after its write committed, and a rolled-back write
     };
     const r = await run(
       'mutation($a:CreateNodeInput!,$b:CreateNodeInput!){b:createNode(input:$b){id} a:createNode(input:$a){id}}',
-      { a: { memoryId, loc: 'a', name: 'boom', content: pin() }, b: { memoryId, loc: 'b', name: 'fine', content: pin() } },
+      { a: { memoryRef: memoryId, loc: 'a', name: 'boom', content: pin() }, b: { memoryRef: memoryId, loc: 'b', name: 'fine', content: pin() } },
     );
     expect(r.errors).toHaveLength(1);
     expect(r.errors![0]).toMatchObject({ message: 'late failure after commit', path: ['a'], extensions: { code: 'LATE_FAILURE' } });

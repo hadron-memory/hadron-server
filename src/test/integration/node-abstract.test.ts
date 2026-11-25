@@ -388,7 +388,7 @@ describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
       const update = async (fields: Record<string, unknown>) => {
         const response = await gqlServer.executeOperation({
           query: 'mutation($input: UpdateNodeInput!) { updateNode(input: $input) { id revision abstract abstractOriginHash content } }',
-          variables: { input: { id: created.id, ...fields } },
+          variables: { input: { ref: created.id, ...fields } },
         }, { contextValue: fx.ctx });
         if (response.body.kind !== 'single') throw new Error('unexpected incremental response');
         expect(response.body.singleResult.errors).toBeUndefined();

@@ -121,8 +121,8 @@ describe('#4168 S3 a reader who does not write gets one uniform answer', () => {
   });
 
   it('is the same for a new node, whatever role it names', async () => {
-    const guide = await check(person(ben), { memoryId, loc: 'fresh', role: 'guide' });
-    const none = await check(person(ben), { memoryId, loc: 'fresh2', role: 'nothing' });
+    const guide = await check(person(ben), { memoryRef: memoryId, loc: 'fresh', role: 'guide' });
+    const none = await check(person(ben), { memoryRef: memoryId, loc: 'fresh2', role: 'nothing' });
     expect(guide).toEqual(none);
     expect(guide.state).toBe('UNAVAILABLE');
   });
@@ -181,8 +181,8 @@ describe('#4168 S7 a caller who cannot read the node gets the node read\'s not-f
   });
 
   it('by memory and loc: MEMORY_NOT_FOUND, the same as for a missing memory', async () => {
-    expect(await code(check(person(carol), { memoryId, loc: 'doc', role: 'guide' }))).toBe('MEMORY_NOT_FOUND');
-    expect(await code(check(person(carol), { memoryId: generateId(), loc: 'doc', role: 'guide' }))).toBe('MEMORY_NOT_FOUND');
+    expect(await code(check(person(carol), { memoryRef: memoryId, loc: 'doc', role: 'guide' }))).toBe('MEMORY_NOT_FOUND');
+    expect(await code(check(person(carol), { memoryRef: generateId(), loc: 'doc', role: 'guide' }))).toBe('MEMORY_NOT_FOUND');
   });
 
   it('a soft-deleted node reads as not-found', async () => {
@@ -193,14 +193,14 @@ describe('#4168 S7 a caller who cannot read the node gets the node read\'s not-f
 
 describe('#4168 a proposed write judged on the node before and after', () => {
   it('a new node by memory and loc answers for the role it would take', async () => {
-    expect(await check(person(ann), { memoryId, loc: 'brand-new', role: 'guide' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
-    expect(await check(person(ann), { memoryId, loc: 'brand-new', role: 'guide', authoredWith: { task: taskId, revision: 4 } })).toMatchObject({ state: 'PASS' });
+    expect(await check(person(ann), { memoryId: memoryId, loc: 'brand-new', role: 'guide' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
+    expect(await check(person(ann), { memoryId: memoryId, loc: 'brand-new', role: 'guide', authoredWith: { task: taskId, revision: 4 } })).toMatchObject({ state: 'PASS' });
     expect(await db.node.count({ where: { memoryId, loc: 'brand-new' } })).toBe(0);
   });
 
   it('a memory and loc that name an existing node judge it as that node', async () => {
     await db.node.update({ where: { id: nodeId }, data: { role: 'guide' } });
-    expect(await check(person(ann), { memoryId, loc: 'doc' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
+    expect(await check(person(ann), { memoryId: memoryId, loc: 'doc' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
   });
 
   it('clearing a governed role cannot shed its requirement', async () => {
@@ -236,7 +236,7 @@ describe('#4168 no write', () => {
   it('a refusal and a pass leave the footprint of the memory unchanged', async () => {
     const before = await footprint();
     await check(person(ann), { ref: nodeId, role: 'guide' });
-    await check(person(ann), { memoryId, loc: 'x', role: 'guide', authoredWith: { task: taskId, revision: 4 } });
+    await check(person(ann), { memoryRef: memoryId, loc: 'x', role: 'guide', authoredWith: { task: taskId, revision: 4 } });
     expect(await footprint()).toEqual(before);
   });
 });
@@ -256,7 +256,7 @@ describe('#5034 the input names the node one way', () => {
     ['loc only', () => ({ loc: 'doc' })],
     ['a ref and a loc', () => ({ ref: nodeId, loc: 'doc' })],
     ['a ref and a memoryId', () => ({ ref: nodeId, memoryId })],
-    ['null memoryId and null loc (null is absent)', () => ({ memoryId: null, loc: null })],
+    ['null memoryId and null loc (null is absent)', () => ({ memoryRef: null, loc: null })],
   ];
   it.each(cases)('%s is BAD_USER_INPUT, before anything is read', async (_label, input) => {
     expect(await code(check(person(ann), { ...input(), role: 'guide' }))).toBe('BAD_USER_INPUT');
@@ -275,7 +275,7 @@ describe('#5034 a create is always an authored change', () => {
   });
 
   it('changesAuthoredContent: false does not excuse a create: REFUSED, as the write refuses it, and nothing is written', async () => {
-    const verdict = await check(person(ann), { memoryId, loc: 'brand-new', role: 'guide', changesAuthoredContent: false });
+    const verdict = await check(person(ann), { memoryRef: memoryId, loc: 'brand-new', role: 'guide', changesAuthoredContent: false });
     expect(verdict).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
     const refused = await refusedWrite(M.createNode({}, { input: { memoryRef: memoryId, loc: 'brand-new', name: 'b', content: 'x', role: 'guide' } }, person(ann)));
     expect(refused?.extensions?.code).toBe('AUTHORING_ATTESTATION_MISSING');
@@ -303,13 +303,13 @@ describe('#5034 a trusted portal human is judged as the write judges them', () =
 describe('#5034 by memory and loc, a soft-deleted node is no node', () => {
   it('the answer is the one for a loc that never existed, and the deleted node\'s role is not inherited', async () => {
     const gone = (await db.node.create({ data: { id: generateId(), memoryId, loc: 'gone', name: 'G', content: 'x', role: 'guide', deletedAt: new Date() } })).id;
-    const goneAnswer = await check(person(ann), { memoryId, loc: 'gone' });
-    const neverAnswer = await check(person(ann), { memoryId, loc: 'never-existed' });
+    const goneAnswer = await check(person(ann), { memoryRef: memoryId, loc: 'gone' });
+    const neverAnswer = await check(person(ann), { memoryRef: memoryId, loc: 'never-existed' });
     expect(goneAnswer).toEqual(neverAnswer);
     expect(goneAnswer).toMatchObject({ state: 'PASS' });
     // The control: the same node, live, is judged by its own role.
     await db.node.update({ where: { id: gone }, data: { deletedAt: null } });
-    expect(await check(person(ann), { memoryId, loc: 'gone' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
+    expect(await check(person(ann), { memoryId: memoryId, loc: 'gone' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
   });
 });
 
@@ -318,7 +318,7 @@ describe('#5034 the write agrees on a soft-deleted loc', () => {
   it('with a claim, the check passes and createNode at that loc is accepted', async () => {
     await softDeleted('gone-claimed');
     const authoredWith = { task: taskId, revision: 4 };
-    expect(await check(person(ann), { memoryId, loc: 'gone-claimed', role: 'guide', authoredWith })).toMatchObject({ state: 'PASS' });
+    expect(await check(person(ann), { memoryId: memoryId, loc: 'gone-claimed', role: 'guide', authoredWith })).toMatchObject({ state: 'PASS' });
     const written = await M.createNode({}, { input: { memoryRef: memoryId, loc: 'gone-claimed', name: 'again', content: 'new', role: 'guide', authoredWith } }, person(ann));
     expect(written.id).toBeTruthy();
     expect(await db.node.count({ where: { memoryId, loc: 'gone-claimed', deletedAt: null } })).toBe(1);
@@ -326,7 +326,7 @@ describe('#5034 the write agrees on a soft-deleted loc', () => {
 
   it('with no claim, the check refuses as for a new node and createNode refuses the same way', async () => {
     await softDeleted('gone-bare');
-    expect(await check(person(ann), { memoryId, loc: 'gone-bare', role: 'guide' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
+    expect(await check(person(ann), { memoryId: memoryId, loc: 'gone-bare', role: 'guide' })).toMatchObject({ state: 'REFUSED', code: 'AUTHORING_ATTESTATION_MISSING' });
     const refused = await refusedWrite(M.createNode({}, { input: { memoryRef: memoryId, loc: 'gone-bare', name: 'again', content: 'new', role: 'guide' } }, person(ann)));
     expect(refused?.extensions?.code).toBe('AUTHORING_ATTESTATION_MISSING');
     expect(await db.node.count({ where: { memoryId, loc: 'gone-bare', deletedAt: null } })).toBe(0);
@@ -342,7 +342,7 @@ describe('#5034 the not-found answers compare with the write\'s', () => {
 
   it('by memory and loc: the same class, code and message as the write\'s, for a memory the caller cannot read and for one that does not exist', async () => {
     for (const id of [memoryId, generateId()]) {
-      const checked = await grab(check(person(carol), { memoryId: id, loc: 'doc', role: 'guide' }));
+      const checked = await grab(check(person(carol), { memoryRef: id, loc: 'doc', role: 'guide' }));
       const written = await grab(M.createNode({}, { input: { memoryRef: id, loc: 'fresh', name: 'f', content: 'x' } }, person(carol)));
       expect(checked).toEqual(written);
       expect(checked.code).toBe('MEMORY_NOT_FOUND');

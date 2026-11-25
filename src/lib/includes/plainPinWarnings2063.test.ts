@@ -65,7 +65,7 @@ it('GraphQL exposes advice only on committed content writes, never reads/no-op/o
   };
   const selection = '{ id }';
   const created = await execute(`mutation($i:CreateNodeInput!){createNode(input:$i)${selection}}`,
-    { i: { memoryId, loc: 'source', name: 'Source', content: '{{> target rev=1}}' } });
+    { i: { memoryRef: memoryId, loc: 'source', name: 'Source', content: '{{> target rev=1}}' } });
   expect(created.errors).toBeUndefined();
   const n = (created.data as any).createNode;
   expect(created.extensions?.warnings).toEqual([expect.objectContaining({ path: 'createNode', code: 'include.pin.unkept' })]);

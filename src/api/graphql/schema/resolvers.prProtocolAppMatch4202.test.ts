@@ -29,7 +29,7 @@ const readiness = (head = H) => Q.pullRequestReadiness!({}, { taskRef: build.id,
 const schedule = (slots = ['local', 'blind']) => command('setReviewSchedule', { taskRef: build.id, slots }, owner.id);
 const freeze = (head = H) => command('freezePullRequestHead', { taskRef: build.id, head }, author.id);
 async function seat(slot: string, head = H) {
-  const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: slot, assignee: { user: reviewer.id }, source: 'synthetic' } }, ctx(author.id));
+  const t = await M.createAgentTask!({}, { input: { parentTaskRef: build.id, title: slot, assignee: { user: reviewer.id }, source: 'synthetic' } }, ctx(author.id));
   await command('assignReviewSeat', { taskRef: t.id, slot, head }, author.id);
   return t;
 }
@@ -74,14 +74,14 @@ describe('#4202 the protocol facts of a task (taskEvents): frozen head, schedule
   it('a pr.frozen event of another App does not let a seat be assigned at a head that was never frozen', async () => {
     await schedule();
     await plant(foreign.id, build.id, 'pr.frozen', { head: H });
-    const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: 'local', assignee: { user: reviewer.id }, source: 'synthetic' } }, ctx(author.id));
+    const t = await M.createAgentTask!({}, { input: { parentTaskRef: build.id, title: 'local', assignee: { user: reviewer.id }, source: 'synthetic' } }, ctx(author.id));
     await expect(command('assignReviewSeat', { taskRef: t.id, slot: 'local', head: H }, author.id)).rejects.toMatchObject(error('REVIEW_HEAD_MISMATCH'));
     expect(await eventsOf(t.id, 'review.seat.assigned')).toEqual([]);
   });
 
   it('a review.seat.assigned event of another App naming a plain child task gives it no seat: no verdict is recorded on it', async () => {
     await schedule(); await freeze();
-    const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: 'not a seat', assignee: { user: reviewer.id }, source: 'synthetic' } }, ctx(author.id));
+    const t = await M.createAgentTask!({}, { input: { parentTaskRef: build.id, title: 'not a seat', assignee: { user: reviewer.id }, source: 'synthetic' } }, ctx(author.id));
     await plant(foreign.id, t.id, 'review.seat.assigned', { slot: 'local', head: H, supersedes: null });
     await M.startAgentTask!({}, { taskRef: t.id }, ctx(reviewer.id));
     await expect(verdict(t, 'APPROVE')).rejects.toMatchObject(error('REVIEW_SEAT_UNASSIGNED'));

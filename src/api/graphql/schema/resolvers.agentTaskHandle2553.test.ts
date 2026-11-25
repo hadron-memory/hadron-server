@@ -96,7 +96,7 @@ describe('numbering', () => {
     expect([c1, c2, d1, other].map(handleOf)).toEqual(['AT1.1', 'AT1.2', 'AT1.1.1', 'AT2.1']);
     expect(await T.taskNumber!(d1, {}, as(alice))).toBe('1');
     expect(d1.parentTaskId).toBe(c1.id);
-    expect(await refusal(project(appX, 'x', alice, { parentTaskId: p1.id }))).toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await refusal(project(appX, 'x', alice, { parentTaskRef: p1.id }))).toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     expect(handleOf(await project(appY, 'Y epic'))).toBe('AT1');
   });
 
@@ -311,10 +311,10 @@ describe('AT0 is the platform\'s own row (rev 6)', () => {
     const zero = await db.agentTask.findFirstOrThrow({ where: { appId: appX.id, handle: 'AT0' } });
     const before = await db.agentTask.count({ where: { appId: appX.id } });
     for (const input of [
-      { parentTaskId: 'AT0', title: 'x' },
-      { parentTaskId: zero.id, title: 'x' },
-      { appRef: appX.id, parentTaskId: 'AT0', title: 'x' },
-      { parentTaskId: 'AT0', project: true, title: 'x' },
+      { parentTaskRef: 'AT0', title: 'x' },
+      { parentTaskRef: zero.id, title: 'x' },
+      { appRef: appX.id, parentTaskRef: 'AT0', title: 'x' },
+      { parentTaskRef: 'AT0', project: true, title: 'x' },
     ]) {
       await expect(M.createAgentTask({}, { input }, as(bob))).rejects.toThrow();
     }

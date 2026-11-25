@@ -197,7 +197,7 @@ describe('parent, root and project', () => {
     it('is refused for anyone else unless the call names another parent or none; nothing is created', async () => {
       await expect(clone(child.id, {}, sibling.id)).rejects.toMatchObject(code('TASK_NOT_ASSIGNEE'));
       expect(await db.agentTask.count({ where: { clonedFromId: child.id } })).toBe(0);
-      const none = await clone(child.id, { parentTaskId: null }, sibling.id);
+      const none = await clone(child.id, { parentTaskRef: null }, sibling.id);
       const at0 = await db.agentTask.findFirstOrThrow({ where: { appId: app.id, handle: 'AT0' } });
       expect((await stored(none.id)).parentTaskId).toBe(at0.id);
     });
@@ -219,7 +219,7 @@ describe('parent, root and project', () => {
 
     it('a parent named from another App reads as not found', async () => {
       const foreign = await M.createAgentTask({}, { input: { appRef: other.id, title: 'Foreign' } }, ctx(outsider.id));
-      await expect(clone(child.id, { parentTaskId: foreign.id }, assignee.id)).rejects.toMatchObject(code('TASK_NOT_FOUND'));
+      await expect(clone(child.id, { parentTaskRef: foreign.id }, assignee.id)).rejects.toMatchObject(code('TASK_NOT_FOUND'));
     });
   });
 });

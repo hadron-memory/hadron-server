@@ -235,7 +235,7 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     await server.start();
     try {
       for (const input of [
-        { memoryId: node.memoryId, loc: 'prompts:lane', name: 'by-memory-loc' },
+        { memoryRef: node.memoryId, loc: 'prompts:lane', name: 'by-memory-loc' },
         { id: node.id, name: 'by-id' },
         { id: nodeUrn, name: 'by-urn' },
       ]) {

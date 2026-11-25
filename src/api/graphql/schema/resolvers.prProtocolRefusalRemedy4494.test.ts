@@ -14,7 +14,7 @@ let owner: any, author: any, reviewer: any, app: any, build: any;
 const ctx = (userId: string) => ({ db, userId, roles: ['READER' as const] });
 const refused = (code: string, message: string) => ({ extensions: { code }, message });
 const PR = [{ kind: 'PULL_REQUEST', target: 'https://github.com/example/project/pull/1' }];
-const child = (parent: string, who = author.id) => M.createAgentTask!({}, { input: { parentTaskId: parent, title: 'Seat', source: 'synthetic', assignee: { user: reviewer.id } } }, ctx(who));
+const child = (parent: string, who = author.id) => M.createAgentTask!({}, { input: { parentTaskRef: parent, title: 'Seat', source: 'synthetic', assignee: { user: reviewer.id } } }, ctx(who));
 const seatCmd = (taskRef: string, head = H, who = author.id) => M.assignReviewSeat!({}, { taskRef, slot: 'local', head }, ctx(who));
 const verdictCmd = (taskRef: string, head = H, who = reviewer.id) => M.recordReviewVerdict!({}, { taskRef, head, verdict: 'APPROVE' }, ctx(who));
 const finishTask = async (id: string, who: string) => {

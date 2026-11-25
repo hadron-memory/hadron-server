@@ -41,7 +41,7 @@ const node = (loc: string, extra: Record<string, unknown> = {}) => db.node.creat
 });
 const state = (loc: string) => db.node.findFirst({ where: { memoryId, loc } });
 const door = (name: string, u: { id: string }, input: Record<string, unknown>) =>
-  (resolvers.Mutation as any)[name](null, { input: { memoryId, name: String(input.loc), content: 'x', ...input } }, as(u));
+  (resolvers.Mutation as any)[name](null, { input: { memoryRef: memoryId, name: String(input.loc), content: 'x', ...input } }, as(u));
 const edgeCount = () => db.edge.count({ where: { memoryId } });
 const mcp = (u: { id: string }) => createTestableMcpServer({ userId: u.id, roles: [], clientId: `user:${u.id}` });
 const urn = (loc: string) => `hrn:node:${memoryUrn}:${loc}`;
@@ -190,7 +190,7 @@ describe('writer levels: dependent edge writes', () => {
 
   it('inline edges', async () => {
     await mkEdge(task.id, 'task:e1');
-    const withEdges = (u: { id: string }) => door('updateTaskNode', u, { loc: 'task', edges: [{ targetId: other.id, name: 'new' }] });
+    const withEdges = (u: { id: string }) => door('updateTaskNode', u, { loc: 'task', edges: [{ targetRef: other.id, name: 'new' }] });
     expect(await code(withEdges(contrib))).toBe(REFUSED);
     expect((await db.edge.findMany({ where: { sourceId: task.id } })).map((e) => e.name)).toEqual(['task:e1']);
     expect(await code(withEdges(admin))).toBe('OK');

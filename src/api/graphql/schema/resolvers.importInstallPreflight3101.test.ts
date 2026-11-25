@@ -55,7 +55,7 @@ async function fixture() {
   const contributor = await db.user.create({ data: { id: generateId(), name: 'contributor' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: contributor.id, role: 'CONTRIBUTOR' } });
   const outsider = await db.user.create({ data: { id: generateId(), name: 'outsider' } });
-  const inline = { memoryId: install.id, loc: 'clips:authority', content: '# Imported', contentType: 'text/markdown' };
+  const inline = { memoryRef: install.id, loc: 'clips:authority', content: '# Imported', contentType: 'text/markdown' };
   const composed = { ...inline, taskRef: task.id, appRef: app.id };
   return { org, app, agent, install, manager, member, contributor, outsider, inline, composed };
 }

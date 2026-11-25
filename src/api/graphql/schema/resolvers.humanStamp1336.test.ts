@@ -122,7 +122,7 @@ describe('#1336 no other path mints HUMAN', () => {
 
   it('import attests and never mints, even with the portal signal on the request', async () => {
     await create('imp', { authoredWith: claim() });
-    const base = { memoryId, loc: 'imp', content: 'imported', contentType: 'text/markdown' };
+    const base = { memoryRef: memoryId, loc: 'imp', content: 'imported', contentType: 'text/markdown' };
     expect(await refusedWith(M.importNode({}, { input: base }, portal()))).toBe('AUTHORING_ATTESTATION_MISSING');
     await M.importNode({}, { input: { ...base, authoredWith: claim() } }, portal());
     expect(await stored('imp')).toMatchObject({ authorshipKind: 'TASK', authoredByHuman: null });

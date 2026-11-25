@@ -71,7 +71,7 @@ describe('#4738 an inline edge with loc "" derives its loc', () => {
 
   it('GraphQL createNode', async () => {
     const c = await node('c');
-    await gql('createNode', { memoryId: mem.id, loc: 'g', name: 'g', edges: [{ targetId: urn('c'), name: 'uses', loc: '' }] });
+    await gql('createNode', { memoryRef: mem.id, loc: 'g', name: 'g', edges: [{ targetRef: urn('c'), name: 'uses', loc: '' }] });
     const e = await db.edge.findFirstOrThrow({ where: { targetId: c.id } });
     expect(e.loc).toBe('g:uses:c');
     expect(e.locAuthored).toBe(false);

@@ -178,20 +178,20 @@ describe('#2206 case 2: a platform admin writes a user-owned Agent\'s system mem
   it.each([false, true])('GraphQL updateNode, a partial write (selected App: %s): lands; the response discloses nothing it did not supply', async (selected) => {
     const node = await secretNode(userAgent.systemMemoryId);
     const res = await gql(ctxOf(u.platform, selected ? { appId: app.id } : {}),
-      `mutation($input: UpdateNodeInput!) { updateNode(input: $input) { ${NODE_FIELDS} } }`, { input: { id: node.id, name: 'Admin Title' } });
+      `mutation($input: UpdateNodeInput!) { updateNode(input: $input) { ${NODE_FIELDS} } }`, { input: { ref: node.id, name: 'Admin Title' } });
     expect(res.errors).toBeUndefined();
     const out = (res.data as any).updateNode;
     expect(JSON.stringify(out)).not.toMatch(/SECRET|secret-tag|Secret Title/);
     expect(out).toMatchObject({ id: node.id, loc: 'def', content: null, abstract: null, tags: [], outgoingEdges: [], incomingEdges: [], memory: null });
     expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({ name: 'Admin Title', content: SECRET.content, abstract: SECRET.abstract });
     // The owner's identical write returns the full projection (positive control).
-    const own = await gql(ctxOf(u.agentOwner), `mutation($input: UpdateNodeInput!) { updateNode(input: $input) { ${NODE_FIELDS} } }`, { input: { id: node.id, name: 'Owner Title' } });
+    const own = await gql(ctxOf(u.agentOwner), `mutation($input: UpdateNodeInput!) { updateNode(input: $input) { ${NODE_FIELDS} } }`, { input: { ref: node.id, name: 'Owner Title' } });
     expect((own.data as any).updateNode).toMatchObject({ name: 'Owner Title', content: SECRET.content, tags: SECRET.tags });
   });
 
   it('GraphQL createNode by the platform admin: lands; the response holds what was supplied, never more', async () => {
     const res = await gql(ctxOf(u.platform), `mutation($input: CreateNodeInput!) { createNode(input: $input) { ${NODE_FIELDS} } }`,
-      { input: { memoryId: userAgent.systemMemoryId, loc: 'admin-made', name: 'Admin Made', content: 'admin body' } });
+      { input: { memoryRef: userAgent.systemMemoryId, loc: 'admin-made', name: 'Admin Made', content: 'admin body' } });
     expect(res.errors).toBeUndefined();
     expect((res.data as any).createNode).toMatchObject({ loc: 'admin-made', memory: null });
     expect(await db.node.count({ where: { memoryId: userAgent.systemMemoryId, loc: 'admin-made', content: 'admin body' } })).toBe(1);

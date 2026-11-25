@@ -91,10 +91,10 @@ const nodeUrn = (loc: string) => `hrn:node:${memory.urn}:${loc}`;
 describe('GraphQL: the stamp, the revision and the wire agree', () => {
   it('records the authenticated user, the same one the revision records, and a worker session adds the worker', async () => {
     await seed('g1');
-    const r1 = await gql(UPDATE, { input: { memoryId: memory.id, loc: 'g1', name: 'one' } });
+    const r1 = await gql(UPDATE, { input: { memoryRef: memory.id, loc: 'g1', name: 'one' } });
     expect(r1.errors).toBeUndefined();
     expect(await stamp('g1')).toMatchObject({ updatedByUserId: user.id, updatedByWorkerId: null });
-    const r2 = await gql(UPDATE, { input: { memoryId: memory.id, loc: 'g1', name: 'two' } }, token, { 'x-hadron-session': sessionId });
+    const r2 = await gql(UPDATE, { input: { memoryRef: memory.id, loc: 'g1', name: 'two' } }, token, { 'x-hadron-session': sessionId });
     expect(r2.errors).toBeUndefined();
     expect(await stamp('g1')).toMatchObject({ updatedByUserId: user.id, updatedByWorkerId: worker.id, updatedByAgentId: agent.id });
     const node = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'g1' } });
@@ -104,7 +104,7 @@ describe('GraphQL: the stamp, the revision and the wire agree', () => {
 
   it('detail and findNodes project the same updatedByUser (handle + urn), and null for an unedited node', async () => {
     await seed('g2'); await seed('g3');
-    await gql(UPDATE, { input: { memoryId: memory.id, loc: 'g2', name: 'edited' } });
+    await gql(UPDATE, { input: { memoryRef: memory.id, loc: 'g2', name: 'edited' } });
     const detail = await gql('query($m: ID!) { node(ref: "g2", memoryRef: $m) { updatedByUser { handle urn } } }', { m: memory.id });
     expect(detail.errors).toBeUndefined();
     expect(detail.data.node.updatedByUser).toEqual({ handle: user.handle, urn: expect.stringContaining(user.handle) });
@@ -146,8 +146,8 @@ describe('impersonation is refused before any stamp, on both surfaces', () => {
     const imp = await impersonationToken();
     const before = await stamp('imp');
     for (const [q, v] of [
-      [UPDATE, { input: { memoryId: memory.id, loc: 'imp', name: 'hijack' } }],
-      ['mutation($input: CreateNodeInput!) { createNode(input: $input) { id } }', { input: { memoryId: memory.id, loc: 'imp2', name: 'x' } }],
+      [UPDATE, { input: { memoryRef: memory.id, loc: 'imp', name: 'hijack' } }],
+      ['mutation($input: CreateNodeInput!) { createNode(input: $input) { id } }', { input: { memoryRef: memory.id, loc: 'imp2', name: 'x' } }],
       ['mutation($m: ID!) { deleteNode(memoryId: $m, loc: "imp") }', { m: memory.id }],
     ] as const) {
       const out = await gql(q, v as never, imp);

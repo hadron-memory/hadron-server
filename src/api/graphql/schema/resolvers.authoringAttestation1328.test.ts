@@ -280,7 +280,7 @@ describe('#1328 merges and bulk edits', () => {
 
   it('importNode carries its claim', async () => {
     await create('imp', { authoredWith: claim() });
-    const base = { memoryId, loc: 'imp', content: 'imported', contentType: 'text/markdown' };
+    const base = { memoryRef: memoryId, loc: 'imp', content: 'imported', contentType: 'text/markdown' };
     await expectRefused(M.importNode({}, { input: base }, ctx()), 'AUTHORING_ATTESTATION_MISSING');
     await expect(M.importNode({}, { input: base }, ctx())).rejects.toMatchObject({ extensions: { taskAccess: 'READABLE' } });
     expect((await stored('imp')).content).toBe('body');

@@ -105,7 +105,7 @@ describe.each([['  '], [' a'], ['a ']])('#4813 inline-edge loc %j is refused at 
 
   it('GraphQL createNode: refused with the door\'s own loc error, no node and no edge written (parity control, green on main)', async () => {
     await node('c');
-    await gqlRefusal('createNode', { memoryId: mem.id, loc: 'g', name: 'g', edges: [{ targetId: urn('c'), name: 'uses', loc: form }] });
+    await gqlRefusal('createNode', { memoryRef: mem.id, loc: 'g', name: 'g', edges: [{ targetRef: urn('c'), name: 'uses', loc: form }] });
     expect(await db.node.findFirst({ where: { memoryId: mem.id, loc: 'g' } })).toBeNull();
     expect(await db.edge.count({ where: { memoryId: mem.id } })).toBe(0);
   });
