@@ -6358,8 +6358,9 @@ model AiModelPrice {
 /// One entry in an organization's ledger of AI credits: an amount added or taken away. The balance of an organization
 /// is the sum of its entries; no balance is stored anywhere.
 ///
-/// Relationships: belongs to one Organization and is deleted with it. `sourceType` and `sourceId` name where the
-/// entry came from as plain values, for example a UsageEvent or the administrator who granted it.
+/// Relationships: belongs to one Organization and is kept when the organization is deleted (the relation restricts,
+/// it does not cascade). `sourceType` and `sourceId` name where the entry came from as plain values, for example a
+/// UsageEvent or the administrator who granted it.
 ///
 /// Behaviour:
 /// - `kind` is `grant` (a positive amount), `debit` (negative) or `adjustment` (either). `amountMicroCents` is
@@ -6367,8 +6368,10 @@ model AiModelPrice {
 /// - Grants and adjustments are written by a platform admin (`grantCredits`, `adjustCredits`) and debits by usage
 ///   metering (`debitCredits`, src/lib/metering/index.ts). A debit is written only when `BILLING_DEBIT_ENABLED` is
 ///   on, and only for usage on the platform's own provider key (hrn:node:hadronmemory.com:specs:cor:dmo:170:07).
-/// - Entries are never edited or reset. A correction is a new `adjustment` entry. Soft-deleting an entry is an
-///   emergency measure for operators only; the balance leaves soft-deleted entries out.
+/// - Entries are never edited and never deleted, not even by an operator: a trigger refuses every UPDATE and DELETE
+///   (prisma/credit-ledger-invariants.sql), except that an audit user id follows an account merge. A correction is a new
+///   `adjustment` entry. Soft delete is retired: a CHECK refuses an entry that carries `deletedAt`
+///   (hrn:node:hadronmemory.com:specs:cor:dmo:170:08).
 /// - At most one entry per (`sourceType`, `sourceId`), so a payment notification that arrives twice produces one
 ///   entry; the same pair with another organization, amount or kind is refused. A grant or an adjustment must name
 ///   its source (hadron-server#5007); entries with no source (a debit written without one, or a grant written
@@ -6397,7 +6400,7 @@ model CreditLedgerEntry {
   deletedAt        DateTime? @map("deleted_at")
   deletedBy        String?   @map("deleted_by")
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   // Idempotency for at-least-once payment webhooks (a payment service):
   // one ledger row per (sourceType, sourceId); NULL-source rows unaffected
