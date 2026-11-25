@@ -102,6 +102,31 @@ describe('#5015 owner-limit races at the node write', { timeout: 20_000 }, () =>
     expect(await db.node.count({ where: { memoryId: mO, loc: 'x' } })).toBe(0);
   });
 
+  it('a transfer that starts after a create read its owner waits for that create to commit', async () => {
+    const owner = { organizationId: orgId };
+    await limitRow(owner, 1_000);
+    const h = await holder((tx) => lockOwnerLimitKeys(tx, owner, ['nodes']));
+    const parked = create(mO, 'x', 10).then(() => 'ok', (e: unknown) => String(e));
+    let transfer: Promise<unknown> | undefined;
+    let transferred = false;
+    try {
+      await waitForLockWaitersBlockedBy(db, h.pid, 1);
+      const [{ pid }] = await db.$queryRaw<Array<{ pid: number }>>`
+        SELECT pid FROM pg_stat_activity WHERE ${h.pid}::int = ANY(pg_blocking_pids(pid))`;
+      transfer = resolvers.Mutation.transferMemoryOwnership(null, { memoryRef: mO, userRef: u, targetClass: 'private' } as never, ctx(u))
+        .then(() => { transferred = true; });
+      // The transfer waits on the create (its memory row), not on the holder.
+      await waitForLockWaitersBlockedBy(db, pid, 1);
+      expect(transferred).toBe(false);
+    } finally {
+      h.release();
+      await h.done;
+    }
+    expect(await parked).toBe('ok');
+    await transfer;
+    expect(await db.memory.findUniqueOrThrow({ where: { id: mO } })).toMatchObject({ ownerUserId: u });
+  });
+
   it('a createRevision that meets an uncommitted change of its system memory\'s owner is judged against the NEW owner', async () => {
     const agent = await resolvers.Mutation.createAgent({}, { orgRef: orgId, name: 'race5015-agent', visibility: 'PERSONAL' } as never, ctx(u)) as { id: string };
     const sys = (await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).systemMemoryId!;
