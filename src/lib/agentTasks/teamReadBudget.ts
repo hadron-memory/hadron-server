@@ -54,9 +54,16 @@ export const TEAM_READ_TX_TIMEOUT_MS = 5_000;
  *     margin still pays it;
  *   - time idled BETWEEN statements is bounded by Prisma's own interactive timer at the same
  *     budget (P2028, #4455) before the backstop's margin expires.
- * The margin buys no safety (the statement cap alone already bounds every statement); it buys
- * kept connections for the reads whose runaway statement starts early enough that the
- * non-fatal cancel can win the race.
+ * The margin adds no bound of its own — it only places the backstop. Every statement is
+ * separately capped by statement_timeout at the budget, but a per-statement cap cannot bound
+ * the READ: a statement that starts late can run nearly a full budget past it under its own
+ * cap, and ending THAT is the backstop's job (at budget+margin, whatever the margin's width).
+ * What the margin buys is WHICH cancel wins for a runaway statement that starts within the
+ * margin of the read's start: its own cap fires first (57014, non-fatal — the pooled
+ * connection survives), while a statement starting later is FATAL-ended by the backstop
+ * (25P04) and churns its connection. Shrink the margin to 0 and the two cancels fire together
+ * — the kept-connection arm is lost to the race; widen it and more reads keep their connection
+ * at a later whole-read bound.
  */
 export const TEAM_READ_TX_BACKSTOP_MARGIN_MS = 1_000;
 /** The explicit pool wait before the transaction even starts (ms). Prisma's own default, pinned so it cannot drift. */
