@@ -568,6 +568,7 @@ function parseCodeDelivery(value: unknown): CodeDelivery | null {
 }
 
 const CONSENT_STATE_FIELD = '<input type="hidden" name="state"                 value="{{state}}">';
+if (!CONSENT_TEMPLATE.includes(CONSENT_STATE_FIELD)) throw new Error('consent template: the state field moved; code_delivery has no place in the form');
 const CODE_PAGE_CONSENT_TEMPLATE = CONSENT_TEMPLATE.replace(
   CONSENT_STATE_FIELD,
   `${CONSENT_STATE_FIELD}\n      <input type="hidden" name="code_delivery"         value="page">`,
@@ -1617,7 +1618,7 @@ async function revokeAuthCodeByHash(codeHash: string): Promise<void> {
 /** #5125: a pending authorization dies at this many wrong entries (hrn:node:hadronmemory.com:specs:cor:aut:030:01). */
 const ENTRY_FAILURE_LIMIT = 5;
 const ENTRY_HANDLE_BYTES = 8;
-const ENTRY_HANDLE_PREFIX = /^([0-9a-f]{16})\./;
+const ENTRY_HANDLE_PREFIX = new RegExp(`^([0-9a-f]{${ENTRY_HANDLE_BYTES * 2}})\\.`);
 
 /**
  * Count a code that matched no row against the pending authorization its handle names, if it names a live one. One

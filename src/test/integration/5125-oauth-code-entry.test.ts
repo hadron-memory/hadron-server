@@ -140,10 +140,9 @@ describe('#5125 authorize', () => {
     expect(document.querySelector('script')!.textContent).toContain('copy.hidden = false');
     expect(page).toContain('Code &lt;Entry&gt; CLI');
     const nonce = document.querySelector('script')!.getAttribute('nonce')!;
-    const csp = post.headers.get('content-security-policy')!;
-    expect(csp).toContain(`script-src 'nonce-${nonce}'`);
-    expect(csp).toContain("default-src 'none'");
-    expect(csp).toContain("frame-ancestors 'none'");
+    expect(post.headers.get('content-security-policy')).toBe(
+      `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+    );
     const row = await rowOf({ code, verifier: '' });
     expect(row).toMatchObject({
       clientId: CLIENT, userId, redirectUri: REDIRECT, codeChallenge: challenge, resource: [RESOURCE],
@@ -309,7 +308,9 @@ describe('#5125 five wrong entries', () => {
       await blocker.query('SELECT id FROM auth_codes FOR UPDATE');
       const all = Array.from({ length: 5 }, () => redeem(wrong(p)));
       // The test pool holds five connections and all five are waiting, so watch from one of our own.
+      const deadline = Date.now() + 4_000;
       for (let waiting = 0; waiting < 5;) {
+        if (Date.now() > deadline) throw new Error(`only ${waiting} of 5 wrong entries reached the row lock`);
         waiting = (await watcher.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'")).rows[0].n;
         if (waiting < 5) await new Promise((done) => setTimeout(done, 20));
       }
@@ -374,6 +375,35 @@ describe('#5125 five wrong entries', () => {
     for (let i = 0; i < 6; i++) await refused(redeem({ code: randomBytes(32).toString('hex'), verifier }));
     expect(await rowOf({ code, verifier })).toMatchObject({ entryHandle: null, entryFailures: 0 });
     expect((await redeem({ code, verifier })).status).toBe(200);
+  });
+});
+
+describe('#5125 review follow-ups', () => {
+  it('a wrong entry that cannot be counted is a server error, never an uncounted refusal', async () => {
+    const p = await pending();
+    const real = db.$executeRaw.bind(db);
+    let counted = 0;
+    // Only the counting statement fails: other statements on the route run for real.
+    const count = vi.spyOn(db, '$executeRaw').mockImplementation(((q: TemplateStringsArray, ...v: unknown[]) => {
+      if (!Array.isArray(q) || !q.join('').includes('entry_failures')) return real(q, ...v);
+      counted++;
+      return Promise.reject(new Error('count failed'));
+    }) as typeof db.$executeRaw);
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await redeem(wrong(p));
+      expect(counted).toBe(1);
+      expect(res.status).toBe(500);
+      expect(res.body.error).toBe('server_error');
+    } finally { count.mockRestore(); quiet.mockRestore(); }
+    expect((await redeem(p)).status).toBe(200);
+  });
+
+  it('a client named like a template placeholder is shown as text, not substituted', async () => {
+    await db.oAuthClient.update({ where: { clientId: CLIENT }, data: { clientName: '{{code}} {{nonce}}' } });
+    const { post } = await consent(PAGE, pkce().challenge);
+    const { document } = parseHTML(await post.text());
+    expect(document.querySelector('strong')!.textContent).toBe('{{code}} {{nonce}}');
   });
 });
 
