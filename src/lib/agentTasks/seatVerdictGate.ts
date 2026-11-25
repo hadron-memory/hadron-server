@@ -7,6 +7,12 @@
  * an old head still finishes after a re-freeze. Exempt, finishing unchanged: a seat never bound (no `review.seat.assigned`
  * event), a seat whose slot was superseded by a later seat, and a task finished with outcome `failed` or `cancelled`.
  * Events are read within the task's OWN App (#4202). Throws before any write; the caller holds the task row.
+ *
+ * Notes from the #5189 blind review: (1) a withdrawn verdict cannot reach this gate, because a verdict is withdrawn only
+ * on a FINISHED seat and this runs only on a started one; (2) this runs before the team outcome-set check, which is
+ * safe: a seat is never stuck, since it can always record its verdict and finish with an outcome in the set, and
+ * `failed`/`cancelled` are then judged by the set check as for any task; (3) a seat finished failed or cancelled has no
+ * verdict and never counts in readiness (pinned); (4) no `review.seat.assigned` head means no bound seat, so no gate.
  */
 import type { Prisma } from '../../generated/prisma/index.js';
 import { GraphQLError } from 'graphql';

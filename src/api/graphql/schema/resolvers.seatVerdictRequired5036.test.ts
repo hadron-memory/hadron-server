@@ -135,3 +135,23 @@ describe('#5036 a review seat is not finished with no verdict at its assigned he
     expect(await code(finishWith(t, 'reviewed'))).toBe('RESOLVED');
   });
 });
+
+describe('#5036 blind-review pins (Gaby P2s, Georgia P3)', () => {
+  beforeEach(async () => { await schedule(['local']); await freeze(); });
+
+  it('a seat finished failed or cancelled with no verdict never counts: its slot is not ready', async () => {
+    const t = await seat('local'); await M.startAgentTask!({}, { taskRef: t.id }, ctx(reviewer.id));
+    await finishWith(t, 'failed');
+    const r = await readiness();
+    expect(r.ready).toBe(false);
+    expect(r.slots.find((x: any) => x.slot === 'local')).toMatchObject({ state: 'FINISHED', verdict: null, counts: false });
+  });
+
+  it('only a supersede event of the same App exempts a seat: another App naming this task id does not', async () => {
+    const t = await seat('local'); await M.startAgentTask!({}, { taskRef: t.id }, ctx(reviewer.id));
+    const org2 = await db.organization.create({ data: { name: 'Other', urn: `other-${generateId()}.test` } });
+    const app2 = await db.app.create({ data: { organizationId: org2.id, name: 'Other', urn: `${org2.urn}:app` } });
+    await db.agentTeamEvent.create({ data: { appId: app2.id, taskId: generateId(), type: 'review.seat.assigned', payload: { slot: 'local', head: H, supersedes: t.id } } });
+    expect(await code(finishWith(t, 'reviewed'))).toBe('SEAT_VERDICT_REQUIRED');
+  });
+});
