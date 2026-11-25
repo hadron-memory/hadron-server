@@ -13,7 +13,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 const M = resolvers.Mutation as any;
 let userId: string, memoryId: string, source: any, a: any, b: any;
 const ctx = (): Context => ({ db, userId, roles: ['ADMIN'] });
-const edges = (target: any) => [{ targetId: target.id, name: 'uses' }];
+const edges = (target: any) => [{ targetRef: target.id, name: 'uses' }];
 const update = (input: Record<string, unknown>) => M.updateNode(null, { input: { ref: source.id, ...input } }, ctx());
 async function state() {
  const row = await db.node.findUniqueOrThrow({ where: { id: source.id } });

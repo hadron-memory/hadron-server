@@ -99,7 +99,7 @@ describe.each([['  '], [' a'], ['a ']])('#4813 inline-edge loc %j is refused at 
   it('GraphQL updateNode: refused with the door\'s own loc error, no edge written (parity control, green on main)', async () => {
     const a = await node('a');
     await node('c');
-    await gqlRefusal('updateNode', { id: a.id, edges: [{ targetId: urn('c'), name: 'uses', loc: form }] });
+    await gqlRefusal('updateNode', { ref: a.id, edges: [{ targetRef: urn('c'), name: 'uses', loc: form }] });
     expect(await db.edge.count({ where: { sourceId: a.id } })).toBe(0);
   });
 
@@ -167,6 +167,6 @@ describe('#4813 the loc check precedes target resolution at both doors', () => {
 
   it('GraphQL updateNode: invalid loc + missing target refuses with the loc error, not a target error', async () => {
     const a = await node('a');
-    await gqlRefusal('updateNode', { id: a.id, edges: [{ targetId: MISSING(), name: 'uses', loc: ' a' }] });
+    await gqlRefusal('updateNode', { ref: a.id, edges: [{ targetRef: MISSING(), name: 'uses', loc: ' a' }] });
   });
 });

@@ -312,7 +312,7 @@ describe('the remaining input paths of the extended door (#4864, blind F3)', () 
 
   it('caller edges and the index edge are both written', async () => {
     const note = await db.node.create({ data: { id: generateId(), memoryId: sysMem.id, loc: 'notes:n', name: 'n', content: '' } });
-    const made = await create(admin, 'tasks:deploy', INDEX(), { edges: [{ targetId: note.id, name: 'see also' }] });
+    const made = await create(admin, 'tasks:deploy', INDEX(), { edges: [{ targetRef: note.id, name: 'see also' }] });
     const edges = await edgesFrom(made.id);
     expect(edges.map((e) => e.targetId).sort()).toEqual([indexId, note.id].sort());
   });

@@ -44,7 +44,7 @@ describe('#4738 an inline edge with loc "" derives its loc', () => {
   it('GraphQL updateNode', async () => {
     const a = await node('a');
     await node('c');
-    await gql('updateNode', { id: a.id, edges: [{ targetId: urn('c'), name: 'uses', loc: '' }] });
+    await gql('updateNode', { ref: a.id, edges: [{ targetRef: urn('c'), name: 'uses', loc: '' }] });
     const e = await db.edge.findFirstOrThrow({ where: { sourceId: a.id } });
     expect(e.loc).toBe('a:uses:c');
     expect(e.locAuthored).toBe(false);
@@ -82,7 +82,7 @@ describe('#4738 an inline edge with loc "" derives its loc', () => {
   it('GraphQL: an authored loc is preserved and flagged authored (control)', async () => {
     const a = await node('a');
     await node('c');
-    await gql('updateNode', { id: a.id, edges: [{ targetId: urn('c'), name: 'uses', loc: 'custom' }] });
+    await gql('updateNode', { ref: a.id, edges: [{ targetRef: urn('c'), name: 'uses', loc: 'custom' }] });
     const e = await db.edge.findFirstOrThrow({ where: { sourceId: a.id, deletedAt: null } });
     expect(e.loc).toBe('custom');
     expect(e.locAuthored).toBe(true);
@@ -101,8 +101,8 @@ describe('#4738 an inline edge with loc "" derives its loc', () => {
   it('GraphQL: an authored edge rewritten with loc "" derives (overwrite case)', async () => {
     const a = await node('a');
     await node('c');
-    await gql('updateNode', { id: a.id, edges: [{ targetId: urn('c'), name: 'uses', loc: 'custom' }] });
-    await gql('updateNode', { id: a.id, edges: [{ targetId: urn('c'), name: 'uses', loc: '' }] });
+    await gql('updateNode', { ref: a.id, edges: [{ targetRef: urn('c'), name: 'uses', loc: 'custom' }] });
+    await gql('updateNode', { ref: a.id, edges: [{ targetRef: urn('c'), name: 'uses', loc: '' }] });
     const edges = await db.edge.findMany({ where: { sourceId: a.id, deletedAt: null } });
     expect(edges.map((e) => [e.loc, e.locAuthored])).toEqual([['a:uses:c', false]]);
   });

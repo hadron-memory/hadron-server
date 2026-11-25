@@ -490,7 +490,7 @@ describe('reserving over a deleted spec with edges (@codex P2 on #1452)', () => 
 
     const reserved = await reserve(draft.id, 'pas:161:01');
     await updateSpec(draft.id, 'pas:161:01', {
-      content: 'Written.', edges: [{ targetId: target.id, name: 'depends-on' }],
+      content: 'Written.', edges: [{ targetRef: target.id, name: 'depends-on' }],
     });
 
     // createMany({ skipDuplicates }) would have dropped this edge silently.

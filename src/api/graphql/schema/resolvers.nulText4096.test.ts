@@ -84,9 +84,9 @@ describe('#4096 GraphQL node writes', () => {
     ['data', { data: { k: nul } }],
     ['data', { data: { [nul]: 1 } }],
     ['properties', { properties: { k: [nul] } }],
-    ['edges[0].name', { edges: [{ targetId: 'x', name: nul }] }],
-    ['edges[0].description', { edges: [{ targetId: 'x', description: nul }] }],
-    ['edges[0].targetId', { edges: [{ targetId: nul }] }],
+    ['edges[0].name', { edges: [{ targetRef: 'x', name: nul }] }],
+    ['edges[0].description', { edges: [{ targetRef: 'x', description: nul }] }],
+    ['edges[0].targetId', { edges: [{ targetRef: nul }] }],
   ];
   for (const [field, patch] of more) {
     it(`createNode refuses unstorable text in ${field} typed, with no row written`, async () => {

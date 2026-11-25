@@ -60,7 +60,7 @@ describe('include tags through createNode / updateNode (#2040)', () => {
   it('keeps derived edges when the write passes inline edges', async () => {
     await create('b', 'B'); await create('c', 'C');
     await create('a', '{{> b}}');
-    await update('a', '{{> b}}', { edges: [{ name: 'see', targetId: 'c' }] });
+    await update('a', '{{> b}}', { edges: [{ name: 'see', targetRef: 'c' }] });
     expect((await includeEdges('a')).map(e => e.target.loc)).toEqual(['b']);
     expect(await db.edge.count({ where: { source: { memoryId, loc: 'a' }, governedKind: null } })).toBe(1);
   });
