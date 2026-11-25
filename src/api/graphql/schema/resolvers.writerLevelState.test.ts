@@ -90,7 +90,7 @@ describe('writer levels: node state judged before and after', () => {
 
   it('generic door routing is unchanged', async () => {
     await node('task', { isRunnable: true });
-    expect(await code(resolvers.Mutation.updateNode(null, { input: { memoryId, loc: 'task', content: 'x' } }, as(admin)))).toBe('ROLE_GOVERNED');
+    expect(await code(resolvers.Mutation.updateNode(null, { input: { memoryRef: memoryId, loc: 'task', content: 'x' } }, as(admin)))).toBe('ROLE_GOVERNED');
   });
 
   it('MCP kind writers', async () => {
@@ -143,7 +143,7 @@ describe('writer levels: node state judged before and after', () => {
     await node('task', { isRunnable: true, content: 'alpha' });
     await node('plain', { content: 'alpha' });
     await resolvers.Mutation.searchReplaceInNodes(null, {
-      input: { memoryIds: [memoryId], fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false },
+      input: { memoryRefs: [memoryId], fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false },
     }, as(contrib)).catch(() => null);
     expect((await state('task'))!.content).toBe('alpha');
     expect((await state('plain'))!.content).toBe('beta');

@@ -14,7 +14,7 @@ const M = resolvers.Mutation as any;
 let userId: string, memoryId: string, source: any, a: any, b: any;
 const ctx = (): Context => ({ db, userId, roles: ['ADMIN'] });
 const edges = (target: any) => [{ targetId: target.id, name: 'uses' }];
-const update = (input: Record<string, unknown>) => M.updateNode(null, { input: { id: source.id, ...input } }, ctx());
+const update = (input: Record<string, unknown>) => M.updateNode(null, { input: { ref: source.id, ...input } }, ctx());
 async function state() {
  const row = await db.node.findUniqueOrThrow({ where: { id: source.id } });
  return { revision: await resolvers.Node.revision(row as never, {}, ctx()), count: await db.nodeRevision.count({ where: { nodeId: source.id } }),
@@ -26,7 +26,7 @@ beforeEach(async () => {
  userId=(await db.user.create({data:{handle:'edges3497-admin',roles:['ADMIN']}})).id;
  await db.orgMember.create({data:{organizationId:org.id,userId,role:'ADMIN'}});
  memoryId=(await db.memory.create({data:{name:'Edges',urn:'edges3497.example:edges',class:'knowledge',organizationId:org.id}})).id;
- [source,a,b]=await Promise.all(['source','a','b'].map(loc=>M.createNode(null,{input:{memoryId,loc,name:loc,content:'original'}},ctx())));
+ [source,a,b]=await Promise.all(['source','a','b'].map(loc=>M.createNode(null,{input:{memoryRef: memoryId,loc,name:loc,content:'original'}},ctx())));
 });
 describe('#3497 GraphQL inline edges', () => {
  it('changed and identical edge-only writes preserve the exposed revision and history', async () => {
@@ -84,7 +84,7 @@ describe('#3558 governed node: edge-only needs no attestation', () => {
  const reader = vi.fn(async (..._a: unknown[]) => true);
  const gctx = (): Context => ({ db, userId, roles: ['ADMIN'], readsAuthorTask: reader as never });
  const claim = () => ({ task: taskId, revision: 1 });
- const gupdate = (input: Record<string, unknown>) => M.updateNode(null, { input: { id: gov.id, ...input } }, gctx());
+ const gupdate = (input: Record<string, unknown>) => M.updateNode(null, { input: { ref: gov.id, ...input } }, gctx());
  const stamp = (r: any) => ({ k: r.authorshipKind, t: r.authoredByTask, v: r.authoredByRevision, h: r.authoredByHuman, at: r.authoredAt });
  async function gstate() {
   const row = await db.node.findUniqueOrThrow({ where: { id: gov.id } });
@@ -98,7 +98,7 @@ describe('#3558 governed node: edge-only needs no attestation', () => {
   taskId = (await db.node.create({ data: { id: generateId(), memoryId: govMemoryId, loc: 'task', name: 'Task', isRunnable: true, content: 'instructions' } })).id;
   const configId = (await db.memoryConfig.create({ data: { id: generateId(), memoryId: govMemoryId } })).id;
   await db.nodeRoleRule.create({ data: { id: generateId(), configId, role: 'guide', authorTaskId: taskId, authorTaskRequired: true } });
-  const mk = (loc: string, extra: Record<string, unknown> = {}) => M.createNode(null, { input: { memoryId: govMemoryId, loc, name: loc, content: 'body', ...extra } }, gctx());
+  const mk = (loc: string, extra: Record<string, unknown> = {}) => M.createNode(null, { input: { memoryRef: govMemoryId, loc, name: loc, content: 'body', ...extra } }, gctx());
   gov = await mk('gov', { role: 'guide', authoredWith: claim() });
   [tgt, other] = await Promise.all([mk('tgt'), mk('other')]);
   reader.mockClear();

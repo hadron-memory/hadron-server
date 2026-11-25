@@ -151,7 +151,7 @@ describe('#5063 C2 — the first-spec-mark conflict probe keys on the node mint,
       await tx.memory.update({ where: { id: m.id }, data: { deletedAt: new Date() } });
     });
     // Settled at once into a value, so a failing waitFor below cannot leave an unhandled rejection behind.
-    const marking = resolvers.Mutation.updateNode({}, { input: { id: n.id, tags: ['spec'] } } as never, ctx())
+    const marking = resolvers.Mutation.updateNode({}, { input: { ref: n.id, tags: ['spec'] } } as never, ctx())
       .then(() => null as unknown, (e: unknown) => e);
     try {
       // A memory FOR SHARE wait appears while the delete holds the row (the
@@ -259,7 +259,7 @@ describe('#5063 C5 — the dry-run spec-replace plan hash is byte-stable (R3)', 
     await db.node.create({ data: { id: N1_ID, memoryId: m.id, loc: 'c5:010', name: 'c5:010', content: 'alpha beta gamma', role: 'spec', nodeType: 'info', tags: ['spec'] } });
     await db.node.create({ data: { id: N2_ID, memoryId: m.id, loc: 'c5:020', name: 'c5:020', content: 'beta zeta', role: 'spec', nodeType: 'info', tags: ['spec'] } });
     const preview = await resolvers.Mutation.searchReplaceInSpecNodes(null, {
-      input: { memoryRef: m.id, nodeIds: [N1_ID, N2_ID], oldText: 'beta', newText: 'delta', fields: ['content'], dryRun: true },
+      input: { memoryRef: m.id, nodeRefs: [N1_ID, N2_ID], oldText: 'beta', newText: 'delta', fields: ['content'], dryRun: true },
     } as never, ctx());
     expect(preview.plan).toMatch(/^[0-9a-f]{64}$/);
     expect(preview.plan).toBe('b7b30519c7d3f1f7f5bb5dbc11eefaffa761b37af5d1fdbcef7811b8c0ac0972');

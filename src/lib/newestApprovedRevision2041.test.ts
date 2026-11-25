@@ -22,8 +22,8 @@ const mk = (loc: string) => db.node.create({
   data: { id: generateId(), memoryId: memory.id, loc, name: `Title ${loc}`, abstract: `Abstract ${loc}`, content: 'v1' },
 });
 const approve = (nodeRef: string) => resolvers.Mutation.approveNode(null, { nodeRef }, as());
-const edit = (id: string, content: string) => resolvers.Mutation.updateNode(null, { input: { id, content } }, as());
-const touchMeta = (id: string, tags: string[]) => resolvers.Mutation.updateNode(null, { input: { id, tags } }, as());
+const edit = (id: string, content: string) => resolvers.Mutation.updateNode(null, { input: { ref: id, content } }, as());
+const touchMeta = (id: string, tags: string[]) => resolvers.Mutation.updateNode(null, { input: { ref: id, tags } }, as());
 
 beforeEach(async () => {
   await cleanDb(db);

@@ -87,12 +87,12 @@ describe('#1987 org task catalogue excludes App-memory tasks', () => {
   });
 
   it('control: the same participant reaches the App task within the App memory', async () => {
-    const hits = await Q.findNodes({}, { filter: { memoryIds: [appMemoryId], isRunnable: true } }, context('participant'));
+    const hits = await Q.findNodes({}, { filter: { memoryRefs: [appMemoryId], isRunnable: true } }, context('participant'));
     expect(locs(hits)).toEqual(['tasks:app-task']);
   });
 
   it('control: an org member without App participation cannot read the App memory at all', async () => {
-    const hits = await Q.findNodes({}, { filter: { memoryIds: [appMemoryId], isRunnable: true } }, context('member'));
+    const hits = await Q.findNodes({}, { filter: { memoryRefs: [appMemoryId], isRunnable: true } }, context('member'));
     expect(hits.hits).toEqual([]);
   });
 
@@ -131,7 +131,7 @@ describe('#2884 App-scoped knowledge and group memories are not in the org catal
   });
 
   it.each(['knowledge', 'group'] as const)('control: the operator reads the App-scoped %s task by explicit memoryIds', async cls => {
-    const hits = await Q.findNodes({}, { filter: { memoryIds: [ids[cls]], isRunnable: true } }, context('operator'));
+    const hits = await Q.findNodes({}, { filter: { memoryRefs: [ids[cls]], isRunnable: true } }, context('operator'));
     expect(locs(hits)).toEqual([loc[cls]]);
   });
 
@@ -145,7 +145,7 @@ describe('#2884 App-scoped knowledge and group memories are not in the org catal
       ['member', 'knowledge'], ['member', 'group'],
     ] as const;
     it.each(cases)('%s gets nothing from the App-scoped %s memory by explicit memoryIds', async (who, cls) => {
-      const hits = await Q.findNodes({}, { filter: { memoryIds: [ids[cls]], isRunnable: true } }, context(who));
+      const hits = await Q.findNodes({}, { filter: { memoryRefs: [ids[cls]], isRunnable: true } }, context(who));
       expect(hits.hits).toEqual([]);
     });
   });

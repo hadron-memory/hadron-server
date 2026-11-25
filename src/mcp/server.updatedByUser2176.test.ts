@@ -108,7 +108,7 @@ describe('GraphQL: the stamp, the revision and the wire agree', () => {
     const detail = await gql('query($m: ID!) { node(ref: "g2", memoryRef: $m) { updatedByUser { handle urn } } }', { m: memory.id });
     expect(detail.errors).toBeUndefined();
     expect(detail.data.node.updatedByUser).toEqual({ handle: user.handle, urn: expect.stringContaining(user.handle) });
-    const found = await gql('query($m: ID!) { findNodes(filter: { memoryIds: [$m] }, limit: 20) { hits { node { loc updatedByUser { handle urn } } } } }', { m: memory.id });
+    const found = await gql('query($m: ID!) { findNodes(filter: { memoryRefs: [$m] }, limit: 20) { hits { node { loc updatedByUser { handle urn } } } } }', { m: memory.id });
     expect(found.errors).toBeUndefined();
     const byLoc = Object.fromEntries(found.data.findNodes.hits.map((h: any) => [h.node.loc, h.node.updatedByUser]));
     expect(byLoc.g2).toEqual(detail.data.node.updatedByUser);

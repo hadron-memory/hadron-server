@@ -60,13 +60,13 @@ describe('generic node writes refuse comments (cor:dmo:110:04)', () => {
   it('createNode / updateNode cannot make, edit or unmake a comment', async () => {
     const target = await node('g:1');
     const c = await comment(target.id);
-    expect((await errorOf(M.createNode(null, { input: { memoryId: memory.id, loc: 'g:2', name: 'x', nodeType: 'comment' } }, as()))).extensions)
+    expect((await errorOf(M.createNode(null, { input: { memoryRef: memory.id, loc: 'g:2', name: 'x', nodeType: 'comment' } }, as()))).extensions)
       .toMatchObject({ ...governed, refusal: 'produces' });
-    expect((await errorOf(M.updateNode(null, { input: { id: target.id, nodeType: 'comment' } }, as()))).extensions)
+    expect((await errorOf(M.updateNode(null, { input: { ref: target.id, nodeType: 'comment' } }, as()))).extensions)
       .toMatchObject({ ...governed, refusal: 'produces' });
-    expect((await errorOf(M.updateNode(null, { input: { id: c.id, content: 'rewritten' } }, as()))).extensions)
+    expect((await errorOf(M.updateNode(null, { input: { ref: c.id, content: 'rewritten' } }, as()))).extensions)
       .toMatchObject({ ...governed, refusal: 'edits' });
-    expect((await errorOf(M.updateNode(null, { input: { id: c.id, nodeType: 'info' } }, as()))).extensions)
+    expect((await errorOf(M.updateNode(null, { input: { ref: c.id, nodeType: 'info' } }, as()))).extensions)
       .toMatchObject({ ...governed, refusal: 'removes' });
     expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).content).toBe('feedback');
   });
@@ -92,7 +92,7 @@ describe('generic node writes refuse comments (cor:dmo:110:04)', () => {
     const target = await node('g:6');
     await comment(target.id, 'Body appears here too');
     const result = await M.searchReplaceInNodes(null, {
-      input: { oldText: 'Body', newText: 'Text', memoryIds: [memory.id], fields: ['CONTENT'] },
+      input: { oldText: 'Body', newText: 'Text', memoryRefs: [memory.id], fields: ['CONTENT'] },
     }, as());
     expect(result.skipCounts.governed).toBe(1);
     expect((await db.node.findFirstOrThrow({ where: { nodeType: 'comment' } })).content).toBe('Body appears here too');
@@ -127,7 +127,7 @@ describe('a target\'s lifecycle carries its threads (cor:dmo:110:02/05)', () => 
     expect(await db.commentMeta.findUniqueOrThrow({ where: { nodeId: kept.id } })).toMatchObject({ threadDeletedCause: 'TARGET' });
     expect(await Q.comment(null, { ref: kept.id }, as())).toBeNull();
 
-    await M.createNode(null, { input: { memoryId: memory.id, loc: 'l:1', name: 'Title l:1' } }, as());
+    await M.createNode(null, { input: { memoryRef: memory.id, loc: 'l:1', name: 'Title l:1' } }, as());
     expect(await Q.comment(null, { ref: kept.id }, as())).toMatchObject({ body: 'kept' });
     // A thread an admin deleted stays deleted.
     expect(await Q.comment(null, { ref: adminDeleted.id }, as())).toBeNull();
@@ -248,7 +248,7 @@ describe('#1663 review cycle', () => {
     await db.orgMember.create({ data: { organizationId: orgId, userId: writer.id, role: 'CONTRIBUTOR' } });
     const priv = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'priv-src', memoryClass: 'private' }, as());
     const target = await node('an:1', priv.id);
-    await M.updateNode(null, { input: { id: target.id, content: 'second' } }, as());
+    await M.updateNode(null, { input: { ref: target.id, content: 'second' } }, as());
     await M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(memory, 'an:1') }, as());
     expect((await errorOf(M.createComment(null, { targetRef: target.id, body: 'x', anchorRevision: 1 }, as(writer.id)))).extensions)
       .toMatchObject({ code: 'COMMENT_ANCHOR_REVISION_UNAVAILABLE' });
@@ -315,7 +315,7 @@ describe('#1663 review — encrypted memories (local P2-2)', () => {
     } });
     sessionKeyCache.set('comment-old-revision', enc.id, key);
     try {
-      await M.updateNode(null, { input: { id: target.id, content: 'second secret' } }, as());
+      await M.updateNode(null, { input: { ref: target.id, content: 'second secret' } }, as());
       expect((await db.node.findUniqueOrThrow({ where: { id: target.id } })).revSeq).toBe(2);
       const snapshot = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: target.id, revNo: 1 } });
       expect(snapshot.memoryId).toBe(enc.id);
@@ -355,7 +355,7 @@ describe('#1663 review — encrypted memories (local P2-2)', () => {
   it('a plaintext target still hashes an old-revision snapshot in another, encrypted memory with its key, else UNAVAILABLE', async () => {
     const src = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'enc-src' }, as());
     const target = await node('e:2', src.id);
-    await M.updateNode(null, { input: { id: target.id, content: 'second' } }, as());
+    await M.updateNode(null, { input: { ref: target.id, content: 'second' } }, as());
     await M.moveNode(null, { sourceRef: target.id, targetUrn: nodeUrn(memory, 'e:2') }, as());
     // Encrypt the source memory's retained snapshot, as encryptMemory would.
     const key = parseDataKey(dataKey);

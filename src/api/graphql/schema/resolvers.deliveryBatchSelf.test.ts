@@ -351,7 +351,7 @@ describe('R57 own-live-session batches', () => {
     const s = await ownSession(); await postForBoth(); await postForBoth();
     const [b] = (await selfRead(s)).batches; expect(b.ranges[0].seqs).toHaveLength(2);
     const seq = b.ranges[0].seqs[0];
-    expect(await M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelId: channel.id, seq }] }, selfCtx(s))).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelRef: channel.id, seq }] }, selfCtx(s))).toEqual({ acknowledged: 1, unchanged: 0 });
     expect((await selfRead(s)).batches[0].ranges[0].seqs).toEqual([b.ranges[0].seqs[1]]);
     expect(await selfAck(s, [b.id])).toEqual({ acknowledged: 1, unchanged: 0 });
     expect((await selfRead(s)).batches).toEqual([]);

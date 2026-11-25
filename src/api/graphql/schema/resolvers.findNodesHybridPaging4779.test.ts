@@ -37,7 +37,7 @@ const VEC = ['A', 'B', 'X', 'E', 'G', 'H', 'C', 'D', 'F', 'I', 'J', 'K'];
 const KW = ['C', 'D', 'X', 'F', 'I', 'A'];
 
 const findNodes = (args: Record<string, unknown>) =>
-  (resolvers.Query as any).findNodes(null, { ...args, filter: { ...((args.filter as object) ?? {}), memoryIds: [mem] } }, { db, roles: ['ADMIN'], userId: 'admin-4779' } as Context);
+  (resolvers.Query as any).findNodes(null, { ...args, filter: { ...((args.filter as object) ?? {}), memoryRefs: [mem] } }, { db, roles: ['ADMIN'], userId: 'admin-4779' } as Context);
 const names = (hits: any[]) => hits.map((h) => Object.keys(id).find((k) => id[k] === h.node.id));
 /** The keyword leg as a fixed ranking, sliced to the depth asked (exhausted when shorter). */
 const keywordLeg = (order: string[]) => vi.spyOn(provider, 'lexicalSearch').mockImplementation(async (a: any) =>
@@ -245,7 +245,7 @@ describe('#4779 BLIND P2-2 (Bianca): one work budget per request, across every v
     const lookups = vi.spyOn(provider, 'vectorRanks');
     process.env.VECTOR_SEARCH_TIMEOUT_MS = '6000';
     try {
-      await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'hybrid', limit: 2, filter: { memoryIds: [mem] } }, { db: handle, roles: ['ADMIN'], userId: 'admin-4779' } as Context);
+      await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'hybrid', limit: 2, filter: { memoryRefs: [mem] } }, { db: handle, roles: ['ADMIN'], userId: 'admin-4779' } as Context);
     } finally { delete process.env.VECTOR_SEARCH_TIMEOUT_MS; }
     expect(lookups).toHaveBeenCalled(); // the request made more than one vector call
     expect(timeouts.length).toBeGreaterThanOrEqual(3);

@@ -91,7 +91,7 @@ describe('#5015 importNode at the owner\'s nodes limit', () => {
     const task = await db.node.create({ data: { id: generateId(), memoryId: mO, loc: 'tasks:import', name: 'Import', isRunnable: true, nodeType: 'task', content: 'Process {{importedNodeUrn}}' } });
     await capAtCurrent({ organizationId: orgId });
     const admin: Context = { db, userId: u, roles: ['READER'], clientId: `user:${u}` } as Context;
-    await expect(M.importNode({}, { input: { memoryId: mO, loc: 'clips:refused', content: '# Imported', contentType: 'text/markdown', taskRef: task.id, appRef: app.id } }, admin))
+    await expect(M.importNode({}, { input: { memoryRef: mO, loc: 'clips:refused', content: '# Imported', contentType: 'text/markdown', taskRef: task.id, appRef: app.id } }, admin))
       .rejects.toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED', limitKey: 'nodes', callerCanManageOwner: true } });
     expect(await db.node.findUnique({ where: { loc_memoryId: { loc: 'clips:refused', memoryId: mO } } })).toBeNull();
     expect(await db.appRun.count()).toBe(0);

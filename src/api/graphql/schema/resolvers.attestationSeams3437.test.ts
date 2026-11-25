@@ -62,9 +62,9 @@ const ctx = (): Context => ({ db, roles: ['ADMIN'], userId }) as Context;
 const portal = (): Context => ({ ...ctx(), portalHumanUserId: userId }) as Context;
 const claim = (revision = 1) => ({ task: taskId, revision });
 const create = (loc: string, extra: Record<string, unknown> = {}, c: Context = ctx()) =>
-  M.createNode({}, { input: { memoryId, loc, name: loc, content: 'body', role: 'guide', ...extra } }, c);
+  M.createNode({}, { input: { memoryRef: memoryId, loc, name: loc, content: 'body', role: 'guide', ...extra } }, c);
 const update = (loc: string, extra: Record<string, unknown> = {}, c: Context = ctx()) =>
-  M.updateNode({}, { input: { memoryId, loc, ...extra } }, c);
+  M.updateNode({}, { input: { memoryRef: memoryId, loc, ...extra } }, c);
 const stored = (loc: string, memory = memoryId) => db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc, memoryId: memory } } });
 const tombstone = (id: unknown) => db.node.update({ where: { id: id as string }, data: { deletedAt: new Date() } });
 const expectRefused = async (promise: Promise<unknown>, code: string, role = 'guide') => {
@@ -144,7 +144,7 @@ describe('#3437 item 1: a task edit races a write, with no rulebook lock held', 
           return work(editTx);
         }, options);
       } });
-      editing = M.updateTaskNode({}, { input: { memoryId, loc: 'author-task', content: 'instructions v2' } }, { ...ctx(), db: observed });
+      editing = M.updateTaskNode({}, { input: { memoryRef: memoryId, loc: 'author-task', content: 'instructions v2' } }, { ...ctx(), db: observed });
       drained = Promise.allSettled([editing]);
       await vi.waitFor(async () => {
         const [{ waiting }] = await db.$queryRaw<Array<{ waiting: boolean }>>`
@@ -167,7 +167,7 @@ describe('#3437 item 1: a task edit races a write, with no rulebook lock held', 
 
   /** Runs on its own connection inside the write's open transaction, so a lock on the task would hang here. */
   async function editTask() {
-    await M.updateTaskNode({}, { input: { memoryId, loc: 'author-task', content: 'instructions v2' } }, ctx());
+    await M.updateTaskNode({}, { input: { memoryRef: memoryId, loc: 'author-task', content: 'instructions v2' } }, ctx());
   }
 });
 

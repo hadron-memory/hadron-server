@@ -422,7 +422,7 @@ describe('#1294 — truthful selected/scanned/skipped reporting', () => {
           input: {
             oldText: 'needle',
             newText: 'changed',
-            nodeIds: [hidden.id],
+            nodeRefs: [hidden.id],
             fields: ['content'],
           },
         } as never,
@@ -507,7 +507,7 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     await expect(beforeBulkTransaction(
       () => resolvers.Mutation.moveNode({}, { sourceRef: node.id, targetMemoryRef: destination.id }, ctx()),
       () => resolvers.Mutation.searchReplaceInNodes({}, {
-        input: { oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] },
+        input: { oldText: 'cat', newText: 'dog', nodeRefs: [node.id], fields: ['content'] },
       } as never, { db, roles: ['READER'], userId: writer.id } as Context),
     )).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
 
@@ -522,7 +522,7 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     const node = await makeNode('same-field', { content: 'cat' });
     await expect(beforeBulkTransaction(
       () => resolvers.Mutation.updateNode({}, {
-        input: { id: node.id, content: 'cat plus cat' },
+        input: { ref: node.id, content: 'cat plus cat' },
       } as never, ctx()),
       () => call({ oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] }),
     )).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
@@ -539,7 +539,7 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     const b = await makeNode('atomic:b', { content: 'cat' });
     await expect(beforeBulkTransaction(
       () => resolvers.Mutation.updateNode({}, {
-        input: { id: b.id, content: 'cat changed' },
+        input: { ref: b.id, content: 'cat changed' },
       } as never, ctx()),
       () => call({ oldText: 'cat', newText: 'dog', nodeIds: [a.id, b.id], fields: ['content'] }),
     )).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });

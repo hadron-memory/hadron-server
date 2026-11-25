@@ -60,7 +60,7 @@ describe('open root state parity', () => {
     expect(locs(out)).toEqual(['F']); expect(out.total).toBe(2);
   });
   it('Comments scope true has no hits, false retains every live comment; ALL combines', async () => {
-    const read = (value: boolean, scope: string) => Q.findNodes(null, {filter:{memoryIds:[memoryId],hasOpenThreads:value,contentScope:scope},limit:200},ctx());
+    const read = (value: boolean, scope: string) => Q.findNodes(null, {filter:{memoryRefs:[memoryId],hasOpenThreads:value,contentScope:scope},limit:200},ctx());
     expect((await read(true,'COMMENTS')).hits).toHaveLength(0);
     const comments = await read(false,'COMMENTS'); expect(comments.hits.length).toBeGreaterThan(0);
     expect((await read(false,'ALL')).hits.length).toBe(comments.hits.length + 6); // five case nodes + memory root
@@ -122,7 +122,7 @@ it('outsider, App key and a real persisted run never discover or count another t
   await M.createComment(null,{targetRef:ownNode.id,body:'own open thread'},ctx(out.id));
   const run=await db.appRun.create({data:{id:generateId(),organizationId:org.id,appId:app.id, agentId: await testRunAgentId(db, org.id, app.id),triggerKind:'SCHEDULE',triggerId:generateId(),entryNodeUrn:'hrn:node:elsewhere.test:missing:entry',status:'RUNNING'}});
   for(const principal of [ctx(out.id),{db,appId:app.id,appKeyId:appKey.id,roles:[],organizationId:org.id}, {...runContext(db,run),db}]) {
-    const own=await Q.findNodes(null,{filter:{memoryIds:[ownMemory.id],hasOpenThreads:true},includeTotal:true},principal);
+    const own=await Q.findNodes(null,{filter:{memoryRefs:[ownMemory.id],hasOpenThreads:true},includeTotal:true},principal);
     expect(own.hits.map((h:any)=>h.node.id)).toEqual([ownNode.id]);expect(own.total).toBe(1);
     const result=await Q.findNodes(null,{filter:filter(true),includeTotal:true},principal);
     expect(result.hits).toEqual([]);expect(result.total).toBe(0);

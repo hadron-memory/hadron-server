@@ -88,7 +88,7 @@ describe('#2694 a task mutation through the worker\'s own live session drives it
     await asWorker(anne, () => M.startAgentTask({}, { taskRef: parent }, ctxFor()));
     const s = await session(anne, 20);
     const before = await heartbeat(s.id);
-    await asWorker(anne, () => M.createAgentTask({}, { input: { appRef: app.id, title: 'child', parentTaskId: parent } }, ctxFor(s.id)));
+    await asWorker(anne, () => M.createAgentTask({}, { input: { appRef: app.id, title: 'child', parentTaskRef: parent } }, ctxFor(s.id)));
     expect(await heartbeat(s.id)).toBeGreaterThan(before + HOUR);
   });
 

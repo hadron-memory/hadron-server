@@ -186,7 +186,7 @@ describe('parent, root and project', () => {
     let child: any;
     beforeEach(async () => {
       await M.startAgentTask({}, { taskRef: source.id }, ctx(assignee.id));
-      child = await M.createAgentTask({}, { input: { parentTaskId: source.id, title: 'Child', source: 's' } }, ctx(assignee.id));
+      child = await M.createAgentTask({}, { input: { parentTaskRef: source.id, title: 'Child', source: 's' } }, ctx(assignee.id));
     });
 
     it('keeps its parent for the parent\'s assignee', async () => {

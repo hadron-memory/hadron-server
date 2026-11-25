@@ -53,9 +53,9 @@ const node = (loc: string, extra: Record<string, unknown> = {}) => db.node.creat
   data: { id: generateId(), memoryId, loc, name: loc, content: 'body', ...extra },
 });
 const create = (u: { id: string }, input: Record<string, unknown>, roles: Context['roles'] = []) =>
-  resolvers.Mutation.createNode(null, { input: { memoryId, name: String(input.loc), content: 'x', ...input } }, as(u, roles));
+  resolvers.Mutation.createNode(null, { input: { memoryRef: memoryId, name: String(input.loc), content: 'x', ...input } }, as(u, roles));
 const update = (u: { id: string }, loc: string, input: Record<string, unknown>, roles: Context['roles'] = []) =>
-  resolvers.Mutation.updateNode(null, { input: { memoryId, loc, ...input } }, as(u, roles));
+  resolvers.Mutation.updateNode(null, { input: { memoryRef: memoryId, loc, ...input } }, as(u, roles));
 const state = async (loc: string) => db.node.findFirst({ where: { memoryId, loc } });
 const revisions = (id: string) => db.nodeRevision.count({ where: { nodeId: id } });
 
@@ -151,14 +151,14 @@ describe('writers=ADMIN on a role (acceptance 1, 2)', () => {
   it('the review door obeys a writer level on role "review" (the cor:acl:130:07 scenario)', async () => {
     await rule('review', { writers: 'ADMIN' });
     expect(await code(resolvers.Mutation.createReviewNode(null, {
-      input: { memoryId, loc: 'rv1', name: 'check', content: 'x', role: 'review' },
+      input: { memoryRef: memoryId, loc: 'rv1', name: 'check', content: 'x', role: 'review' },
     }, as(contrib)))).toBe(REFUSED);
     expect(await code(resolvers.Mutation.createReviewNode(null, {
-      input: { memoryId, loc: 'rv2', name: 'check', content: 'x', role: 'review' },
+      input: { memoryRef: memoryId, loc: 'rv2', name: 'check', content: 'x', role: 'review' },
     }, as(admin)))).toBe('OK');
     // the existing review's role cannot be cleared by the member through the door either
     expect(await code(resolvers.Mutation.updateReviewNode(null, {
-      input: { memoryId, loc: 'rv2', role: null },
+      input: { memoryRef: memoryId, loc: 'rv2', role: null },
     }, as(contrib)))).toBe(REFUSED);
   });
 });
@@ -176,12 +176,12 @@ describe('every writer path honors the level (the inventory)', () => {
     await node('p1', { role: 'policy', content: 'alpha' });
     await node('o1', { content: 'alpha' });
     await resolvers.Mutation.searchReplaceInNodes(null, {
-      input: { memoryIds: [memoryId], fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false },
+      input: { memoryRefs: [memoryId], fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false },
     }, as(contrib)).catch(() => null);
     expect((await state('p1'))!.content).toBe('alpha');
     expect((await state('o1'))!.content).toBe('beta');
     await resolvers.Mutation.searchReplaceInNodes(null, {
-      input: { memoryIds: [memoryId], fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false },
+      input: { memoryRefs: [memoryId], fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false },
     }, as(admin));
     expect((await state('p1'))!.content).toBe('beta');
   });
@@ -253,7 +253,7 @@ describe('ALL, OWNER, and the user-owned audience', () => {
     const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: owned.id } });
     await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'policy', writers: 'ADMIN' } });
     expect(await code(resolvers.Mutation.createNode(null, {
-      input: { memoryId: owned.id, loc: 'u1', name: 'u1', content: 'x', role: 'policy' },
+      input: { memoryRef: owned.id, loc: 'u1', name: 'u1', content: 'x', role: 'policy' },
     }, as(contrib)))).toBe('OK');
   });
 });

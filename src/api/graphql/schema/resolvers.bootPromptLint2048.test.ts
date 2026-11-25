@@ -122,10 +122,10 @@ describe('#2048 S11a source warnings, current state and concealment', () => {
   });
 
   it('keeps a valid pin and reports a newer approval separately, never RECOMPILE_AVAILABLE for a source', async () => {
-    const part = await M.createNode(null, { input: { memoryId, loc: 'part', name: 'Part', content: 'First' } }, ctx());
+    const part = await M.createNode(null, { input: { memoryRef: memoryId, loc: 'part', name: 'Part', content: 'First' } }, ctx());
     await M.approveNode(null, { nodeRef: part.id }, ctx());
     const pinnedRevision = part.revSeq;
-    const newer = await M.updateNode(null, { input: { id: part.id, content: 'Second' } }, ctx());
+    const newer = await M.updateNode(null, { input: { ref: part.id, content: 'Second' } }, ctx());
     await M.approveNode(null, { nodeRef: part.id }, ctx());
     const prompt = await source(`{{> part rev=${pinnedRevision} approved}}`);
     const warnings = (await page(prompt.id)).items;
@@ -172,14 +172,14 @@ describe('#2048 S11a source warnings, current state and concealment', () => {
     expect(last.nextCursor).toBeNull();
     expect(new Set([...first.items, ...last.items].map(warning => warning.position)).size).toBe(101);
     expect(await page(prompt.id, 999)).toEqual(first);
-    await M.updateNode(null, { input: { id: prompt.id, content: 'No includes remain.' } }, ctx());
+    await M.updateNode(null, { input: { ref: prompt.id, content: 'No includes remain.' } }, ctx());
     expect(await page(prompt.id)).toEqual({ items: [], total: 0, nextCursor: null });
   });
 
   it('a selected write/approval payload carries the same non-blocking warnings as a later read', async () => {
     await target();
     const prompt = await source('Original');
-    const saved = await execute(`mutation($id: String!) { updateNode(input: { id: $id, content: "{{> part signed}}" }) {
+    const saved = await execute(`mutation($id: String!) { updateNode(input: { ref: $id, content: "{{> part signed}}" }) {
       id lintWarnings { ${pageSelection} }
     } }`, { id: prompt.id });
     expect(saved.errors).toBeUndefined();
@@ -244,7 +244,7 @@ describe('#2048 S11a post-commit unavailable is not success', () => {
   it('returns null on target-batch failure without undoing the already committed source write', async () => {
     await target();
     const prompt = await source('Before');
-    const committed = await M.updateNode(null, { input: { id: prompt.id, content: '{{> part signed}}' } }, ctx());
+    const committed = await M.updateNode(null, { input: { ref: prompt.id, content: '{{> part signed}}' } }, ctx());
     const beforeLint = await db.node.findUniqueOrThrow({ where: { id: prompt.id } });
     const field = (resolvers as any).Node.lintWarnings;
     expect(field, 'registered lint field is missing').toEqual(expect.any(Function));

@@ -250,7 +250,7 @@ describe('Mutation.createNode access control', () => {
   it('App with READ_WRITE AppAgent can write', async () => {
     const node = await resolvers.Mutation.createNode(
       null,
-      { input: { memoryId: graphA.id, loc: 'org-a.repo.new', name: 'new' } },
+      { input: { memoryRef: graphA.id, loc: 'org-a.repo.new', name: 'new' } },
       ctx({ appId: appContributor.id, userId: appMember.id }),
     );
     expect(node.loc).toBe('org-a.repo.new');
@@ -260,7 +260,7 @@ describe('Mutation.createNode access control', () => {
     await expect(
       resolvers.Mutation.createNode(
         null,
-        { input: { memoryId: graphA.id, loc: 'org-a.repo.new2', name: 'new2' } },
+        { input: { memoryRef: graphA.id, loc: 'org-a.repo.new2', name: 'new2' } },
         ctx({ appId: appReader.id, userId: appMember.id }),
       ),
     ).rejects.toThrow('Forbidden');
@@ -270,7 +270,7 @@ describe('Mutation.createNode access control', () => {
     await expect(
       resolvers.Mutation.createNode(
         null,
-        { input: { memoryId: graphB.id, loc: 'org-b.repo.hack', name: 'hack' } },
+        { input: { memoryRef: graphB.id, loc: 'org-b.repo.hack', name: 'hack' } },
         ctx({ appId: appContributor.id }),
       ),
     ).rejects.toThrow('MEMORY_NOT_FOUND');
@@ -279,7 +279,7 @@ describe('Mutation.createNode access control', () => {
   it('user with CONTRIBUTOR org role can write', async () => {
     const node = await resolvers.Mutation.createNode(
       null,
-      { input: { memoryId: graphA.id, loc: 'org-a.repo.user-node', name: 'un' } },
+      { input: { memoryRef: graphA.id, loc: 'org-a.repo.user-node', name: 'un' } },
       ctx({ clientId: `github:user-a`, userId: userA.id, roles: ['READER'] }),
     );
     expect(node.loc).toBe('org-a.repo.user-node');
@@ -289,7 +289,7 @@ describe('Mutation.createNode access control', () => {
     await expect(
       resolvers.Mutation.createNode(
         null,
-        { input: { memoryId: graphB.id, loc: 'org-b.repo.nope', name: 'nope' } },
+        { input: { memoryRef: graphB.id, loc: 'org-b.repo.nope', name: 'nope' } },
         ctx({ clientId: `github:user-b`, userId: userB.id, roles: ['READER'] }),
       ),
     ).rejects.toThrow('Forbidden');
@@ -511,7 +511,7 @@ describe('global ADMIN bypass', () => {
   it('ADMIN can write to any memory', async () => {
     const node = await resolvers.Mutation.createNode(
       null,
-      { input: { memoryId: graphB.id, loc: 'org-b.repo.admin-node', name: 'admin' } },
+      { input: { memoryRef: graphB.id, loc: 'org-b.repo.admin-node', name: 'admin' } },
       ctx({ clientId: 'github:admin', userId: 'admin-id', roles: ['ADMIN'] }),
     );
     expect(node.loc).toBe('org-b.repo.admin-node');

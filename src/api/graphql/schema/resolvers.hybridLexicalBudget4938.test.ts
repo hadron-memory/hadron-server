@@ -45,7 +45,7 @@ const slow = <T extends Pick<PrismaClient, '$queryRawUnsafe'>>(client: T): T => 
 const slowDb = slow(db);
 
 const findNodes = (args: Record<string, unknown>) =>
-  (resolvers.Query as any).findNodes(null, { ...args, filter: { memoryIds: [mem] } }, { db, roles: ['ADMIN'], userId: 'admin-4938' } as Context);
+  (resolvers.Query as any).findNodes(null, { ...args, filter: { memoryRefs: [mem] } }, { db, roles: ['ADMIN'], userId: 'admin-4938' } as Context);
 
 beforeAll(async () => {
   await cleanDb(db);

@@ -42,7 +42,7 @@ const statusOf = async (id: string) => {
   return resolvers.Node.approvalStatus(row, {}, as());
 };
 const edit = (id: string, content: string) =>
-  resolvers.Mutation.updateNode(null, { input: { id, content } }, as());
+  resolvers.Mutation.updateNode(null, { input: { ref: id, content } }, as());
 const codeOf = async (p: Promise<unknown>) => {
   try { await p; return 'NO_ERROR'; } catch (e) {
     return e instanceof GraphQLError ? String(e.extensions.code) : (e as Error).message;

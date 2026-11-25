@@ -100,7 +100,7 @@ beforeEach(async () => {
 
 describe('listings re-check what they read against the effective set now', () => {
   const graphIds = async (args: Record<string, unknown>) =>
-    (await Q.findNodes({}, { filter: { memoryIds: [backend.mem] }, ...args }, ctx())).hits.map((h: any) => h.node.id);
+    (await Q.findNodes({}, { filter: { memoryRefs: [backend.mem] }, ...args }, ctx())).hits.map((h: any) => h.node.id);
 
   it('GraphQL findNodes: a boot prompt inserted, a node turned boot prompt, an override added after the snapshot', async () => {
     hooks.afterScope = async () => { await insertBootPrompt(); await turnReleaseIntoBootPrompt(); await overrideShip(); };
@@ -182,7 +182,7 @@ describe('P2-1 in chunk mode (Diego, #1891 at 65d3ce85): passages re-check their
     async embed(texts: string[]) { return texts.map(() => { const v = new Array(768).fill(0); v[1] = 1; return v; }); },
   };
   const parentIds = async () => (await Q.findNodes({}, {
-    query: 'q', mode: 'vector', granularity: 'chunk', filter: { memoryIds: [backend.mem] },
+    query: 'q', mode: 'vector', granularity: 'chunk', filter: { memoryRefs: [backend.mem] },
   }, ctx())).passages.map((p: any) => p.parentNodeId);
 
   beforeEach(async () => {

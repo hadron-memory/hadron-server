@@ -131,7 +131,7 @@ describe('#2206 case 1: an org-owned Agent\'s system memory is written by its or
 
   it('the org manager reads the memory, so a write returns the full projection', async () => {
     const node = await secretNode(orgAgent.systemMemoryId);
-    const out = await M.updateNode(null, { input: { id: node.id, name: 'New Title' } }, ctxOf(u.orgAdmin, { appId: app.id }));
+    const out = await M.updateNode(null, { input: { ref: node.id, name: 'New Title' } }, ctxOf(u.orgAdmin, { appId: app.id }));
     expect(out).toMatchObject({ name: 'New Title', content: SECRET.content, abstract: SECRET.abstract });
   });
 
@@ -221,8 +221,8 @@ describe('#2206 case 2: a platform admin writes a user-owned Agent\'s system mem
     const refusals = [
       await errOf(M.moveNode(null, { sourceRef: node.id, targetMemoryRef: scratch.id }, ctxOf(u.platform))),
       await errOf(M.mergeNodes(null, { input: { source: node.id, target: (await db.node.create({ data: { id: generateId(), memoryId: scratch.id, loc: 'merge-into', name: 'T', content: 't' } })).id, include: ['CONTENT'] } }, ctxOf(u.platform))),
-      await errOf(M.searchReplaceInNodes(null, { input: { oldText: 'SECRET', newText: 'X', memoryIds: [userAgent.systemMemoryId], fields: ['content', 'abstract'], dryRun: true } }, ctxOf(u.platform))),
-      await errOf(M.searchReplaceInNodes(null, { input: { oldText: 'SECRET', newText: 'X', nodeIds: [node.id], fields: ['content'] } }, ctxOf(u.platform))),
+      await errOf(M.searchReplaceInNodes(null, { input: { oldText: 'SECRET', newText: 'X', memoryRefs: [userAgent.systemMemoryId], fields: ['content', 'abstract'], dryRun: true } }, ctxOf(u.platform))),
+      await errOf(M.searchReplaceInNodes(null, { input: { oldText: 'SECRET', newText: 'X', nodeRefs: [node.id], fields: ['content'] } }, ctxOf(u.platform))),
     ];
     for (const r of refusals) {
       expect(r).not.toBe('NO_ERROR');
@@ -243,13 +243,13 @@ describe('#2206 case 2: a platform admin writes a user-owned Agent\'s system mem
     // Already read-gated carriers stay refused.
     expect(await errOf(M.createEdge(null, { sourceRef: node.id, targetRef: (await db.node.findFirstOrThrow({ where: { memoryId: userAgent.systemMemoryId, loc: 'def-peer' } })).id, name: 'x' }, ctxOf(u.platform)))).not.toBe('NO_ERROR');
     // The owner may search their own memory.
-    const own = await M.searchReplaceInNodes(null, { input: { oldText: 'SECRET', newText: 'SECRET', memoryIds: [userAgent.systemMemoryId], fields: ['content'], dryRun: true } }, ctxOf(u.agentOwner));
+    const own = await M.searchReplaceInNodes(null, { input: { oldText: 'SECRET', newText: 'SECRET', memoryRefs: [userAgent.systemMemoryId], fields: ['content'], dryRun: true } }, ctxOf(u.agentOwner));
     expect(JSON.stringify(own)).toMatch(/def/);
   });
 
   it('a refused admin write rolls back and its refusal carries no existing content', async () => {
     const node = await secretNode(userAgent.systemMemoryId);
-    const res = await M.updateNode(null, { input: { id: node.id, name: 'Late', expectedRevision: 99 } }, ctxOf(u.platform)).then(() => null, (e: any) => e);
+    const res = await M.updateNode(null, { input: { ref: node.id, name: 'Late', expectedRevision: 99 } }, ctxOf(u.platform)).then(() => null, (e: any) => e);
     expect(res).not.toBeNull();
     expect(String(res?.message)).not.toMatch(/SECRET|Secret Title/);
     expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({ name: 'Secret Title', content: SECRET.content });
@@ -281,7 +281,7 @@ describe('#2233 BLIND P2 (Gene): the platform arm is decided on live authority, 
     }, { timeout: 20_000 });
     await isHeld;
     // The pre-transaction gate saw ADMIN (the demotion is uncommitted); the deciding one runs after it commits.
-    const writing = M.updateNode(null, { input: { id: node.id, name: 'Raced' } }, ctxOf(u.platform)).then(() => 'wrote', (e: any) => e);
+    const writing = M.updateNode(null, { input: { ref: node.id, name: 'Raced' } }, ctxOf(u.platform)).then(() => 'wrote', (e: any) => e);
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1);
     } finally {
@@ -292,7 +292,7 @@ describe('#2233 BLIND P2 (Gene): the platform arm is decided on live authority, 
     expect(out).not.toBe('wrote');
     expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({ name: 'Secret Title' });
     // Control: the owner's write is unaffected by the platform actor's demotion.
-    await M.updateNode(null, { input: { id: node.id, name: 'Owner Raced' } }, ctxOf(u.agentOwner));
+    await M.updateNode(null, { input: { ref: node.id, name: 'Owner Raced' } }, ctxOf(u.agentOwner));
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).name).toBe('Owner Raced');
   });
 });

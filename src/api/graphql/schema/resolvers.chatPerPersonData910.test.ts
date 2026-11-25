@@ -460,7 +460,7 @@ describe('#1328 — extraction into a data node a rule governs', () => {
     const task = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'author-task', memoryId } } });
     const authored = { region: 'EU', extra: 'stamped' };
     await resolvers.Mutation.updateNode({}, {
-      input: { memoryId, loc: 'data', data: authored, authoredWith: { task: task.id, revision: task.revSeq } },
+      input: { memoryRef: memoryId, loc: 'data', data: authored, authoredWith: { task: task.id, revision: task.revSeq } },
     } as never, { db, roles: ['ADMIN'], userId: adminId });
     const stamped = await db.node.findUniqueOrThrow({ where });
     expect(stamped.authoredByTask).toBe(task.id);

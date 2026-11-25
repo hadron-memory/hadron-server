@@ -1,5 +1,5 @@
 /**
- * Issue #355 — `findNodes(filter: { memoryIds })` plural memory-set scope.
+ * Issue #355 — `findNodes(filter: { memoryRefs: memoryIds })` plural memory-set scope.
  *
  * Lets the portal run one node-content search across an agent's / app's
  * SET of memories in a single round-trip, instead of one-memory-or-all.

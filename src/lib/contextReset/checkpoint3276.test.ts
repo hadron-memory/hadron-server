@@ -105,11 +105,11 @@ it.each([false,true])('generic GraphQL and MCP writes stay refused, claimed=%s',
  for(const mem of memories){
   const node=await f.checkpoint(mem.id),before=await db.node.findMany({orderBy:{id:'asc'}}),edgeCount=await db.edge.count();
   for(const loc of ['ordinary:probe','sheds:auto-test']){
-   await expect(M.createNode({}, {input:{memoryId:mem.id,loc,name:'No',content:'No'}},f.keyCtx())).rejects.toBeDefined();
+   await expect(M.createNode({}, {input:{memoryRef:mem.id,loc,name:'No',content:'No'}},f.keyCtx())).rejects.toBeDefined();
    const text=await server.callToolText('hadron_create_node',{urn:`hrn:node:${mem.urn}:${loc}`,name:'No',content:'No'});
    expect(text).toMatch(/forbidden|not found|cannot write|does not have write/i);
   }
-  await expect(M.updateNode({}, {input:{id:node.id,name:'No'}},f.keyCtx())).rejects.toBeDefined();
+  await expect(M.updateNode({}, {input:{ref:node.id,name:'No'}},f.keyCtx())).rejects.toBeDefined();
   await expect(M.deleteNode({}, {nodeRef:node.id},f.keyCtx())).rejects.toBeDefined();
   for(const verb of ['hadron_update_node','hadron_delete_node']){
    const row=await db.node.findUniqueOrThrow({where:{id:node.id}});

@@ -51,7 +51,7 @@ beforeEach(async () => {
 describe('#1329 the run surface', () => {
   it('names the read a run tool has, and no CLI command', async () => {
     await rule('guide', taskId);
-    await M.createNode({}, { input: { memoryId, loc: 'a', name: 'a', content: 'x', role: 'guide', authoredWith: { task: taskId, revision: 2 } } }, ctx());
+    await M.createNode({}, { input: { memoryRef: memoryId, loc: 'a', name: 'a', content: 'x', role: 'guide', authoredWith: { task: taskId, revision: 2 } } }, ctx());
     const e = await refusal(hadronUpdateNode.execute({ principal: ctx(), db, run: { id: 'run', organizationId } } as never, {
       urn: 'hrn:node:refuse-org:mem:a', content: 'y',
     }));
@@ -65,7 +65,7 @@ describe('#1329 a task whose URN would not resolve back (#697)', () => {
   it('gives the id, and names no URN route', async () => {
     await db.memory.update({ where: { id: memoryId }, data: { urn: 'refuse-org:app:mem' } });
     await rule('guide', taskId);
-    const e = await refusal(M.createNode({}, { input: { memoryId, loc: 'a', name: 'a', content: 'x', role: 'guide' } }, ctx()));
+    const e = await refusal(M.createNode({}, { input: { memoryRef: memoryId, loc: 'a', name: 'a', content: 'x', role: 'guide' } }, ctx()));
     expect(e.extensions).toMatchObject({
       task: null, taskId, taskRevision: 2, load: { graphql: `node(ref: "${taskId}")`, mcp: null, cli: null },
     });
@@ -151,7 +151,7 @@ describe('#1329 content validation', () => {
       id: generateId(), configId, role: 'guide', authorTaskId: taskId, authorTaskRequired: true,
       validationTaskId: taskId, validationTaskRequired: true, validateBy: 'AGENT',
     } });
-    const node = await M.createNode({}, { input: { memoryId, loc: 'a', name: 'a', content: 'x', role: 'guide', authoredWith: { task: taskId, revision: 2 } } }, ctx());
+    const node = await M.createNode({}, { input: { memoryRef: memoryId, loc: 'a', name: 'a', content: 'x', role: 'guide', authoredWith: { task: taskId, revision: 2 } } }, ctx());
     expect(node.id).toBeTruthy();
   });
 });

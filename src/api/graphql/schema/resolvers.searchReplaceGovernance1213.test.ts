@@ -262,7 +262,7 @@ describe('#1213 S3 dry run reads governed state at planning, like selection', ()
 describe('#4725 a dual-signal row (a runnable review) skips ONCE, at selection and under the lock', () => {
   it('fixture row with BOTH signals: selection counts one governed skip, not one per signal', async () => {
     const dualId = (await db.node.create({ data: { memoryId, loc: 'dual', name: 'dual', content: 'alpha', role: 'review', isRunnable: true } })).id;
-    const result = await resolvers.Mutation.searchReplaceInNodes({}, { input: { nodeIds: [dualId, ordinaryId],
+    const result = await resolvers.Mutation.searchReplaceInNodes({}, { input: { nodeRefs: [dualId, ordinaryId],
       fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false } }, ctx());
     expect(result).toMatchObject({ nodesSelected: 2, nodesScanned: 1, nodesSkipped: 1, nodesChanged: 1,
       totalReplacements: 1, skipCounts: { governed: 1, protectedAddress: 0 } });

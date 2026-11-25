@@ -43,12 +43,12 @@ it('no-pin writes and recorded-approval pins have no false warning; covered sibl
   await resolvers.Mutation.approveNode(null, { nodeRef: n.id }, ctx());
   expect(await check('{{> target}}')).toEqual([]);
   expect(await check('{{> target rev=1 approved}}')).toEqual([]);
-  await resolvers.Mutation.updateNode(null, { input: { id: n.id, tags: ['metadata'] } }, ctx());
+  await resolvers.Mutation.updateNode(null, { input: { ref: n.id, tags: ['metadata'] } }, ctx());
   expect(await check('{{> target rev=2 approved}}')).toHaveLength(1);
 });
 it('a moved snapshot is concealed unless both current and capture memories are readable', async () => {
   const n = await db.node.create({ data: { id: generateId(), memoryId, loc: 'target', name: 'Target', content: 'text' } });
-  await resolvers.Mutation.updateNode(null, { input: { id: n.id, content: 'new' } }, ctx());
+  await resolvers.Mutation.updateNode(null, { input: { ref: n.id, content: 'new' } }, ctx());
   const foreignOwner = await db.user.create({ data: { githubId: 206304, githubUsername: 'foreign2063', handle: 'foreign2063', roles: [] } });
   const foreign = await db.memory.create({ data: { id: generateId(), name: 'foreign', urn: 'pins2063.example:foreign', class: 'private', userId: foreignOwner.id, ownerUserId: foreignOwner.id } });
   await db.nodeRevision.updateMany({ where: { nodeId: n.id, revNo: 1 }, data: { memoryId: foreign.id } });
@@ -159,7 +159,7 @@ it('a recorded signature suppresses advice, while a covered non-carrier still wa
       mayWrite: maySignInMemory(db),
     }));
     expect(await check('{{> signed-target rev=1 signed}}')).toEqual([]);
-    await resolvers.Mutation.updateNode(null, { input: { id: n.id, tags: ['metadata'] } }, ctx());
+    await resolvers.Mutation.updateNode(null, { input: { ref: n.id, tags: ['metadata'] } }, ctx());
     expect(await check('{{> signed-target rev=2 signed}}')).toHaveLength(1);
   } finally {
     if (oldOrigin === undefined) delete process.env.SIGNING_CEREMONY_ORIGINS; else process.env.SIGNING_CEREMONY_ORIGINS = oldOrigin;

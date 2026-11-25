@@ -82,7 +82,7 @@ describe('createComment (cor:dmo:110:01–05)', () => {
 
   it('anchors an older revision from its retained snapshot, and refuses impossible or pruned ones', async () => {
     const target = await node('spec:2');
-    await resolvers.Mutation.updateNode(null, { input: { id: target.id, content: 'Edited body' } }, as());
+    await resolvers.Mutation.updateNode(null, { input: { ref: target.id, content: 'Edited body' } }, as());
     const live = await db.node.findUniqueOrThrow({ where: { id: target.id } });
     expect(live.revSeq).toBe(2);
     const old = await comment(target.id, 'about v1', writer.id, { anchorRevision: 1 });

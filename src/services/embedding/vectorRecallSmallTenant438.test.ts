@@ -130,35 +130,35 @@ describe('#438 the fixture means what it says', () => {
              min(embedding <=> '[${qvec().join(',')}]'::vector) FILTER (WHERE memory_id = '${small}') AS small_min
       FROM node_embeddings`);
     expect(Number(d!.big_max)).toBeLessThan(Number(d!.small_min));
-    expect(nodeIds(await findNodes(exact(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small] } }))).toEqual(smallIds);
+    expect(nodeIds(await findNodes(exact(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryRefs: [small] } }))).toEqual(smallIds);
   });
 });
 
 describe('#438 / #3054: on the HNSW plan the small tenant keeps its eligible top-k', () => {
   it('node, memory-scoped: mode vector returns all 5 of SMALL\'s eligible nodes', async () => {
-    expect(nodeIds(await findNodes(hnsw(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small] } }))).toEqual(smallIds);
+    expect(nodeIds(await findNodes(hnsw(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryRefs: [small] } }))).toEqual(smallIds);
   });
 
   it('chunk, memory-scoped: granularity chunk returns all 5 of SMALL\'s passages', async () => {
-    expect(passageIds(await findNodes(hnsw(), { query: 'q', mode: 'vector', granularity: 'chunk', limit: 5, filter: { memoryIds: [small] } }))).toEqual(smallIds);
+    expect(passageIds(await findNodes(hnsw(), { query: 'q', mode: 'vector', granularity: 'chunk', limit: 5, filter: { memoryRefs: [small] } }))).toEqual(smallIds);
   });
 
   it('node, role-filtered: returns SMALL\'s spec nodes', async () => {
-    expect(nodeIds(await findNodes(hnsw(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small], role: 'spec' } }))).toEqual(smallSpecIds);
+    expect(nodeIds(await findNodes(hnsw(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryRefs: [small], role: 'spec' } }))).toEqual(smallSpecIds);
   });
 
   it('hybrid with no keyword match: the vector leg brings SMALL\'s nodes', async () => {
-    expect(nodeIds(await findNodes(hnsw(), { query: 'zzzunmatchable', mode: 'hybrid', limit: 5, filter: { memoryIds: [small] } }))).toEqual(smallIds);
+    expect(nodeIds(await findNodes(hnsw(), { query: 'zzzunmatchable', mode: 'hybrid', limit: 5, filter: { memoryRefs: [small] } }))).toEqual(smallIds);
   });
 });
 
 describe('#438 contract: scope holds and a short ANN result is never proven absence', () => {
   it('on the exact plan every recall path retrieves SMALL\'s full eligible set (the recall pins\' ground truth)', async () => {
     const ex = exact();
-    expect(nodeIds(await findNodes(ex, { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small] } })), 'node').toEqual(smallIds);
-    expect(passageIds(await findNodes(ex, { query: 'q', mode: 'vector', granularity: 'chunk', limit: 5, filter: { memoryIds: [small] } })), 'chunk').toEqual(smallIds);
-    expect(nodeIds(await findNodes(ex, { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small], role: 'spec' } })), 'role').toEqual(smallSpecIds);
-    expect(nodeIds(await findNodes(ex, { query: 'zzzunmatchable', mode: 'hybrid', limit: 5, filter: { memoryIds: [small] } })), 'hybrid').toEqual(smallIds);
+    expect(nodeIds(await findNodes(ex, { query: 'q', mode: 'vector', limit: 5, filter: { memoryRefs: [small] } })), 'node').toEqual(smallIds);
+    expect(passageIds(await findNodes(ex, { query: 'q', mode: 'vector', granularity: 'chunk', limit: 5, filter: { memoryRefs: [small] } })), 'chunk').toEqual(smallIds);
+    expect(nodeIds(await findNodes(ex, { query: 'q', mode: 'vector', limit: 5, filter: { memoryRefs: [small], role: 'spec' } })), 'role').toEqual(smallSpecIds);
+    expect(nodeIds(await findNodes(ex, { query: 'zzzunmatchable', mode: 'hybrid', limit: 5, filter: { memoryRefs: [small] } })), 'hybrid').toEqual(smallIds);
   }, LOOP_TIMEOUT_MS);
 
   it('a SMALL-scoped search never returns a BIG node, on either plan and every path', async () => {
@@ -170,7 +170,7 @@ describe('#438 contract: scope holds and a short ANN result is never proven abse
         { query: 'zzzunmatchable', mode: 'hybrid', limit: 5 },
       ]) {
         const { role, ...rest } = args as any;
-        const res = await findNodes(h, { ...rest, filter: { memoryIds: [small], ...(role ? { role } : {}) } });
+        const res = await findNodes(h, { ...rest, filter: { memoryRefs: [small], ...(role ? { role } : {}) } });
         const got = [...res.hits.map((x: any) => x.node.id), ...(res.passages ?? []).map((p: any) => p.parentNodeId)];
         expect(got.filter((id: string) => !smallIds.includes(id)), JSON.stringify(args)).toEqual([]);
       }

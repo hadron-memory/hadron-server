@@ -79,7 +79,7 @@ describe('#3306 PUBLIC knowledge for a principal with no user', () => {
   });
   it.each(['key', 'run'] as const)('RED: a node search naming the memory finds it for the %s principal', async who => {
     const principal = who === 'key' ? f.keyPrincipal : f.runPrincipal;
-    const out = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 10, filter: { memoryIds: [f.pub.id] } }, { ...principal });
+    const out = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 10, filter: { memoryRefs: [f.pub.id] } }, { ...principal });
     expect(out.hits.map((h: { node: { memoryId: string } }) => h.node.memoryId)).toEqual([f.pub.id]);
   });
 
@@ -122,7 +122,7 @@ describe('#3306 PUBLIC knowledge for a principal with no user', () => {
       expect(await Q.node({}, { ref: urn(f.pub) }, f.confined)).toMatchObject({ content: 'secret pub' });
       expect(await getAccessibleMemoryIds(f.confined)).not.toContain(f.pub.id);
       expect(await getAccessibleMemoryIds(f.confined, f.pub.id)).toEqual([f.pub.id]);
-      const out = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 10, filter: { memoryIds: [f.pub.id] } }, { ...f.confined });
+      const out = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 10, filter: { memoryRefs: [f.pub.id] } }, { ...f.confined });
       expect(out.hits.map((h: { node: { memoryId: string } }) => h.node.memoryId)).toEqual([f.pub.id]);
       expect(await filterReadableMemoryIds(db, f.confined as never, [f.pub.id, f.orgVisible.id])).toEqual(new Set([f.pub.id]));
     });
@@ -351,7 +351,7 @@ describe('#3306 the shared predicate itself', () => {
   it.each(['key', 'run', 'session'] as const)('named discovery is capped at 200 and pages the 201st node (%s)', async who => {
     await db.node.createMany({ data: Array.from({ length: 200 }, (_, i) => ({ memoryId: f.pub.id, loc: `cap:${String(i).padStart(3, '0')}`, name: 'needle3306 cap', content: 'cap', nodeType: 'record' })) });
     const principal = who === 'key' ? f.keyPrincipal : who === 'run' ? f.runPrincipal : f.confined;
-    const page = (limit: number, offset = 0) => Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit, offset, filter: { memoryIds: [f.pub.id, f.orgVisible.id, f.appScoped.id] } }, { ...principal });
+    const page = (limit: number, offset = 0) => Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit, offset, filter: { memoryRefs: [f.pub.id, f.orgVisible.id, f.appScoped.id] } }, { ...principal });
     const at = await page(200);
     const over = await page(201);
     const next = await page(200, 200);

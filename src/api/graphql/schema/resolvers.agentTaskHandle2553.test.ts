@@ -89,10 +89,10 @@ describe('numbering', () => {
     const p1: any = await project(appX, 'epic one', alice, { assignee: { user: bob.id } });
     const p2: any = await project(appX, 'epic two', alice, { assignee: { user: bob.id } });
     expect([handleOf(p1), handleOf(p2)]).toEqual(['AT1', 'AT2']);
-    const c1: any = await M.createAgentTask({}, { input: { parentTaskId: p1.id, title: 'c1', assignee: { user: bob.id } } }, as(bob));
-    const c2: any = await M.createAgentTask({}, { input: { parentTaskId: 'AT1', title: 'c2' } }, as(bob));
-    const d1: any = await M.createAgentTask({}, { input: { parentTaskId: 'AT1.1', title: 'd1' } }, as(bob));
-    const other: any = await M.createAgentTask({}, { input: { parentTaskId: 'AT2', title: 'o1' } }, as(bob));
+    const c1: any = await M.createAgentTask({}, { input: { parentTaskRef: p1.id, title: 'c1', assignee: { user: bob.id } } }, as(bob));
+    const c2: any = await M.createAgentTask({}, { input: { parentTaskRef: 'AT1', title: 'c2' } }, as(bob));
+    const d1: any = await M.createAgentTask({}, { input: { parentTaskRef: 'AT1.1', title: 'd1' } }, as(bob));
+    const other: any = await M.createAgentTask({}, { input: { parentTaskRef: 'AT2', title: 'o1' } }, as(bob));
     expect([c1, c2, d1, other].map(handleOf)).toEqual(['AT1.1', 'AT1.2', 'AT1.1.1', 'AT2.1']);
     expect(await T.taskNumber!(d1, {}, as(alice))).toBe('1');
     expect(d1.parentTaskId).toBe(c1.id);
@@ -199,7 +199,7 @@ describe('numbering', () => {
       parent = await db.agentTask.create({ data: { appId: appX.id, title: `l${i}`, ownerUserId: bob.id, assigneeUserId: bob.id, assignedAt: new Date(), status: 'started', startedAt: new Date(), parentTaskId: parent.id } });
     }
     expect(parent.handle!.split('.')).toHaveLength(16);
-    const e = await refusal(M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'too deep' } }, as(bob)));
+    const e = await refusal(M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'too deep' } }, as(bob)));
     expect(e.extensions?.code).toBe('TASK_TOO_DEEP');
   });
 
@@ -212,7 +212,7 @@ describe('numbering', () => {
     for (const seg of ['1234567890123', '1234567890123', '1234567890123', '123456789012345']) { handle += `.${seg}`; parent = await mkRow(parent.id, BigInt(seg), handle); }
     expect(parent.handle!.length).toBe(64);
     const before = await db.agentTaskCounter.findMany({ where: { appId: appX.id }, orderBy: { id: 'asc' } });
-    const e = await refusal(M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'too long' } }, as(bob)));
+    const e = await refusal(M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'too long' } }, as(bob)));
     expect(e.extensions?.code).toBe('TASK_TOO_DEEP');
     expect(await db.agentTask.count({ where: { appId: appX.id, parentTaskId: parent.id } })).toBe(0);
     expect(await db.agentTaskCounter.findMany({ where: { appId: appX.id }, orderBy: { id: 'asc' } })).toEqual(before);
@@ -221,8 +221,8 @@ describe('numbering', () => {
   it('every task is created in the same transaction as its counter: creates under two parents and two Apps do not contend', async () => {
     const [pa, pb]: any[] = await Promise.all([project(appX, 'pa', alice, { assignee: { user: bob.id } }), project(appX, 'pb', alice, { assignee: { user: bob.id } })]);
     const made = await Promise.all([
-      ...Array.from({ length: 4 }, (_, i) => M.createAgentTask({}, { input: { parentTaskId: pa.id, title: `a${i}` } }, as(bob))),
-      ...Array.from({ length: 4 }, (_, i) => M.createAgentTask({}, { input: { parentTaskId: pb.id, title: `b${i}` } }, as(bob))),
+      ...Array.from({ length: 4 }, (_, i) => M.createAgentTask({}, { input: { parentTaskRef: pa.id, title: `a${i}` } }, as(bob))),
+      ...Array.from({ length: 4 }, (_, i) => M.createAgentTask({}, { input: { parentTaskRef: pb.id, title: `b${i}` } }, as(bob))),
       mk(appY, 'y'),
     ]);
     const handles = made.map(handleOf);
@@ -461,7 +461,7 @@ describe('resolution (item 3, 4, 5)', () => {
     // Only the parent's assignee creates its children, so the parent is assigned to bob.
     const t: any = await M.createAgentTask({}, { input: { appRef: appX.id, title: 'ops', assignee: { user: bob.id } } }, as(bob));
     expect((await Q.agentTaskTree({}, { root: 'AT0.1' }, as(bob)))?.map((r: any) => r.id)).toEqual([t.id]);
-    const child: any = await M.createAgentTask({}, { input: { parentTaskId: 'AT0.1', title: 'child' } }, as(bob));
+    const child: any = await M.createAgentTask({}, { input: { parentTaskRef: 'AT0.1', title: 'child' } }, as(bob));
     expect(child.parentTaskId).toBe(t.id);
     expect((await Q.agentTasks({}, { appRef: appX.id, parentTaskRef: 'AT0.1' }, as(bob))).map((r: any) => r.id)).toEqual([child.id]);
     const events = await Q.agentTeamEvents({}, { appRef: appX.id, taskRef: 'AT0.1.1' }, as(bob));

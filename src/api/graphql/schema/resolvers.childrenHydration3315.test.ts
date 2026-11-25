@@ -15,7 +15,7 @@ let nodeId: string;
 let priorUrl: string | undefined;
 const ctx: Context = { db, userId: 'admin-3315', roles: ['ADMIN'] } as Context;
 const read = (args: Record<string, unknown>) =>
-  (resolvers.Query as any).findNodes(null, { filter: { memoryIds: [memoryId], childrenOf: 'parent' }, limit: 1, ...args }, ctx);
+  (resolvers.Query as any).findNodes(null, { filter: { memoryRefs: [memoryId], childrenOf: 'parent' }, limit: 1, ...args }, ctx);
 
 beforeEach(async () => {
   priorUrl = process.env.EMBEDDING_API_URL;

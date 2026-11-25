@@ -80,7 +80,7 @@ describe('A1: sparse lexical/regex admission happens before the page', () => {
       expect(hitsOf(await provider.regexSearch({ ...common, filter: base(prefix, value), pattern: 'sparsemark3541' }))).toEqual(expected);
 
       for (const mode of ['keyword', 'regex'] as const) {
-        const out = await Q.findNodes(null, { query: 'sparsemark3541', mode, sort: 'LOC', limit: 2, offset: 1, includeTotal: true, filter: { memoryIds: [memoryId], locPrefix: `${prefix}:`, hasOpenThreads: value } }, ctx(author()));
+        const out = await Q.findNodes(null, { query: 'sparsemark3541', mode, sort: 'LOC', limit: 2, offset: 1, includeTotal: true, filter: { memoryRefs: [memoryId], locPrefix: `${prefix}:`, hasOpenThreads: value } }, ctx(author()));
         expect(out.hits.map((h: any) => h.node.id), mode).toEqual(expected);
         expect(out.total, `${mode} keeps total null`).toBeNull();
       }
@@ -115,7 +115,7 @@ describe('#3675: a soft-deleted whole thread and an offset past the end, on lexi
     const regex = idsOf(await provider.regexSearch({ ...common, pattern: 'sparsemark3541' }));
     const modes: Record<string, { ids: string[]; total: unknown }> = {};
     for (const mode of ['keyword', 'regex'] as const) {
-      const out = await Q.findNodes(null, { query: 'sparsemark3541', mode, sort: 'LOC', limit, offset, includeTotal: true, filter: { memoryIds: [memoryId], locPrefix: `${prefix}:`, hasOpenThreads: value } }, ctx(author()));
+      const out = await Q.findNodes(null, { query: 'sparsemark3541', mode, sort: 'LOC', limit, offset, includeTotal: true, filter: { memoryRefs: [memoryId], locPrefix: `${prefix}:`, hasOpenThreads: value } }, ctx(author()));
       modes[mode] = { ids: out.hits.map((h: any) => h.node.id), total: out.total };
     }
     return { lexical, regex, modes };
@@ -269,7 +269,7 @@ describe('A5: vector-mode expansion keeps eligible context and drops wrong-threa
       out[`${g}-seed`] = seed.id; out[`${g}-keep`] = keep.id; out[`${g}-drop`] = drop.id;
     }
     for (const [g, value] of [['v', true], ['w', false]] as const) {
-      const res = await Q.findNodes(null, { query: 'xyzzy-no-lexical-match', mode: 'vector', expand: 1, includeTotal: true, filter: { memoryIds: [memoryId], locPrefix: `${g}:`, role: 'spec', hasOpenThreads: value } }, ctx(author()));
+      const res = await Q.findNodes(null, { query: 'xyzzy-no-lexical-match', mode: 'vector', expand: 1, includeTotal: true, filter: { memoryRefs: [memoryId], locPrefix: `${g}:`, role: 'spec', hasOpenThreads: value } }, ctx(author()));
       const seedHit = res.hits.find((h: any) => h.node.id === out[`${g}-seed`]);
       expect(seedHit, `${g}: the seed is a real vector hit`).toBeTruthy();
       expect(seedHit.vector?.similarity, `${g}: non-null vector similarity`).toBeGreaterThan(0.99);

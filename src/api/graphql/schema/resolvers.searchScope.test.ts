@@ -90,9 +90,9 @@ describe('a scope named in the call', () => {
 
   it('filter.memoryIds narrows WITHIN the scope; outside it is empty, still disclosed', async () => {
     const s = await M.createScope({}, { input: { name: 'lens', organizationRef: orgA.urn, memoryRefs: [memA1.urn, memA2.urn] } }, ctx(contributor.id));
-    const within = await Q.findNodes({}, { scope: s.id, filter: { memoryIds: [memA2.urn] } }, ctx(reader.id));
+    const within = await Q.findNodes({}, { scope: s.id, filter: { memoryRefs: [memA2.urn] } }, ctx(reader.id));
     expect(locsOf(within)).toEqual([`${memA2.id}:alpha`]);
-    const outside = await Q.findNodes({}, { scope: s.id, filter: { memoryIds: [memB.urn] } }, ctx(reader.id));
+    const outside = await Q.findNodes({}, { scope: s.id, filter: { memoryRefs: [memB.urn] } }, ctx(reader.id));
     expect(outside.hits).toEqual([]);
     expect(outside.scope.label).toBe('lens');
   });

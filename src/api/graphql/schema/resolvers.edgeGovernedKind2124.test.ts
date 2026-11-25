@@ -69,7 +69,7 @@ const ALL = ['COMMENT_ANCHOR', 'COMMENT_REPLY', 'INCLUDE', null];
 
 describe('Edge.governedKind (#2124)', () => {
   it('edges(filter) reports each stored kind; a normal edge named "includes" is null', async () => {
-    const r = await run(`{ edges(filter: { memoryId: "${memId}" }) { items { loc governedKind } } }`, ctx);
+    const r = await run(`{ edges(filter: { memoryRef: "${memId}" }) { items { loc governedKind } } }`, ctx);
     expect(r.errors).toBeUndefined();
     expect(kindsOf((r.data as any).edges.items)).toEqual(ALL);
     const ordinary = (r.data as any).edges.items.find((i: any) => i.loc === 'src:rel:ordinary');

@@ -73,7 +73,7 @@ describe('#4039 INVALID_ENTRY_CONDITION on the GraphQL writers', () => {
 
   it('6 updateNode (id selector): an invalid condition is refused and the node is unchanged', async () => {
     const node = await existing();
-    const r = await code(M.updateNode({}, { input: { id: node.id, data: { stageOrder: ['s1'], entryCondition: CHAT_VAR } } }, ctx()));
+    const r = await code(M.updateNode({}, { input: { ref: node.id, data: { stageOrder: ['s1'], entryCondition: CHAT_VAR } } }, ctx()));
     expect(r).toMatchObject({ code: 'INVALID_ENTRY_CONDITION', reason: 'SCOPE_NOT_AVAILABLE_AT_START' });
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).data).toEqual({ stageOrder: ['s1'] });
   });
@@ -87,7 +87,7 @@ describe('#4039 INVALID_ENTRY_CONDITION on the GraphQL writers', () => {
 
   it('CONTROL: a valid memory.* condition with now() saves; a chat.* condition on a NON-conversation node is not an entry condition', async () => {
     expect(await code(M.createNode({}, { input: conv({ entryCondition: GOOD }) }, ctx()))).toBeNull();
-    expect(await code(M.createNode({}, { input: { loc: 'notes:x', name: 'x', memoryId: memory.id, data: { entryCondition: CHAT_VAR } } }, ctx()))).toBeNull();
-    expect(await code(M.createNode({}, { input: { loc: 'conversations:welcome:s1', name: 's1', memoryId: memory.id, data: { entryCondition: CHAT_VAR } } }, ctx()))).toBeNull();
+    expect(await code(M.createNode({}, { input: { loc: 'notes:x', name: 'x', memoryRef: memory.id, data: { entryCondition: CHAT_VAR } } }, ctx()))).toBeNull();
+    expect(await code(M.createNode({}, { input: { loc: 'conversations:welcome:s1', name: 's1', memoryRef: memory.id, data: { entryCondition: CHAT_VAR } } }, ctx()))).toBeNull();
   });
 });

@@ -274,7 +274,7 @@ describe('searchReplaceInSpecNodes', () => {
     await expect(call(request([outside.id], { memoryRef: minted.id })))
       .rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_NOT_DRAFT' } });
     const generic = await resolvers.Mutation.searchReplaceInNodes(null, {
-      input: { nodeIds: [spec.id], oldText: 'cat', newText: 'dog', fields: ['content'], dryRun: true },
+      input: { nodeRefs: [spec.id], oldText: 'cat', newText: 'dog', fields: ['content'], dryRun: true },
     }, ctx());
     expect(generic).toMatchObject({ nodesSelected: 1, nodesScanned: 0, nodesSkipped: 1 });
   });

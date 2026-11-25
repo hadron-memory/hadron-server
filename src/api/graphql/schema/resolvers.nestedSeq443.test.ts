@@ -20,7 +20,7 @@ beforeEach(async () => {
 });
 afterEach(() => vi.restoreAllMocks());
 async function create(surface: string, loc: string) {
- if(surface==='graphql') return resolvers.Mutation.createNode(null,{input:{memoryId,loc,name:loc}},ctx());
+ if(surface==='graphql') return resolvers.Mutation.createNode(null,{input:{memoryRef: memoryId,loc,name:loc}},ctx());
  const srv=createTestableMcpServer({userId:adminId,roles:['ADMIN'],clientId:`user:${adminId}`} as AuthContext);
  return srv.callToolText('hadron_create_node',{urn:`hrn:node:seq443:seq443:${loc}`,name:loc});
 }

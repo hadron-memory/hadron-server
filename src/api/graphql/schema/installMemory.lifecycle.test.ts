@@ -97,7 +97,7 @@ describe('#2044 install memory — lazy creation', () => {
     const f = await fixture();
     await expect(M.createNode({}, { input: { loc: 'x', name: 'x' } }, ctxOf(f.admin.id))).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     const mem = await db.memory.create({ data: { id: generateId(), class: 'knowledge', name: 'k', urn: `${orgId}:k`, organizationId: orgId } });
-    await expect(M.createNode({}, { input: { memoryId: mem.id, install: f.install, loc: 'x', name: 'x' } }, ctxOf(f.admin.id)))
+    await expect(M.createNode({}, { input: { memoryRef: mem.id, install: f.install, loc: 'x', name: 'x' } }, ctxOf(f.admin.id)))
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 
@@ -188,7 +188,7 @@ describe('#2044 install memory — URN reclaim (R29) and account erasure', () =>
     expect((await Q.memory({}, { ref: install.id }, ctxOf(f.admin.id)))?.id).toBe(install.id);
     // A stranger finds nothing, and a detached install takes no further write.
     expect(await Q.memory({}, { ref: install.id }, ctxOf(f.stranger.id))).toBeNull();
-    await expect(M.updateNode({}, { input: { memoryId: install.id, loc: 'prompts:lane', name: 'x' } }, ctxOf(f.admin.id))).rejects.toThrow();
+    await expect(M.updateNode({}, { input: { memoryRef: install.id, loc: 'prompts:lane', name: 'x' } }, ctxOf(f.admin.id))).rejects.toThrow();
     await expect(M.deleteMemory({}, { ref: install.id }, ctxOf(f.stranger.id))).rejects.toThrow();
     // Once its App is deleted the manager still finds the detached record but reads no content (R45).
     await M.deleteApp({}, { ref: app.id }, ctxOf(f.admin.id));
@@ -254,11 +254,11 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
       }
     } finally { await server.stop(); }
     // The same addresses return the content to a participant manager.
-    const viaMemory = await M.updateNode({}, { input: { memoryId: node.memoryId, loc: 'prompts:lane', name: 'p1' } }, ctxOf(f.admin.id));
+    const viaMemory = await M.updateNode({}, { input: { memoryRef: node.memoryId, loc: 'prompts:lane', name: 'p1' } }, ctxOf(f.admin.id));
     expect(viaMemory.content).toBe('replacement');
-    const viaId = await M.updateNode({}, { input: { id: node.id, name: 'p2' } }, ctxOf(f.admin.id));
+    const viaId = await M.updateNode({}, { input: { ref: node.id, name: 'p2' } }, ctxOf(f.admin.id));
     expect(viaId.content).toBe('replacement');
-    const viaUrn = await M.updateNode({}, { input: { id: nodeUrn, name: 'p3' } }, ctxOf(f.admin.id));
+    const viaUrn = await M.updateNode({}, { input: { ref: nodeUrn, name: 'p3' } }, ctxOf(f.admin.id));
     expect(viaUrn.content).toBe('replacement');
   });
 
@@ -510,7 +510,7 @@ describe('#2044 install memory — list surfaces', () => {
       expect((await Q.memory({}, { ref }, ctxOf(f.contributor.id)))?.id).toBe(row!.id);
     }
     // And a node read through the enumeration gate finds nothing for the reader.
-    const found = await Q.findNodes({}, { filter: { memoryIds: [row!.id] }, limit: 10 }, ctxOf(reader.id)).catch(() => ({ items: [] }));
+    const found = await Q.findNodes({}, { filter: { memoryRefs: [row!.id] }, limit: 10 }, ctxOf(reader.id)).catch(() => ({ items: [] }));
     expect(found.items ?? found.nodes ?? []).toHaveLength(0);
   });
 
@@ -627,7 +627,7 @@ describe('#2044 install memory — existing-node writes versus revocation', () =
   const update = (f: Awaited<ReturnType<typeof fixture>>) =>
     M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'late' } }, ctxOf(f.admin.id));
   const createByMemoryId = (f: Awaited<ReturnType<typeof fixture>>, memoryId: string) =>
-    M.createNode({}, { input: { memoryId, loc: 'prompts:other', name: 'o', content: 'late' } }, ctxOf(f.admin.id));
+    M.createNode({}, { input: { memoryRef: memoryId, loc: 'prompts:other', name: 'o', content: 'late' } }, ctxOf(f.admin.id));
 
   for (const [label, write] of [['updateNode(install)', (f: any) => update(f)], ['createNode(memoryId)', (f: any, id: string) => createByMemoryId(f, id)]] as const) {
     it(`${label} vs deleteApp: refused, nothing committed`, async () => {

@@ -128,7 +128,7 @@ describe('#3587 P2s — a retirement that lands after the auto-save and before t
       // B: a real retirement through updateNode, which commits while A is paused (A holds no key or row it needs).
       // Bounded: if A already holds specs:l's row at the pause (the check ran early), B waits on A, and this fails
       // fast instead of deadlocking until the test timeout; the finally drains both.
-      const b = M.updateNode({}, { input: { id: spec.id, tags: ['superseded'] } }, ctx).then(() => { bCommitted = true; });
+      const b = M.updateNode({}, { input: { ref: spec.id, tags: ['superseded'] } }, ctx).then(() => { bCommitted = true; });
       await Promise.race([b, new Promise((r) => setTimeout(r, 5_000))]);
       expect(bCommitted, 'the retirement committed while the restore was paused (A held no lock it needs)').toBe(true);
       // Observed before A resumes: a fresh read sees the committed tag.
@@ -305,9 +305,9 @@ describe('#3587 scope — what the rule leaves alone', () => {
 
   it('restoreNodeRevision may still put back a minted spec\'s pre-retirement tags (cor:spc:010:02 stated limit, ruling 0220 Q5)', async () => {
     const spec = await mk('specs:h', mintedFields);
-    await M.updateNode({}, { input: { id: spec.id, content: 'second' } }, ctx);
+    await M.updateNode({}, { input: { ref: spec.id, content: 'second' } }, ctx);
     const first = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: spec.id }, orderBy: { revNo: 'asc' } });
-    await M.updateNode({}, { input: { id: spec.id, tags: ['superseded'] } }, ctx);
+    await M.updateNode({}, { input: { ref: spec.id, tags: ['superseded'] } }, ctx);
     expect((await rowOf('specs:h')).tags).toEqual(['superseded']);
     await M.restoreNodeRevision({}, { nodeRevRef: first.id }, ctx);
     expect((await rowOf('specs:h')).tags).not.toContain('superseded');

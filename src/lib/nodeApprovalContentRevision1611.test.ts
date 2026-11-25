@@ -28,7 +28,7 @@ const node = (loc: string, extra: Record<string, unknown> = {}) => db.node.creat
 const approve = (nodeRef: string) => resolvers.Mutation.approveNode(null, { nodeRef }, as());
 const verify = (nodeRef: string) => resolvers.Query.verifyNode(null, { nodeRef }, as());
 const update = (id: string, input: Record<string, unknown>) =>
-  resolvers.Mutation.updateNode(null, { input: { id, ...input } }, as());
+  resolvers.Mutation.updateNode(null, { input: { ref: id, ...input } }, as());
 const statusOf = async (id: string) => {
   const row = await db.node.findUniqueOrThrow({ where: { id } });
   return resolvers.Node.approvalStatus(row, {}, as());
@@ -196,11 +196,11 @@ describe('searchReplaceInNodes is a content writer (cor:dmo:120:04)', () => {
     const n = await node('a:1', { content: 'alpha beta' });
     await approve(n.id);
     await resolvers.Mutation.searchReplaceInNodes(null, {
-      input: { nodeIds: [n.id], fields: ['content'], oldText: 'nomatch', newText: 'x', dryRun: false },
+      input: { nodeRefs: [n.id], fields: ['content'], oldText: 'nomatch', newText: 'x', dryRun: false },
     }, as());
     expect((await statusOf(n.id)).state).toBe('APPROVED');
     await resolvers.Mutation.searchReplaceInNodes(null, {
-      input: { nodeIds: [n.id], fields: ['content'], oldText: 'beta', newText: 'gamma', dryRun: false },
+      input: { nodeRefs: [n.id], fields: ['content'], oldText: 'beta', newText: 'gamma', dryRun: false },
     }, as());
     expect((await rowOf(n.id)).content).toBe('alpha gamma');
     expect((await statusOf(n.id)).state).toBe('SUPERSEDED');

@@ -83,7 +83,7 @@ describe('#5109 Node.specLint', () => {
 
   it('blind P3-4: a list read (findNodes) hands specLint the same gate — an unreadable memory yields no nodes, a readable one findings', async () => {
     await node('cor:agt:100:03', '# Rule Spec: A\n\n## The Rule\n\nChecks.\n', { role: 'spec.rule' });
-    const q = `query($m: ID!) { findNodes(mode: keyword, query: "Checks", filter: { memoryIds: [$m] }) { hits { node { loc specLint { rule } } } } }`;
+    const q = `query($m: ID!) { findNodes(mode: keyword, query: "Checks", filter: { memoryRefs: [$m] }) { hits { node { loc specLint { rule } } } } }`;
     const ok = await execute(q, { m: memoryId }, readerId);
     expect(ok.errors, JSON.stringify(ok.errors)).toBeUndefined();
     expect((ok.data as any).findNodes.hits[0].node).toMatchObject({ loc: 'cor:agt:100:03', specLint: [{ rule: 'RULE_WHY_MISSING' }] });

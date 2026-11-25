@@ -1,5 +1,5 @@
 /**
- * #2343 — `apps(filter: { agentId })`: the Apps that install an Agent.
+ * #2343 — `apps(filter: { agentRef: agentId })`: the Apps that install an Agent.
  *
  * Matches the AppAgent join (there is no primary-agent column on the server),
  * AND-combines with `ownedByMe`, and resolves the value through the Agent read
@@ -178,7 +178,7 @@ describe('Query.apps(filter.agentId)', () => {
   });
 });
 
-describe('Query.apps(filter: { ownedByMe, agentId })', () => {
+describe('Query.apps(filter: { ownedByMe, agentRef: agentId })', () => {
   let mineWithG: string;
   let mineWithH: string;
   let othersWithG: string;

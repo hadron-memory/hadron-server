@@ -234,7 +234,7 @@ describe('createNode — create-only + abstract', () => {
       {},
       {
         input: {
-          memoryId: fx.memory.id,
+          memoryRef: fx.memory.id,
           loc: 'co1',
           name: 'co1',
           abstract: SHORT_ABSTRACT,
@@ -258,7 +258,7 @@ describe('createNode — create-only + abstract', () => {
         {},
         {
           input: {
-            memoryId: fx.memory.id,
+            memoryRef: fx.memory.id,
             loc: 'co2',
             name: 'co2',
             abstract: 'Should not land.',
@@ -628,7 +628,7 @@ describe('searchReplaceInNodes — abstract-cap refusal headroom (#1117)', () =>
     return resolvers.Mutation.searchReplaceInNodes(
       {},
       {
-        input: { oldText, newText, nodeIds, fields: ['abstract'], dryRun: false },
+        input: { oldText, newText, nodeRefs: nodeIds, fields: ['abstract'], dryRun: false },
       },
       fx.ctx,
     );

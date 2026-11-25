@@ -80,7 +80,7 @@ describe('#3101 importNode into a live install memory', () => {
 
   it('admits the App manager on the url import, fetching once', async () => {
     const f = await fixture();
-    const result = await resolvers.Mutation.importNode({}, { input: { memoryId: f.install.id, loc: 'clips:web', url: 'https://example.com/a' } as never }, context(f.manager.id));
+    const result = await resolvers.Mutation.importNode({}, { input: { memoryRef: f.install.id, loc: 'clips:web', url: 'https://example.com/a' } as never }, context(f.manager.id));
     expect(result.status).toBe('STORED');
     expect(fetchWebPage).toHaveBeenCalledTimes(1);
   });
@@ -88,7 +88,7 @@ describe('#3101 importNode into a live install memory', () => {
   it.each(['member', 'contributor', 'outsider'] as const)('refuses %s before any fetch, writing nothing', async who => {
     const f = await fixture();
     const user = f[who];
-    const error: any = await resolvers.Mutation.importNode({}, { input: { memoryId: f.install.id, loc: 'clips:denied', url: 'https://example.com/x' } as never }, context(user.id)).catch((e: unknown) => e);
+    const error: any = await resolvers.Mutation.importNode({}, { input: { memoryRef: f.install.id, loc: 'clips:denied', url: 'https://example.com/x' } as never }, context(user.id)).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(Error);
     expect(error.extensions?.code).toBe('FORBIDDEN');
     expect(fetchWebPage).not.toHaveBeenCalled();

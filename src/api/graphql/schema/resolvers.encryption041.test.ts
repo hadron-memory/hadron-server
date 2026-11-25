@@ -260,7 +260,7 @@ describe('encryptMemory — locked conversion (#1346)', () => {
     }) as unknown as typeof db.memory.findUniqueOrThrow);
     try {
       const writer = resolvers.Mutation.updateNode(
-        {}, { input: { id: nodeId, content: 'late plaintext update' } } as never, ownerCtx(),
+        {}, { input: { ref: nodeId, content: 'late plaintext update' } } as never, ownerCtx(),
       );
       await atOldFlag;
       await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
