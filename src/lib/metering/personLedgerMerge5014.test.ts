@@ -130,4 +130,16 @@ describe('the global re-point (the hourly job)', () => {
     }
     expect(settled.filter((o) => 'userId' in (o as object))).toEqual([]);
   });
+  it('a move cannot collide: the only unique key is (source_type, source_id), so the survivor holding its own settlement does not abort it', async () => {
+    const uniques = await db.$queryRaw<{ indexdef: string }[]>`
+      SELECT indexdef FROM pg_indexes WHERE tablename = 'credit_ledger_entries' AND indexdef ILIKE '%UNIQUE%' AND indexname <> 'credit_ledger_entries_pkey'`;
+    expect(uniques.map((x) => x.indexdef.replace(/^.*\(/, '('))).toEqual(['(source_type, source_id)']);
+    const g1 = await entry(s, { createdAt: new Date(Date.now() - 3 * DAY), expiresAt: new Date(Date.now() - DAY) });
+    const g2 = await entry(t, { createdAt: new Date(Date.now() - 3 * DAY), expiresAt: new Date(Date.now() - DAY) });
+    await mergeUsers(db, { sourceUserId: s, targetUserId: t, actorUserId: admin });
+    await entry(t, { kind: 'adjustment', amountMicroCents: -100n, sourceType: 'grant-expiry', sourceId: g2.id });
+    await entry(s, { kind: 'adjustment', amountMicroCents: -100n, sourceType: 'grant-expiry', sourceId: g1.id });
+    expect(await repointMergedLedgerOwners(db)).toBe(1);
+    expect(await db.creditLedgerEntry.count({ where: { ownerUserId: t, sourceType: 'grant-expiry' } })).toBe(2);
+  });
 });
