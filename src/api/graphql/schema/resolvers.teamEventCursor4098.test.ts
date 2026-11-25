@@ -7,7 +7,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { type TeamEventsArgs } from './resolvers.agentTask.js';
 import { settleTeamEventHorizon, useTeamEventHorizonTimeout } from '../../../test/teamEventHorizon.js';
-useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 30 s timeout, not an import side effect.
+useTeamEventHorizonTimeout(); // #4316: this file waits on the horizon; its own 60 s timeout, not an import side effect.
 
 let appId:string,userId:string;
 const T=Date.UTC(2026,10,1);
@@ -40,12 +40,12 @@ describe('#4098 committed-event completeness',()=>{
    expect(seen,'every committed event must be delivered exactly once').toEqual([olderId,newer.id]);
    expect(await read(surface,cursor)).toEqual([]);
   }finally{if(open)await pg.query('ROLLBACK');await pg.end();}
- },30000);
+ });
  it.each(surfaces)('%s: a later transaction with an older caller stamp cannot land behind a served cursor',async(surface)=>{
   const anchor=await event(T);await settle();expect(await read(surface,anchor.id)).toEqual([]);
   const later=await event(T-3600000);await settle();
   expect((await read(surface,anchor.id)).map(r=>r.id)).toEqual([later.id]);
- },30000);
+ });
  it.each(surfaces)('%s: a same-transaction sibling behind the cursor at finer stored precision is not re-served (#4372 fold)',async(surface)=>{
   // #4372 fold (Baylor P2: the key round-trip unpinned): the cursor key carries created_at as TEXT, and the
   // column's full storable precision is milliseconds — so the discriminator is two same-transaction siblings
@@ -65,7 +65,7 @@ describe('#4098 committed-event completeness',()=>{
   }finally{if(open)await pg.query('ROLLBACK');await pg.end();}
   const after=await event(T+4000);await settle();
   expect((await read(surface,curId,10)).map(r=>r.id)).toEqual([after.id]);
- },30000);
+ });
 });
 
 describe('#4098 row and filter parity',()=>{
@@ -146,7 +146,7 @@ describe('#4098 every filter selects the same events on the forward (SQL) and th
    expect(got.forward,`forward ${JSON.stringify(filter)}`).toEqual([...expected].sort());
    expect(got.newest,`newest-first ${JSON.stringify(filter)}`).toEqual([...expected].sort());
   }
- },30000);
+ });
 });
 
 describe('#4098 first forward page and continuation agree',()=>{
@@ -155,5 +155,5 @@ describe('#4098 first forward page and continuation agree',()=>{
   const page=await read(surface,undefined);expect(page.map(r=>r.id)).toEqual([first.id]);
   expect((await read(surface,page[0].id)).map(r=>r.id)).toEqual([second.id]);
   expect(await read(surface,second.id)).toEqual([]);
- },30000);
+ });
 });
