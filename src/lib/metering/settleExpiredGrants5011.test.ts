@@ -218,11 +218,38 @@ describe('#5011 settleExpiredGrants', () => {
     expect(await unsettledRemainders(db, { organizationId: orgId }, d('12-31'))).toBe(0n);
   });
 
-  it('S7: a soft-deleted debit is ignored by the replay, as by the balance', async () => {
+  it('S7: a soft-deleted debit is ignored by the replay, as by the balance (a legacy row the #5010 guard would refuse today)', async () => {
+    // Since #5010 (cor:dmo:170:08) the database refuses a soft-deleted ledger entry (CHECK chk_credit_ledger_not_soft_deleted),
+    // so no live path can write one. The filter stays because creditBalance keeps it for a database where that migration was
+    // refused (HDPRF) and the old schema is still served; this pin proves the replay agrees with it. The guard is bypassed
+    // EXPLICITLY: the CHECK is dropped inside one transaction (DDL is transactional) that is always rolled back, so no other
+    // test sees the dropped constraint.
     const g = await grant(100, d('01-01'), d('02-01'));
-    await debit(30, d('01-10'), d('01-11'));
-    await settleExpiredGrants(db, { organizationId: orgId }, { now: d('02-02') });
-    expect((await settlements()).map((s) => [s.sourceId, s.amountMicroCents])).toEqual([[g.id, -100n]]);
+    const rollback = new Error('rollback S7');
+    let seen: [string | null, bigint][] = [];
+    await expect(
+      db.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('ALTER TABLE credit_ledger_entries DROP CONSTRAINT chk_credit_ledger_not_soft_deleted');
+        await tx.creditLedgerEntry.create({
+          data: {
+            id: generateId(),
+            organizationId: orgId,
+            kind: 'debit',
+            amountMicroCents: -30n,
+            sourceType: 'usage-event',
+            sourceId: generateId(),
+            createdAt: d('01-10'),
+            deletedAt: d('01-11'),
+          },
+        });
+        await settleExpiredGrants(tx as unknown as typeof db, { organizationId: orgId }, { now: d('02-02') });
+        const rows = await tx.creditLedgerEntry.findMany({ where: { sourceType: 'grant-expiry' } });
+        seen = rows.map((r) => [r.sourceId, r.amountMicroCents]);
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
+    expect(seen).toEqual([[g.id, -100n]]);
+    expect(await settlements()).toHaveLength(0);
   });
 
   it('another organization\'s entries take no part', async () => {
