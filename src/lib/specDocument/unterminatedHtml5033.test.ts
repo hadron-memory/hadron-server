@@ -318,6 +318,15 @@ describe('escapeUnterminatedHtml', () => {
     expect(out).not.toMatch(/<a /);
     expect(out.length).toBe(body.length + 3 * 40000);
   }, 60_000);
+  it('stays linear on one long line of many tags, end tags and comments (LOCAL delta P2-1: line-start tests were O(line))', () => {
+    for (const unit of ['<b>x', '</b>', '<!-- c -->', '<?p?>', '<![CDATA[c]]>']) {
+      const body = unit.repeat(120_000 / unit.length * 4);
+      const t0 = Date.now();
+      expect(escapeUnterminatedHtml(body)).toBe(body);
+      // A quadratic scan takes tens of seconds here.
+      expect(Date.now() - t0, unit).toBeLessThan(3000);
+    }
+  }, 120_000);
   it('stays linear on thousands of unmatched backtick runs', () => {
     const body = '` ``'.repeat(30000) + ' <pre x=';
     const t0 = Date.now();
