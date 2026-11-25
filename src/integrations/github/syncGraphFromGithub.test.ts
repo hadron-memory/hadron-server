@@ -3,7 +3,7 @@ import { dirname, join } from 'path';
 import { mkdirSync, rmSync, writeFileSync } from 'fs';
 import { stringify } from 'yaml';
 import { db } from '../db/client.js';
-import { cleanDb, createDbOrgAndGraph, makeTmpDir, writeFrontmatterNode, writeNodeFiles } from '../../test/helpers.js';
+import { cleanDb, createMintMarker, createDbOrgAndGraph, makeTmpDir, writeFrontmatterNode, writeNodeFiles } from '../../test/helpers.js';
 import { splitGitArgv } from '../../test/gitArgv.js';
 import { GIT_TRANSPORT_GUARD } from './execGit.js';
 import { syncGraphFromGithub, updateNodeFromGitSync, GitSyncTargetMovedError, describeSyncOutcome, type MemoryWithOrg } from './syncGraphFromGithub.js';
@@ -2910,13 +2910,7 @@ describe('#1468 — git sync pruning and minted specs', () => {
    */
   const mintCorpus = () => {
     const mintedAt = new Date();
-    return db.node.create({
-      data: {
-        id: generateId(), memoryId: dbGraphId, loc: 'zz:mint-marker', name: 'zz:mint-marker',
-        content: 'minted elsewhere; tombstoned', role: null, tags: [],
-        mintedAt, mintedByInfo: 'test', deletedAt: mintedAt,
-      },
-    });
+    return createMintMarker(db, dbGraphId, { mintedAt });
   };
 
   it('keeps a minted spec whose file is gone, warns, and still prunes the rest', async () => {

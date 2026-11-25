@@ -14511,7 +14511,7 @@ export const typeDefs = `#graphql
       is per node, and every new node starts unminted, with draft rights, in
       any memory.
       """
-      draftCorpus: Boolean
+      draftCorpus: Boolean @deprecated(reason: "Accepted and ignored since #1591: a memory's draft or minted state is derived from its nodes.")
     ): Memory!
 
     """
