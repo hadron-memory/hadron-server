@@ -38,16 +38,18 @@ export async function memoryOwnerInTx(tx: Pick<Prisma.TransactionClient, 'memory
  * Refuse when the owner of `memoryId` has no room for `amount` more live nodes. The helper's advisory key is the LAST lock
  * a door takes (A7a; gate ruling 5): call this after the door's subtree, loc, memory and row locks, right before the write.
  * After it a door only writes rows it already holds and inserts at locs whose advisory key it holds.
+ * A memory always has exactly one owner (`chk_memory_owner_xor`), so the no-owner return is only for a row that is gone.
  */
 export async function requireNodeHeadroom(
   tx: Prisma.TransactionClient,
   { memoryId, amount = 1n, caller, alreadyWritten }: {
     memoryId: string; amount?: bigint; caller: { userId: string } | null;
-    /** See `requireOwnerHeadroom`: only the GitHub sync, which judges its net at the end of its one transaction. */
+    /** See `requireOwnerHeadroom`: the part of `amount` this transaction already wrote. */
     alreadyWritten?: bigint;
   },
 ): Promise<void> {
-  if (amount <= 0n) return;
+  if (amount < 0n) throw new Error('requireNodeHeadroom: amount must not be negative');
+  if (amount === 0n) return;
   const owner = await memoryOwnerInTx(tx, memoryId);
   if (!owner) return;
   await requireOwnerHeadroom(tx, { owner, key: 'nodes', amount, caller, alreadyWritten });

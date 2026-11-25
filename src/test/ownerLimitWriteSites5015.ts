@@ -3,7 +3,7 @@
  * table. Every node insert (`.node.create|createMany|createManyAndReturn|upsert(`) and every `writeNodeCore(` call under
  * `src`, keyed by file and ENCLOSING FUNCTION (never by line, so drift does not fail the guard), parsed with the
  * TypeScript compiler so a comment or a string that names a writer is not a site. Fixtures are excluded by place:
- * `*.test.ts`, `src/test/**`, `src/lib/grants/*Fixtures*.ts`.
+ * `*.test.ts`, `src/test/**`, `src/lib/grants/*Fixtures*.ts`. Not seen: a raw SQL insert, a destructured `node` delegate.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';

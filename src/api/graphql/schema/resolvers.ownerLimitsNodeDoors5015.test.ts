@@ -310,6 +310,29 @@ describe('#5015 mergeMemories judges each batch once, at an exact fit', () => {
     expect([await inMemory(mO), await inMemory(mU1)]).toEqual([2, 2]);
   });
 
+  it('the batch counts the carried thread: room for the node alone, after the preflight passed, refuses', async () => {
+    const x = await node(mO, 'x');
+    await M.createComment({}, { targetRef: x.id, body: 'carried with the merge' }, { db, userId: u, roles: ['READER'] } as Context);
+    const mK = (await db.memory.create({
+      data: { id: generateId(), name: 'k', urn: 'nd5015-k:knowledge', class: 'knowledge', ownerUserId: u, vectorIndexEnabled: false },
+    })).id;
+    await capWithRoom({ userId: u }, 2n);
+    const roomForOne = (await liveCount({ userId: u })) + 1n;
+    const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    let calls = 0;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...a: unknown[]) => {
+      const out = await real(...a);
+      calls += 1;
+      if (calls === 1) await db.ownerLimit.updateMany({ where: { ownerUserId: u, key: 'nodes' }, data: { limitValue: roomForOne } });
+      return out;
+    }) as never);
+    const outcome = await merge(mK).then(() => null, (e: unknown) => e);
+    spy.mockRestore();
+    expect(calls).toBe(1);
+    expect(outcome).toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: x.id } })).memoryId).toBe(mO);
+  });
+
   it('refuses before the first batch commits anything (only the preflight can: each batch alone would fit at first)', async () => {
     await node(mO, 'x');
     await node(mO, 'y');

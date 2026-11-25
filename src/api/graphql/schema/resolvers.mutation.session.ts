@@ -647,12 +647,10 @@ async function writeRevisionRow(
   // count is read after it is granted, on READ COMMITTED's fresh statement snapshot, so concurrent saves each see
   // the previous save's row and take distinct slots.
   await lockPathForCreateUnder(tx, sysMemId, 'revisions');
-  // #5015 — whether the parent ensure below inserts a row (any row at its loc, a tombstone included, makes it a no-op).
-  const parentAdded = ownerLimit.mode === 'refuse'
-    && (await tx.node.findFirst({ where: { memoryId: sysMemId, loc: 'revisions' }, select: { id: true } })) == null;
   // The parent ensure must not abort the transaction (#3587 D5): inside one, a unique violation aborts it whatever
   // is caught, so this is ON CONFLICT DO NOTHING, which waits for a competing insert and then does nothing.
-  await tx.node.createMany({
+  // #5015 — its count says whether it inserted one (a row at the loc, a tombstone included, makes it a no-op).
+  const { count: parentAdded } = await tx.node.createMany({
     data: [{ id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' }],
     skipDuplicates: true,
   });
@@ -677,7 +675,10 @@ async function writeRevisionRow(
     // The memory row FOR SHARE pins its owner against a concurrent transfer (finding `node-write-owner-transfer-race`);
     // the owner-limit key is then the save's last lock (gate ruling 5), and a refusal rolls back the parent ensure.
     await tx.$queryRaw`SELECT id FROM memories WHERE id = ${sysMemId} FOR SHARE`;
-    await requireNodeHeadroom(tx, { memoryId: sysMemId, amount: parentAdded ? 2n : 1n, caller: ownerLimit.caller });
+    // The parent is already written, so the owner's count already holds it.
+    await requireNodeHeadroom(tx, {
+      memoryId: sysMemId, amount: BigInt(1 + parentAdded), alreadyWritten: BigInt(parentAdded), caller: ownerLimit.caller,
+    });
   }
   await tx.node.create({
     data: {

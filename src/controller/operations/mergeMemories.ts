@@ -671,8 +671,10 @@ async function runMerge(
             const liveThreads = threadIds.length
               ? await tx.node.count({ where: { id: { in: threadIds }, deletedAt: null } })
               : 0;
+            // The rows were re-homed above, so the owner's count already holds them; the threads have not moved yet.
             await requireNodeHeadroom(tx, {
-              memoryId: targetMemoryId, amount: BigInt(rows.length + liveThreads), caller: args.ownerLimitCaller,
+              memoryId: targetMemoryId, amount: BigInt(rows.length + liveThreads), alreadyWritten: BigInt(rows.length),
+              caller: args.ownerLimitCaller,
             });
           };
           // #1664 — the batch's threads move in the same transaction as their targets.

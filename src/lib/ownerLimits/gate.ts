@@ -50,9 +50,10 @@ export async function requireOwnerHeadroom(
   { owner, key, amount = 1n, caller, alreadyWritten = 0n }: {
     owner: OwnerRef; key: OwnerLimitKey; amount?: bigint; caller: { userId: string } | null;
     /**
-     * #5015: how many of `amount` this transaction has ALREADY written, and so are in the count. Only a door that cannot know
-     * its amount before it writes passes it (the GitHub sync, whose net is known once its loop and cleanup ran): it judges
-     * once, at the end of its one transaction, and a refusal rolls back everything. Never more than `amount`.
+     * #5015: how many of `amount` this transaction has ALREADY written, and so are in the count. Every door that judges
+     * after a counted write must pass it, or those rows count twice: the GitHub sync (its net is known only at the end), a
+     * merge batch (its rows are re-homed first) and the first createRevision (its parent). A refusal rolls the
+     * transaction back. Never more than `amount`.
      */
     alreadyWritten?: bigint;
   },
