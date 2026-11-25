@@ -173,6 +173,26 @@ describe('#4779 P3-4: hybrid pages are slices of one fused order (no repeat, no 
     expect(res.degraded ?? '').toContain('stopped_early');
   }, 60_000);
 
+  it('#4994: one fused ranking hands every lookup the same memo; a re-ranking gets a new one', async () => {
+    const endless = Array.from({ length: 5000 }, (_, i) => `nohit-${i}`);
+    keywordLeg(['C', ...endless]);
+    const spy = vi.spyOn(provider, 'vectorRanks').mockResolvedValue({ ranks: new Map(), stoppedEarly: false });
+    await findNodes({ query: 'q', mode: 'hybrid', limit: 2 });
+    expect(spy.mock.calls.length).toBeGreaterThan(1);
+    const memos = new Set(spy.mock.calls.map((c) => c[0].memo));
+    expect(memos.size).toBe(1);
+    expect([...memos][0]).toBeDefined();
+  }, 60_000);
+
+  it('#4994: ranks a stopped lookup DID return order the page, which is still flagged stopped_early', async () => {
+    keywordLeg(KW);
+    // D has a rank inside the lookup's depth; C is past it (no rank), so the lookup is incomplete.
+    vi.spyOn(provider, 'vectorRanks').mockResolvedValue({ ranks: new Map([[id.D!, 3]]), stoppedEarly: true });
+    const res = await findNodes({ query: 'q', mode: 'hybrid', limit: 2 });
+    expect(names(res.hits)).toEqual(['D', 'C']); // D = 1/62 + 1/63 leads; without its rank the page is C, A
+    expect(res.degraded ?? '').toContain('stopped_early');
+  }, 60_000);
+
   it('a keyword leg that is never exhausted is widened to its ceiling (2000), then the page says stopped_early', async () => {
     // An endless keyword ranking of non-nodes: every vector hit is vector-only, so its keyword term stays unknown, and
     // A (1/61) over B (1/62) is certain only once 1/61 - 1/62 > 1/(61 + depth), a depth past 3700: past the ceiling.

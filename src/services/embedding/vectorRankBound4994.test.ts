@@ -1,6 +1,7 @@
 /**
- * #4994 — the cost of the hybrid vector-rank lookup (`vectorRanksOf`) is bounded: it no longer ranks the whole eligible
- * scope on every call. It reads the page's own vector ranking to a fixed depth (1000 nodes). A node found there has its
+ * #4994 — the cost of the hybrid vector-rank lookup (`vectorRanksOf`) is bounded: a LARGE scope is no longer ranked
+ * whole on every call (a small one, at most `vectorSmallScopeRows()`, still is). The lookup reads the page's own vector
+ * ranking to a fixed depth (1000 nodes). A node found there has its
  * rank; a node that has an eligible vector but lies past the depth is only bounded, so the lookup reports it stopped early
  * (cor:api:090:04: never a certified page); a node with no eligible vector is still absent, a term of exactly zero.
  *
@@ -43,6 +44,7 @@ function recorder(fail?: (sql: string) => unknown) {
           const vv = Reflect.get(tt, pp);
           if (pp !== '$queryRaw') return typeof vv === 'function' ? vv.bind(tt) : vv;
           return (s: TemplateStringsArray, ...a: unknown[]) => {
+            if (!Array.isArray(s)) return (tt as any).$queryRaw(s, ...a); // the version probe passes a Prisma.Sql
             const sql = s.join('?');
             seen.push(sql);
             const err = fail?.(sql);
@@ -108,37 +110,77 @@ describe('#4994: the rank lookup is bounded', () => {
     const res = await provider.vectorRanks({ ...opts(), db: r.handle, nodeIds: [at(1), at(40)] });
     expect(Object.fromEntries(res.ranks)).toEqual({ [at(1)]: 1, [at(40)]: 40 });
     expect(res.stoppedEarly).toBe(false);
+    expect(r.seen.some((s) => s.includes('count(*)::int AS n'))).toBe(true); // the large-scope path really ran
     expect(r.seen.filter((s) => /ROW_NUMBER|MATERIALIZED/.test(s))).toEqual([]);
   }, 60_000);
 
-  for (const [name, smallScope] of [['walked (large scope)', 5], ['exact (small scope)', null]] as const) {
-    it(`${name}: a node past the depth is only bounded: no rank, stoppedEarly, and the ranks inside the depth stand`, async () => {
-      if (smallScope !== null) setVectorSmallScopeRowsForTests(smallScope);
-      const res = await lookup([at(3), at(1006)]);
-      expect(Object.fromEntries(res.ranks)).toEqual({ [at(3)]: 3 });
-      expect(res.stoppedEarly).toBe(true);
-    }, 60_000);
+  it('a node past the depth is only bounded: no rank, stoppedEarly, and the ranks inside the depth stand', async () => {
+    setVectorSmallScopeRowsForTests(5);
+    const res = await lookup([at(3), at(1006)]);
+    expect(Object.fromEntries(res.ranks)).toEqual({ [at(3)]: 3 });
+    expect(res.stoppedEarly).toBe(true);
+  }, 60_000);
 
-    it(`${name}: equidistant nodes across the depth boundary rank by node id, as the page does`, async () => {
-      if (smallScope !== null) setVectorSmallScopeRowsForTests(smallScope);
-      const hits = await page();
-      expect(hits.map((h) => h.nodeId).slice(TIED_FROM - 1)).toEqual([at(998), at(999), at(1000)]);
-      const inside = await lookup([at(998), at(999), at(1000)]);
-      expect(Object.fromEntries(inside.ranks)).toEqual({ [at(998)]: 998, [at(999)]: 999, [at(1000)]: 1000 });
-      expect(inside.stoppedEarly).toBe(false);
-      // Same distance, larger id: rank 1001, one past the depth.
-      const past = await lookup([at(1001)]);
-      expect(past.ranks.size).toBe(0);
-      expect(past.stoppedEarly).toBe(true);
-    }, 60_000);
+  it('equidistant nodes across the depth boundary rank by node id, as the page does', async () => {
+    setVectorSmallScopeRowsForTests(5);
+    const hits = await page();
+    expect(hits.map((h) => h.nodeId).slice(TIED_FROM - 1)).toEqual([at(998), at(999), at(1000)]);
+    const inside = await lookup([at(998), at(999), at(1000)]);
+    expect(Object.fromEntries(inside.ranks)).toEqual({ [at(998)]: 998, [at(999)]: 999, [at(1000)]: 1000 });
+    expect(inside.stoppedEarly).toBe(false);
+    // Same distance, larger id: rank 1001, one past the depth.
+    const past = await lookup([at(1001)]);
+    expect(past.ranks.size).toBe(0);
+    expect(past.stoppedEarly).toBe(true);
+  }, 60_000);
 
-    it(`${name}: a node with NO eligible vector is absent, and that is not an early stop even in a scope past the depth`, async () => {
+  it('a node with NO eligible vector is absent, and that is not an early stop even in a scope past the depth', async () => {
+    setVectorSmallScopeRowsForTests(5);
+    const res = await lookup([at(2), NO_VECTOR, 'r4994-not-a-node']);
+    expect(Object.fromEntries(res.ranks)).toEqual({ [at(2)]: 2 });
+    expect(res.stoppedEarly).toBe(false);
+  }, 60_000);
+
+  it('a SMALL scope keeps the exact whole ranking: no depth, every rank exact however deep', async () => {
+    const res = await lookup([at(3), at(1001), at(1006), NO_VECTOR]);
+    expect(Object.fromEntries(res.ranks)).toEqual({ [at(3)]: 3, [at(1001)]: 1001, [at(1006)]: 1006 });
+    expect(res.stoppedEarly).toBe(false);
+  }, 60_000);
+
+  it('the size count runs under the budget too: a timeout there is stoppedEarly with no ranks', async () => {
+    const r = recorder((s) => (s.includes('count(*)::int AS n') ? Object.assign(new Error('canceling statement due to statement timeout'), { meta: { code: '57014' } }) : undefined));
+    expect(await provider.vectorRanks({ ...opts(), db: r.handle, nodeIds: [at(1)] })).toEqual({ ranks: new Map(), stoppedEarly: true });
+  }, 60_000);
+
+  for (const [name, smallScope] of [['large', 5], ['small', null]] as const) {
+    it(`${name} scope: the lookups of one ranking share one computed ranking, and answer as unshared ones do`, async () => {
       if (smallScope !== null) setVectorSmallScopeRowsForTests(smallScope);
-      const res = await lookup([at(2), NO_VECTOR, 'r4994-not-a-node']);
-      expect(Object.fromEntries(res.ranks)).toEqual({ [at(2)]: 2 });
-      expect(res.stoppedEarly).toBe(false);
+      const r = recorder();
+      const memo = {};
+      const ask = (nodeIds: string[]) => provider.vectorRanks({ ...opts(), db: r.handle, nodeIds, memo });
+      const first = await ask([at(1), at(2)]);
+      const statements = r.seen.length;
+      expect(statements).toBeGreaterThan(0);
+      const second = await ask([at(30), at(998)]);
+      expect(r.seen.length).toBe(statements); // nothing more to run: every id is in the computed ranking
+      expect(Object.fromEntries(first.ranks)).toEqual({ [at(1)]: 1, [at(2)]: 2 });
+      expect(Object.fromEntries(second.ranks)).toEqual({ [at(30)]: 30, [at(998)]: 998 });
+      const third = await ask([at(3), NO_VECTOR]);
+      expect(Object.fromEntries(third.ranks)).toEqual({ [at(3)]: 3 });
+      expect(third.stoppedEarly).toBe(false);
+      expect(r.seen.length - statements).toBe(smallScope === null ? 0 : 1); // the large scope probes the missing node only
     }, 60_000);
   }
+
+  it('a cut ranking is not kept: the next lookup computes it', async () => {
+    setVectorSmallScopeRowsForTests(5);
+    const memo = {};
+    const r = recorder((s) => (s.includes('count(*)::int AS n') ? Object.assign(new Error('canceling statement due to statement timeout'), { meta: { code: '57014' } }) : undefined));
+    expect((await provider.vectorRanks({ ...opts(), db: r.handle, nodeIds: [at(1)], memo })).stoppedEarly).toBe(true);
+    const after = await provider.vectorRanks({ ...opts(), nodeIds: [at(1)], memo });
+    expect(Object.fromEntries(after.ranks)).toEqual({ [at(1)]: 1 });
+    expect(after.stoppedEarly).toBe(false);
+  }, 60_000);
 
   it('a node the caller excluded, or the filter does not admit, is not "past the depth": it is absent', async () => {
     setVectorSmallScopeRowsForTests(5);
@@ -173,7 +215,9 @@ describe('#4994: parity with vectorSearchNodes across scopes, filters and exclus
     ['COMMENTS', { contentScope: 'COMMENTS' }],
     ['ALL + filter + exclusions', { contentScope: 'ALL', filter: { nodeTypes: ['comment', 'info'] } }],
   ] as const) {
-    it(`${name}: every looked-up rank is the node's position in the search`, async () => {
+    for (const [branch, smallScope] of [['exact', null], ['walked', 1]] as const)
+    it(`${name}, ${branch}: every looked-up rank is the node's position in the search`, async () => {
+      if (smallScope !== null) setVectorSmallScopeRowsForTests(smallScope);
       const base = { ...(extra as Partial<VectorSearchOpts>), memoryIds: [comments], ...(name.includes('exclusions') ? { excludeNodeIds: [commentIds[3]!] } : {}) };
       const hits = await page(base, 100);
       const all = (await db.node.findMany({ where: { memoryId: comments }, select: { id: true } })).map((n) => n.id);
