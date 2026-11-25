@@ -5135,6 +5135,12 @@ model AuthCode {
   /// #1897: the recorded SignIn this code descends from (null = the approving session has no SignIn row, which is
   /// every ordinary sign-in, hrn:node:hadronmemory.com:specs:cor:aut:030:03; never inferred). Immutable, same owner as `userId`.
   signInId      String?   @map("sign_in_id")
+  /// #5125: set when the code is shown on the code page (hrn:node:hadronmemory.com:specs:cor:aut:030:01); null for a
+  /// code delivered by redirect. The code reads `<handle>.<secret>` and `codeHash` covers all of it; the handle alone is
+  /// not a secret, it is what a wrong entry is counted against.
+  entryHandle   String?   @unique @map("entry_handle")
+  /// Wrong entries against `entryHandle`. The fifth also sets `redeemedAt`, so the code is dead for every reader.
+  entryFailures Int       @default(0) @map("entry_failures")
 
   user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   client OAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)

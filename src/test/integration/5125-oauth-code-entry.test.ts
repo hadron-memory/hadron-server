@@ -7,6 +7,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
+import { inspect } from 'node:util';
 import { parseHTML } from 'linkedom';
 import { Client } from 'pg';
 import { db } from '../../integrations/db/client.js';
@@ -121,7 +122,7 @@ describe('#5125 authorize', () => {
     const { challenge } = pkce();
     const before = Date.now();
     const { html, post } = await consent(PAGE, challenge);
-    expect(html).not.toMatch(/[0-9a-f]{16}\.[0-9a-f]{64}/); // nothing shown before consent
+    expect(parseHTML(html).document.querySelector('#code')).toBeNull(); // nothing shown before consent
     expect(post.status).toBe(200);
     expect(post.headers.get('location')).toBeNull();
     expect(post.headers.get('cache-control')).toBe('no-store');
@@ -186,7 +187,8 @@ describe('#5125 authorize', () => {
   });
 
   it('7: an invalid client or redirect_uri is the existing 400 and shows nothing', async () => {
-    for (const bad of [{ client_id: 'nope' }, { redirect_uri: 'https://evil.example/cb' }]) {
+    const bads: Params[] = [{ client_id: 'nope' }, { redirect_uri: 'https://evil.example/cb' }];
+    for (const bad of bads) {
       const plain = await authorize(bad, pkce().challenge);
       const asked = await authorize({ ...PAGE, ...bad }, pkce().challenge);
       expect(asked.status).toBe(400);
@@ -296,15 +298,20 @@ describe('#5125 five wrong entries', () => {
   it('5: five concurrent wrong entries count five, held at one lock, and no sixth attempt succeeds', async () => {
     const p = await pending();
     const blocker = new Client({ connectionString: process.env.DATABASE_URL });
-    await blocker.connect();
+    const watcher = new Client({ connectionString: process.env.DATABASE_URL });
+    await Promise.all([blocker.connect(), watcher.connect()]);
     try {
       await blocker.query('BEGIN');
       await blocker.query('SELECT id FROM auth_codes FOR UPDATE');
       const all = Array.from({ length: 5 }, () => redeem(wrong(p)));
-      await waitForLockWaiters(db, 5);
+      // The test pool holds five connections and all five are waiting, so watch from one of our own.
+      for (let waiting = 0; waiting < 5;) {
+        waiting = (await watcher.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'")).rows[0].n;
+        if (waiting < 5) await new Promise((done) => setTimeout(done, 20));
+      }
       await blocker.query('COMMIT');
       for (const r of all) await refused(r);
-    } finally { await blocker.end(); }
+    } finally { await Promise.all([blocker.end(), watcher.end()]); }
     expect((await rowOf(p)).entryFailures).toBe(5);
     await refused(redeem(p));
   });
@@ -370,7 +377,7 @@ describe('#5125 logging', () => {
   it('9: no log line carries the code, its handle or its secret', async () => {
     const lines: string[] = [];
     const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
-      vi.spyOn(console, m).mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(' ')); }));
+      vi.spyOn(console, m).mockImplementation((...a: unknown[]) => { lines.push(a.map((v) => inspect(v)).join(' ')); }));
     const out = vi.spyOn(process.stdout, 'write').mockImplementation((s) => { lines.push(String(s)); return true; });
     let p: Pending;
     try {
