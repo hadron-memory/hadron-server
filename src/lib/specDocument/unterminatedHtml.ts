@@ -119,7 +119,7 @@ function tagEndOf(text: string, i: number, nameFrom: number): number {
 }
 
 /** What a line of the text was, for the rules that depend on whether a paragraph is open. */
-type LineKind = 'blank' | 'code' | 'nonpara' | 'other';
+type LineKind = 'blank' | 'code' | 'nonpara' | 'marker' | 'other';
 
 /** The index of the `<` that opens the first unterminated construct at or after `from`, or -1. */
 function firstUnterminated(text: string, from: number): number {
@@ -131,7 +131,8 @@ function firstUnterminated(text: string, from: number): number {
   // thematic break, a link reference definition (one line, or a label alone with the destination and a title on the next lines), a fence
   // line or the last line of an HTML block. A line is judged after its block quote markers are taken off (`> # h`, a bare `>`); the lines
   // of a quote or list item that continue a paragraph lazily are paragraph lines. A line that only looks like one of these
-  // is taken for it: an extra raw region means extra escaping, the safe side.
+  // is taken for it: an extra raw region means extra escaping, the safe side. 'marker' is a bare list marker (`-`, `1.`): no paragraph is open, so a
+  // type 7 tag at the line head starts a block, but an indented line after it is the item's content, never indented code.
   let prev: LineKind = 'blank';
   // The kind of the line before the one being read (`prev` is already the current line's kind once its head is handled).
   let prevBefore: LineKind = 'blank';
@@ -218,7 +219,7 @@ function firstUnterminated(text: string, from: number): number {
       fence = step.open;
       if (step.fenceLine || wasOpen) { prev = 'nonpara'; lrd = 0; i = end + 1; continue; }
       // An indented code block: a line of four spaces or a tab, after a blank line, the start of the text or another such line.
-      if (/^(?: {4}|\t)/.test(inner) && inner.trim() !== '' && prev !== 'other') { prev = 'code'; lrd = 0; i = end + 1; continue; }
+      if (/^(?: {4}|\t)/.test(inner) && inner.trim() !== '' && prev !== 'other' && prev !== 'marker') { prev = 'code'; lrd = 0; i = end + 1; continue; }
       if (lrd === 3) {
         // Inside a title that opened on an earlier line: still the definition, until the line that closes it (or a blank line, which ends the attempt).
         if (inner.trim() === '') { prev = 'blank'; lrd = 0; } else { prev = 'nonpara'; lrd = /["')][ \t]*$/.test(inner) ? 0 : 3; }
@@ -231,7 +232,7 @@ function firstUnterminated(text: string, from: number): number {
       } else {
         const label = /^ {0,3}\[(?:[^\]\\]|\\.)+\]:([ \t]*)/.exec(inner);
         lrd = label ? (label[0].length === inner.length ? 1 : titleOpens(inner.slice(label[0].length)) ? 3 : 2) : 0;
-        prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|=+[ \t]*$|(?:[-+*]|\d{1,9}[.)])[ \t]*$)/.test(inner) ? 'nonpara' : 'other';
+        prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|=+[ \t]*$)/.test(inner) ? 'nonpara' : /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]*$/.test(inner) ? 'marker' : 'other';
       }
     }
     const c = text[i];
