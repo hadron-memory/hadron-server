@@ -10116,7 +10116,7 @@ export const typeDefs = `#graphql
     nothing; a retired worker is no party to name, so it matches nothing). creator is
     the task's creator as createdBy projects it: a worker, or a person for a task they created
     themselves (not one their worker created, #2370). queued selects pending tasks with no assignee; rootsOnly selects roots. These
-    take precedence over status and parentTaskId respectively. limit defaults to 20 (cap 200).
+    take precedence over status and parentTaskRef respectively. limit defaults to 20 (cap 200).
     Readers: the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:050:21), or the App's own live key
     without a session binding (#1755).
     An App you do not participate in answers APP_NOT_FOUND, exactly like an
@@ -10600,7 +10600,7 @@ export const typeDefs = `#graphql
       offset: Int
       "Optional absolute relevance floor (cor:api:090 / #497): drop ranked hits whose score is below this value. Scores are NOT comparable across modes, so the meaningful scale differs per mode (keyword ts_rank is roughly 0..a-few; vector cosine similarity is 0..1; hybrid is a small RRF fraction) — pick a floor for the mode in use. Ignored on the no-query browse list (unscored) and never trims expand-neighbours. A floor returns fewer hits, never weaker ones."
       minScore: Float
-      "Spec 049 (D-2026-09-13-002): search under a named scope — a scope id, a bare scope name (needs appRef), 'app' (the App's attached memories; needs appRef), or 'global' (the active organization's view — orgId, or your single membership). The scope's memories are intersected with your access (a lens never grants; the rest is disclosed as scope.droppedCount) and filter.memoryIds narrows WITHIN it. Omitted: the pre-049 behaviour — your accessible set, optionally narrowed by orgId."
+      "Spec 049 (D-2026-09-13-002): search under a named scope — a scope id, a bare scope name (needs appRef), 'app' (the App's attached memories; needs appRef), or 'global' (the active organization's view — orgId, or your single membership). The scope's memories are intersected with your access (a lens never grants; the rest is disclosed as scope.droppedCount) and filter.memoryRefs narrows WITHIN it. Omitted: the pre-049 behaviour — your accessible set, optionally narrowed by orgId."
       scope: String
       "Spec 049: the App context for a bare scope name or for scope: 'app' (ID or URN)."
       appRef: ID
@@ -11605,7 +11605,7 @@ export const typeDefs = `#graphql
     result; this is not every memory linked to any installed Agent.
 
     Accepts the App's ID or fully qualified URN. NodeFilter narrows node fields,
-    including objectType, approvalState and minted. Nonempty memoryIds or
+    including objectType, approvalState and minted. Nonempty memoryRefs or
     memoryClasses are rejected with BAD_USER_INPUT: the App scope is authoritative.
     where and childrenOf are rejected with BAD_USER_INPUT too (#3427, #2832); use findNodes.
     Unlike findNodes, system-node types are not excluded by default. Deleted
@@ -11623,7 +11623,7 @@ export const typeDefs = `#graphql
     but total counts every node appNodes would return for the filter and hasMore says whether rows
     remain past this page. Ordered by loc, then id, so the order is stable across the App's memories.
     Default page 20, limit: 0 is count-only, a negative limit is 0, a limit over 200 is served as 200,
-    a negative offset is 0. The filter's memoryIds, memoryClasses, where and childrenOf are refused, as on appNodes.
+    a negative offset is 0. The filter's memoryRefs, memoryClasses, where and childrenOf are refused, as on appNodes.
 
     Accepts the App's ID or URN.
     """
