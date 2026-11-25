@@ -35,7 +35,7 @@ const call = (input: Record<string, unknown>) => resolvers.Mutation.searchReplac
 );
 const request = (nodeIds: string[], rest: Record<string, unknown> = {}) => ({
   memoryRef: draft.id,
-  nodeIds,
+  nodeRefs: nodeIds,
   oldText: 'cat',
   newText: 'dog',
   fields: ['content'],
