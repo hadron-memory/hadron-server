@@ -362,12 +362,12 @@ describe('the chat path', () => {
     // serialized error is compared; and the echo is the verbatim input, never anything config-derived.
     const refusal = (id: string, run: () => Promise<unknown>) => run().then(() => null, (e: any) => {
       const whole = JSON.stringify({ name: e.name, ...(typeof e.toJSON === 'function' ? e.toJSON() : { message: e.message }) });
-      expect(whole).toContain(id); // the caller's own input comes back verbatim
+      expect(whole).not.toContain(id); // #5168: the caller's input is no longer echoed back
       for (const derived of [orgConfig.name, orgConfig.model, orgConfig.provider, orgConfig.apiKeyPreview!, KEY]) expect(whole).not.toContain(derived);
       return whole.split(id).join('<id>');
     });
     const absent = generateId();
-    const spellings = [orgConfig.id, orgConfig.id.toUpperCase(), orgConfig.id.toLowerCase(), absent]; // a spelling only the caller supplied is echoed as sent
+    const spellings = [orgConfig.id, orgConfig.id.toUpperCase(), orgConfig.id.toLowerCase(), absent]; // no spelling is echoed (#5168)
     const starts = await Promise.all(spellings.map(id => refusal(id, () => start({ scope: 'private', aiConfigChoice: id }))));
     expect(new Set(starts).size).toBe(1);
     expect(starts[0]).toContain('AiServiceConfigNotFoundError');
