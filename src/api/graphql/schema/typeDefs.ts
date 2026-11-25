@@ -13136,6 +13136,12 @@ export const typeDefs = `#graphql
     malformed, or two installed Team Agents when either carries the node, is TASK_OUTCOME_SET_UNUSABLE, refusing
     every finish. Both are judged after the assignee and status checks and before any write or event: the task
     stays started. With no set, any one word is accepted. The set is read only at finish.
+    #5036: a task bound as a PR review seat (pr seat) with no verdict recorded at its assigned head is refused with
+    SEAT_VERDICT_REQUIRED, whose message names hadron team pr verdict; record the verdict, then finish. Exempt: a
+    seat never bound, a seat superseded by a later seat, and a task finished with outcome failed or cancelled (any
+    case). Judged at the assigned head of the seat, not the current frozen head of the build task, after the assignee and status
+    checks and before any write or event: the task stays started. Rule: the team memory
+    coordination:pr-finishing (Finishing a review seat).
     """
     finishAgentTask(taskRef: ID!, result: AgentTaskResultInput!): AgentTask!
 
