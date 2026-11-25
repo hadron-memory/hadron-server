@@ -44,7 +44,7 @@ describe('#5019 the measure', () => {
     expect(nodeContentBytes(withEncryptedSizes({ content: 'plain', data: { a: 1 } }))).toBe(12);
   });
   it('is a trusted refusal, and not a Sentry fault', () => {
-    const e = new NodeContentTooLargeError(5, 6);
+    const e = new NodeContentTooLargeError(5);
     expect(isTrustedRefusal(e)).toBe(true);
     expect(isExpectedClientError(e)).toBe(true);
   });

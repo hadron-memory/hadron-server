@@ -68,7 +68,7 @@ function mapping<E>(
 
 const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // #5009: an owner reached a limit. The caller's to resolve (delete, or ask the owner), so silenced; the extensions are the contract.
-  // #5019: `NODE_CONTENT_TOO_LARGE` with `maxBytes` and the caller's own `bytes`. A caller's input is not a server fault.
+  // #5019: `NODE_CONTENT_TOO_LARGE` with `maxBytes` only, never the measured size. A caller's input is not a server fault.
   mapping(
     (err): err is NodeContentTooLargeError => err instanceof NodeContentTooLargeError,
     (err) => ({ ...err.extensions, code: 'NODE_CONTENT_TOO_LARGE' }),

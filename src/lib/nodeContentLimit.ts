@@ -63,10 +63,13 @@ export function withEncryptedSizes(row: NodeContentFields): NodeContentFields {
   };
 }
 
-/** Registered in `CLIENT_ERROR_MAPPINGS` (formatError.ts). The extensions are the contract the CLI and the portal read. */
+/**
+ * Registered in `CLIENT_ERROR_MAPPINGS` (formatError.ts). The extensions are the contract the CLI and the portal read. They never
+ * carry the measured size: it includes stored fields, which a caller who may write a memory and not read it must not learn.
+ */
 export class NodeContentTooLargeError extends GraphQLError {
-  constructor(maxBytes: number, bytes: number) {
-    super(`A node can hold at most ${maxBytes} bytes.`, { extensions: { code: 'NODE_CONTENT_TOO_LARGE', maxBytes, bytes } });
+  constructor(maxBytes: number) {
+    super(`A node can hold at most ${maxBytes} bytes.`, { extensions: { code: 'NODE_CONTENT_TOO_LARGE', maxBytes } });
     this.name = 'NodeContentTooLargeError';
   }
 }
@@ -81,8 +84,7 @@ export function exceedsNodeContentLimit(fields: NodeContentFields): boolean {
 export function assertNodeContentSize(fields: NodeContentFields): void {
   const max = nodeContentMaxBytes();
   if (max === null) return;
-  const bytes = nodeContentBytes(fields);
-  if (bytes > max) throw new NodeContentTooLargeError(max, bytes);
+  if (nodeContentBytes(fields) > max) throw new NodeContentTooLargeError(max);
 }
 
 /**

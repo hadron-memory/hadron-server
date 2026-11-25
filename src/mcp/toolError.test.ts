@@ -30,7 +30,7 @@ describe('owner-limit refusal (#5015)', () => {
 describe('node-size refusal (#5019)', () => {
   it('a tool that catches and maps answers the coded text, never its own fallback', () => {
     const fallback = vi.fn(() => 'fallback');
-    expect(toolErrorResult(new NodeContentTooLargeError(5, 6), fallback)).toMatchObject({
+    expect(toolErrorResult(new NodeContentTooLargeError(5), fallback)).toMatchObject({
       isError: true, content: [{ type: 'text', text: '[node_content_too_large] A node can hold at most 5 bytes.' }],
     });
     expect(fallback).not.toHaveBeenCalled();
