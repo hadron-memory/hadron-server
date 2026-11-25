@@ -17,7 +17,7 @@ import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
  * created after authority has gone. A refused write leaves no memory behind,
  * because the creation and the write roll back together.
  */
-import { GraphQLError } from 'graphql';
+import { GraphQLError, Kind, parse } from 'graphql';
 import type { Prisma, PrismaClient } from '../../../generated/prisma/index.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { agentSlugFromUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
@@ -428,11 +428,10 @@ const CONCEALED_FIELDS: Record<string, (args?: any) => unknown> = {
   asComment: () => null,
   asset: () => null,
   inheritedFrom: () => null,
-  // #5131 (Peter's ruling, 2026-11-25): the sparse parent carries no
-  // embeddingTruncatedChunks, so the resolver's truncatedChunksBatched fallback would
-  // re-read the live row by node id and answer { omittedChunks } — content-size-derived
-  // metadata, exactly the leak class cor:acl:010:01 withholding exists for. The drift
-  // pin caught this on its first run; this entry is the PR's single behaviour delta.
+  // #5131: the sparse parent carries no embeddingTruncatedChunks, so the
+  // resolver's truncatedChunksBatched fallback re-reads the live row by node id
+  // and answers { omittedChunks } — content-size-derived metadata, exactly the
+  // leak class cor:acl:010:01 withholding exists for. Null, never a re-read.
   indexTruncated: () => null,
   signingRequests: () => [],
   signingRequestsPage: (args) => {
@@ -450,7 +449,7 @@ const CONCEALED_FIELDS: Record<string, (args?: any) => unknown> = {
 };
 
 /** Fields in {@link CONCEALED_FIELDS}, for the drift pin. */
-export const INSTALL_CONCEALED_FIELDS = Object.keys(CONCEALED_FIELDS);
+export const INSTALL_CONCEALED_FIELDS: readonly string[] = Object.keys(CONCEALED_FIELDS);
 
 /**
  * #5131 — the reviewed half of the classification: `Node` fields that are neither blanked
@@ -485,7 +484,7 @@ export const INSTALL_REVIEWED_NO_LOAD_FIELDS: Readonly<Record<string, string>> =
   tags: 'carried as [] on the concealed parent; deserializeTags is pure over it',
   specLint: 'content is undefined on the sparse parent, so the resolver nulls before linting (resolvers.types.ts Node.specLint)',
   content: 'the stored text is absent from the concealed parent, so resolveNodeContent returns it before any include/template/access machinery can run',
-  lintWarnings: 'role is absent from the concealed parent, so lintSourceWarnings returns [] with no query; the compiled branch needs nodeType compiled-boot-prompt, which no install-memory write can produce (lib/bootPrompt.ts refuses such writes outside compile scope)',
+  lintWarnings: 'role is absent from the concealed parent, so lintSourceWarnings returns [] with no query; the compiled branch needs nodeType compiled-boot-prompt, which a generic write door refuses and a compile never returns (its write projection is discarded for a full re-read), so no concealed write response carries one',
 };
 
 /**
@@ -510,7 +509,7 @@ export const INSTALL_REVIEWED_ADDRESS_LOADS: Readonly<Record<string, string>> = 
  * cannot escape concealment silently (the `storedBytes` near-miss, #5018).
  */
 export interface InstallConcealmentDrift {
-  /** How many fields the SDL's `type Node` block has (sanity: the slice found the block). */
+  /** How many distinct fields the SDL's `type Node` definition and extensions declare (sanity: the AST walk found them). */
   fieldCount: number;
   /** SDL `type Node` fields in none of the buckets — the drift the pin fails on. */
   unclassified: string[];
@@ -520,11 +519,28 @@ export interface InstallConcealmentDrift {
   overlapping: Array<{ name: string; buckets: string[] }>;
 }
 
+/**
+ * The distinct field names of the SDL's `type Node` — its definition AND every
+ * `extend type Node` — read from the parsed AST (graphql-js `parse`), so
+ * descriptions, indentation and GraphQL names with digits or underscores are
+ * read exactly as the schema sees them. A text slice or line regex would
+ * silently under-report — an unseen field is an unclassified one, which is the
+ * drift this classification exists to catch (#5147 review).
+ */
+function nodeFieldNamesFromSdl(sdl: string): string[] {
+  const doc = parse(sdl);
+  const names = new Set<string>();
+  for (const def of doc.definitions) {
+    if ((def.kind === Kind.OBJECT_TYPE_DEFINITION || def.kind === Kind.OBJECT_TYPE_EXTENSION) && def.name.value === 'Node') {
+      for (const field of def.fields ?? []) names.add(field.name.value);
+    }
+  }
+  if (names.size === 0) throw new Error('classifyInstallNodeConcealment: no `type Node` definition or extension in the SDL');
+  return [...names];
+}
+
 export function classifyInstallNodeConcealment(sdl: string): InstallConcealmentDrift {
-  const start = sdl.indexOf('\n  type Node {');
-  if (start < 0) throw new Error('classifyInstallNodeConcealment: no `type Node` block in the SDL');
-  const body = sdl.slice(start, sdl.indexOf('\n  }', start));
-  const fields = [...body.matchAll(/^    ([a-zA-Z]+)[:(]/gm)].map((m) => m[1]!).filter(Boolean);
+  const fields = nodeFieldNamesFromSdl(sdl);
   const buckets: Array<[string, readonly string[]]> = [
     ['concealed', INSTALL_CONCEALED_FIELDS],
     ['keeps', CONCEALED_NODE_KEEPS],
