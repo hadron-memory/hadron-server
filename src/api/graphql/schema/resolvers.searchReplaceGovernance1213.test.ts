@@ -112,7 +112,7 @@ function heldTransactionDb(ready: ReturnType<typeof latch<number>>, release: Ret
 }
 
 
-const input = () => ({ memoryIds: [memoryId], nodeIds: [nodeId, nodeId, ordinaryId],
+const input = () => ({ memoryRefs: [memoryId], nodeRefs: [nodeId, nodeId, ordinaryId],
   fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false });
 const replace = (context: Context) => resolvers.Mutation.searchReplaceInNodes({}, { input: input() }, context);
 function promote(context: Context, signal: 'review' | 'task') {
@@ -376,7 +376,7 @@ describe('#4725 more governed-skip race cases', () => {
       { organizationId: orgId, userId: orgAdmin, role: 'ADMIN' },
     ] });
     const notesId = (await db.node.create({ data: { memoryId, loc: 'notes', name: 'notes', content: 'alpha', role: 'notes' } })).id;
-    const notesInput = () => ({ nodeIds: [notesId, ordinaryId],
+    const notesInput = () => ({ nodeRefs: [notesId, ordinaryId],
       fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false });
     const run = (who: string) => resolvers.Mutation.searchReplaceInNodes({}, { input: notesInput() },
       { db, roles: [], userId: who, clientId: `user:${who}` });

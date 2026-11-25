@@ -1,6 +1,6 @@
 /**
  * searchReplaceInNodes — bulk literal/regex search-and-replace across selected
- * nodes. Covers selection (nodeIds / memoryIds / prefix), field coverage,
+ * nodes. Covers selection (nodeRefs / memoryRefs / prefix), field coverage,
  * dryRun, the name/abstract guards, revision snapshots, and regex mode.
  */
 
@@ -85,7 +85,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     const res = await call({
       oldText: 'cat',
       newText: 'dog',
-      memoryIds: [memory.id],
+      memoryRefs: [memory.id],
       fields: ['content', 'description', 'tags'],
     });
 
@@ -109,7 +109,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     const res = await call({
       oldText: 'cat',
       newText: 'dog',
-      memoryIds: [memory.id],
+      memoryRefs: [memory.id],
       fields: ['content'],
       dryRun: true,
     });
@@ -130,7 +130,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     const res = await call({
       oldText: 'cat',
       newText: 'dog',
-      memoryIds: [memory.id],
+      memoryRefs: [memory.id],
       prefix: 'auth',
       fields: ['content'],
     });
@@ -142,14 +142,14 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     expect((await db.node.findUnique({ where: { id: other.id } }))?.content).toBe('cat');
   });
 
-  it('selects explicit nodeIds (deduped against memoryIds)', async () => {
+  it('selects explicit nodeRefs (deduped against memoryRefs)', async () => {
     const a = await makeNode('a', { content: 'cat' });
     await makeNode('b', { content: 'cat' });
 
     const res = await call({
       oldText: 'cat',
       newText: 'dog',
-      nodeIds: [a.id],
+      nodeRefs: [a.id],
       fields: ['content'],
     });
     expect(res.nodesScanned).toBe(1);
@@ -158,7 +158,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
 
   it('writes a NodeRevision snapshot for each changed node', async () => {
     const a = await makeNode('a', { content: 'cat' });
-    await call({ oldText: 'cat', newText: 'dog', nodeIds: [a.id], fields: ['content'] });
+    await call({ oldText: 'cat', newText: 'dog', nodeRefs: [a.id], fields: ['content'] });
     const versions = await db.nodeRevision.findMany({ where: { nodeId: a.id } });
     expect(versions).toHaveLength(1);
     expect(versions[0].content).toBe('cat'); // pre-change snapshot
@@ -172,7 +172,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     await call({
       oldText: 'cat',
       newText: 'dog',
-      nodeIds: [a.id],
+      nodeRefs: [a.id],
       fields: ['content'],
       reason: 'rename across corpus',
     });
@@ -187,7 +187,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     await call({
       oldText: '(\\w+)@(\\w+)',
       newText: '$2.$1',
-      nodeIds: [a.id],
+      nodeRefs: [a.id],
       fields: ['content'],
       regex: true,
     });
@@ -201,7 +201,7 @@ describe('searchReplaceInNodes — guards', () => {
   it('rejects a replacement that would empty a required name', async () => {
     const a = await makeNode('only-name', { name: 'cat' });
     await expect(
-      call({ oldText: 'cat', newText: '', nodeIds: [a.id], fields: ['name'] }),
+      call({ oldText: 'cat', newText: '', nodeRefs: [a.id], fields: ['name'] }),
     ).rejects.toThrow(/would leave it empty/i);
   });
 
@@ -211,33 +211,33 @@ describe('searchReplaceInNodes — guards', () => {
       call({
         oldText: 'x',
         newText: 'y'.repeat(2001),
-        nodeIds: [a.id],
+        nodeRefs: [a.id],
         fields: ['abstract'],
       }),
     ).rejects.toThrow(/2000/);
   });
 
-  it('requires at least one of nodeIds / memoryIds', async () => {
+  it('requires at least one of nodeRefs / memoryRefs', async () => {
     await expect(
       call({ oldText: 'a', newText: 'b', fields: ['content'] }),
-    ).rejects.toThrow(/nodeIds.*memoryIds/);
+    ).rejects.toThrow(/nodeRefs.*memoryRefs/);
   });
 
-  it('rejects prefix without memoryIds', async () => {
+  it('rejects prefix without memoryRefs', async () => {
     await expect(
-      call({ oldText: 'a', newText: 'b', nodeIds: ['x'], prefix: 'auth', fields: ['content'] }),
+      call({ oldText: 'a', newText: 'b', nodeRefs: ['x'], prefix: 'auth', fields: ['content'] }),
     ).rejects.toThrow(/prefix/i);
   });
 
   it('rejects an empty fields list', async () => {
     await expect(
-      call({ oldText: 'a', newText: 'b', memoryIds: [memory.id], fields: [] }),
+      call({ oldText: 'a', newText: 'b', memoryRefs: [memory.id], fields: [] }),
     ).rejects.toThrow(/field/i);
   });
 
   it('rejects an invalid regex pattern', async () => {
     await expect(
-      call({ oldText: '(', newText: 'b', memoryIds: [memory.id], fields: ['content'], regex: true }),
+      call({ oldText: '(', newText: 'b', memoryRefs: [memory.id], fields: ['content'], regex: true }),
     ).rejects.toThrow(/invalid search pattern/i);
   });
 });
@@ -253,7 +253,7 @@ describe('#1294 — truthful selected/scanned/skipped reporting', () => {
     const result = await gqlCall({
       oldText: 'needle',
       newText: 'changed',
-      nodeIds: [ordinary.id, governed.id],
+      nodeRefs: [ordinary.id, governed.id],
       fields: ['content'],
       dryRun: true,
     });
@@ -283,7 +283,7 @@ describe('#1294 — truthful selected/scanned/skipped reporting', () => {
       const res = await call({
         oldText: 'needle',
         newText: 'changed',
-        nodeIds: [governed.id, ordinary.id, governed.id],
+        nodeRefs: [governed.id, ordinary.id, governed.id],
         fields: ['content'],
         dryRun,
       });
@@ -316,7 +316,7 @@ describe('#1294 — truthful selected/scanned/skipped reporting', () => {
       const res = await call({
         oldText: 'needle',
         newText: 'changed',
-        memoryIds: [memory.id],
+        memoryRefs: [memory.id],
         prefix: 'scope',
         fields: ['content'],
         dryRun,
@@ -365,7 +365,7 @@ describe('#1294 — truthful selected/scanned/skipped reporting', () => {
     const res = await call({
       oldText: 'needle',
       newText: 'changed',
-      nodeIds: [rootId, governedRootId],
+      nodeRefs: [rootId, governedRootId],
       fields: ['content'],
     });
 
@@ -524,7 +524,7 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
       () => resolvers.Mutation.updateNode({}, {
         input: { ref: node.id, content: 'cat plus cat' },
       } as never, ctx()),
-      () => call({ oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] }),
+      () => call({ oldText: 'cat', newText: 'dog', nodeRefs: [node.id], fields: ['content'] }),
     )).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
 
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
@@ -541,7 +541,7 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
       () => resolvers.Mutation.updateNode({}, {
         input: { ref: b.id, content: 'cat changed' },
       } as never, ctx()),
-      () => call({ oldText: 'cat', newText: 'dog', nodeIds: [a.id, b.id], fields: ['content'] }),
+      () => call({ oldText: 'cat', newText: 'dog', nodeRefs: [a.id, b.id], fields: ['content'] }),
     )).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
 
     expect(await db.node.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ content: 'cat', revSeq: 1 });
@@ -557,7 +557,7 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
       () => ensureChannelWithRoot(db, {
         memoryId: memory.id, loc: 'channel-race', name: 'channel-race', createdBy: admin.id,
       }),
-      () => call({ oldText: 'cat', newText: 'dog', nodeIds: [node.id, ordinary.id], fields: ['content'] }),
+      () => call({ oldText: 'cat', newText: 'dog', nodeRefs: [node.id, ordinary.id], fields: ['content'] }),
     );
     expect(result).toMatchObject({
       nodesSelected: 2,
@@ -579,7 +579,7 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     });
     const paused = pauseBulkAfterWriting(node.id);
 
-    const bulk = call({ oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] });
+    const bulk = call({ oldText: 'cat', newText: 'dog', nodeRefs: [node.id], fields: ['content'] });
     let move: Promise<unknown> | undefined;
     try {
       await paused.atBulkWrite;
@@ -613,7 +613,7 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
   it('bulk-first holds the Channel key until commit, then an ancestor Channel can claim the address', async () => {
     const node = await makeNode('late-channel:child', { content: 'cat' });
     const paused = pauseBulkAfterWriting(node.id);
-    const bulk = call({ oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] });
+    const bulk = call({ oldText: 'cat', newText: 'dog', nodeRefs: [node.id], fields: ['content'] });
     let channel: Promise<unknown> | undefined;
     try {
       await paused.atBulkWrite;
