@@ -46,7 +46,6 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
-import { createNode } from '../../../controller/operations/createNode.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
@@ -262,8 +261,7 @@ export const appMemoryMutations = {
         visibility: null, isInstallMemory: false, installOfAgentId: null,
         createdBy: ctx.userId,
       }, include: MEMORY_INCLUDE });
-      await createNode({ memoryId: memory.id, loc: name, name: name.split(':').pop() ?? name,
-        description: 'Root node for this memory.' }, tx);
+      // #3952 (R11): no root node on create.
       return memory;
     }));
   },
@@ -420,10 +418,7 @@ export const appMemoryMutations = {
           },
         });
       }
-      // #2728: the root node joins the anchored transaction (as createAppMemory's does), so a root failure rolls
-      // the Memory back and a retry cannot mint a second one.
-      await createNode({ memoryId: created.id, loc: name, name: name.split(':').pop() ?? name,
-        description: 'Root node for this memory.' }, tx);
+      // #3952 (R11): no root node on create.
       return created;
       }));
     } catch (err) {

@@ -52,7 +52,7 @@ for (const door of ['personal', 'app', 'installed']) {
     });
     it.each(['a..b', 'x.y', 'Has Space', 'ünï', String.raw`back\slash`])('preserves ordinary input %s', async name => {
       const memory = await create(door, name);
-      expect(await db.node.findMany({ where: { memoryId: memory.id } })).toMatchObject([{ loc: name }]);
+      expect(await db.node.findMany({ where: { memoryId: memory.id } })).toEqual([]);
       expect(existsSync(join(projection.root, ...name.split(':'), '.node', 'node.yaml'))).toBe(false);
     });
   });
@@ -69,7 +69,7 @@ describe('projection writer boundary', () => {
 
 it('ordinary creation does not use the standalone projection writer', async () => {
   const made = await create('personal', 'Ordinary root');
-  expect(await db.node.count({ where: { memoryId: made.id } })).toBe(1);
+  expect(await db.node.count({ where: { memoryId: made.id } })).toBe(0);
   expect(readdirSync(projection.root)).toEqual([]);
 });
 

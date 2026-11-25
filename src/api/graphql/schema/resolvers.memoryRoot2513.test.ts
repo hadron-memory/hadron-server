@@ -36,21 +36,16 @@ beforeEach(async () => {
 });
 
 describe('createMemory scaffold root (#2513)', () => {
-  it('gives a new root a nonempty one-line description, preserving its loc and name', async () => {
+  it('gives a new memory no scaffold root (#3952, R11)', async () => {
     const memory = await createMemory();
-    const roots = await db.node.findMany({ where: { memoryId: memory.id } });
-    expect(roots).toHaveLength(1);
-    expect(roots[0]).toMatchObject({ loc: memoryName, name: memoryName, content: null, abstract: null });
-    expect(roots[0]!.description, 'new scaffold root must carry a description (#2513)').toEqual(expect.any(String));
-    expect(roots[0]!.description!.trim()).not.toBe('');
-    expect(roots[0]!.description).not.toMatch(/[\r\n]/);
+    expect(await db.node.findMany({ where: { memoryId: memory.id } })).toEqual([]);
   });
 
-  it('does not report the fresh scaffold as sparse through hadron_validate', async () => {
+  it('validates a fresh memory as empty, with nothing sparse (#3952)', async () => {
     await createMemory();
     const result = await server().callToolText('hadron_validate', { memoryUrn });
-    expect(result, 'fresh createMemory root must not be [sparse] (#2513)').not.toContain('[sparse]');
-    expect(result).toContain('Validated 1 nodes. No issues found.');
+    expect(result).not.toContain('[sparse]');
+    expect(result).toContain('Validated 0 nodes. No issues found.');
   });
 
   it('still flags a name-only node as sparse', async () => {
@@ -63,7 +58,7 @@ describe('createMemory scaffold root (#2513)', () => {
     expect(result).toContain('no description, content, or abstract');
   });
 
-  it('keeps bare MCP node and parent locs beside the scaffold root', async () => {
+  it('keeps bare MCP node and parent locs in a memory with no root', async () => {
     const memory = await createMemory();
     const mcp = server();
     await mcp.callToolText('hadron_create_node', {
@@ -75,7 +70,6 @@ describe('createMemory scaffold root (#2513)', () => {
     const nodes = await db.node.findMany({ where: { memoryId: memory.id }, orderBy: { loc: 'asc' } });
     expect(nodes.map(n => ({ loc: n.loc, name: n.name }))).toEqual([
       { loc: 'facts', name: 'Facts' },
-      { loc: memoryName, name: memoryName },
       { loc: 'sections', name: 'Sections' },
     ]);
   });

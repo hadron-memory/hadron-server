@@ -751,3 +751,11 @@ export async function createDbRunConsentPrincipal(db: PrismaClient, organization
   await db.orgMember.create({ data: { organizationId, userId: user.id, role: 'READER' } });
   return { userId: user.id, appId, organizationId, roles: [] as Role[] };
 }
+
+/**
+ * #3952: a new memory no longer gets a root node. Tests whose fixture relied on that auto root (a node at
+ * the memory's own name, "Root node for this memory.") seed one explicitly with this helper.
+ */
+export async function seedRootNode(db: PrismaClient, memoryId: string, loc: string) {
+  return db.node.create({ data: { memoryId, loc, name: loc.split(':').pop() ?? loc, description: 'Root node for this memory.' } });
+}

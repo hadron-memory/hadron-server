@@ -125,7 +125,6 @@ import { validateMemorySource, GitSourceError } from '../../../lib/gitSource.js'
 import { validateGitBranch, GitRefError } from '../../../lib/gitRef.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 import { recordNodeUsage } from '../../../lib/usageRecorder.js';
-import { createNode } from '../../../controller/operations/createNode.js';
 import {
   ALL_NODE_MERGE_FIELDS,
   type NodeMergeField,
@@ -828,19 +827,13 @@ export const memoryMutations = {
             },
           });
         }
-        // #2728: the root node is created in the Memory's own transaction, so a root failure rolls the Memory
-        // (and a group's owner row) back instead of leaving a rootless row a retry would duplicate.
-        const rootName = name.split(':').pop() ?? name;
-        await createNode({
-          memoryId: created.id,
-          loc: name,
-          name: rootName,
-          description: 'Root node for this memory.',
-        }, tx);
+        // #3952 (R11): a new memory has no root node. It was built from the display name, so a name with a space
+        // gave a loc no client can address (D-2026-05-11-013) and an unapproved node that blocked the first mint
+        // (cor:dmo:120:06/:07). Existing roots are left alone (R12).
         // #3426 (C3): the ONE site where the org's default templates are applied — an org-owned knowledge or group memory
         // created here. Not personal/private (the owner alone manages those), not user-owned, and no other creation path
         // (App, install, agent, chat, worker, clone, extract). No flag opts a caller out, so `source` changes nothing.
-        // Inside this transaction: a failure rolls the memory, its root node and its rules back together.
+        // Inside this transaction: a failure rolls the memory and its rules back together.
         if (resolvedOrgId && (requestedClass === 'knowledge' || requestedClass === 'group')) {
           await applyOrgDefaultsAtCreation(tx, { memoryId: created.id, orgId: resolvedOrgId, actor: ctx.userId ?? ctx.clientId ?? 'system' });
         }
