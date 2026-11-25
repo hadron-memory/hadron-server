@@ -4180,6 +4180,7 @@ model App {
   automationReadGrantEvents AppAutomationReadGrantEvent[]
   automationTeamSnapshotGrants AppAutomationTeamSnapshotGrant[]
   automationTeamSnapshotGrantEvents AppAutomationTeamSnapshotGrantEvent[]
+  grantSigningSelections GrantSigningSelection[]
   /// #3668 — grants issued in this App, the grants THIS App holds, and the grant events.
   grants                  Grant[]      @relation("GrantApp")
   secretReadClients       SecretReadClient[]
@@ -5426,6 +5427,7 @@ model PasskeyCredential {
   owner             User                       @relation(fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   signatures        NodeSignature[]
   grantSignatures   GrantSignature[]
+  grantSelectionSignatures GrantSelectionSignature[]
   signIns           SignIn[]
   cancelToken       PasskeyCancelToken?
   notice            PasskeyRegistrationNotice?
@@ -10590,12 +10592,85 @@ model GrantSigningRequest {
   endedAt            DateTime? @map("ended_at")
   /// #4546: latest verified ineligible proof on an open request; no signer identity and no state change.
   lastRefusedAt      DateTime? @map("last_refused_at")
+  /// #5001: set when this request is one item of a selection (then `positionInSelection` is its place, 0-based, in
+  /// ascending grant id); NULL for a one-grant request. Both set or both NULL (chk_grant_signing_request_shape).
+  selectionId        String?   @map("selection_id")
+  positionInSelection Int?     @map("position_in_selection")
 
-  grant     Grant           @relation(fields: [grantId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  grant     Grant                 @relation(fields: [grantId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  selection GrantSigningSelection? @relation(fields: [selectionId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   signature GrantSignature?
 
   @@index([grantId, createdAt])
+  @@unique([selectionId, grantId])
+  @@index([selectionId])
   @@map("grant_signing_requests")
+}
+
+/// One request for ONE passkey touch over a SELECTION of one App's pending grants (#5001; ruling 0255 item 19).
+///
+/// Relationships: belongs to one App and is deleted with it. `items` are the per-grant GrantSigningRequest rows
+/// (one per grant, each with its own version and terms-hash pin, so a grant that changes ends only its own item).
+/// `signature` is the one touch record once the selection completes.
+///
+/// Behaviour:
+/// - Begins `open`, ends exactly once: `completed`, `declined`, `expired` or `withdrawn`. There is no `stale`
+///   state, because staleness is per item (the item request goes `stale`; the selection stays open).
+/// - Every time is the database clock. A trigger sets the times and enforces the fixed fields and the single end
+///   (prisma/grant-selection-signing-invariants.sql).
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:acl:140:07. Payload: hrn:node:hadronmemory.com:specs:cor:acl:140:09. Background: #5001.
+model GrantSigningSelection {
+  /// 128 bits of randomness, base64url (the node-signing id mint).
+  id                 String    @id
+  appId              String    @map("app_id")
+  payloadVersion     String    @map("payload_version")
+  requesterUserId    String?   @map("requester_user_id")
+  requesterAppId     String?   @map("requester_app_id")
+  requesterWorkerId  String?   @map("requester_worker_id")
+  requesterSessionId String?   @map("requester_session_id")
+  /// open | completed | declined | expired | withdrawn
+  state              String    @default("open")
+  createdAt          DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  expiresAt          DateTime  @map("expires_at")
+  endedAt            DateTime? @map("ended_at")
+  lastRefusedAt      DateTime? @map("last_refused_at")
+
+  app       App                       @relation(fields: [appId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  items     GrantSigningRequest[]
+  signature GrantSelectionSignature?
+
+  @@index([appId, createdAt])
+  @@map("grant_signing_selections")
+}
+
+/// The record of one person's ONE passkey touch over a selection of grants (#5001). It keeps the signed item list
+/// (each item's grant id, version and terms hash, in signed order) so that a later read rebuilds the bytes from what
+/// was signed, never from the grants as they are now. Each activated item also has its own GrantSignature row.
+///
+/// Append-only (prisma/grant-selection-signing-invariants.sql); deleted only with its App.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:acl:140:09. Background: #5001.
+model GrantSelectionSignature {
+  id                  String   @id @default(cuid())
+  selectionId         String   @unique @map("selection_id")
+  /// A person, always. Sealed history: no FK.
+  signerId            String   @map("signer_id")
+  passkeyCredentialId String   @map("passkey_credential_id")
+  payloadVersion      String   @map("payload_version")
+  /// The signed items in signed order: [{grantId, version, termsHash}], ascending grant id.
+  items               Json
+  rpId                String   @map("rp_id")
+  authenticatorData   Bytes    @map("authenticator_data")
+  clientDataJson      Bytes    @map("client_data_json")
+  signature           Bytes
+  verifiedAt          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("verified_at")
+
+  selection       GrantSigningSelection @relation(fields: [selectionId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  passkey         PasskeyCredential     @relation(fields: [passkeyCredentialId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  grantSignatures GrantSignature[]
+
+  @@map("grant_selection_signatures")
 }
 
 /// The record of one person's passkey signature on one Grant. It proves that this person, with this passkey,
@@ -10642,7 +10717,10 @@ model GrantSignature {
   clientDataJson      Bytes    @map("client_data_json")
   signature           Bytes
   verifiedAt          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("verified_at")
+  /// #5001: the touch record this one came from when the grant was signed as part of a selection; NULL for a one-grant signature.
+  selectionSignatureId String? @map("selection_signature_id")
 
+  selectionSignature GrantSelectionSignature? @relation(fields: [selectionSignatureId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   grant          Grant               @relation("GrantSignatures", fields: [grantId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   signingRequest GrantSigningRequest @relation(fields: [signingRequestId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   passkey        PasskeyCredential   @relation(fields: [passkeyCredentialId], references: [id], onDelete: Restrict, onUpdate: Restrict)

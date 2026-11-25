@@ -1046,6 +1046,9 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
 -- verbatim with migration 20261109200000_grant_signing (after grant-invariants.sql: the tables it guards reference grants).
 \ir grant-signing-invariants.sql
 
+-- #5001: the selection tables' guards and the selection-version widening of the signing CHECKs; after grant-signing-invariants.sql.
+\ir grant-selection-signing-invariants.sql
+
 -- #3999: secret change requests. Verbatim with migration 20261120180000_secret_change_requests.
 \ir secret-change-requests-invariants.sql
 
