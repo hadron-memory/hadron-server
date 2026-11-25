@@ -268,7 +268,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // per-door `appRef`, `taskId`, `workerRef`, `nodeRef`, `nodeRevRef`, `channelRef`, `grantRef`, `id` on their not-found
 // refusals. `expectedType` and `reason` stay. A client branches on the code, as it should; no first-party client reads a
 // dropped key (re-grep on the PR). No SDL change.
-export const HADRON_SERVER_VERSION = '0.41.0';
+export const HADRON_SERVER_VERSION = '0.42.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

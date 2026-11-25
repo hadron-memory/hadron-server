@@ -14687,18 +14687,31 @@ export const typeDefs = `#graphql
     require the App's user-owner or owning-org OWNER/ADMIN. Personal/private
     require the caller's actual App membership (the caller becomes the owner),
     with no platform-admin membership bypass; they are not yet supported for
-    a user-owned App. The install is rechecked as live and licensed in the
-    deciding transaction. Live name collisions are aliased to a free URN.
+    a user-owned App. Only the signed-in member acting as themselves creates
+    one: a run principal, worker session, App key or impersonation is refused.
+    The install is rechecked as live and licensed in the deciding transaction.
+    Live name collisions of an app or knowledge memory are aliased to a free URN.
 
-    Typed errors: UNSUPPORTED_MEMORY_CLASS, BAD_USER_INPUT (maxRevCount < 1),
-    APP_UNINSTALLED, AGENT_NOT_INSTALLED, MEMORY_URN_CONFLICT, FORBIDDEN,
-    UNAUTHENTICATED.
+    A personal or private memory is always the caller's own (owner and tenant;
+    its URN roots on their handle). The server derives its slug and display name
+    as <app slug>-<handle>-<class> (a numeric tail, -2, -3, when taken); a name
+    argument sets neither. A user holds at most one of each class created this
+    way per App; a second is refused with APP_USER_MEMORY_ALREADY_EXISTS.
+    See hrn:node:hadronmemory.com:specs:cor:dmo:060:20.
+
+    Typed errors: UNSUPPORTED_MEMORY_CLASS, BAD_USER_INPUT (maxRevCount < 1, or
+    no name for an app or knowledge memory), APP_UNINSTALLED, AGENT_NOT_INSTALLED,
+    MEMORY_URN_CONFLICT, FORBIDDEN, UNAUTHENTICATED, APP_USER_MEMORY_ALREADY_EXISTS.
     """
     createMemoryInApp(
       appRef: ID!
       agentRef: ID!
       memoryClass: MemoryClass!
-      name: String!
+      """
+      The display name of an 'app' or 'knowledge' memory (required for those classes). Ignored for 'personal' and
+      'private': the server derives both the slug and the display name.
+      """
+      name: String
       shortDescription: String
       description: String
       data: JSON
