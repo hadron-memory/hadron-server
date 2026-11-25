@@ -274,8 +274,16 @@ export const meteringQueries = {
         });
       }
     }
-    const sum = await creditBalance(ctx.db, owner);
-    const unsettled = await unsettledRemainders(ctx.db, owner, asOf);
+    // #5014 (SEC10 at d07bd862, the twin of #5221's REPEATABLE READ fix): the stored sum and the unsettled remainder are read in ONE
+    // snapshot, so a settlement the sweep commits between the two reads cannot be counted out of the probe but still in the sum
+    // (expired credit served as available, ruling 10.7). Holds for the writing read and for the read that writes nothing.
+    const { sum, unsettled } = await ctx.db.$transaction(
+      async (tx) => {
+        const c = tx as unknown as typeof ctx.db;
+        return { sum: await creditBalance(c, owner), unsettled: await unsettledRemainders(c, owner, asOf) };
+      },
+      { isolationLevel: 'RepeatableRead' },
+    );
     return {
       organizationId: 'organizationId' in owner ? owner.organizationId : null,
       ownerUserId: 'userId' in owner ? owner.userId : null,

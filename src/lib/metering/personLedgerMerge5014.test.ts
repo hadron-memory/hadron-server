@@ -142,4 +142,52 @@ describe('the global re-point (the hourly job)', () => {
     expect(await repointMergedLedgerOwners(db)).toBe(1);
     expect(await db.creditLedgerEntry.count({ where: { ownerUserId: t, sourceType: 'grant-expiry' } })).toBe(2);
   });
+  it('the balance reads its sum and its unsettled remainder in one snapshot: a settlement committed between them is not read half', async () => {
+    const grant = await entry(t, { createdAt: new Date(Date.now() - 3 * DAY), expiresAt: new Date(Date.now() - DAY) });
+    let injected = false;
+    let settleFailed = false;
+    const wrap = (client: typeof db): typeof db =>
+      new Proxy(client, {
+        get: (target, prop, recv) => {
+          if (prop === '$transaction')
+            return (fn: (tx: typeof db) => Promise<unknown>, opts: unknown) =>
+              (target.$transaction as (f: unknown, o: unknown) => Promise<unknown>)((tx: typeof db) => fn(wrap(tx)), opts);
+          if (prop === 'creditLedgerEntry')
+            return new Proxy(target.creditLedgerEntry, {
+              get: (m, name, r) =>
+                name === 'aggregate'
+                  ? async (...args: unknown[]) => {
+                      const out = await (m.aggregate as (...a: unknown[]) => Promise<unknown>)(...args);
+                      if (settleFailed && !injected) {
+                        injected = true; // the sweep commits the settlement on another connection, after the sum was read
+                        await db.creditLedgerEntry.create({
+                          data: { id: generateId(), ownerUserId: t, kind: 'adjustment', amountMicroCents: -100n, sourceType: 'grant-expiry', sourceId: grant.id },
+                        });
+                      }
+                      return out;
+                    }
+                  : Reflect.get(m, name, r),
+            });
+          // the settle step fails, so the read takes the figure it works out (the catch path of ruling 10.4)
+          return Reflect.get(target, prop, recv);
+        },
+      });
+    const failing = new Proxy(db.creditLedgerEntry, {
+      get: (m, name, r) => (name === 'createMany' ? async () => { settleFailed = true; throw new Error('boom'); } : Reflect.get(m, name, r)),
+    });
+    const base = new Proxy(db, { get: (target, prop, recv) => (prop === 'creditLedgerEntry' ? failing : Reflect.get(target, prop, recv)) }) as typeof db;
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await server.executeOperation(
+        { query: `query($u: ID) { creditBalance(userRef: $u) { balanceMicroCents } }`, variables: { u: t } },
+        { contextValue: { db: wrap(base), userId: t, roles: ['READER'] } as Context },
+      );
+      if (res.body.kind !== 'single') throw new Error('unexpected');
+      expect(res.body.singleResult.errors).toBeUndefined();
+      expect((res.body.singleResult.data as { creditBalance: { balanceMicroCents: string } }).creditBalance.balanceMicroCents).toBe('0');
+    } finally {
+      quiet.mockRestore();
+    }
+    expect(injected).toBe(true);
+  });
 });
