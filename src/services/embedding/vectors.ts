@@ -386,6 +386,13 @@ export function iterativeScanSupported(
     if (!iterativeScanOverride) logIterativeUnsupported('stubbed');
     return Promise.resolve(iterativeScanOverride);
   }
+  // #5002 — the cold probe is ONE shared promise. It runs on the FIRST caller's client (inside a search, that caller's own
+  // transaction), and every caller that arrives while it is in flight awaits the same promise instead of probing on its
+  // own connection. If that first transaction dies mid-probe (its deadline, a cancel, a lost connection), the catch below
+  // answers `false` to all of them: each of those waiters runs the exact scan for that ONE call. That is safe (the exact
+  // scan is correct at any size and still under the budget), it is not cached (the next search probes again), and it is
+  // not an "unsupported pgvector" answer: it never logs `vector.iterative_scan_unsupported` (cor:api:090:04), only the
+  // `iterative_scan_probe_failed` line.
   iterativeScanProbe ??= (async () => {
     let version: string | null;
     // #4938 BLIND P2 (Billie, at 548c0cb9): inside a transaction a failed statement aborts it (25P02), so the caught
