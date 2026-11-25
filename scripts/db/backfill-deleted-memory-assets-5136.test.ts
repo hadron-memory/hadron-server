@@ -37,9 +37,13 @@ describe('#5136 backfill', () => {
     const dead = await mem('dead', new Date(Date.now() - 86_400_000 * 30));
     const a = await file(dead.id, 100);
     await file(dead.id, 250, { scanStatus: 'PENDING' });
+    await file(dead.id, 999, { scanStatus: 'BLOCKED' });
+    const u = await db.user.create({ data: { githubId: 513601, githubUsername: 'bf-u', handle: 'bf-u', roles: ['READER'] } });
+    const mine = await db.memory.create({ data: { id: generateId(), name: 'mine', urn: 'bf:mine', class: 'knowledge', ownerUserId: u.id, deletedAt: new Date() } });
+    await file(mine.id, 7);
     const { code, lines } = await run([]);
     expect(code).toBe(0);
-    expect(lines).toEqual([`${TAG}.owner owner=org:${org.id} files=2 bytes=350`, `${TAG} dry_run owners=1 files=2 bytes=350`]);
+    expect(lines).toEqual([`${TAG}.owner owner=org:${org.id} files=2 bytes=350`, `${TAG}.owner owner=user:${u.id} files=1 bytes=7`, `${TAG} dry_run owners=2 files=3 bytes=357`]);
     expect(await at(a.id)).toBeNull();
     expect(await used()).toBe(350n);
   });
@@ -85,6 +89,42 @@ describe('#5136 backfill', () => {
     expect((await runAssetJanitor(db, new Date(instant.getTime() + ASSET_RETENTION_WINDOW_MS - 1000))).purged).toBe(0);
     expect((await runAssetJanitor(db, new Date(instant.getTime() + ASSET_RETENTION_WINDOW_MS + 1000))).purged).toBe(1);
     expect(await db.asset.findUnique({ where: { id: a.id } })).toBeNull();
+    expect(deleteObjectMock).toHaveBeenCalledOnce();
+    expect(deleteObjectMock.mock.calls[0]![0]).toBe(a.storageKey);
+    expect(await used()).toBe(0n);
+  });
+
+  it('a file or memory that leaves scope between the batch read and its write is not written, and the run still ends', async () => {
+    const dead = await mem('dead', new Date());
+    const restored = await mem('restored', new Date());
+    const x = await file(restored.id);
+    const y = await file(dead.id);
+    const z = await file(dead.id);
+    let first = true;
+    const afterRead = async () => {
+      if (!first) return;
+      first = false;
+      await db.memory.update({ where: { id: restored.id }, data: { deletedAt: null } });
+      await db.asset.update({ where: { id: z.id }, data: { scanStatus: 'BLOCKED' } });
+    };
+    const lines: string[] = [];
+    const code = await main(['--apply'], { env: process.env, log: (l) => lines.push(l), afterRead });
+    expect(code).toBe(0);
+    expect(await at(x.id)).toBeNull();
+    expect(await at(z.id)).toBeNull();
+    expect(await at(y.id)).not.toBeNull();
+    expect(lines.some((l) => l.includes('raced=2'))).toBe(true);
+    expect(lines.at(-1)).toMatch(/ applied files=1 /);
+  });
+
+  it('a failure reports what was stamped so far, never the message', async () => {
+    const dead = await mem('dead', new Date());
+    await file(dead.id);
+    const lines: string[] = [];
+    const code = await main(['--apply'], { env: process.env, log: (l) => lines.push(l), afterRead: async () => { throw Object.assign(new Error('postgresql://secret@host/db'), { code: 'P1001' }); } });
+    expect(code).toBe(1);
+    expect(lines.at(-1)).toMatch(new RegExp(`^${TAG}\\.failed applied_so_far=0 at=\\S+ error=Error code=P1001$`));
+    expect(lines.join('\n')).not.toContain('secret');
   });
 
   it('refuses unknown arguments and a missing URL', async () => {

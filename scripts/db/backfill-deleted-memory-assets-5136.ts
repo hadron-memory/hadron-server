@@ -12,6 +12,9 @@
  *     memory's file, never a staged file with no memory, never a BLOCKED tombstone (cor:dmo:060:12 owns those).
  *   - VEHICLE: this script, not a migration.
  *
+ * A run that fails part-way logs `applied_so_far` and the instant; a rerun stamps the rest with ITS OWN new instant (every file still gets a
+ * full window, but not the same one).
+ *
  * Safe to repeat and beside live writers: a batch is one guarded updateMany that re-checks the scope on every row it writes, so a second apply
  * finds nothing and a file restored or a memory restored meanwhile is never touched. Batches are `BATCH_SIZE` rows.
  *
@@ -31,6 +34,8 @@ export interface BackfillIo {
   log: (line: string) => void;
   /** The run instant. Injected by tests; defaults to the process clock. */
   now?: () => Date;
+  /** Test seam: runs between a batch's read and its write, to let a test change the data in that gap. */
+  afterRead?: () => Promise<void>;
 }
 
 interface OwnerRow { owner: string; files: bigint; bytes: bigint }
@@ -46,6 +51,8 @@ export async function main(argv: readonly string[], io: BackfillIo): Promise<num
     return 2;
   }
   let db: PrismaClient | undefined;
+  let done = 0;
+  let at: Date | undefined;
   try {
     db = new PrismaClient({ datasourceUrl: io.env.DATABASE_URL });
     const owners = await db.$queryRaw<OwnerRow[]>`
@@ -65,17 +72,18 @@ export async function main(argv: readonly string[], io: BackfillIo): Promise<num
       io.log(`${TAG} dry_run owners=${owners.length} files=${files} bytes=${bytes}`);
       return 0;
     }
-    const at = io.now ? io.now() : new Date();
-    let done = 0;
+    at = io.now ? io.now() : new Date();
     const inScope = { deletedAt: null, scanStatus: { not: 'BLOCKED' as const }, memory: { is: { deletedAt: { not: null } } } };
     for (;;) {
       const ids = (await db.asset.findMany({ where: inScope, select: { id: true }, orderBy: { id: 'asc' }, take: BATCH_SIZE })).map((r) => r.id);
       if (ids.length === 0) break;
+      await io.afterRead?.();
       // The scope is re-checked on the write: a file restored, blocked or a memory restored since the read is left alone.
       const { count } = await db.asset.updateMany({ where: { id: { in: ids }, ...inScope }, data: { deletedAt: at } });
       done += count;
-      io.log(`${TAG}.batch rows=${count} total=${done}`);
-      if (count === 0) break;
+      io.log(`${TAG}.batch rows=${count} total=${done}${count < ids.length ? ` raced=${ids.length - count}` : ''}`);
+      // No break on a short or empty write: a row that left scope between the read and the write is out of the next read too, and a row
+      // still in scope is always written, so the loop ends only when the read finds nothing.
     }
     io.log(`${TAG} applied files=${done} at=${at.toISOString()}`);
     return 0;
@@ -83,7 +91,7 @@ export async function main(argv: readonly string[], io: BackfillIo): Promise<num
     // The class and code only, never the message: it can carry the URL.
     const name = error instanceof Error ? error.constructor.name : typeof error;
     const code = (error as { code?: unknown } | null)?.code;
-    io.log(`${TAG}.failed error=${/^\w+$/.test(name) ? name : 'unknown'}${typeof code === 'string' && /^\w+$/.test(code) ? ` code=${code}` : ''}`);
+    io.log(`${TAG}.failed applied_so_far=${done}${at ? ` at=${at.toISOString()}` : ''} error=${/^\w+$/.test(name) ? name : 'unknown'}${typeof code === 'string' && /^\w+$/.test(code) ? ` code=${code}` : ''}`);
     return 1;
   } finally {
     await db?.$disconnect().catch(() => {});
