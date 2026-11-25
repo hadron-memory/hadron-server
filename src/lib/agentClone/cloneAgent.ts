@@ -26,6 +26,7 @@ import type { Prisma } from '../../generated/prisma/index.js';
 import { requireOrgRole, requireReadableAgent, getAccessibleMemoryIds, type Context, AGENT_INCLUDE } from '../../api/graphql/schema/resolvers.helpers.js';
 import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import { AgentUrnTakenError } from '../../api/graphql/schema/resolvers.mutation.agent.js';
+import { requireOwnerHeadroom } from '../ownerLimits/gate.js';
 import { cloneMemoryGraphInTx, reconcileStampedSourceNodes } from '../../controller/operations/cloneMemory.js';
 import { ensureAgentOrgGrant } from '../../controller/operations/ensureAgentOrgGrant.js';
 import { subscribeOrgToPublicAgentInTx } from '../../controller/operations/subscribeOrgToPublicAgent.js';
@@ -270,6 +271,9 @@ async function writeClone(
   const urn = `${targetUrn}:${slug}`;
   await claimUrn(tx, urn);
 
+  // #5016: one Agent more for the target organization, after every anchor and row lock and before the first insert. The copy's own
+  // memory is a `system` one and free; slice A7b adds `nodes` to this call as one multi-key check.
+  await requireOwnerHeadroom(tx, { owner: { organizationId: target.orgId }, key: 'agents', caller: ctx.userId ? { userId: ctx.userId } : null });
   const memoryCopy = await cloneMemoryGraphInTx(tx, {
     // #5015 — the system memory copy is the clone's node batch, judged against the target organization's `nodes` limit.
     ownerLimitCaller: ownerLimitCaller(ctx),

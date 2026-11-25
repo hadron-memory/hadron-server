@@ -15,6 +15,8 @@ import { carryNodeAuthorship, clearNodeAuthorship } from '../../lib/nodeAuthorsh
 import { computeContentHash } from '../../lib/contentHash.js';
 import { rebindIncludeTags } from '../../lib/includes/rebindIncludeTags.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
+import { requireOwnerHeadroom } from '../../lib/ownerLimits/gate.js';
+import { memoryCountsAgainstOwner } from '../../lib/ownerLimits/keys.js';
 import { resetEmbeddingObligations } from '../../services/embedding/obligation.js';
 import type { MemoryClass, MemoryVisibility } from '../../generated/prisma/index.js';
 
@@ -266,6 +268,10 @@ export async function extractParentNodeGraph(
         args.rootLoc + oldLoc.slice(args.parentLoc.length);
 
       // ── New memory ───────────────────────────────────────────────────────
+      // #5016: the new memory counts for the target organization when its class does; refused here, before any write and before a node moves.
+      if (memoryCountsAgainstOwner({ class: args.newClass, appId: null, isInstallMemory: false })) {
+        await requireOwnerHeadroom(tx, { owner: { organizationId: args.targetOrganizationId }, key: 'memories', caller: args.actorId ? { userId: args.actorId } : null });
+      }
       const memoryId = generateId();
       await tx.memory.create({
         data: {

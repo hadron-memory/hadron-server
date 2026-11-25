@@ -12,6 +12,8 @@ import { ensureCurrentNodeRevisionInTransaction, jsonOrDbNull } from '../../lib/
 import { carryGovernedSignals } from '../../lib/governedSignals.js';
 import { carryNodeAuthorship, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { computeContentHash } from '../../lib/contentHash.js';
+import { requireOwnerHeadroom } from '../../lib/ownerLimits/gate.js';
+import { memoryCountsAgainstOwner } from '../../lib/ownerLimits/keys.js';
 import { resetEmbeddingObligations } from '../../services/embedding/obligation.js';
 import { memoryIsVectorIndexed } from '../../lib/embedding/indexing.js';
 import {
@@ -244,6 +246,10 @@ export async function cloneMemoryGraphInTx(
     where: { id: args.sourceMemoryId },
   });
 
+  // #5016: the copy counts for the target organization when its class does (a clone's `system` memory is free). Before the first write.
+  if (memoryCountsAgainstOwner({ class: source.class, appId: null, isInstallMemory: false })) {
+    await requireOwnerHeadroom(tx, { owner: { organizationId: args.targetOrganizationId }, key: 'memories', caller: args.actorId ? { userId: args.actorId } : null });
+  }
   const memoryId = generateId();
   await tx.memory.create({
     data: {
