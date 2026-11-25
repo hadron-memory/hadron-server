@@ -263,7 +263,7 @@ describe('#4142 S6 chunk B — memory writes', () => {
       { o: '' },
     ));
     expect(empty).toEqual({
-      message: 'URN "" is not fully qualified. Expected a org URN with at least 1 hierarchy segment (e.g., "acme.com").',
+      message: 'The ref is not a fully qualified org URN. Expected a org URN with at least 1 hierarchy segment (e.g., "acme.com").',
       code: 'URN_NOT_QUALIFIED',
     });
     const spaces = await refusal(ask(
@@ -762,7 +762,7 @@ describe('#4142 S6 chunk F — required survivor refs', () => {
       { m: `  ${hidden.id}  ` },
     ));
     expect(paddedHidden).toEqual({
-      message: `No match for memoryRef "${hidden.id}".`,
+      message: 'No match for memoryRef.',
       code: 'NOT_FOUND',
     });
     const paddedMissing = await refusal(ask(
@@ -771,7 +771,7 @@ describe('#4142 S6 chunk F — required survivor refs', () => {
       { m: `  ${missing}  ` },
     ));
     expect(paddedMissing).toEqual({
-      message: `No match for memoryRef "${missing}".`,
+      message: 'No match for memoryRef.',
       code: 'NOT_FOUND',
     });
     // deleteMemorySubscription's caller-input conversion carries the same

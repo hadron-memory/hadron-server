@@ -338,10 +338,10 @@ export async function resolveScopeMemoryRefs(ctx: Context, memoryRefs: string[])
     try {
       ({ id } = await resolveMemoryRef(ctx.db, ref));
     } catch {
-      throw badInput(`No match for memoryRef "${ref}".`);
+      throw badInput('No match for memoryRef.');
     }
     if (!accessible.includes(id)) {
-      throw badInput(`No match for memoryRef "${ref}".`);
+      throw badInput('No match for memoryRef.');
     }
     if (!ids.includes(id)) ids.push(id);
   }
@@ -814,7 +814,7 @@ export interface RunScopeSnapshot {
  */
 export async function resolveScopeForTrigger(ctx: Context, appId: string, scopeRef: string): Promise<string> {
   const ref = scopeRef.trim();
-  const refuse = () => badInput(`No readable scope matches "${ref}" in this App's context.`);
+  const refuse = () => badInput("No readable scope matches in this App's context.");
   const context = await appContextIfReadable(ctx, appId);
   if (!context) throw refuse();
   let scope: Scope | null = await ctx.db.scope.findFirst({ where: { id: ref, deletedAt: null } });

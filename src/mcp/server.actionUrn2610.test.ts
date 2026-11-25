@@ -380,7 +380,7 @@ describe('#2711 delta review — D-1 impersonation, D-2 pins', () => {
     // change that starts serving these memories fails here loudly and the
     // masked pins get written.
     const byNode = await getNode(emitNodeUrnV2(teamMemoryUrn, `register:${CODE}`));
-    expect(byNode).toBe(`Memory not found: "${teamMemoryUrn}".`);
+    expect(byNode).toBe('Memory not found.');
   });
 
   it('D-2: an unminted PLAIN node\'s rename leaves no alias — only register: entries widen (#1591 + #2610)', async () => {

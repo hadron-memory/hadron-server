@@ -38,7 +38,7 @@ type SigningRequestRow = {
 };
 
 function nodeNotFound(nodeRef: string): GraphQLError {
-  return new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+  return new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
 }
 
 function requestNotFound(id: string): GraphQLError {

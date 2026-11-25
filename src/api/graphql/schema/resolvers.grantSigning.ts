@@ -44,7 +44,7 @@ type GrantSigningRequestRow = {
 };
 
 function grantNotFound(grantRef: string): GraphQLError {
-  return new GraphQLError('Grant not found', { extensions: { code: 'GRANT_NOT_FOUND', grantRef } });
+  return new GraphQLError('Grant not found', { extensions: { code: 'GRANT_NOT_FOUND' } }); // #5168: no caller ref relayed
 }
 
 function requestNotFound(id: string): GraphQLError {

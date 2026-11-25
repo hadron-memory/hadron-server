@@ -88,7 +88,8 @@ export class AmbiguousUserRefError extends Error {
  */
 export class AmbiguousLegacyUrnError extends Error {
   constructor(public ref: string, public candidateNodeIds?: readonly string[]) {
-    super(`AMBIGUOUS_LEGACY_URN: ${ref}`);
+    // #5168: the ref is the caller's own text and is not quoted back; `ref` stays on the instance.
+    super('AMBIGUOUS_LEGACY_URN: the legacy URN matches more than one entity; use its id or current URN.');
     this.name = 'AmbiguousLegacyUrnError';
   }
 }

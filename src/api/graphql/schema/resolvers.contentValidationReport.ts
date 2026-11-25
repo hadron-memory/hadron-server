@@ -43,7 +43,7 @@ function badInput(message: string): GraphQLError {
 }
 
 function nodeNotFound(nodeRef: string): GraphQLError {
-  return new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+  return new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
 }
 
 /** The caller's own arguments, judged before anything is read; a refusal here says nothing about the memory. */

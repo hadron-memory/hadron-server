@@ -9,6 +9,7 @@ import { attestationRefusalResult } from '../lib/authoringAttestation.js';
 import { isContentResolutionLimitError, type ContentResolutionLimitError } from '../lib/includes/resolutionBudget.js';
 import { OwnerLimitReachedError } from '../lib/ownerLimits/errors.js';
 import { NodeContentTooLargeError } from '../lib/nodeContentLimit.js';
+import { concealRefEcho } from '../lib/refEcho.js';
 
 // Backstop for wrappers that copied the diagnostic and discarded its class.
 // Use distinctive ORM signatures, not broad words like "query" or "database",
@@ -114,6 +115,8 @@ export function toolErrorResult(
   site = 'mcp_tool',
 ): ReturnType<typeof refusalResult> | ReturnType<typeof toolFaultResult> | ReturnType<typeof rateLimitedResult>
   | ReturnType<typeof resolutionLimitResult> | NonNullable<ReturnType<typeof attestationRefusalResult>> {
+  // #5168: a URN library refusal quotes the caller's value; conceal it before `domainText` reads the message.
+  concealRefEcho(error);
   if (isSessionSupersededError(error)) return supersededResult(error);
   if (error instanceof RateLimited) return rateLimitedResult(error);
   if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
@@ -134,6 +137,7 @@ export function withToolErrorBoundary(
     try {
       return await callback(args, extra);
     } catch (error) {
+      concealRefEcho(error); // #5168, as in toolErrorResult: the rethrown refusal is serialized by its message.
       if (isSessionSupersededError(error)) return supersededResult(error);
       if (error instanceof RateLimited) return rateLimitedResult(error);
       if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);

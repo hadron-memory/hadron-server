@@ -45,7 +45,8 @@ import {
 } from '../../../lib/hostOperations/assignments.js';
 import { recordingRefusal } from './resolvers.hostOperation.js';
 
-const appNotFound = (appRef: string) => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
+// #5168: the refusal never relays the caller's ref (it is their own text, possibly a pasted secret).
+const appNotFound = (_appRef: string) => taskError('APP_NOT_FOUND', 'App not found.');
 const badInput = (message: string) => taskError('BAD_USER_INPUT', message);
 const notPermitted = () =>
   taskError('HOST_ASSIGNMENT_NOT_PERMITTED', 'Only whoever manages the App says which workers its hosts run.');

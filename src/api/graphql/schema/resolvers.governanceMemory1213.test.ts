@@ -577,8 +577,8 @@ it.each([false, true])('task export missing edge keeps the shared refusal shape 
   await expect(resolvers.Mutation.updateTaskNode({}, {
     input: { id: nodeId, properties: { exports: {} }, edges: [{ targetId: 'tasks:nope' }] }, mergeExports,
   }, ctx())).rejects.toMatchObject({
-    message: 'Edge target not found: "tasks:nope"',
-    extensions: { code: 'NodeNotFoundError', ref: 'tasks:nope' },
+    message: 'Edge target not found',
+    extensions: { code: 'NodeNotFoundError' },
   });
   expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toEqual(before);
 });

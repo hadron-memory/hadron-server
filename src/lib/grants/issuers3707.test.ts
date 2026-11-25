@@ -126,7 +126,7 @@ describe('#3730 item 2: the issuer follows the schedule gates for the Apps they 
       // #3730 item 4: the code is the contract. resolveAppRef refuses the deleted App before requireScheduleAdmin's own
       // NOT_FOUND branch, with EntityNotFoundError's wire code — at the ceremony door the route's uniform catch turns it
       // into the one refusal, so this shape never reaches a client as anything but "no" (pinned over real HTTP below).
-      await expect(requireActionIssuer(ctx(u.admin), action, app.id), action).rejects.toMatchObject({ code: 'APP_NOT_FOUND', message: `APP_NOT_FOUND: ${app.id}` });
+      await expect(requireActionIssuer(ctx(u.admin), action, app.id), action).rejects.toMatchObject({ code: 'APP_NOT_FOUND', message: 'APP_NOT_FOUND: no match for the given ref.' });
     }
   });
 });

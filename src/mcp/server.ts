@@ -430,6 +430,7 @@ import { Prisma, type PrismaClient, type SessionType, type NodeContentValidation
 import { memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
 import { ownerLimitCaller, requireNodeHeadroom } from '../lib/ownerLimits/nodes.js';
 import { assertNodeContentSize, resultingNodeContent } from '../lib/nodeContentLimit.js';
+import { refusalText } from '../lib/refEcho.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -852,7 +853,7 @@ export async function resolveEdgeRefs(
         select: { loc: true, memoryId: true },
       });
       if (!tgt || !(await canReadMemory(db, auth, tgt.memoryId, EXPLICIT_REF))) {
-        return { error: `Edge target not found: "${edge.targetId}"` };
+        return { error: 'Edge target not found' };
       }
       resolved.push({
         targetNodeId,
@@ -865,7 +866,7 @@ export async function resolveEdgeRefs(
       });
     } catch (err) {
       if (err instanceof NodeNotFoundError) {
-        return { error: `Edge target not found: "${err.ref}"` };
+        return { error: 'Edge target not found' };
       }
       throw err;
     }
@@ -934,7 +935,7 @@ export async function addEdge(args: {
       assertFullyQualifiedUrn(rawTarget, 'node');
     }
   } catch (e) {
-    if (e instanceof UrnNotQualifiedError) return { error: `Target: ${e.message}` };
+    if (e instanceof UrnNotQualifiedError) return { error: `Target: ${refusalText(e)}` };
     throw e;
   }
 
@@ -949,14 +950,14 @@ export async function addEdge(args: {
     });
     // #1316: a node in a memory hidden from this caller answers as a missing one.
     if (!found || found.deletedAt || (await isMemoryHiddenFrom(auth, found.memoryId, 'write'))) {
-      return { error: `Source node not found: "${rawSource}".` };
+      return { error: 'Source node not found.' };
     }
     sourceNode = { id: found.id, loc: found.loc, memoryId: found.memoryId };
   } else {
     try {
       assertFullyQualifiedUrn(rawSource, 'node');
     } catch (e) {
-      if (e instanceof UrnNotQualifiedError) return { error: `Source: ${e.message}` };
+      if (e instanceof UrnNotQualifiedError) return { error: `Source: ${refusalText(e)}` };
       throw e;
     }
     const { memoryUrn: sourceMemoryUrn, loc: sourceLoc, fragment: sourceFrag } =
@@ -970,14 +971,14 @@ export async function addEdge(args: {
     // confirms the memory exists.
     const sourceMem = await resolveVisibleMemoryByUrn(auth, sourceMemoryUrn, 'write');
     if (!sourceMem) {
-      return { error: `Source memory not found: "${sourceMemoryUrn}".` };
+      return { error: 'Source memory not found.' };
     }
     const found = await db.node.findUnique({
       where: { loc_memoryId: { loc: sourceLoc, memoryId: sourceMem.id } },
       select: { id: true, loc: true, memoryId: true, deletedAt: true },
     });
     if (!found || found.deletedAt) {
-      return { error: `Source node not found: "${rawSource}".` };
+      return { error: 'Source node not found.' };
     }
     sourceNode = { id: found.id, loc: found.loc, memoryId: found.memoryId };
   }
@@ -991,7 +992,7 @@ export async function addEdge(args: {
     ({ id: targetNodeId } = await resolveNodeRefForAuth(rawTarget, auth, sourceNode.memoryId));
   } catch (e) {
     if (e instanceof NodeNotFoundError) {
-      return { error: `Edge target not found: "${e.ref}"` };
+      return { error: 'Edge target not found' };
     }
     throw e;
   }
@@ -1003,7 +1004,7 @@ export async function addEdge(args: {
     select: { loc: true, memoryId: true },
   });
   if (!target || !(await canReadMemory(db, auth, target.memoryId, EXPLICIT_REF))) {
-    return { error: `Edge target not found: "${rawTarget}"` };
+    return { error: 'Edge target not found' };
   }
 
   // Spec 037: the edge's identity is its loc within the source memory.
@@ -1028,8 +1029,8 @@ export async function addEdge(args: {
       sourceNode,
       { id: targetNodeId, loc: target.loc, memoryId: target.memoryId },
     );
-    if (!locked.source) return `Source node not found: "${rawSource}".`;
-    if (!locked.target) return `Edge target not found: "${rawTarget}"`;
+    if (!locked.source) return 'Source node not found.';
+    if (!locked.target) return 'Edge target not found';
 
     // Ownership may transfer after preflight while this transaction waits on
     // the endpoint keys. Fence both Memories through the insert, then rerun
@@ -1038,13 +1039,13 @@ export async function addEdge(args: {
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
     }
     if (!(await canReadMemory(tx as typeof db, auth, sourceNode.memoryId, EXPLICIT_REF))) {
-      return `Source node not found: "${rawSource}".`;
+      return 'Source node not found.';
     }
     if (!(await canWriteToMemory(tx as typeof db, auth, sourceNode.memoryId, EXPLICIT_REF))) {
       return `Write access denied for source memory.${await explainWriteRefusal(tx as typeof db, auth, sourceNode.memoryId)}`;
     }
     if (!(await canReadMemory(tx as typeof db, auth, target.memoryId, EXPLICIT_REF))) {
-      return `Edge target not found: "${rawTarget}"`;
+      return 'Edge target not found';
     }
     // Writer level of the source node, on the locked source.
     try {
@@ -1232,9 +1233,9 @@ async function replaceOutgoingEdgesInTransaction(
     memoryId: edge.targetMemoryId,
   }));
   const live = await liveEdgeEndpointSet(tx, [source, ...targets]);
-  if (!live.has(source.id)) return `Source node not found: "${source.id}".`;
+  if (!live.has(source.id)) return 'Source node not found.';
   const missing = args.resolved.find((edge) => !live.has(edge.targetNodeId));
-  if (missing) return `Edge target not found: "${missing.targetNodeId}"`;
+  if (missing) return 'Edge target not found';
 
   // Derived INCLUDE edges (#2040) belong to the content writer.
   await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId, governedKind: null } });
@@ -1279,9 +1280,9 @@ async function addOutgoingEdgesInTransaction(
   const source = { id: args.sourceNodeId, loc: args.sourceLoc, memoryId: args.sourceMemoryId };
   const targets = args.resolved.map((edge) => ({ id: edge.targetNodeId, loc: edge.targetLoc, memoryId: edge.targetMemoryId }));
   const live = await liveEdgeEndpointSet(tx, [source, ...targets]);
-  if (!live.has(source.id)) return { error: `Source node not found: "${source.id}".` };
+  if (!live.has(source.id)) return { error: 'Source node not found.' };
   const missing = args.resolved.find((edge) => !live.has(edge.targetNodeId));
-  if (missing) return { error: `Edge target not found: "${missing.targetNodeId}"` };
+  if (missing) return { error: 'Edge target not found' };
   let added = 0;
   let unchanged = 0;
   for (const e of args.resolved) {
@@ -1496,7 +1497,7 @@ async function resolveParentForRead(
     }
     return { ok: true, ...resolved };
   } catch (e) {
-    if (e instanceof UrnNotQualifiedError) return { ok: false, kind: 'invalid', message: e.message };
+    if (e instanceof UrnNotQualifiedError) return { ok: false, kind: 'invalid', message: refusalText(e) };
     throw e;
   }
 }
@@ -3682,7 +3683,7 @@ export function createMcpServerInstance(
             + ` Current revision state: ${receipt.state}.`,
         );
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${refusalText(e)}`);
         return toolErrorResult(e, () => codedRefusalText(e), 'hadron_record_content_validation:resolver');
       }
     },
@@ -4063,7 +4064,7 @@ export function createMcpServerInstance(
       return { ...toolErrorResult(error, () => {
         if (error instanceof ScopeGraphQLError) return `[${String(error.extensions.code ?? 'ERROR').toLowerCase()}] ${error.message}`;
         if (error instanceof MemoryNotFoundError) return '[not_found] Memory not found.';
-        if (error instanceof UrnNotQualifiedError) return `[bad_user_input] ${error.message}`;
+        if (error instanceof UrnNotQualifiedError) return `[bad_user_input] ${refusalText(error)}`;
         throw error;
       }, 'node_recovery'), isError: true as const };
     }
@@ -4102,7 +4103,7 @@ export function createMcpServerInstance(
     ) {
       return refusalResult(`[not_found] No match for "${(e as { ref?: string }).ref ?? ''}".`);
     }
-    if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${e.message}`);
+    if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${refusalText(e)}`);
     throw e;
   };
 
@@ -4476,7 +4477,7 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
@@ -4486,7 +4487,7 @@ export function createMcpServerInstance(
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
-        return refusalResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult('Memory not found.');
       }
       const memoryId = memory.id;
       // Default name to the last loc atom (e.g. `services:db-helpers` → `db-helpers`).
@@ -4808,7 +4809,7 @@ export function createMcpServerInstance(
         try {
           assertFullyQualifiedUrn(memoryUrn, 'memory');
         } catch (e) {
-          if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+          if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
           throw e;
         }
         const mem = await resolveMemoryByUrn(memoryUrn);
@@ -4834,7 +4835,7 @@ export function createMcpServerInstance(
             try {
               assertFullyQualifiedUrn(urn, 'memory');
             } catch (e) {
-              if (e instanceof UrnNotQualifiedError) return { error: e.message };
+              if (e instanceof UrnNotQualifiedError) return { error: refusalText(e) };
               throw e;
             }
             const mem = await resolveMemoryByUrn(urn);
@@ -5454,7 +5455,7 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
@@ -5474,7 +5475,7 @@ export function createMcpServerInstance(
       const sourceReadable = !!memory && await canReadMemory(db, auth, memory.id, EXPLICIT_REF);
       const missing = () => refusalResult(sourceReadable
         ? `Node "${rawUrn}" not found.`
-        : `Memory not found: "${memoryUrn}".`);
+        : 'Memory not found.');
 
       // The projection's include, named so the two candidate lookups below
       // cannot drift apart.
@@ -5605,7 +5606,7 @@ export function createMcpServerInstance(
         const mem = await resolveMemoryByUrn(memoryUrn!);
         if (!mem || !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
           // Don't leak existence — mirror the single read's phrasing.
-          return refusalResult(`Memory not found: "${memoryUrn}".`);
+          return refusalResult('Memory not found.');
         }
         prefixReadMemoryId = mem.id;
         // Count cap (cor:api:040:02): take MAX+1 to detect overflow, then fail
@@ -6065,14 +6066,14 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawParent, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(`Parent: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Parent: ${refusalText(e)}`);
         throw e;
       }
       if (rawCurrent) {
         try {
           assertFullyQualifiedUrn(rawCurrent, 'node');
         } catch (e) {
-          if (e instanceof UrnNotQualifiedError) return refusalResult(`Current: ${e.message}`);
+          if (e instanceof UrnNotQualifiedError) return refusalResult(`Current: ${refusalText(e)}`);
           throw e;
         }
       }
@@ -6080,10 +6081,10 @@ export function createMcpServerInstance(
       const { memoryUrn, loc: parentLoc } = splitNodeUrn(rawParent);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
-        return refusalResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult('Memory not found.');
       }
       if (!(await canReadMemory(db, auth, memory.id, EXPLICIT_REF))) {
-        return refusalResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult('Memory not found.');
       }
       const prefix = parentLoc + ':';
 
@@ -6223,7 +6224,7 @@ export function createMcpServerInstance(
           try {
             assertFullyQualifiedUrn(memoryUrn, 'memory');
           } catch (e) {
-            if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+            if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
             throw e;
           }
           const mem = await resolveMemoryByUrn(memoryUrn);
@@ -6601,7 +6602,7 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
@@ -6612,7 +6613,7 @@ export function createMcpServerInstance(
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
-        return refusalResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult('Memory not found.');
       }
       const memoryId = memory.id;
 
@@ -6708,7 +6709,7 @@ export function createMcpServerInstance(
             }
           } catch (e) {
             if (e instanceof UrnNotQualifiedError) {
-              return textResult(`Edge target: ${e.message}`);
+              return textResult(`Edge target: ${refusalText(e)}`);
             }
             throw e;
           }
@@ -7229,7 +7230,7 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
@@ -7239,7 +7240,7 @@ export function createMcpServerInstance(
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
-        return refusalResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult('Memory not found.');
       }
 
       // Auth BEFORE any node-existence probe: returning "not found" for an
@@ -7314,7 +7315,7 @@ export function createMcpServerInstance(
       // a partial update, not a resurrect — a caller who wants a deleted loc
       // back must recreate it via hadron_create_node (which resurrects).
       if (!existing || existing.deletedAt) {
-        return refusalResult(`Node not found: "${rawUrn}"`);
+        return refusalResult('Node not found');
       }
 
       // Resolve edge targets BEFORE the revision snapshot + node update
@@ -7331,7 +7332,7 @@ export function createMcpServerInstance(
             }
           } catch (e) {
             if (e instanceof UrnNotQualifiedError) {
-              return textResult(`Edge target: ${e.message}`);
+              return textResult(`Edge target: ${refusalText(e)}`);
             }
             throw e;
           }
@@ -7359,7 +7360,7 @@ export function createMcpServerInstance(
           try {
             if (!isId(edge.targetUrn)) assertFullyQualifiedUrn(edge.targetUrn, 'node');
           } catch (e) {
-            if (e instanceof UrnNotQualifiedError) return textResult(`Edge target: ${e.message}`);
+            if (e instanceof UrnNotQualifiedError) return textResult(`Edge target: ${refusalText(e)}`);
             throw e;
           }
         }
@@ -7383,13 +7384,13 @@ export function createMcpServerInstance(
         const seen = new Set<string>();
         for (const ref of removeEdges) {
           // The one answer deleteEdge gives for an unknown, foreign or unreadable edge: no existence oracle.
-          const notFound = refusalResult(`Edge not found: "${ref}"`);
+          const notFound = refusalResult('Edge not found');
           let edgeId: string;
           try {
             ({ id: edgeId } = await resolveEdgeRef(db, ref));
           } catch (e) {
             if (e instanceof EdgeNotFoundError) return notFound;
-            if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+            if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
             throw e;
           }
           const owned = await db.edge.findUnique({ where: { id: edgeId }, select: { sourceId: true, memoryId: true } });
@@ -7874,7 +7875,7 @@ export function createMcpServerInstance(
     // own concealment answered instead, echoing the RESOLVED id it was handed —
     // the victim memory's internal id, to a caller who cannot read it.
     const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
-    if (!memory) return refusalResult(`Memory not found: "${memoryUrn}".`);
+    if (!memory) return refusalResult('Memory not found.');
     try {
       validateLoc(loc);
     } catch (e) {
@@ -8389,7 +8390,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
@@ -8672,13 +8673,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       try {
         assertFullyQualifiedUrn(rawFrom, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(`Source: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Source: ${refusalText(e)}`);
         throw e;
       }
       try {
         assertFullyQualifiedUrn(rawTo, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(`Target: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Target: ${refusalText(e)}`);
         throw e;
       }
 
@@ -8698,11 +8699,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // #2206 (B): a move carries the node's content (and its render, below) to the caller, so a source memory the
       // caller may write but not read answers as one it cannot see.
       if (!fromMemory || (await isWriteBeyondRead(db, auth, fromMemory.id))) {
-        return refusalResult(`Source memory not found: "${fromMemoryUrn}".`);
+        return refusalResult('Source memory not found.');
       }
       const toMemory = await resolveVisibleMemoryByUrn(auth, toMemoryUrn, 'write');
       if (!toMemory) {
-        return refusalResult(`Target memory not found: "${toMemoryUrn}".`);
+        return refusalResult('Target memory not found.');
       }
 
       try {
@@ -9008,7 +9009,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           return refusalResult(`[chat_message_seq_conflict] ${CHAT_SEQ_CONFLICT_MESSAGE}`);
         }
         if (e instanceof ArchivePlanExhaustedError) return refusalResult('The node was moved concurrently; re-read it and retry.');
-        if (e instanceof MoveSourceBeyondReadError) return refusalResult(`Source memory not found: "${fromMemoryUrn}".`);
+        if (e instanceof MoveSourceBeyondReadError) return refusalResult('Source memory not found.');
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
         // A descendant-slot collision (or a move-into-own-subtree) aborts the
         // whole transaction — including any overwrite eviction — and surfaces as
@@ -9172,7 +9173,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     try {
       assertFullyQualifiedUrn(rawUrn, 'node');
     } catch (e) {
-      if (e instanceof UrnNotQualifiedError) return { error: e.message };
+      if (e instanceof UrnNotQualifiedError) return { error: refusalText(e) };
       throw e;
     }
     const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
@@ -9180,7 +9181,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     if (actionFragRefusal) return { error: actionFragRefusal };
     const memory = await resolveMemoryByUrn(memoryUrn);
     if (!memory || !(await canReadMemory(db, auth, memory.id))) {
-      return { error: `Memory not found: "${memoryUrn}".` };
+      return { error: 'Memory not found.' };
     }
     const node = await findRunNode({ loc_memoryId: { loc, memoryId: memory.id } });
     if (!node) return { error: `Node "${rawUrn}" not found.` };
@@ -12311,14 +12312,14 @@ function ageOf(at: Date, now: Date = new Date()): string {
       try {
         assertFullyQualifiedUrn(memoryUrn, 'memory');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
       // #1316: an unreadable memory takes the missing branch.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!memory) {
-        return refusalResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult('Memory not found.');
       }
 
       // #819 — the checks themselves now live in src/lib/memoryValidation.ts,
@@ -12349,13 +12350,13 @@ function ageOf(at: Date, now: Date = new Date()): string {
       try {
         assertFullyQualifiedUrn(memoryUrn, 'memory');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memoryRef = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
-      if (!memoryRef) return refusalResult(`Memory not found: "${memoryUrn}".`);
+      if (!memoryRef) return refusalResult('Memory not found.');
       if (!(await canWriteToMemory(db, auth, memoryRef.id, EXPLICIT_REF))) {
         return refusalResult('Access denied.');
       }

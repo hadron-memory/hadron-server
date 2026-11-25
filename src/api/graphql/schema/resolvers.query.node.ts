@@ -651,7 +651,7 @@ export const nodeQueries = {
       } catch (e) {
         // Genuine miss → NOT_FOUND; a malformed ref propagates as itself.
         if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+          throw new GraphQLError('Node not found', {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
@@ -677,7 +677,7 @@ export const nodeQueries = {
       });
       // Denied and missing share one message — no existence oracle.
       const denied = () =>
-        new GraphQLError(`Node not found: "${nodeRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+        new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       if (!node) throw denied();
       if (!(await isMemoryReadableCached(ctx, node.memoryId))) throw denied();
 

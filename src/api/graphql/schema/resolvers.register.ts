@@ -66,7 +66,7 @@ async function readableEntry(ctx: Context, ref: string): Promise<RegisterEntry |
 async function writableEntry(ctx: Context, ref: string): Promise<RegisterEntry> {
   if (ctx.impersonation) throw forbiddenError();
   const row = await readableEntry(ctx, ref);
-  if (!row) throw new GraphQLError(`No match for registerEntryRef "${ref}".`, { extensions: { code: 'NOT_FOUND' } });
+  if (!row) throw new GraphQLError('No match for registerEntryRef.', { extensions: { code: 'NOT_FOUND' } });
   await requireRegisterOwnerWrite(ctx, row);
   return row;
 }
@@ -331,10 +331,10 @@ export const readStateMutations = {
     ctx: Context,
   ) => {
     const resolved = await readableAttendee(ctx, attendeeRef, appRef);
-    if (!resolved) throw new GraphQLError(`No match for attendeeRef "${attendeeRef}".`, { extensions: { code: 'NOT_FOUND' } });
+    if (!resolved) throw new GraphQLError('No match for attendeeRef.', { extensions: { code: 'NOT_FOUND' } });
     await requireReadStateDriver(ctx, resolved.attendee, resolved.appId);
     const channel = await registeredChannel(ctx, resolved.attendee, channelRef);
-    if (!channel) throw new GraphQLError(`No match for channelRef "${channelRef}".`, { extensions: { code: 'NOT_FOUND' } });
+    if (!channel) throw new GraphQLError('No match for channelRef.', { extensions: { code: 'NOT_FOUND' } });
     if (!Number.isInteger(seq) || seq < 0) throw new GraphQLError('seq must be a non-negative integer.', { extensions: { code: 'BAD_USER_INPUT' } });
     // A cursor past the watermark could never be corrected downward (every
     // later write is GREATEST) and would suppress attention until the Channel

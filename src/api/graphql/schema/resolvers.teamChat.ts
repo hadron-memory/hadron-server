@@ -734,7 +734,7 @@ async function resolveMentionTokens(
 type ChannelTarget = { channelId: string; lastSeq: number; app: AppRow | null; root: ChatRootRow; incarnation: ChannelIncarnation };
 
 const channelNotFound = (ref: string): GraphQLError =>
-  new GraphQLError(`No match for channelRef "${ref}".`, { extensions: { code: 'CHANNEL_NOT_FOUND', channelRef: ref } });
+  new GraphQLError('No match for channelRef.', { extensions: { code: 'CHANNEL_NOT_FOUND' } }); // #5168: the ref is not quoted back
 
 /**
  * May this caller READ the Channel's host memory? Since #1196 this is the whole

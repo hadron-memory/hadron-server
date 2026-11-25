@@ -352,7 +352,7 @@ async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<Wor
  */
 export function workerNotFound(workerRef: string): GraphQLError {
   return new GraphQLError('Worker not found.', {
-    extensions: { code: 'WORKER_NOT_FOUND', workerRef },
+    extensions: { code: 'WORKER_NOT_FOUND' }, // #5168: the caller's ref is not relayed
   });
 }
 
@@ -1870,7 +1870,7 @@ export const workerMutations = {
         await tx.$executeRaw`INSERT INTO worker_reference_fences(subject_id) VALUES (${worker.id})
           ON CONFLICT (subject_id) DO UPDATE SET version = worker_reference_fences.version + 1`;
         const current = await tx.worker.findUnique({ where: { id: worker.id } });
-        if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
+        if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND' } });
         if (await miscastHasReferences(tx, current)) throw refuse();
         await deletePristineGeneratedTickers(tx, worker.id);
         await tx.session.deleteMany({ where: { workerId: worker.id } });
@@ -1931,7 +1931,7 @@ export const workerQueries = {
         await lockStaffingAct(tx, app, admission, ctx.sessionId);
         admission = await admitWorkerStaffAct(txCtx, app, instruction, admission, true);
         const current = await tx.worker.findUnique({ where: { id: worker.id } });
-        if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
+        if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND' } });
         if (await miscastHasReferences(tx, current)) {
           throw new GraphQLError('This worker has persisted references, an unreleased stint, or encrypted attribution that cannot be verified. Retire it instead.', {
             extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
@@ -1999,7 +1999,7 @@ export const workerQueries = {
         // database fault propagates (it is not "worker not found").
         if (!isAppRefResolutionFailure(e)) throw e;
         throw new GraphQLError('Worker not found.', {
-          extensions: { code: 'WORKER_NOT_FOUND', workerRef: trimmed },
+          extensions: { code: 'WORKER_NOT_FOUND' },
         });
       }
       // Gate-then-lookup, with denial and absence collapsed — see
@@ -2007,7 +2007,7 @@ export const workerQueries = {
       const byName = await resolveWorkerIdByNameGated(ctx, appId, trimmed);
       if (!byName) {
         throw new GraphQLError('Worker not found.', {
-          extensions: { code: 'WORKER_NOT_FOUND', workerRef: trimmed },
+          extensions: { code: 'WORKER_NOT_FOUND' },
         });
       }
       return singleWorkerActivityRow(await ctx.db.worker.findUniqueOrThrow({ where: { id: byName } }));

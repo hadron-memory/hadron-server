@@ -111,7 +111,7 @@ describe('#3688 — a named memory discloses other principals\' volumes only, th
     const missing = generateId();
     for (const m of [unreadable.id, missing]) {
       const res = await gql(`query($m: ID!){ usageEvents(memoryRef: $m){ id } }`, { m }, ctx({ userId: me.id, roles: ['READER'] }));
-      expect(res.errors?.[0]?.message).toContain(`MEMORY_NOT_FOUND: ${m}`);
+      expect(res.errors?.[0]?.message).toContain('MEMORY_NOT_FOUND: no match for the given ref.');
     }
   });
 });

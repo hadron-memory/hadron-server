@@ -49,7 +49,7 @@ describe('resolveRefArg (unit)', () => {
     };
     await expect(
       resolveRefArg(db, missing, { ref: 'ghost', label: 'user' }),
-    ).rejects.toThrow(/No match for userRef "ghost"/);
+    ).rejects.toThrow(/^No match for userRef\.$/);
   });
 
   it('maps AmbiguousUserRefError to BAD_USER_INPUT with guidance', async () => {

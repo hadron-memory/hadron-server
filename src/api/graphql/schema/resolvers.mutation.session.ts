@@ -145,6 +145,7 @@ import {
   getConnectProvider,
   issueConnectStart,
 } from '../../../integrations/mailboxConnect.js';
+import { refusalText } from '../../../lib/refEcho.js';
 
 /** `ConnectionProvider` enum value -> the emailClient provider key a connect flow is mounted under (#2897). */
 const CONNECTION_PROVIDER_KEYS: Record<string, string> = {
@@ -244,7 +245,7 @@ const launchGrantInvalid = () =>
 
 /** startSession's answer for a worker ref that names nothing the caller may see: one envelope for absent and unreadable alike. */
 const workerRefNotFound = (workerRef: string) =>
-  new GraphQLError(`Worker not found: ${workerRef}`, { extensions: { code: 'WORKER_NOT_FOUND' } });
+  new GraphQLError('Worker not found', { extensions: { code: 'WORKER_NOT_FOUND' } }); // #5168: no ref quoted
 
 /**
  * #4836 — startSession's appRef refusal judge, PURE so the race arms can be pinned without a database.
@@ -862,7 +863,7 @@ export const sessionMutations = {
           // which masks not-found to null); malformed URNs propagate their
           // own typed error from assertFullyQualifiedUrn.
           if (e instanceof AgentNotFoundError) {
-            throw new GraphQLError(`Agent not found: ${agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+            throw new GraphQLError('Agent not found', { extensions: { code: 'BAD_USER_INPUT' } }); // #5168: no ref quoted
           }
           throw e;
         }
@@ -3472,7 +3473,7 @@ export const sessionMutations = {
           assertFullyQualifiedUrn(targetNodeUrn, 'node');
         } catch (e) {
           if (e instanceof UrnNotQualifiedError) {
-            throw new GraphQLError(e.message, {
+            throw new GraphQLError(refusalText(e), {
               extensions: { code: e.name },
             });
           }
@@ -3501,7 +3502,7 @@ export const sessionMutations = {
         });
 
         if (!memory || !(await canReadMemory(ctx.db, auth, memory.id))) {
-          throw new GraphQLError(`Memory not found: "${resolvedMemoryUrn}".`, {
+          throw new GraphQLError('Memory not found.', {
             extensions: { code: 'NOT_FOUND' },
           });
         }
@@ -3685,7 +3686,7 @@ export const sessionMutations = {
         ({ id: resolvedNodeId } = await resolveNodeRefForCaller(ctx, ref));
       } catch (e) {
         if (e instanceof NodeNotFoundError || e instanceof UrnNotQualifiedError) {
-          throw new GraphQLError(e.message, { extensions: { code: 'NOT_FOUND' } });
+          throw new GraphQLError(refusalText(e), { extensions: { code: 'NOT_FOUND' } });
         }
         throw e;
       }

@@ -339,7 +339,7 @@ describe('Mutation.deleteNode access control', () => {
         { nodeRef: target.id },
         ctx({ appId: appContributor.id }),
       ),
-    ).rejects.toThrow(`Node not found: "${target.id}"`);
+    ).rejects.toThrow('Node not found');
     expect(await db.node.findUnique({ where: { id: target.id }, select: { deletedAt: true } })).toEqual({
       deletedAt: null,
     });
@@ -394,7 +394,7 @@ describe('Mutation.moveNode access control (#564 sourceRef/targetUrn)', () => {
         { sourceRef, targetUrn: targetInB('org-b.repo.moved') },
         ctx({ appId: appContributor.id }),
       ),
-    ).rejects.toThrow(`Node not found: "${sourceRef}"`);
+    ).rejects.toThrow('Node not found');
   });
 
   // 007-entity-id-or-urn: sourceRef accepts a fully-qualified URN, not just a PK.
@@ -492,7 +492,7 @@ describe('Mutation.replaceSubtree retirement (#454)', () => {
     await expect(resolvers.Mutation.replaceSubtree(
       null, { ownerRepo: 'org-b/repo', memoryId: graphB.id, nodes: [], edges: [] },
       ctx({ appId: appContributor.id, userId: appMember.id }),
-    )).rejects.toThrow(`MEMORY_NOT_FOUND: ${graphB.id}`);
+    )).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
   });
 });
 

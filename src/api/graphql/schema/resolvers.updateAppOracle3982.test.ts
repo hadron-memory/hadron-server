@@ -56,7 +56,7 @@ const row = () => db.app.findUniqueOrThrow({ where: { id: app.id } });
 
 describe('#3982 updateApp reach versus act (Holger model A)', () => {
   const update = (ref: string, c = ctx(stranger.id), input = {}) => M.updateApp({}, { ref, name: 'changed', ...input }, c);
-  const unknown = (ref: string) => ({ code: 'APP_NOT_FOUND', message: `APP_NOT_FOUND: ${ref}` });
+  const unknown = (ref: string) => ({ code: 'APP_NOT_FOUND', message: 'APP_NOT_FOUND: no match for the given ref.' });
   const denied = { code: 'FORBIDDEN', message: 'Forbidden' };
 
   it.each(['id', 'urn'] as const)('unreachable existing and missing %s use the same unknown envelope, with only the supplied ref', async kind => {
@@ -175,7 +175,7 @@ describe('#3982 updateApp reach versus act (Holger model A)', () => {
     const a = await ask(app[kind]);
     expect(a).toEqual(await ask(missing));
     expect(a.errors).toHaveLength(1);
-    expect(a.errors[0]).toMatchObject({ message: 'APP_NOT_FOUND: <ref>', extensions: { code: 'APP_NOT_FOUND' } });
+    expect(a.errors[0]).toMatchObject({ message: 'APP_NOT_FOUND: no match for the given ref.', extensions: { code: 'APP_NOT_FOUND' } });
     expect(a.data).toBeNull();
   });
 

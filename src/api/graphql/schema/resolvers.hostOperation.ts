@@ -101,7 +101,8 @@ import {
   type ResetHost,
 } from '../../../lib/contextReset/contextReset.js';
 
-const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
+// #5168: the refusal never relays the caller's ref (it is their own text, possibly a pasted secret).
+const appNotFound = (_appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.');
 const opNotFound = (id: string): GraphQLError => taskError('HOST_OPERATION_NOT_FOUND', 'Host operation not found.', { id });
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
 

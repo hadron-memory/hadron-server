@@ -215,7 +215,7 @@ describe('hadron_create_node — a LIVE loc is refused, not overwritten (#1181)'
     // #1316: the outsider cannot read this memory, so the refusal is the
     // missing-memory answer rather than "Write access denied" — which would
     // itself confirm the memory exists.
-    expect(occupied).toBe(`Memory not found: "${fx.memory.urn}".`);
+    expect(occupied).toBe('Memory not found.');
     expect(occupied).not.toMatch(/already exists/i);
     // Byte-identical — no existence signal in either direction.
     expect(free).toBe(occupied);

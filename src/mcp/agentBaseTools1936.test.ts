@@ -372,8 +372,9 @@ describe('#1944 — an Agent the caller can\'t read answers like an absent one, 
     ] as const) {
       const real = await call(adminB, tool, args(`hrn:agent:${secret.urn}`));
       const guessed = await call(adminB, tool, args(nobody));
-      expect(guessed).toEqual({ isError: true, text: `[AGENT_NOT_FOUND] AGENT_NOT_FOUND: ${nobody}` });
-      expect(real).toEqual({ isError: true, text: `[AGENT_NOT_FOUND] AGENT_NOT_FOUND: hrn:agent:${secret.urn}` });
+      // #5168: one fixed text for both; the ref is no longer quoted back.
+      expect(guessed).toEqual({ isError: true, text: '[AGENT_NOT_FOUND] AGENT_NOT_FOUND: no match for the given ref.' });
+      expect(real).toEqual(guessed);
     }
   });
 
