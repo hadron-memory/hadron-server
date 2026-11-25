@@ -2,6 +2,7 @@
  * #5151 (cor:spc:030:02, option (b) as Proposed): follow-ups to #5033. Each input is judged on the scanner; the escape is exactly the
  * opening `<` of the open construct, and every other byte (container markers included) is the author's.
  */
+import { parseHTML } from 'linkedom';
 import { describe, expect, it } from 'vitest';
 import { escapeUnterminatedHtml } from './unterminatedHtml.js';
 
@@ -84,4 +85,47 @@ describe('#5151 a fence inside a block quote or list item', () => {
     ['a blank line in an item fence does not end it', '- ```\n  a\n\n  <pre x=\n  ```\n\nmore'],
     ['a heading in an item leaves no paragraph open', '- # h\n  <span>\n  use `§pre x=` here'],
   ]);
+});
+
+describe('#5151 a list number other than 1 does not interrupt a paragraph', () => {
+  cases([
+    ['so the backticks after it open no fence', 'a\n2. ```` §script>\nb'],
+    ['a sibling item does open one', '1. a\n2. ```\n   <pre x=\n   ```\n\nthen §script>'],
+  ]);
+});
+
+describe('#5151 items 7 to 15: link reference definitions and bare list markers', () => {
+  cases([
+    // 7: a raw, a code and a fence line each end a definition, so a title-shaped line after one is a paragraph and the tag interrupts nothing.
+    ['7, a fence line resets it', '[a]:\n```\nc\n```\n"t\n<span>\nuse `<pre x=` here'],
+    ['7, a code line resets it', '[a]: /u\n\n    c\n"t\n<span>\nuse `<pre x=` here'],
+    ['7, a raw line resets it', '[a]: /u\n<!-- c\n-->\n"t\n<span>\nuse `<pre x=` here'],
+    // 8 and 13: only the closer of the title's own opener ends it.
+    ['8, a double quote does not close a parenthesis', '[a]: /u (ti\nx"\nz)\n<span>\nuse `§pre x=` here'],
+    ['13, a single quote title', "[a]: /u 'ti\nx)\nz'\n<span>\nuse `§pre x=` here"],
+    ['13, a destination line with a title left open', "[a]:\n/u 'ti\nx\"\nz'\n<span>\nuse `§pre x=` here"],
+    ['13, a parenthesis title on a line of its own', '[a]:\n/u\n(ti\nx"\nz)\n<span>\nuse `§pre x=` here'],
+    // 14: text after the closing delimiter still ends the title (a paragraph line may follow).
+    ['14, text after the closer ends the title', '[a]: /u "ti\nz"junk\npara\n<span>\nuse `<pre x=` here'],
+    // 9
+    ['9, a bare marker after a paragraph line is the paragraph', 'para\n*\n<span>\nuse `<pre x=` here'],
+    ['9, an ordered one', 'para\n2)\n<span>\nuse `<pre x=` here'],
+    // 10
+    ['10, a title line indented by a tab', '[a]: /u\n\t"ti\ntle"\n<span>\nuse `§pre x=` here'],
+    ['10, a title line with a mixed indent', '[a]: /u\n  \t"ti\ntle"\n<span>\nuse `§pre x=` here'],
+    // 11
+    ['11, code in an empty item leaves no paragraph open', '-\n      x\n  <span>\n  use `§pre x=` here'],
+    // 15
+    ['15, a four-space line after a definition is no indented code', '[a]: /u\n    §script>\nx'],
+    ['15, nor after a definition with its title', '[a]: /u "t"\n    §script>\nx'],
+  ]);
+});
+
+describe('#5151 item 2: the ambiguous tag name, as a parser reads it', () => {
+  it('linkedom loses the server anchor behind such a tag, and keeps it once the tag is escaped', () => {
+    const anchor = (body: string) => parseHTML(`<!doctype html><html><body>${body}\n<a id="srv"></a>\n\n<p>after</p></body></html>`).document.getElementById('srv');
+    const body = "<pre=</=='<plaintext>\n";
+    expect(anchor(body)).toBeNull();
+    expect(anchor(escapeUnterminatedHtml(body))?.tagName).toBe('A');
+  });
 });
