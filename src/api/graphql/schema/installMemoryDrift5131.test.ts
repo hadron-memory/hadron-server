@@ -161,8 +161,10 @@ describe('#5131 install-concealment field drift pin', () => {
     } as unknown as Context;
     // Control: an ORDINARY parent carrying the column serves it (no concealment marker).
     const control = { id: 'node-pin-id', memoryId: 'mem-pin-id', loc: LOC, embeddingTruncatedChunks: 3 };
-    expect(await (resolvers.Node as Record<string, unknown>).indexTruncated(control, {}, servingCtx)).toEqual({ omittedChunks: 3 });
+    const indexTruncated = (resolvers.Node as Record<string, unknown>).indexTruncated as
+      (parent: unknown, args: unknown, ctx: unknown) => Promise<unknown>;
+    expect(await indexTruncated(control, {}, servingCtx)).toEqual({ omittedChunks: 3 });
     // Concealed parent: same node, same serving database — must answer null.
-    expect(await (resolvers.Node as Record<string, unknown>).indexTruncated(concealedParent, {}, servingCtx)).toBeNull();
+    expect(await indexTruncated(concealedParent, {}, servingCtx)).toBeNull();
   });
 });
