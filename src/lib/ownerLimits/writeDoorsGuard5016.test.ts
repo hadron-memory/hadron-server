@@ -9,6 +9,9 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { scanWriteSites, type WriteSite } from '../../test/ownerLimitWriteSites5015.js';
 
+const withoutComments = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+const ASKS_HELPER = /\brequireOwnerHeadroom(?:Many)?\s*\(|\bextraOwnerChecks\s*:/;
+
 type Verdict = { n: number; kind: 'refuses' | 'free' | 'counts-not-refused'; because: string; asks?: string };
 const SITES: Record<string, Verdict> = {
   'src/api/graphql/schema/resolvers.mutation.memory.ts': { n: 1, kind: 'refuses', because: 'createMemory: every class it accepts is free-standing and counts', asks: 'memories' },
@@ -60,7 +63,8 @@ describe('#5016 every memory, Agent and App creation site under src is classifie
     for (const [p, v] of Object.entries(SITES)) {
       if (v.kind !== 'refuses') continue;
       const src = readFileSync(p, 'utf8');
-      expect(src, p).toMatch(/requireOwnerHeadroom|extraOwnerChecks/);
+      // #5145: a call site or the property form in CODE; a comment that only names the helper must not satisfy it.
+      expect(withoutComments(src), p).toMatch(ASKS_HELPER);
       expect(src, p).toContain(`'${v.asks}'`);
     }
   });
@@ -105,7 +109,7 @@ const INSERTS: Record<string, InsertVerdict> = {
   'src/mcp/server.ts#createMcpServerInstance.tool(hadron_create_node)': { n: 1, kind: 'refuses', because: 'MCP inline create (plain or revive), checked after the loc lock and the authoritative collision read' },
   'src/mcp/server.ts#createMcpServerInstance.tool(hadron_create_parent_node)': { n: 1, kind: 'refuses', because: 'MCP inline parent create, checked only when no row exists (the upsert leaves a tombstone deleted)' },
   'src/controller/operations/cloneMemory.ts#cloneMemoryGraphInTx': { n: 1, kind: 'refuses', because: 'the whole clone batch against the new memory\'s owner, before the createMany (also reached by cloneAgent)' },
-  'src/controller/operations/extractParentNode.ts#extractParentNodeGraph': { n: 1, kind: 'refuses', because: 'the copied rows against the new memory\'s owner; skipped when it is a move within one owner (net zero)' },
+  'src/controller/operations/extractParentNode.ts#extractParentNodeGraph': { n: 1, kind: 'refuses', because: 'the copied rows against the new memory\'s owner; asked with amount 0 when it is a move within one owner (net zero), which the call skips' },
   'src/integrations/github/syncGraphFromGithub.ts#syncGraphFromGithubAsSystem': { n: 1, kind: 'refuses', because: 'the sync\'s net new live nodes, judged once at the end of its one transaction (alreadyWritten)' },
   [`${G}/resolvers.mutation.session.ts#writeRevisionRow`]: { n: 2, kind: 'per-caller', because: 'the Agent snapshot: createRevision refuses (mode refuse), restoreRevision\'s auto-save counts (mode count-only)' },
   [`${G}/resolvers.mutation.session.ts#sessionMutations.restoreRevision`]: { n: 1, kind: 'counts-not-refused', because: 'restoring an Agent snapshot; restoring is never refused (cor:acl:150:04), and the transaction takes no advisory key after a row lock (#3587)' },

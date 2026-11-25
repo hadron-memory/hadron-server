@@ -1864,8 +1864,10 @@ export interface OAuthRouteOptions {
 
 export function buildOAuthRouter(opts: OAuthRouteOptions = {}): Router {
   const router = Router();
-  const authRate = buildAuthRateAdmission(db, { protocol: 'oauth', credential: 'cookie' });
-  const tokenRate = buildAuthRateAdmission(db, { protocol: 'oauth', credential: 'none' });
+  // #4675: only the authorize GET is a navigation that may get the page; the decision POST and the token endpoint never do.
+  const authorizePageRate = buildAuthRateAdmission(db, { protocol: 'oauth', credential: 'cookie', form: 'page' });
+  const authRate = buildAuthRateAdmission(db, { protocol: 'oauth', credential: 'cookie', form: 'json' });
+  const tokenRate = buildAuthRateAdmission(db, { protocol: 'oauth', credential: 'none', form: 'json' });
 
   router.get('/.well-known/oauth-protected-resource', handleProtectedResourceMetadata);
   router.get('/.well-known/oauth-authorization-server', handleAuthorizationServerMetadata);
@@ -1885,7 +1887,7 @@ export function buildOAuthRouter(opts: OAuthRouteOptions = {}): Router {
   // a CSRF token cookie); POST processes the decision. Both depend
   // on the `cookie-parser` middleware mounted in server.ts.
   const csrf = buildAuthorizeCsrfProtection();
-  router.get('/oauth/authorize', authRate, buildHandleAuthorizeGet(csrf));
+  router.get('/oauth/authorize', authorizePageRate, buildHandleAuthorizeGet(csrf));
   router.post(
     '/oauth/authorize',
     authRate,

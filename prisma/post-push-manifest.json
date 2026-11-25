@@ -1690,6 +1690,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_tsv_unclosed_comment",
+      "kind": "function",
+      "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_usage_cell",
       "kind": "function",
       "file": "usage-activity-rollup-invariants.sql",
