@@ -64,6 +64,21 @@ describe('#5151 item 5: an HTML block inside a block quote or list item', () => 
     ['a complete multi-line tag in a list item', '- <div>\n  <a\n    href="x">y</a>\n  </div>'],
     ['a complete script in a list item', '- <script>\n  x\n  </script>'],
     ['a complete script in a quote', '> <script>\n> x\n> </script>'],
+    ['a complete script behind a `>` inside an unquoted HTML block', '<div>\n> <script>\nx\n</script>\n</div>'],
     ['a complete pre in a quote', '> <pre>\n> x\n> </pre>'],
+  ]);
+});
+
+describe('#5151 a fence inside a block quote or list item', () => {
+  cases([
+    ['a fence on an item\'s marker line is closed by its closing line', '- ```html\n  <b>\n  ```\n\nThen §textarea> here'],
+    ['an ordered item', '1. ```\n   c\n   ```\n\n§script>'],
+    ['a fence in an item in a quote', '> - ```\n>   c\n>   ```\n\n§script>'],
+    ['a fence ends where its quote ends', '> ```\n> c\n\nThen §textarea> here'],
+    ['a fence ends where its item ends', '- ```\n  c\n\nThen §textarea> here'],
+    ['the code in an item fence stays as written', '- ```html\n  <pre x=\n  ```\n\nmore'],
+    ['the code in a quoted fence stays as written', '> ```html\n> <pre x=\n> ```\n\nmore'],
+    ['a blank line in an item fence does not end it', '- ```\n  a\n\n  <pre x=\n  ```\n\nmore'],
+    ['a heading in an item leaves no paragraph open', '- # h\n  <span>\n  use `§pre x=` here'],
   ]);
 });
