@@ -17,22 +17,22 @@ import { readRateKeys } from '../lib/rateLimit/config.js';
 import { signJwt } from './jwt.js';
 import { createSignIn } from './signIn.js';
 import { AUTH_COOKIE_NAME } from './cookieName.js';
-import { AUTH_RATE_ADMISSION_PREFIX, authRateAdmissionName, type CredentialSource, type RefusalProtocol } from './authRate.js';
+import { AUTH_RATE_ADMISSION_PREFIX, authRateAdmissionName, type CredentialSource, type RefusalForm, type RefusalProtocol } from './authRate.js';
 import { connectInterstitialToken, peekExchangeStartNonce } from './authHandoff.js';
 
-type Inventory = Array<[method: string, path: string, protocol: RefusalProtocol, credential: CredentialSource]>;
+type Inventory = Array<[method: string, path: string, protocol: RefusalProtocol, credential: CredentialSource, form: RefusalForm]>;
 /** The audited list of every route that carries the shared charge, and with which choices (#4677 item 16). */
 const GUARDED: Inventory = [
-  ['GET', '/auth/github', 'rest', 'none'], ['GET', '/auth/github/callback', 'rest', 'none'],
-  ['GET', '/auth/google', 'rest', 'none'], ['GET', '/auth/google/callback', 'rest', 'none'],
-  ['GET', '/auth/apple', 'rest', 'none'], ['POST', '/auth/apple/callback', 'rest', 'none'],
-  ['GET', '/auth/email/verify', 'rest', 'none'], ['POST', '/auth/session', 'rest', 'none'],
-  ['GET', '/auth/me', 'rest', 'bearer'],
-  ['GET', '/oauth/authorize', 'oauth', 'cookie'], ['POST', '/oauth/authorize', 'oauth', 'cookie'],
-  ['POST', '/oauth/token', 'oauth', 'none'],
+  ['GET', '/auth/github', 'rest', 'none', 'page'], ['GET', '/auth/github/callback', 'rest', 'none', 'page'],
+  ['GET', '/auth/google', 'rest', 'none', 'page'], ['GET', '/auth/google/callback', 'rest', 'none', 'page'],
+  ['GET', '/auth/apple', 'rest', 'none', 'page'], ['POST', '/auth/apple/callback', 'rest', 'none', 'page'],
+  ['GET', '/auth/email/verify', 'rest', 'none', 'page'], ['POST', '/auth/session', 'rest', 'none', 'json'],
+  ['GET', '/auth/me', 'rest', 'bearer', 'json'],
+  ['GET', '/oauth/authorize', 'oauth', 'cookie', 'page'], ['POST', '/oauth/authorize', 'oauth', 'cookie', 'json'],
+  ['POST', '/oauth/token', 'oauth', 'none', 'json'],
   ...['microsoft', 'gmail', 'google-cal', 'google-drive'].flatMap(p => [
-    ['POST', `/auth/${p}/start`, 'rest', 'bearer'], ['GET', `/auth/${p}`, 'rest', 'none'],
-    ['POST', `/auth/${p}`, 'rest', 'none'], ['GET', `/auth/${p}/callback`, 'rest', 'none'],
+    ['POST', `/auth/${p}/start`, 'rest', 'bearer', 'json'], ['GET', `/auth/${p}`, 'rest', 'none', 'json'],
+    ['POST', `/auth/${p}`, 'rest', 'none', 'json'], ['GET', `/auth/${p}/callback`, 'rest', 'none', 'json'],
   ] as Inventory),
 ];
 /** Auth/OAuth routes deliberately WITHOUT the shared charge: own limiters (email, code, DCR), discovery, dev login. */
@@ -102,7 +102,7 @@ describe('#4677 route inventory (item 4, 16)', () => {
   it('every mounted auth/OAuth route is either guarded with the audited choices or explicitly excluded', () => {
     const actual = mounted();
     const guarded = actual.filter(r => r.guard).map(r => `${r.method} ${r.path} ${r.guard}`).sort();
-    const expected = GUARDED.map(([m, p, proto, cred]) => `${m} ${p} ${authRateAdmissionName(proto, cred)}`).sort();
+    const expected = GUARDED.map(([m, p, proto, cred, form]) => `${m} ${p} ${authRateAdmissionName(proto, cred, form)}`).sort();
     expect(guarded).toEqual(expected);
     const unguarded = actual.filter(r => !r.guard).map(r => `${r.method} ${r.path}`).sort();
     expect(unguarded).toEqual(EXCLUDED.map(([m, p]) => `${m} ${p}`).sort());

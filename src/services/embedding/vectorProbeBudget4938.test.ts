@@ -113,19 +113,35 @@ describe('#4938 BLIND P2 — a probe that fails inside the transaction leaves it
   }, 20000);
 
   it('a failed probe is not cached: the next search probes again (and a healthy probe still answers)', async () => {
+    // #5002: a failure wrongly cached as `false` would still return the same empty page (the exact scan), so the pin counts
+    // the probes the searches actually run. ONE probe statement does both: its first run fails (a real SQL error, 22012) and
+    // every later run answers the real version, and a sequence counts the runs (a sequence does not roll back with the
+    // probe's savepoint). No seam is touched between the two searches: resetting the probe SQL also drops the cached answer,
+    // which would hide exactly the caching this pin is for.
     const client = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL! });
+    const seq = `probe5002_${process.pid}_${Date.now()}`;
+    const probes = async () => Number((await client.$queryRawUnsafe<{ n: bigint }[]>(
+      `SELECT CASE WHEN is_called THEN last_value ELSE 0 END AS n FROM ${seq}`))[0].n);
     try {
+      await client.$executeRawUnsafe(`CREATE SEQUENCE ${seq}`);
       setIterativeScanSupportForTests(null);
-      setIterativeScanProbeSqlForTests(Prisma.sql`SELECT (1 / 0)::text AS extversion`);
+      // The divisor is not a constant, so the planner cannot fold the error into every run.
+      setIterativeScanProbeSqlForTests(Prisma.sql([`SELECT CASE WHEN nextval('${seq}') = 1 THEN (1 / (currval('${seq}') - 1))::text
+        ELSE extversion END AS extversion FROM pg_extension WHERE extname = 'vector'`]));
       await vectorSearchNodes(client, { memoryIds: ['00000000000000000000000000000000'], queryEmbedding: q, limit: 10 });
-      setIterativeScanProbeSqlForTests(null);
+      expect(await probes()).toBe(1);
       let w: { exhausted: boolean; stoppedEarly?: boolean } | undefined;
       const hits = await vectorSearchNodes(client, {
         memoryIds: ['00000000000000000000000000000000'], queryEmbedding: q, limit: 10, onWindow: (x) => { w = x; },
       });
       expect(hits).toEqual([]);
       expect(w?.stoppedEarly ?? false).toBe(false);
+      expect(await probes()).toBe(2); // the second search probed again (red: a cached failure never probes)
+      await vectorSearchNodes(client, { memoryIds: ['00000000000000000000000000000000'], queryEmbedding: q, limit: 10 });
+      expect(await probes()).toBe(2); // and a healthy answer IS cached
     } finally {
+      setIterativeScanProbeSqlForTests(null);
+      await client.$executeRawUnsafe(`DROP SEQUENCE IF EXISTS ${seq}`).catch(() => undefined);
       await client.$disconnect();
     }
   }, 20000);
