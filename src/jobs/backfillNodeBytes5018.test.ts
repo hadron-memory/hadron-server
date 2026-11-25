@@ -39,6 +39,17 @@ const legacy = async (content: string, revisions = 1) => {
   return n.id;
 };
 const settle = (ms = 150) => new Promise((r) => setTimeout(r, ms));
+/** Waits until some other statement of this database is blocked on a lock (so a test that asserts "still waiting" has something to assert about). */
+const waitForLockWait = async (timeoutMs = 10_000) => {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`
+      SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`;
+    if (n > 0n) return;
+    if (Date.now() > until) throw new Error('no statement ever waited on a lock');
+    await new Promise((r) => setTimeout(r, 25));
+  }
+};
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -133,7 +144,7 @@ describe('#5018 against a concurrent revision insert, in either order, the node 
     }, { timeout: 20_000 });
     await insertedSignal;
     const filler = backfillNodeBytes(db, { apply: true });
-    await settle();
+    await waitForLockWait();
     release();
     await Promise.all([writer, filler]);
     expect((await rows([id]))[0]).toMatchObject(await recomputed(id));
@@ -154,11 +165,76 @@ describe('#5018 against a concurrent revision insert, in either order, the node 
     await lockedSignal;
     let writerDone = false;
     const writer = snapshotOf(id).then(() => { writerDone = true; });
-    await settle();
+    await waitForLockWait();
     expect(writerDone).toBe(false);
     release();
     await Promise.all([batch, writer]);
     expect(writerDone).toBe(true);
     expect((await rows([id]))[0]).toMatchObject(await recomputed(id));
+  });
+});
+
+describe('#5018 a concurrent revision DELETE or rewrite, which takes no node lock on a node that is not measured yet', () => {
+  it('a revision deleted in a transaction the backfill must wait for: the node ends equal to a recomputation', async () => {
+    const id = await legacy('abc', 2);
+    let release!: () => void;
+    let deleted!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const deletedSignal = new Promise<void>((resolve) => { deleted = resolve; });
+    const writer = db.$transaction(async (tx) => {
+      await tx.$executeRaw`DELETE FROM node_revisions WHERE id = (SELECT id FROM node_revisions WHERE node_id = ${id} ORDER BY id LIMIT 1)`;
+      deleted();
+      await held;
+    }, { timeout: 20_000 });
+    await deletedSignal;
+    const filler = backfillNodeBytes(db, { apply: true });
+    await waitForLockWait();
+    release();
+    await Promise.all([writer, filler]);
+    expect((await rows([id]))[0]).toMatchObject(await recomputed(id));
+    expect((await rows([id]))[0]!.revision).toBe(3n);
+  });
+
+  it('a revision rewritten in place in such a transaction: the same', async () => {
+    const id = await legacy('abc', 1);
+    let release!: () => void;
+    let rewritten!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const rewrittenSignal = new Promise<void>((resolve) => { rewritten = resolve; });
+    const writer = db.$transaction(async (tx) => {
+      await tx.$executeRaw`UPDATE node_revisions SET content = 'abcdefghij' WHERE node_id = ${id}`;
+      rewritten();
+      await held;
+    }, { timeout: 20_000 });
+    await rewrittenSignal;
+    const filler = backfillNodeBytes(db, { apply: true });
+    await waitForLockWait();
+    release();
+    await Promise.all([writer, filler]);
+    expect((await rows([id]))[0]).toMatchObject(await recomputed(id));
+    expect((await rows([id]))[0]!.revision).toBe(10n);
+  });
+
+  it('a backfill batch that holds its locks first: a revision delete waits, then applies its difference', async () => {
+    const id = await legacy('abc', 2);
+    let release!: () => void;
+    let locked!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const lockedSignal = new Promise<void>((resolve) => { locked = resolve; });
+    const batch = db.$transaction(async (tx) => {
+      const result = await fillNodeBytesBatch(tx as never, { after: null, batch: 10 });
+      locked();
+      await held;
+      return result;
+    }, { timeout: 20_000 });
+    await lockedSignal;
+    let deleteDone = false;
+    const writer = db.$executeRaw`DELETE FROM node_revisions WHERE id = (SELECT id FROM node_revisions WHERE node_id = ${id} ORDER BY id LIMIT 1)`.then(() => { deleteDone = true; });
+    await waitForLockWait();
+    expect(deleteDone).toBe(false);
+    release();
+    await Promise.all([batch, writer]);
+    expect((await rows([id]))[0]).toMatchObject(await recomputed(id));
+    expect((await rows([id]))[0]!.revision).toBe(3n);
   });
 });

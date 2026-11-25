@@ -8,10 +8,13 @@
  *  - IDEMPOTENT: a second run finds no null row and changes nothing.
  *  - WRITES ONLY THE TWO COLUMNS, in raw SQL that names no other column, so `updated_at`, `rev_seq` and
  *    `revision_content_hash` are untouched and no node-column trigger fires.
- *  - SAFE AGAINST A CONCURRENT REVISION WRITE: each batch locks its node rows (`FOR UPDATE`, id order) before it reads the
- *    revisions, the same row the revision writer locks to take its revision number. Whichever goes first, the node ends equal
- *    to a full recomputation: a revision written before the lock is summed, one written after finds a measured node and adds
- *    its own size through the trigger.
+ *  - SAFE AGAINST A CONCURRENT REVISION WRITE: each batch locks its node rows (`FOR UPDATE`, id order) and then their
+ *    revision rows (`FOR SHARE`, id order) before it sums anything. A revision INSERT takes the node lock first (it numbers
+ *    itself from `rev_seq`, and the foreign key takes a key-share lock the node lock conflicts with); a revision DELETE or
+ *    in-place rewrite (`deleteNodeRevision`, `clearNodeHistory`, the encryption pass) locks only the revision row, and on a node
+ *    that is not measured yet its trigger finds nothing to update and takes no node lock, so the revision-row lock is what makes
+ *    it wait. Whichever goes first, the node ends equal to a full recomputation: a change committed before the locks is summed,
+ *    one after them finds a measured node and applies its own difference through the trigger.
  *
  * It is NOT scheduled and never part of a migration. Running it against production needs the recorded grant (authorizations
  * register); code deploy and the production run are separate acts.
@@ -24,6 +27,8 @@ export const BACKFILL_STATEMENT_TIMEOUT_MS = 60_000;
 export const DEFAULT_BATCH = 1_000;
 
 export interface NodeBytesBackfillOptions {
+  /** Called after each committed batch with the cursor to resume from, so a killed run still tells the operator where it was. */
+  onBatch?: (cursor: string, filled: number) => void;
   apply?: boolean;
   batch?: number;
   limit?: number;
@@ -89,6 +94,8 @@ export async function fillNodeBytesBatch(
         SELECT id FROM nodes WHERE (stored_bytes IS NULL OR revision_bytes IS NULL) AND (${after}::text IS NULL OR id > ${after})
         ORDER BY id LIMIT ${opts.batch} FOR UPDATE`).map((r) => r.id);
   if (ids.length === 0 || opts.apply === false) return { ids, filled: 0 };
+  // The revision rows too (id order, so two batches never wait on each other in a cycle): see the header.
+  await tx.$queryRawUnsafe('SELECT id FROM node_revisions WHERE node_id = ANY($1::text[]) ORDER BY id FOR SHARE', ids);
   const filled = await tx.$executeRawUnsafe(FILL, ids);
   return { ids, filled };
 }
@@ -111,6 +118,7 @@ export async function backfillNodeBytes(db: PrismaClient, opts: NodeBytesBackfil
     remaining -= step.ids.length;
     after = step.ids[step.ids.length - 1]!;
     report.cursor = after;
+    opts.onBatch?.(after, report.filled);
   }
   // The budget ended the run: say so unless nothing is left to do.
   const [more] = await db.$queryRaw<Array<{ n: bigint }>>`
@@ -120,7 +128,7 @@ export async function backfillNodeBytes(db: PrismaClient, opts: NodeBytesBackfil
   return report;
 }
 
-// Hand-run entry point.
+// Hand-run entry point (run through tsx, as the usage line says: a compiled or wrapped copy would not match this name and would do nothing).
 if (process.argv[1] && process.argv[1].endsWith('backfillNodeBytes.ts')) {
   const { db: prisma } = await import('../integrations/db/client.js');
   const shutdown = async (code: number): Promise<never> => {
@@ -135,7 +143,7 @@ if (process.argv[1] && process.argv[1].endsWith('backfillNodeBytes.ts')) {
     await shutdown(2);
   }
   try {
-    const report = await backfillNodeBytes(prisma, parsed!);
+    const report = await backfillNodeBytes(prisma, { ...parsed!, onBatch: (cursor, filled) => console.error(`batch committed: ${filled} filled so far, resume with --after ${cursor}`) });
     console.log(JSON.stringify(report, null, 2));
     if (parsed!.apply !== true) console.log('\nDry run, nothing written. Re-run with --apply (production needs the recorded grant).');
     if (!report.complete) console.log(`\nPartial: continue with --after ${report.cursor}`);

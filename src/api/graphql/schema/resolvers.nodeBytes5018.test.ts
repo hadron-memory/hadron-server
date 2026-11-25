@@ -10,8 +10,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { createNodeRevision } from '../../../lib/nodeRevisionSnapshot.js';
-import { reloadOwnerDefaultLimitsForTests } from '../../../lib/ownerLimits/defaults.js';
-import { parseOwnerDefaultLimits, OWNER_DEFAULT_LIMITS_ERROR } from '../../../lib/ownerLimits/defaults.js';
+import { reloadOwnerDefaultLimitsForTests, parseOwnerDefaultLimits, OWNER_DEFAULT_LIMITS_ERROR } from '../../../lib/ownerLimits/defaults.js';
 import { OWNER_LIMIT_KEYS } from '../../../lib/ownerLimits/keys.js';
 import { formatGraphQLError } from '../formatError.js';
 import { typeDefs } from './typeDefs.js';
@@ -28,7 +27,7 @@ const codeOf = (r: Result) => r.errors?.[0]?.extensions?.code ?? null;
 const ctxOf = (userId: string, roles: string[] = ['READER']): Partial<Context> => ({ userId, roles: roles as never });
 
 let seq = 0;
-let admin: string, orgAdmin: string, reader: string, ownerU: string, strangerU: string;
+let admin: string, orgAdmin: string, reader: string, ownerU: string;
 let orgId: string;
 const mkUser = async (name: string, roles: string[] = ['READER']) =>
   (await db.user.create({ data: { id: generateId(), handle: name, email: `${name}@example.test`, roles: roles as never } })).id;
@@ -45,7 +44,7 @@ beforeEach(async () => {
   await cleanDb(db);
   reloadOwnerDefaultLimitsForTests({});
   admin = await mkUser('nb18-admin', ['ADMIN']);
-  [orgAdmin, reader, ownerU, strangerU] = await Promise.all(['nb18-orgadmin', 'nb18-reader', 'nb18-owner', 'nb18-stranger'].map((n) => mkUser(n)));
+  [orgAdmin, reader, ownerU] = await Promise.all(['nb18-orgadmin', 'nb18-reader', 'nb18-owner'].map((n) => mkUser(n)));
   orgId = (await db.organization.create({ data: { id: generateId(), name: 'nb18', urn: 'nb18-org' } })).id;
   await db.orgMember.create({ data: { organizationId: orgId, userId: orgAdmin, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: orgId, userId: reader, role: 'READER' } });
@@ -62,7 +61,7 @@ describe('#5018 the nodeBytes owner-limit row', () => {
     const dead = await orgMemory({ deletedAt: new Date() });
     const a = await mkNode(live.id, { content: 'abc' });
     await snapshot(a.id);
-    const b = await mkNode(live.id, { content: 'defgh' });
+    await mkNode(live.id, { content: 'defgh' });
     await mkNode(live.id, { content: 'soft', deletedAt: new Date() });
     await mkNode(dead.id, { content: 'in a deleted memory' });
     const unmeasured = await mkNode(live.id, { content: 'not measured yet' });
@@ -70,7 +69,6 @@ describe('#5018 the nodeBytes owner-limit row', () => {
     const result = await gql(READ, ctxOf(orgAdmin), { orgRef: orgId });
     expect(result.errors).toBeUndefined();
     expect(row(result)).toEqual({ key: 'nodeBytes', limit: null, used: String(3 + 3 + 5) });
-    expect(b.id).toBeTruthy();
   });
 
   it('a moved node counts at its new owner, with its revisions', async () => {
@@ -143,7 +141,6 @@ describe('#5018 Node.storedBytes and Node.revisionBytes', () => {
     const [{ total }] = await db.$queryRaw<Array<{ total: bigint }>>`SELECT COALESCE(sum(octet_length(content)), 0)::bigint AS total FROM node_revisions WHERE node_id = ${n.id}`;
     expect(asOwner.data!.node.revisionBytes).toBe(total.toString());
     expect(Number(total)).toBeGreaterThanOrEqual(3);
-    expect(strangerU).toBeTruthy();
   });
 
   it('a full-row node read followed by JSON.stringify does not throw (the BigInt is left out of the default select)', async () => {

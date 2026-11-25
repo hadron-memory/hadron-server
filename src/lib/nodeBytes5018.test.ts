@@ -4,6 +4,7 @@
  * database, not by the writers. The columns are read with raw SQL: `revision_bytes` is a BigInt that the client leaves out of every
  * full-row read.
  */
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
@@ -192,6 +193,15 @@ describe('#5018 the trigger bodies are schema-qualified (#5089)', () => {
       expect(shadow!.revision_bytes).toBe(100n);
     });
     expect((await bytes(n.id)).revision).toBe(3n);
+  });
+});
+
+describe('#5018 the migration carries the shared SQL verbatim', () => {
+  it('prisma/node-bytes-invariants.sql is the tail of migration 20261124213000_node_bytes, after its ALTER TABLE', () => {
+    const migration = readFileSync('prisma/migrations/20261124213000_node_bytes/migration.sql', 'utf8');
+    const shared = readFileSync('prisma/node-bytes-invariants.sql', 'utf8');
+    expect(migration.endsWith(shared)).toBe(true);
+    expect(migration.slice(0, migration.length - shared.length)).toMatch(/^-- AlterTable\nALTER TABLE "nodes" ADD COLUMN "stored_bytes" INTEGER,\nADD COLUMN "revision_bytes" BIGINT;\n\n$/);
   });
 });
 

@@ -6,6 +6,8 @@
 -- nodes.revision_bytes the same figure summed over the node's rows in node_revisions; a new node has 0, and a node that is not
 --                      measured yet (NULL) stays NULL until the hand-run backfill, so no trigger ever guesses a starting value.
 -- Every table and function the trigger bodies read or write is schema-qualified, so a session temp table named `nodes` cannot shadow them (#5089).
+-- The revision INSERT path depends on createNodeRevision taking the node row's lock first (it bumps rev_seq before it inserts). A bulk delete
+-- (clearNodeHistory over K revisions) is K single-row updates of the node row: leave it so, the trigger shape cannot batch it.
 -- The triggers keep the figures right for every writer, the raw UPDATEs of data included. The revision triggers update the node
 -- row, which the revision writer already holds locked, so the figure cannot drift under a concurrent edit or the backfill.
 
