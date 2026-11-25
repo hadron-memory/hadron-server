@@ -80,6 +80,15 @@ describe('#5124 deleteMemory', () => {
     expect(await deletedAtOf(keep.id)).toBeNull();
   });
 
+  it('a re-delete of a memory deleted BEFORE this change leaves its live files alone (that would be an unruled backfill, #5136)', async () => {
+    const earlier = new Date(Date.now() - 3_600_000);
+    await db.memory.update({ where: { id: memory.id }, data: { deletedAt: earlier } });
+    const a = await file(memory.id);
+    await M.deleteMemory({}, { ref: memory.id }, ctx(admin.id));
+    expect(await memoryDeletedAt(memory.id)).toEqual(earlier);
+    expect(await deletedAtOf(a.id)).toBeNull();
+  });
+
   it('the files and the memory are one transaction: when the file soft delete fails, the memory is not deleted either', async () => {
     const a = await file(memory.id);
     const failing = db.$extends({ query: { asset: { updateMany() { throw new Error('fixture-asset-fault-5124'); } } } });
