@@ -1,3 +1,4 @@
+import { assertMoveWithinSizeLimit, SubtreeMoveTooLargeError } from '../lib/moveSizeLimit.js';
 import { respondSessionSuperseded } from '../lib/sessionSuperseded.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/github/syncNotAttempted.js';
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
@@ -8890,6 +8891,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               // 6 bytes are the ms timestamp, so an 8-char slice was timestamp-only
               // entropy (PR-189). Descendant-slot collisions are always refused —
               // moveNodeSubtree throws SubtreeMoveCollisionError (caught below).
+              // #5128 (cor:api:190:01): an over-limit subtree is refused before the occupant is touched or any node is
+              // locked or written; the read and write gates above have already run (advisory locks above are not the move's work).
+              await assertMoveWithinSizeLimit(tx, existing);
               const existingTarget = await tx.node.findUnique({
                 where: { loc_memoryId: { loc: toLoc, memoryId: toMemory.id } },
               });
@@ -9030,6 +9034,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         if (e instanceof SubtreeMoveIntoSelfError) {
           return refusalResult('Cannot move a node into its own subtree.');
+        }
+        if (e instanceof SubtreeMoveTooLargeError) {
+          return refusalResult(`[move_too_large] ${e.message}`);
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
           return refusalResult(`[spec_minted_permanent] ${e.message}`);
