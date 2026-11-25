@@ -16,6 +16,7 @@ import {
   nodeFilePath,
   orphanedLegacyPaths,
 } from './nodeFrontmatter.js';
+import { InvalidRootMemoryError, rootLocForMemory } from '../localFs/loadNodeFromFs.js';
 import { removeLegacySidecar } from './legacySidecar.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { hasIncompleteMirrorMutation } from './mirrorFileMutation.js';
@@ -253,7 +254,16 @@ async function pushMemoryToGitUnderLock(
     }
 
     // 6. Write root README.md with memory manifest (if no root node exists)
-    const hasRootNode = nodes.some((n) => !n.loc.includes(':') && n.loc.length < 20);
+    // #5146 / cor:int:010:01: the root page is defined by its loc (the memory's
+    // single-atom slug), or by R12's legacy empty-loc root. Any other node, flat
+    // or not, is not a root page; without one the manifest carries the memory's
+    // identity. A compound slug has no slug loc (its root is an open spec
+    // question), so only the empty-loc root can stand in for it.
+    let rootLoc: string | undefined;
+    try { rootLoc = rootLocForMemory(memory.urn); } catch (err) {
+      if (!(err instanceof InvalidRootMemoryError)) throw err;
+    }
+    const hasRootNode = nodes.some((n) => n.loc === '' || n.loc === rootLoc);
     if (!hasRootNode) {
       const rootPath = join(localPath, 'README.md');
       if (!existsSync(rootPath)) {

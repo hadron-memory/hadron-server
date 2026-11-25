@@ -6376,7 +6376,11 @@ model AiModelPrice {
 ///   entry; the same pair with another organization, amount or kind is refused. A grant or an adjustment must name
 ///   its source (hadron-server#5007); entries with no source (a debit written without one, or a grant written
 ///   before #5007) are not limited.
-/// - `expiresAt` on a grant is stored and not enforced.
+/// - `expiresAt` on a grant is enforced (hadron-server#5011): spend draws on the soonest-expiring grant first and on
+///   credit that never expires last (hrn:node:hadronmemory.com:specs:cor:dmo:170:11), and once a grant has expired
+///   what is left of it is settled by one `adjustment` entry of minus that amount with the pair (`grant-expiry`,
+///   <grant id>), written by the server once per grant, also when nothing was left
+///   (hrn:node:hadronmemory.com:specs:cor:dmo:170:10; src/lib/metering/settleExpiredGrants.ts).
 ///
 /// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:170:08. Background (history, not law): the Spec Kit spec 046.
 model CreditLedgerEntry {
@@ -6386,7 +6390,8 @@ model CreditLedgerEntry {
   kind             String
   /// Signed micro-cents (1e-8 USD). Grants positive, debits negative.
   amountMicroCents BigInt    @map("amount_micro_cents")
-  /// Grant expiry policy field (no enforcement in Phase 0).
+  /// When a grant expires; enforced by the settlement of hadron-server#5011. Null on debits, adjustments and credit
+  /// that never expires.
   expiresAt        DateTime? @map("expires_at")
   /// Provenance: e.g. ('usage-event', <UsageEvent.id>), ('admin', <userId>),
   /// later ('payment', <processor ref>).
@@ -6407,6 +6412,8 @@ model CreditLedgerEntry {
   // (Postgres unique treats NULLs as distinct).
   @@unique([sourceType, sourceId])
   @@index([organizationId, createdAt])
+  // #5011: the partial index credit_ledger_entries_expiring_grants_idx (organization_id, expires_at) WHERE expires_at
+  // IS NOT NULL lives in prisma/post-push.sql and migration 20261125140000 (Prisma cannot model a partial index).
   @@map("credit_ledger_entries")
 }
 

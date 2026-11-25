@@ -2226,9 +2226,28 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  """
+  What is left of one unexpired grant that expires (hrn:node:hadronmemory.com:specs:cor:dmo:170:10). Spend draws on the
+  soonest-expiring credit first and on credit that never expires last
+  (hrn:node:hadronmemory.com:specs:cor:dmo:170:11).
+  """
+  type ExpiringCredit {
+    "What is left of the grant, in micro-cents, as a base-10 integer string. Always more than zero."
+    amountMicroCents: String!
+    "When what is left expires and stops counting in the balance."
+    expiresAt: DateTime!
+  }
+
   type CreditBalance {
     organizationId: ID!
+    "The balance in micro-cents. Never includes credit whose expiry has passed."
     balanceMicroCents: String!
+    """
+    What is left of each unexpired grant that expires, soonest first, worked out by the server from the ledger (a
+    client never replays the ledger itself). Grants with nothing left are not listed. The parts can add up to more than
+    the balance when credit that never expires is below zero (hrn:node:hadronmemory.com:specs:cor:dmo:170:11).
+    """
+    expiring: [ExpiringCredit!]!
   }
 
   """
@@ -2354,7 +2373,12 @@ export const typeDefs = `#graphql
     """
     amountMicroCents: String!
     """
-    Grant expiry policy field (no enforcement in Phase 0).
+    When the grant expires, ISO 8601; omit for credit that never expires. Enforced
+    (hrn:node:hadronmemory.com:specs:cor:dmo:170:10): from this instant what is left of the grant no longer counts in
+    the balance, and the server settles it with one adjustment entry of minus that amount. Must be later than now
+    (BAD_USER_INPUT otherwise). A replay of the same source pair returns the stored grant with its stored expiry, which is
+    the one enforced; a different expiry on a replay is not compared and does not change it (a corrected expiry needs an
+    adjustment, not a second grant).
     """
     expiresAt: String
     """
@@ -10578,6 +10602,15 @@ export const typeDefs = `#graphql
     cast inferred from the memory schema; 'where' is the full #719 predicate
     (ANDed with match); 'sort' is a single-field shorthand desugared to a
     property-path sort.
+    In a STRICT collection (the memory's schema declares the type with strict:
+    true) a field the query names that the collection does not declare is refused
+    with FIELD_NOT_DECLARED (extensions: field, objectType), before any row is read
+    (hrn:node:hadronmemory.com:specs:cor:api:170:03): the first segment of each
+    properties path in match, where and sort; where on data, and exports, are never
+    refused. A non-strict collection, a memory with no schema and a type the schema
+    does not declare are unchanged, and a caller who cannot read the memory gets the
+    answer it always got. Malformed input is still BAD_USER_INPUT. The declared
+    fields are discovered through Memory.schema.
     """
     findObjects(
       "Memory ID or fully-qualified URN (hrn:memory:...) — relative refs are rejected (spec 022)."
@@ -12605,7 +12638,12 @@ export const typeDefs = `#graphql
     aiModelPrices(provider: String, model: String, tier: Int, limit: Int, offset: Int): AiModelPriceList!
     "One org's append-only credit-ledger page, newest first (spec 046). Org-ADMIN."
     creditLedgerEntries(orgRef: String!, limit: Int, offset: Int): CreditLedgerEntryList!
-    "One org's credit balance - SUM over the append-only ledger (spec 046). Org-ADMIN."
+    """
+    One organization's credit balance (spec 046). Org-ADMIN. The sum over the append-only ledger, less what is left of
+    any grant whose expiry has passed (hrn:node:hadronmemory.com:specs:cor:dmo:170:10). Before summing, the read settles
+    the organization's grants that expired more than a minute ago: it may write those settlement entries, once per grant,
+    and never does for an impersonated session, which gets the same figure worked out and stored nowhere.
+    """
     creditBalance(orgRef: String!): CreditBalance!
     "The owner limits of an organization or a person, one row per measure (hadron-server issue 5009). Give exactly one ref. An organization's: its ADMIN or OWNER. A person's: that person in their own session. A platform admin reads any."
     ownerLimits(orgRef: String, userRef: ID): [OwnerLimitUsage!]!
