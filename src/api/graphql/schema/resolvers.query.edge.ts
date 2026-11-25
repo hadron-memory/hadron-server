@@ -100,23 +100,24 @@ export const edgeQueries = {
     let endpointWhere: Record<string, unknown> = {};
     for (const [ref, key] of [[f.sourceNodeId, 'sourceId'], [f.targetNodeId, 'targetId']] as const) {
       if (ref == null) continue;
+      let id: string;
       try {
-        const { id } = await resolveNodeRef(ctx.db, ref);
-        const node = await ctx.db.node.findUnique({ where: { id }, select: { memoryId: true } });
-        if (!node || !readable.has(node.memoryId)) return empty;
-        endpointWhere = { ...endpointWhere, [key]: id };
+        ({ id } = await resolveNodeRef(ctx.db, ref));
       } catch {
         return empty;
       }
+      const node = await ctx.db.node.findUnique({ where: { id }, select: { memoryId: true } });
+      if (!node || !readable.has(node.memoryId)) return empty;
+      endpointWhere = { ...endpointWhere, [key]: id };
     }
 
     const where = {
-      // The readable set is `listableMemories`' own gate (getAccessibleMemoryIds), asked once for the whole list.
-      AND: [edgeWithin(accessible, ['source', 'target'])],
       ...memoryWhere,
       ...endpointWhere,
       ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
       ...(f.includeDeleted ? {} : { deletedAt: null }),
+      // The readable set is `listableMemories`' own gate (getAccessibleMemoryIds), asked once for the whole list. It is never narrowed.
+      AND: [edgeWithin(accessible, ['source', 'target'])],
     };
 
     const take = clampListTake(limit);

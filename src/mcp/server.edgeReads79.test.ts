@@ -67,14 +67,16 @@ describe('#79 the edges of an MCP node read', () => {
   const reads: Array<[string, () => Promise<{ isError: boolean; text: string }>]> = [
     ['hadron_find_nodes brief', () => call('hadron_find_nodes', { query: 'nearprobe', brief: true, memoryUrn: 'hrn:mem:mcp79-org:o' })],
     ['hadron_get_node', () => call('hadron_get_node', { urn: urn('near') })],
+    ['hadron_get_next_node', async () => { await node('p'); await db.node.update({ where: { id: near }, data: { loc: 'p:near', seq: 1 } }); return call('hadron_get_next_node', { parent: urn('p') }); }],
     ['hadron_get_nodes', () => call('hadron_get_nodes', { refs: [urn('near')] })],
   ];
 
   it.each(reads)('%s prints no far node of an unread memory, and keeps the others', async (_name, read) => {
     await edge('far-out', mem, near, far);
+    await edge('far-in', mem, far, near);
     const r = await read();
     ok(r);
-    for (const s of ['far-slug', 'far-loc', 'far-out']) expect(r.text).not.toContain(s);
+    for (const s of ['far-slug', 'far-loc', 'far-out', 'far-in']) expect(r.text).not.toContain(s);
     for (const s of ['sibling', 'mine-loc']) expect(r.text).toContain(s);
   });
 
@@ -85,5 +87,20 @@ describe('#79 the edges of an MCP node read', () => {
     ok(r);
     for (const s of ['third-out', 'third-in']) expect(r.text).not.toContain(s);
     expect(r.text).toContain('same-out');
+  });
+
+  it('the reads that print no far edge keep printing none, and the brief line prints outgoing edges only', async () => {
+    await edge('far-out', mem, near, far);
+    await edge('far-in', mem, far, near);
+    await edge('same-in', mem, sibling, near);
+    const q = { query: 'nearprobe', memoryUrn: 'hrn:mem:mcp79-org:o' };
+    for (const [name, args] of [['hadron_find_nodes', { ...q, expand: 1 }], ['hadron_find_nodes', { ...q, brief: true, expand: 1 }], ['hadron_list_nodes', { memoryUrn: q.memoryUrn }]] as const) {
+      const r = await call(name, args);
+      ok(r);
+      for (const s of ['far-slug', 'far-loc', 'far-out', 'far-in']) expect([name, r.text]).toEqual([name, expect.not.stringContaining(s)]);
+    }
+    const brief = await call('hadron_find_nodes', { ...q, brief: true });
+    expect(brief.text).toContain('same-out');
+    expect(brief.text).not.toContain('same-in');
   });
 });

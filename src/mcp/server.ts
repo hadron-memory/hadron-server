@@ -1775,8 +1775,8 @@ type ReadProjectionNode = {
   abstract: string | null;
   abstractOriginHash: string | null;
   memory: { isEncrypted: boolean };
-  outgoingEdges: Array<{ name: string | null; loc: string; governedKind?: unknown; target: { id: string; loc: string; memoryId: string; name: string } }>;
-  incomingEdges: Array<{ name: string | null; loc: string; governedKind?: unknown; source: { id: string; loc: string; memoryId: string; name: string } }>;
+  outgoingEdges: Array<{ name: string | null; loc: string; memoryId: string; governedKind?: unknown; target: { id: string; loc: string; memoryId: string; name: string } }>;
+  incomingEdges: Array<{ name: string | null; loc: string; memoryId: string; governedKind?: unknown; source: { id: string; loc: string; memoryId: string; name: string } }>;
 };
 
 const readProjectionInclude = {
@@ -2019,15 +2019,16 @@ function inheritedReadRow<T extends ReadProjectionNode>(node: T): T {
  * #1647 (cor:api:140:03, concealment): a readable near endpoint does not authorize returning an unreadable far
  * endpoint's metadata. Drops edges whose far node lives in another memory the caller cannot read, as if absent, so the
  * far URN, id and name never reach the projection. Same-memory edges ride the near node's own gate.
+ * hadron-internal#79: the memory that holds the edge is asked the same way.
  */
 async function concealUnreadableEdgeEnds<N extends {
   memoryId: string;
-  outgoingEdges: Array<{ target: { memoryId: string } }>;
-  incomingEdges: Array<{ source: { memoryId: string } }>;
+  outgoingEdges: Array<{ memoryId: string; target: { memoryId: string } }>;
+  incomingEdges: Array<{ memoryId: string; source: { memoryId: string } }>;
 }>(auth: AuthContext | undefined, node: N): Promise<N> {
   const foreign = new Set<string>();
-  for (const e of node.outgoingEdges) if (e.target.memoryId !== node.memoryId) foreign.add(e.target.memoryId);
-  for (const e of node.incomingEdges) if (e.source.memoryId !== node.memoryId) foreign.add(e.source.memoryId);
+  for (const e of node.outgoingEdges) for (const id of [e.memoryId, e.target.memoryId]) if (id !== node.memoryId) foreign.add(id);
+  for (const e of node.incomingEdges) for (const id of [e.memoryId, e.source.memoryId]) if (id !== node.memoryId) foreign.add(id);
   if (foreign.size === 0) return node;
   const readable = new Set<string>();
   if (auth) {
@@ -2036,8 +2037,8 @@ async function concealUnreadableEdgeEnds<N extends {
   const ok = (memoryId: string) => memoryId === node.memoryId || readable.has(memoryId);
   return {
     ...node,
-    outgoingEdges: node.outgoingEdges.filter((e) => ok(e.target.memoryId)),
-    incomingEdges: node.incomingEdges.filter((e) => ok(e.source.memoryId)),
+    outgoingEdges: node.outgoingEdges.filter((e) => ok(e.memoryId) && ok(e.target.memoryId)),
+    incomingEdges: node.incomingEdges.filter((e) => ok(e.memoryId) && ok(e.source.memoryId)),
   };
 }
 
@@ -5107,6 +5108,7 @@ export function createMcpServerInstance(
             target: { loc: string; memoryId: string; deletedAt: Date | null } | null;
             name: string | null;
             loc: string;
+            memoryId: string;
           }>;
         };
         score: number | null;
@@ -5173,9 +5175,11 @@ export function createMcpServerInstance(
                   canReadMemory: (memoryId) => canReadMemory(db, auth, memoryId, EXPLICIT_REF),
                 })).map(({ edge, endpoint }) => ({ ...edge, target: endpoint }))
               : [])
-            : (n.outgoingEdges ?? []).filter(
-                (e) => e.target && e.target.deletedAt == null,
-              );
+            : (await concealUnreadableEdgeEnds(auth, {
+                memoryId: n.memoryId,
+                outgoingEdges: (n.outgoingEdges ?? []).flatMap((e) => (e.target && e.target.deletedAt == null ? [{ ...e, target: e.target }] : [])),
+                incomingEdges: [],
+              })).outgoingEdges;
           if (edges.length) {
             const edgeStrs = await Promise.all(
               edges.map(async (e) => {
