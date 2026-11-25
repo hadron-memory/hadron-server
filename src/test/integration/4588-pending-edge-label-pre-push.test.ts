@@ -113,6 +113,15 @@ describe('#4588 pending-edge label pre-push transition', () => {
     });
   });
 
+  it('ignores a legacy table in another schema when this one has none', async () => {
+    await scratch(async (c) => {
+      const own = (await c.query('SELECT current_schema() AS s')).rows[0].s as string;
+      await c.query(`CREATE SCHEMA "${own}_other"; CREATE TABLE "${own}_other".pending_edges (id text, label text)`);
+      await prePush(c);
+      expect((await c.query("SELECT to_regclass('pending_edges')::text AS t")).rows).toEqual([{ t: null }]);
+    });
+  });
+
   it('is a no-op on a fresh database, leaving db push to create the table', async () => {
     await scratch(async (c) => {
       await prePush(c);
