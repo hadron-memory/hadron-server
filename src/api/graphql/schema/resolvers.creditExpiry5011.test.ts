@@ -153,8 +153,10 @@ describe('#5011 creditBalance and grant expiry', () => {
     expect(block).not.toMatch(/no enforcement/);
     expect(block).toMatch(/expires/i);
     const fields = [...block.matchAll(/^\s{4}(\w+): ([\w!]+)$/gm)].map((m) => `${m[1]}: ${m[2]}`);
+    // #5014 (A6): orgRef becomes optional and userRef is new (exactly one of the two is required by the resolver).
     expect(fields).toEqual([
-      'orgRef: String!',
+      'orgRef: String',
+      'userRef: ID',
       'amountMicroCents: String!',
       'expiresAt: String',
       'sourceType: String',

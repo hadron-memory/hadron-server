@@ -264,7 +264,10 @@ export const meteringQueries = {
       try {
         await settleExpiredGrants(ctx.db, owner, { now: asOf });
       } catch (err) {
-        console.error('credit_expiry.settle_failed', 'organizationId' in owner ? { organizationId: owner.organizationId } : { ownerUserId: owner.userId }, { code: safeErrorCode(err) });
+        console.error('credit_expiry.settle_failed', {
+          ...('organizationId' in owner ? { organizationId: owner.organizationId } : { ownerUserId: owner.userId }),
+          code: safeErrorCode(err),
+        });
       }
     }
     const sum = await creditBalance(ctx.db, owner);

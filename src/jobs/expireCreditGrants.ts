@@ -101,7 +101,7 @@ export async function expireCreditGrants(
           out.settlements += written.length;
         } catch (err) {
           out.failures += 1;
-          console.error(`${TAG}.owner_failed`, leg === 'organization' ? { organizationId: id } : { ownerUserId: id }, { code: safeErrorCode(err) });
+          console.error(`${TAG}.owner_failed`, { ...(leg === 'organization' ? { organizationId: id } : { ownerUserId: id }), code: safeErrorCode(err) });
         }
       }
       if (owners.length < batchSize) break;
