@@ -18,7 +18,7 @@ import {
   SETTLE_DELAY_MS,
   databaseNow,
   settleExpiredGrants,
-  unsettledRemainders,
+  unsettledRemainder,
   writeSettlements,
 } from './settleExpiredGrants.js';
 
@@ -128,13 +128,13 @@ describe('#5011 settleExpiredGrants', () => {
     const inside = later(d('02-01'), 59_000);
     expect(await settleExpiredGrants(db, { organizationId: orgId }, { now: inside })).toEqual([]);
     expect(await settlements()).toHaveLength(0);
-    expect(await unsettledRemainders(db, { organizationId: orgId }, inside)).toBe(70n);
+    expect(await unsettledRemainder(db, { organizationId: orgId }, inside)).toBe(70n);
     // At exactly 60 s it is settled.
     const at = later(d('02-01'), 60_000);
     expect(await settleExpiredGrants(db, { organizationId: orgId }, { now: at })).toEqual([
       { grantId: g.id, amountMicroCents: -70n },
     ]);
-    expect(await unsettledRemainders(db, { organizationId: orgId }, at)).toBe(0n);
+    expect(await unsettledRemainder(db, { organizationId: orgId }, at)).toBe(0n);
   });
 
   it('S2 (acceptance 3): G0 is settled -40 and, a fortnight later, G1 -100', async () => {
@@ -215,7 +215,7 @@ describe('#5011 settleExpiredGrants', () => {
     expect(await settleExpiredGrants(client, { organizationId: orgId }, { now: d('12-31') })).toEqual([]);
     expect(counter.reads).toBe(0);
     expect(await settlements()).toHaveLength(0);
-    expect(await unsettledRemainders(db, { organizationId: orgId }, d('12-31'))).toBe(0n);
+    expect(await unsettledRemainder(db, { organizationId: orgId }, d('12-31'))).toBe(0n);
   });
 
   it('S7: a soft-deleted debit is ignored by the replay, as by the balance (a legacy row the #5010 guard would refuse today)', async () => {

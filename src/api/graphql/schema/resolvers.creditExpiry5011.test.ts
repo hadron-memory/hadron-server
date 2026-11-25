@@ -219,4 +219,71 @@ describe('#5011 creditBalance and grant expiry', () => {
     expect(ok.errors).toBeUndefined();
     expect(await db.creditLedgerEntry.count()).toBe(1);
   });
+  it('#5100 item 1: the org-ADMIN gate runs BEFORE any settlement write: a contributor or stranger gets FORBIDDEN and the ledger is unchanged', async () => {
+    const now = await dbNow();
+    await entry('grant', 100, shift(now, -3_600_000), shift(now, -120_000));
+    const before = await db.creditLedgerEntry.count();
+    for (const userId of [contributor, stranger]) {
+      const res = await gql(BALANCE_ONLY, { userId, roles: ['READER'] }, { orgRef: orgId });
+      expect(res.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+    }
+    expect(await db.creditLedgerEntry.count()).toBe(before);
+    expect(await settlementCount()).toBe(0);
+  });
+
+  /** A db whose grant-window reads (one per replay, `readReplayWindow`) are counted. */
+  function countingDb() {
+    const state = { windowReads: 0 };
+    const ledger = new Proxy(db.creditLedgerEntry, {
+      get(target, key) {
+        if (key === 'findMany') {
+          return (args: { where?: { kind?: string } }) => {
+            if (args?.where?.kind === 'grant') state.windowReads += 1;
+            return (target.findMany as (a: unknown) => unknown)(args);
+          };
+        }
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const counted = new Proxy(db, {
+      get(target, key) {
+        if (key === 'creditLedgerEntry') return ledger;
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as typeof db;
+    return { state, counted };
+  }
+  const withDb = (counted: typeof db, ctx: Partial<Context>) => ({ ...ctx, db: counted });
+  const run = async (counted: typeof db, query: string, ctx: Partial<Context>) =>
+    single(await server.executeOperation({ query, variables: { orgRef: orgId } }, { contextValue: withDb(counted, ctx) as Context }));
+
+  it('#5100 item 2: a read replays the window ONCE, whether it settles, only computes (inside the 60 s, impersonated) or selects `expiring`', async () => {
+    const now = await dbNow();
+    await entry('grant', 100, shift(now, -3_600_000), shift(now, -120_000)); // settles on a plain read
+    await entry('grant', 50, shift(now, -3_600_000), shift(now, -1_000)); // inside the 60 s
+    await entry('grant', 70, shift(now, -3_600_000), shift(now, 86_400_000)); // still expiring
+    const a = countingDb();
+    const res = await run(a.counted, BALANCE, orgAdminCtx());
+    expect(res.errors).toBeUndefined();
+    expect(a.state.windowReads).toBe(1);
+    expect((res.data as { creditBalance: { balanceMicroCents: string; expiring: unknown[] } }).creditBalance.balanceMicroCents).toBe('70');
+    expect((res.data as { creditBalance: { expiring: unknown[] } }).creditBalance.expiring).toHaveLength(1);
+    // Impersonated: nothing written, still one replay, same figure.
+    const b = countingDb();
+    const imp = await run(b.counted, BALANCE, impersonatedCtx());
+    expect(b.state.windowReads).toBe(1);
+    expect((imp.data as { creditBalance: { balanceMicroCents: string } }).creditBalance.balanceMicroCents).toBe('70');
+  });
+
+  it('#5100 item 3: a grant dated after now with an expiry in the past is no hot row: no replay, nothing settled', async () => {
+    const now = await dbNow();
+    await entry('grant', 100, shift(now, 86_400_000), shift(now, -3_600_000));
+    const c = countingDb();
+    const res = await run(c.counted, BALANCE_ONLY, orgAdminCtx());
+    expect(res.errors).toBeUndefined();
+    expect(c.state.windowReads).toBe(0);
+    expect(await settlementCount()).toBe(0);
+  });
 });
