@@ -60,6 +60,7 @@ import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
 import { mountSigningCeremonyRoutes } from './api/signingCeremonyRoutes.js';
 import { mountSecretChangeCeremonyRoutes } from './api/secretChangeCeremonyRoutes.js';
 import { mountGrantSigningCeremonyRoutes } from './api/grantSigningCeremonyRoutes.js';
+import { mountGrantSelectionSigningCeremonyRoutes } from './api/grantSelectionSigningCeremonyRoutes.js';
 import { mountSecretRevealRoutes } from './api/secretRevealRoutes.js';
 import { mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
 import { signingSurfacePolicy } from './lib/signing/surface.js';
@@ -1128,6 +1129,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   mountSigningCeremonyRoutes(app);
   // #3649 slice C: the grant signing ceremony, on the same switch.
   mountGrantSigningCeremonyRoutes(app);
+  mountGrantSelectionSigningCeremonyRoutes(app);
   mountSecretChangeCeremonyRoutes(app);
   mountSecretRevealRoutes(app);
   mountPasskeySignInRoutes(app);
