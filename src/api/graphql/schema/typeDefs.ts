@@ -353,7 +353,9 @@ export const typeDefs = `#graphql
     #4779: also when a hybrid page's fused order could not be certified inside
     the work budget or the keyword leg's 2000-row ceiling (#4994: including
     when, among more than 20000 eligible vectors, a hit whose vector rank was
-    needed lies past the first 1000 nodes of the vector ranking), or when a page that
+    needed lies past the first 1000 nodes of the vector ranking; #5162: or when, among
+    that many, the vector ranking read to certify the page disagrees with the vector
+    results the page was built from), or when a page that
     hydration left short (or filled past the depth its ranking was certified
     to) was still incomplete after its one deeper re-ranking (chunk
     granularity flags a short page without re-ranking);
