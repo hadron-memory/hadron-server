@@ -114,6 +114,15 @@ async function dataNodeOf(chatId: string) {
 }
 
 describe('#910 — per-person extraction in an app-class host', () => {
+  it('#5019: a chat message and its reply are not judged by NODE_CONTENT_MAX_BYTES', async () => {
+    vi.stubEnv('NODE_CONTENT_MAX_BYTES', '5');
+    try {
+      const { chatId } = await startShared(alice.id);
+      await resolvers.Mutation.sendChatMessage({}, { chatId, userMessage: 'x'.repeat(2000) }, ctxFor(alice.id));
+      await extract(alice.id, chatId, { industry: 'y'.repeat(2000) });
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it("separate chats: A's value never reaches B's prompt; each then sees only their own", async () => {
     const a = await startShared(alice.id);
     const b = await startShared(bob.id);

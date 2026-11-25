@@ -320,6 +320,13 @@ describe('createTeamChatMessage — body validation', () => {
     await expectCode(post(ctx(appMember.id), { body: '   ' }), 'BAD_USER_INPUT');
   });
 
+  it('#5019: a 60,000-character message is not judged by NODE_CONTENT_MAX_BYTES', async () => {
+    vi.stubEnv('NODE_CONTENT_MAX_BYTES', '1000');
+    try {
+      expect((await post(ctx(appMember.id), { body: 'x'.repeat(60_000) })).body).toHaveLength(60_000);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it('refuses an over-cap body with TEAM_CHAT_BODY_TOO_LARGE', async () => {
     await expectCode(
       post(ctx(appMember.id), { body: 'x'.repeat(TEAM_CHAT_BODY_MAX_CHARS + 1) }),
@@ -1070,6 +1077,15 @@ describe('#1029 — worker handoff', () => {
     // The chain is walkable, which it was not before: prevSessionId has been in
     // the schema since the beginning with nothing writing it.
     expect(second.prevSessionId).toBe(first.id);
+  });
+
+  it('#5019: a handoff is not judged by NODE_CONTENT_MAX_BYTES', async () => {
+    const worker = await castOne('Hattie');
+    const s = await startAs(appMember.id, worker.id);
+    vi.stubEnv('NODE_CONTENT_MAX_BYTES', '100');
+    try { await M.endSession({}, { id: s.id, handoff: 'x'.repeat(2000) }, ctx(appMember.id)); } finally { vi.unstubAllEnvs(); }
+    const { memoryId } = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect((await db.node.findFirstOrThrow({ where: { memoryId: memoryId!, nodeType: 'record', content: { startsWith: 'xxx' } } })).content).toHaveLength(2000);
   });
 
   it('stores the handoff as an ordered child in the worker\'s own working memory', async () => {
