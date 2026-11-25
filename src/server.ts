@@ -84,6 +84,7 @@ import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
 import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
 import { loadOwnerDefaultLimits } from './lib/ownerLimits/defaults.js';
+import { nodeContentMaxBytes } from './lib/nodeContentLimit.js';
 import { complexityAdmissionPlugin } from './api/graphql/admissionComplexity.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
@@ -1226,6 +1227,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   const admission = readGraphqlAdmissionConfig();
   // #5009: the deployment's default owner limits; a malformed value refuses boot.
   loadOwnerDefaultLimits();
+  nodeContentMaxBytes(); // #5019: a malformed ceiling refuses boot
   // The effective L4 configuration, on one line, so ops can confirm the mode a deploy actually booted with.
   console.log(JSON.stringify({
     event: 'graphql.admission.config', mode: admission.complexityMode, maxDepth: admission.maxDepth,

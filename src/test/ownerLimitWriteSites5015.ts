@@ -21,6 +21,8 @@ export interface WriteSite {
   kind: 'insert' | 'writeNodeCore';
   /** For `writeNodeCore`: the literal `ownerLimit` it states, or `?` when not a string literal. */
   ownerLimit?: string;
+  /** #5019: the literal `sizeCeiling` it states, or `?`. */
+  sizeCeiling?: string;
 }
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -72,11 +74,11 @@ function isNodeInsert(call: ts.CallExpression): boolean {
   return ts.isPropertyAccessExpression(target) && target.name.text === 'node';
 }
 
-function ownerLimitOf(call: ts.CallExpression): string {
+function optionOf(call: ts.CallExpression, option: string): string {
   for (const arg of call.arguments) {
     if (!ts.isObjectLiteralExpression(arg)) continue;
     for (const p of arg.properties) {
-      if (ts.isPropertyAssignment(p) && p.name.getText() === 'ownerLimit') {
+      if (ts.isPropertyAssignment(p) && p.name.getText() === option) {
         return ts.isStringLiteral(p.initializer) ? p.initializer.text : '?';
       }
     }
@@ -96,7 +98,7 @@ export function scanWriteSites(): WriteSite[] {
       if (ts.isCallExpression(n)) {
         if (isNodeInsert(n)) out.push({ file, fn: enclosingFn(n), kind: 'insert' });
         else if (ts.isIdentifier(n.expression) && n.expression.text === 'writeNodeCore') {
-          out.push({ file, fn: enclosingFn(n), kind: 'writeNodeCore', ownerLimit: ownerLimitOf(n) });
+          out.push({ file, fn: enclosingFn(n), kind: 'writeNodeCore', ownerLimit: optionOf(n, 'ownerLimit'), sizeCeiling: optionOf(n, 'sizeCeiling') });
         }
       }
       ts.forEachChild(n, visit);

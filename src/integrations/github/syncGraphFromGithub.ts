@@ -1,6 +1,7 @@
 import type { SyncNotAttemptedReason } from './syncNotAttempted.js';
 import { acquireSyncRunLock } from './syncRunLock.js';
 import { committedSyncReport, failedSyncReport, type SyncReportEntry } from './syncReport.js';
+import { exceedsNodeContentLimit, resultingNodeContent } from '../../lib/nodeContentLimit.js';
 import { requireNodeHeadroom } from '../../lib/ownerLimits/nodes.js';
 import { OWNER_LIMIT_NO_NUMBER_MESSAGE, OwnerLimitReachedError } from '../../lib/ownerLimits/errors.js';
 import { GitCommandError } from './execGit.js';
@@ -159,6 +160,8 @@ export function describeSyncOutcome(result: {
   skippedUndeclaredRoles?: SkippedUndeclaredRole[];
   skippedAttestations?: SkippedAttestation[];
   skippedInvalidIncludes?: SkippedInvalidInclude[];
+  /** #5019 — locs NOT synced because the node would pass `NODE_CONTENT_MAX_BYTES`; each row is kept. */
+  skippedOversize?: string[];
   deferredLateRows?: string[];
   heldMoves?: string[];
 }): string {
@@ -177,6 +180,10 @@ export function describeSyncOutcome(result: {
     section(
       result.skippedInvalidIncludes?.map((i) => `${i.loc} (${i.code}: ${i.message})`),
       (n) => `Skipped ${n} file(s) with an invalid include tag (fix the tag; the stored node was kept as it was):`,
+    ) +
+    section(
+      result.skippedOversize,
+      (n) => `Skipped ${n} file(s), NODE_CONTENT_TOO_LARGE (the node would be over this server's size ceiling; shorten the file; the stored node was kept as it was):`,
     ) +
     section(
       result.deferredLateRows,
@@ -373,6 +380,8 @@ const syncGraphFromGithubAsSystem = async (
   skippedAttestations?: SkippedAttestation[];
   /** #2040 — files NOT synced because an include tag is malformed or cycles. */
   skippedInvalidIncludes?: SkippedInvalidInclude[];
+  /** #5019 — locs NOT synced because the node would pass `NODE_CONTENT_MAX_BYTES`; each row is kept. */
+  skippedOversize?: string[];
   /**
    * #1330 — files left for the next sync because the node they would write
    * arrived after this sync locked its rows (`loc (node <id>)`). Only while
@@ -508,6 +517,7 @@ const syncGraphFromGithubAsSystem = async (
     const skippedUndeclaredRoles: SkippedUndeclaredRole[] = [];
     const skippedAttestations: SkippedAttestation[] = [];
     const skippedInvalidIncludes: SkippedInvalidInclude[] = [];
+    const skippedOversize: string[] = [];
     const deferredLateRows: string[] = [];
     const heldMoves: string[] = [];
     const reportEntries: SyncReportEntry[] = [];
@@ -583,7 +593,7 @@ const syncGraphFromGithubAsSystem = async (
     // Every accumulator restarts with the attempt: a rolled-back attempt
     // wrote nothing, so nothing it reported is true.
     embeddingWakeNeeded = false;
-    for (const acc of [writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedAttestations, skippedInvalidIncludes, deferredLateRows, heldMoves, reportEntries]) {
+    for (const acc of [writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedAttestations, skippedInvalidIncludes, skippedOversize, deferredLateRows, heldMoves, reportEntries]) {
       acc.length = 0;
     }
     pendingSourceMemories = [];
@@ -1239,8 +1249,19 @@ const syncGraphFromGithubAsSystem = async (
           refusedRoleLocs.add(loc);
           return true;
         };
+        // #5019 (cor:dmo:060:19) — a file that would leave its node over the ceiling is skipped and named, its row kept; the
+        // run does not fail. Judged before anything is written, so it is not in the owner-limit net either.
+        const refusesSize = (prior: Node | null): boolean => {
+          const data = update.data === Prisma.DbNull ? null : update.data;
+          if (!exceedsNodeContentLimit(resultingNodeContent({ content: update.content, description: update.description, data }, prior))) return false;
+          skippedOversize.push(loc);
+          reportEntries.push({ kind: 'oversize', loc, code: 'NODE_CONTENT_TOO_LARGE' });
+          if (prior) protectedRowIds.add(prior.id);
+          refusedRoleLocs.add(loc);
+          return true;
+        };
         const refusesRole = async (prior: Node | null): Promise<boolean> =>
-          (await refusesGovernance(prior)) || refusesAttestation(prior);
+          (await refusesGovernance(prior)) || (await refusesAttestation(prior)) || refusesSize(prior);
 
         const fileId = node.id && !claimedFileIds.has(node.id) ? node.id : null;
         const byId = fileId
@@ -1894,12 +1915,15 @@ const syncGraphFromGithubAsSystem = async (
         `Sync of "${graphName}": skipped ${skippedInvalidIncludes.length} file(s) with an invalid include tag: ${skippedInvalidIncludes.map((i) => `${i.loc} (${i.code})`).join('; ')}`,
       );
     }
+    if (skippedOversize.length > 0) {
+      console.warn(`Sync of "${graphName}": skipped ${skippedOversize.length} file(s) over the node size ceiling (NODE_CONTENT_TOO_LARGE): ${skippedOversize.join('; ')}`);
+    }
     if (heldMoves.length > 0) {
       console.warn(
         `Sync of "${graphName}": held ${heldMoves.length} move(s) whose destination's occupant could not be moved out of the way this sync: ${heldMoves.join('; ')}`,
       );
     }
-    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedAttestations, skippedInvalidIncludes, deferredLateRows, heldMoves };
+    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedAttestations, skippedInvalidIncludes, skippedOversize, deferredLateRows, heldMoves };
   } catch (error) {
     // #5015 — an owner-limit refusal is recorded with its code and in the form that names no owner and no number,
     // whoever started the sync: every reader of the memory reads these fields. The caller's own form is returned.

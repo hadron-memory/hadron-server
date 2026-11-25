@@ -27,6 +27,7 @@ import {
 } from '../../../lib/nodeRevisionSnapshot.js';
 import { decryptNodeFields, encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { assertNodeContentSize, resultingNodeContent } from '../../../lib/nodeContentLimit.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { assertAuthoring, authoringFromRequest, type AuthoredWith } from '../../../lib/authoringAttestation.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
@@ -317,7 +318,10 @@ export async function searchReplaceInSpecNodes(
         }
       }
       replacement.authoredChange = authoredContentChanged(diffNodeChanges(pt, replacement.changed));
-      if (replacement.total > 0) changed.push(replacement);
+      if (replacement.total > 0) {
+        assertNodeContentSize(resultingNodeContent(replacement.changed, pt)); // #5019 — before any write; a dry run too
+        changed.push(replacement);
+      }
     }
 
     const plan = createHash('sha256').update(JSON.stringify({

@@ -19,6 +19,8 @@ const VERSION_V1 = 0x01;
 const IV_LENGTH = 12; // 96 bits, standard for GCM
 const TAG_LENGTH = 16;
 const KEY_LENGTH = 32; // 256 bits
+/** What an envelope adds to its plaintext (version, iv, tag), before base64. */
+export const ENVELOPE_OVERHEAD_BYTES = 1 + IV_LENGTH + TAG_LENGTH;
 
 export interface EncryptionKey {
   raw: Buffer;
