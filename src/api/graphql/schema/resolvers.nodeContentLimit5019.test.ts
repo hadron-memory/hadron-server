@@ -164,7 +164,7 @@ describe('#5160 restoreNodeRevision in an encrypted memory', () => {
     const restorable = async (loc: string, bytes: number) => {
       ok(await create({ loc, content: a(bytes) }));
       const n = await db.node.findFirstOrThrow({ where: { memoryId: mem, loc } });
-      ok(await gql(UPDATE, { input: { id: n.id, content: 'short' } }));
+      ok(await gql(UPDATE, { input: { ref: n.id, content: 'short' } }));
       return { n, rev: await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id } }) };
     };
     const fits = await restorable('fits', 1000);
@@ -267,10 +267,10 @@ describe('#5019 the other content doors', () => {
   it('#5160: importNode over a live node counts the fields it keeps, and leaves the row unchanged', async () => {
     const n = await node('i', { content: 'before', data: json(600) });
     const before = await row(n.id);
-    refusedAt(await gql(IMPORT, { input: { memoryId: mem, loc: 'i', name: 'i', content: a(600), contentType: 'text/markdown' } }));
+    refusedAt(await gql(IMPORT, { input: { memoryRef: mem, loc: 'i', name: 'i', content: a(600), contentType: 'text/markdown' } }));
     expect(await row(n.id)).toEqual(before);
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
-    ok(await gql(IMPORT, { input: { memoryId: mem, loc: 'i', name: 'i', content: a(100), contentType: 'text/markdown' } }));
+    ok(await gql(IMPORT, { input: { memoryRef: mem, loc: 'i', name: 'i', content: a(100), contentType: 'text/markdown' } }));
   });
 
   it('a copy is not checked: cloneNode of a node over the ceiling still works', async () => {
