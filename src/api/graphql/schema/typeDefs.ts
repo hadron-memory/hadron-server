@@ -2062,7 +2062,7 @@ export const typeDefs = `#graphql
     expectedWorkerId, expectedWorkerName (null unless the caller may read that worker), foundWorkerId,
     foundWorkerName and foundSource (CLAIM or LIVE_SESSION), before any write: no claim is consumed and no
     session is started, ended or touched. With nothing of the caller's waiting the answer stays
-    NOTHING_TO_RESUME. Omitted or null: unchanged. Blank or not an id (a URN or a name): BAD_USER_INPUT, before any read. That id-only refusal is built behaviour (#3822), not a rule of cor:agt:020:03, which says only that the caller may name the worker it expects and that a blank one is refused; the field is a known gap against cor:api:140:01, deferred to hadron-server#5163.
+    NOTHING_TO_RESUME. Omitted or null: unchanged. Blank or not an id (a URN or a name): BAD_USER_INPUT, before any read. That id-only refusal is built behaviour (#3822), not a rule of hrn:node:hadronmemory.com:specs:cor:agt:020:03, which says only that the caller may name the worker it expects and that a blank one is refused; the field is a known gap against hrn:node:hadronmemory.com:specs:cor:api:140:01, deferred to hadron-server#5163.
     """
     expectedWorkerId: ID
   }
