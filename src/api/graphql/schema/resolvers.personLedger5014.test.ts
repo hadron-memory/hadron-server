@@ -140,6 +140,17 @@ describe('pin 6: an impersonated session and an App key read nobody\'s person le
     expect(code(await gql(LEDGER, appKey, { userRef: p }))).toBe('FORBIDDEN');
   });
 
+  it('an impersonation context is refused on the credential even if it somehow carried an admin role (the arm is direct, not only isStrictOwner)', async () => {
+    await gql(GRANT, adminCtx(), { input: grant() });
+    // roles are [] for an impersonated session by construction; a context that carried ADMIN anyway must still not read a person's ledger.
+    const impersonatedAdmin: Partial<Context> = {
+      userId: admin, roles: ['ADMIN'],
+      impersonation: { sessionId: 's2', actorUserId: admin, orgId, expiresAt: new Date(Date.now() + 60_000) },
+    };
+    expect(code(await gql(BALANCE, impersonatedAdmin, { userRef: p }))).toBe('FORBIDDEN');
+    expect(code(await gql(LEDGER, impersonatedAdmin, { userRef: p }))).toBe('FORBIDDEN');
+  });
+
   it('an App-key context that carries a userId is still refused (the arm is judged on the credential, not on userId)', async () => {
     await gql(GRANT, adminCtx(), { input: grant() });
     const appKeyWithUser: Partial<Context> = { userId: p, appKeyId: generateId(), appId: generateId(), roles: [] };
@@ -230,6 +241,25 @@ describe('pin 10: an account merge moves the merged-away person\'s entries to th
     expect(rows[0]!.expiresAt?.getTime()).toBe(expiresAt.getTime());
     const bal = await gql(BALANCE, ctxOf(p), { userRef: p });
     expect(bal.data).toMatchObject({ creditBalance: { balanceMicroCents: '1400' } });
+  });
+});
+
+describe('pin 13 and ruling 4: deleteUser keeps a person\'s entries, and only a platform admin can still read them', () => {
+  const DELETE = `mutation($u: ID, $r: String) { deleteUser(userRef: $u, reason: $r) }`;
+  it('after deleteUser the entries and the balance are unchanged; an admin reads them, nobody else does', async () => {
+    await gql(GRANT, adminCtx(), { input: grant({ userRef: q, sourceId: 'cs_q' }) });
+    const del = await gql(DELETE, adminCtx(), { u: q, r: 'pin 13' });
+    expect(del.errors).toBeUndefined();
+    expect(await db.creditLedgerEntry.count({ where: { ownerUserId: q } })).toBe(1);
+    const byAdmin = await gql(BALANCE, adminCtx(), { userRef: q });
+    expect(byAdmin.errors).toBeUndefined();
+    expect(byAdmin.data).toMatchObject({ creditBalance: { ownerUserId: q, balanceMicroCents: '1000' } });
+    expect((await gql(LEDGER, adminCtx(), { userRef: q })).data).toMatchObject({ creditLedgerEntries: { total: 1 } });
+    // an erased account is not found by anyone else, so the read is the same FORBIDDEN as for a person who never existed
+    expect(code(await gql(BALANCE, ctxOf(p), { userRef: q }))).toBe('FORBIDDEN');
+    expect(code(await gql(BALANCE, ctxOf(q), { userRef: q }))).toBe('FORBIDDEN');
+    // a write never reaches an erased account
+    expect(code(await gql(GRANT, adminCtx(), { input: grant({ userRef: q, sourceId: 'cs_q2' }) }))).toBe('USER_NOT_FOUND');
   });
 });
 
