@@ -189,10 +189,10 @@ describe('slackConnections', () => {
     expect(page.total).toBe(1);
     expect(page.items[0]!.id).toBe(connection.id);
 
-    const scoped = await resolvers.Query.slackConnections({}, { orgId: org.id }, ctxFor(member.id));
+    const scoped = await resolvers.Query.slackConnections({}, { orgRef: org.id }, ctxFor(member.id));
     expect(scoped.total).toBe(1);
 
-    const outsiderPage = await resolvers.Query.slackConnections({}, { orgId: org.id }, ctxFor(outsider.id));
+    const outsiderPage = await resolvers.Query.slackConnections({}, { orgRef: org.id }, ctxFor(outsider.id));
     expect(outsiderPage).toEqual({ items: [], total: 0 });
 
     const countOnly = await resolvers.Query.slackConnections({}, { limit: 0 }, ctxFor(member.id));

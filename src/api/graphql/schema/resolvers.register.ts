@@ -2,7 +2,7 @@ import { resolveAppInstallation, listAppInstallations } from '../../../lib/appIn
 /**
  * Spec 049 Phase 5 — the register's read + write surface (D-2026-09-13-007).
  *
- * `registerEntry(ref)` / `registerEntries(filter, orgId, …)` follow §8.6: a
+ * `registerEntry(ref)` / `registerEntries(filter, orgRef, …)` follow §8.6: a
  * row is returned to a caller who may read its Channel's host memory or is on
  * the row's owner side; a filter naming a foreign Channel or attendee returns
  * the same empty page as a nonexistent one. Mutations go through the owner
@@ -144,19 +144,19 @@ export const registerQueries = {
     _: unknown,
     {
       filter,
-      orgId,
+      orgRef,
       limit,
       offset,
     }: {
       filter?: { ownerRef?: string | null; channelRef?: string | null; attendeeRef?: string | null } | null;
-      orgId?: string | null;
+      orgRef?: string | null;
       limit?: number | null;
       offset?: number | null;
     },
     ctx: Context,
   ) => {
     const empty = { items: [] as RegisterEntry[], total: 0 };
-    const scope = await resolveOrgScope(ctx, orgId);
+    const scope = await resolveOrgScope(ctx, orgRef);
     if (!scope) return empty;
     const and: Prisma.RegisterEntryWhereInput[] = [{ deletedAt: null }, await readableRegisterWhere(ctx)];
     if (scope.scopedOrgId) {

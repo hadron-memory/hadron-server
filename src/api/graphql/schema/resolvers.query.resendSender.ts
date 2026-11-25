@@ -11,10 +11,10 @@ export const resendSenderQueries = {
 
   resendSenders: async (
     _: unknown,
-    { orgId, limit, offset }: { orgId?: string | null; limit?: number | null; offset?: number | null },
+    { orgRef, limit, offset }: { orgRef?: string | null; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
-    const scope = await resolveOrgScope(ctx, orgId);
+    const scope = await resolveOrgScope(ctx, orgRef);
     if (!scope) return { items: [], total: 0 };
     const where = { organizationId: { in: scope.memberOrgIds } };
     const take = clampListTake(limit);

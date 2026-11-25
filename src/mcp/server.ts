@@ -1356,7 +1356,8 @@ function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent' | 'org', bareUrn: 
 /**
  * Tenant-editable text (an org, App or memory name) inside a line-parsed answer: control characters (CR, LF, the
  * Unicode line separators) collapse to a space so a name can never forge an extra `signed in as:` or `active memory:`
- * line, and it is cut at `max` characters. Shared by the #1412 org block and the #4290 whoami header.
+ * line, and it is cut at `max` characters. Shared by the #1412 org block, the #4290 whoami header and the whoami
+ * session rows (worker name, role and App name, #4587).
  */
 function oneLineText(name: string, max = 100): string {
   const flat = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
@@ -4944,7 +4945,7 @@ export function createMcpServerInstance(
             // (subsumes the old matchesQuery "*" / "" path).
             query: isSurvey ? undefined : safeQuery,
             mode: effectiveMode,
-            orgId: scopeOrgId,
+            orgRef: scopeOrgId,
             filter: {
               memoryIds: filterMemoryIds,
               isRunnable: isRunnable ?? undefined,
@@ -10588,9 +10589,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // The un-bound case is the one worth calling out: it is the shape in
           // which a team-chat post silently lands under the human's name.
           (worker
-            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''} (worker id: ${worker.id})${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
+            ? `    working as: ${oneLineText(worker.name)}${worker.role ? ` (${oneLineText(worker.role)})` : ''} (worker id: ${worker.id})${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
             : '    working as: nobody — this session is NOT bound to a worker, so anything it posts is attributed to you, not a teammate.\n') +
-          (app ? `    app: ${app.name}\n` : '') +
+          (app ? `    app: ${oneLineText(app.name)}\n` : '') +
           `    started: ${s.startedAt.toISOString()}${s.type ? ` · ${s.type}` : ''}` +
           (s.endedAt ? '' : `\n    ${renderSessionLiveness(sessionLapsesAt(s, lastEventForLiveness.get(s.id)), nowForLiveness, s.expiresAt)}`) +
           (s.plan ? `\n    plan: ${s.plan}` : '') +

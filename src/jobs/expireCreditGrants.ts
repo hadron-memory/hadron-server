@@ -9,6 +9,13 @@
  * settleExpiredGrants in its own try/catch: a failure logs one line (organization id, error code; no message, no
  * amount) and the run goes on. A second run, instance or reader is a no-op: the settlement pair is unique.
  *
+ * No attempt cap and no alarm (#5100 item 7, a stated divergence from the chat-tool teardown and Git mirror sweeps): those
+ * sweeps keep an attempt count per row so that a failing remote is eventually CAPPED and raised. Here a failing owner
+ * keeps no state: nothing is retried against a remote, the settlement is idempotent, and every read of that owner's
+ * balance settles it too (a failure there answers the computed figure, ruling 10.4), so a stuck owner costs one logged
+ * line an hour (`credit_expiry_sweep.owner_failed`, owner id and error code) and no balance is ever wrong. A cap would
+ * need a column to count in, for no figure it could protect.
+ *
  * Env: DISABLE_CREDIT_EXPIRY_SWEEP=true disables the loop (only the exact value `true`); skipped under NODE_ENV=test.
  * Reads still settle the owner at hand whatever the switch says. Run one sweep by hand:
  *   pnpm tsx src/jobs/expireCreditGrants.ts
@@ -21,7 +28,7 @@ import {
   settleExpiredGrants,
   toNaiveUtc,
 } from '../lib/metering/settleExpiredGrants.js';
-import { safeErrorCode } from '../lib/secrets/autoDelete.js';
+import { safeErrorCode } from '../lib/safeErrorCode.js';
 import { isProcessEntry } from './isProcessEntry.js';
 
 const BATCH_SIZE = 500;
@@ -38,7 +45,7 @@ export interface ExpireCreditGrantsOptions {
 }
 
 export interface ExpireCreditGrantsResult {
-  /** Owners settled without error. */
+  /** Owners the run judged without error, including those it wrote nothing for (a grant inside its 60 s, or one another settler took first). */
   owners: number;
   /** Settlement entries those owners asked to write. */
   settlements: number;

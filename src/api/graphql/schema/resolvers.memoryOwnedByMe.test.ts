@@ -183,7 +183,7 @@ const list = (
   filter: Record<string, unknown> | null,
   over: Partial<Context>,
   orgId?: string | null,
-) => resolvers.Query.memories(null, { filter, orgId }, ctx(over));
+) => resolvers.Query.memories(null, { filter, orgRef: orgId }, ctx(over));
 
 // ---------------------------------------------------------------------------
 // #1176 — the default (unfiltered) list IS the caller's accessible set.

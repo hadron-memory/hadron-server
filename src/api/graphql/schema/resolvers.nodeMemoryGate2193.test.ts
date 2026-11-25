@@ -237,7 +237,7 @@ describe('#2193 — other Node parents: Node.memory still answers as Query.memor
     // A cross-memory edge, so the two endpoints sit under different record gates.
     await db.edge.create({ data: { memoryId: mem.know!, sourceId: node.know!, targetId: node.handoff!, loc: `edges:e-${n}` } });
     for (const [who, bearer] of await allBearers()) {
-      const r = await post(bearer, 'query($o: ID) { edges(orgId: $o, limit: 50) { items { loc source { id memoryId memory { id } } target { id memoryId memory { id } } } } }', { o: org.id });
+      const r = await post(bearer, 'query($o: ID) { edges(orgRef: $o, limit: 50) { items { loc source { id memoryId memory { id } } target { id memoryId memory { id } } } } }', { o: org.id });
       expect(r.errors, `${who}: edges`).toBeUndefined();
       const items = r.data.edges.items as Array<{ loc: string; source: any; target: any }>;
       const e = items.find((x) => x.loc === `edges:e-${n}`);

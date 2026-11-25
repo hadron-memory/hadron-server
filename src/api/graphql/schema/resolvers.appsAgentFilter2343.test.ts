@@ -141,10 +141,10 @@ describe('Query.apps(filter.agentId)', () => {
   });
 
   it('scopes to the org with orgId, and a non-member of that org gets an empty page', async () => {
-    const scoped = await resolvers.Query.apps(null, { orgId: orgO, filter: { agentId: agentG } }, asMember());
+    const scoped = await resolvers.Query.apps(null, { orgRef: orgO, filter: { agentId: agentG } }, asMember());
     expect(ids(scoped)).toEqual([a1, a3].sort());
     const outside = await resolvers.Query.apps(
-      null, { orgId: orgO, filter: { agentId: agentG } }, ctx({ userId: outsider, roles: ['READER'] }),
+      null, { orgRef: orgO, filter: { agentId: agentG } }, ctx({ userId: outsider, roles: ['READER'] }),
     );
     expect(outside).toEqual(EMPTY);
   });

@@ -152,7 +152,7 @@ describe('#79 readable memories', () => {
     expect((await page(`memoryId: "${shared}"`, context(member))).names).toEqual(['other-out', 'same-in', 'same-out']);
     const own = await memory('own', { class: 'private', userId: member, ownerUserId: member });
     await edge('own-out', shared, near, (await createDbNode(db, { loc: 'o', memoryId: own })).id);
-    const inOrg = await run(`{ edges(orgId: "${orgId}") { items { name } } }`, context(member));
+    const inOrg = await run(`{ edges(orgRef: "${orgId}") { items { name } } }`, context(member));
     expect((inOrg.data as any).edges.items.map((e: any) => e.name).sort()).toEqual(['other-in', 'other-out', 'own-out', 'same-in', 'same-out']);
     await db.edge.deleteMany({ where: { name: 'own-out' } });
     await db.node.update({ where: { id: n }, data: { deletedAt: new Date() } });
