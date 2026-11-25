@@ -114,14 +114,14 @@ export async function writeReportsTo(
   },
 ): Promise<ReportsToChange> {
   const appId = args.appId ?? (await tx.worker.findUnique({ where: { id: args.workerId }, select: { appId: true } }))?.appId;
-  if (!appId) throw refusal('WORKER_NOT_FOUND', `Worker not found: "${args.workerId}"`);
+  if (!appId) throw refusal('WORKER_NOT_FOUND', 'Worker not found');
   await lockAppReportsTo(tx, appId);
 
   const ids = [...new Set([args.workerId, ...(args.to ? [args.to] : [])])].sort();
   const rows = await tx.$queryRaw<Array<{ id: string; app_id: string; retired_at: Date | null; reports_to_worker_id: string | null; explicit_no_team: boolean }>>`
     SELECT id, app_id, retired_at, explicit_no_team, reports_to_worker_id FROM workers WHERE id = ANY(${ids}::text[]) ORDER BY id FOR UPDATE`;
   const worker = rows.find((r) => r.id === args.workerId);
-  if (!worker || worker.app_id !== appId) throw refusal('WORKER_NOT_FOUND', `Worker not found: "${args.workerId}"`);
+  if (!worker || worker.app_id !== appId) throw refusal('WORKER_NOT_FOUND', 'Worker not found');
   const from = worker.reports_to_worker_id;
   if (args.expectedFrom !== undefined && args.expectedFrom !== from) {
     throw refusal('WORKER_REPORTS_TO_STALE', 'Who this worker reports to changed since you read it; read it again.', { reportsTo: from });
@@ -143,7 +143,7 @@ export async function writeReportsTo(
   if (args.to !== null) {
     if (args.to === args.workerId) throw refusal('WORKER_REPORTS_TO_SELF', 'A worker cannot report to itself.');
     const target = rows.find((r) => r.id === args.to);
-    if (!target) throw refusal('WORKER_NOT_FOUND', `Worker not found: "${args.to}"`);
+    if (!target) throw refusal('WORKER_NOT_FOUND', 'Worker not found');
     if (target.app_id !== appId) {
       throw refusal('WORKER_REPORTS_TO_OTHER_APP', 'A worker reports to a worker of its own App.');
     }

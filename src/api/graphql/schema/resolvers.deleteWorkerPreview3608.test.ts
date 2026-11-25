@@ -109,9 +109,10 @@ beforeEach(async () => {
 afterEach(() => sessionKeyCache.clear());
 
 describe('#3608 item 3: the delete wins the race', () => {
-  const gone = (workerRef: string) => ({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
+  // #5168: the refusal no longer echoes the caller's ref, so it is one envelope for every ref.
+  const gone = (_workerRef: string) => ({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND' } });
 
-  it('both winner orders give the same refusal, echo the caller\'s input and leave no claim', async () => {
+  it('both winner orders give the same refusal, echo nothing of the caller\'s input (#5168) and leave no claim', async () => {
     const urn = `hrn:worker:${f.app.urn}:${f.target.slug}`;
     const first = interruptAt('census', async () => { expect(await remove()).toBe(true); });
     const beforeCensus = await refusal(preview(bound({ db: first.client }), urn, instruction));
@@ -134,7 +135,7 @@ describe('#3608 item 3: the delete wins the race', () => {
   it('the claim-time refusal carries nothing of the fence', async () => {
     const race = interruptAt('claim', async () => { expect(await remove()).toBe(true); });
     const got = await refusal(preview(bound({ db: race.client }), f.target.id, instruction));
-    expect(Object.keys(got.extensions).sort()).toEqual(['code', 'workerRef']);
+    expect(Object.keys(got.extensions).sort()).toEqual(['code']); // #5168: the caller's ref is not relayed
     expect(JSON.stringify(got)).not.toMatch(/agent_team_events|referenceRef|referenceKind|writer/);
   });
 
@@ -216,7 +217,7 @@ describe('#3608 reference forms and negative controls', () => {
     const before = await state();
     const got = await refusal(preview(ctx(), ref));
     expect(got).toEqual(await refusal(remove(ref)));
-    expect(got).toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND', workerRef: ref } });
+    expect(got).toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND'} });
     expect(await state()).toEqual(before);
   });
   it('a malformed instruction refuses exactly as the delete does', async () => {

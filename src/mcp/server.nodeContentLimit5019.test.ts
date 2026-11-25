@@ -106,6 +106,60 @@ describe('#5019 MCP content doors', () => {
     expect(await row(before.id)).toEqual(before);
   });
 
+  describe('#5160 encrypted memory', () => {
+    const p = (loc: string) => `hrn:node:mcp5019-u:private:${loc}`;
+    beforeEach(async () => {
+      const dataKey = Buffer.alloc(32, 9).toString('base64');
+      mem = (await db.memory.create({ data: { id: generateId(), name: 'p', urn: 'mcp5019-u:private', class: 'private', userId: u, ownerUserId: u, vectorIndexEnabled: false } })).id;
+      await encryptWithSecret(null, { memoryRef: mem, dataKey }, { db, userId: u, roles: ['READER'] } as Context);
+      sessionKeyCache.set('mcp5019', mem, parseDataKey(dataKey));
+    });
+
+    it('hadron_create_parent_node is measured in plaintext, new and re-saved (the description counts twice)', async () => {
+      expect(await call('hadron_create_parent_node', { urn: p('s'), name: 's', description: a(501) })).toEqual(REFUSED);
+      expect(await db.node.count({ where: { memoryId: mem, loc: 's' } })).toBe(0);
+      ok(await call('hadron_create_parent_node', { urn: p('s'), name: 's', description: a(500) }));
+      const before = await db.node.findFirstOrThrow({ where: { memoryId: mem, loc: 's' } });
+      expect(await call('hadron_create_parent_node', { urn: p('s'), name: 's', description: a(501) })).toEqual(REFUSED);
+      expect(await row(before.id)).toEqual(before);
+    });
+
+    it('a section counts the data it keeps in plaintext, live and deleted', async () => {
+      ok(await call('hadron_create_node', { urn: p('s'), name: 's', data: { k: a(592) } })); // 600 bytes
+      ok(await call('hadron_create_parent_node', { urn: p('s'), name: 's', description: a(200) }));
+      expect(await call('hadron_create_parent_node', { urn: p('s'), name: 's', description: a(201) })).toEqual(REFUSED);
+      await db.node.updateMany({ where: { memoryId: mem, loc: 's' }, data: { deletedAt: new Date() } });
+      expect(await call('hadron_create_parent_node', { urn: p('s'), name: 's', description: a(201) })).toEqual(REFUSED);
+      ok(await call('hadron_create_parent_node', { urn: p('s'), name: 's', description: a(200) }));
+    });
+
+    it('with no ceiling set, a tombstone that does not decrypt is not read for its size', async () => {
+      vi.stubEnv('NODE_CONTENT_MAX_BYTES', '');
+      await node('t', { data: { __enc: Buffer.alloc(64, 1).toString('base64') }, deletedAt: new Date() });
+      await node('s', { data: { __enc: Buffer.alloc(64, 1).toString('base64') }, deletedAt: new Date() });
+      ok(await call('hadron_create_node', { urn: p('t'), name: 't', content: 'x' }));
+      ok(await call('hadron_create_parent_node', { urn: p('s'), name: 's', description: 'x' }));
+    });
+  });
+
+  it('#5160 hadron_create_node: a revive is judged by the role gates before the ceiling', async () => {
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: mem } });
+    const task = await node('author-task', { isRunnable: true, content: 'instructions' });
+    await db.nodeRoleRule.createMany({ data: [
+      { id: generateId(), configId: config.id, role: 'policy', writers: 'ADMIN' },
+      { id: generateId(), configId: config.id, role: 'doc', strictSubRoles: true },
+      { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    ] });
+    await db.orgMember.updateMany({ where: { userId: u }, data: { role: 'CONTRIBUTOR' } });
+    for (const role of ['policy', 'doc', 'guide']) {
+      await node(role, { role, data: { k: a(600) }, deletedAt: new Date() });
+      const r = await call('hadron_create_node', { urn: urn(role), name: role, content: a(600), ...(role === 'doc' ? { role: 'doc.unknown' } : {}) });
+      expect(r.isError).toBe(true);
+      expect([role, r.text]).toEqual([role, expect.not.stringContaining('node_content_too_large')]);
+      expect([role, r.text]).toEqual([role, expect.stringMatching({ policy: /writer|ADMIN/i, doc: /declared/i, guide: /author/i }[role]!)]);
+    }
+  });
+
   it('hadron_update_node_data and hadron_replace_text', async () => {
     const n = await node('n', { content: `cat ${a(600)}`, data: { first: a(300) } });
     const before = await row(n.id);

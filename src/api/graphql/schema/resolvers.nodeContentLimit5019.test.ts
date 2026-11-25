@@ -97,6 +97,8 @@ describe('#5019 create and update', () => {
     refusedAt(await gql(UPDATE, { input: { id: n.id, data: json(600) } }));
     ok(await gql(UPDATE, { input: { id: n.id, data: json(400) } }));
     ok(await gql(UPDATE, { input: { id: n.id, content: null, data: json(1000) } }));
+    // #5160: what was measured is what was written.
+    expect(await row(n.id)).toMatchObject({ content: null, data: json(1000) });
   });
 
   it('reviving a tombstone counts the fields it keeps', async () => {
@@ -149,6 +151,57 @@ describe('#5019 an encrypted memory is measured in plaintext', () => {
     sessionKeyCache.clear();
     ok(await gql(MERGE, { input: { source: small.id, target: n.id, include: ['DESCRIPTION'] } }));
     refusedAt(await gql(MERGE, { input: { source: src.id, target: n.id, include: ['DESCRIPTION'] } }));
+  });
+});
+
+describe('#5160 restoreNodeRevision in an encrypted memory', () => {
+  it('is measured in plaintext: 1,000 bytes are restored, 1,001 refused', async () => {
+    const dataKey = Buffer.alloc(32, 7).toString('base64');
+    mem = (await db.memory.create({ data: { id: generateId(), name: 'p', urn: 'nc5019-u:p', class: 'private', userId: u, ownerUserId: u, vectorIndexEnabled: false } })).id;
+    await encryptWithSecret(null, { memoryRef: mem, dataKey }, { db, userId: u, roles: ['READER'] } as Context);
+    sessionKeyCache.set('nc5019', mem, parseDataKey(dataKey));
+    cap('');
+    const restorable = async (loc: string, bytes: number) => {
+      ok(await create({ loc, content: a(bytes) }));
+      const n = await db.node.findFirstOrThrow({ where: { memoryId: mem, loc } });
+      ok(await gql(UPDATE, { input: { id: n.id, content: 'short' } }));
+      return { n, rev: await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id } }) };
+    };
+    const fits = await restorable('fits', 1000);
+    const over = await restorable('over', 1001);
+    cap(1000);
+    const before = await row(over.n.id);
+    refusedAt(await gql(RESTORE, { ref: over.rev.id }));
+    expect(await row(over.n.id)).toEqual(before);
+    ok(await gql(RESTORE, { ref: fits.rev.id }));
+  });
+});
+
+describe('#5160 a revive is judged by the role gates before the ceiling', () => {
+  // Over the ceiling only with the fields the tombstone keeps, so a refusal for size would tell a refused writer its stored size.
+  const revive = async (role: string, rule: Record<string, unknown>, input: Record<string, unknown> = {}) => {
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: mem } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role, ...rule } });
+    await node('n', { role, data: json(600), deletedAt: new Date() });
+    return create({ content: a(600), ...input });
+  };
+  const code = (r: Result) => r.errors?.[0]?.extensions?.code;
+  it('the role-declared gate', async () => {
+    expect(code(await revive('doc', { strictSubRoles: true }, { role: 'doc.unknown' }))).toBe('ROLE_NOT_DECLARED');
+  });
+  it('the role-writer gate', async () => {
+    await db.orgMember.updateMany({ where: { userId: u }, data: { role: 'CONTRIBUTOR' } });
+    expect(code(await revive('policy', { writers: 'ADMIN' }))).toBe('ROLE_WRITER_LEVEL_REQUIRED');
+  });
+  it('the authoring gate', async () => {
+    const task = await node('author-task', { isRunnable: true, content: 'instructions' });
+    expect(code(await revive('guide', { authorTaskId: task.id, authorTaskRequired: true }))).toBe('AUTHORING_ATTESTATION_MISSING');
+  });
+  it('a new node too', async () => {
+    await db.orgMember.updateMany({ where: { userId: u }, data: { role: 'CONTRIBUTOR' } });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: mem } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'policy', writers: 'ADMIN' } });
+    expect(code(await create({ role: 'policy', content: a(1001) }))).toBe('ROLE_WRITER_LEVEL_REQUIRED');
   });
 });
 
@@ -209,6 +262,15 @@ describe('#5019 the other content doors', () => {
   it('importNode is refused and writes nothing', async () => {
     refusedAt(await gql(IMPORT, { input: { memoryId: mem, loc: 'i', name: 'i', content: a(1001), contentType: 'text/markdown' } }));
     expect(await db.node.count({ where: { memoryId: mem, loc: 'i' } })).toBe(0);
+  });
+
+  it('#5160: importNode over a live node counts the fields it keeps, and leaves the row unchanged', async () => {
+    const n = await node('i', { content: 'before', data: json(600) });
+    const before = await row(n.id);
+    refusedAt(await gql(IMPORT, { input: { memoryId: mem, loc: 'i', name: 'i', content: a(600), contentType: 'text/markdown' } }));
+    expect(await row(n.id)).toEqual(before);
+    expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+    ok(await gql(IMPORT, { input: { memoryId: mem, loc: 'i', name: 'i', content: a(100), contentType: 'text/markdown' } }));
   });
 
   it('a copy is not checked: cloneNode of a node over the ceiling still works', async () => {

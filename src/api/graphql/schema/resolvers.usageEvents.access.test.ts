@@ -140,7 +140,7 @@ describe('usageEvents access control — scoped (memoryId) path', () => {
   // meant "exists, not yours".
   it('member cannot read a memory in an org they don\'t belong to → MEMORY_NOT_FOUND, as if missing', async () => {
     await expect(resolvers.Query.usageEvents(null, { memoryRef: memB.id }, asMember())).rejects.toThrow(
-      `MEMORY_NOT_FOUND: ${memB.id}`,
+      'MEMORY_NOT_FOUND: nothing found for the given ref.',
     );
   });
 
@@ -151,7 +151,7 @@ describe('usageEvents access control — scoped (memoryId) path', () => {
 
   it('non-owner cannot read someone else\'s private memory → MEMORY_NOT_FOUND, as if missing', async () => {
     await expect(resolvers.Query.usageEvents(null, { memoryRef: privMem.id }, asOther())).rejects.toThrow(
-      `MEMORY_NOT_FOUND: ${privMem.id}`,
+      'MEMORY_NOT_FOUND: nothing found for the given ref.',
     );
   });
 
@@ -159,7 +159,7 @@ describe('usageEvents access control — scoped (memoryId) path', () => {
     const allowed = await resolvers.Query.usageEvents(null, { memoryRef: memA.urn }, asMember());
     expect(locsOf(allowed)).toEqual(new Set(['a-loc']));
     await expect(resolvers.Query.usageEvents(null, { memoryRef: memB.urn }, asMember())).rejects.toThrow(
-      `MEMORY_NOT_FOUND: ${memB.urn}`,
+      'MEMORY_NOT_FOUND: nothing found for the given ref.',
     );
   });
 });

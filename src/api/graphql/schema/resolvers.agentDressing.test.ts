@@ -274,6 +274,6 @@ describe('startSession — coding provenance + agentRef (#928)', () => {
         ctx(outsider.id),
       ),
     // #1944: an Agent the caller can't read answers exactly as an absent one.
-    ).rejects.toThrow(`Agent not found: ${agent.id}`);
+    ).rejects.toThrow(/^Agent not found$/); // #5168: the ref is not quoted back
   });
 });

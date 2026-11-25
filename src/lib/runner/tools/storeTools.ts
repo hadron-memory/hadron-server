@@ -43,7 +43,7 @@ import { generateId } from '../../id.js';
 import { splitNodeUrn } from '../../urn.js';
 import { emitAssetUrnV2 } from '../../urnEmit.js';
 import { resolveFlowMemory } from '../loadFlowNode.js';
-import { ownerLimitToolError } from '../../ownerLimits/errors.js';
+import { createRefusalToolError } from '../../ownerLimits/errors.js';
 import type { RunToolDef, RunToolContext } from './types.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 
@@ -191,7 +191,7 @@ export const hadronStoreFile: RunToolDef = {
       await checkAssetBytesHeadroom(ctx.db, memory.id, body.byteLength, limitCaller);
     } catch (err) {
       // #5015: an owner-limit refusal is returned to the model like the final check's below (nothing was written yet).
-      const refused = ownerLimitToolError(err);
+      const refused = createRefusalToolError(err);
       if (refused) return { stored: false, nodeUrn: urn, ...refused };
       throw err;
     }
@@ -251,7 +251,7 @@ export const hadronStoreFile: RunToolDef = {
       await deleteObject(storageKey).catch(() => {});
       // #5015: an owner limit (`nodes`, or #5017's `assetBytes` under the lock) is the model's to react to, not the end of
       // the run (nothing is left behind).
-      const refused = ownerLimitToolError(err);
+      const refused = createRefusalToolError(err);
       if (refused) return { stored: false, nodeUrn: urn, ...refused };
       if (err instanceof GraphQLError && err.extensions?.code === 'NodeLocConflictError') {
         throw new Error(

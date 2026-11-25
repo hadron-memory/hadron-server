@@ -341,8 +341,9 @@ async function requireLogManage(ctx: Context, memoryId: string, concealRef?: str
   }
 }
 
-const questionMissing = (ref: string) => questionError('QUESTION_NOT_FOUND', `Question not found: "${ref}"`, { ref });
-const logMissing = (ref: string) => questionError('QUESTION_LOG_NOT_FOUND', `Question log not found: "${ref}"`, { ref });
+// #5168: neither miss quotes or relays the caller's ref (their own text, possibly a pasted secret).
+const questionMissing = (_ref: string) => questionError('QUESTION_NOT_FOUND', 'Question not found');
+const logMissing = (_ref: string) => questionError('QUESTION_LOG_NOT_FOUND', 'Question log not found');
 
 /** Resolve a ref to a live, readable node of `role`, or the typed miss (no existence oracle). */
 async function resolveGovernedNode(

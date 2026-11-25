@@ -304,12 +304,12 @@ describe('validateMemory — shape and access (#819)', () => {
   // resolution — two different answers, i.e. an existence oracle.
   it('a non-member is refused, indistinguishably from a miss', async () => {
     const missing = generateId();
-    await expect(validate(mem.id, undefined, ctx(stranger.id))).rejects.toThrow(`MEMORY_NOT_FOUND: ${mem.id}`);
-    await expect(validate(missing, undefined, ctx(stranger.id))).rejects.toThrow(`MEMORY_NOT_FOUND: ${missing}`);
+    await expect(validate(mem.id, undefined, ctx(stranger.id))).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
+    await expect(validate(missing, undefined, ctx(stranger.id))).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
   });
 
   it('an anonymous caller is refused', async () => {
-    await expect(validate(mem.id, undefined, ctx())).rejects.toThrow(`MEMORY_NOT_FOUND: ${mem.id}`);
+    await expect(validate(mem.id, undefined, ctx())).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
   });
 
   // PR #859 review (Codex P1). This query returns node ids, locs, counts and
@@ -331,7 +331,7 @@ describe('validateMemory — shape and access (#819)', () => {
     // The member CAN open the memory record (Query.memory admits them)…
     expect(await Q.memory(null, { ref: appMem.id }, ctx(member.id))).not.toBeNull();
     // …but must NOT be able to enumerate its nodes through the validator.
-    await expect(validate(appMem.id, undefined, ctx(member.id))).rejects.toThrow(`MEMORY_NOT_FOUND: ${appMem.id}`);
+    await expect(validate(appMem.id, undefined, ctx(member.id))).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
   });
 
   it('an org member CAN validate an ordinary org memory (no over-tightening)', async () => {

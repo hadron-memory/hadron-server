@@ -1026,7 +1026,7 @@ describe('hadron_move_node — cross-memory move + permission denial', () => {
       targetUrn: `urn:node:${fx.memory.urn}:somewhere-else`,
     });
 
-    expect(text).toBe(`Source memory not found: "${fx.memory.urn}".`);
+    expect(text).toBe('Source memory not found.');
     // No row got moved.
     const sourceRow = await db.node.findUnique({
       where: { id: fx.nodes.moveSource.id },

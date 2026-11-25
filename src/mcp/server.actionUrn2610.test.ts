@@ -143,21 +143,21 @@ describe('#2610 — hadron_get_node action branch', () => {
     const out = createTestableMcpServer(auth(outsider.id));
     const otherTenant = await out.callToolText('hadron_get_node', { urn: actionUrn(teamAgent.urn, CODE) });
     const missing = await out.callToolText('hadron_get_node', { urn: actionUrn(teamAgent.urn, MISSING_CODE) });
-    expect(otherTenant).toBe(`Node "${actionUrn(teamAgent.urn, CODE)}" not found.`);
+    expect(otherTenant).toBe('Node not found.');
     expect(missing).toBe(otherTenant.replace(CODE, MISSING_CODE));
   });
 
   it('refuses a missing code for an authorized caller', async () => {
     await registerEntry(teamMemoryId, CODE);
     const text = await getNode(actionUrn(teamAgent.urn, MISSING_CODE));
-    expect(text).toBe(`Node "${actionUrn(teamAgent.urn, MISSING_CODE)}" not found.`);
+    expect(text).toBe('Node not found.');
   });
 
   it('refuses a malformed leaf (bad charset, over length)', async () => {
     await registerEntry(teamMemoryId, CODE);
     for (const bad of ['bad code!', 'x'.repeat(65)]) {
       const text = await getNode(actionUrn(teamAgent.urn, bad));
-      expect(text).toBe(`Node "${actionUrn(teamAgent.urn, bad)}" not found.`);
+      expect(text).toBe('Node not found.');
     }
   });
 
@@ -166,7 +166,7 @@ describe('#2610 — hadron_get_node action branch', () => {
     await db.agent.update({ where: { id: teamAgent.id }, data: { visibility: 'PUBLIC' } });
     const text = await createTestableMcpServer(auth(outsider.id))
       .callToolText('hadron_get_node', { urn: actionUrn(teamAgent.urn, CODE) });
-    expect(text).toBe(`Node "${actionUrn(teamAgent.urn, CODE)}" not found.`);
+    expect(text).toBe('Node not found.');
   });
 
   it('refuses an App participant who READS the entry by node address but is not owner/org member (agent gate, verbatim)', async () => {
@@ -183,13 +183,13 @@ describe('#2610 — hadron_get_node action branch', () => {
     expect(byNode).toContain(`Action URN: ${actionUrn(teamAgent.urn, CODE)}`);
     // …but the ACTION address refuses them — the `agent` arm's gate, verbatim.
     const byAction = await out.callToolText('hadron_get_node', { urn: actionUrn(teamAgent.urn, CODE) });
-    expect(byAction).toBe(`Node "${actionUrn(teamAgent.urn, CODE)}" not found.`);
+    expect(byAction).toBe('Node not found.');
   });
 
   it('refuses a child-Agent URN whose code exists only in the Team Agent\'s memory (no chain fallthrough)', async () => {
     await registerEntry(teamMemoryId, CODE); // only the Team Agent holds the entry
     const text = await getNode(actionUrn(childAgent.urn, CODE));
-    expect(text).toBe(`Node "${actionUrn(childAgent.urn, CODE)}" not found.`);
+    expect(text).toBe('Node not found.');
   });
 
   it('keeps an OLD code resolving after the entry renames (alias heal) and reports the CURRENT address', async () => {
@@ -229,7 +229,7 @@ describe('#2610 — hadron_get_node action branch', () => {
     );
     const out = createTestableMcpServer(auth(outsider.id));
     const text = await out.callToolText('hadron_get_node', { urn: actionUrn(teamAgent.urn, CODE) });
-    expect(text).toBe(`Node "${actionUrn(teamAgent.urn, CODE)}" not found.`);
+    expect(text).toBe('Node not found.');
     // The admin still resolves it — to where the entry lives NOW (the healed
     // memory's address, not the system memory the ref started from).
     const adminText = await getNode(actionUrn(teamAgent.urn, CODE));
@@ -348,7 +348,7 @@ describe('#2711 delta review — D-1 impersonation, D-2 pins', () => {
     };
     const byAction = await createTestableMcpServer(impersonated)
       .callToolText('hadron_get_node', { urn: actionUrn(teamAgent.urn, CODE) });
-    expect(byAction).toBe(`Node "${actionUrn(teamAgent.urn, CODE)}" not found.`);
+    expect(byAction).toBe('Node not found.');
     // The same impersonated caller still reads the entry by NODE address —
     // the memory gate's org fold is the pre-existing, separately-routed
     // surface (Rico D-1: "exposes nothing new"). This boundary is what makes
@@ -372,7 +372,7 @@ describe('#2711 delta review — D-1 impersonation, D-2 pins', () => {
     // keeps value here as a behavior pin: uniform not-found, never an error
     // or a partial leak.
     const byAction = await getNode(actionUrn(teamAgent.urn, CODE));
-    expect(byAction).toBe(`Node "${actionUrn(teamAgent.urn, CODE)}" not found.`);
+    expect(byAction).toBe('Node not found.');
     // The node address's read refuses too ("Memory not found") — so the
     // line-omission observable ("the entry served WITHOUT its Action URN
     // line") is unreachable on MCP by construction (documented in the
@@ -380,7 +380,7 @@ describe('#2711 delta review — D-1 impersonation, D-2 pins', () => {
     // change that starts serving these memories fails here loudly and the
     // masked pins get written.
     const byNode = await getNode(emitNodeUrnV2(teamMemoryUrn, `register:${CODE}`));
-    expect(byNode).toBe(`Memory not found: "${teamMemoryUrn}".`);
+    expect(byNode).toBe('Memory not found.');
   });
 
   it('D-2: an unminted PLAIN node\'s rename leaves no alias — only register: entries widen (#1591 + #2610)', async () => {
@@ -395,7 +395,7 @@ describe('#2711 delta review — D-1 impersonation, D-2 pins', () => {
       gqlCtx(admin.id),
     );
     const old = await getNode(emitNodeUrnV2(teamMemoryUrn, 'plain-old-loc'));
-    expect(old).toBe(`Node "${emitNodeUrnV2(teamMemoryUrn, 'plain-old-loc')}" not found.`);
+    expect(old).toBe('Node not found.');
     const moved = await getNode(emitNodeUrnV2(teamMemoryUrn, 'plain-new-loc'));
     expect(moved).toContain('ID: ');
   });
@@ -421,6 +421,6 @@ describe('#2711 delta review — D-1 impersonation, D-2 pins', () => {
     await registerEntry(teamMemoryId, CODE);
     const tooLong = `${actionUrn(teamAgent.urn, CODE)}:extra`;
     const text = await getNode(tooLong);
-    expect(text).toBe(`Node "${tooLong}" not found.`);
+    expect(text).toBe('Node not found.');
   });
 });

@@ -360,7 +360,8 @@ export function chosenRefArg(args: { ref?: string | null; id?: string | null }):
  * the identical error rather than a copy that could drift.
  */
 export function refArgNotFoundError(label: string, chosen: string): GraphQLError {
-  return new GraphQLError(`No match for ${label}Ref "${chosen}".`, { extensions: { code: 'NOT_FOUND' } });
+  // #5168: names the argument, never quotes the value the caller typed in it.
+  return new GraphQLError(`No match for ${label}Ref.`, { extensions: { code: 'NOT_FOUND' } });
 }
 
 /** #764 — per-entity `resolveRefArg` wrappers (label = the ref arg's name). */
@@ -1182,8 +1183,8 @@ export async function concealUnreadableNodeDenial(
  * to it (#1316).
  */
 export function nodeNotFoundError(ref: string): GraphQLError {
-  return new GraphQLError(`Node not found: "${ref}"`, {
-    extensions: { code: 'NODE_NOT_FOUND', ref },
+  return new GraphQLError('Node not found', {
+    extensions: { code: 'NODE_NOT_FOUND' },
   });
 }
 

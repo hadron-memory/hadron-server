@@ -155,7 +155,7 @@ describe('addEdge — happy path', () => {
       release();
       await holder;
       await expect(adding).resolves.toEqual({
-        error: `Edge target not found: "${topLevel.id}"`,
+        error: 'Edge target not found',
       });
       expect(await db.edge.count({ where: { targetId: topLevel.id, deletedAt: null } })).toBe(0);
     } finally {
@@ -494,7 +494,7 @@ describe('addEdge — source by PK (#322)', () => {
       auth: adminAuth(),
     });
 
-    expect(result).toEqual({ error: expect.stringMatching(/^Source node not found:/) });
+    expect(result).toEqual({ error: expect.stringMatching(/^Source node not found/) });
     expect(await db.edge.count({ where: { targetId: topLevel.id } })).toBe(0);
   });
 });
@@ -524,7 +524,7 @@ describe('addEdge — not-found errors', () => {
       auth: adminAuth(),
     });
 
-    expect(result).toEqual({ error: expect.stringMatching(/^Source node not found:/) });
+    expect(result).toEqual({ error: expect.stringMatching(/^Source node not found/) });
     expect(await db.edge.count({ where: { sourceId: source.id } })).toBe(0);
   });
 
@@ -536,7 +536,7 @@ describe('addEdge — not-found errors', () => {
       auth: adminAuth(),
     });
 
-    expect(result).toEqual({ error: expect.stringMatching(/^Edge target not found:/) });
+    expect(result).toEqual({ error: expect.stringMatching(/^Edge target not found/) });
     expect(await db.edge.count({ where: { sourceId: source.id } })).toBe(0);
   });
 });

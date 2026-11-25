@@ -465,7 +465,7 @@ async function resolveWorkSession(
     select: { id: true, appId: true, userId: true, workerId: true, deletedAt: true, llmModel: true, launchOperationId: true, memoryId: true },
   });
   if (!session || session.deletedAt) {
-    throw new GraphQLError(`Session "${sessionRef}" not found.`, {
+    throw new GraphQLError('Session not found.', {
       extensions: { code: 'SESSION_NOT_FOUND' },
     });
   }

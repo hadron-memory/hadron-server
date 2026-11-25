@@ -22,7 +22,7 @@ import { resolveAppRef } from '../entityRef/appRef.js';
 
 export class TickerNotFoundError extends Error {
   constructor(public readonly ref: string) {
-    super(`Ticker not found: ${ref}`);
+    super('Ticker not found');
     this.name = 'TickerNotFoundError';
   }
 }

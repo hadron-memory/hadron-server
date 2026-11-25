@@ -162,8 +162,8 @@ describe('deleteUserApiKey: who may delete (ruling 0006)', () => {
     const before = await snapshot();
     const unknown = await del('nope').catch((e) => ({ code: e.extensions?.code, message: e.message }));
     const foreign = await del(theirs.userApiKey.id).catch((e) => ({ code: e.extensions?.code, message: e.message }));
-    expect(unknown).toEqual({ code: 'NOT_FOUND', message: 'UserApiKey nope not found.' });
-    expect(foreign).toEqual({ code: 'NOT_FOUND', message: `UserApiKey ${theirs.userApiKey.id} not found.` });
+    expect(unknown).toEqual({ code: 'NOT_FOUND', message: 'UserApiKey not found.' });
+    expect(foreign).toEqual(unknown); // #5168: no id quoted, so the two are byte-identical
     expect(await snapshot()).toEqual(before);
     expect(await authenticates(theirs.rawKey)).toBe(true);
     expect(await authenticates(mine.rawKey)).toBe(true);

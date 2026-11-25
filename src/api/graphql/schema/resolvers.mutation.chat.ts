@@ -794,7 +794,7 @@ export const chatMutations = {
             if (!convNode) {
               throw new ChatScopeError(
                 'CONVERSATION_NOT_FOUND',
-                `Conversation "${convName}" not found in agent's system memory.`,
+                "Conversation not found in agent's system memory.", // #5168: the name is not quoted back
               );
             }
 
