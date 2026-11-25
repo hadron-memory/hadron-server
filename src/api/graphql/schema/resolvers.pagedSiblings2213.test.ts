@@ -336,22 +336,22 @@ describe('exchangeConnectionsPage', () => {
       ['impersonated admin', imp(users.admin)], ['impersonated reader', imp(users.reader)],
     ];
     for (const [label, c] of cases) {
-      const old = await outcome(Q.exchangeConnections({}, { orgId }, c));
-      const page = await outcome(Q.exchangeConnectionsPage({}, { orgId, limit: 200 }, c));
+      const old = await outcome(Q.exchangeConnections({}, { orgRef: orgId }, c));
+      const page = await outcome(Q.exchangeConnectionsPage({}, { orgRef: orgId, limit: 200 }, c));
       expect(Boolean(page.ok), label).toBe(Boolean(old.ok));
       expect(page.code, label).toBe(old.code);
       if (old.ok) expect(ids(page.ok.items), label).toEqual(ids(old.ok));
     }
-    expect((await outcome(Q.exchangeConnections({}, { orgId }, ctxFor('reader')))).code).toBe('FORBIDDEN');
+    expect((await outcome(Q.exchangeConnections({}, { orgRef: orgId }, ctxFor('reader')))).code).toBe('FORBIDDEN');
   });
 
   it('pages concatenate to the old list in order; ties never drop or duplicate', async () => {
     const c = ctxFor('admin');
-    const old = await Q.exchangeConnections({}, { orgId }, c);
+    const old = await Q.exchangeConnections({}, { orgRef: orgId }, c);
     expect(old).toHaveLength(45);
     const seen: string[] = [];
     for (let offset = 0; offset < 45; offset += 20) {
-      const p = await Q.exchangeConnectionsPage({}, { orgId, limit: 20, offset }, c);
+      const p = await Q.exchangeConnectionsPage({}, { orgRef: orgId, limit: 20, offset }, c);
       expect(p.total).toBe(45);
       expect(p.hasMore).toBe(offset + p.items.length < 45);
       seen.push(...ids(p.items));
@@ -362,12 +362,12 @@ describe('exchangeConnectionsPage', () => {
 
   it('size edges, and the count excludes deleted rows and another org', async () => {
     const c = ctxFor('admin');
-    expect((await Q.exchangeConnectionsPage({}, { orgId }, c)).items).toHaveLength(20);
-    expect(await Q.exchangeConnectionsPage({}, { orgId, limit: 0 }, c)).toMatchObject({ items: [], total: 45, hasMore: true });
-    expect(await Q.exchangeConnectionsPage({}, { orgId, limit: -2 }, c)).toMatchObject({ items: [], total: 45, hasMore: true });
-    expect((await Q.exchangeConnectionsPage({}, { orgId, limit: 9999 }, c)).items).toHaveLength(45);
-    expect(await Q.exchangeConnectionsPage({}, { orgId, offset: 999 }, c)).toMatchObject({ items: [], total: 45, hasMore: false });
-    expect((await Q.exchangeConnectionsPage({}, { orgId, limit: 45 }, c)).hasMore).toBe(false);
+    expect((await Q.exchangeConnectionsPage({}, { orgRef: orgId }, c)).items).toHaveLength(20);
+    expect(await Q.exchangeConnectionsPage({}, { orgRef: orgId, limit: 0 }, c)).toMatchObject({ items: [], total: 45, hasMore: true });
+    expect(await Q.exchangeConnectionsPage({}, { orgRef: orgId, limit: -2 }, c)).toMatchObject({ items: [], total: 45, hasMore: true });
+    expect((await Q.exchangeConnectionsPage({}, { orgRef: orgId, limit: 9999 }, c)).items).toHaveLength(45);
+    expect(await Q.exchangeConnectionsPage({}, { orgRef: orgId, offset: 999 }, c)).toMatchObject({ items: [], total: 45, hasMore: false });
+    expect((await Q.exchangeConnectionsPage({}, { orgRef: orgId, limit: 45 }, c)).hasMore).toBe(false);
   });
 
   it('Organization.exchangeConnections still masks a refusal to [] and is unchanged above 20', async () => {
@@ -382,7 +382,7 @@ describe('exchangeConnectionsPage', () => {
   it('runs count and page in one RepeatableRead batch with database take/skip', async () => {
     const find = vi.spyOn(db.exchangeConnection, 'findMany');
     const tx = vi.spyOn(db, '$transaction');
-    await Q.exchangeConnectionsPage({}, { orgId, limit: 10, offset: 5 }, ctxFor('admin'));
+    await Q.exchangeConnectionsPage({}, { orgRef: orgId, limit: 10, offset: 5 }, ctxFor('admin'));
     expect(find).toHaveBeenCalledWith(expect.objectContaining({ take: 10, skip: 5 }));
     expect(tx).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ isolationLevel: 'RepeatableRead' }));
   });

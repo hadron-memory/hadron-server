@@ -53,7 +53,7 @@ describe('#4017 signing preview URNs', () => {
     expect(fields.workerUrn?.description).toMatch(/worker/i);
   });
   it('exposes nullable, documented agent/worker URNs through the actual GraphQL surface on both row kinds', async () => {
-    const result = await api.executeOperation({ query: `query($orgRef:ID!){orgBootPromptSigningPreview(orgRef:$org){rows{agentId agentUrn workerId workerUrn}}}`, variables: { orgRef: orgId } }, { contextValue: context() });
+    const result = await api.executeOperation({ query: `query($orgRef:ID!){orgBootPromptSigningPreview(orgRef:$orgRef){rows{agentId agentUrn workerId workerUrn}}}`, variables: { orgRef: orgId } }, { contextValue: context() });
     expect(result.body.kind).toBe('single');
     if (result.body.kind !== 'single') throw new Error('Unexpected incremental result');
     expect(result.body.singleResult.errors).toBeUndefined();
