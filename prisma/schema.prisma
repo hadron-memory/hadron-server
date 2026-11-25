@@ -1607,6 +1607,15 @@ model Node {
   /// edit with no user behind it clears it. Null = unknown (nodes edited before
   /// #2176 are not backfilled). No FK, like the audit stamps (hrn:node:hadronmemory.com:specs:cor:dmo:010:01).
   updatedByUserId     String?             @map("updated_by_user_id")
+  /// #5018 (Billing A14, hrn:node:hadronmemory.com:specs:cor:dmo:060:18) — the bytes this node's content, description, data and
+  /// properties take as stored (the ciphertext in an encrypted memory; `data` and `properties` as their jsonb text). Kept by the
+  /// `nodes_record_stored_bytes` trigger, never by a writer, and capped at the Int range. Null means not measured yet (a row
+  /// written before the trigger; the hand-run backfill fills it).
+  storedBytes         Int?                @map("stored_bytes")
+  /// #5018 — the same figure summed over this node's rows in `node_revisions`, kept by the triggers on that table; a node
+  /// starts at 0 and a not-measured (null) node stays null until the backfill. A BigInt, so the client leaves it out of every
+  /// default select (src/integrations/db/client.ts) and only the readers that need it ask.
+  revisionBytes       BigInt?             @map("revision_bytes")
 
   memory                   Memory                        @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   includeReferences        IncludeReference[]

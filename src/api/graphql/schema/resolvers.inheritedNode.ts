@@ -86,6 +86,9 @@ const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: a
   updatedByAgent: none,
   updatedByUser: none,
   createdByUser: none,
+  // #5018: a node's recorded size is the base owner's storage figure (and its revisions are the base owner's records): never served to a child's reader.
+  storedBytes: none,
+  revisionBytes: none,
   asComment: none,
   asset: none,
   signingRequests: empty,

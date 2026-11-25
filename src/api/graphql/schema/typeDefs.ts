@@ -1537,6 +1537,10 @@ export const typeDefs = `#graphql
     moveEdgeUrnChanges: [NodeMoveEdgeUrnChange!]
     "#1323 — current live revision. Creation is revision 1; each committed authoring change advances it. NodeRevision.revNo N is the retained snapshot of this node when revision N was current, before the edit that advanced it."
     revision: Int!
+    "#5018 (hrn:node:hadronmemory.com:specs:cor:dmo:060:18) — the bytes this node's content, description, data and properties take as stored: the stored (encrypted) form in an encrypted memory, and data and properties as their jsonb text. Name, alias, abstract and tags are not counted. Null means not measured yet."
+    storedBytes: Int
+    "#5018 (hrn:node:hadronmemory.com:specs:cor:dmo:060:18) — the same figure over this node's earlier revisions as they are stored now, a base-10 string (pruning may run after the write that exceeds the memory's maxRevCount, so it can briefly be higher). A revision taken in another memory the node once lived in still counts. Null means not measured yet, and also for a reader who cannot read every memory a counted revision was taken in, or whose node history is concealed."
+    revisionBytes: String
     "#1326 — attribution of this content state. Null means legacy or unknown. Task identity is redacted unless its memory is independently readable."
     authorship: NodeAuthorship
     "#1326 — advisory validation for this exact revision. A report for an older revision is STALE."
