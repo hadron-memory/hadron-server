@@ -29,7 +29,7 @@ beforeEach(async () => {
 describe('cloneMemoryGraphInTx', () => {
   it('returns the old->new node map and the skipped edge count', async () => {
     const result = await db.$transaction((tx) =>
-      cloneMemoryGraphInTx(tx, {
+      cloneMemoryGraphInTx(tx, { ownerLimitCaller: null,
         sourceMemoryId: memId, name: 'copy', newUrn: 'cm-a:copy', targetOrganizationId: orgId,
         ownerUserId: null, groupOwnerUserId: null, actorId: null, copierReadableMemoryIds: null,
       }),
@@ -45,7 +45,7 @@ describe('cloneMemoryGraphInTx', () => {
   it('rolls everything back with the caller\'s transaction', async () => {
     await expect(
       db.$transaction(async (tx) => {
-        await cloneMemoryGraphInTx(tx, {
+        await cloneMemoryGraphInTx(tx, { ownerLimitCaller: null,
           sourceMemoryId: memId, name: 'copy', newUrn: 'cm-a:copy', targetOrganizationId: orgId,
           ownerUserId: null, groupOwnerUserId: null, actorId: null, copierReadableMemoryIds: null,
         });
