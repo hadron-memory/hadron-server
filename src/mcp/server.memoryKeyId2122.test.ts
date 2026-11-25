@@ -66,13 +66,13 @@ describe('#2122 lock/unlock documented memory IDs', () => {
     const foreign = mcp(strangerId, 'key2122-stranger');
     const call = (server: ReturnType<typeof mcp>, input: string) => server.callToolText(tool, { memoryUrn: input, ...(tool === 'hadron_unlock_memory' ? { passphrase: PASS } : {}) });
     for (const input of [memoryId, FULL_URN, generateId(), 'hrn:mem:key2122.example:absent']) {
-      expect(await call(foreign, input)).toBe(`Memory "${input}" not found.`);
+      expect(await call(foreign, input)).toBe('Memory not found.');
       expect(sessionKeyCache.getByMemoryId(memoryId)).toBe(ownerKey);
       expect(sessionKeyCache.refCount(memoryId)).toBe(1);
     }
     await db.memory.update({ where: { id: memoryId }, data: { deletedAt: new Date() } });
     for (const input of [memoryId, FULL_URN]) {
-      expect(await call(owner, input)).toBe(`Memory "${input}" not found.`);
+      expect(await call(owner, input)).toBe('Memory not found.');
       expect(sessionKeyCache.getByMemoryId(memoryId)).toBe(ownerKey);
       expect(sessionKeyCache.refCount(memoryId)).toBe(1);
     }

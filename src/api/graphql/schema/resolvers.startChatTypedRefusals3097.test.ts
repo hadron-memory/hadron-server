@@ -61,7 +61,7 @@ describe('#3097: startChat refuses the empty conversation states with a typed co
   it('a named conversation that does not exist is CONVERSATION_NOT_FOUND', async () => {
     await seedNode('conversations');
     await seedNode('conversations:qa', { stageOrder: ['s1'] });
-    await expectRefusal({ conversationName: 'missing' }, 'CONVERSATION_NOT_FOUND', /"missing" not found/);
+    await expectRefusal({ conversationName: 'missing' }, 'CONVERSATION_NOT_FOUND', /^Conversation not found/); // #5168: the name is not quoted back
   });
 
   it('a conversation with no stages is CONVERSATION_HAS_NO_STAGES', async () => {

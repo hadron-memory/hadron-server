@@ -244,7 +244,7 @@ describe('#4893 keep doors: the typed URN_NOT_QUALIFIED contract stays', () => {
       expect(miss).toMatchObject({ ok: false, code: missCode });
       const got = await answer(call(CANARY));
       expect(got).toMatchObject({ ok: false, code: 'URN_NOT_QUALIFIED' });
-      expect((got as any).message).toContain('CANARY'); // the boundary quotes the caller's value (spec 022) — unchanged
+      expect((got as any).message).not.toContain('CANARY'); // #5168: the boundary no longer quotes the caller's value
     });
   }
 });

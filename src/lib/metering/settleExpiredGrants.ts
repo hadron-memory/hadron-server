@@ -4,8 +4,6 @@
  * ('grant-expiry', <grant id>), also when nothing was left (a zero entry), and never again. What was left comes from
  * the pure replay in ./expiry.ts (hrn:node:hadronmemory.com:specs:cor:dmo:170:11, soonest-expiring first).
  *
- * The owner is an organization or a person (#5014, A6): every read and write goes through the one owner column it sets.
- *
  * Called for the owner at hand before a balance is read (the creditBalance resolver; A3's gate later) and by the hourly
  * job (src/jobs/expireCreditGrants.ts) for everyone else.
  *
@@ -13,7 +11,7 @@
  * - 10.1 the clock: `now` is the database's. A grant is written settled only once `expiresAt <= now - 60 s`
  *   ({@link SETTLE_DELAY_MS}), so a debit stamped just before the expiry that commits a moment later is still counted
  *   in the settlement instead of being charged twice. Every read answers the computed figure meanwhile
- *   ({@link unsettledRemainders}), so no balance ever includes credit whose expiry has passed (10.7).
+ *   ({@link unsettledRemainder}), so no balance ever includes credit whose expiry has passed (10.7).
  * - 10.6 a settlement carries createdBy {@link CREDIT_EXPIRY_CREATED_BY} and no note (the source pair says it all).
  *
  * The writer is NOT A1's insert-or-replay helper: a pair already taken is done whatever its amount (a concurrent
@@ -69,7 +67,7 @@ function ownerPredicate(owner: OwnerRef, alias: 'g'): Prisma.Sql {
 }
 
 /**
- * The probe: does the owner (an organization or a person) hold a live grant that expired at or before `cutoff` and has no settlement? One
+ * The probe: does the organization hold a live grant that expired at or before `cutoff` and has no settlement? One
  * range on the partial index `credit_ledger_entries_expiring_grants_idx` plus the unique pair index. The pair is
  * checked whatever its row's deletedAt: a taken pair is settled (the writer could never write it again). Internal:
  * exported for the M1 measurement, not for other callers.
@@ -83,6 +81,7 @@ export async function hasUnsettledExpiredGrant(db: PrismaClient, owner: OwnerRef
        AND g.expires_at <= ${toNaiveUtc(cutoff)}::timestamp
        AND g.kind = 'grant'
        AND g.deleted_at IS NULL
+       AND g.created_at <= g.expires_at
        AND NOT EXISTS (
          SELECT 1 FROM credit_ledger_entries s
           WHERE s.source_type = ${GRANT_EXPIRY_SOURCE_TYPE} AND s.source_id = g.id
@@ -91,7 +90,7 @@ export async function hasUnsettledExpiredGrant(db: PrismaClient, owner: OwnerRef
   return rows.length > 0;
 }
 
-/** What the replay of one owner reads: its window's entries, the opening figure and the taken pairs. */
+/** What the replay of one organization reads: its window's entries, the opening figure and the taken pairs. */
 export interface ReplayWindow {
   entries: ReplayEntry[];
   opening: bigint;
@@ -105,10 +104,14 @@ export interface ReplayWindow {
  */
 export async function readReplayWindow(db: PrismaClient, owner: OwnerRef, now: Date): Promise<ReplayWindow | null> {
   const who = ownerWhere(owner);
-  const grants = await db.creditLedgerEntry.findMany({
-    where: { ...who, kind: 'grant', expiresAt: { not: null }, deletedAt: null },
+  const allGrants = await db.creditLedgerEntry.findMany({
+    // createdAt <= now: a grant dated after `now` is no part of the replay (#5100 item 3), and the probe skips one whose
+    // expiry precedes its creation (`created_at <= expires_at`), so a hand-written future-dated row is never a hot row.
+    where: { ...who, kind: 'grant', expiresAt: { not: null }, deletedAt: null, createdAt: { lte: now } },
     select: { id: true, createdAt: true, expiresAt: true },
   });
+  // Same rule as the probe (`created_at <= expires_at`), so a row the probe never sees is no part of the window either.
+  const grants = allGrants.filter((g) => (g.createdAt as Date).getTime() <= (g.expiresAt as Date).getTime());
   if (grants.length === 0) return null;
   const pairs = await db.creditLedgerEntry.findMany({
     where: { sourceType: GRANT_EXPIRY_SOURCE_TYPE, sourceId: { in: grants.map((g) => g.id) } },
@@ -177,6 +180,12 @@ export async function writeSettlements(
   return count;
 }
 
+/** The grants of a replay that are due: expired at least {@link SETTLE_DELAY_MS} before `now`. The one filter both settle paths use. */
+function dueGrants(result: ReplayResult | null, now: Date) {
+  const cutoff = now.getTime() - SETTLE_DELAY_MS;
+  return (result?.toSettle ?? []).filter((g) => g.expiresAt.getTime() <= cutoff);
+}
+
 /**
  * Settle every grant of `owner` that expired at least {@link SETTLE_DELAY_MS} before `now` and has no settlement.
  * Returns the settlements it asked to write, in the replay's total order (a pair another settler took meanwhile is
@@ -188,9 +197,7 @@ export async function settleExpiredGrants(db: PrismaClient, owner: OwnerRef, opt
   const cutoff = new Date(now.getTime() - SETTLE_DELAY_MS);
   if (!(await hasUnsettledExpiredGrant(db, owner, cutoff))) return [];
   const result = await replayOwner(db, owner, now);
-  const due = (result?.toSettle ?? [])
-    .filter((g) => g.expiresAt.getTime() <= cutoff.getTime())
-    .map((g) => ({ grantId: g.grantId, amountMicroCents: -g.remaining }));
+  const due = dueGrants(result, now).map((g) => ({ grantId: g.grantId, amountMicroCents: -g.remaining }));
   await writeSettlements(db, owner, due, now);
   return due;
 }
@@ -200,11 +207,50 @@ export async function settleExpiredGrants(db: PrismaClient, owner: OwnerRef, opt
  * settlement: the figure a read subtracts from the stored sum, written nowhere (the impersonated read, and any read
  * inside the 60 s; rulings 10.1 and 10.7). 0n after the probe in the common case.
  */
-export async function unsettledRemainders(db: PrismaClient, owner: OwnerRef, now: Date): Promise<bigint> {
+export async function unsettledRemainder(db: PrismaClient, owner: OwnerRef, now: Date): Promise<bigint> {
   ownerColumns(owner);
   if (!(await hasUnsettledExpiredGrant(db, owner, now))) return 0n;
   const result = await replayOwner(db, owner, now);
   return (result?.toSettle ?? []).reduce((acc, g) => acc + g.remaining, 0n);
+}
+
+/** What one read of an owner's credit learned at `now`: see {@link settleAndMeasure}. */
+export interface CreditMeasure {
+  /** The settlements written (empty when `write` is false or nothing was past the 60 s). */
+  settled: Settlement[];
+  /** What is left of grants expired at `now` and still without a settlement after this call: subtract from the stored sum. */
+  unsettled: bigint;
+  /** The one replay at `now`, or undefined when the probe found nothing expired and no replay ran. */
+  replay: ReplayResult | null | undefined;
+}
+
+/**
+ * #5100 items 2 and 8: the read path of `creditBalance` in ONE probe and AT MOST ONE replay (one window read). The probe
+ * is made at `now`; when it finds an expired, unsettled grant the replay at `now` yields both what to settle (expired
+ * 60 s ago or more, written when `write`) and what stays unsettled (the rest, or all of it when nothing is written),
+ * so no second read of the ledger can disagree with the first. With `write: true` the caller reads the stored sum AFTER
+ * this call: a settlement written here is in that sum and was excluded from `unsettled` (`dueIds`), one written by another
+ * settler between the replay and the sum is the same grant, which this call also lists as due, and nobody settles a grant
+ * inside the 60 s. With `write: false` that argument does not hold (nothing here is excluded), so the caller MUST run
+ * this call and the sum read in ONE REPEATABLE READ snapshot (see `creditBalance`). `replay` is handed on so the
+ * `expiring` field needs no second replay.
+ */
+export async function settleAndMeasure(
+  db: PrismaClient,
+  owner: OwnerRef,
+  now: Date,
+  opts: { write: boolean },
+): Promise<CreditMeasure> {
+  ownerColumns(owner);
+  if (!(await hasUnsettledExpiredGrant(db, owner, now))) return { settled: [], unsettled: 0n, replay: undefined };
+  const replay = await replayOwner(db, owner, now);
+  const toSettle = replay?.toSettle ?? [];
+  const due = opts.write ? dueGrants(replay, now) : [];
+  const dueIds = new Set(due.map((g) => g.grantId));
+  const settled = due.map((g) => ({ grantId: g.grantId, amountMicroCents: -g.remaining }));
+  if (settled.length > 0) await writeSettlements(db, owner, settled, now);
+  const unsettled = toSettle.filter((g) => !dueIds.has(g.grantId)).reduce((acc, g) => acc + g.remaining, 0n);
+  return { settled, unsettled, replay };
 }
 
 /** What is left of each unexpired expiring grant of `owner` at `now`, soonest first (CreditBalance.expiring). */

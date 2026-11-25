@@ -23,6 +23,7 @@ import type { StopSignalView } from '../api/graphql/schema/resolvers.stopSignal.
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
 import { stopNames } from '../lib/stopSignals/names.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
+import { refusalText } from '../lib/refEcho.js';
 
 type Row = Record<string, any>;
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
@@ -50,7 +51,7 @@ function refusal(e: unknown) {
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
   }
-  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`, true);
+  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${refusalText(e)}`, true);
   throw e;
 }
 

@@ -57,6 +57,13 @@ describe('#5019 git sync', () => {
     expect(describeSyncOutcome(result)).toContain('- big');
   });
 
+  it('#5160: a file exactly at the ceiling is written', async () => {
+    file('at', 'x'.repeat(1000));
+    const result = await syncGraphFromGithub(graph);
+    expect(result.skippedOversize ?? []).toEqual([]);
+    expect((await at('at'))!.content).toHaveLength(1000);
+  });
+
   it('keeps the stored row of a file that grew over the ceiling, and does not delete it', async () => {
     file('a', 'v1');
     await syncGraphFromGithub(graph);

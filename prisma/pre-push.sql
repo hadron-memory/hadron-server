@@ -174,3 +174,4 @@ END $$;
 \ir app-run-duration-pre-push.sql
 \ir agent-team-event-tx-id-pre-push.sql
 \ir edge-first-class-pre-push.sql
+\ir pending-edge-label-pre-push.sql

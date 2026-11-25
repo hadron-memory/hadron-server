@@ -163,13 +163,13 @@ describe('listAssets — filters', () => {
   });
 
   it('orgId narrows to that org’s memories', async () => {
-    const page = await listAssets(userCtx(uploader.id), { orgId: orgA.id });
+    const page = await listAssets(userCtx(uploader.id), { orgRef: orgA.id });
     expect(names(page)).toEqual(['a-mine.pdf']);
   });
 
   it('orgId for a non-member org returns the empty page, not an error', async () => {
     // cor:api:100:01 — no org-existence disclosure, no admin bypass.
-    const page = await listAssets(userCtx(outsider.id), { orgId: orgA.id });
+    const page = await listAssets(userCtx(outsider.id), { orgRef: orgA.id });
     expect(page).toEqual({ items: [], total: 0 });
   });
 

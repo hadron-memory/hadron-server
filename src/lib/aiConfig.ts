@@ -34,7 +34,7 @@ export async function lockAiServiceConfig(tx: Prisma.TransactionClient, id: stri
 
 export class AiServiceConfigNotFoundError extends Error {
   constructor(public ref: string) {
-    super(`AI service config not found: ${ref}`);
+    super('AI service config not found');
     this.name = 'AiServiceConfigNotFoundError';
   }
 }

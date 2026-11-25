@@ -89,6 +89,10 @@ it.skipIf(!PARALLEL_DBS)('#1793 actual production CIDR boot ignores forged XFF f
     expect((await response.json() as { errors?: unknown }).errors).toBeUndefined();
   }
   const buckets = await db.rateLimitBucket.findMany({ where: { fieldClass: 'FAN_OUT_READS', dimension: 'ip' } });
-  expect(buckets).toHaveLength(1);
-  expect(buckets[0].used).toBe(2n);
+  // #5181: a bucket is per minute window, so two requests that straddle a :00 make two rows.
+  // The claim is one subject for both forged addresses, whatever the wall clock: one
+  // distinct subject, one row per window, two admissions between them.
+  expect(new Set(buckets.map(b => b.subject)).size).toBe(1);
+  expect(new Set(buckets.map(b => b.windowStart.getTime())).size).toBe(buckets.length);
+  expect(buckets.reduce((sum, b) => sum + b.used, 0n)).toBe(2n);
 }, 30_000);

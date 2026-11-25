@@ -46,11 +46,12 @@ import {
 import {
   databaseNow,
   expiringCredit,
-  settleExpiredGrants,
-  unsettledRemainders,
+  settleAndMeasure,
+  type CreditMeasure,
 } from '../../../lib/metering/settleExpiredGrants.js';
+import type { ReplayResult } from '../../../lib/metering/expiry.js';
 import { isReadOnlyImpersonation } from '../impersonationReadOnlyPlugin.js';
-import { safeErrorCode } from '../../../lib/secrets/autoDelete.js';
+import { safeErrorCode } from '../../../lib/safeErrorCode.js';
 import type { CreditLedgerEntry, AiModelPrice } from '../../../generated/prisma/index.js';
 
 const badInput = (message: string) =>
@@ -261,34 +262,43 @@ export const meteringQueries = {
   creditBalance: async (_: unknown, { orgRef, userRef }: { orgRef?: string | null; userRef?: string | null }, ctx: Context) => {
     const owner = await resolveLedgerOwner(ctx, { orgRef, userRef }, 'read');
     const asOf = await databaseNow(ctx.db);
-    if (!isReadOnlyImpersonation(ctx)) {
+    // One probe and at most one replay (#5100 items 2, 8): what is settled, what stays unsettled and the `expiring` list all
+    // come from that one read. A writing read settles first and reads the stored sum after it (see settleAndMeasure); a
+    // read that writes nothing (impersonated, or after a failed settlement) takes the probe, the replay and the sum in ONE
+    // REPEATABLE READ snapshot, so a settlement another reader or the sweep commits meanwhile cannot be counted twice.
+    const readOnly = async () =>
+      ctx.db.$transaction(
+        async (tx) => {
+          const m = await settleAndMeasure(tx as unknown as typeof ctx.db, owner, asOf, { write: false });
+          return { measure: m, sum: await creditBalance(tx as unknown as typeof ctx.db, owner) };
+        },
+        { isolationLevel: 'RepeatableRead' },
+      );
+    let measure: CreditMeasure;
+    let sum: bigint;
+    if (isReadOnlyImpersonation(ctx)) {
+      ({ measure, sum } = await readOnly());
+    } else {
       try {
         // #5014 (local review P2): first bring in any entry still named by a person merged into this one, so the figure
         // and the settlement below see the whole ledger whatever the interleaving of a merge and a write.
         if ('userId' in owner) await repointMergedLedgerOwners(ctx.db, { survivor: owner.userId });
-        await settleExpiredGrants(ctx.db, owner, { now: asOf });
+        measure = await settleAndMeasure(ctx.db, owner, asOf, { write: true });
+        sum = await creditBalance(ctx.db, owner);
       } catch (err) {
         console.error('credit_expiry.settle_failed', {
           ...('organizationId' in owner ? { organizationId: owner.organizationId } : { ownerUserId: owner.userId }),
           code: safeErrorCode(err),
         });
+        ({ measure, sum } = await readOnly());
       }
     }
-    // #5014 (SEC10 at d07bd862, the twin of #5221's REPEATABLE READ fix): the stored sum and the unsettled remainder are read in ONE
-    // snapshot, so a settlement the sweep commits between the two reads cannot be counted out of the probe but still in the sum
-    // (expired credit served as available, ruling 10.7). Holds for the writing read and for the read that writes nothing.
-    const { sum, unsettled } = await ctx.db.$transaction(
-      async (tx) => {
-        const c = tx as unknown as typeof ctx.db;
-        return { sum: await creditBalance(c, owner), unsettled: await unsettledRemainders(c, owner, asOf) };
-      },
-      { isolationLevel: 'RepeatableRead' },
-    );
     return {
       organizationId: 'organizationId' in owner ? owner.organizationId : null,
       ownerUserId: 'userId' in owner ? owner.userId : null,
-      balanceMicroCents: (sum - unsettled).toString(),
+      balanceMicroCents: (sum - measure.unsettled).toString(),
       asOf,
+      replay: measure.replay,
     };
   },
 
@@ -516,14 +526,17 @@ export const meteringMutations = {
 export const meteringTypeResolvers = {
   CreditBalance: {
     expiring: async (
-      parent: { organizationId: string | null; ownerUserId: string | null; asOf: Date },
+      parent: { organizationId: string | null; ownerUserId: string | null; asOf: Date; replay?: ReplayResult | null },
       _: unknown,
       ctx: Context,
     ) => {
       // #5014: the owner the balance was read for, one column set (a person's balance has no organization).
       if (parent.ownerUserId == null && parent.organizationId == null) throw new Error('A balance names an owner.');
       const owner: OwnerRef = parent.ownerUserId != null ? { userId: parent.ownerUserId } : { organizationId: parent.organizationId as string };
-      const parts = await expiringCredit(ctx.db, owner, parent.asOf);
+      // The parent's one replay when it ran (#5100 item 2); a read whose probe found nothing expired runs it here, once.
+      const parts = parent.replay !== undefined
+        ? (parent.replay?.expiring ?? [])
+        : await expiringCredit(ctx.db, owner, parent.asOf);
       return parts.map((p) => ({ amountMicroCents: p.remaining.toString(), expiresAt: p.expiresAt.toISOString() }));
     },
   },

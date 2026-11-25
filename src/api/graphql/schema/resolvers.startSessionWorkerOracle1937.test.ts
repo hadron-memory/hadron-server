@@ -45,7 +45,8 @@ async function envelope(p: Promise<unknown>): Promise<string> {
   }
   throw new Error('expected a refusal');
 }
-const absentEnvelope = (ref: string) => JSON.stringify({ message: `Worker not found: ${ref}`, extensions: { code: 'WORKER_NOT_FOUND' } });
+// #5168: the absent envelope no longer quotes the ref, so it is one text for every ref.
+const absentEnvelope = (_ref: string) => JSON.stringify({ message: 'Worker not found', extensions: { code: 'WORKER_NOT_FOUND' } });
 const start = (c: Context, input: Record<string, unknown>) =>
   M.startSession({}, { input: { id: generateId(), tool: 'vitest', ...input } }, c);
 

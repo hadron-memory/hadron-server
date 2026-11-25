@@ -427,19 +427,19 @@ export const sessionQueries = {
       return { status: 'PENDING', connectionId: null, failureCode: null };
     },
 
-    exchangeConnections: async (_: unknown, { orgId }: { orgId: string }, ctx: Context) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+    exchangeConnections: async (_: unknown, { orgRef }: { orgRef: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: orgRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
       return listOrgExchangeConnections(ctx, resolvedOrgId);
     },
 
     /** #2213 — `exchangeConnections` as a page: the same admission, rows and order (one shared scope), counted and read in one snapshot. */
     exchangeConnectionsPage: async (
       _: unknown,
-      args: { orgId: string; limit?: number | null; offset?: number | null },
+      args: { orgRef: string; limit?: number | null; offset?: number | null },
       ctx: Context,
     ) => {
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, args.orgId);
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, args.orgRef);
       const { where, orderBy } = await orgExchangeConnectionScope(ctx, resolvedOrgId);
       const { take, skip } = pageArgs(args);
       const [total, items] = await ctx.db.$transaction([

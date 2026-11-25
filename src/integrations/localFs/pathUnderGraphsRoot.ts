@@ -2,8 +2,8 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 export class ProjectionPathError extends Error {}
 
-/** Shared by input validation and writers, including either path separator. */
-export function hasReservedProjectionComponent(segment: string): boolean {
+/** A "." or ".." component, under either path separator. */
+function hasReservedProjectionComponent(segment: string): boolean {
   return segment.split(/[\\/]/).some(atom => atom === '.' || atom === '..');
 }
 

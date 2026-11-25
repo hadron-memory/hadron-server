@@ -18,7 +18,8 @@ import {
   SETTLE_DELAY_MS,
   databaseNow,
   settleExpiredGrants,
-  unsettledRemainders,
+  unsettledRemainder,
+  settleAndMeasure,
   writeSettlements,
 } from './settleExpiredGrants.js';
 
@@ -121,6 +122,31 @@ describe('#5011 settleExpiredGrants', () => {
     expect(await db.creditLedgerEntry.count()).toBe(3);
   });
 
+  it('#5100 settleAndMeasure: the 60 s boundary, write:false, and the unsettled figure come from one replay', async () => {
+    const owner = { organizationId: orgId };
+    const g = await grant(100, d('01-01'), d('02-01'));
+    await debit(30, d('01-10'));
+    const inside = later(d('02-01'), 59_000);
+    // Inside the 60 s: nothing written, the whole remainder unsettled, the replay handed on.
+    const a = await settleAndMeasure(db, owner, inside, { write: true });
+    expect(a.settled).toEqual([]);
+    expect(a.unsettled).toBe(70n);
+    expect(a.replay).toBeTruthy();
+    expect(await settlements()).toHaveLength(0);
+    // At 60 s with write:false: still nothing written, everything unsettled.
+    const at = later(d('02-01'), 60_000);
+    const b = await settleAndMeasure(db, owner, at, { write: false });
+    expect(b).toMatchObject({ settled: [], unsettled: 70n });
+    expect(await settlements()).toHaveLength(0);
+    // At 60 s with write:true: settled, nothing unsettled.
+    const c = await settleAndMeasure(db, owner, at, { write: true });
+    expect(c.settled).toEqual([{ grantId: g.id, amountMicroCents: -70n }]);
+    expect(c.unsettled).toBe(0n);
+    expect(await settlements()).toHaveLength(1);
+    // Nothing expired and unsettled any more: no replay runs.
+    expect(await settleAndMeasure(db, owner, later(at, 1000), { write: true })).toEqual({ settled: [], unsettled: 0n, replay: undefined });
+  });
+
   it('ruling 10.1: within 60 s of the expiry nothing is written, and the remainder is still reported unsettled', async () => {
     expect(SETTLE_DELAY_MS).toBe(60_000);
     const g = await grant(100, d('01-01'), d('02-01'));
@@ -128,13 +154,13 @@ describe('#5011 settleExpiredGrants', () => {
     const inside = later(d('02-01'), 59_000);
     expect(await settleExpiredGrants(db, { organizationId: orgId }, { now: inside })).toEqual([]);
     expect(await settlements()).toHaveLength(0);
-    expect(await unsettledRemainders(db, { organizationId: orgId }, inside)).toBe(70n);
+    expect(await unsettledRemainder(db, { organizationId: orgId }, inside)).toBe(70n);
     // At exactly 60 s it is settled.
     const at = later(d('02-01'), 60_000);
     expect(await settleExpiredGrants(db, { organizationId: orgId }, { now: at })).toEqual([
       { grantId: g.id, amountMicroCents: -70n },
     ]);
-    expect(await unsettledRemainders(db, { organizationId: orgId }, at)).toBe(0n);
+    expect(await unsettledRemainder(db, { organizationId: orgId }, at)).toBe(0n);
   });
 
   it('S2 (acceptance 3): G0 is settled -40 and, a fortnight later, G1 -100', async () => {
@@ -215,7 +241,7 @@ describe('#5011 settleExpiredGrants', () => {
     expect(await settleExpiredGrants(client, { organizationId: orgId }, { now: d('12-31') })).toEqual([]);
     expect(counter.reads).toBe(0);
     expect(await settlements()).toHaveLength(0);
-    expect(await unsettledRemainders(db, { organizationId: orgId }, d('12-31'))).toBe(0n);
+    expect(await unsettledRemainder(db, { organizationId: orgId }, d('12-31'))).toBe(0n);
   });
 
   it('S7: a soft-deleted debit is ignored by the replay, as by the balance (a legacy row the #5010 guard would refuse today)', async () => {

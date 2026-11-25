@@ -81,8 +81,8 @@ async function requirePlainApprovalMemory(ctx: Context, memoryId: string): Promi
   throw new GraphQLError('Approval and integrity verification are not applicable to encrypted memories.', { extensions: { code: 'ENCRYPTED_MEMORY_NOT_APPLICABLE', memoryId } });
 }
 
-function nodeNotFound(nodeRef: string): GraphQLError {
-  return new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+function nodeNotFound(_nodeRef: string): GraphQLError {
+  return new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
 }
 
 function refusalToGraphQL(error: NodeApprovalRefusal, nodeRef: string): GraphQLError {

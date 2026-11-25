@@ -200,8 +200,9 @@ export function notAssignee(actor: TaskActor, message: string, ext: Record<strin
     : ' This request acted as a person: it carried no worker session, and a worker\'s task is acted on only with that worker\'s session.';
   return taskError('TASK_NOT_ASSIGNEE', message + note, { ...ext, actor: actor.kind === 'worker' ? 'worker' : 'person' });
 }
-const notFound = (taskId: string): GraphQLError =>
-  taskError('TASK_NOT_FOUND', 'Task not found.', { taskId });
+// #5168: the miss names no task, so `taskId` would only relay the caller's own ref; it is left off.
+const notFound = (_taskRef: string): GraphQLError =>
+  taskError('TASK_NOT_FOUND', 'Task not found.');
 /** The refusal for a task that does not exist or that the caller may not read, for a door outside `mutateTask`. */
 export const taskNotFound = notFound;
 /** #2664: the longest `text` filter, after trimming. */
@@ -343,7 +344,8 @@ export async function loadApp(ctx: Context, appId: string): Promise<TaskApp | nu
   return ctx.db.app.findUnique({ where: { id: appId }, select: APP_SELECT });
 }
 
-const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
+// #5168: the refusal never relays the caller's ref (it is their own text, possibly a pasted secret).
+const appNotFound = (_appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.');
 
 /**
  * Resolve an App ref the caller participates in. An App that does not exist
