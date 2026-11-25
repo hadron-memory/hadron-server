@@ -118,6 +118,64 @@ function tagEndOf(text: string, i: number, nameFrom: number): number {
   return -1;
 }
 
+/** A container a line sits in: a block quote, or a list item whose content starts `width` columns further in. */
+type Container = { quote: true } | { quote: false; width: number };
+
+/** The containers a line's own markers open or continue, outermost first, and the index in `line` where its content starts. */
+function containersOf(line: string): { list: Container[]; at: number } {
+  const list: Container[] = [];
+  let at = 0;
+  let col = 0;
+  for (;;) {
+    let p = at;
+    while (line[p] === ' ') p += 1;
+    const indent = p - at;
+    if (indent > 3) break;
+    if (line[p] === '>') {
+      at = p + 1;
+      col += indent + 1;
+      // The one blank after the marker belongs to it (of a tab, one column does: the rest is content indent, which only `<` at a tab's far side sees).
+      if (line[at] === ' ' || line[at] === '\t') { col += line[at] === '\t' ? 4 - (col % 4) : 1; at += 1; }
+      list.push({ quote: true });
+      continue;
+    }
+    const m = /^(?:[-+*]|\d{1,9}[.)])/.exec(line.slice(p, p + 10));
+    if (!m) break;
+    let q = p + m[0].length;
+    const markerEnd = col + indent + m[0].length;
+    let c = markerEnd;
+    while (line[q] === ' ' || line[q] === '\t') { c += line[q] === '\t' ? 4 - (c % 4) : 1; q += 1; }
+    // Nothing after the marker, or content five or more columns in (indented code inside the item): no HTML block on this line.
+    if (c === markerEnd || c - markerEnd > 4 || q >= line.length) break;
+    list.push({ quote: false, width: c - col });
+    at = q;
+    col = c;
+  }
+  return { list, at };
+}
+
+/** The content of `line` inside `list`, or null when the line is outside one of them (a lazy continuation is outside: it never continues an HTML block). */
+function contentInside(line: string, list: readonly Container[]): string | null {
+  let at = 0;
+  let col = 0;
+  for (const c of list) {
+    if (c.quote) {
+      let p = at;
+      while (line[p] === ' ') p += 1;
+      if (p - at > 3 || line[p] !== '>') return null;
+      col += p - at + 1;
+      at = p + 1;
+      if (line[at] === ' ' || line[at] === '\t') { col += line[at] === '\t' ? 4 - (col % 4) : 1; at += 1; }
+    } else {
+      if (line.slice(at).trim() === '') return '';
+      const to = col + c.width;
+      while (col < to && (line[at] === ' ' || line[at] === '\t')) { col += line[at] === '\t' ? 4 - (col % 4) : 1; at += 1; }
+      if (col < to) return null;
+    }
+  }
+  return line.slice(at);
+}
+
 /** What a line of the text was, for the rules that depend on whether a paragraph is open. */
 type LineKind = 'blank' | 'code' | 'nonpara' | 'marker' | 'other';
 
@@ -170,31 +228,74 @@ function firstUnterminated(text: string, from: number): number {
     blankTo = m ? m.index : n;
     return blankTo;
   };
-  // Whether the `<` at `j` is the first non-space of its line, within three spaces of indent (where CommonMark starts an HTML block). The
+  // Whether the `<` at `j` is the first non-space of its line after its container markers, within three spaces of indent (where CommonMark starts an HTML block). The
   // facts of a line are found once, so a line of many constructs costs its length once, not once per construct.
   let lineFrom = -1;
   let lineTo = -2;
   let lineFirst = -1;
+  let lineContent = -1;
+  let lineContainers: Container[] = [];
   const startsLine = (j: number): boolean => {
     if (j < lineFrom || j > lineTo) {
       lineFrom = text.lastIndexOf('\n', j - 1) + 1;
       const nl = text.indexOf('\n', j);
       lineTo = nl === -1 ? n : nl;
-      let f = lineFrom;
+      const c = containersOf(text.slice(lineFrom, lineTo));
+      lineContainers = c.list;
+      lineContent = lineFrom + c.at;
+      let f = lineContent;
       while (f < lineTo && text[f] === ' ') f += 1;
       lineFirst = f;
     }
-    return j - lineFrom <= 3 && lineFirst === j;
+    return j - lineContent <= 3 && lineFirst === j;
+  };
+  // Where the containers of the line at `j` end (`blank`: or the first line that is blank inside them). `startsLine(j)` was asked first. A line
+  // in the same containers below a known end has the same end, so a long quote is walked once.
+  const containerEnds = new Map<string, { from: number; to: number }>();
+  const containerEnd = (j: number, blank: boolean): number => {
+    if (lineContainers.length === 0) return blank ? blankBound(j) : n;
+    const key = `${blank}${lineContainers.map((c) => (c.quote ? '>' : c.width)).join()}`;
+    const known = containerEnds.get(key);
+    if (known && j >= known.from && j < known.to) return known.to;
+    let to = lineTo;
+    while (to < n) {
+      const nl = text.indexOf('\n', to + 1);
+      const end = nl === -1 ? n : nl;
+      const content = contentInside(text.slice(to + 1, end), lineContainers);
+      if (content === null || (blank && content.trim() === '')) break;
+      to = end;
+    }
+    containerEnds.set(key, { from: j, to });
+    return to;
+  };
+  const inQuote = (): boolean => lineContainers.some((c) => c.quote);
+  // Whether a type 7 tag at the head of the line at `j` would interrupt a paragraph. A line that opens a list item or a deeper quote starts afresh.
+  const interrupts = (): boolean => {
+    if (prevBefore !== 'other') return false;
+    if (lineContainers.some((c) => !c.quote)) return false;
+    const before = lineFrom === 0 ? '' : text.slice(text.lastIndexOf('\n', lineFrom - 2) + 1, lineFrom - 1);
+    const depth = (l: readonly Container[]): number => l.filter((c) => c.quote).length;
+    return depth(lineContainers) <= depth(containersOf(before).list);
   };
   // A tag runs to the next blank line only where it opens an HTML block (a type 6 name, or a type 1 start tag); anywhere else it is inline
   // HTML, which no block boundary lets through, even at the head of a line.
   // Inside an HTML block (types 1 to 7) Markdown reads no fence, code span, backslash escape or indented code: the lines are raw HTML, and
   // a browser reads them as markup. `rawUntil` is the end of the last such line; the scan skips the Markdown rules below it.
   let rawUntil = -1;
+  // Whether that block sits in a block quote. Markdown takes the quote markers off and a reader of the raw text does not (a marker is a `>` to
+  // it), so a construct there may not run past its line.
+  let rawQuoted = false;
+  const raw = (to: number): void => {
+    if (to <= rawUntil) return;
+    rawUntil = to;
+    rawQuoted = inQuote();
+  };
+  const rawLimit = (j: number): number => (rawQuoted ? Math.min(rawUntil, lineEndAt(j)) : rawUntil);
+  const headLimit = (j: number, blank: boolean): number => (inQuote() ? lineEndAt(j) : containerEnd(j, blank));
   // Inside an HTML block's raw region no Markdown block start applies: a construct there runs to the end of the region.
   const tagLimit = (j: number, opensBlock: boolean): number =>
-    (j < rawUntil ? rawUntil : opensBlock && startsLine(j) ? blankBound(j) : inlineBound(j));
-  const blockLimit = (j: number): number => (j < rawUntil ? rawUntil : startsLine(j) ? n : inlineBound(j));
+    (j < rawUntil ? rawLimit(j) : opensBlock && startsLine(j) ? headLimit(j, true) : inlineBound(j));
+  const blockLimit = (j: number): number => (j < rawUntil ? rawLimit(j) : startsLine(j) ? headLimit(j, false) : inlineBound(j));
   const lineEndAt = (j: number): number => {
     const nl = text.indexOf('\n', j);
     return nl === -1 ? n : nl;
@@ -278,7 +379,7 @@ function firstUnterminated(text: string, from: number): number {
       if (text.startsWith('<!--->', i)) { i += 6; continue; }
       const close = text.indexOf('-->', i + 4);
       if (close === -1 || close + 3 > blockLimit(i)) return i;
-      if (startsLine(i)) rawUntil = Math.max(rawUntil, lineEndAt(close));
+      if (startsLine(i)) raw(lineEndAt(close));
       i = close + 3;
       continue;
     }
@@ -291,7 +392,7 @@ function firstUnterminated(text: string, from: number): number {
       const first = text.indexOf('>', i + 2);
       const closer = text.indexOf(']]>', i + 9);
       if (first === -1 || closer === -1 || first !== closer + 2 || closer + 3 > blockLimit(i)) return i;
-      if (startsLine(i)) rawUntil = Math.max(rawUntil, lineEndAt(closer));
+      if (startsLine(i)) raw(lineEndAt(closer));
       i = first + 1;
       continue;
     }
@@ -299,14 +400,14 @@ function firstUnterminated(text: string, from: number): number {
       const first = text.indexOf('>', i + 2);
       const closer = text.indexOf('?>', i + 1);
       if (first === -1 || closer === -1 || first !== closer + 1 || closer + 2 > blockLimit(i)) return i;
-      if (startsLine(i)) rawUntil = Math.max(rawUntil, lineEndAt(closer));
+      if (startsLine(i)) raw(lineEndAt(closer));
       i = first + 1;
       continue;
     }
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
-      if (startsLine(i) && isLetter(text[i + 2])) rawUntil = Math.max(rawUntil, lineEndAt(close));
+      if (startsLine(i) && isLetter(text[i + 2])) raw(lineEndAt(close));
       i = close + 1;
       continue;
     }
@@ -320,8 +421,8 @@ function firstUnterminated(text: string, from: number): number {
     }
     if (!isLetter(text[i + (isEnd ? 2 : 1)])) { i += 1; continue; }
 
-    // A complete autolink is not a tag: it is inert as written.
-    if (!isEnd) {
+    // A complete autolink is not a tag: it is inert as written. Inside an HTML block Markdown reads no autolink, and a browser reads a tag.
+    if (!isEnd && i >= rawUntil) {
       AUTOLINK.lastIndex = i;
       const link = AUTOLINK.exec(text);
       if (link) { i += link[0].length; continue; }
@@ -342,9 +443,9 @@ function firstUnterminated(text: string, from: number): number {
     // A block-level tag at the head of a line (type 6), or a complete tag alone on its line that does not interrupt a paragraph (type 7),
     // starts an HTML block that runs to the next blank line.
     if (startsLine(i)) {
-      if (BLOCK6_NAMES.has(name)) rawUntil = Math.max(rawUntil, blankBound(i));
-      else if (!TYPE1_NAMES.has(name) && !text.slice(i, tagEnd).includes('\n') && text.slice(tagEnd, lineEndAt(tagEnd)).trim() === '' && prevBefore !== 'other') {
-        rawUntil = Math.max(rawUntil, blankBound(i));
+      if (BLOCK6_NAMES.has(name)) raw(containerEnd(i, true));
+      else if (!TYPE1_NAMES.has(name) && !text.slice(i, tagEnd).includes('\n') && text.slice(tagEnd, lineEndAt(tagEnd)).trim() === '' && !interrupts()) {
+        raw(containerEnd(i, true));
       }
     }
     if (isEnd) {
@@ -363,8 +464,9 @@ function firstUnterminated(text: string, from: number): number {
         // block: the scan resumes there.
         const literal = new RegExp(`</${name}>`, 'gi');
         literal.lastIndex = tagEnd;
-        if (!literal.test(text)) return i;
-        rawUntil = Math.max(rawUntil, lineEndAt(literal.lastIndex));
+        // The block is cut where its containers end, so an end tag beyond them is none of its own.
+        if (!literal.test(text) || literal.lastIndex > containerEnd(i, false)) return i;
+        raw(lineEndAt(literal.lastIndex));
         const closer = new RegExp(`</${name}(?=[\\s/>])`, 'gi');
         closer.lastIndex = tagEnd;
         const m = closer.exec(text);
@@ -373,7 +475,7 @@ function firstUnterminated(text: string, from: number): number {
         // so the element is left unterminated rather than guessed.
         if (text[m.index + 2 + name.length] === '/') return i;
         const end = tagEndOf(text, m.index, m.index + 2);
-        if (end === -1) return i;
+        if (end === -1 || (inQuote() && end > lineEndAt(m.index))) return i;
         i = end;
       } else {
         rawStart = i;
@@ -386,8 +488,8 @@ function firstUnterminated(text: string, from: number): number {
       // CommonMark type 1 ends at a line holding any one of these four end tags.
       const closer = /<\/(?:pre|script|style|textarea)>/gi;
       closer.lastIndex = i;
-      if (!closer.test(text)) return i;
-      rawUntil = Math.max(rawUntil, lineEndAt(closer.lastIndex));
+      if (!closer.test(text) || closer.lastIndex > containerEnd(i, false)) return i;
+      raw(lineEndAt(closer.lastIndex));
     }
     i = tagEnd;
   }
