@@ -1,5 +1,4 @@
 import { lockMemoriesForChannelChange } from '../../lib/channels.js';
-import { requireNodeHeadroom } from '../../lib/ownerLimits/nodes.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -12,8 +11,8 @@ import { ensureCurrentNodeRevisionInTransaction, jsonOrDbNull } from '../../lib/
 import { carryGovernedSignals } from '../../lib/governedSignals.js';
 import { carryNodeAuthorship, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { computeContentHash } from '../../lib/contentHash.js';
-import { requireOwnerHeadroom } from '../../lib/ownerLimits/gate.js';
-import { memoryCountsAgainstOwner } from '../../lib/ownerLimits/keys.js';
+import { requireOwnerHeadroomMany } from '../../lib/ownerLimits/gate.js';
+import { memoryCountsAgainstOwner, type OwnerLimitKey } from '../../lib/ownerLimits/keys.js';
 import { resetEmbeddingObligations } from '../../services/embedding/obligation.js';
 import { memoryIsVectorIndexed } from '../../lib/embedding/indexing.js';
 import {
@@ -141,6 +140,8 @@ export interface CloneMemoryArgs {
    * memory's owner: the whole batch is judged once, before the insert.
    */
   ownerLimitCaller: { userId: string } | null;
+  /** #5016: keys the caller's own writes add for the same owner (`cloneAgent`: one Agent), asked in the clone's one multi-key call. */
+  extraOwnerChecks?: ReadonlyArray<{ key: OwnerLimitKey; amount: bigint }>;
 }
 
 export interface CloneMemoryResult {
@@ -246,10 +247,32 @@ export async function cloneMemoryGraphInTx(
     where: { id: args.sourceMemoryId },
   });
 
-  // #5016: the copy counts for the target organization when its class does (a clone's `system` memory is free). Before the first write.
-  if (memoryCountsAgainstOwner({ class: source.class, appId: null, isInstallMemory: false })) {
-    await requireOwnerHeadroom(tx, { owner: { organizationId: args.targetOrganizationId }, key: 'memories', caller: args.actorId ? { userId: args.actorId } : null });
-  }
+  // ── Nodes ──────────────────────────────────────────────────────────
+  // #1606 — comments are discussion about the source's nodes, not content:
+  // a clone starts without them (and a generic copy could not produce one,
+  // cor:dmo:110:04). Their governed edges drop with them below, since an
+  // edge is copied only from a cloned source.
+  const selectedNodes = await tx.node.findMany({ where: copyableNodeWhere(source.id) });
+  // #2043 (cor:agt:040:11) — a worker session's copy never writes a boot prompt.
+  await assertNoBootPromptRowsForWorkerSession(tx, source.id, 'clone');
+  // A raw writer may have changed a stamped source without advancing its
+  // revision. Reconcile and refetch stamped rows before the destination
+  // insert can certify a stale claim against freshly copied content.
+  const refreshed = await reconcileStampedNodes(tx, source.id, selectedNodes);
+  const nodes = selectedNodes.map((n) => refreshed.get(n.id) ?? n);
+
+  // #5015/#5016: ONE multi-key call, so the owner-limit locks are taken together in resolved order: the new memory when its class counts
+  // (a clone's `system` memory is free), every copied node, and the caller's own keys. It is the clone's last lock (gate ruling 5) and comes
+  // before the first insert, so a refusal writes nothing. The new memory is created below under this owner and cannot change it before commit.
+  await requireOwnerHeadroomMany(tx, {
+    owner: { organizationId: args.targetOrganizationId },
+    checks: [
+      ...(memoryCountsAgainstOwner({ class: source.class, appId: null, isInstallMemory: false }) ? [{ key: 'memories' as const, amount: 1n }] : []),
+      ...(args.extraOwnerChecks ?? []),
+      { key: 'nodes', amount: BigInt(nodes.length) },
+    ],
+    caller: args.ownerLimitCaller,
+  });
   const memoryId = generateId();
   await tx.memory.create({
     data: {
@@ -292,20 +315,6 @@ export async function cloneMemoryGraphInTx(
       createdBy: args.actorId,
     },
   });
-
-  // ── Nodes ──────────────────────────────────────────────────────────
-  // #1606 — comments are discussion about the source's nodes, not content:
-  // a clone starts without them (and a generic copy could not produce one,
-  // cor:dmo:110:04). Their governed edges drop with them below, since an
-  // edge is copied only from a cloned source.
-  const selectedNodes = await tx.node.findMany({ where: copyableNodeWhere(source.id) });
-  // #2043 (cor:agt:040:11) — a worker session's copy never writes a boot prompt.
-  await assertNoBootPromptRowsForWorkerSession(tx, source.id, 'clone');
-  // A raw writer may have changed a stamped source without advancing its
-  // revision. Reconcile and refetch stamped rows before the destination
-  // insert can certify a stale claim against freshly copied content.
-  const refreshed = await reconcileStampedNodes(tx, source.id, selectedNodes);
-  const nodes = selectedNodes.map((n) => refreshed.get(n.id) ?? n);
 
   const idMap = new Map<string, string>();
   for (const n of nodes) idMap.set(n.id, generateId());
@@ -375,10 +384,6 @@ export async function cloneMemoryGraphInTx(
       createdBy: args.actorId,
     };
   });
-  // #5015 — every copied row is a new live node of the new memory's owner, judged as one batch before the insert. The
-  // new memory row was created in this transaction, so its owner cannot change before commit; the owner-limit key is
-  // the clone's last lock (gate ruling 5) and nothing after it locks a row the clone does not already hold or own.
-  await requireNodeHeadroom(tx, { memoryId, amount: BigInt(nodeRows.length), caller: args.ownerLimitCaller });
   if (nodeRows.length > 0) {
     // #992/#2622: the copy preserves loc + seq.
     // Unreachable by input today — a clone always lands in a NEW memory — but

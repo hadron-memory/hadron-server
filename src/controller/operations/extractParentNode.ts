@@ -1,5 +1,5 @@
 import { lockMemoriesForChannelChange } from '../../lib/channels.js';
-import { requireNodeHeadroom, sameMemoryOwner } from '../../lib/ownerLimits/nodes.js';
+import { memoryOwnerInTx, sameOwner } from '../../lib/ownerLimits/nodes.js';
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -15,7 +15,7 @@ import { carryNodeAuthorship, clearNodeAuthorship } from '../../lib/nodeAuthorsh
 import { computeContentHash } from '../../lib/contentHash.js';
 import { rebindIncludeTags } from '../../lib/includes/rebindIncludeTags.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
-import { requireOwnerHeadroom } from '../../lib/ownerLimits/gate.js';
+import { requireOwnerHeadroomMany } from '../../lib/ownerLimits/gate.js';
 import { memoryCountsAgainstOwner } from '../../lib/ownerLimits/keys.js';
 import { resetEmbeddingObligations } from '../../services/embedding/obligation.js';
 import type { MemoryClass, MemoryVisibility } from '../../generated/prisma/index.js';
@@ -268,10 +268,20 @@ export async function extractParentNodeGraph(
         args.rootLoc + oldLoc.slice(args.parentLoc.length);
 
       // ── New memory ───────────────────────────────────────────────────────
-      // #5016: the new memory counts for the target organization when its class does; refused here, before any write and before a node moves.
-      if (memoryCountsAgainstOwner({ class: args.newClass, appId: null, isInstallMemory: false })) {
-        await requireOwnerHeadroom(tx, { owner: { organizationId: args.targetOrganizationId }, key: 'memories', caller: args.actorId ? { userId: args.actorId } : null });
-      }
+      // #5015/#5016: ONE multi-key call (the owner-limit locks together, in resolved order), the extract's last lock (gate ruling 5), before
+      // any insert and before a node moves: the new memory when its class counts, and the copied rows. A move soft-deletes every copied
+      // source in this same transaction, so a move that stays with one owner adds no node; a copy, or a move to another owner, adds every
+      // row. The source memory row is held FOR SHARE on a move and the new memory is created below, so neither owner changes before commit.
+      const targetOwner = { organizationId: args.targetOrganizationId };
+      const addsNodes = !(args.move && sameOwner(await memoryOwnerInTx(tx, args.sourceMemoryId), targetOwner));
+      await requireOwnerHeadroomMany(tx, {
+        owner: targetOwner,
+        checks: [
+          ...(memoryCountsAgainstOwner({ class: args.newClass, appId: null, isInstallMemory: false }) ? [{ key: 'memories' as const, amount: 1n }] : []),
+          { key: 'nodes', amount: addsNodes ? BigInt(nodes.length) : 0n },
+        ],
+        caller: args.ownerLimitCaller,
+      });
       const memoryId = generateId();
       await tx.memory.create({
         data: {
@@ -382,13 +392,6 @@ export async function extractParentNodeGraph(
         createdBy: args.actorId,
         };
       });
-      // #5015 — the copies are new live nodes of the new memory's owner. A move soft-deletes every copied source in this
-      // same transaction (`movedIds` is the copied set), so a move that stays with one owner is net zero; a copy, or a
-      // move to another owner, adds every row. The source row is held FOR SHARE on a move and the new memory was created
-      // here, so neither owner changes before commit; the owner-limit key is the extract's last lock (gate ruling 5).
-      if (!(args.move && (await sameMemoryOwner(tx, args.sourceMemoryId, memoryId)))) {
-        await requireNodeHeadroom(tx, { memoryId, amount: BigInt(nodeRows.length), caller: args.ownerLimitCaller });
-      }
       if (nodeRows.length > 0) {
         // #992/#2622: this bulk copy preserves loc + seq.
         // Unreachable by input today — the op creates a FRESH target memory in

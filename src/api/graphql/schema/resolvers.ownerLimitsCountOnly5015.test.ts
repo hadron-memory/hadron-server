@@ -3,7 +3,7 @@
  * a question log and a question asked each add a live node to an owner who is AT its `nodes` limit and are never refused;
  * the nodes they add count. The team surfaces (team chat post, worklog record, session handoff, compiled boot prompt, team
  * role node) are driven in `resolvers.ownerLimitsCountOnlyTeam5015.test.ts`; the rest (an agent chat message, a run's
- * output node, an account merge) are pinned per call site by `src/lib/ownerLimits/writeDoorsGuard5015.test.ts`, which
+ * output node, an account merge) are pinned per call site by `src/lib/ownerLimits/writeDoorsGuard5016.test.ts`, which
  * fails if any of them turns to `refuse`.
  *
  * Also here, two refusing doors outside the main pin file: `importNode`, whose node insert precedes its run, refuses at the cap

@@ -85,7 +85,8 @@ describe('#5015 owner-limit races at the node write', { timeout: 20_000 }, () =>
 
   it('a create parked inside its transaction while the memory is transferred to a capped person is judged against that person', async () => {
     const person = { userId: u };
-    await limitRow(person, Number(await OWNER_LIMIT_KEYS.nodes.count(db, person)));
+    // Room for exactly the transferred memory's live nodes (the transfer asks `nodes` too, #5016), so the person is at the cap after it.
+    await limitRow(person, Number(await OWNER_LIMIT_KEYS.nodes.count(db, person)) + await db.node.count({ where: { memoryId: mO, deletedAt: null } }));
     // The org has room: judged against the owner read before the transfer, the create would commit.
     await limitRow({ organizationId: orgId }, 1_000);
     const h = await holder((tx) => acquireLockSet(tx, [{ memoryId: mO, loc: 'x' }]));

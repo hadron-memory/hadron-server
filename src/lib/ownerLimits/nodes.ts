@@ -2,7 +2,7 @@
  * #5015 (Billing A7b): the `nodes` key at the node doors. A write that adds a live node to an owner (an insert, a deleted
  * node brought back, a node moved in from another owner) either refuses at the owner's limit or counts and is never
  * refused; an update, or a move inside one owner, adds nothing (cor:acl:150:04, Proposed). Which doors refuse is listed,
- * per call site, in `writeDoorsGuard5015.test.ts`.
+ * per call site, in `writeDoorsGuard5016.test.ts`.
  */
 import type { Prisma } from '../../generated/prisma/index.js';
 import { ownerRefOf, type OwnerRef } from '../owner.js';
@@ -60,6 +60,11 @@ export async function sameMemoryOwner(tx: Pick<Prisma.TransactionClient, 'memory
   if (a === b) return true;
   const oa = await memoryOwnerInTx(tx, a);
   const ob = await memoryOwnerInTx(tx, b);
+  return sameOwner(oa, ob);
+}
+
+/** Two owners are the same one; a missing owner is nobody's. */
+export function sameOwner(oa: OwnerRef | null, ob: OwnerRef | null): boolean {
   if (!oa || !ob) return false;
   return 'userId' in oa ? 'userId' in ob && oa.userId === ob.userId : 'organizationId' in ob && oa.organizationId === ob.organizationId;
 }

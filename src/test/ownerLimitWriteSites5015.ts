@@ -1,5 +1,5 @@
 /**
- * #5015: the inventory the node write-door guard (`src/lib/ownerLimits/writeDoorsGuard5015.test.ts`) compares with its
+ * #5015: the inventory the node write-door guard (`src/lib/ownerLimits/writeDoorsGuard5016.test.ts`) compares with its
  * table. Every node insert (`.node.create|createMany|createManyAndReturn|upsert(`) and every `writeNodeCore(` call under
  * `src`, keyed by file and ENCLOSING FUNCTION (never by line, so drift does not fail the guard), parsed with the
  * TypeScript compiler so a comment or a string that names a writer is not a site. Fixtures are excluded by place:

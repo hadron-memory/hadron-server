@@ -5,7 +5,7 @@
  * against over-refusal: the handoff and the compile go through `writeNodeCore` with `ownerLimit: 'count-only'`, so the
  * mutant that treats `count-only` as `refuse` turns them red (issue #5015 section 5, "option honoured").
  *
- * Not driven here, pinned per call site by `src/lib/ownerLimits/writeDoorsGuard5015.test.ts` instead: an agent chat
+ * Not driven here, pinned per call site by `src/lib/ownerLimits/writeDoorsGuard5016.test.ts` instead: an agent chat
  * message (a raw insert with no gate call; driving it needs a conversation and stage fixture), a run's output node
  * (`makeProdRunDeps.writeOutput`, its `count-only` literal pinned), and an account merge (re-owns rows without an insert;
  * its marker pinned).

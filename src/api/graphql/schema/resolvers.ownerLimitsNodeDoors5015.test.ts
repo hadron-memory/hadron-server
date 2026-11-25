@@ -13,6 +13,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { reloadOwnerDefaultLimitsForTests } from '../../../lib/ownerLimits/defaults.js';
 import { OWNER_LIMIT_KEYS } from '../../../lib/ownerLimits/keys.js';
+import { requireNodeHeadroom } from '../../../lib/ownerLimits/nodes.js';
 import type { OwnerRef } from '../../../lib/owner.js';
 import { formatGraphQLError } from '../formatError.js';
 import { mergeMemoryGraph } from '../../../controller/operations/mergeMemories.js';
@@ -212,7 +213,10 @@ describe('#5015 moveNode and cloneNode', () => {
     const x = await node(mO, 'x');
     await node(mO, 'x:child');
     await capWithRoom({ userId: u }, 2n);
+    const before = await liveCount({ userId: u });
     expect((await gql(MOVE, asU(), { src: x.id, to: mU1 })).errors).toBeUndefined();
+    expect(await liveCount({ userId: u })).toBe(before + 2n);
+    expect(await db.node.count({ where: { memoryId: mO, loc: { in: ['x', 'x:child'] }, deletedAt: null } })).toBe(0);
   });
 
   it('succeeds at the cap: a move between two memories of the same owner', async () => {
@@ -304,7 +308,7 @@ describe('#5015 mergeMemories judges each batch once, at an exact fit', () => {
     }) as never);
     const outcome = await merge(mU1).then(() => null, (e: unknown) => e);
     spy.mockRestore();
-    // Two transactions ran: the preflight's (it passed) and the batch's (it refused).
+    // One transaction committed, the preflight's; the batch's refused (`calls` counts commits).
     expect(calls).toBe(1);
     expect(outcome).toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED' } });
     expect([await inMemory(mO), await inMemory(mU1)]).toEqual([2, 2]);
@@ -379,6 +383,41 @@ describe('#5015 cloneMemory and extractParentNodeToMemory', () => {
     const r = await gql(EXTRACT, ctxOf(orgAdmin), { ref: p.id, urn: `hrn:mem:${orgUrn}:extracted`, move: false });
     expect(code(r)).toBe('OWNER_LIMIT_REACHED');
     expect(await db.memory.count({ where: { urn: `${orgUrn}:extracted` } })).toBe(0);
+  });
+});
+
+describe('#5015 a negative amount is a door bug', () => {
+  it('requireNodeHeadroom throws instead of passing', async () => {
+    await expect(db.$transaction((tx) => requireNodeHeadroom(tx, { memoryId: mU1, amount: -1n, caller: null })))
+      .rejects.toThrow('requireNodeHeadroom: amount must not be negative');
+  });
+});
+
+describe('#5015/#5016 clone and extract ask `memories` and `nodes` together', () => {
+  const limits = async (nodes: bigint, memories: bigint) => {
+    await db.ownerLimit.deleteMany({ where: { organizationId: orgId } });
+    for (const [key, limitValue] of [['nodes', nodes], ['memories', memories]] as const) {
+      await db.ownerLimit.create({ data: { id: generateId(), organizationId: orgId, key, limitValue, sourceType: 'manual', sourceId: 't', note: 't' } });
+    }
+  };
+  it.each([['cloneMemory'], ['extractParentNodeToMemory']])('%s: room for exactly one memory and one node succeeds; one short of either refuses and writes nothing', async (door) => {
+    const p = await node(mO, 'p');
+    const extra = door === 'cloneMemory' ? (await db.node.count({ where: { memoryId: mO, deletedAt: null } })) : 1;
+    const nodes = await liveCount({ organizationId: orgId });
+    const memories = await OWNER_LIMIT_KEYS.memories.count(db, { organizationId: orgId });
+    const run = () => door === 'cloneMemory'
+      ? gql(CLONE_MEMORY, ctxOf(orgAdmin), { ref: mO, urn: `hrn:mem:${orgUrn}:both` })
+      : gql(EXTRACT, ctxOf(orgAdmin), { ref: p.id, urn: `hrn:mem:${orgUrn}:both`, move: false });
+    for (const [n, m, key] of [[nodes + BigInt(extra) - 1n, memories + 1n, 'nodes'], [nodes + BigInt(extra), memories, 'memories']] as const) {
+      await limits(n, m);
+      const r = await run();
+      expect(code(r)).toBe('OWNER_LIMIT_REACHED');
+      expect(r.errors?.[0].extensions?.limitKey).toBe(key);
+      expect(await db.memory.count({ where: { urn: `${orgUrn}:both` } })).toBe(0);
+    }
+    await limits(nodes + BigInt(extra), memories + 1n);
+    expect((await run()).errors).toBeUndefined();
+    expect(await liveCount({ organizationId: orgId })).toBe(nodes + BigInt(extra));
   });
 });
 
