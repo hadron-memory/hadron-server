@@ -120,9 +120,9 @@ describe('Query.edges — the uniform paginated edge list', () => {
   });
 
   it('orgId: member → scoped, non-member → empty page (no disclosure)', async () => {
-    expect((await Q.edges(null, { orgId: orgA.id }, ctx(member.id))).total).toBe(1);
-    expect(await Q.edges(null, { orgId: orgB.id }, ctx(member.id))).toEqual({ items: [], total: 0 });
-    expect(await Q.edges(null, { orgId: 'no-such-org' }, ctx(member.id))).toEqual({ items: [], total: 0 });
+    expect((await Q.edges(null, { orgRef: orgA.id }, ctx(member.id))).total).toBe(1);
+    expect(await Q.edges(null, { orgRef: orgB.id }, ctx(member.id))).toEqual({ items: [], total: 0 });
+    expect(await Q.edges(null, { orgRef: 'no-such-org' }, ctx(member.id))).toEqual({ items: [], total: 0 });
   });
 
   it('excludes soft-deleted edges unless filter.includeDeleted', async () => {
@@ -208,10 +208,10 @@ describe('Query.agents — the uniform paginated agent list', () => {
   });
 
   it('orgId: member → scoped; non-member → empty; NO admin bypass', async () => {
-    expect((await Q.agents(null, { orgId: orgA.urn }, ctx(member.id))).total).toBe(1);
-    expect(await Q.agents(null, { orgId: orgB.id }, ctx(member.id))).toEqual({ items: [], total: 0 });
+    expect((await Q.agents(null, { orgRef: orgA.urn }, ctx(member.id))).total).toBe(1);
+    expect(await Q.agents(null, { orgRef: orgB.id }, ctx(member.id))).toEqual({ items: [], total: 0 });
     // The admin is not a member of orgA — scoping is a membership concept.
-    expect(await Q.agents(null, { orgId: orgA.id }, ctx(admin.id, ['ADMIN']))).toEqual({ items: [], total: 0 });
+    expect(await Q.agents(null, { orgRef: orgA.id }, ctx(admin.id, ['ADMIN']))).toEqual({ items: [], total: 0 });
   });
 
   it('filter narrows by visibility', async () => {

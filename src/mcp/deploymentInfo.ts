@@ -268,7 +268,18 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // per-door `appRef`, `taskId`, `workerRef`, `nodeRef`, `nodeRevRef`, `channelRef`, `grantRef`, `id` on their not-found
 // refusals. `expectedType` and `reason` stay. A client branches on the code, as it should; no first-party client reads a
 // dropped key (re-grep on the PR). No SDL change.
-export const HADRON_SERVER_VERSION = '0.42.0';
+//
+// 0.42.0 — BREAKING, entity refs gap 3 (#5081): the organization argument on 21 fields is `orgRef`, no alias. The 18 Query
+// arguments named `orgId` (findNodes, globalSearch, edges, impersonationSessions, memories, exchangeConnections,
+// exchangeConnectionsPage, slackConnections, telegramConnections, mcpServers, homeAssistantInstances, resendSenders, apps,
+// agents, scopes, channels, registerEntries, assets) and the 3 named `org` (orgBootPromptSigning,
+// orgBootPromptSigningPreview, setOrgBootPromptSigning) are renamed. Scalars and gates are unchanged (impersonationSessions
+// keeps `String`); a lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation. (0.41.0 is #5168, merged first.)
+//
+// 0.43.0 — #5183 (A1 of #5182): createMemoryInApp's `name` is optional. For a personal or private memory the server derives
+// slug and display name (<app>-<handle>-<class>), the memory is the user's own, one per class per App
+// (APP_USER_MEMORY_ALREADY_EXISTS). A client that still sends `name` has it ignored for those classes.
+export const HADRON_SERVER_VERSION = '0.43.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

@@ -253,7 +253,7 @@ describe('mcpServer / mcpServers reads', () => {
     expect(page.total).toBe(1);
     expect(page.items[0].id).toBe(server.id);
 
-    const outsiderPage = await resolvers.Query.mcpServers({}, { orgId: org.id }, ctxFor(outsider.id));
+    const outsiderPage = await resolvers.Query.mcpServers({}, { orgRef: org.id }, ctxFor(outsider.id));
     expect(outsiderPage).toEqual({ items: [], total: 0 });
 
     expect(resolvers.McpServer.hasHeaders(server)).toBe(true);

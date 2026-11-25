@@ -68,11 +68,11 @@ export const channelQueries = {
 
   channels: async (
     _: unknown,
-    { filter, orgId, limit, offset }: { filter?: { appRef?: string | null; memoryRef?: string | null } | null; orgId?: string | null; limit?: number | null; offset?: number | null },
+    { filter, orgRef, limit, offset }: { filter?: { appRef?: string | null; memoryRef?: string | null } | null; orgRef?: string | null; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
     const empty = { items: [] as Channel[], total: 0 };
-    const scope = await resolveOrgScope(ctx, orgId);
+    const scope = await resolveOrgScope(ctx, orgRef);
     if (!scope) return empty;
     const memoryWhere: Prisma.MemoryWhereInput[] = [{ deletedAt: null }, await readableMemoryWhere(ctx)];
     if (scope.scopedOrgId) memoryWhere.push({ organizationId: scope.scopedOrgId });
