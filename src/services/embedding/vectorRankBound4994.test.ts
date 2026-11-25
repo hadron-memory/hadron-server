@@ -110,7 +110,7 @@ describe('#4994: the rank lookup is bounded', () => {
     const res = await provider.vectorRanks({ ...opts(), db: r.handle, nodeIds: [at(1), at(40)] });
     expect(Object.fromEntries(res.ranks)).toEqual({ [at(1)]: 1, [at(40)]: 40 });
     expect(res.stoppedEarly).toBe(false);
-    expect(r.seen.some((s) => s.includes('count(*)::int AS n'))).toBe(true); // the large-scope path really ran
+    expect(r.seen.filter((s) => s.includes('count(*)::int AS n'))).toHaveLength(1); // the large-scope path, counted once
     expect(r.seen.filter((s) => /ROW_NUMBER|MATERIALIZED/.test(s))).toEqual([]);
   }, 60_000);
 
@@ -145,6 +145,13 @@ describe('#4994: the rank lookup is bounded', () => {
     const res = await lookup([at(3), at(1001), at(1006), NO_VECTOR]);
     expect(Object.fromEntries(res.ranks)).toEqual({ [at(3)]: 3, [at(1001)]: 1001, [at(1006)]: 1006 });
     expect(res.stoppedEarly).toBe(false);
+  }, 60_000);
+
+  it('the small scope\'s exact ranking cut by the budget is stoppedEarly, and is not kept', async () => {
+    const memo = {};
+    const r = recorder((s) => (s.includes('ROW_NUMBER') ? Object.assign(new Error('canceling statement due to statement timeout'), { meta: { code: '57014' } }) : undefined));
+    expect(await provider.vectorRanks({ ...opts(), db: r.handle, nodeIds: [at(1)], memo })).toEqual({ ranks: new Map(), stoppedEarly: true });
+    expect(memo).toEqual({});
   }, 60_000);
 
   it('the size count runs under the budget too: a timeout there is stoppedEarly with no ranks', async () => {
