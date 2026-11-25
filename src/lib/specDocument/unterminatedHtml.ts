@@ -128,11 +128,16 @@ function firstUnterminated(text: string, from: number): number {
   let paraEnd = -1;
   // What the previous line was. 'other' is a line of a paragraph (or anything that a following line can continue); every other kind leaves
   // no paragraph open: after it a four-space line is indented code and a type 7 tag may start an HTML block. 'nonpara' is a heading (ATX, or a setext underline), a
-  // thematic break, a link reference definition, a fence line or the last line of an HTML block. A line that only looks like one of these
+  // thematic break, a link reference definition (one line, or a label alone with the destination and a title on the next lines), a fence
+  // line or the last line of an HTML block. A line is judged after its block quote markers are taken off (`> # h`, a bare `>`); the lines
+  // of a quote or list item that continue a paragraph lazily are paragraph lines. A line that only looks like one of these
   // is taken for it: an extra raw region means extra escaping, the safe side.
   let prev: LineKind = 'blank';
   // The kind of the line before the one being read (`prev` is already the current line's kind once its head is handled).
   let prevBefore: LineKind = 'blank';
+  // A link reference definition may spread over lines: its destination (and then its title) can sit on the next line. 1: the line before was a
+  // label alone (`[a]:`), so this line is the destination; 2: the line before was a definition with a destination, so a title may follow.
+  let lrd: 0 | 1 | 2 = 0;
   // A raw-text element opened in the middle of a line is inline HTML: Markdown goes on parsing after it, so only an end tag
   // that Markdown also reads as HTML (outside code, a fence and a backslash escape) closes it. -1 when none is open.
   let rawStart = -1;
@@ -198,6 +203,7 @@ function firstUnterminated(text: string, from: number): number {
     if ((i === 0 || text[i - 1] === '\n') && i < rawUntil) {
       prevBefore = prev;
       prev = 'nonpara';
+      lrd = 0;
     } else if (i === 0 || text[i - 1] === '\n') {
       // The line before was the last raw line of an HTML block: nothing is open after it.
       if (i - 1 === rawUntil) prev = 'nonpara';
@@ -210,10 +216,20 @@ function firstUnterminated(text: string, from: number): number {
       const wasOpen = fence !== null;
       const step = stepFence(inner, fence);
       fence = step.open;
-      if (step.fenceLine || wasOpen) { prev = 'nonpara'; i = end + 1; continue; }
+      if (step.fenceLine || wasOpen) { prev = 'nonpara'; lrd = 0; i = end + 1; continue; }
       // An indented code block: a line of four spaces or a tab, after a blank line, the start of the text or another such line.
-      if (/^(?: {4}|\t)/.test(inner) && inner.trim() !== '' && prev !== 'other') { prev = 'code'; i = end + 1; continue; }
-      prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|=+[ \t]*$|\[[^\]]+\]:)/.test(inner) ? 'nonpara' : 'other';
+      if (/^(?: {4}|\t)/.test(inner) && inner.trim() !== '' && prev !== 'other') { prev = 'code'; lrd = 0; i = end + 1; continue; }
+      if (lrd === 1) {
+        prev = 'nonpara';
+        lrd = 2;
+      } else if (lrd === 2 && /^ {0,3}["'(]/.test(inner)) {
+        prev = 'nonpara';
+        lrd = 0;
+      } else {
+        const label = /^ {0,3}\[(?:[^\]\\]|\\.)+\]:([ \t]*)/.exec(inner);
+        lrd = label ? (label[0].length === inner.length ? 1 : 2) : 0;
+        prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|=+[ \t]*$)/.test(inner) ? 'nonpara' : 'other';
+      }
     }
     const c = text[i];
     if (c === '\\' && i >= rawUntil) { i += isAsciiPunct(text[i + 1]) ? 2 : 1; continue; }
