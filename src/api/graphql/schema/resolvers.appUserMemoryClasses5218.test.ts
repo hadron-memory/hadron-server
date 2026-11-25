@@ -55,18 +55,22 @@ async function field(ctx: Context, id = appId): Promise<string[]> {
   return resolve({ id }, {}, ctx);
 }
 
-const create = (ctx: Context, memoryClass: string, app = appId) =>
-  createMemoryInApp(null, { appRef: app, agentRef: agentId, memoryClass, name: `n-${memoryClass}-${generateId()}` }, ctx);
+const create = (ctx: Context, memoryClass: string, app = appId, agentRef = agentId) =>
+  createMemoryInApp(null, { appRef: app, agentRef, memoryClass, name: `n-${memoryClass}-${generateId()}` }, ctx);
 
-/** What the door admits for this caller, asked one class at a time. */
+/** What the door admits for this caller, asked one class at a time, through any Agent installed in the App. */
 async function doorAdmits(ctx: Context, app = appId): Promise<string[]> {
   const admitted: string[] = [];
+  const rows = await db.appAgent.findMany({ where: { appId: app }, select: { agentId: true } });
   for (const klass of CLASSES) {
-    try {
-      await create(ctx, klass, app);
-      admitted.push(klass);
-    } catch {
-      // refused
+    for (const row of rows) {
+      try {
+        await create(ctx, klass, app, row.agentId);
+        admitted.push(klass);
+        break;
+      } catch {
+        // refused through this Agent
+      }
     }
   }
   return admitted;
@@ -186,7 +190,43 @@ describe('#5218 App.viewerAppUserMemoryClasses', () => {
     await differential(ctxFor(member), []);
   });
 
+  const dead: Array<[string, () => Promise<unknown>]> = [
+    ['a soft-deleted App', () => db.app.update({ where: { id: appId }, data: { deletedAt: new Date() } })],
+    ["a soft-deleted organization", () => db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } })],
+    ['a soft-deleted caller', () => db.user.update({ where: { id: member }, data: { deletedAt: new Date() } })],
+    ['an App whose only Agent is deleted', () => db.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } })],
+    // The Agent row stays installed, but another organization's private Agent has no licence here (#1526).
+    ['an App whose only Agent is installed but unlicensed', async () => {
+      const foreign = await db.organization.create({ data: { id: generateId(), name: 'F', urn: 'foreign5218.test' } });
+      await db.agent.update({ where: { id: agentId }, data: { organizationId: foreign.id, visibility: 'PERSONAL' } });
+    }],
+  ];
+  dead.push(['a soft-deleted organization whose App has a PUBLIC Agent of another one', async () => {
+    const foreign = await db.organization.create({ data: { id: generateId(), name: 'P', urn: 'public5218.test' } });
+    await db.agent.update({ where: { id: agentId }, data: { organizationId: foreign.id, visibility: 'PUBLIC' } });
+    await db.agentOrgGrant.create({ data: { orgId, agentId } });
+    await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+  }]);
+  for (const [label, kill] of dead) {
+    it(`${label} lists nothing`, async () => {
+      await kill();
+      await differential(ctxFor(member), []);
+    });
+  }
+
+  it('one usable Agent beside an unusable one is enough, whichever was installed first', async () => {
+    const foreign = await db.organization.create({ data: { id: generateId(), name: 'F', urn: 'foreign5218.test' } });
+    await db.agent.update({ where: { id: agentId }, data: { organizationId: foreign.id, visibility: 'PERSONAL' } });
+    const usable = await db.agent.create({
+      data: { id: generateId(), name: 'usable', urn: 'org5218.test:usable', organizationId: orgId },
+    });
+    await createDbAppAgent(db, appId, usable.id);
+    await differential(ctxFor(member), ['personal', 'private']);
+  });
+
   it("a member of a user-owned App gets exactly the door's answer", async () => {
+    // The owner's own Agent is licensed there, so the App's ownership is what the door judges.
+    await db.agent.update({ where: { id: agentId }, data: { organizationId: null, ownerUserId: userOwner } });
     const answer = await field(ctxFor(userOwner), userAppId);
     expect(await doorAdmits(ctxFor(userOwner), userAppId)).toEqual(answer);
   });

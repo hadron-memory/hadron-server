@@ -46,7 +46,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
-import { refusedAppUserMemoryPrincipal, heldAppUserMemoryClasses } from './appUserMemoryEligibility.js';
+import { refusedAppUserMemoryPrincipal, heldAppUserMemoryClasses, appAdmitsUserMemories } from './appUserMemoryEligibility.js';
 import { appUserMemorySlug, APP_USER_MEMORY_MAX_TAIL } from '../../../lib/appUserMemoryName.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
@@ -364,7 +364,7 @@ export const appMemoryMutations = {
     const app = await loadAppAndAuthorize(ctx, appRef, klass);
     const agent = await resolveInstalledAgent(ctx, app.id, agentRef);
     // A user-owned App is A4's (#5186): its personal/private creation stays refused.
-    if (isUserOwned && !app.organizationUrn) {
+    if (isUserOwned && !appAdmitsUserMemories(app)) {
       throw new GraphQLError(
         'Personal/private App-scoped memories are not yet supported for a user-owned App.',
         { extensions: { code: 'BAD_USER_INPUT' } },

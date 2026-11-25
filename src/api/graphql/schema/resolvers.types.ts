@@ -17,6 +17,7 @@ import { requireAppKeyManager } from './appKeyManagement.js';
 import { callerIsWorkerSession } from './resolvers.instruction.js';
 import { servedPromptOwnerFields, servedPromptTypeResolvers } from './resolvers.servedPrompt.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { creatableAppUserMemoryClasses } from './appUserMemoryEligibility.js';
 import { loadViewerManages } from './resolvers.appViewerManages.js';
 import { loadSelfJoinFacts } from './resolvers.appSelfJoinFacts.js';
 import { resolveSelfJoinRole, SelfJoinNotAllowedError } from '../../../controller/operations/joinApp.js';
@@ -2062,6 +2063,8 @@ export const typeResolvers = {
     },
     /** #2109 — whether the caller manages this App; the shared managesApp predicate as a read-time fact. */
     viewerManages: (a: { id: string }, _: unknown, ctx: Context) => loadViewerManages(ctx, a.id),
+    /** #5218 — what createMemoryInApp would still admit for the viewer; the door's own check, from the viewer's own rows. */
+    viewerAppUserMemoryClasses: (a: { id: string }, _: unknown, ctx: Context) => creatableAppUserMemoryClasses(ctx, a.id),
     /**
      * Spec 049 Phase 4 — the App's default Channel, gated on its HOST MEMORY
      * like `App.sharedMemory`: `Query.app` admits an org member who is not an
