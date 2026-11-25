@@ -19848,9 +19848,10 @@ export const typeDefs = `#graphql
     """
     #3125 S2 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the outside item this task claims, for example an issue's
     canonical URL. Stored and compared exactly as written; 1 to 512 characters with no whitespace, control or invisible
-    format character and no user name or password (else BAD_USER_INPUT). Set only here: no edit takes it. A second
-    task with the same value in this App, whatever the first task's state, is refused TASK_EXTERNAL_ID_TAKEN, which
-    names no task (find it with agentTasks(externalId:)). Another App's tasks never conflict.
+    format character and no user name or password (else BAD_USER_INPUT). Set only here: no edit takes it. At most one
+    ACTIVE task (backlog, pending or started) per App holds a given value; a finished or cancelled task keeps its value
+    but no longer blocks a new claim. A create while an active task holds the value is refused TASK_EXTERNAL_ID_TAKEN,
+    which names no task (find it with agentTasks(externalId:)). Another App's tasks never conflict.
     #4113 (hrn:node:hadronmemory.com:specs:cor:agt:050:02): naming it with YOURSELF as the assignee is the claim, and a
     claim is created STARTED in this one call (startedAt set; task.created, task.assigned, task.started; never queued,
     matched or alarmed as not started). A claim naming another assignee, no assignee, or an open blocker stays PENDING
