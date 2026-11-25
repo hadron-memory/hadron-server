@@ -404,6 +404,7 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('[a\\]b]: /u\n<b>\nuse `<pre x=` here')).toBe('[a\\]b]: /u\n<b>\nuse `&lt;pre x=` here');
     // A title on the line after a definition, and a definition followed by an ordinary paragraph line, are told apart.
     expect(escapeUnterminatedHtml('[a]: /u\n"title"\n<b>\nuse `<pre x=` here')).toBe('[a]: /u\n"title"\n<b>\nuse `&lt;pre x=` here');
+    expect(escapeUnterminatedHtml('[a]:\nhttp://x\n"title"\n<span>\nuse `<pre x=` here')).toBe('[a]:\nhttp://x\n"title"\n<span>\nuse `&lt;pre x=` here');
     expect(escapeUnterminatedHtml('[a]: /u\ntext\n<b>\nuse `<pre x=` here')).toBe('[a]: /u\ntext\n<b>\nuse `<pre x=` here');
     // A quote's own heading line leaves no paragraph open either.
     expect(escapeUnterminatedHtml('> # h\n<b>\n```\n<i x=\n```\nz')).toBe('> # h\n<b>\n```\n&lt;i x=\n```\nz');
