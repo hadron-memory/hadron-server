@@ -68,6 +68,7 @@
     "AiModelPriceList": "envelope",
     "CreditLedgerEntryList": "envelope",
     "CreditBalance": "value",
+    "ExpiringCredit": "value",
     "AiSpendRow": "value",
     "AiSpendSummary": "envelope",
     "NodeMintStatus": "value",

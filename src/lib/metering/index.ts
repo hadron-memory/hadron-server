@@ -416,7 +416,10 @@ export interface GrantCreditsParams {
   owner: OwnerRef;
   /** Positive micro-cents. */
   amountMicroCents: bigint;
-  /** Policy field only in Phase 0 (FR-005). */
+  /**
+   * When the grant expires (#5011, hrn:node:hadronmemory.com:specs:cor:dmo:170:10): enforced by
+   * ./settleExpiredGrants.ts. The mutation refuses one not later than now; the library stores what it is given.
+   */
   expiresAt?: Date | null;
   /**
    * Idempotency + provenance pair, required (#5007): e.g. ('stripe-checkout',

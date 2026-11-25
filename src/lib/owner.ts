@@ -59,4 +59,5 @@ export function sameOwner(row: OwnedRow, owner: OwnerRef): boolean {
 export function ownerWhere(owner: OwnerRef): { organizationId: string } | { ownerUserId: string } {
   const cols = ownerColumns(owner);
   return cols.ownerUserId != null ? { ownerUserId: cols.ownerUserId } : { organizationId: cols.organizationId as string };
+
 }
