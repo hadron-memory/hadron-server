@@ -10,6 +10,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { insertSoftPasskey, softPasskey } from '../../test/softPasskey.js';
 import { DB_NOW, dropTestActions, insertGrant, seedWorld, type World } from '../grants/grantFixtures3668.js';
 import { newSigningRequestId } from './requests.js';
+import { GRANT_SELECTION_CAP } from './grantSelectionPayload.js';
 
 const RP = 'localhost';
 const V1 = 'hadron-grant-signature-v1';
@@ -24,32 +25,34 @@ beforeEach(async () => { await cleanDb(db); w = await seedWorld(); });
 afterAll(async () => { await cleanDb(db); await dropTestActions(); });
 
 async function insertSelection(over: Record<string, unknown> = {}): Promise<string> {
-  const v: Record<string, unknown> = { id: newSigningRequestId(), app_id: w.appId, payload_version: SEL, requester_user_id: w.userId, ...over };
+  const { lifetime = '1 hour', ...rest } = over;
+  const v: Record<string, unknown> = { id: newSigningRequestId(), app_id: w.appId, payload_version: SEL, requester_user_id: w.userId, ...rest };
   const cols = Object.keys(v);
   await exec(`INSERT INTO grant_signing_selections (${cols.join(', ')}, expires_at)
-    VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')}, ${DB_NOW} + interval '1 hour')`, ...cols.map((c) => v[c]));
+    VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')}, ${DB_NOW} + interval '${lifetime}')`, ...cols.map((c) => v[c]));
   return v.id as string;
 }
 
 async function insertItem(selectionId: string | null, grantId: string, position: number | null, over: Record<string, unknown> = {}): Promise<string> {
+  const { lifetime = '1 hour', ...rest } = over;
   const v: Record<string, unknown> = {
     id: newSigningRequestId(), grant_id: grantId, version: 1, terms_hash: HASH, payload_version: selectionId ? SEL : V1,
-    requester_user_id: w.userId, selection_id: selectionId, position_in_selection: position, ...over,
+    requester_user_id: w.userId, selection_id: selectionId, position_in_selection: position, ...rest,
   };
   const cols = Object.keys(v);
   await exec(`INSERT INTO grant_signing_requests (${cols.join(', ')}, expires_at)
-    VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')}, ${DB_NOW} + interval '1 hour')`, ...cols.map((c) => v[c]));
+    VALUES (${cols.map((_, i) => `$${i + 1}`).join(', ')}, ${DB_NOW} + interval '${lifetime}')`, ...cols.map((c) => v[c]));
   return v.id as string;
 }
 
 /** Grants g1 < g2 (ascending id bytes), both pending, and a selection naming both as items. */
-async function fixture() {
+async function fixture(lifetime = '1 hour') {
   const a = await insertGrant(w);
   const b = await insertGrant(w);
   const [g1, g2] = [a, b].sort((x, y) => Buffer.compare(Buffer.from(x), Buffer.from(y)));
-  const sel = await insertSelection();
-  const r1 = await insertItem(sel, g1, 0);
-  const r2 = await insertItem(sel, g2, 1);
+  const sel = await insertSelection({ lifetime });
+  const r1 = await insertItem(sel, g1, 0, { lifetime });
+  const r2 = await insertItem(sel, g2, 1, { lifetime });
   return { g1, g2, sel, r1, r2 };
 }
 
@@ -149,9 +152,40 @@ describe('P19 selection lifecycle', () => {
     const f = await fixture();
     await refused(exec('DELETE FROM grant_signing_selections WHERE id = $1', f.sel), /kept for the App/);
   });
+  it('a completed selection leaves its failed items stale, and is never expired afterwards', async () => {
+    const f = await fixture();
+    const t = await insertTouch(f.sel, [item(f.g1)]);
+    await insertItemSignature(t, f.r1, f.g1);
+    await exec(`UPDATE grant_signing_requests SET state = 'completed' WHERE id = $1`, f.r1);
+    await exec(`UPDATE grant_signing_selections SET state = 'completed' WHERE id = $1`, f.sel);
+    expect(await stateOf('grant_signing_requests', f.r1)).toBe('completed');
+    expect(await stateOf('grant_signing_requests', f.r2)).toBe('stale');
+    await refused(exec(`UPDATE grant_signing_selections SET state = 'expired' WHERE id = $1`, f.sel), /ends exactly once/);
+  });
+  it('expiry: refused before the lifetime has passed; after it the selection and its open items expire together and nothing else ends it', async () => {
+    const f = await fixture('1 second');
+    await refused(exec(`UPDATE grant_signing_selections SET state = 'expired' WHERE id = $1`, f.sel), /only once its lifetime has passed/);
+    for (let i = 0; i < 60; i++) {
+      const [{ over }] = await query<{ over: boolean }>(`SELECT hadron_signing_now() >= expires_at AS over FROM grant_signing_selections WHERE id = $1`, f.sel);
+      if (over) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    await refused(exec(`UPDATE grant_signing_selections SET state = 'withdrawn' WHERE id = $1`, f.sel), /expired grant signing selection cannot end any other way/);
+    await exec(`UPDATE grant_signing_selections SET state = 'expired' WHERE id = $1`, f.sel);
+    expect(await stateOf('grant_signing_requests', f.r1)).toBe('expired');
+    expect(await stateOf('grant_signing_requests', f.r2)).toBe('expired');
+    const [row] = await query<{ same: boolean }>(`SELECT ended_at = expires_at AS same FROM grant_signing_selections WHERE id = $1`, f.sel);
+    expect(row.same).toBe(true);
+  });
 });
 
 describe('P19 touch record', () => {
+  it('an item version that is not a whole number in range is a shape refusal (23514), never a cast error', async () => {
+    const f = await fixture();
+    for (const version of [1.5, 1e10, -1, 12345678901]) {
+      await expect(insertTouch(f.sel, [item(f.g1, { version })])).rejects.toMatchObject({ meta: { code: '23514' } });
+    }
+  });
   it('records a touch over items that are the selection\'s item requests at their pins, ascending by grant id', async () => {
     const f = await fixture();
     expect((await insertTouch(f.sel, [item(f.g1), item(f.g2)])).id).toBeTruthy();
@@ -165,8 +199,17 @@ describe('P19 touch record', () => {
     await refused(insertTouch(f.sel, [item(f.g2), item(f.g1)]), /ascending grant id/);
     await refused(insertTouch(f.sel, [item(f.g1), item(f.g1)]), /ascending grant id/);
     await refused(insertTouch(f.sel, []), /chk_grant_selection_signature_shape/);
-    await refused(insertTouch(f.sel, Array.from({ length: 26 }, (_, i) => item(`g${String(i).padStart(3, '0')}`))), /chk_grant_selection_signature_shape|ascending|item of its selection/);
     await refused(insertTouch(f.sel, [{ grantId: f.g1, version: 1 }]), /grant id, a version and a terms hash/);
+  });
+  it('the cap: 26 REAL items (each an item of the selection, in order) reach the CHECK and are refused by it, 25 are accepted; the CHECK states the TS cap', async () => {
+    const [def] = await query<{ def: string }>(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'chk_grant_selection_signature_shape'`);
+    // Postgres prints BETWEEN 1 AND 25 as the two comparisons.
+    expect(def!.def).toMatch(new RegExp(`jsonb_array_length\\(items\\) <= ${GRANT_SELECTION_CAP}\\b`));
+    const grants = (await Promise.all(Array.from({ length: GRANT_SELECTION_CAP + 1 }, () => insertGrant(w)))).sort((x, y) => Buffer.compare(Buffer.from(x), Buffer.from(y)));
+    const sel = await insertSelection();
+    for (const [i, g] of grants.entries()) await insertItem(sel, g, i);
+    await refused(insertTouch(sel, grants.map((g) => item(g))), /chk_grant_selection_signature_shape/);
+    expect((await insertTouch(sel, grants.slice(0, GRANT_SELECTION_CAP).map((g) => item(g)))).id).toBeTruthy();
   });
   it('needs the signer\'s own unrevoked passkey and an open selection, and is append-only', async () => {
     const f = await fixture();
@@ -223,5 +266,37 @@ describe('an App\'s hard delete takes its selections, touch records and per-gran
     expect((await query('SELECT 1 FROM grant_signing_selections WHERE id = $1', f.sel)).length).toBe(0);
     expect((await query('SELECT 1 FROM grant_selection_signatures WHERE id = $1', t.id)).length).toBe(0);
     expect((await query('SELECT 1 FROM grant_signatures WHERE selection_signature_id = $1', t.id)).length).toBe(0);
+  });
+
+  // An App's delete reaches a request by two cascades (App to grants, App to selections to items), and which fires first depends on the
+  // order the foreign keys were created (a migrated and a pushed database can differ), among many other cascades that also delete
+  // grants. So the state "the App is gone and its grant row is still there" is made directly: with foreign keys off, the App row goes
+  // (no cascade runs), the guards are switched back on, and the delete of a request and of a signature must be allowed (the grant's
+  // App is gone). The transaction always rolls back.
+  class Rollback extends Error {}
+  it('with the App already gone and its grant row still present, a request and a signature may be deleted', async () => {
+    const f = await fixture();
+    const t = await insertTouch(f.sel, [item(f.g1)]);
+    const sig = await insertItemSignature(t, f.r1, f.g1);
+    let left: { requests: number; signatures: number } | undefined;
+    await expect(db.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`);
+      await tx.$executeRawUnsafe('DELETE FROM apps WHERE id = $1', w.appId);
+      await tx.$executeRawUnsafe(`SET LOCAL session_replication_role = origin`);
+      await tx.$executeRawUnsafe('DELETE FROM grant_signatures WHERE id = $1', sig);
+      await tx.$executeRawUnsafe('DELETE FROM grant_signing_requests WHERE id = $1', f.r1);
+      const [r] = await tx.$queryRawUnsafe<Array<{ requests: number; signatures: number }>>(
+        `SELECT (SELECT count(*) FROM grant_signing_requests WHERE id = $1)::int AS requests, (SELECT count(*) FROM grant_signatures WHERE id = $2)::int AS signatures`, f.r1, sig);
+      left = r;
+      throw new Rollback();
+    })).rejects.toBeInstanceOf(Rollback);
+    expect(left).toEqual({ requests: 0, signatures: 0 });
+  });
+  it('a request or a signature is still never deleted on its own while its grant and App live', async () => {
+    const f = await fixture();
+    const t = await insertTouch(f.sel, [item(f.g1)]);
+    const sig = await insertItemSignature(t, f.r1, f.g1);
+    await refused(exec('DELETE FROM grant_signing_requests WHERE id = $1', f.r2), /kept for the grant/);
+    await refused(exec('DELETE FROM grant_signatures WHERE id = $1', sig), /never deleted/);
   });
 });

@@ -137,7 +137,9 @@ BEGIN
 END $$;
 
 -- Requests: begin open on a pending grant at its version, pinned fields immutable, one end, DB-clock times, deleted only with
--- their grant (the FK cascade fires after the grant row is gone).
+-- their grant (the FK cascade fires after the grant row is gone), or with their App: an App's hard delete reaches a request by two
+-- cascades (App to grants, App to selections to items), and which fires first is not ours to rely on, so a request or signature whose
+-- grant's App is already gone may go too.
 CREATE OR REPLACE FUNCTION hadron_guard_grant_signing_request() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
@@ -146,7 +148,7 @@ DECLARE
   sel grant_signing_selections%ROWTYPE;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    IF EXISTS (SELECT 1 FROM grants WHERE id = OLD.grant_id) THEN
+    IF EXISTS (SELECT 1 FROM grants gr JOIN apps ap ON ap.id = gr.app_id WHERE gr.id = OLD.grant_id) THEN
       RAISE EXCEPTION 'Grant signing requests are kept for the grant''s lifetime' USING ERRCODE = '23514';
     END IF;
     RETURN OLD;
@@ -241,7 +243,7 @@ DECLARE
   touch grant_selection_signatures%ROWTYPE;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    IF EXISTS (SELECT 1 FROM grants WHERE id = OLD.grant_id) THEN
+    IF EXISTS (SELECT 1 FROM grants gr JOIN apps ap ON ap.id = gr.app_id WHERE gr.id = OLD.grant_id) THEN
       RAISE EXCEPTION 'Grant signature records are never deleted' USING ERRCODE = '23514';
     END IF;
     RETURN OLD;
@@ -564,6 +566,7 @@ BEGIN
   FOR item IN SELECT * FROM jsonb_array_elements(NEW.items) LOOP
     IF jsonb_typeof(item) <> 'object' OR (SELECT count(*) FROM jsonb_object_keys(item)) <> 3
        OR jsonb_typeof(item -> 'grantId') <> 'string' OR jsonb_typeof(item -> 'version') <> 'number'
+       OR (item ->> 'version') !~ '^[0-9]{1,9}$'
        OR jsonb_typeof(item -> 'termsHash') <> 'string' THEN
       RAISE EXCEPTION 'A selection signature item is a grant id, a version and a terms hash' USING ERRCODE = '23514';
     END IF;

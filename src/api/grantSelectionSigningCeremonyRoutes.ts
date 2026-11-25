@@ -20,14 +20,14 @@ import { createHash, randomBytes } from 'node:crypto';
 import express, { type Express, type Request, type Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { db } from '../integrations/db/client.js';
-import { passkeyRpId, signingCeremonyOrigins, SigningNotConfiguredError } from '../lib/signing/config.js';
+import { passkeyRpId, signingCeremonyOrigins } from '../lib/signing/config.js';
 import { GRANT_SELECTION_SIGNING_CEREMONY_PATH } from '../lib/signing/ceremonyUrl.js';
 import { signingSurfacePolicy } from '../lib/signing/surface.js';
 import { GrantSigningRefusal } from '../lib/signing/grantRequests.js';
 import { ceremonyShell } from './ceremonyShell.js';
 import { GRANT_SIGN_TTL_SECONDS } from '../lib/signing/grantCeremony.js';
 import {
-  CeremonyRefused, completeGrantSelectionSigning, currentGrantSelectionSigningChallenge, declineGrantSelectionSigning,
+  completeGrantSelectionSigning, currentGrantSelectionSigningChallenge, declineGrantSelectionSigning,
   openGrantSelectionProofCeremony, proveForGrantSelectionSigning,
 } from '../lib/signing/grantSelectionCeremony.js';
 import { SIGNING_CEREMONY_PER_REQUEST_LIMIT, SIGNING_CEREMONY_RATE_LIMIT_PER_MINUTE } from './signingCeremonyRoutes.js';
@@ -289,6 +289,5 @@ function refusal(res: Response, e: unknown): void {
     if (e.code === 'SECRET_AUTO_DELETE_NEEDS_LIMIT') return void json(res, 409, { error: 'SECRET_AUTO_DELETE_NEEDS_LIMIT' });
     if (e.code === 'PASSKEY_COOLING_OFF') return void json(res, 409, { error: 'PASSKEY_COOLING_OFF' });
   }
-  if (e instanceof CeremonyRefused || e instanceof GrantSigningRefusal || e instanceof SigningNotConfiguredError) return void refuse(res);
   refuse(res);
 }

@@ -252,4 +252,32 @@ describe('P17: withdraw is the requester account\'s alone, once, and ends the it
     expect(code(again)).toBe('SIGNING_REQUEST_ENDED');
     expect(again.errors[0].extensions.state).toBe('WITHDRAWN');
   });
+
+  it('SIGNING_REQUEST_NOT_REQUESTER: a manager who reads every grant but did not ask is refused by name, and nothing ends', async () => {
+    const ids = [await held(), await held()];
+    const id = (await asWorker(REQUEST, { g: ids })).data.requestGrantSelectionSignature.id;
+    await db.orgMember.updateMany({ where: { organizationId: w.orgId, userId: w.user2Id }, data: { role: 'ADMIN' } });
+    // The manager reads the selection (the manager arm reaches every grant of the App) ...
+    const read = await post(personKey, null, READ, { id });
+    expect(read.errors).toBeUndefined();
+    expect(read.data.grantSigningSelection.id).toBe(id);
+    // ... but is not the account that asked.
+    expect(code(await post(personKey, null, WITHDRAW, { id }))).toBe('SIGNING_REQUEST_NOT_REQUESTER');
+    expect((await db.grantSigningSelection.findUniqueOrThrow({ where: { id } })).state).toBe('open');
+    expect((await db.grantSigningRequest.findMany({ where: { selectionId: id } })).map((r) => r.state)).toEqual(['open', 'open']);
+  });
+});
+
+describe('the read returns the whole items, not the pre-read\'s grant ids', () => {
+  const FULL = 'query($id:ID!){grantSigningSelection(id:$id){id state payloadVersion ceremonyUrl requestedBy{userId workerId sessionId} items{id grantId version termsHash payloadVersion selectionId state ceremonyUrl}}}';
+  it('every item field resolves, equal to what the request call returned', async () => {
+    const ids = [await held(), await held(), await held()];
+    const made = (await asWorker(REQUEST, { g: ids })).data.requestGrantSelectionSignature;
+    const read = await asWorker(FULL, { id: made.id });
+    expect(read.errors).toBeUndefined();
+    const sel = read.data.grantSigningSelection;
+    expect(sel.items).toHaveLength(3);
+    expect(sel.items).toEqual(made.items.map((i: any) => ({ ...i })));
+    expect(sel.items.every((i: any) => i.id && i.termsHash && i.payloadVersion && i.selectionId === made.id && i.state === 'OPEN' && i.ceremonyUrl)).toBe(true);
+  });
 });

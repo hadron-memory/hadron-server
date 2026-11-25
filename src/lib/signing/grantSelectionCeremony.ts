@@ -78,7 +78,6 @@ function offeredIds(v: unknown): string[] | null {
   }
   return sortedSelectionItems([...ids].map((grantId) => ({ grantId }))).map((i) => i.grantId);
 }
-export { offeredIds as normalizeOfferedGrantIds };
 
 /** Open a proof ceremony for the browser. Reads nothing about the selection: the same answer for every id. */
 export async function openGrantSelectionProofCeremony(

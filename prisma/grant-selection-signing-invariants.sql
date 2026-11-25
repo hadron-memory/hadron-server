@@ -144,6 +144,7 @@ BEGIN
   FOR item IN SELECT * FROM jsonb_array_elements(NEW.items) LOOP
     IF jsonb_typeof(item) <> 'object' OR (SELECT count(*) FROM jsonb_object_keys(item)) <> 3
        OR jsonb_typeof(item -> 'grantId') <> 'string' OR jsonb_typeof(item -> 'version') <> 'number'
+       OR (item ->> 'version') !~ '^[0-9]{1,9}$'
        OR jsonb_typeof(item -> 'termsHash') <> 'string' THEN
       RAISE EXCEPTION 'A selection signature item is a grant id, a version and a terms hash' USING ERRCODE = '23514';
     END IF;

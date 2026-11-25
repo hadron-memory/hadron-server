@@ -146,9 +146,11 @@ async function readableSelectionReach(ctx: Context, grantIds: readonly string[],
 async function readableSelection(ctx: Context, id: string): Promise<(GrantSigningSelectionRow & { appId: string; grantIds: string[] }) | null> {
   const row = await ctx.db.grantSigningSelection.findUnique({ where: { id }, include: { items: { select: { grantId: true } } } });
   if (!row) return null;
-  const grantIds = row.items.map((i) => i.grantId).sort();
+  const { items: peeked, ...rest } = row;
+  const grantIds = peeked.map((i) => i.grantId).sort();
   const reach = await readableSelectionReach(ctx, grantIds);
-  return reach && reach.appId === row.appId ? { ...row, grantIds } : null;
+  // The pre-read holds grant ids only: it must not ride along as `items`, or the field resolver would serve it instead of the full rows.
+  return reach && reach.appId === row.appId ? { ...rest, grantIds } : null;
 }
 
 export const grantSigningMutations = {
