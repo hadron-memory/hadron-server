@@ -39,6 +39,14 @@ import {
   parseSpendInstant,
   type AiSpendGroup,
 } from '../../../lib/metering/spend.js';
+import {
+  databaseNow,
+  expiringCredit,
+  settleExpiredGrants,
+  unsettledRemainders,
+} from '../../../lib/metering/settleExpiredGrants.js';
+import { isReadOnlyImpersonation } from '../impersonationReadOnlyPlugin.js';
+import { safeErrorCode } from '../../../lib/secrets/autoDelete.js';
 import type { CreditLedgerEntry, AiModelPrice } from '../../../generated/prisma/index.js';
 
 const badInput = (message: string) =>
@@ -209,12 +217,30 @@ export const meteringQueries = {
     return { items: items.map(projectLedgerEntry), total };
   },
 
-  /** Org balance = SUM over the append-only ledger. Org-ADMIN. */
+  /**
+   * Org balance. Org-ADMIN (the one gate; A6 widens it). #5011 (Billing A4,
+   * hrn:node:hadronmemory.com:specs:cor:dmo:170:10): the owner's expired grants are settled FIRST (written entries,
+   * once each), then the stored sum is read, less what is left of any grant whose expiry has passed and is not yet
+   * settled (inside the 60 s of ruling 10.1), so no answer ever includes expired credit (ruling 10.7). An impersonated
+   * session writes nothing (the impersonation plugin blocks mutations, not a query that writes) and gets the same
+   * figure, worked out. A settlement that fails logs one line (organization id, error code) and the read answers the
+   * computed figure (ruling 10.4); the hourly job retries.
+   */
   creditBalance: async (_: unknown, { orgRef }: { orgRef: string }, ctx: Context) => {
     const { id: orgId } = await resolveOrgRef(ctx.db, orgRef);
     await requireOrgRole(ctx, orgId, 'ADMIN');
-    const balance = await creditBalance(ctx.db, orgId);
-    return { organizationId: orgId, balanceMicroCents: balance.toString() };
+    const owner = { organizationId: orgId };
+    const asOf = await databaseNow(ctx.db);
+    if (!isReadOnlyImpersonation(ctx)) {
+      try {
+        await settleExpiredGrants(ctx.db, owner, { now: asOf });
+      } catch (err) {
+        console.error('credit_expiry.settle_failed', { organizationId: orgId, code: safeErrorCode(err) });
+      }
+    }
+    const sum = await creditBalance(ctx.db, orgId);
+    const unsettled = await unsettledRemainders(ctx.db, owner, asOf);
+    return { organizationId: orgId, balanceMicroCents: (sum - unsettled).toString(), asOf };
   },
 
   /**
@@ -376,6 +402,11 @@ export const meteringMutations = {
       throw badInput('expiresAt is not a valid date.');
     }
     refuseServerWrittenSource(input.sourceType);
+    // #5011 ruling 10.3: a grant already expired would be settled at once for its full amount. Judged on the
+    // database clock, before the write.
+    if (expiresAt && expiresAt.getTime() <= (await databaseNow(ctx.db)).getTime()) {
+      throw badInput('expiresAt must be later than now.');
+    }
     try {
       const entry = await grantCredits(ctx.db, {
         organizationId: orgId,
@@ -437,5 +468,23 @@ export const meteringMutations = {
     } catch (err) {
       ledgerRefusal(err);
     }
+  },
+};
+
+/**
+ * #5011 (Billing A4): what is left of each unexpired expiring grant, soonest first, at the instant the parent read
+ * settled and summed (`asOf`). Runs the replay only when the field is selected; the parent query already passed the
+ * org-ADMIN gate, and the field reads only that organization's ledger.
+ */
+export const meteringTypeResolvers = {
+  CreditBalance: {
+    expiring: async (
+      parent: { organizationId: string; asOf: Date },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      const parts = await expiringCredit(ctx.db, { organizationId: parent.organizationId }, parent.asOf);
+      return parts.map((p) => ({ amountMicroCents: p.remaining.toString(), expiresAt: p.expiresAt.toISOString() }));
+    },
   },
 };

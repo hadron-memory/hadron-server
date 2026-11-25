@@ -17,7 +17,7 @@ import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
  * created after authority has gone. A refused write leaves no memory behind,
  * because the creation and the write roll back together.
  */
-import { GraphQLError } from 'graphql';
+import { GraphQLError, Kind, parse } from 'graphql';
 import type { Prisma, PrismaClient } from '../../../generated/prisma/index.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { agentSlugFromUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
@@ -393,9 +393,18 @@ export const INSTALL_CONCEALED = '__installConcealed';
  * gains later is concealed until someone decides it is not content; the earlier blocklist let a
  * preexisting title (`name`) through on a partial update. `name` is set to the loc, never the title.
  */
-const CONCEALED_NODE_KEEPS = ['id', 'memoryId', 'loc', 'nodeType', 'objectType', 'revision', 'revSeq', 'isLink', 'isPlaceholder', 'createdAt', 'updatedAt'] as const;
+export const CONCEALED_NODE_KEEPS = ['id', 'memoryId', 'loc', 'nodeType', 'objectType', 'revision', 'revSeq', 'isLink', 'isPlaceholder', 'createdAt', 'updatedAt'] as const;
 
-function concealedInstallNode(node: Record<string, any>): Record<string, any> {
+/**
+ * #5131 — the KEEPS entries that are NOT SDL `type Node` fields but are load-bearing
+ * internals of the sparse parent. The drift pin's "no stale entry" rule exempts exactly
+ * these, each with its reason; a new exemption must say what reads it.
+ */
+export const CONCEALED_NODE_INTERNAL_KEEPS: Readonly<Record<string, string>> = {
+  revSeq: "Node.revision's carried-counter fallback reads it (resolvers.types.ts `current?.revSeq ?? n.revSeq`); it is a column, not an SDL field",
+};
+
+export function concealedInstallNode(node: Record<string, any>): Record<string, any> {
   const out: Record<string, any> = { [INSTALL_CONCEALED]: true, tags: [], outgoingEdges: [], incomingEdges: [], embeddingAttempts: 0 };
   for (const key of CONCEALED_NODE_KEEPS) out[key] = node[key];
   out.name = node.loc;
@@ -419,6 +428,11 @@ const CONCEALED_FIELDS: Record<string, (args?: any) => unknown> = {
   asComment: () => null,
   asset: () => null,
   inheritedFrom: () => null,
+  // #5131: the sparse parent carries no embeddingTruncatedChunks, so the
+  // resolver's truncatedChunksBatched fallback re-reads the live row by node id
+  // and answers { omittedChunks } — content-size-derived metadata, exactly the
+  // leak class cor:acl:010:01 withholding exists for. Null, never a re-read.
+  indexTruncated: () => null,
   signingRequests: () => [],
   signingRequestsPage: (args) => {
     validateListPageInput(args ?? {});
@@ -438,7 +452,120 @@ const CONCEALED_FIELDS: Record<string, (args?: any) => unknown> = {
 };
 
 /** Fields in {@link CONCEALED_FIELDS}, for the drift pin. */
-export const INSTALL_CONCEALED_FIELDS = Object.keys(CONCEALED_FIELDS);
+export const INSTALL_CONCEALED_FIELDS: readonly string[] = Object.keys(CONCEALED_FIELDS);
+
+/**
+ * #5131 — the reviewed half of the classification: `Node` fields that are neither blanked
+ * ({@link CONCEALED_FIELDS}) nor carried ({@link CONCEALED_NODE_KEEPS}), because they derive
+ * from the concealed parent itself and read nothing by id. Each value is the reason, in
+ * those terms. Every entry must survive the drift pin's throwing-database resolution
+ * (installMemoryDrift5131.test.ts): resolving the field against a concealed parent with a
+ * database whose every access throws must return the parent-derived value without a query.
+ * A resolver here may not touch `ctx.db` at all — the leak this list guards against is a
+ * field that re-reads the live row by node id and returns what the caller cannot read.
+ */
+export const INSTALL_REVIEWED_NO_LOAD_FIELDS: Readonly<Record<string, string>> = {
+  deletedAt: 'absent on the sparse parent; default resolution reads parent.deletedAt and yields null',
+  name: 'set to the loc on the concealed parent — the address, never the title',
+  alias: 'absent on the sparse parent; default resolution yields null',
+  description: 'absent on the sparse parent; default resolution yields null',
+  abstract: 'absent on the sparse parent; default resolution yields null',
+  abstractOriginHash: 'absent on the sparse parent; default resolution yields null',
+  embeddingPendingAt: 'absent on the sparse parent; default resolution yields null',
+  embeddingFailedAt: 'absent on the sparse parent; default resolution yields null',
+  embeddingError: 'absent on the sparse parent; default resolution yields null',
+  tokens: 'absent on the sparse parent; default resolution yields null',
+  properties: 'absent on the sparse parent; default resolution yields null',
+  data: 'absent on the sparse parent; default resolution yields null',
+  seq: 'absent on the sparse parent; default resolution yields null',
+  ownerRepo: 'absent on the sparse parent; default resolution yields null',
+  isRunnable: 'absent on the sparse parent; default resolution yields null',
+  role: 'absent on the sparse parent; default resolution yields null',
+  llmModel: 'absent on the sparse parent; default resolution yields null',
+  aiAgent: 'absent on the sparse parent; default resolution yields null',
+  embeddingAttempts: 'carried as 0 on the concealed parent; default resolution yields the carried value',
+  tags: 'carried as [] on the concealed parent; deserializeTags is pure over it',
+  specLint: 'content is undefined on the sparse parent, so the resolver nulls before linting (resolvers.types.ts Node.specLint)',
+  content: 'the stored text is absent from the concealed parent, so resolveNodeContent returns it before any include/template/access machinery can run',
+  lintWarnings: 'role is absent from the concealed parent, so lintSourceWarnings returns [] with no query; the compiled branch needs nodeType compiled-boot-prompt, which a generic write door refuses and a compile never returns (its write projection is discarded for a full re-read), so no concealed write response carries one',
+};
+
+/**
+ * #5131 — reviewed fields that DO load, but only address data, never the node row and never
+ * a content-derived column: the memory's urn (by memory id, a KEEP the writer supplied when
+ * addressing the write) or the holding Agent's urn. `Node.urn` is `String!`, so blanking it
+ * is not schema-legal; the pin instead proves these resolvers cannot reach the node table
+ * at all (a throwing node namespace) and that their answers are composed from loc plus the
+ * memory's urn.
+ */
+export const INSTALL_REVIEWED_ADDRESS_LOADS: Readonly<Record<string, string>> = {
+  urn: "resolveNodeUrnField loads only the memory's urn by memory id and composes it with the carried loc; never the node row",
+  portalUrl: "portalUrlForUrn over the same composed urn; the only load is the memory's urn, as for Node.urn",
+  actionUrn: "null with no query for every non-register: loc; a register:<code> loc loads only the holding Agent's urn by systemMemoryId, which no App install memory matches",
+};
+
+/**
+ * #5131 — classify an SDL string's `type Node` fields against the install-concealment
+ * buckets: CONCEALED_FIELDS (blanked), CONCEALED_NODE_KEEPS (carried, plus the documented
+ * internal keeps) and the two reviewed lists. Exported so the drift pin can feed it a
+ * doctored SDL; the structural pin this backs is the reason a newly added `Node` field
+ * cannot escape concealment silently (the `storedBytes` near-miss, #5018).
+ */
+export interface InstallConcealmentDrift {
+  /** How many distinct fields the SDL's `type Node` definition and extensions declare (sanity: the AST walk found them). */
+  fieldCount: number;
+  /** SDL `type Node` fields in none of the buckets — the drift the pin fails on. */
+  unclassified: string[];
+  /** Bucket names that are not SDL `type Node` fields (stale entries), beyond the documented internal keeps. */
+  stale: Array<{ name: string; bucket: string }>;
+  /** Names present in more than one bucket. */
+  overlapping: Array<{ name: string; buckets: string[] }>;
+}
+
+/**
+ * The distinct field names of the SDL's `type Node` — its definition AND every
+ * `extend type Node` — read from the parsed AST (graphql-js `parse`), so
+ * descriptions, indentation and GraphQL names with digits or underscores are
+ * read exactly as the schema sees them. A text slice or line regex would
+ * silently under-report — an unseen field is an unclassified one, which is the
+ * drift this classification exists to catch (#5147 review).
+ */
+function nodeFieldNamesFromSdl(sdl: string): string[] {
+  const doc = parse(sdl);
+  const names = new Set<string>();
+  for (const def of doc.definitions) {
+    if ((def.kind === Kind.OBJECT_TYPE_DEFINITION || def.kind === Kind.OBJECT_TYPE_EXTENSION) && def.name.value === 'Node') {
+      for (const field of def.fields ?? []) names.add(field.name.value);
+    }
+  }
+  if (names.size === 0) throw new Error('classifyInstallNodeConcealment: no `type Node` definition or extension in the SDL');
+  return [...names];
+}
+
+export function classifyInstallNodeConcealment(sdl: string): InstallConcealmentDrift {
+  const fields = nodeFieldNamesFromSdl(sdl);
+  const buckets: Array<[string, readonly string[]]> = [
+    ['concealed', INSTALL_CONCEALED_FIELDS],
+    ['keeps', CONCEALED_NODE_KEEPS],
+    ['reviewed-no-load', Object.keys(INSTALL_REVIEWED_NO_LOAD_FIELDS)],
+    ['reviewed-address', Object.keys(INSTALL_REVIEWED_ADDRESS_LOADS)],
+  ];
+  const classified = new Set(buckets.flatMap(([, names]) => names as readonly string[]));
+  const internalKeeps = new Set(Object.keys(CONCEALED_NODE_INTERNAL_KEEPS));
+  const stale = buckets.flatMap(([bucket, names]) =>
+    (names as readonly string[])
+      .filter((name) => !fields.includes(name) && !(bucket === 'keeps' && internalKeeps.has(name)))
+      .map((name) => ({ name, bucket })),
+  );
+  const byField = new Map<string, string[]>();
+  for (const [bucket, names] of buckets) {
+    for (const name of names as readonly string[]) byField.set(name, [...(byField.get(name) ?? []), bucket]);
+  }
+  const overlapping = [...byField.entries()]
+    .filter(([, bs]) => bs.length > 1)
+    .map(([name, bs]) => ({ name, buckets: bs }));
+  return { fieldCount: fields.length, unclassified: fields.filter((f) => !classified.has(f)), stale, overlapping };
+}
 
 /**
  * Wrap the merged Node resolver map: on a concealed parent, every field whose resolver loads by node
