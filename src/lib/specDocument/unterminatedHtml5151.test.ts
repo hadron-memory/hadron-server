@@ -63,6 +63,10 @@ describe('#5151 item 5: an HTML block inside a block quote or list item', () => 
     // A construct across quoted lines: a marker is a `>` to a reader of the raw text and nothing to Markdown, so it is never its closer.
     ['a tag across quoted lines is open', '> §div\n> class="x'],
     ['inside a quoted block too', '> <div>\n> §a\n> href="x'],
+    ['an end tag across quoted lines does not end its element', '> §script>a§/script\n> b></script>'],
+    ['a quote that opens after a paragraph line is a new container', 'a\n> <span>\n> use `§pre x=` here'],
+    ['a tab right after a quote marker, and a blank: three columns', '>\t §textarea>\n> x'],
+    ['content five columns past a list marker is code', '-      <div>\n       use `<pre x=` here'],
     // Complete blocks are the author's bytes.
     ['a complete quoted block', '> <div>\n> <b>x</b>\n> </div>'],
     ['a complete multi-line tag in a list item', '- <div>\n  <a\n    href="x">y</a>\n  </div>'],
@@ -100,6 +104,8 @@ describe('#5151 items 7 to 15: link reference definitions and bare list markers'
     ['7, a fence line resets it', '[a]:\n```\nc\n```\n"t\n<span>\nuse `<pre x=` here'],
     ['7, a code line resets it', '[a]: /u\n\n    c\n"t\n<span>\nuse `<pre x=` here'],
     ['7, a raw line resets it', '[a]: /u\n<!-- c\n-->\n"t\n<span>\nuse `<pre x=` here'],
+    ['7, a raw line resets it when the block opened on the destination line', '[a]:\n<!-- c\n-->\n"t\n<span>\nuse `<pre x=` here'],
+    ['13, a parenthesis title ends at its closer', '[a]: /u (ti\nmid\ntle)\npara\n<span>\nuse `<pre x=` here'],
     // 8 and 13: only the closer of the title's own opener ends it.
     ['8, a double quote does not close a parenthesis', '[a]: /u (ti\nx"\nz)\n<span>\nuse `§pre x=` here'],
     ['13, a single quote title', "[a]: /u 'ti\nx)\nz'\n<span>\nuse `§pre x=` here"],
@@ -129,3 +135,13 @@ describe('#5151 item 2: the ambiguous tag name, as a parser reads it', () => {
     expect(anchor(escapeUnterminatedHtml(body))?.tagName).toBe('A');
   });
 });
+
+it('#5151 stays linear on long containers and long marker lines', () => {
+  for (const unit of ['> <!-- c -->\n', '> <div>\n', '> > <b>\n', '- <div>\n', '> ', '- ', '1. ', '> <script>x</script>\n', '> ```\n> c\n']) {
+    const body = unit.repeat(120_000 / unit.length);
+    const t0 = Date.now();
+    escapeUnterminatedHtml(body);
+    // A quadratic scan takes tens of seconds here.
+    expect({ unit, fast: Date.now() - t0 < 5000 }).toEqual({ unit, fast: true });
+  }
+}, 120_000);

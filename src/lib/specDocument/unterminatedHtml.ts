@@ -38,6 +38,11 @@
  * sample shows). A four-space continuation of a list item is read as indented code, so an unterminated construct in one is
  * left as written. Line breaks are read as `\n`, as the rest of the renderer reads them.
  *
+ * Containers (#5151): an HTML block or a fence may start after a line's own quote and list markers, and ends where those containers end.
+ * The markers are read past and never changed. A raw reader takes a quote marker for a `>`, so a construct inside a quote may not cross a line.
+ * Limits, pinned in unterminatedHtmlRender5151.test.ts: a tag whose attribute Markdown does not accept, a type 1 end tag alone on a line,
+ * `<!-->` at the head of a line, and a four-space continuation of a list item.
+ *
  * Cost: one linear scan per escape, each from the start of the escaped text (an open construct may hide another, and an open
  * `<template>` stays open after a later construct is escaped), at most {@link MAX_RESTARTS} times; a text that needs more has
  * every `<` in it escaped (a body that hides more than that many constructs behind one another is not an authoring case).
@@ -329,9 +334,10 @@ function firstUnterminated(text: string, from: number): number {
       prevBefore = prev;
       prev = 'nonpara';
       lrd = 0;
+      inDefinition = false;
     } else if (i === 0 || text[i - 1] === '\n') {
       // The line before was the last raw line of an HTML block: nothing is open after it.
-      if (i - 1 === rawUntil) prev = 'nonpara';
+      if (i - 1 === rawUntil) { prev = 'nonpara'; lrd = 0; inDefinition = false; }
       prevBefore = prev;
       const nl = text.indexOf('\n', i);
       const end = nl === -1 ? n : nl;
@@ -352,7 +358,7 @@ function firstUnterminated(text: string, from: number): number {
       const step = stepFence(within ?? content, fence);
       if (!wasOpen && step.open !== null) fenceContainers = here.list;
       fence = step.open;
-      if (step.fenceLine || wasOpen) { prev = 'nonpara'; lrd = 0; i = end + 1; continue; }
+      if (step.fenceLine || wasOpen) { prev = 'nonpara'; lrd = 0; inDefinition = false; i = end + 1; continue; }
       // An indented code block: a line of four spaces or a tab, after a blank line, the start of the text or another such line.
       const quotes = line.slice(0, line.length - inner.length);
       const from = columnAfter(quotes);
