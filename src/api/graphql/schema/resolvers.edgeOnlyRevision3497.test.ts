@@ -103,7 +103,7 @@ describe('#3558 governed node: edge-only needs no attestation', () => {
   [tgt, other] = await Promise.all([mk('tgt'), mk('other')]);
   reader.mockClear();
  });
- const gedges = (t: any) => [{ targetId: t.id, name: 'uses' }];
+ const gedges = (t: any) => [{ targetRef: t.id, name: 'uses' }];
 
  it('applies with no claim, keeps the exact stamp, appends no revision and never reads the author task', async () => {
   const before = await gstate();

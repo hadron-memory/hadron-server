@@ -39,7 +39,7 @@ beforeEach(async () => {
   memory = await M.createMemory({}, { orgRef: org.id, name: 'mem-4039s' }, ctx());
 });
 
-const conv = (data: unknown, loc = 'conversations:welcome') => ({ loc, name: 'welcome', memoryId: memory.id, data });
+const conv = (data: unknown, loc = 'conversations:welcome') => ({ loc, name: 'welcome', memoryRef: memory.id, data });
 const existing = (data: unknown = { stageOrder: ['s1'] }) =>
   db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'conversations:welcome', name: 'welcome', data: data as never } });
 

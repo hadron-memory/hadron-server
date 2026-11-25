@@ -96,7 +96,7 @@ afterEach(() => { vi.restoreAllMocks(); reloadOwnerDefaultLimitsForTests({ OWNER
 describe('#5015 createNode at the owner\'s nodes limit', () => {
   it('refuses a third node for a person at a default of 2, in the limited person\'s form, and writes nothing', async () => {
     defaults({ user: { nodes: 2 } });
-    const r = await gql(CREATE, asU(), { input: { memoryId: mU1, loc: 'c', name: 'c' } });
+    const r = await gql(CREATE, asU(), { input: { memoryRef: mU1, loc: 'c', name: 'c' } });
     expect(code(r)).toBe('OWNER_LIMIT_REACHED');
     expect(err(r)!.extensions).toMatchObject({ limitKey: 'nodes', ownerType: 'user', callerCanManageOwner: true, ownerId: u, limit: '2' });
     expect(await db.node.count({ where: { memoryId: mU1, loc: 'c' } })).toBe(0);
@@ -105,7 +105,7 @@ describe('#5015 createNode at the owner\'s nodes limit', () => {
   it('refuses a create at the loc of a tombstone (the revive branch) and leaves the tombstone deleted', async () => {
     const t = await node(mU1, 't', { deletedAt: new Date() });
     defaults({ user: { nodes: 2 } });
-    const r = await gql(CREATE, asU(), { input: { memoryId: mU1, loc: 't', name: 't again' } });
+    const r = await gql(CREATE, asU(), { input: { memoryRef: mU1, loc: 't', name: 't again' } });
     expect(code(r)).toBe('OWNER_LIMIT_REACHED');
     expect((await db.node.findUniqueOrThrow({ where: { id: t.id } })).deletedAt).not.toBeNull();
   });
@@ -113,7 +113,7 @@ describe('#5015 createNode at the owner\'s nodes limit', () => {
   it('succeeds at the cap: an update of an existing node', async () => {
     defaults({ user: { nodes: 2 } });
     const a = await db.node.findFirstOrThrow({ where: { memoryId: mU1, loc: 'a' } });
-    const r = await gql(UPDATE, asU(), { input: { memoryId: mU1, loc: 'a', description: 'edited' } });
+    const r = await gql(UPDATE, asU(), { input: { memoryRef: mU1, loc: 'a', description: 'edited' } });
     expect(r.errors).toBeUndefined();
     expect((await db.node.findUniqueOrThrow({ where: { id: a.id } })).description).toBe('edited');
   });
@@ -122,12 +122,12 @@ describe('#5015 createNode at the owner\'s nodes limit', () => {
     defaults({ user: { nodes: 2 } });
     const a = await db.node.findFirstOrThrow({ where: { memoryId: mU1, loc: 'a' } });
     expect((await gql(DELETE, asU(), { ref: a.id })).errors).toBeUndefined();
-    const r = await gql(CREATE, asU(), { input: { memoryId: mU1, loc: 'c', name: 'c' } });
+    const r = await gql(CREATE, asU(), { input: { memoryRef: mU1, loc: 'c', name: 'c' } });
     expect(r.errors).toBeUndefined();
   });
 
   it('with OWNER_DEFAULT_LIMITS unset, a create is not limited', async () => {
-    const r = await gql(CREATE, asU(), { input: { memoryId: mU1, loc: 'c', name: 'c' } });
+    const r = await gql(CREATE, asU(), { input: { memoryRef: mU1, loc: 'c', name: 'c' } });
     expect(r.errors).toBeUndefined();
   });
 
