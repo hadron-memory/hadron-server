@@ -1,5 +1,6 @@
 import { encryptChatEngineStateWithKey, buildEngineStateIncompleteError } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { softDeleteMemoryAssets } from '../../../lib/asset/memoryDelete.js';
 import { requireOwnerHeadroom } from '../../../lib/ownerLimits/gate.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../../../integrations/github/syncNotAttempted.js';
@@ -1420,10 +1421,13 @@ export const memoryMutations = {
         if (row && row.deleted_at === null) {
           await assertNoMintedCorpusRemoval(tx, resolvedId, 'delete the corpus', { includeTombstones: false });
         }
-        await tx.memory.updateMany({
+        const deletedAt = new Date();
+        const { count } = await tx.memory.updateMany({
           where: { id: resolvedId, deletedAt: null },
-          data: { deletedAt: new Date() },
+          data: { deletedAt },
         });
+        // #5124: the memory's files go with it, at the same instant, so the janitor reclaims them. A re-delete touches nothing.
+        if (count === 1) await softDeleteMemoryAssets(tx, resolvedId, deletedAt);
       });
       return true;
     },
