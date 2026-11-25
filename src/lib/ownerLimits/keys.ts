@@ -99,3 +99,11 @@ export const OWNER_LIMIT_KEY_LIST: readonly OwnerLimitKey[] = Object.keys(OWNER_
 
 export const isOwnerLimitKey = (key: string): key is OwnerLimitKey => Object.hasOwn(OWNER_LIMIT_KEYS, key);
 export const isSettableOwnerLimitKey = (key: string): key is OwnerLimitKey => isOwnerLimitKey(key) && OWNER_LIMIT_KEYS[key].settable;
+
+/**
+ * The row-level form of the `memories` count above (#5016): does a memory of this shape count against its owner? Each creation door
+ * decides from the row it is about to write whether to ask for headroom. A test holds this and the SQL count to the same answer.
+ */
+export function memoryCountsAgainstOwner(m: { class: string; appId: string | null | undefined; isInstallMemory?: boolean | null }): boolean {
+  return m.appId == null && !m.isInstallMemory && ['knowledge', 'group', 'personal', 'private'].includes(m.class);
+}

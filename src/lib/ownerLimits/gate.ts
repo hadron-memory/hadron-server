@@ -6,6 +6,9 @@ import { ownerDefaultLimit } from './defaults.js';
 import { OwnerLimitReachedError } from './errors.js';
 import { OWNER_LIMIT_KEYS, type OwnerLimitKey } from './keys.js';
 
+/** The one comparison the write and the `dryRun` preview share: adding `amount` to `used` would pass `limit`. */
+const exceedsLimit = (used: bigint, amount: bigint, limit: bigint): boolean => used + amount > limit;
+
 /** The `owner_limits` predicate of an owner. */
 export const ownerLimitWhere = (owner: OwnerRef) =>
   'organizationId' in owner ? { organizationId: owner.organizationId } : { ownerUserId: owner.userId };
@@ -62,9 +65,48 @@ export async function requireOwnerHeadroom(
   const limit = await readLimit(tx, owner, key);
   if (limit === null) return;
   const used = await OWNER_LIMIT_KEYS[key].count(tx, owner);
-  if (used + amount > limit) {
+  if (exceedsLimit(used, amount, limit)) {
     throw new OwnerLimitReachedError({ key, owner, limit, callerCanManageOwner: await canManageOwner(tx, owner, caller) });
   }
+}
+
+/**
+ * One door, several keys (#5016): a clone of an Agent adds an Agent and its nodes, a transfer adds a memory and its nodes. Every key
+ * that has a limit is locked FIRST, in resolved hash order (`lockOwnerLimitKeys`), and then checked one by one, so the door takes no
+ * second owner-limit lock after a first. A zero amount is skipped; a key with no limit is neither locked nor counted.
+ */
+export async function requireOwnerHeadroomMany(
+  tx: Prisma.TransactionClient,
+  { owner, checks, caller }: { owner: OwnerRef; checks: ReadonlyArray<{ key: OwnerLimitKey; amount: bigint }>; caller: { userId: string } | null },
+): Promise<void> {
+  const active: Array<{ key: OwnerLimitKey; amount: bigint }> = [];
+  for (const c of checks) {
+    if (c.amount < 0n) throw new Error('requireOwnerHeadroomMany: amount must not be negative');
+    if (c.amount !== 0n && (await readLimit(tx, owner, c.key)) !== null) active.push(c);
+  }
+  if (active.length === 0) return;
+  await lockOwnerLimitKeys(tx, owner, active.map((c) => c.key));
+  for (const c of active) await requireOwnerHeadroom(tx, { owner, key: c.key, amount: c.amount, caller });
+}
+
+/**
+ * What a preview may say (#5016): the refusals a write of these amounts would meet right now, in the caller's own form, WITHOUT a lock
+ * and without writing. The write itself still goes through `requireOwnerHeadroomMany`; this answers a `dryRun` only.
+ */
+export async function ownerHeadroomRefusals(
+  db: Prisma.TransactionClient,
+  { owner, checks, caller }: { owner: OwnerRef; checks: ReadonlyArray<{ key: OwnerLimitKey; amount: bigint }>; caller: { userId: string } | null },
+): Promise<OwnerLimitReachedError[]> {
+  const out: OwnerLimitReachedError[] = [];
+  for (const c of checks) {
+    if (c.amount <= 0n) continue;
+    const limit = await readLimit(db, owner, c.key);
+    if (limit === null) continue;
+    if (exceedsLimit(await OWNER_LIMIT_KEYS[c.key].count(db, owner), c.amount, limit)) {
+      out.push(new OwnerLimitReachedError({ key: c.key, owner, limit, callerCanManageOwner: await canManageOwner(db, owner, caller) }));
+    }
+  }
+  return out;
 }
 
 /** The caller is the limited person, or a live OWNER or ADMIN of the limited organization. A platform role alone does not count. */
