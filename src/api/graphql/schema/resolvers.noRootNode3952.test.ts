@@ -8,7 +8,19 @@ import * as nodeMutations from '../../../controller/operations/createNode.js';
 // display name (createMemory, createAppMemory, createMemoryInApp) no longer do; the memory row, a group's
 // owner row and a knowledge memory's agent grant are still written in the same transaction. A memory that
 // already has a root keeps it (no migration, no data change).
-afterEach(() => vi.restoreAllMocks());
+let failingTable: string | null = null;
+/** A real database failure on the next insert into `table`, so a step AFTER the memory row can be made to fail. */
+const failInsertsInto = async (table: string) => {
+  failingTable = table;
+  await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION fail_insert_3952() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'injected failure 3952'; END $$ LANGUAGE plpgsql`);
+  await db.$executeRawUnsafe(`CREATE TRIGGER fail_insert_3952 BEFORE INSERT ON "${table}" FOR EACH ROW EXECUTE FUNCTION fail_insert_3952()`);
+};
+const stopFailing = async () => {
+  if (!failingTable) return;
+  await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS fail_insert_3952 ON "${failingTable}"`);
+  failingTable = null;
+};
+afterEach(async () => { vi.restoreAllMocks(); await stopFailing(); });
 const M = resolvers.Mutation as any;
 let org: any, admin: any, app: any, agent: any;
 const ctx = (): Context => ({ db, userId: admin.id, roles: ['READER'] });
@@ -65,5 +77,42 @@ describe('#3952 a new memory has no root node', () => {
     const root = await db.node.create({ data: { memoryId: made.id, loc: 'Old 3952', name: 'Old 3952', description: 'Root node for this memory.' } });
     await M.updateMemory({}, { ref: made.id, description: 'edited' }, ctx());
     expect(await nodesOf(made.id)).toMatchObject([{ id: root.id, loc: 'Old 3952' }]);
+  });
+
+  it('a memory that already has a root keeps it through a rename, and through a mint dry run', async () => {
+    const made = await M.createMemory({}, { name: 'Old2 3952', orgRef: org.id }, ctx());
+    const root = await db.node.create({ data: { memoryId: made.id, loc: 'Old2 3952', name: 'Old2 3952', description: 'Root node for this memory.' } });
+    await M.updateMemory({}, { ref: made.id, name: 'Renamed3952' }, ctx());
+    await M.mintMemoryNodes({}, { memoryRef: made.id, dryRun: true }, ctx());
+    expect(await nodesOf(made.id)).toMatchObject([{ id: root.id, loc: 'Old2 3952', deletedAt: null }]);
+  });
+});
+
+// Blind review P2s on #5129: with the root gone, the failure that proves atomicity must come from a step that still
+// runs AFTER the memory row is written. createAppMemory has no such step (the memory row is its only write), so
+// there is nothing to roll back there; createMemory (group owner row) and createMemoryInApp (knowledge agent grant) do.
+describe('#3952 a failure after the memory row rolls everything back, is a server fault, and a retry mints one', () => {
+  it('createMemoryInApp (knowledge): the agent grant fails', async () => {
+    await failInsertsInto('agent_memory_items');
+    const err = await M.createMemoryInApp({}, { appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge', name: 'Atomic3952' }, ctx()).catch((e: any) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.extensions?.code).not.toBe('BAD_USER_INPUT');
+    expect(await db.memory.count()).toBe(0);
+    expect(await db.node.count()).toBe(0);
+    await stopFailing();
+    const made = await M.createMemoryInApp({}, { appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge', name: 'Atomic3952' }, ctx());
+    expect(await db.memory.count()).toBe(1);
+    expect(await db.agentMemoryItem.count({ where: { memoryId: made.id } })).toBe(1);
+  });
+  it('createMemory (group): the owner row fails', async () => {
+    await failInsertsInto('memory_members');
+    const err = await M.createMemory({}, { name: 'AtomicGrp3952', orgRef: org.id, memoryClass: 'group' }, ctx()).catch((e: any) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.extensions?.code).not.toBe('BAD_USER_INPUT');
+    expect(await db.memory.count()).toBe(0);
+    await stopFailing();
+    const made = await M.createMemory({}, { name: 'AtomicGrp3952', orgRef: org.id, memoryClass: 'group' }, ctx());
+    expect(await db.memory.count()).toBe(1);
+    expect(await db.memoryMember.count({ where: { memoryId: made.id } })).toBe(1);
   });
 });

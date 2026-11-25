@@ -101,10 +101,10 @@ for (const door of ['personal', 'organization', 'app', 'installed'] as const) de
     expect(await db.memory.count()).toBe(0); expect(await db.node.count()).toBe(0);
     expect(snapshot()).toEqual(before); noParticipants();
   });
-  it('rolls back both database rows without reading or restoring existing projection bytes', async () => {
+  // #3952: no root node is written, so the database-stage failure is injected at the org-default step, which only
+  // the organization door runs; the other doors have no step after the memory row (the skip is visible, not a pass).
+  it.runIf(door === 'organization')('rolls back the memory without reading or restoring existing projection bytes', async () => {
     const before = snapshot();
-    // #3952: no root node is written, so the database-stage failure is injected at the org-default step (organization door only).
-    if (door !== 'organization') return;
     const fail = vi.spyOn(defaults, 'applyOrgDefaultsAtCreation').mockRejectedValueOnce(new Error('synthetic database-stage failure'));
     try { await expect(create(door, 'other-storage.test:notes')).rejects.toThrow('synthetic database-stage failure'); }
     finally { fail.mockRestore(); }

@@ -64,19 +64,22 @@ for (const door of ['memory', 'installed', 'app'] as const) describe(`database r
   const create = () => door === 'memory' ? M.createMemory({}, { name: `Root-${door}`, orgRef: org.id }, ctx())
     : door === 'app' ? M.createAppMemory({}, { name: `Root-${door}`, appRef: app.id }, ctx())
     : M.createMemoryInApp({}, { name: `Root-${door}`, appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge' }, ctx());
-  it('a later failure rolls back its memory, and a successful retry creates one memory and no root node (#3952)', async () => {
+  it('creates one memory and no root node, and writes no projection (#3952)', async () => {
     const before = await db.memory.count();
-    // No root node is written any more, so the failure is injected at the org-default step (memory door only).
-    if (door === 'memory') {
-      vi.spyOn(defaults, 'applyOrgDefaultsAtCreation').mockRejectedValueOnce(new Error('synthetic database failure'));
-      await expect(create()).rejects.toThrow('synthetic database failure');
-      expect(await db.memory.count()).toBe(before);
-    }
-    expect(await db.node.count()).toBe(0);
     const made = await create();
     expect(await db.memory.findUniqueOrThrow({ where: { id: made.id } })).toMatchObject({ organizationId: org.id });
     expect(await db.memory.count()).toBe(before + 1);
     expect(await db.node.count({ where: { memoryId: made.id } })).toBe(0);
     expect(existsSync(yaml(`Root-${door}`))).toBe(false);
+  });
+  // The failure is injected at the org-default step, which only the memory door runs; the rollback of the other
+  // doors is pinned in resolvers.noRootNode3952.test.ts (agent grant, group owner row).
+  it.runIf(door === 'memory')('a later failure rolls its memory back, and a retry creates exactly one', async () => {
+    const before = await db.memory.count();
+    vi.spyOn(defaults, 'applyOrgDefaultsAtCreation').mockRejectedValueOnce(new Error('synthetic database failure'));
+    await expect(create()).rejects.toThrow('synthetic database failure');
+    expect(await db.memory.count()).toBe(before);
+    await create();
+    expect(await db.memory.count()).toBe(before + 1);
   });
 });

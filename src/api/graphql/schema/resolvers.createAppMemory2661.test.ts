@@ -11,7 +11,6 @@ import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { typeDefs } from './typeDefs.js';
 import { buildSchema, graphql } from 'graphql';
 
-
 afterEach(() => vi.restoreAllMocks());
 const M = resolvers.Mutation as any;
 let org: any, foreign: any, app: any, agent: any;

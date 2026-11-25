@@ -52,6 +52,7 @@ for (const door of ['personal', 'app', 'installed']) {
     });
     it.each(['a..b', 'x.y', 'Has Space', 'ünï', String.raw`back\slash`])('preserves ordinary input %s', async name => {
       const memory = await create(door, name);
+      expect(memory.name).toBe(name); // the name is kept as typed; #3952: no root node is created from it
       expect(await db.node.findMany({ where: { memoryId: memory.id } })).toEqual([]);
       expect(existsSync(join(projection.root, ...name.split(':'), '.node', 'node.yaml'))).toBe(false);
     });

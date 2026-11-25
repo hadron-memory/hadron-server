@@ -1,4 +1,4 @@
-/** #2513: describe new scaffold roots without changing sparse checks or placement. */
+/** #2513 pinned the scaffold root's description; #3952 removed the root, so this file now pins its absence. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -35,7 +35,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: orgId, userId, role: 'ADMIN' } });
 });
 
-describe('createMemory scaffold root (#2513)', () => {
+describe('createMemory makes no scaffold root (#2513, #3952)', () => {
   it('gives a new memory no scaffold root (#3952, R11)', async () => {
     const memory = await createMemory();
     expect(await db.node.findMany({ where: { memoryId: memory.id } })).toEqual([]);

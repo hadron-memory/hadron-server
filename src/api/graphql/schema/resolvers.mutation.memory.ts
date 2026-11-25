@@ -707,9 +707,8 @@ export const memoryMutations = {
         );
       }
 
-      // #2730: the root node's loc is `name`; refuse an unprojectable one here,
-      // after the gates and before ensureUserHandle, the tombstone reclaim or
-      // any create.
+      // #2730: refuse an unprojectable name here, after the gates and before ensureUserHandle,
+      // the tombstone reclaim or any create. Kept by #3952 (no root node is made from the name any more).
       assertMemoryRootLoc(name);
       assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
 
