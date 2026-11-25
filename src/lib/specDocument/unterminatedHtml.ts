@@ -58,7 +58,7 @@ const isAsciiPunct = (c: string | undefined): boolean => c !== undefined && /[!-
  * a quote, a list item, a thematic break or an HTML block of CommonMark's types 1 to 6 (type 7 cannot interrupt a paragraph). A heading is one line, so a span that opens in one ends with it. Where a line only
  * looks like a block start the run is cut short, which means fewer code spans are skipped and more `<` are judged: the safe side.
  */
-/** CommonMark HTML block type 6: the tag names that start a block (the name may be an opening or a closing tag). */
+/** CommonMark HTML block type 6 (spec 0.31): the tag names that start a block (the name may be an opening or a closing tag). */
 const BLOCK6 = 'address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul';
 const BLOCK6_NAMES: ReadonlySet<string> = new Set(BLOCK6.split('|'));
 /** HTML block type 1: the elements whose block runs to a literal end tag. */
@@ -222,7 +222,9 @@ function firstUnterminated(text: string, from: number): number {
 
     if (rawStart !== -1) {
       // Inside an inline raw-text element: the only markup is its own end tag.
-      if (text[i + 1] === '/' && text.slice(i + 2, i + 2 + rawName.length).toLowerCase() === rawName && /[\s>]/.test(text[i + 2 + rawName.length] ?? 'x')) {
+      if (text[i + 1] === '/' && text.slice(i + 2, i + 2 + rawName.length).toLowerCase() === rawName && /[\s/>]/.test(text[i + 2 + rawName.length] ?? 'x')) {
+        // Same rule as at the head of a line: `</name/` is an end tag for a browser and not for the others, so the element stays open.
+        if (text[i + 2 + rawName.length] === '/') return rawStart;
         const end = tagEndOf(text, i, i + 2);
         if (end === -1 || end > tagLimit(i, false)) return rawStart;
         rawStart = -1;
@@ -311,10 +313,13 @@ function firstUnterminated(text: string, from: number): number {
         literal.lastIndex = tagEnd;
         if (!literal.test(text)) return i;
         rawUntil = Math.max(rawUntil, lineEndAt(literal.lastIndex));
-        const closer = new RegExp(`</${name}(?=[\\s>])`, 'gi');
+        const closer = new RegExp(`</${name}(?=[\\s/>])`, 'gi');
         closer.lastIndex = tagEnd;
         const m = closer.exec(text);
         if (!m) return i;
+        // `</name/`: a browser ends the element there, htmlparser2 and CommonMark do not. The readers disagree on where the markup resumes,
+        // so the element is left unterminated rather than guessed.
+        if (text[m.index + 2 + name.length] === '/') return i;
         const end = tagEndOf(text, m.index, m.index + 2);
         if (end === -1) return i;
         i = end;
