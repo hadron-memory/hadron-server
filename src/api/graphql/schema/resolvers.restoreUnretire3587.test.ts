@@ -4,7 +4,7 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createMintMarker } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { snapshotTagsOf } from '../../../lib/restoreUnretireGuard.js';
@@ -106,11 +106,7 @@ describe('#3587 restore refuses to un-retire a minted spec', () => {
 
   it('keys on the node\'s own mint record, never the corpus (an unminted retired spec in a minted corpus restores)', async () => {
     // A mint record elsewhere in the memory (#5063 re-key); 'specs:u' stays unminted.
-    await db.node.create({ data: {
-      id: generateId(), memoryId, loc: 'zz:mint-marker', name: 'zz:mint-marker',
-      content: 'minted elsewhere; tombstoned', role: null, tags: [],
-      mintedAt: MINT, mintedByInfo: 'test', deletedAt: MINT,
-    } });
+    await createMintMarker(db, memoryId, { mintedAt: MINT });
     await mk('specs:u');
     const rev = await save();
     await db.node.updateMany({ where: { memoryId, loc: 'specs:u' }, data: { tags: ['superseded'] } });

@@ -9,7 +9,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { createNodeRevision } from '../lib/nodeRevisionSnapshot.js';
-import { backfillNodeBytes, fillNodeBytesBatch, parseBackfillArgs } from './backfillNodeBytes.js';
+import { backfillNodeBytes, DEADLOCK_RETRIES, fillNodeBytesBatch, parseBackfillArgs, withDeadlockRetry } from './backfillNodeBytes.js';
 
 let memoryId: string;
 let seq = 0;
@@ -236,5 +236,40 @@ describe('#5018 a concurrent revision DELETE or rewrite, which takes no node loc
     await Promise.all([batch, writer]);
     expect((await rows([id]))[0]).toMatchObject(await recomputed(id));
     expect((await rows([id]))[0]!.revision).toBe(3n);
+  });
+});
+
+describe('#5018 a batch that loses a deadlock is run again (BLIND delta P3)', () => {
+  const deadlock = () => Object.assign(new Error('ERROR: deadlock detected'), { code: '40P01' });
+
+  it('retries a deadlock a few times and then succeeds', async () => {
+    let calls = 0;
+    const result = await withDeadlockRetry(async () => { if (++calls <= DEADLOCK_RETRIES) throw deadlock(); return 'done'; });
+    expect(result).toBe('done');
+    expect(calls).toBe(DEADLOCK_RETRIES + 1);
+  });
+
+  it('gives up after the retries, and never retries any other error', async () => {
+    let calls = 0;
+    await expect(withDeadlockRetry(async () => { calls++; throw deadlock(); })).rejects.toThrow('deadlock detected');
+    expect(calls).toBe(DEADLOCK_RETRIES + 1);
+    calls = 0;
+    await expect(withDeadlockRetry(async () => { calls++; throw new Error('boom'); })).rejects.toThrow('boom');
+    expect(calls).toBe(1);
+  });
+
+  it('the job runs a batch again after a deadlock and still ends equal to a recomputation', async () => {
+    const id = await legacy('abc', 2);
+    let thrown = false;
+    const flaky = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === '$transaction') return (...args: unknown[]) => { if (!thrown) { thrown = true; return Promise.reject(deadlock()); } return (target.$transaction as (...a: unknown[]) => unknown)(...args); };
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as typeof db;
+    const report = await backfillNodeBytes(flaky, { apply: true });
+    expect(thrown).toBe(true);
+    expect(report).toMatchObject({ filled: 1, complete: true });
+    expect((await rows([id]))[0]).toMatchObject(await recomputed(id));
   });
 });

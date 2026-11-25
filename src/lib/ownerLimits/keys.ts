@@ -1,11 +1,11 @@
 /**
  * The registry of owner-limit keys (#5009). Adding a measure is one entry here and no schema change. Totals are counted when they are
- * asked for; there is no cache and no stored counter.
+ * asked for. Only `nodes` reads a stored figure (#5078): its answer must equal `countOwnerNodesOnDemand`, the truth.
  */
 import { Prisma } from '../../generated/prisma/index.js';
 import type { OwnerRef } from '../owner.js';
 
-export type OwnerLimitKey = 'nodes' | 'memories' | 'agents' | 'apps' | 'nodeBytes';
+export type OwnerLimitKey = 'nodes' | 'memories' | 'agents' | 'apps' | 'assetBytes' | 'nodeBytes';
 /** What a count needs: the plain client or a transaction. */
 export type OwnerCountDb = Pick<Prisma.TransactionClient, '$queryRaw'>;
 
@@ -28,15 +28,36 @@ async function countOf(db: OwnerCountDb, query: Prisma.Sql): Promise<bigint> {
   return row.n;
 }
 
+/**
+ * Live nodes in every live memory of the owner, of any class, counted from the rows (#5009). A deleted memory keeps its node rows live, so
+ * the memory must be live too. This is the figure the stored one must equal: the fallback, and the reference of every pin.
+ */
+export const countOwnerNodesOnDemand = (db: OwnerCountDb, owner: OwnerRef): Promise<bigint> => countOf(db, Prisma.sql`
+  SELECT count(*) AS n FROM nodes n JOIN memories o ON o.id = n.memory_id
+  WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL AND n.deleted_at IS NULL`);
+
+/**
+ * The same figure from the per-memory totals the triggers on `nodes` keep (#5078). The owner and the memory's liveness are joined here, so
+ * a deleted, transferred or merged memory needs no write to the totals. The pending rows are this transaction's own (a commit folds
+ * them in), so a check inside a writing transaction counts what it already wrote. The stored figure is only an input to this sum
+ * (hrn:node:hadronmemory.com:specs:cor:acl:150:03): never serve it.
+ */
+const countOwnerNodesFromTotals = (db: OwnerCountDb, owner: OwnerRef): Promise<bigint> => countOf(db, Prisma.sql`
+  SELECT COALESCE(sum(f.n), 0)::bigint AS n FROM (
+    SELECT memory_id, live_nodes AS n FROM memory_node_totals
+    UNION ALL SELECT memory_id, delta FROM memory_node_pending
+  ) f JOIN memories o ON o.id = f.memory_id
+  WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL`);
+
+/** Read per call. Only the exact value `on-demand` goes back to counting the rows; anything else reads the totals. */
+const nodesOnDemand = (): boolean => process.env.OWNER_NODE_COUNT_SOURCE === 'on-demand';
+
 /** The order here is the order `ownerLimits` reports. */
 export const OWNER_LIMIT_KEYS: Readonly<Record<OwnerLimitKey, OwnerLimitKeyDef>> = {
-  /** Live nodes in every live memory of the owner, of any class. A deleted memory keeps its node rows live, so the memory must be live too. */
   nodes: {
     unitNoun: { one: 'node', many: 'nodes' },
     settable: true,
-    count: (db, owner) => countOf(db, Prisma.sql`
-      SELECT count(*) AS n FROM nodes n JOIN memories o ON o.id = n.memory_id
-      WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL AND n.deleted_at IS NULL`),
+    count: (db, owner) => (nodesOnDemand() ? countOwnerNodesOnDemand : countOwnerNodesFromTotals)(db, owner),
   },
   /** Free-standing memories of the four user-made classes. A memory inside an App, an install memory and a system memory are free. */
   memories: {
@@ -56,6 +77,21 @@ export const OWNER_LIMIT_KEYS: Readonly<Record<OwnerLimitKey, OwnerLimitKeyDef>>
     unitNoun: { one: 'app', many: 'apps' },
     settable: true,
     count: (db, owner) => countOf(db, Prisma.sql`SELECT count(*) AS n FROM apps o WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL`),
+  },
+  /**
+   * #5017 (A10): the bytes of the owner's files, as a 64-bit sum, counted until they are reclaimed. A file counts while its row is attached
+   * to a memory of the owner and is neither soft-deleted nor BLOCKED; a file still being scanned (PENDING) counts. A soft-deleted MEMORY's
+   * files still count (re-gate on #5017): deleting a memory touches no asset row, so nothing reclaims those bytes, and excluding them would
+   * let an owner cycle the cap by delete-and-refill. A file's own soft delete is excluded, because the janitor reclaims it after its window.
+   * The size is the declared one (capped by the per-file limit), so this is a cap and not an invoice figure. A staged file with no memory
+   * has no owner and counts for nobody.
+   */
+  assetBytes: {
+    unitNoun: { one: 'byte of files', many: 'bytes of files' },
+    settable: true,
+    count: (db, owner) => countOf(db, Prisma.sql`
+      SELECT COALESCE(sum(a.size_bytes), 0)::bigint AS n FROM assets a JOIN memories o ON o.id = a.memory_id
+      WHERE ${ownedBy(owner)} AND a.deleted_at IS NULL AND a.scan_status <> 'BLOCKED'`),
   },
   /**
    * #5018 (Billing A14, hrn:node:hadronmemory.com:specs:cor:dmo:060:18): the recorded size of the owner's nodes, each node's stored bytes

@@ -100,6 +100,24 @@ export async function fillNodeBytesBatch(
   return { ids, filled };
 }
 
+/**
+ * A batch locks its node rows and then their revision rows; a writer that touches a node's revision rows before its node row (the
+ * encryption pass, a bulk history clear on a node that is not measured yet) takes the two in the other order, and Postgres may abort
+ * one of the two as a deadlock victim (40P01). The batch commits nothing until its end, so it is safe to run again: retry it a few times
+ * before giving up. Anything else is not retried.
+ */
+export const DEADLOCK_RETRIES = 3;
+export async function withDeadlockRetry<T>(run: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      const text = `${(error as { code?: string }).code ?? ''} ${(error as { meta?: { code?: string } }).meta?.code ?? ''} ${(error as Error).message ?? ''}`;
+      if (attempt > DEADLOCK_RETRIES || !/40P01|deadlock detected/i.test(text)) throw error;
+    }
+  }
+}
+
 export async function backfillNodeBytes(db: PrismaClient, opts: NodeBytesBackfillOptions = {}): Promise<NodeBytesBackfillReport> {
   const apply = opts.apply === true;
   const batch = Math.max(1, Math.floor(opts.batch ?? DEFAULT_BATCH));
@@ -108,10 +126,10 @@ export async function backfillNodeBytes(db: PrismaClient, opts: NodeBytesBackfil
   let after: string | null = opts.after ?? null;
   let remaining = limit;
   while (remaining > 0) {
-    const step = await db.$transaction(async (tx) => {
+    const step = await withDeadlockRetry(() => db.$transaction(async (tx) => {
       await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${BACKFILL_STATEMENT_TIMEOUT_MS}`);
       return fillNodeBytesBatch(tx, { after, batch: Math.min(batch, remaining), apply });
-    }, { timeout: BACKFILL_STATEMENT_TIMEOUT_MS + 5_000 });
+    }, { timeout: BACKFILL_STATEMENT_TIMEOUT_MS + 5_000 }));
     if (step.ids.length === 0) { report.cursor = null; return report; }
     report.scanned += step.ids.length;
     report.filled += step.filled;

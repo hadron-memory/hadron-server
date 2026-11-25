@@ -9,6 +9,7 @@ import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { lintWarningPage, lintWarningPageForNodeId } from '../../../lib/bootPromptLint.js';
+import { lintSpec } from '../../../lib/specLint.js';
 import { sharedOrganizations } from './sharedOrganizations.js';
 import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
@@ -1328,6 +1329,9 @@ export const typeResolvers = {
       args: { first?: number | null; after?: string | null },
       ctx: Context,
     ) => lintWarningPage(ctx, n, args),
+    /** #5109 — spec content lint: pure on the stored text, under the node's own read gate (the parent resolved it). */
+    specLint: (n: { loc: string; name?: string | null; role?: string | null; tags?: string[] | null; content?: string | null }) =>
+      n.content === undefined ? null : lintSpec({ loc: n.loc, name: n.name, role: n.role, tags: n.tags, content: n.content }),
     /**
      * #2041 — the one place a node's include tags resolve for a reader
      * (cor:dmo:150:03), so every path that reaches `Node.content` is covered

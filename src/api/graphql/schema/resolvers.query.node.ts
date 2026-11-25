@@ -443,6 +443,24 @@ export async function nodeRevisionsScope(ctx: Context, nodeRef: string) {
   return { nodeId, memoryId: node.memoryId, accessible, canRead };
 }
 
+/**
+ * The node-content read gate shared by node(ref:) and nodeExport (#4139,
+ * cor:dmo:150:03 "exports read like any reader"): the caller's accessible
+ * memory list, plus (#3306, cor:acl:010:01) PUBLIC knowledge for a pure App key
+ * or userless run, one named memory at a time. A filter without an `in` list
+ * fails closed.
+ */
+async function nodeReadMemoryAllowed(
+  ctx: Context,
+  access: Awaited<ReturnType<typeof memoryAccessFilter>>,
+  memoryId: string,
+): Promise<boolean> {
+  // memoryAccessFilter always returns an `in` list; any other shape fails CLOSED (#4763 blind P3-1).
+  if (!access.memoryId || typeof access.memoryId !== 'object' || !('in' in access.memoryId)) return false;
+  if ((access.memoryId.in as string[]).includes(memoryId)) return true;
+  return readsPublicKnowledgeWithoutUser(ctx) && (await publicKnowledgeAmong(ctx.db, [memoryId])).has(memoryId);
+}
+
 export const nodeQueries = {
     /** #2046 P5: provenance belongs to a compiled revision, never its latest derived edge. */
     compiledPromptProvenance: async (
@@ -1211,16 +1229,8 @@ export const nodeQueries = {
         incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
       };
       // Denied ≡ not-found (null) — same non-disclosure the old queries had.
-      const allowedByList = (memoryId: string): boolean => {
-        if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
-          return (access.memoryId.in as string[]).includes(memoryId);
-        }
-        return true;
-      };
-      // #3306: a pure App key / userless run also reads PUBLIC knowledge, one named row at a time (no id list).
-      const allowed = async (memoryId: string): Promise<boolean> =>
-        allowedByList(memoryId)
-        || (readsPublicKnowledgeWithoutUser(ctx) && (await publicKnowledgeAmong(ctx.db, [memoryId])).has(memoryId));
+      // #4139: the gate is shared with nodeExport (nodeReadMemoryAllowed).
+      const allowed = (memoryId: string): Promise<boolean> => nodeReadMemoryAllowed(ctx, access, memoryId);
       // Decrypt + (unless raw) compile Mustache templates — shared tail of
       // every dispatch form. Generic so the full node row type flows through.
       const finish = async <T extends { id: string; loc: string; deletedAt: Date | null; content: string | null; data: unknown; memoryId: string }>(
@@ -1407,27 +1417,48 @@ export const nodeQueries = {
       return finish(candidates[0]);
     },
 
-    // #386: render one node to its portable single-node file. Same node-read
-    // gate as nodeById; uses RAW content (the export must round-trip, so it
-    // never template-compiles) and the same unordered edge include the CLI's
-    // nodeBatch uses, so edge order agrees.
+    // #386: render one node to its portable single-node file. #4139: takes a
+    // `ref` (PK or URN, cor:api:140) and applies the SAME node-read gate as
+    // node(ref:) (nodeReadMemoryAllowed). Uses RAW content (the export must
+    // round-trip, so it never template-compiles) and the same ordered edge
+    // include the CLI's nodeBatch uses, so edge order agrees.
     nodeExport: async (
       _: unknown,
-      { id, format, full, sections }: { id: string; format?: NodeExportFormat | null; full?: boolean | null; sections?: NodeExportSection[] | null },
+      { ref, format, full, sections }: { ref: string; format?: NodeExportFormat | null; full?: boolean | null; sections?: NodeExportSection[] | null },
       ctx: Context,
     ) => {
       const access = await memoryAccessFilter(ctx);
+      // Unknown, soft-deleted (resolveNodeRef excludes tombstones, #391) and
+      // concealed-ambiguous refs all raise NODE_NOT_FOUND; a malformed ref
+      // propagates its own typed error (cor:api:140:01/:03).
+      const { id } = await resolveNodeRefForCaller(ctx, ref);
       const node = await ctx.db.node.findUnique({
         where: { id },
         include: { outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() } },
       });
-      // #391: don't export a soft-deleted node (denied ≡ not-found).
-      if (!node || node.deletedAt) throw new GraphQLError('Node not found', { extensions: { code: 'NOT_FOUND' } });
-      if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
-        // Denied and not-found are indistinguishable on purpose (same as nodeById).
-        if (!(access.memoryId.in as string[]).includes(node.memoryId)) {
-          throw new GraphQLError('Node not found', { extensions: { code: 'NOT_FOUND' } });
+      // Denied ≡ not-found, the identical refusal for every shape of miss.
+      if (!node || node.deletedAt || !(await nodeReadMemoryAllowed(ctx, access, node.memoryId))) {
+        throw new NodeNotFoundError(ref);
+      }
+      // #4763 / #781: an edge whose TARGET sits in another memory is shown only when the
+      // caller can read that memory (the Edge.target rule, denied ≡ absent). The export rendered raw
+      // rows, so without this a userless caller reading PUBLIC knowledge would learn the targetId and
+      // targetLoc of an edge into a memory it cannot read.
+      // This makes a partial-access export LOSSY by design: the file omits such edges (and an
+      // edge with no target row — the required, cascading FK makes that shape impossible, so that
+      // guard is defensive). The omission is not destructive on restore: `hadron node import
+      // --with-edges` is additive (it wires the edges the file carries and never deletes an edge
+      // the file lacks — cli internal/cmd/node/import_edges.go wireEdges), so an omitted edge
+      // survives a restore into a memory that still has it.
+      const edgeTargetReadable = new Map<string, boolean>([[node.memoryId, true]]);
+      const exportEdges = [];
+      for (const edge of node.outgoingEdges) {
+        const targetMemoryId = edge.target?.memoryId;
+        if (!targetMemoryId) continue;
+        if (!edgeTargetReadable.has(targetMemoryId)) {
+          edgeTargetReadable.set(targetMemoryId, await nodeReadMemoryAllowed(ctx, access, targetMemoryId));
         }
+        if (edgeTargetReadable.get(targetMemoryId)) exportEdges.push(edge);
       }
       await decryptNodesBatch(ctx.db, [node]);
       // #1061 — an export hands the caller the node's full content, so it is a
@@ -1470,7 +1501,9 @@ export const nodeQueries = {
         isRunnable: node.isRunnable,
         data: node.data,
         properties: node.properties,
-        edges: node.outgoingEdges as unknown as EdgeForGit[],
+        // #4763: the MD/JSON renders carry the READABILITY-filtered edges (the loop
+        // above); the PDF branch below overrides with its own live-and-readable set.
+        edges: exportEdges as unknown as EdgeForGit[],
       };
 
       // PDF is a presentation render produced by the external hadrontool-pdf
@@ -1481,7 +1514,9 @@ export const nodeQueries = {
       if (fmt === 'PDF') {
         // §10 (#395): the Edges section prints a target's loc, so it keeps only targets that are live and in a
         // memory this caller can read (the same readable set the node gate used; #781 gates an edge endpoint on
-        // its own memory). The MD/JSON export prints every outgoing edge and is not changed here.
+        // its own memory). The MD/JSON export (#4763) applies the same #781 readability rule through the edge
+        // loop above, with one deliberate difference: it keeps a SOFT-DELETED target in a readable memory
+        // (the file is a restore artifact), while this presentation section drops it with the dead ones.
         const readableMemoryIds =
           access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId
             ? new Set(access.memoryId.in as string[])

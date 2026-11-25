@@ -322,6 +322,10 @@ export async function searchReplaceInSpecNodes(
 
     const plan = createHash('sha256').update(JSON.stringify({
       memoryId,
+      // Deliberate literal, not read from the memory (#5063 R3, pinned by corpusColumns1613.test.ts C5, which holds a
+      // golden hash of this input): the legacy `Memory.corpusDraft` column is gone from the inputs, but the key stays in
+      // the hashed JSON so a plan previewed before the re-key still applies after it. Changing or dropping it changes
+      // every plan hash and stales all in-flight previews.
       corpusDraft: true,
       selectedIds,
       oldText: input.oldText,
