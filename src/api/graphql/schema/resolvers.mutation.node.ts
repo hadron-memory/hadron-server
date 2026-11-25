@@ -1,3 +1,4 @@
+import { assertMoveWithinSizeLimit, SubtreeMoveTooLargeError } from '../../../lib/moveSizeLimit.js';
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { assertNoGenericMessageSeqWrite } from '../../../lib/legacyMessageSeq.js';
@@ -2632,6 +2633,9 @@ export const nodeMoveOps = {
             // #3031: moving content requires the source read reach again after the authority wait.
             // Match resolveExistingNode's refusal; install-memory audiences remain in their own gate.
             if (await isWriteBeyondRead(tx as never, txCtx, source.memoryId)) throw nodeNotFoundError(sourceRef);
+            // #5128 (cor:api:190:01): an over-limit subtree is refused here, after every gate above (so the count tells a
+            // caller nothing about a subtree they could not move) and before any lock or write.
+            if (!isSameSlot) await assertMoveWithinSizeLimit(tx, source);
             // #1187 — DECLARE the complete key set first, in the one global
             // order: the destination ancestor path AND the source path that
             // `lockSourceForMove` takes further down. Previously those were two
@@ -2741,6 +2745,9 @@ export const nodeMoveOps = {
         }
         if (e instanceof SubtreeMoveIntoSelfError) {
           throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT', loc: e.loc } });
+        }
+        if (e instanceof SubtreeMoveTooLargeError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'MOVE_TOO_LARGE', limit: e.limit, count: e.count } });
         }
         if (e instanceof SubtreeMoveMintedError) {
           throw new GraphQLError(e.message, {
