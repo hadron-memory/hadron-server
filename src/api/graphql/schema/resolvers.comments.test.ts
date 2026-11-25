@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb, createDbWorkerAttribution } from '../../../test/helpers.js';
+import { seedRootNode, cleanDb, createDbWorkerAttribution } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { runAsActor } from '../../../lib/requestActor.js';
@@ -56,6 +56,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
   memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'discussion' }, as());
+  await seedRootNode(db, memory.id, 'discussion');
 });
 
 describe('createComment (cor:dmo:110:01–05)', () => {

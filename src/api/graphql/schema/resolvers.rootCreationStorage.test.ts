@@ -6,7 +6,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import * as locks from '../../../lib/nodeSubtreeLock.js';
+import * as defaults from './resolvers.memoryConfigOrgDefault.js';
 import { memoryLocalPath } from '../../../integrations/github/gitMirrorCheckout.js';
 
 const fixture = await vi.hoisted(async () => {
@@ -91,7 +91,7 @@ for (const door of ['personal', 'organization', 'app', 'installed'] as const) de
     expect(memory).toMatchObject({ name, organizationId });
     expect(memory.urn.startsWith(`${door === 'personal' ? 'storage-person' : org.urn}:`)).toBe(true);
     expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({ name, organizationId });
-    expect(await db.node.findMany({ where: { memoryId: memory.id } })).toMatchObject([{ loc: name, name: name.split(':').at(-1), description: 'Root node for this memory.' }]);
+    expect(await db.node.findMany({ where: { memoryId: memory.id } })).toEqual([]); // #3952: no root node on create
     expect(snapshot()).toEqual(before);
     noParticipants();
   });
@@ -101,9 +101,13 @@ for (const door of ['personal', 'organization', 'app', 'installed'] as const) de
     expect(await db.memory.count()).toBe(0); expect(await db.node.count()).toBe(0);
     expect(snapshot()).toEqual(before); noParticipants();
   });
-  it('rolls back both database rows without reading or restoring existing projection bytes', async () => {
+  // #3952: no root node is written, so the database-stage failure is injected at the org-default step, which only
+  // the organization door runs. The other doors' rollback is pinned in resolvers.noRootNode3952.test.ts: the agent
+  // grant of a knowledge memory in an App, and the group owner row. The personal door and createAppMemory write
+  // nothing after the memory row, so they have no step to fail. The skip is visible, not a pass.
+  it.runIf(door === 'organization')('rolls back the memory without reading or restoring existing projection bytes', async () => {
     const before = snapshot();
-    const fail = vi.spyOn(locks, 'lockLocForWrite').mockRejectedValueOnce(new Error('synthetic database-stage failure'));
+    const fail = vi.spyOn(defaults, 'applyOrgDefaultsAtCreation').mockRejectedValueOnce(new Error('synthetic database-stage failure'));
     try { await expect(create(door, 'other-storage.test:notes')).rejects.toThrow('synthetic database-stage failure'); }
     finally { fail.mockRestore(); }
     expect(await db.memory.count()).toBe(0); expect(await db.node.count()).toBe(0);

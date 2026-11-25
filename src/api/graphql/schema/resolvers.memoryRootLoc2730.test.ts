@@ -5,7 +5,6 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
-import * as rootLocks from '../../../lib/nodeSubtreeLock.js';
 import { resolvers, type Context } from './resolvers.js';
 
 // #2796: this file's projections go to its OWN graph root. The run's root
@@ -95,10 +94,10 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
       expect(graphEntries()).toBe(entries);
     });
     for (const [label, name] of admitted) {
-      it(`still creates a memory and root for ${label}`, async () => {
+      it(`still creates a memory, and no root node (#3952), for ${label}`, async () => {
         const memory = await d().create(name);
         expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({ organizationId: org.id });
-        expect(await db.node.findMany({ where: { memoryId: memory.id } })).toMatchObject([{ loc: name }]);
+        expect(await db.node.findMany({ where: { memoryId: memory.id } })).toEqual([]);
       });
     }
     it('#2796 an entry another worker adds to the shared run root between the snapshots is not residue', async () => {
@@ -115,17 +114,6 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
       expect(code).not.toBe('BAD_USER_INPUT');
       expect(code).toBeDefined();
       expect(await db.memory.count()).toBe(0);
-    });
-    it('still reports a non-input filesystem fault as a server fault', async () => {
-      const rootLock = vi.spyOn(rootLocks, 'lockLocForWrite').mockImplementationOnce(async (tx, memoryId, loc) => {
-        expect(loc).toBe('Fine name');
-        expect(await tx.memory.findUnique({ where: { id: memoryId } })).toMatchObject({ name: 'Fine name' });
-        throw new Error('injected root failure');
-      });
-      const err = await d().create('Fine name').catch(e => e);
-      expect(rootLock).toHaveBeenCalledTimes(1);
-      expect(err.message).toContain('injected root failure');
-      expect(err.extensions?.code).not.toBe('BAD_USER_INPUT');
     });
   });
 }
