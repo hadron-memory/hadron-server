@@ -39,7 +39,7 @@ const THREE = (aBody: string, extra: Partial<DocPart> = {}): DocInput =>
 function expectNextAnchorSurvives(out: string): void {
   for (const id of ['fx-110-b', 'fx-110-c']) {
     const r = probe(out, id);
-    expect(r, id).toMatchObject({ count: 1, tag: 'A', attrs: ['id'], insideAuthored: false });
+    expect({ id: id, ...r }).toMatchObject({ id: id, count: 1, tag: 'A', attrs: ['id'], insideAuthored: false });
   }
   const b = probe(out, 'fx-110-b');
   expect(b.text).toContain('Rule: Second [fx:110:b]');
@@ -260,8 +260,8 @@ describe('escapeUnterminatedHtml', () => {
   it('an unclosed template before another escaped construct is escaped too, and the result is a fixed point', () => {
     for (const body of ['<template><?x>', '<template><!--', '<template> a <b', '<template><![CDATA[x']) {
       const once = escapeUnterminatedHtml(body);
-      expect(once, body).toMatch(/^&lt;template>/);
-      expect(escapeUnterminatedHtml(once), body).toBe(once);
+      expect([body, once]).toEqual([body, expect.stringMatching(/^&lt;template>/)]);
+      expect([body, escapeUnterminatedHtml(once)]).toEqual([body, once]);
     }
   });
   it('a code span never crosses a block boundary: a heading, a fence or a quote ends the paragraph', () => {
@@ -274,7 +274,7 @@ describe('escapeUnterminatedHtml', () => {
       ['a span opened inside a heading line', '## a `b\n<b x=\'\nd` w'],
       ['a CRLF blank line', 'a `x\r\n\r\n<b x=\'\r\ny`'],
     ];
-    for (const [label, body] of cases) expect(escapeUnterminatedHtml(body), label).toBe(body.replace('<b x=', '&lt;b x='));
+    for (const [label, body] of cases) expect([label, escapeUnterminatedHtml(body)]).toEqual([label, body.replace('<b x=', '&lt;b x=')]);
     // One paragraph with no interrupting line is still one span: the construct inside it is code.
     expect(escapeUnterminatedHtml("a `x\n<b x='\ny` w")).toBe("a `x\n<b x='\ny` w");
   });
@@ -283,8 +283,8 @@ describe('escapeUnterminatedHtml', () => {
     for (const [open, inner] of [['<?x', '?>'], ['<![CDATA[x', ']]>'], ['<!-- x', '-->'], ['<!DOCTYPE x', '>'], ['</ x', '>'], ['<b y="', '">']] as const) {
       const out = escapeUnterminatedHtml(FENCED(open, inner));
       // Exactly the opener and the textarea escaped, nothing else.
-      expect(out, open).toBe(FENCED(open, inner).replace('<', '&lt;').replace('<textarea>', '&lt;textarea>'));
-      expect(escapeUnterminatedHtml(out), open).toBe(out);
+      expect([open, out]).toEqual([open, FENCED(open, inner).replace('<', '&lt;').replace('<textarea>', '&lt;textarea>')]);
+      expect([open, escapeUnterminatedHtml(out)]).toEqual([open, out]);
     }
     // At the head of a line the HTML block of type 2 to 5 is not bounded by a block boundary: it runs to its closer.
     expect(escapeUnterminatedHtml('<!-- x\n\n```\n-->')).toBe('<!-- x\n\n```\n-->');
@@ -316,12 +316,12 @@ describe('escapeUnterminatedHtml', () => {
     ['a block tag that is not the first of the list (table)', "a `x\n<table>\n<b x='\ny` w", "a `x\n<table>\n&lt;b x='\ny` w"],
     ['a block end tag (type 6)', "a `x\n</div>\n<b x='\ny` w", "a `x\n</div>\n&lt;b x='\ny` w"],
     ];
-    for (const [label, body, want] of cases) expect(escapeUnterminatedHtml(body), label).toBe(want);
+    for (const [label, body, want] of cases) expect([label, escapeUnterminatedHtml(body)]).toEqual([label, want]);
     // An opener may be indented by one to three spaces; four spaces is a paragraph continuation, not an opener.
     for (const sp of [' ', '  ', '   ']) {
-      expect(escapeUnterminatedHtml(`see \`a\n${sp}<div> b <pre x= \` c`), `${sp.length} spaces`).toBe(`see \`a\n${sp}<div> b &lt;pre x= \` c`);
-      expect(escapeUnterminatedHtml(`see \`a\n${sp}<p> b <b x=' \` c`), `${sp.length} spaces, p`).toBe(`see \`a\n${sp}<p> b &lt;b x=' \` c`);
-      expect(escapeUnterminatedHtml(`a <!-- c\n${sp}<div>\nd --> e`), `${sp.length} spaces, comment cut`).toBe(`a &lt;!-- c\n${sp}<div>\nd --> e`);
+      expect([`${sp.length} spaces`, escapeUnterminatedHtml(`see \`a\n${sp}<div> b <pre x= \` c`)]).toEqual([`${sp.length} spaces`, `see \`a\n${sp}<div> b &lt;pre x= \` c`]);
+      expect([`${sp.length} spaces, p`, escapeUnterminatedHtml(`see \`a\n${sp}<p> b <b x=' \` c`)]).toEqual([`${sp.length} spaces, p`, `see \`a\n${sp}<p> b &lt;b x=' \` c`]);
+      expect([`${sp.length} spaces, comment cut`, escapeUnterminatedHtml(`a <!-- c\n${sp}<div>\nd --> e`)]).toEqual([`${sp.length} spaces, comment cut`, `a &lt;!-- c\n${sp}<div>\nd --> e`]);
     }
     expect(escapeUnterminatedHtml("see `a\n    <div> b <pre x= ` c")).toBe("see `a\n    <div> b <pre x= ` c");
     // An inline tag that is not a block-level name does not end the paragraph (type 7 cannot interrupt one): the span runs on.
@@ -332,7 +332,7 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml(lineHead)).toBe('&lt;script> a </script/> &lt;textarea> c </script> d [link](#x)');
     const inline = 'a <script> b </script/> <textarea> c </script> d';
     expect(escapeUnterminatedHtml(inline)).toBe('a &lt;script> b </script/> &lt;textarea> c </script> d');
-    for (const body of [lineHead, inline]) expect(escapeUnterminatedHtml(escapeUnterminatedHtml(body)), body).toBe(escapeUnterminatedHtml(body));
+    for (const body of [lineHead, inline]) expect([body, escapeUnterminatedHtml(escapeUnterminatedHtml(body))]).toEqual([body, escapeUnterminatedHtml(body)]);
     // The ordinary closers are unchanged.
     expect(escapeUnterminatedHtml('a <script> b </script> c')).toBe('a <script> b </script> c');
     expect(escapeUnterminatedHtml('<script> a </script > b </script>')).toBe('<script> a </script > b </script>');
@@ -381,7 +381,7 @@ describe('escapeUnterminatedHtml', () => {
       '<div>\n  a <!--\n# x\n--> b\n</div>',
       '<p class="a"\n>text</p>',
     ];
-    for (const body of same) expect(escapeUnterminatedHtml(body), body).toBe(body);
+    for (const body of same) expect([body, escapeUnterminatedHtml(body)]).toEqual([body, body]);
     // The block ends at its blank line: a tag that is still open there is unterminated.
     expect(escapeUnterminatedHtml('<div>\n<a href="x\n\n">z')).toBe('<div>\n&lt;a href="x\n\n">z');
     // Outside an HTML block the same tag is inline HTML and a `>` at a line start ends its paragraph.
@@ -398,7 +398,7 @@ describe('escapeUnterminatedHtml', () => {
       ['a setext underline (-)', 'Title\n---\n<b>\n```\n<i x=\n```\nz'],
       ['a link reference definition', '[a]: http://x\n<b>\n```\n<i x=\n```\nz'],
     ];
-    for (const [label, body] of starts) expect(escapeUnterminatedHtml(body), label).toBe(body.replace('<i x=', '&lt;i x='));
+    for (const [label, body] of starts) expect([label, escapeUnterminatedHtml(body)]).toEqual([label, body.replace('<i x=', '&lt;i x=')]);
     // A link reference definition may put its destination on the next line, and its label may hold an escaped bracket.
     expect(escapeUnterminatedHtml('[a]:\n/u\n<b>\nuse `<pre x=` here')).toBe('[a]:\n/u\n<b>\nuse `&lt;pre x=` here');
     expect(escapeUnterminatedHtml('[a\\]b]: /u\n<b>\nuse `<pre x=` here')).toBe('[a\\]b]: /u\n<b>\nuse `&lt;pre x=` here');
@@ -433,7 +433,7 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('> # h\n<b>\n```\n<i x=\n```\nz')).toBe('> # h\n<b>\n```\n&lt;i x=\n```\nz');
     // After a paragraph line (a lazy continuation of a quote or a list item included) a type 7 tag cannot interrupt: the fence is a fence.
     for (const body of ['a\n<b>\n```\n<i x=\n```\nz', '> a\n<b>\n```\n<i x=\n```\nz', '- a\n<b>\n```\n<i x=\n```\nz']) {
-      expect(escapeUnterminatedHtml(body), body).toBe(body);
+      expect([body, escapeUnterminatedHtml(body)]).toEqual([body, body]);
     }
     // The shapes from the review: a span in the raw interior hides nothing.
     expect(escapeUnterminatedHtml('Title\n===\n<span>\nuse `<pre x=` here')).toBe('Title\n===\n<span>\nuse `&lt;pre x=` here');
@@ -473,13 +473,13 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('x <a<b> y')).toBe('x &lt;a<b> y');
     // A CommonMark autolink is not an HTML tag: `=`, `'` and the like are legal in it, and it is left alone.
     for (const body of ['<mailto:a@b.c?subject=hi>', '<irc:chan?x=1>', '<ftp:host?a=b>', '<https://x?q=1>', '<a=b@c.de>', "<o'brien@x.com>", 'see <mailto:a@b.c?s=1> now', '<tel:+1555>', '<urn:isbn:0451450523>']) {
-      expect(escapeUnterminatedHtml(body), body).toBe(body);
+      expect([body, escapeUnterminatedHtml(body)]).toEqual([body, body]);
     }
     // Only a complete autolink is exempt: with a blank in it it is a tag again (named `mailto:a`, complete), and with no closing `>` it is open.
     expect(escapeUnterminatedHtml('<mailto:a b=c>')).toBe('<mailto:a b=c>');
     expect(escapeUnterminatedHtml('<mailto:a@b.c?s=1')).toBe('&lt;mailto:a@b.c?s=1');
     // Names that real pages use are untouched.
-    for (const body of ['x <o:p> y', 'x <svg:rect/> y', 'x <my-element a="b"> y', 'x <h1>t</h1>', 'x <a b="c">d</a>']) expect(escapeUnterminatedHtml(body), body).toBe(body);
+    for (const body of ['x <o:p> y', 'x <svg:rect/> y', 'x <my-element a="b"> y', 'x <h1>t</h1>', 'x <a b="c">d</a>']) expect([body, escapeUnterminatedHtml(body)]).toEqual([body, body]);
   });
   it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag', () => {
     expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');
@@ -505,7 +505,7 @@ describe('escapeUnterminatedHtml', () => {
       const t0 = Date.now();
       expect(escapeUnterminatedHtml(body)).toBe(body);
       // A quadratic scan takes tens of seconds here.
-      expect(Date.now() - t0, unit).toBeLessThan(3000);
+      expect({ unit: unit, fast: Date.now() - t0 < 3000 }).toEqual({ unit: unit, fast: true });
     }
   }, 120_000);
   it('stays linear on thousands of unmatched backtick runs', () => {
