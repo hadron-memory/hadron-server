@@ -114,6 +114,26 @@ describe('#5136 backfill', () => {
     expect(lines.at(-1)).toMatch(/ applied files=1 /);
   });
 
+  it('a memory restored between the batch read and its write keeps its files', async () => {
+    const dead = await mem('dead', new Date());
+    const restored = await mem('restored', new Date());
+    const x = await file(restored.id);
+    const y = await file(dead.id);
+    let first = true;
+    const afterRead = async () => {
+      if (!first) return;
+      first = false;
+      await db.memory.update({ where: { id: restored.id }, data: { deletedAt: null } });
+    };
+    const lines: string[] = [];
+    const code = await main(['--apply'], { env: process.env, log: (l) => lines.push(l), afterRead });
+    expect(code).toBe(0);
+    expect(await at(x.id)).toBeNull();
+    expect(await at(y.id)).not.toBeNull();
+    expect(lines.some((l) => l.includes('raced=1'))).toBe(true);
+    expect(lines.at(-1)).toMatch(/ applied files=1 /);
+  });
+
   it('a failure reports what was stamped so far, never the message', async () => {
     const dead = await mem('dead', new Date());
     await file(dead.id);
