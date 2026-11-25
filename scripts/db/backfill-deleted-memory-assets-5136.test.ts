@@ -94,26 +94,23 @@ describe('#5136 backfill', () => {
     expect(await used()).toBe(0n);
   });
 
-  it('a file or memory that leaves scope between the batch read and its write is not written, and the run still ends', async () => {
+  it('a whole batch that leaves scope between its read and its write writes nothing, and the run still reaches the rows after it', async () => {
     const dead = await mem('dead', new Date());
-    const restored = await mem('restored', new Date());
-    const x = await file(restored.id);
-    const y = await file(dead.id);
-    const z = await file(dead.id);
+    const files = await Promise.all(Array.from({ length: BATCH_SIZE + 1 }, () => file(dead.id)));
     let first = true;
     const afterRead = async () => {
       if (!first) return;
       first = false;
-      await db.memory.update({ where: { id: restored.id }, data: { deletedAt: null } });
-      await db.asset.update({ where: { id: z.id }, data: { scanStatus: 'BLOCKED' } });
+      // The same read the script made: its whole first batch is blocked before the write, so that write counts 0 while a row is still in scope after it.
+      const batch = await db.asset.findMany({ where: { memoryId: dead.id, deletedAt: null }, select: { id: true }, orderBy: { id: 'asc' }, take: BATCH_SIZE });
+      await db.asset.updateMany({ where: { id: { in: batch.map((r) => r.id) } }, data: { scanStatus: 'BLOCKED' } });
     };
     const lines: string[] = [];
     const code = await main(['--apply'], { env: process.env, log: (l) => lines.push(l), afterRead });
     expect(code).toBe(0);
-    expect(await at(x.id)).toBeNull();
-    expect(await at(z.id)).toBeNull();
-    expect(await at(y.id)).not.toBeNull();
-    expect(lines.some((l) => l.includes('raced=2'))).toBe(true);
+    expect(lines.some((l) => l.includes(`rows=0 total=0 raced=${BATCH_SIZE}`))).toBe(true);
+    const stamped = (await Promise.all(files.map((f) => at(f.id)))).filter((d) => d !== null);
+    expect(stamped).toHaveLength(1);
     expect(lines.at(-1)).toMatch(/ applied files=1 /);
   });
 
