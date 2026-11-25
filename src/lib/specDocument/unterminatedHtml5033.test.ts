@@ -394,12 +394,18 @@ describe('escapeUnterminatedHtml', () => {
       ['a closed fence', '```\nc\n```\n<b>\n```\n<i x=\n```\nz'],
       ['indented code', '    code\n<b>\n```\n<i x=\n```\nz'],
       ['a block that has ended', '<!-- c -->\n<b>\n```\n<i x=\n```\nz'],
+      ['a setext underline (=)', 'Title\n===\n<b>\n```\n<i x=\n```\nz'],
+      ['a setext underline (-)', 'Title\n---\n<b>\n```\n<i x=\n```\nz'],
+      ['a link reference definition', '[a]: http://x\n<b>\n```\n<i x=\n```\nz'],
     ];
     for (const [label, body] of starts) expect(escapeUnterminatedHtml(body), label).toBe(body.replace('<i x=', '&lt;i x='));
     // After a paragraph line (a lazy continuation of a quote or a list item included) a type 7 tag cannot interrupt: the fence is a fence.
     for (const body of ['a\n<b>\n```\n<i x=\n```\nz', '> a\n<b>\n```\n<i x=\n```\nz', '- a\n<b>\n```\n<i x=\n```\nz']) {
       expect(escapeUnterminatedHtml(body), body).toBe(body);
     }
+    // The shapes from the review: a span in the raw interior hides nothing.
+    expect(escapeUnterminatedHtml('Title\n===\n<span>\nuse `<pre x=` here')).toBe('Title\n===\n<span>\nuse `&lt;pre x=` here');
+    expect(escapeUnterminatedHtml('[a]: http://x\n<span>\nuse `<pre x=` here')).toBe('[a]: http://x\n<span>\nuse `&lt;pre x=` here');
     // A closed code span cannot hide the interior of such a block.
     expect(escapeUnterminatedHtml('# h\n<b>\n`x\n<script>\ny` z')).toBe('# h\n<b>\n`x\n&lt;script>\ny` z');
   });
