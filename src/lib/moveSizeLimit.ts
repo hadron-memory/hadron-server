@@ -3,21 +3,24 @@
  * with a typed refusal naming N and the subtree's count. N defaults to 5,000 and a deployment may change it. It covers
  * every subtree move, within one memory and across, through GraphQL `moveNode`, `planNodeMove` and MCP `hadron_move_node`.
  *
+ * The count is advisory, not a lock: it runs before the move's key-set locks, so a concurrent insert under the subtree can slip past
+ * it (the move's own work is bounded by the ceiling either way). It is exact because the refusal names the subtree's count.
+ *
  * The check is a bare COUNT, run AFTER the caller's read and write gates (the callers place it there), so it tells a
  * caller nothing about a subtree they could not already move (acceptance 7: no size oracle).
  *
- * `MOVE_NODE_MAX_NODES`: a plain positive integer up to 10,000,000. Anything else (unset, empty, signed, fractional,
+ * `MOVE_NODE_MAX_NODES`: a plain positive integer up to 30,000. The ceiling sits under Postgres's 32,767 bind-variable cap because the rest of the move still binds one id per moved node in single statements (occupant, comment-carry and other lookups): a higher limit would let a move pass the gate and then fail with a raw database message after its locks and reconcile work. Only the edge lookup is chunked (#5128). Anything else (unset, empty, signed, fractional,
  * exponent, hex, zero, above the ceiling) falls back to 5,000, so a typo can neither switch the limit off nor refuse
  * every move. Read per call.
  */
 import type { Prisma } from '../generated/prisma/index.js';
 
 export const MOVE_NODE_MAX_NODES_DEFAULT = 5_000;
-export const MOVE_NODE_MAX_NODES_CEILING = 10_000_000;
+export const MOVE_NODE_MAX_NODES_CEILING = 30_000;
 
 export function moveNodeMaxNodes(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.MOVE_NODE_MAX_NODES;
-  if (raw !== undefined && /^[1-9][0-9]{0,7}$/.test(raw)) {
+  if (raw !== undefined && /^[1-9][0-9]{0,4}$/.test(raw)) {
     const n = Number(raw);
     if (n <= MOVE_NODE_MAX_NODES_CEILING) return n;
   }
@@ -27,7 +30,7 @@ export function moveNodeMaxNodes(env: NodeJS.ProcessEnv = process.env): number {
 /** The subtree to move has more nodes than the deployment's limit. Nothing was written. */
 export class SubtreeMoveTooLargeError extends Error {
   constructor(public readonly limit: number, public readonly count: number) {
-    super(`This move covers ${count} nodes, more than the limit of ${limit} nodes for one move. Nothing was moved. Move it in smaller parts.`);
+    super(`This move covers ${count} nodes, more than the limit of ${limit} nodes for one move (limit ${limit}, count ${count}). Nothing was moved. Move it in smaller parts.`);
     this.name = 'SubtreeMoveTooLargeError';
   }
 }

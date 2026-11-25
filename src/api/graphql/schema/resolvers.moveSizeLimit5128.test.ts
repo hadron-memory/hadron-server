@@ -13,9 +13,10 @@ import type { AuthContext } from '../../../middleware/auth.js';
 import {
   moveNodeMaxNodes,
   MOVE_NODE_MAX_NODES_DEFAULT,
+  MOVE_NODE_MAX_NODES_CEILING,
   assertMoveWithinSizeLimit,
 } from '../../../lib/moveSizeLimit.js';
-import { findLiveEdgesTouching } from '../../../lib/nodeSubtreeMove.js';
+import { findLiveEdgesTouching, EDGE_LOOKUP_CHUNK } from '../../../lib/nodeSubtreeMove.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -61,9 +62,11 @@ describe('the limit setting', () => {
     expect(MOVE_NODE_MAX_NODES_DEFAULT).toBe(5000);
     const at = (v: string | undefined) => moveNodeMaxNodes({ MOVE_NODE_MAX_NODES: v } as NodeJS.ProcessEnv);
     expect(at(undefined)).toBe(5000);
-    for (const bad of ['', '0', '-1', '1.5', '1e3', '0x10', '+7', ' 7', '99999999999']) expect(at(bad)).toBe(5000);
+    for (const bad of ['', '0', '-1', '1.5', '1e3', '0x10', '+7', ' 7', '99999999999', String(MOVE_NODE_MAX_NODES_CEILING + 1)]) expect(at(bad)).toBe(5000);
     expect(at('7')).toBe(7);
-    expect(at('50000')).toBe(50000);
+    // The ceiling stays under Postgres's 32,767 bind cap: the move's other lookups bind one id per node.
+    expect(MOVE_NODE_MAX_NODES_CEILING).toBeLessThan(32_767);
+    expect(at(String(MOVE_NODE_MAX_NODES_CEILING))).toBe(MOVE_NODE_MAX_NODES_CEILING);
   });
 });
 
@@ -133,6 +136,9 @@ describe.each([
     expect(locs).toEqual([[destId, 'moved'], [destId, 'moved:c0']]);
     expect(await db.node.count({ where: { memoryId: destId, loc: { startsWith: 'moved' }, deletedAt: null } })).toBe(5);
     expect(await db.edge.count({ where: { deletedAt: null, OR: [{ sourceId: inner.id }, { targetId: inner.id }] } })).toBe(2);
+    // These edges are authored (the default), so they keep their locs on every move (ruling 0154); both survive, unchanged.
+    const edgeLocs = (await db.edge.findMany({ where: { OR: [{ sourceId: inner.id }, { targetId: inner.id }] }, select: { loc: true } })).map(e => e.loc).sort();
+    expect(edgeLocs).toEqual(['big:c0:ref:outside', 'outside:ref:big:c0']);
   });
 
   it('small moves are unchanged', async () => {
@@ -238,17 +244,17 @@ describe('assertMoveWithinSizeLimit', () => {
 describe('the edge lookup at any size (independent of the limit)', () => {
   const fakeIds = (n: number) => Array.from({ length: n }, () => generateId());
 
-  it('does not hit the bind-variable cap with 40,000 ids', async () => {
-    await expect(findLiveEdgesTouching(db as never, fakeIds(40_000))).resolves.toEqual([]);
+  it('does not hit the bind-variable cap with 40,000 ids (more than 32,767)', async () => {
+    await expect(findLiveEdgesTouching(db as never, fakeIds(4 * EDGE_LOOKUP_CHUNK))).resolves.toEqual([]);
   });
 
   it('finds an edge whose endpoint is in a later chunk, once, even when both endpoints are in different chunks', async () => {
     const a = await createDbNode(db, { memoryId: src.id, loc: 'ea' });
     const b = await createDbNode(db, { memoryId: src.id, loc: 'eb' });
     const edge = await db.edge.create({ data: { id: generateId(), memoryId: src.id, sourceId: a.id, targetId: b.id, loc: 'ea:ref:eb', name: 'ref' } });
-    const ids = [a.id, ...fakeIds(10_000), b.id, ...fakeIds(5)];
+    const ids = [a.id, ...fakeIds(EDGE_LOOKUP_CHUNK), b.id, ...fakeIds(5)];
     const found = await findLiveEdgesTouching(db as never, ids);
     expect(found.map(e => e.id)).toEqual([edge.id]);
-    expect((await findLiveEdgesTouching(db as never, [...fakeIds(10_500), b.id])).map(e => e.id)).toEqual([edge.id]);
+    expect((await findLiveEdgesTouching(db as never, [...fakeIds(EDGE_LOOKUP_CHUNK + 500), b.id])).map(e => e.id)).toEqual([edge.id]);
   });
 });
