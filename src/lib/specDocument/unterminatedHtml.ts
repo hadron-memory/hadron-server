@@ -183,6 +183,7 @@ type LineKind = 'blank' | 'code' | 'nonpara' | 'marker' | 'other';
 function firstUnterminated(text: string, from: number): number {
   const n = text.length;
   let fence: OpenFence | null = null;
+  let fenceContainers: Container[] = [];
   let paraEnd = -1;
   // What the previous line was. 'other' is a line of a paragraph (or anything that a following line can continue); every other kind leaves
   // no paragraph open: after it a four-space line is indented code and a type 7 tag may start an HTML block. 'nonpara' is a heading (ATX, or a setext underline), a
@@ -240,7 +241,10 @@ function firstUnterminated(text: string, from: number): number {
       lineFrom = text.lastIndexOf('\n', j - 1) + 1;
       const nl = text.indexOf('\n', j);
       lineTo = nl === -1 ? n : nl;
-      const c = containersOf(text.slice(lineFrom, lineTo));
+      const line = text.slice(lineFrom, lineTo);
+      // A line inside an HTML block opens no container: it sits in the block's own.
+      const inner = lineFrom > 0 && lineFrom < rawUntil ? contentInside(line, rawContainers) : null;
+      const c = inner === null ? containersOf(line) : { list: rawContainers, at: line.length - inner.length };
       lineContainers = c.list;
       lineContent = lineFrom + c.at;
       let f = lineContent;
@@ -285,10 +289,12 @@ function firstUnterminated(text: string, from: number): number {
   // Whether that block sits in a block quote. Markdown takes the quote markers off and a reader of the raw text does not (a marker is a `>` to
   // it), so a construct there may not run past its line.
   let rawQuoted = false;
+  let rawContainers: Container[] = [];
   const raw = (to: number): void => {
     if (to <= rawUntil) return;
     rawUntil = to;
     rawQuoted = inQuote();
+    rawContainers = lineContainers;
   };
   const rawLimit = (j: number): number => (rawQuoted ? Math.min(rawUntil, lineEndAt(j)) : rawUntil);
   const headLimit = (j: number, blank: boolean): number => (inQuote() ? lineEndAt(j) : containerEnd(j, blank));
@@ -317,8 +323,14 @@ function firstUnterminated(text: string, from: number): number {
       const line = text.slice(i, end);
       // Block quote markers do not change what is code inside them.
       const inner = line.replace(/^ {0,3}(?:> ?)+/, '');
+      const here = containersOf(line);
+      const content = line.slice(here.at);
+      // A fence lives in the containers of the line that opened it, and ends with them.
+      const within = fence === null ? null : contentInside(line, fenceContainers);
+      if (within === null) fence = null;
       const wasOpen = fence !== null;
-      const step = stepFence(inner, fence);
+      const step = stepFence(within ?? content, fence);
+      if (!wasOpen && step.open !== null) fenceContainers = here.list;
       fence = step.open;
       if (step.fenceLine || wasOpen) { prev = 'nonpara'; lrd = 0; i = end + 1; continue; }
       // An indented code block: a line of four spaces or a tab, after a blank line, the start of the text or another such line.
@@ -335,10 +347,10 @@ function firstUnterminated(text: string, from: number): number {
         titleClose = titleOpens(inner);
         lrd = titleClose ? 3 : 0;
       } else {
-        const label = /^ {0,3}\[(?:[^\]\\]|\\.)+\]:([ \t]*)/.exec(inner);
-        titleClose = label && label[0].length !== inner.length ? titleOpens(inner.slice(label[0].length)) : '';
-        lrd = label ? (label[0].length === inner.length ? 1 : titleClose ? 3 : 2) : 0;
-        prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|=+[ \t]*$)/.test(inner) ? 'nonpara' : /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]*$/.test(inner) ? 'marker' : 'other';
+        const label = /^ {0,3}\[(?:[^\]\\]|\\.)+\]:([ \t]*)/.exec(content);
+        titleClose = label && label[0].length !== content.length ? titleOpens(content.slice(label[0].length)) : '';
+        lrd = label ? (label[0].length === content.length ? 1 : titleClose ? 3 : 2) : 0;
+        prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|=+[ \t]*$)/.test(inner) || /^ {0,3}#{1,6}(?:[ \t]|$)/.test(content) ? 'nonpara' : /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]*$/.test(inner) ? 'marker' : 'other';
       }
     }
     const c = text[i];
