@@ -110,7 +110,7 @@ describe('#4096 GraphQL node writes', () => {
   it('searchReplaceInNodes refuses a NUL in newText typed (dry run too), after authorization, leaving every node untouched', async () => {
     await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', content: 'hello world' } }, ctx(admin.id));
     const snap = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'n1' } });
-    const input = (dryRun: boolean) => ({ oldText: 'hello', newText: nul, memoryIds: [memory.id], fields: ['content'], dryRun });
+    const input = (dryRun: boolean) => ({ oldText: 'hello', newText: nul, memoryRefs: [memory.id], fields: ['content'], dryRun });
     await refused(M.searchReplaceInNodes({}, { input: input(false) }, ctx(admin.id)), 'newText');
     await refused(M.searchReplaceInNodes({}, { input: input(true) }, ctx(admin.id)), 'newText');
     expect(await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'n1' } })).toEqual(snap);

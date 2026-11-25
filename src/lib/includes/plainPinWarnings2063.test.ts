@@ -73,15 +73,15 @@ it('GraphQL exposes advice only on committed content writes, never reads/no-op/o
   expect(read.errors).toBeUndefined();
   expect(read.extensions?.warnings).toBeUndefined();
   const omitted = await execute(`mutation($i:UpdateNodeInput!){updateNode(input:$i)${selection}}`,
-    { i: { id: n.id, description: 'changed metadata' } });
+    { i: { ref: n.id, description: 'changed metadata' } });
   expect(omitted.errors).toBeUndefined();
   expect(omitted.extensions?.warnings).toBeUndefined();
   const noop = await execute(`mutation($i:UpdateNodeInput!){updateNode(input:$i)${selection}}`,
-    { i: { id: n.id, content: '{{> target rev=1}}' } });
+    { i: { ref: n.id, content: '{{> target rev=1}}' } });
   expect(noop.errors).toBeUndefined();
   expect(noop.extensions?.warnings).toBeUndefined();
   const refused = await execute(`mutation($i:UpdateNodeInput!){updateNode(input:$i)${selection}}`,
-    { i: { id: n.id, content: '{{> target rev=1}} {{> missing}}' } });
+    { i: { ref: n.id, content: '{{> target rev=1}} {{> missing}}' } });
   expect(refused.errors).toHaveLength(1);
   expect(await db.node.findUniqueOrThrow({ where: { id: n.id } })).toMatchObject({ content: '{{> target rev=1}}' });
   await server.stop();

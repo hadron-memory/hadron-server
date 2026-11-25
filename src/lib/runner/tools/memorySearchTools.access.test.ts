@@ -119,7 +119,7 @@ describe('#632 real principal access matrix', () => {
       const out = await call(c, { query: '  orchard  ', memoryUrn: `hrn:mem:${memories.attached.urn}` });
       expect(out.hits.map(h => h.urn)).toEqual([emitNodeUrnV2(memories.attached.urn, 'attached')]);
       expect(spy).toHaveBeenCalledTimes(1);
-      expect(spy.mock.calls[0][1]).toMatchObject({ query: 'orchard', mode: 'keyword', filter: { memoryIds: [memories.attached.id] }, limit: 10, expand: 0, includeTotal: false });
+      expect(spy.mock.calls[0][1]).toMatchObject({ query: 'orchard', mode: 'keyword', filter: { memoryRefs: [memories.attached.id] }, limit: 10, expand: 0, includeTotal: false });
       expect(spy.mock.calls[0][2]).toMatchObject({ clientId: c.principal.clientId, appId, userId });
       expect(c.log).toHaveBeenCalledTimes(1);
       expect(c.log).toHaveBeenCalledWith('hadron_find_nodes (1 results)');

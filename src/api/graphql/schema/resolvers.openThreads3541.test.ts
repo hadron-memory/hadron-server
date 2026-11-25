@@ -186,7 +186,7 @@ describe('A2: a soft-deleted root never counts as an open thread, on the Prisma 
 describe('A4: Node.commentSummary through a real GraphQL execution', () => {
   const QUERY = `query($f: NodeFilter) { findNodes(filter: $f, limit: 50) { hits { node { loc commentSummary { openThreads resolvedThreads comments oldestOpenThreadAt viewerOpenThreadId } } } } }`;
   const run = async (contextValue: Context) => {
-    const res = await server.executeOperation({ query: QUERY, variables: { f: { memoryIds: [memoryId], locPrefix: 'sum:' } } }, { contextValue });
+    const res = await server.executeOperation({ query: QUERY, variables: { f: { memoryRefs: [memoryId], locPrefix: 'sum:' } } }, { contextValue });
     if (res.body.kind !== 'single') throw new Error('unexpected incremental result');
     expect(res.body.singleResult.errors).toBeUndefined();
     const out = new Map<string, any>();

@@ -104,7 +104,7 @@ describe('request reset', () => {
       return result;
     };
     const id = (first.data as any).createNode.id;
-    const second = await run(UPDATE, { i: { id, description: 'metadata only' } }, c);
+    const second = await run(UPDATE, { i: { ref: id, description: 'metadata only' } }, c);
     expect(second.errors).toBeUndefined();
     expect(second.extensions?.warnings).toBeUndefined();
 
@@ -113,7 +113,7 @@ describe('request reset', () => {
       if (name === 'updateNode') attachIncludePinWarnings(cc, { memoryId }, pin(), undefined, cc, captureIncludePinWarningLifetime(cc));
       return result;
     };
-    const third = await run(UPDATE, { i: { id, description: 'metadata again' } }, c);
+    const third = await run(UPDATE, { i: { ref: id, description: 'metadata again' } }, c);
     expect(third.extensions?.warnings).toEqual([{ path: 'updateNode', ...WARNING }]);
   });
 });
@@ -160,7 +160,7 @@ describe('a field that errors after its write committed, and a rolled-back write
         if (name === 'updateNode') await outerWrite(commit, c);
         return control;
       };
-      const r = await run(UPDATE, { i: { id: control.id, description: `round ${commit}` } });
+      const r = await run(UPDATE, { i: { ref: control.id, description: `round ${commit}` } });
       expect(r.errors).toBeUndefined();
       expect(await db.node.count({ where: { memoryId, loc: 'nested', deletedAt: null } })).toBe(commit ? 1 : 0);
       expect(r.extensions?.warnings).toEqual(commit ? [{ path: 'updateNode', ...WARNING }] : undefined);

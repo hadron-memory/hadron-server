@@ -749,7 +749,7 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
 
 describe('#1417 — known provider ranges bind what a write sets, never a stored row', () => {
   it('create refuses an anthropic temperature above 1; 1 is fine', async () => {
-    const base = { ownerType: 'AGENT', ownerId: agent.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001', apiKey: 'sk-ant-x-1234' };
+    const base = { ownerType: 'AGENT', ownerRef: agent.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001', apiKey: 'sk-ant-x-1234' };
     await expect(resolvers.Mutation.createAiServiceConfig({}, { ...base, name: 'hot', params: { temperature: 1.5 } } as never, ctxFor(admin.id)))
       .rejects.toThrow(/at most 1/);
     await expect(resolvers.Mutation.createAiServiceConfig({}, { ...base, name: 'ok', params: { temperature: 1 } } as never, ctxFor(admin.id)))

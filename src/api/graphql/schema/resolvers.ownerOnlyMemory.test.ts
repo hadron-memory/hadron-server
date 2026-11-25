@@ -365,7 +365,7 @@ describe('private/personal access is owner-only', () => {
       const app = await db.app.create({
         data: { id: generateId(), organizationId: org.id, urn: `micromentor:${memoryClass}-app`, name: `${memoryClass}-app` },
       });
-      const input = { oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] };
+      const input = { oldText: 'cat', newText: 'dog', nodeRefs: [node.id], fields: ['content'] };
       await expect(resolvers.Mutation.searchReplaceInNodes(
         {}, { input } as never, ctx({ userId: admin.id, roles: ['OWNER'], appId: app.id }),
       )).rejects.toThrow();

@@ -236,8 +236,8 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     try {
       for (const input of [
         { memoryRef: node.memoryId, loc: 'prompts:lane', name: 'by-memory-loc' },
-        { id: node.id, name: 'by-id' },
-        { id: nodeUrn, name: 'by-urn' },
+        { ref: node.id, name: 'by-id' },
+        { ref: nodeUrn, name: 'by-urn' },
       ]) {
         const result = await server.executeOperation(
           { query: 'mutation($i:UpdateNodeInput!){updateNode(input:$i){id name content description}}', variables: { i: input } },
