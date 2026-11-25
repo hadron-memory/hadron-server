@@ -55,10 +55,10 @@ const isAsciiPunct = (c: string | undefined): boolean => c !== undefined && /[!-
 /**
  * The end of the inline run that holds `i`: where a code span that opened at `i` can no longer close. A code span never crosses a
  * block boundary, so the run ends at a blank line (also with CRLF) or at a line that starts another block: an ATX heading, a fence,
- * a quote, a list item or a thematic break. A heading is one line, so a span that opens in one ends with it. Where a line only
+ * a quote, a list item, a thematic break or an HTML block of CommonMark's types 1 to 6 (type 7 cannot interrupt a paragraph). A heading is one line, so a span that opens in one ends with it. Where a line only
  * looks like a block start the run is cut short, which means fewer code spans are skipped and more `<` are judged: the safe side.
  */
-const BLOCK_START = /\n(?: {0,3}(?:#{1,6}(?:[ \t\r]|$)|`{3,}|~{3,}|>|[-+*][ \t]+\S|1[.)][ \t]+\S|(?:[-*_][ \t]*){3,}\r?(?:\n|$))|[ \t\r]*\n)/gm;
+const BLOCK_START = /\n(?: {0,3}(?:#{1,6}(?:[ \t\r]|$)|`{3,}|~{3,}|>|[-+*][ \t]+\S|1[.)][ \t]+\S|(?:[-*_][ \t]*){3,}\r?(?:\n|$))|<(?:script|pre|style|textarea)(?:[ \t>\r]|$)|<!--|<\?|<![A-Za-z]|<!\[CDATA\[|<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t>\r]|\/>|$)|[ \t\r]*\n)/gim;
 function paragraphEnd(text: string, i: number): number {
   const lineStart = text.lastIndexOf('\n', i - 1) + 1;
   const eol = text.indexOf('\n', i);
@@ -264,13 +264,13 @@ function firstUnterminated(text: string, from: number): number {
     if (RAW_TEXT.has(name)) {
       if (startsLine(i) && (name === 'script' || name === 'style' || name === 'textarea')) {
         // CommonMark type 1: the block runs raw to the first line that holds an end tag, code or not.
-        const closer = new RegExp(`</${name}(?=[\\s>])`, 'gi');
+        // The block ends at the line that holds `</name>` itself: a partial end tag (`</name ` or `</name` and a newline) ends nothing in
+        // Markdown, and a browser would read one of those as swallowing what follows up to the next `>`, so both readers need the full tag.
+        const closer = new RegExp(`</${name}>`, 'gi');
         closer.lastIndex = tagEnd;
         const m = closer.exec(text);
         if (!m) return i;
-        const end = tagEndOf(text, m.index, m.index + 2);
-        if (end === -1) return i;
-        i = end;
+        i = m.index + name.length + 3;
       } else {
         rawStart = i;
         rawName = name;
