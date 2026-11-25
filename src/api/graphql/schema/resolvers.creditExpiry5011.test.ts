@@ -249,6 +249,8 @@ describe('#5011 creditBalance and grant expiry', () => {
     const counted = new Proxy(db, {
       get(target, key) {
         if (key === 'creditLedgerEntry') return ledger;
+        // The read-only snapshot runs its callback on the counted client (the count, not the isolation, is what this seam pins).
+        if (key === '$transaction') return (fn: (tx: unknown) => unknown) => fn(counted);
         const value = Reflect.get(target, key);
         return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
       },
@@ -285,5 +287,46 @@ describe('#5011 creditBalance and grant expiry', () => {
     expect(res.errors).toBeUndefined();
     expect(c.state.windowReads).toBe(0);
     expect(await settlementCount()).toBe(0);
+  });
+  it('#5100 BLIND P2-1: a read that writes nothing takes its figure from ONE snapshot: a settlement committed between the replay and the sum is not subtracted twice', async () => {
+    const now = await dbNow();
+    const g = await entry('grant', 100, shift(now, -3_600_000), shift(now, -120_000));
+    await entry('debit', 30, shift(now, -1_800_000));
+    // Inside the snapshot, after the replay and just before the stored sum is read, another settler commits the grant's settlement.
+    let raced = false;
+    const snapshotDb = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return (fn: (tx: unknown) => unknown, opts: unknown) =>
+            (target.$transaction as (f: (t: unknown) => unknown, o: unknown) => unknown)((tx) => {
+              const ledger = new Proxy((tx as typeof db).creditLedgerEntry, {
+                get(t, k) {
+                  if (k === 'aggregate') {
+                    return async (args: { where?: { createdAt?: unknown } }) => {
+                      if (args?.where?.createdAt === undefined && !raced) {
+                        raced = true;
+                        await db.creditLedgerEntry.create({
+                          data: { id: generateId(), organizationId: orgId, kind: 'adjustment', amountMicroCents: -70n, sourceType: 'grant-expiry', sourceId: g.id, createdBy: 'system:credit-expiry' },
+                        });
+                      }
+                      return (t.aggregate as (a: unknown) => Promise<unknown>)(args);
+                    };
+                  }
+                  const v = Reflect.get(t, k);
+                  return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+                },
+              });
+              return fn(new Proxy(tx as object, { get: (t2, k2) => (k2 === 'creditLedgerEntry' ? ledger : Reflect.get(t2, k2)) }));
+            }, opts);
+        }
+        const v = Reflect.get(target, key);
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as typeof db;
+    const res = await run(snapshotDb, BALANCE_ONLY, impersonatedCtx());
+    expect(res.errors).toBeUndefined();
+    expect(raced).toBe(true);
+    // 100 granted - 30 debited, the 70 left having expired: 0. Counting the racing settlement twice would answer -70.
+    expect((res.data as { creditBalance: { balanceMicroCents: string } }).creditBalance.balanceMicroCents).toBe('0');
   });
 });

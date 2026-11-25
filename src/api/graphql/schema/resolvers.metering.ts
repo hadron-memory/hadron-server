@@ -232,15 +232,30 @@ export const meteringQueries = {
     const owner = { organizationId: orgId };
     const asOf = await databaseNow(ctx.db);
     // One probe and at most one replay (#5100 items 2, 8): what is settled, what stays unsettled and the `expiring` list all
-    // come from that one read; the stored sum is read after it (see settleAndMeasure).
+    // come from that one read. A writing read settles first and reads the stored sum after it (see settleAndMeasure); a
+    // read that writes nothing (impersonated, or after a failed settlement) takes the probe, the replay and the sum in ONE
+    // REPEATABLE READ snapshot, so a settlement another reader or the sweep commits meanwhile cannot be counted twice.
+    const readOnly = async () =>
+      ctx.db.$transaction(
+        async (tx) => {
+          const m = await settleAndMeasure(tx as unknown as typeof ctx.db, owner, asOf, { write: false });
+          return { measure: m, sum: await creditBalance(tx as unknown as typeof ctx.db, orgId) };
+        },
+        { isolationLevel: 'RepeatableRead' },
+      );
     let measure: CreditMeasure;
-    try {
-      measure = await settleAndMeasure(ctx.db, owner, asOf, { write: !isReadOnlyImpersonation(ctx) });
-    } catch (err) {
-      console.error('credit_expiry.settle_failed', { organizationId: orgId, code: safeErrorCode(err) });
-      measure = await settleAndMeasure(ctx.db, owner, asOf, { write: false });
+    let sum: bigint;
+    if (isReadOnlyImpersonation(ctx)) {
+      ({ measure, sum } = await readOnly());
+    } else {
+      try {
+        measure = await settleAndMeasure(ctx.db, owner, asOf, { write: true });
+        sum = await creditBalance(ctx.db, orgId);
+      } catch (err) {
+        console.error('credit_expiry.settle_failed', { organizationId: orgId, code: safeErrorCode(err) });
+        ({ measure, sum } = await readOnly());
+      }
     }
-    const sum = await creditBalance(ctx.db, orgId);
     return { organizationId: orgId, balanceMicroCents: (sum - measure.unsettled).toString(), asOf, replay: measure.replay };
   },
 

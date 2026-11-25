@@ -31,8 +31,9 @@ export function ownerOfWork(app: OwnedRow | null | undefined, agent: OwnedRow | 
 }
 
 /**
- * #5014 / finding org-xor-owner-null-comparison-bypass: compare owners explicitly by KIND, never by a nullable column, so a
- * person owner can never read as "no organization" (and two persons' null organization columns are never "the same owner").
+ * The rule (finding org-xor-owner-null-comparison-bypass; the person ledger of #5014, A6, implements the comparison):
+ * compare owners explicitly by KIND, never by a nullable column, so a person owner can never read as "no organization" and
+ * two persons' null organization columns are never "the same owner". This file states it; it adds no comparison code.
  * A function that only knows organizations refuses a person with the error below instead of treating it as an absent one.
  *
  * A person owner reached a ledger function that only knows organizations: a programming error, never a refusal.
