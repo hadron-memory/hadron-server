@@ -125,7 +125,7 @@ describe('#5078 the fold at commit', () => {
   });
 
   /** #5126 item 1: the order of a fold's `GROUP BY` is a HashAggregate over random ids, so one set of ids kills a removed `ORDER BY` only
-   *  about half of the time. Each round makes fresh memories (fresh random ids) and the loop makes a miss in every round vanishingly rare. */
+   *  in some runs (SEC10 measured about half). Each round makes fresh memories (fresh random ids) and the loop makes a miss in every round vanishingly rare. */
   it('a fold takes the total rows in memory order, over several fresh sets of memories', async () => {
     let expected = 0n;
     for (let round = 0; round < 12; round++) {
@@ -187,18 +187,24 @@ describe('#5078 the fold at commit', () => {
     await expectExact(3n);
   });
 
-  /** #5126 item 3. Not the limit refusal (cor:acl:150:03 S2): the doors that gate a write run READ COMMITTED. This pins what two SERIALIZABLE
-   *  writers that each read their owner's figure and then write a node in their own memory do today: exactly one commits, the other is aborted.
-   *  (A probe with the owner read removed aborts one as well, so the read is not what conflicts: the pin names the observed outcome, not a cause.) */
-  it('two SERIALIZABLE writers in two memories of one owner, each reading the owner figure first: exactly one commits, the other is aborted', async () => {
+  /** #5126 item 3. Not the limit refusal (cor:acl:150:03 S2): the doors that gate a write run READ COMMITTED. This pins what two concurrent
+   *  SERIALIZABLE node writers in two memories of one owner do today: exactly one commits, the other is aborted with a serialization failure.
+   *  Each also reads the owner's figure first, as a gated door would, but a probe without that read aborts one writer as well, so the pin
+   *  names the observed outcome and no cause. The outcome follows Postgres's serializable predicate locking, so a plan change that stops it
+   *  is a finding to look at, not noise. A writer that fails before the barrier opens it in `finally`, so the other never waits out its timeout. */
+  it('two concurrent SERIALIZABLE node writers in two memories of one owner: exactly one commits, the other is aborted', async () => {
     let ready = 0;
     let go!: () => void;
     const both = new Promise<void>((r) => { go = r; });
     const gatedWrite = (memoryId: string, loc: string) => db.$transaction(async (tx) => {
-      await OWNER_LIMIT_KEYS.nodes.count(tx as typeof db, { organizationId: orgId });
-      await mk(tx, memoryId, loc);
-      if (++ready === 2) go();
-      await both;
+      try {
+        await OWNER_LIMIT_KEYS.nodes.count(tx as typeof db, { organizationId: orgId });
+        await mk(tx, memoryId, loc);
+        if (++ready === 2) go();
+        await both;
+      } finally {
+        go();
+      }
     }, { isolationLevel: 'Serializable', timeout: 30_000 });
     const settled = await Promise.allSettled([gatedWrite(m1, 'g1'), gatedWrite(m2, 'g2')]);
     expect(settled.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
@@ -275,26 +281,35 @@ describe('#5078 the migration and post-push', () => {
 });
 
 /** #5126 item 2: `TRUNCATE nodes CASCADE` is refused by the append-only tables, so the trigger function is exercised through a scratch table that carries the
- *  same trigger; a do-nothing function leaves the figures behind. */
+ *  same trigger; a do-nothing function leaves the figures behind. It all runs in one transaction that is rolled back, so no trigger is disabled and no
+ *  total or pending row outside it is touched; a transaction's own pending rows exist before its commit folds them. */
 describe('#5078 the TRUNCATE trigger', () => {
+  const rolledBack = new Error('rollback');
+  it('is bound to nodes', async () => {
+    const [{ n }] = await db.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM pg_trigger WHERE tgname = 'memory_node_total_truncate' AND tgrelid = 'nodes'::regclass AND tgenabled <> 'D'`;
+    expect(n).toBe(1);
+  });
+
   it('a truncate empties the pending rows and zeroes every total', async () => {
     await mk(db, m1, 'a');
     await mk(db, m2, 'b');
-    await db.$executeRaw`ALTER TABLE memory_node_pending DISABLE TRIGGER memory_node_pending_fold`;
-    try { await mk(db, m1, 'unfolded'); } finally {
-      await db.$executeRaw`ALTER TABLE memory_node_pending ENABLE TRIGGER memory_node_pending_fold`;
-    }
-    expect(await db.memoryNodePending.count()).toBe(1);
-    expect(await db.memoryNodeTotal.count({ where: { liveNodes: { gt: 0 } } })).toBeGreaterThan(0);
-    await db.$executeRawUnsafe('CREATE TABLE scratch_truncate_5126 (id int)');
-    try {
-      await db.$executeRawUnsafe(`CREATE TRIGGER scratch_truncate_5126_trg AFTER TRUNCATE ON scratch_truncate_5126
+    await expect(db.$transaction(async (tx) => {
+      await mk(tx, m1, 'pending');
+      expect(await tx.memoryNodePending.count()).toBe(1);
+      const before = await tx.memoryNodeTotal.findMany();
+      expect(before.length).toBeGreaterThan(0);
+      expect(before.every((t) => t.liveNodes > 0)).toBe(true);
+      await tx.$executeRawUnsafe('CREATE TEMP TABLE scratch_truncate_5126 (id int) ON COMMIT DROP');
+      await tx.$executeRawUnsafe(`CREATE TRIGGER scratch_truncate_5126_trg AFTER TRUNCATE ON scratch_truncate_5126
         FOR EACH STATEMENT EXECUTE FUNCTION hadron_memory_node_total_after_truncate()`);
-      await db.$executeRawUnsafe('TRUNCATE scratch_truncate_5126');
-    } finally {
-      await db.$executeRawUnsafe('DROP TABLE scratch_truncate_5126');
-    }
-    expect(await db.memoryNodePending.count()).toBe(0);
-    expect(await db.memoryNodeTotal.count({ where: { liveNodes: { not: 0 } } })).toBe(0);
+      await tx.$executeRawUnsafe('TRUNCATE scratch_truncate_5126');
+      expect(await tx.memoryNodePending.count()).toBe(0);
+      const after = await tx.memoryNodeTotal.findMany();
+      expect(after).toHaveLength(before.length);
+      expect(after.every((t) => t.liveNodes === 0n)).toBe(true);
+      throw rolledBack;
+    })).rejects.toBe(rolledBack);
+    await expectExact(2n);
   });
 });
