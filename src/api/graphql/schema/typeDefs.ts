@@ -951,7 +951,7 @@ export const typeDefs = `#graphql
     organizationId IS NULL AND the caller owns it. For ALL callers INCLUDING
     platform ADMIN/OWNER (owner scope is never an admin-bypass surface), the
     same intent as AgentFilter.ownedByMe and AppFilter.ownedByMe. Org-less by
-    definition, so orgId is not consulted. App-key callers (no user context)
+    definition, so orgRef is not consulted. App-key callers (no user context)
     and impersonated sessions get an empty page. Powers the portal's
     "My memories".
 
@@ -1003,7 +1003,7 @@ export const typeDefs = `#graphql
     agents: organizationId IS NULL AND ownerUserId = the caller. For ALL
     callers INCLUDING platform ADMIN/OWNER (owner scope is never an
     admin-bypass surface), mirroring the owner-only personal/private memories
-    slice. Org-less by definition, so orgId is not consulted. App-key callers
+    slice. Org-less by definition, so orgRef is not consulted. App-key callers
     (no user context) get an empty page. Powers the portal's "My agents".
     """
     ownedByMe: Boolean
@@ -1029,7 +1029,7 @@ export const typeDefs = `#graphql
     apps: organizationId IS NULL AND ownerUserId = the caller. For ALL callers
     INCLUDING platform ADMIN/OWNER (owner scope is never an admin-bypass
     surface), mirroring the owner-only personal/private memories slice.
-    Org-less by definition, so orgId is not consulted. App-key callers (no
+    Org-less by definition, so orgRef is not consulted. App-key callers (no
     user context) get an empty page. Powers the portal's "My apps".
     """
     ownedByMe: Boolean
@@ -1038,7 +1038,7 @@ export const typeDefs = `#graphql
     join; an App has no separate primary-agent column to match). Accepts an ID
     or a fully-qualified URN. The Agent must be one the caller can read: an
     unreadable, deleted, unresolvable or nonexistent Agent yields an empty page,
-    never a not-found or forbidden error. Combines with ownedByMe and orgId.
+    never a not-found or forbidden error. Combines with ownedByMe and orgRef.
     """
     agentId: ID
   }
@@ -10558,8 +10558,8 @@ export const typeDefs = `#graphql
     (SYSTEM memory class excluded by default; explicit wins). Returns a
     scored-hit envelope. Access-scoped identically to the per-kind node queries.
 
-    orgId (optional) narrows the accessible scope to a single organization the
-    caller is a member of; a non-member orgId returns an empty envelope
+    orgRef (optional) narrows the accessible scope to a single organization the
+    caller is a member of; a non-member orgRef returns an empty envelope
     (total 0, no existence disclosure). Combined with filter.isRunnable: true
     this is the canonical "the caller's runnable task nodes in one org" query
     (there is no separate myTasks surface — a task is simply an isRunnable node).
@@ -10574,14 +10574,14 @@ export const typeDefs = `#graphql
       sortProperty: NodePropertySort
       expand: Int
       granularity: SearchGranularity
-      orgId: ID
+      orgRef: ID
       "#437 — primary page size, default 20 (also null), clamped to 1–200. Expansion neighbors are additional. hrn:node:hadronmemory.com:specs:cor:api:090"
       limit: Int
       "#437 — page offset, default 0 (also null); negative values become 0. No offset ceiling. #2991: in vector and hybrid modes, offset pages are not snapshot-stable while the memory's vector index is filling (an embedding landing between reads can repeat one hit and skip another); callers who need complete, duplicate-free paging use mode: keyword on one memory, ordered score DESC then loc (unique within a memory; across memories, hits with equal score and loc have no defined order). hrn:node:hadronmemory.com:specs:cor:api:090"
       offset: Int
       "Optional absolute relevance floor (cor:api:090 / #497): drop ranked hits whose score is below this value. Scores are NOT comparable across modes, so the meaningful scale differs per mode (keyword ts_rank is roughly 0..a-few; vector cosine similarity is 0..1; hybrid is a small RRF fraction) — pick a floor for the mode in use. Ignored on the no-query browse list (unscored) and never trims expand-neighbours. A floor returns fewer hits, never weaker ones."
       minScore: Float
-      "Spec 049 (D-2026-09-13-002): search under a named scope — a scope id, a bare scope name (needs appRef), 'app' (the App's attached memories; needs appRef), or 'global' (the active organization's view — orgId, or your single membership). The scope's memories are intersected with your access (a lens never grants; the rest is disclosed as scope.droppedCount) and filter.memoryIds narrows WITHIN it. Omitted: the pre-049 behaviour — your accessible set, optionally narrowed by orgId."
+      "Spec 049 (D-2026-09-13-002): search under a named scope — a scope id, a bare scope name (needs appRef), 'app' (the App's attached memories; needs appRef), or 'global' (the active organization's view — orgRef, or your single membership). The scope's memories are intersected with your access (a lens never grants; the rest is disclosed as scope.droppedCount) and filter.memoryIds narrows WITHIN it. Omitted: the pre-049 behaviour — your accessible set, optionally narrowed by orgRef."
       scope: String
       "Spec 049: the App context for a bare scope name or for scope: 'app' (ID or URN)."
       appRef: ID
@@ -10637,12 +10637,12 @@ export const typeDefs = `#graphql
     the caller exactly as the per-kind queries are. Distinct from \`findNodes\`,
     which is the node-only, vector-aware retrieval surface.
 
-    orgId (optional) narrows the org-anchored slices to a single organization:
+    orgRef (optional) narrows the org-anchored slices to a single organization:
     node/memory hits are confined to that org's memories and organization /
     agent / app / aiServiceConfig hits to that org. (The user slice is NOT
     org-scoped — users aren't org-owned; they stay gated by the caller's
     user-visibility as usual.) Omit for the cross-org union (default). A caller
-    who is not a member of orgId gets an empty page (total: 0) — no
+    who is not a member of orgRef gets an empty page (total: 0) — no
     org-existence disclosure; membership-gated for everyone, no admin bypass.
 
     Paged in the repo standard idiom: limit (default 20, capped 200) + offset
@@ -10655,10 +10655,10 @@ export const typeDefs = `#graphql
       query: String!
       entityTypes: [SearchEntityType!]
       fields: [SearchField!]
-      orgId: ID
+      orgRef: ID
       limit: Int
       offset: Int
-      "Spec 049 (D-2026-09-13-002): run the memory + node slices under a named scope — a scope id, a bare name (needs appRef), 'app' (needs appRef), or 'global' (orgId, or your single membership). See findNodes.scope; the result's scope field discloses what applied."
+      "Spec 049 (D-2026-09-13-002): run the memory + node slices under a named scope — a scope id, a bare name (needs appRef), 'app' (needs appRef), or 'global' (orgRef, or your single membership). See findNodes.scope; the result's scope field discloses what applied."
       scope: String
       "Spec 049: the App context for a bare scope name or scope: 'app' (ID or URN)."
       appRef: ID
@@ -10676,11 +10676,11 @@ export const typeDefs = `#graphql
     """
     Uniform paginated edge list (#473). Scope: edges whose (denormalized,
     source-side) memory the caller can read, AND-narrowed by the filter.
-    orgId follows cor:api:100:01 (member -> scope, non-member -> empty page,
+    orgRef follows hrn:node:hadronmemory.com:specs:cor:api:100:01 (member -> scope, non-member -> empty page,
     no disclosure, no admin bypass). Deterministic loc-ascending order
     (id tiebreak); limit default 20 / cap 200; limit: 0 -> count only.
     """
-    edges(filter: EdgeFilter, orgId: ID, limit: Int, offset: Int): EdgesPage!
+    edges(filter: EdgeFilter, orgRef: ID, limit: Int, offset: Int): EdgesPage!
 
     """
     Batch read (spec cor:api:040) — the full node projection (select any Node
@@ -11041,11 +11041,11 @@ export const typeDefs = `#graphql
 
     """
     Uniform paginated admin-impersonation audit list (createdAt-desc).
-    Platform admins may omit orgId (unscoped); everyone else must name an
+    Platform admins may omit orgRef (unscoped); everyone else must name an
     org they are a live ADMIN/OWNER of. filter.activeOnly keeps only
     currently-live sessions. limit default 20 / cap 200.
     """
-    impersonationSessions(orgId: String, filter: ImpersonationSessionFilter, limit: Int, offset: Int): ImpersonationSessionList!
+    impersonationSessions(orgRef: String, filter: ImpersonationSessionFilter, limit: Int, offset: Int): ImpersonationSessionList!
 
     """
     Uniform paginated organization list (#473) — replaces organizations +
@@ -11126,17 +11126,17 @@ export const typeDefs = `#graphql
     (every PUBLIC memory — the old publicMemories). filter.memoryClasses
     restricts to exactly the listed classes; omitted, the noisy agent system
     class is hidden by default (pass it explicitly to surface system
-    memories, e.g. the old orgSystemMemories = orgId + memoryClasses:
+    memories, e.g. the old orgSystemMemories = orgRef + memoryClasses:
     [system]).
 
-    orgId follows cor:api:100:01: member -> the "active organization" view
+    orgRef follows hrn:node:hadronmemory.com:specs:cor:api:100:01: member -> the "active organization" view
     (own personal/private + that org's owned + subscribed memories);
     non-member -> empty page, no existence disclosure, no admin bypass.
 
     Name-ascending order (id tiebreak); limit default 20 / cap 200;
     limit: 0 -> count only.
     """
-    memories(filter: MemoryFilter, orgId: ID, limit: Int, offset: Int): MemoriesPage!
+    memories(filter: MemoryFilter, orgRef: ID, limit: Int, offset: Int): MemoriesPage!
 
     "#772 — the caller's placed dashboard widgets, ordered by position. Empty for a non-user (App-key) caller."
     dashboardWidgets: [DashboardWidget!]!
@@ -11185,14 +11185,14 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    exchangeConnections(orgId: ID!): [ExchangeConnection!]!
+    exchangeConnections(orgRef: ID!): [ExchangeConnection!]!
 
     """
     #2213 — \`exchangeConnections\` as a page: the same admission (org ADMIN/OWNER,
     platform admin) and FORBIDDEN refusal, the same rows and order, with the real
     total. Sizes as \`tickersPage\`.
     """
-    exchangeConnectionsPage(orgId: ID!, limit: Int, offset: Int): ExchangeConnectionPage!
+    exchangeConnectionsPage(orgRef: ID!, limit: Int, offset: Int): ExchangeConnectionPage!
 
     """
     Fetch one Slack connection by id (spec 043). Returns null when the row
@@ -11203,12 +11203,12 @@ export const typeDefs = `#graphql
 
     """
     Uniform paginated Slack-connection list (cor:api:120). Default scope:
-    the caller's member orgs. orgId follows cor:api:100:01 (member -> that
+    the caller's member orgs. orgRef follows hrn:node:hadronmemory.com:specs:cor:api:100:01 (member -> that
     org, non-member -> empty page, no disclosure, no admin bypass).
     Team-name-ascending order (id tiebreak); limit default 20 / cap 200;
     limit: 0 -> count only.
     """
-    slackConnections(orgId: ID, limit: Int, offset: Int): SlackConnectionsPage!
+    slackConnections(orgRef: ID, limit: Int, offset: Int): SlackConnectionsPage!
 
     """
     Fetch one Telegram connection by id (#597). Returns null when the row does
@@ -11219,12 +11219,12 @@ export const typeDefs = `#graphql
 
     """
     Uniform paginated Telegram-connection list (hrn:node:hadronmemory.com:specs:cor:api:120). Default scope:
-    the caller's member orgs. orgId follows hrn:node:hadronmemory.com:specs:cor:api:100:01 (member -> that
+    the caller's member orgs. orgRef follows hrn:node:hadronmemory.com:specs:cor:api:100:01 (member -> that
     org, non-member -> empty page, no disclosure, no admin bypass).
     Bot-username-ascending order (id tiebreak); limit default 20 / cap 200;
     limit: 0 -> count only.
     """
-    telegramConnections(orgId: ID, limit: Int, offset: Int): TelegramConnectionsPage!
+    telegramConnections(orgRef: ID, limit: Int, offset: Int): TelegramConnectionsPage!
 
     """
     Fetch one registered external MCP server by id. Returns null when the
@@ -11235,12 +11235,12 @@ export const typeDefs = `#graphql
 
     """
     Uniform paginated MCP-server list (cor:api:120). Default scope: the
-    caller's member orgs. orgId follows cor:api:100:01 (member -> that
+    caller's member orgs. orgRef follows hrn:node:hadronmemory.com:specs:cor:api:100:01 (member -> that
     org, non-member -> empty page, no disclosure, no admin bypass).
     Slug-ascending order (id tiebreak); limit default 20 / cap 200;
     limit: 0 -> count only.
     """
-    mcpServers(orgId: ID, limit: Int, offset: Int): McpServersPage!
+    mcpServers(orgRef: ID, limit: Int, offset: Int): McpServersPage!
 
     """
     The organization's active page-monitor watches (#1562): what web_poll_list
@@ -11300,18 +11300,18 @@ export const typeDefs = `#graphql
 
     """
     Uniform paginated Home Assistant instance list (cor:api:120). Default
-    scope: the caller's member orgs. orgId follows cor:api:100:01 (member
+    scope: the caller's member orgs. orgRef follows hrn:node:hadronmemory.com:specs:cor:api:100:01 (member
     -> that org, non-member -> empty page, no disclosure, no admin
     bypass). Slug-ascending order (id tiebreak); limit default 20 / cap
     200; limit: 0 -> count only.
     """
-    homeAssistantInstances(orgId: ID, limit: Int, offset: Int): HomeAssistantInstancesPage!
+    homeAssistantInstances(orgRef: ID, limit: Int, offset: Int): HomeAssistantInstancesPage!
 
     "Fetch one sanitized BYO Resend sender config; null for missing or inaccessible."
     resendSender(ref: ID!): ResendSender
 
     "Uniform paginated BYO Resend sender list scoped to the caller's member orgs."
-    resendSenders(orgId: ID, limit: Int, offset: Int): ResendSendersPage!
+    resendSenders(orgRef: ID, limit: Int, offset: Int): ResendSendersPage!
 
     """
     The ops one registered instance exposes (the closed catalog filtered
@@ -11408,16 +11408,16 @@ export const typeDefs = `#graphql
     driveFileExport(connectionRef: ID!, fileId: ID!, format: DriveExportFormat): DriveFileExport!
 
     """
-    Uniform paginated app list (#473) — replaces the org-ADMIN apps(orgId!)
+    Uniform paginated app list (#473) — replaces the org-ADMIN apps(orgRef!)
     and the member myApps. Scope: Apps in the caller's member orgs (App
     doesn't carry a userId, so org membership is the routing); platform
-    ADMIN/OWNER unscoped get every live App. orgId follows cor:api:100:01
+    ADMIN/OWNER unscoped get every live App. orgRef follows hrn:node:hadronmemory.com:specs:cor:api:100:01
     (member -> scope, non-member -> empty page, no disclosure, no admin
     bypass). Name-ascending order (id tiebreak); limit default 20 / cap 200;
     limit: 0 -> count only. filter.ownedByMe (#782) narrows to the caller's own
     user-owned (org-less) Apps for every caller including platform admins.
     """
-    apps(filter: AppFilter, orgId: ID, limit: Int, offset: Int): AppsPage!
+    apps(filter: AppFilter, orgRef: ID, limit: Int, offset: Int): AppsPage!
 
     """
     Fetch an App (member of the App's org, or platform ADMIN — the myApps
@@ -11499,24 +11499,24 @@ export const typeDefs = `#graphql
     included), an App key, an App run, impersonation, a non-member (a platform admin included), a revoked member, a member
     below ADMIN, and an organisation that does not exist are all refused with the same FORBIDDEN.
     """
-    orgBootPromptSigning(org: ID!): OrgBootPromptSigning!
+    orgBootPromptSigning(orgRef: ID!): OrgBootPromptSigning!
     """
     #2973 PR2 / hrn:node:hadronmemory.com:specs:cor:agt:040:09: what switching the organisation's boot-prompt signing on
     would change, paged (first at least 1, default 20, served at 200 when more is asked, hrn:node:hadronmemory.com:specs:cor:api:120:04; after is the previous page's endCursor). The audience and refusals are
     orgBootPromptSigning's.
     """
-    orgBootPromptSigningPreview(org: ID!, first: Int, after: String): BootPromptSigningPreview!
+    orgBootPromptSigningPreview(orgRef: ID!, first: Int, after: String): BootPromptSigningPreview!
 
     """
     Uniform paginated agent list (#473). Scope: Agents owned by the caller's
-    member orgs; platform ADMIN/OWNER unscoped get every live Agent. orgId
+    member orgs; platform ADMIN/OWNER unscoped get every live Agent. orgRef
     follows cor:api:100:01 (member -> scope, non-member -> empty page, no
     disclosure, no admin bypass). filter narrows by type / visibility.
     filter.ownedByMe (#782) narrows to the caller's own user-owned (org-less)
     agents for every caller including platform admins. Name-ascending order
     (id tiebreak); limit default 20 / cap 200; limit: 0 -> count only.
     """
-    agents(filter: AgentFilter, orgId: ID, limit: Int, offset: Int): AgentsPage!
+    agents(filter: AgentFilter, orgRef: ID, limit: Int, offset: Int): AgentsPage!
 
     """
     #551 — the public-agent marketplace slice: every live PUBLIC agent,
@@ -11804,11 +11804,11 @@ export const typeDefs = `#graphql
     """
     Spec 049 Phase 2 — paginated list of the scopes you may read, optionally
     narrowed by owner, by an App's resolution context, by name, and by the
-    cor:api:100:01 orgId (member-gated, no admin bypass; non-member ⇒ empty
+    hrn:node:hadronmemory.com:specs:cor:api:100:01 orgRef (member-gated, no admin bypass; non-member ⇒ empty
     page). Name-ascending (id tiebreak); limit default 20 / cap 200; limit: 0
     ⇒ count only.
     """
-    scopes(filter: ScopeFilter, orgId: ID, limit: Int, offset: Int): ScopesPage!
+    scopes(filter: ScopeFilter, orgRef: ID, limit: Int, offset: Int): ScopesPage!
 
     """
     Spec 049 Phase 2 — explain a scope for YOU. Pass scopeRef, or a bare name
@@ -11832,9 +11832,9 @@ export const typeDefs = `#graphql
     """
     Spec 049 Phase 4 — Channels whose host memory you may read, narrowed by an
     App (its host memories' Channels) or by one memory, and by the cor:api:100:01
-    orgId. Loc-ascending (id tiebreak); limit default 20 / cap 200.
+    orgRef. Loc-ascending (id tiebreak); limit default 20 / cap 200.
     """
-    channels(filter: ChannelFilter, orgId: ID, limit: Int, offset: Int): ChannelsPage!
+    channels(filter: ChannelFilter, orgRef: ID, limit: Int, offset: Int): ChannelsPage!
 
     """
     Spec 049 Phase 5 — one register entry. Null when missing OR when you may
@@ -11845,10 +11845,10 @@ export const typeDefs = `#graphql
     """
     Spec 049 Phase 5 — register entries you may read (§8.6), narrowed by owner
     (an App or an organization), Channel, or attendee (a Worker or an Agent),
-    and by the cor:api:100:01 orgId. A filter naming something foreign returns
+    and by the hrn:node:hadronmemory.com:specs:cor:api:100:01 orgRef. A filter naming something foreign returns
     the same empty page as one naming nothing. Oldest first; limit default 20 / cap 200.
     """
-    registerEntries(filter: RegisterEntryFilter, orgId: ID, limit: Int, offset: Int): RegisterEntriesPage!
+    registerEntries(filter: RegisterEntryFilter, orgRef: ID, limit: Int, offset: Int): RegisterEntriesPage!
 
     """
     Spec 049 Phase 6 — an attendee's RESOLVED register: the rows that apply to
@@ -12375,11 +12375,11 @@ export const typeDefs = `#graphql
     as the per-memory one.
 
     The three tabs of a top-level Assets section are filters over this,
-    not separate queries: mine: true, no filter, and orgId respectively.
+    not separate queries: mine: true, no filter, and orgRef respectively.
     """
     assets(
       filter: AssetFilter
-      orgId:  ID
+      orgRef:  ID
       limit:  Int = 20
       offset: Int = 0
     ): AssetsPage!
@@ -14628,7 +14628,7 @@ export const typeDefs = `#graphql
       visibility: MemoryVisibility
       """
       'knowledge' (default), 'group', or the owner-only 'personal' /
-      'private'. Without orgId, only personal/private are accepted; the
+      'private'. Without orgRef, only personal/private are accepted; the
       knowledge default is refused. 'system' and 'app' are rejected here and
       auto-provision via different code paths.
       """
@@ -16273,7 +16273,7 @@ export const typeDefs = `#graphql
     since changed. That refusal comes only after the audience check. On when already on, with a valid token, succeeds and
     changes nothing. Turning the switch on does not turn on the deployment's signing: read enforced.
     """
-    setOrgBootPromptSigning(org: ID!, required: Boolean!, previewToken: String): OrgBootPromptSigning!
+    setOrgBootPromptSigning(orgRef: ID!, required: Boolean!, previewToken: String): OrgBootPromptSigning!
     """
     #2045 — set or clear a worker's boot-prompt pointer (for customised workers). The node must be compiled and
     sit in the worker's App's install memory for the worker's Agent. Only the App's manager, as themselves;

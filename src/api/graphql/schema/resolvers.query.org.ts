@@ -378,7 +378,7 @@ export const orgQueries = {
         query,
         entityTypes,
         fields,
-        orgId: orgIdArg,
+        orgRef: orgIdArg,
         limit,
         offset,
         scope,
@@ -387,7 +387,7 @@ export const orgQueries = {
         query: string;
         entityTypes?: SearchEntityType[] | null;
         fields?: SearchField[] | null;
-        orgId?: string | null;
+        orgRef?: string | null;
         limit?: number | null;
         offset?: number | null;
         /** Spec 049 Phase 3 — a scope named in the call (see findNodes). */

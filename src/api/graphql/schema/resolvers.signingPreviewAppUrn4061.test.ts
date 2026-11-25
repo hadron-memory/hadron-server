@@ -16,7 +16,7 @@ afterAll(() => api.stop());
 const Q = resolvers.Query!;
 let orgId: string, authorRoot: string, servingRoot: string, appId: string, agentId: string, workerId: string, adminId: string, memberId: string;
 const context = (userId = adminId): Context => ({ db, userId, roles: [] });
-const preview = (ctx = context()) => Q.orgBootPromptSigningPreview!({}, { org: orgId }, ctx) as Promise<any>;
+const preview = (ctx = context()) => Q.orgBootPromptSigningPreview!({}, { orgRef: orgId }, ctx) as Promise<any>;
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -61,7 +61,7 @@ describe('#4061 signing preview appUrn', () => {
 
   it('emits the same bytes over GraphQL', async () => {
     await db.app.update({ where: { id: appId }, data: { urn: `${servingRoot}::team-slug` } });
-    const result = await api.executeOperation({ query: `query($org:ID!){orgBootPromptSigningPreview(org:$org){rows{appUrn}}}`, variables: { org: orgId } }, { contextValue: context() });
+    const result = await api.executeOperation({ query: `query($orgRef:ID!){orgBootPromptSigningPreview(orgRef:$orgRef){rows{appUrn}}}`, variables: { orgRef: orgId } }, { contextValue: context() });
     if (result.body.kind !== 'single') throw new Error('Unexpected incremental result');
     expect(result.body.singleResult.errors).toBeUndefined();
     expect((result.body.singleResult.data as any).orgBootPromptSigningPreview.rows).toEqual([{ appUrn: `hrn:app:${servingRoot}:team-slug` }, { appUrn: `hrn:app:${servingRoot}:team-slug` }]);

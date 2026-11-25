@@ -17,7 +17,7 @@ afterAll(() => api.stop());
 const Q = resolvers.Query!;
 let orgId: string, authorRoot: string, servingRoot: string, appId: string, agentId: string, workerId: string, adminId: string, memberId: string;
 const context = (userId = adminId): Context => ({ db, userId, roles: [] });
-const preview = (ctx = context()) => Q.orgBootPromptSigningPreview!({}, { org: orgId }, ctx) as Promise<any>;
+const preview = (ctx = context()) => Q.orgBootPromptSigningPreview!({}, { orgRef: orgId }, ctx) as Promise<any>;
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -106,7 +106,7 @@ describe('#4054 address-composition diagnostic', () => {
   });
   it('emits one event per computation, not per page or per failed row, and once on the token recheck', async () => {
     await breakAgent(); await breakApp();
-    const result = await api.executeOperation({ query: `query($org:ID!){orgBootPromptSigningPreview(org:$org,first:1){rows{agentUrn workerUrn} hasMore}}`, variables: { org: orgId } }, { contextValue: context() });
+    const result = await api.executeOperation({ query: `query($orgRef:ID!){orgBootPromptSigningPreview(orgRef:$orgRef,first:1){rows{agentUrn workerUrn} hasMore}}`, variables: { orgRef: orgId } }, { contextValue: context() });
     if (result.body.kind !== 'single') throw new Error('incremental');
     expect(result.body.singleResult.errors).toBeUndefined();
     expect(events()).toHaveLength(1);
