@@ -287,14 +287,14 @@ describe('#5131 install-concealment field drift pin', () => {
     expect(dbAccesses).not.toEqual([]);
   });
 
-  it('12. the only KEEPS field with an explicit resolver is Node.revision, whose reconcile is the documented follow-up', () => {
+  it('12. the only KEEPS field with an explicit resolver is Node.revision, whose non-reader path is pinned in installMemoryConcealedRevision5131.test.ts', () => {
     // The carried fields are safe because the sparse parent carries them — UNLESS a field
     // gains an explicit resolver that re-reads the live row, the way indexTruncated did.
     // This pin enumerates the wrap: a NEW explicit resolver on a KEEPS field turns this
-    // red and must be moved to a reviewed bucket with a reason and a no-query proof (or,
-    // like Node.revision, carry a recorded ruling). Node.revision's reconcile
-    // (withReconciledNodeRead) answers the counter the writer just supplied on a write
-    // response; its redundant cost is the follow-up recorded on the PR.
+    // red and must be moved to a reviewed bucket with a reason and a no-query proof.
+    // Node.revision's proof needs a real database (its read gate is the memory's access
+    // predicate), so it lives in installMemoryConcealedRevision5131.test.ts: on a concealed
+    // parent it answers the carried revSeq with no node-row read, row lock or reconcile.
     const nodeResolvers = resolvers.Node as Record<string, unknown>;
     const withResolvers = CONCEALED_NODE_KEEPS.filter((k) => typeof nodeResolvers[k] === 'function');
     expect(withResolvers).toEqual(['revision']);
