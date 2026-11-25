@@ -83,7 +83,7 @@ describe('#1174 — the not-found is in the code, not only in the message', () =
     // #5168: the ref is not relayed (it was, as `extensions.ref`): the caller's own text, possibly a pasted secret.
     expect(err!.extensions?.ref).toBeUndefined();
     // #5168: the message keeps its code prefix and no longer quotes the ref.
-    expect(err!.message).toBe('ORGANIZATION_NOT_FOUND: no match for the given ref.');
+    expect(err!.message).toBe('ORGANIZATION_NOT_FOUND: nothing found for the given ref.');
   });
 
   it('the siblings still answer a bare null, because THAT is their contract', async () => {

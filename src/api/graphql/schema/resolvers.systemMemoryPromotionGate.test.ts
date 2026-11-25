@@ -168,7 +168,7 @@ describe('fixture', () => {
 describe('createAgent(systemMemoryId)', () => {
   it('an org ADMIN who cannot read a member\'s holding cannot promote it', async () => {
     const err = await refusal(M.createAgent({}, { orgRef: org.id, name: 'B', systemMemoryRef: holding.id }, userCtx(admin.id)));
-    expect(JSON.parse(wire(err, holding.id))).toEqual({ message: 'MEMORY_NOT_FOUND: no match for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } });
+    expect(JSON.parse(wire(err, holding.id))).toEqual({ message: 'MEMORY_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } });
     await expectUnpromoted(holding.id);
   });
 
@@ -189,7 +189,7 @@ describe('createAgent(systemMemoryId)', () => {
       answers.push(wire(await refusal(M.createAgent({}, { orgRef: org.id, name: 'B', systemMemoryRef: target }, userCtx(admin.id))), target));
     }
     expect(new Set(answers).size).toBe(1);
-    expect(JSON.parse(answers[0]!)).toEqual({ message: 'MEMORY_NOT_FOUND: no match for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } });
+    expect(JSON.parse(answers[0]!)).toEqual({ message: 'MEMORY_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } });
   });
 
   it('CONTROL: a readable plain org memory is still promoted', async () => {
@@ -206,7 +206,7 @@ describe('updateAgent(systemMemoryId) first attach', () => {
   it('pre-lock site: an org ADMIN who cannot read a member\'s holding cannot attach it', async () => {
     const c = await brainlessAgent('C');
     const err = await refusal(M.updateAgent({}, { ref: c.id, systemMemoryRef: holding.id }, userCtx(admin.id)));
-    expect(JSON.parse(wire(err, holding.id))).toEqual({ message: 'MEMORY_NOT_FOUND: no match for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } });
+    expect(JSON.parse(wire(err, holding.id))).toEqual({ message: 'MEMORY_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } });
     await expectUnpromoted(holding.id);
   });
 
@@ -241,7 +241,7 @@ describe('updateAgent(systemMemoryId) first attach', () => {
       answers.push(wire(await refusal(M.updateAgent({}, { ref: c.id, systemMemoryRef: target }, userCtx(admin.id))), target));
     }
     expect(new Set(answers).size).toBe(1);
-    expect(JSON.parse(answers[0]!)).toEqual({ message: 'MEMORY_NOT_FOUND: no match for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } });
+    expect(JSON.parse(answers[0]!)).toEqual({ message: 'MEMORY_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } });
   });
 
   it('CONTROL: a readable plain org memory is still attached', async () => {
@@ -433,7 +433,7 @@ describe('a promotion target whose owner moves before the anchors are held (priv
   let orgB: { id: string };
   let orgC: { id: string };
   let foreignOwner: { id: string }; // OWNER of B and C; the caller is in neither
-  const NOT_FOUND = { message: 'MEMORY_NOT_FOUND: no match for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } };
+  const NOT_FOUND = { message: 'MEMORY_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } };
 
   beforeEach(async () => {
     const s = generateId().toLowerCase();

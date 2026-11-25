@@ -429,7 +429,7 @@ describe('cloneMemory', () => {
     // Forbidden that would confirm the memory exists.
     await expect(
       resolvers.Mutation.cloneMemory({}, { ref: personal.id, targetUrn: 'org-a::notes-2' }, adminCtx()),
-    ).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
+    ).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
 
     const clone = await resolvers.Mutation.cloneMemory(
       {},

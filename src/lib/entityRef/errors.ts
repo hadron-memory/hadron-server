@@ -164,8 +164,9 @@ export class NodeRevisionNotFoundError extends EntityNotFoundError {
  * of silently writing to `pending_edges` (issue #105).
  */
 export class NodeNotFoundError extends EntityNotFoundError {
-  constructor(ref: string) {
-    super('NODE_NOT_FOUND', ref);
+  /** `detail`: server-authored context for the message (#5168), never the caller's ref. */
+  constructor(ref: string, detail?: string) {
+    super('NODE_NOT_FOUND', ref, detail);
     this.name = 'NodeNotFoundError';
   }
 }

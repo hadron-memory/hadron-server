@@ -254,7 +254,7 @@ describe('EntityNotFoundError → its own code on the wire (#1174)', () => {
 
   it('the MESSAGE keeps the code as its prefix and no longer quotes the ref (#5168)', () => {
     expect(format(new OrganizationNotFoundError('nosuch.example')).message).toBe(
-      'ORGANIZATION_NOT_FOUND: no match for the given ref.',
+      'ORGANIZATION_NOT_FOUND: nothing found for the given ref.',
     );
   });
 

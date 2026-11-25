@@ -492,7 +492,7 @@ describe('Mutation.replaceSubtree retirement (#454)', () => {
     await expect(resolvers.Mutation.replaceSubtree(
       null, { ownerRepo: 'org-b/repo', memoryId: graphB.id, nodes: [], edges: [] },
       ctx({ appId: appContributor.id, userId: appMember.id }),
-    )).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
+    )).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
   });
 });
 

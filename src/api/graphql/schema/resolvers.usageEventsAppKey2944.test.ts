@@ -181,8 +181,8 @@ describe('#2944 items 2 and 4: whoever manages the App sees K in the memories th
   it('naming a memory narrows; an unreadable one answers MEMORY_NOT_FOUND exactly as a missing one', async () => {
     expect(ids(await list({ appKey: keyK, memoryRef: memA.id }, asUser(mgr)))).toEqual([kInA]);
     const missing = generateId();
-    await expect(list({ appKey: keyK, memoryRef: memB.id }, asUser(mgr))).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
-    await expect(list({ appKey: keyK, memoryRef: missing }, asUser(mgr))).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
+    await expect(list({ appKey: keyK, memoryRef: memB.id }, asUser(mgr))).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
+    await expect(list({ appKey: keyK, memoryRef: missing }, asUser(mgr))).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
   });
 
   it('the window composes with the key filter', async () => {
@@ -266,7 +266,7 @@ describe('#2944 blind P3 (#3714): nodeId and loc follow the same key rules as me
     for (const [, run] of surfaces) {
       const unreadable = await outcomeAs(run, { appKey: keyK, memoryRef: memB.id }, asKey(keyK), memB.id);
       expect(unreadable).toEqual(await outcomeAs(run, { appKey: keyK, memoryRef: missing }, asKey(keyK), missing));
-      expect(unreadable).toEqual({ error: 'MEMORY_NOT_FOUND: no match for the given ref.', code: 'MEMORY_NOT_FOUND' });
+      expect(unreadable).toEqual({ error: 'MEMORY_NOT_FOUND: nothing found for the given ref.', code: 'MEMORY_NOT_FOUND' });
       expect(unreadable).not.toHaveProperty('rows');
     }
   });

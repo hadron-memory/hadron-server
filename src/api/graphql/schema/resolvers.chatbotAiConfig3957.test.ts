@@ -224,10 +224,12 @@ describe('chatAiConfigChoices', () => {
   it('a non-member gets exactly the answer a missing App gets', async () => {
     const a = await Q.chatAiConfigChoices(null, { appRef: app.id }, ctx(outsider)).catch((e: any) => e);
     const b = await Q.chatAiConfigChoices(null, { appRef: generateId() }, ctx(outsider)).catch((e: any) => e);
-    const strip = (e: Error, id: string) => `${e.name}|${e.message.split(id).join('<ref>')}`;
+    // #5168: the refusal no longer quotes the ref, so the two compare whole, with nothing to strip.
+    const whole = (e: Error) => `${e.name}|${e.message}`;
     expect(a).toBeInstanceOf(Error);
     expect(a.name).toBe('AppNotFoundError');
-    expect(strip(a, app.id)).toBe(strip(b, (b.message.match(/[A-Za-z0-9]{20,}/) ?? [''])[0]));
+    expect(whole(a)).toBe(whole(b));
+    expect(a.message).not.toContain(app.id);
   });
 });
 

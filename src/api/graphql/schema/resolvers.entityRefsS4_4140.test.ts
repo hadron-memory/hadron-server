@@ -148,7 +148,7 @@ describe('#4140 createAgent(orgRef, systemMemoryRef)', () => {
     for (const r of refs) {
       const e = await refusal(M.createAgent({}, { orgRef: orgA.id, name: 'X', systemMemoryRef: r }, ctxOf(admin.id)));
       expect(codeOf(e)).toBe('MEMORY_NOT_FOUND');
-      expect(e.message).toBe('MEMORY_NOT_FOUND: no match for the given ref.');
+      expect(e.message).toBe('MEMORY_NOT_FOUND: nothing found for the given ref.');
       expect(e.message).not.toContain(hidden.id);
       answers.push(e.message.replace(r, '<ref>'));
     }
@@ -206,7 +206,7 @@ describe('#4140 updateAgent(systemMemoryRef)', () => {
     for (const r of [hidden.urn, gone.urn, `${orgA.urn}:never-existed`]) {
       const e = await refusal(M.updateAgent({}, { ref: a.id, systemMemoryRef: r }, ctxOf(admin.id)));
       expect(codeOf(e)).toBe('MEMORY_NOT_FOUND');
-      expect(e.message).toBe('MEMORY_NOT_FOUND: no match for the given ref.');
+      expect(e.message).toBe('MEMORY_NOT_FOUND: nothing found for the given ref.');
     }
   });
   it('first attach on a USER-owned agent is the owner\'s act BEFORE resolution: an admitted platform ADMIN sees the exact FORBIDDEN for existing, missing and relative refs', async () => {
@@ -253,7 +253,7 @@ describe('#4140 LOCAL F1: an unreadable AMBIGUOUS legacy alias is indistinguisha
     const without = await refusal(M.createAgent({}, { orgRef: orgA.id, name: 'Amb', systemMemoryRef: claim }, ctxOf(admin.id)));
     expect(codeOf(withAlias)).toBe('MEMORY_NOT_FOUND');
     expect(withAlias.message).toBe(without.message);
-    expect(withAlias.message).toBe('MEMORY_NOT_FOUND: no match for the given ref.');
+    expect(withAlias.message).toBe('MEMORY_NOT_FOUND: nothing found for the given ref.');
   });
   it('updateAgent first attach: same answer with and without the foreign aliases', async () => {
     const a = await brainless('AmbAttach');

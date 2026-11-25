@@ -63,7 +63,7 @@ describe('#5168: GraphQL formatter legs', () => {
     const out = wire(new OrganizationNotFoundError(SECRET));
     expect(out.extensions).toMatchObject({ code: 'ORGANIZATION_NOT_FOUND' });
     expect(out.extensions).not.toHaveProperty('ref');
-    expect(out.message).toBe('ORGANIZATION_NOT_FOUND: no match for the given ref.');
+    expect(out.message).toBe('ORGANIZATION_NOT_FOUND: nothing found for the given ref.');
   });
 
   it('an ambiguous legacy URN: its code, no offendingValue, no value', () => {

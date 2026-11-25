@@ -64,7 +64,7 @@ const MUTATIONS = SURFACES.filter(([s]) => s !== 'Query.agent');
  */
 const absentAnswer = (surface: string, _ref: string): Answer => surface === 'Query.agent'
   ? { data: null, error: null }
-  : { data: null, error: { message: 'AGENT_NOT_FOUND: no match for the given ref.', extensions: { code: 'AGENT_NOT_FOUND' } } };
+  : { data: null, error: { message: 'AGENT_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'AGENT_NOT_FOUND' } } };
 
 let orgA: { id: string; urn: string };
 let orgB: { id: string; urn: string };

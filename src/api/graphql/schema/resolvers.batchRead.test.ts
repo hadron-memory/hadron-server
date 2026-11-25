@@ -196,8 +196,8 @@ describe('nodeBatch — prefix subtree', () => {
   // FORBIDDEN this used to pin disclosed that the memory exists.
   it('throws on a memory the caller cannot read, indistinguishably from a missing one', async () => {
     const missing = generateId();
-    await expect(nodeBatch({ memory: pmem.id, locPrefix: '' })).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
-    await expect(nodeBatch({ memory: missing, locPrefix: '' })).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
+    await expect(nodeBatch({ memory: pmem.id, locPrefix: '' })).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
+    await expect(nodeBatch({ memory: missing, locPrefix: '' })).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
   });
 });
 

@@ -312,7 +312,7 @@ describe('#3359 implicit asking Agent membership (ruling 0120)', () => {
     const wrap = kind === 'worker' ? asWorker : asRun;
     const named = await wireRefusal(index({ agentRef: agentUrn(outside) }));
     // #5168: the refusal no longer quotes the named URN; byte-identity with the named form still holds.
-    expect(JSON.parse(named)).toMatchObject({ message: 'AGENT_NOT_FOUND: no match for the given ref.', extensions: { code: 'AGENT_NOT_FOUND' } });
+    expect(JSON.parse(named)).toMatchObject({ message: 'AGENT_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'AGENT_NOT_FOUND' } });
     expect(await wireRefusal(wrap(outside.id, implicit))).toBe(named);
   });
 
@@ -451,7 +451,7 @@ describe('#3365 implicit asking Agent readability (ruling 0122)', () => {
     // Membership remains valid: this must exercise liveness, not the membership gate.
     await db.agent.update({ where: { id: coder.id }, data: { deletedAt: new Date() } });
     const named = await wire(index({ agentRef: agentUrn(coder) }));
-    expect(JSON.parse(named)).toMatchObject({ message: 'AGENT_NOT_FOUND: no match for the given ref.', extensions: { code: 'AGENT_NOT_FOUND' } });
+    expect(JSON.parse(named)).toMatchObject({ message: 'AGENT_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'AGENT_NOT_FOUND' } });
     expect(await wire((kind === 'worker' ? asWorker : asRun)(coder.id, implicit))).toBe(named);
   });
 
@@ -484,7 +484,7 @@ describe('#3365 implicit asking Agent readability (ruling 0122)', () => {
     try {
       const result = await wire(asRun(missing, implicit));
       expect(JSON.parse(result)).toEqual({
-        message: 'AGENT_NOT_FOUND: no match for the given ref.', extensions: { code: 'AGENT_NOT_FOUND'},
+        message: 'AGENT_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'AGENT_NOT_FOUND'},
       });
       expect(result).not.toContain(missing);
       expect(JSON.stringify(logs.flatMap((spy) => spy.mock.calls))).not.toContain(missing);

@@ -932,7 +932,7 @@ describe('deleteMemory (spec 013)', () => {
       // named its class.
       await expect(
         resolvers.Mutation.deleteMemory({}, { ref: personalMemory.id }, adminCtx()),
-      ).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
+      ).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
       const after = await db.memory.findUniqueOrThrow({
         where: { id: personalMemory.id },
       });
@@ -946,7 +946,7 @@ describe('deleteMemory (spec 013)', () => {
           { ref: personalMemory.id },
           { db, userId: nonOwner.id },
         ),
-      ).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
+      ).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
       const after = await db.memory.findUniqueOrThrow({
         where: { id: personalMemory.id },
       });
@@ -960,7 +960,7 @@ describe('deleteMemory (spec 013)', () => {
           { ref: personalMemory.id },
           { db },
         ),
-      ).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
+      ).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
     });
 
     it('personal-class authz is idempotent for the owner', async () => {

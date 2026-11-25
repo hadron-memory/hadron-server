@@ -102,8 +102,8 @@ describe('#2817 item 1 — an App key is admitted', () => {
 
   it('naming a memory it cannot read answers MEMORY_NOT_FOUND, exactly like a missing one', async () => {
     const missingId = generateId();
-    await expect(list({ memoryRef: memB.id }, asKey())).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
-    await expect(list({ memoryRef: missingId }, asKey())).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
+    await expect(list({ memoryRef: memB.id }, asKey())).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
+    await expect(list({ memoryRef: missingId }, asKey())).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
   });
 
   it('a bare loc names a resource: the key gets that loc in its readable memories, never own activity', async () => {
@@ -194,7 +194,7 @@ describe('#2817 review — what an App key\'s resource read discloses', () => {
 describe('#2817 item 2 — missing and unreadable memories answer alike (regression)', () => {
   it('a user naming an unreadable memory and a missing one both get MEMORY_NOT_FOUND', async () => {
     for (const memoryId of [memB.id, memB.urn, generateId()]) {
-      await expect(page({ memoryRef: memoryId }, asMe())).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
+      await expect(page({ memoryRef: memoryId }, asMe())).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
     }
   });
 });

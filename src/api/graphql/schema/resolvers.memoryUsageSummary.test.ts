@@ -153,10 +153,10 @@ describe('memoryUsageSummary access control (#250)', () => {
     const missing = generateId();
     await expect(
       resolvers.Query.memoryUsageSummary(null, { memoryRef: memory.id }, outsider),
-    ).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
+    ).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
     await expect(
       resolvers.Query.memoryUsageSummary(null, { memoryRef: missing }, outsider),
-    ).rejects.toThrow('MEMORY_NOT_FOUND: no match for the given ref.');
+    ).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
   });
 
   it('a caller with no role is rejected by the READER gate', async () => {
