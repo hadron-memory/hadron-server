@@ -16,9 +16,9 @@
  * org-owned (`organizationId` set, `userId` the owner). Only the second gives an organization OWNER or admin a
  * relation to the target, so only it can catch an arm that admits by organization role (Rodolfo, SEC10).
  *
- * No behaviour changes in this slice. A surface that answers differently is REPORTED on the issue, not fixed here:
- * GraphQL keeps the edge ROW (loc, name, urn) with a null endpoint where MCP drops the edge, and a derived edge
- * loc embeds the far node's loc. Reported on #5187, left as an `it.todo` below, never asserted as correct.
+ * No behaviour changes in this slice. A surface that answers differently is REPORTED, not fixed or pinned as correct here:
+ * GraphQL and MCP differ on an edge row whose holder or far end the reader cannot read, left as an `it.todo` below
+ * (tracked privately; the number goes on the PR).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
@@ -185,9 +185,8 @@ for (const shapeName of SHAPES) {
         });
       }
 
-      // Reported on #5187 (details with the security seat, not here), never asserted as correct: GraphQL keeps an edge
-      // row whose far end, or whose holding memory, the reader cannot read, where MCP drops the edge. Wired when
-      // Victor/Holger rule which answer holds.
+      // Reported privately, never asserted as correct: GraphQL and MCP answer differently for an edge row whose holder or
+      // far end the reader cannot read. Wired when the fix lands.
       it.todo('GraphQL edge rows whose holder or far end the reader cannot read are absent, as on MCP (reported on #5187)');
     });
 
