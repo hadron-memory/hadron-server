@@ -1547,6 +1547,8 @@ export const typeDefs = `#graphql
     mintStatus: NodeMintStatus!
     "#2048 (hrn:node:hadronmemory.com:specs:cor:agt:040:13) — link lint for a boot-prompt source: the warnings that hold for this node as it is now, read as the caller (a target the caller cannot read is a position-only BROKEN_INCLUDE). An empty page is a real answer; null means the warnings are unavailable (a fault, or a compiled boot prompt, whose warnings read its recorded provenance). Lint never blocks a write, and nothing is stored or pushed. Pages default to 50 and clamp at 100."
     lintWarnings(first: Int = 50, after: String): LintWarningPage
+    "#5109 (server half of hadron-cli#3127) — spec content lint, computed on read from this node's stored text and never stored: a Rule spec with no Why We Need This Rule section, or an empty one, is an ERROR; a sentence above the divider line that restricts something and gives no reason (no because, so that, since or why in its paragraph, and no link to a ruling or a Why section) is a WARNING that names the sentence. A node that is not a spec, and a retired one, have no findings; an empty list is a real answer. Null means the node's text was not loaded for this read. Read under the node's own read gate; at most 200 findings."
+    specLint: [SpecLintFinding!]
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:06) — the node's signatures and their derived states, current signers first. Batch-loaded on list and search reads. An encrypted node reads NOT_APPLICABLE and lists none."
     signatureStatus: NodeSignatureStatus!
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — the node's signing requests, newest first, including ended ones (#10019). state filters on the effective state (an open request past its deadline is EXPIRED). first: 1–100, default 20."
@@ -2627,6 +2629,35 @@ export const typeDefs = `#graphql
     approval: NodeApproval!
     "#2048 — the link-lint warnings for this node as they hold now; the same data as Node.lintWarnings. Approving never blocks on a warning."
     lintWarnings(first: Int = 50, after: String): LintWarningPage
+  }
+
+  "#5109 — which spec lint check a finding comes from."
+  enum SpecLintRule {
+    "A Rule spec has no Why We Need This Rule section."
+    RULE_WHY_MISSING
+    "A Rule spec has the section, but it is empty or only whitespace."
+    RULE_WHY_EMPTY
+    "A sentence restricts something and gives no reason in its paragraph or through a link to a ruling or a Why section."
+    LIMIT_WITHOUT_REASON
+  }
+
+  "#5109 — how serious a spec lint finding is. The sentence check is a WARNING for now (it has false positives)."
+  enum SpecLintSeverity {
+    ERROR
+    WARNING
+  }
+
+  "#5109 — one spec lint finding."
+  type SpecLintFinding {
+    "The spec's citation (its loc)."
+    citation: String!
+    rule: SpecLintRule!
+    severity: SpecLintSeverity!
+    message: String!
+    "The offending sentence, for LIMIT_WITHOUT_REASON; null for a structural finding."
+    sentence: String
+    "1-based line of the sentence's paragraph or of the Why heading; null when there is none."
+    line: Int
   }
 
   "#2048 (hrn:node:hadronmemory.com:specs:cor:agt:040:13) — what link lint warns about."
@@ -12454,10 +12485,14 @@ export const typeDefs = `#graphql
 
     sortBy / sortDir (#833) order the whole result set server-side, so a client
     table is no longer limited to sorting the page it happens to hold.
+
+    appRef, orgRef and parentRunRef share one scalar, ID (#5050,
+    hrn:node:hadronmemory.com:specs:cor:api:140:01). appRef and orgRef were String until #5050, so a
+    document that declares either variable as String no longer validates; declare it ID.
     """
     appRuns(
-      appRef: String
-      orgRef: String
+      appRef: ID
+      orgRef: ID
       status: AppRunStatus @deprecated(reason: "Use statuses (#836) - a single value cannot express PENDING-or-RUNNING.")
       statuses: [AppRunStatus!]
       parentRunRef: ID
