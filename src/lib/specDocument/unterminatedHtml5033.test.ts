@@ -326,7 +326,7 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('<script>\nx\n</script>\ny')).toBe('<script>\nx\n</script>\ny');
     // The browser ends the element at the first `</script ` and reads what follows as markup, inside the Markdown block (found by fuzz).
     expect(escapeUnterminatedHtml('<script>"</script <plaintext><style></template></script><noscript>')).toBe('<script>"</script <plaintext>&lt;style></template></script>&lt;noscript>');
-    expect(escapeUnterminatedHtml('<script></script <pre><!--</title><a</script></textarea')).toBe('<script></script <pre>&lt;!--</title><a</script></textarea');
+    expect(escapeUnterminatedHtml('<script></script <pre><!--</title><a</script></textarea')).toBe('<script></script <pre>&lt;!--</title><a</script>&lt;/textarea');
   });
   it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag (BLIND delta pin)', () => {
     expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');
