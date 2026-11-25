@@ -32,15 +32,15 @@ export const mcpQueries = {
 
   /**
    * Uniform paginated list (cor:api:120): default scope is the caller's
-   * member orgs; orgId narrows per cor:api:100:01 (non-member → empty
+   * member orgs; orgRef narrows per cor:api:100:01 (non-member → empty
    * page, no disclosure, no admin bypass).
    */
   mcpServers: async (
     _: unknown,
-    { orgId, limit, offset }: { orgId?: string | null; limit?: number | null; offset?: number | null },
+    { orgRef, limit, offset }: { orgRef?: string | null; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
-    const scope = await resolveOrgScope(ctx, orgId);
+    const scope = await resolveOrgScope(ctx, orgRef);
     if (!scope) return { items: [], total: 0 };
     const where = { organizationId: { in: scope.memberOrgIds } };
     const take = clampListTake(limit);

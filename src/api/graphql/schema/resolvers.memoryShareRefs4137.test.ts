@@ -57,6 +57,7 @@ let grantee: U;
 let stranger: U;
 let personal: { id: string; urn: string };
 let group: { id: string; urn: string };
+let groupOrgId: string;
 
 const mkUser = async (h: string): Promise<U> => {
   const handle = `${h}-${generateId().slice(-8)}`.toLowerCase();
@@ -80,6 +81,7 @@ beforeEach(async () => {
   const org = await db.organization.create({
     data: { id: generateId(), name: 'm-org', urn: `m-org-${generateId().slice(-8)}` },
   });
+  groupOrgId = org.id;
   await db.orgMember.create({
     data: { id: generateId(), organizationId: org.id, userId: owner.id, role: 'OWNER' },
   });
@@ -101,6 +103,30 @@ const updateShare = (memoryRef: string, granteeRef: string, userId: string, role
     `mutation { updateMemoryShareRole(memoryRef: ${JSON.stringify(memoryRef)}, granteeRef: ${JSON.stringify(granteeRef)}, role: ${role}) { memoryShare { role grantee { id } } } }`,
     userId,
   );
+const deleteShare = (memoryRef: string, granteeRef: string, userId: string) =>
+  run(
+    `mutation { deleteMemoryShare(memoryRef: ${JSON.stringify(memoryRef)}, granteeRef: ${JSON.stringify(granteeRef)}) { memoryId } }`,
+    userId,
+  );
+const addMember = (memoryRef: string, userRef: string, userId: string, role = 'reader') =>
+  run(
+    `mutation { addMemoryMember(memoryRef: ${JSON.stringify(memoryRef)}, userRef: ${JSON.stringify(userRef)}, role: ${role}) { memoryMember { role user { id } } } }`,
+    userId,
+  );
+const updateMember = (memoryRef: string, userRef: string, userId: string, role = 'writer') =>
+  run(
+    `mutation { updateMemoryMemberRole(memoryRef: ${JSON.stringify(memoryRef)}, userRef: ${JSON.stringify(userRef)}, role: ${role}) { memoryMember { role user { id } } } }`,
+    userId,
+  );
+const removeMember = (memoryRef: string, userRef: string, userId: string) =>
+  run(
+    `mutation { removeMemoryMember(memoryRef: ${JSON.stringify(memoryRef)}, userRef: ${JSON.stringify(userRef)}) { memoryId userId } }`,
+    userId,
+  );
+const memberRow = () =>
+  db.memoryMember.findUnique({
+    where: { memoryId_userId: { memoryId: group.id, userId: grantee.id } },
+  });
 const shareRow = () =>
   db.memoryShare.findUnique({
     where: { memoryId_granteeId: { memoryId: personal.id, granteeId: grantee.id } },
@@ -213,25 +239,10 @@ describe('the share gate refuses a non-principal byte-identically (#4137, cor:ap
 });
 
 describe('member mutations take memoryRef / userRef only (#4137)', () => {
-  const add = (memoryRef: string, userRef: string, userId: string, role = 'reader') =>
-    run(
-      `mutation { addMemoryMember(memoryRef: ${JSON.stringify(memoryRef)}, userRef: ${JSON.stringify(userRef)}, role: ${role}) { memoryMember { role user { id } } } }`,
-      userId,
-    );
-  const upd = (memoryRef: string, userRef: string, userId: string, role = 'writer') =>
-    run(
-      `mutation { updateMemoryMemberRole(memoryRef: ${JSON.stringify(memoryRef)}, userRef: ${JSON.stringify(userRef)}, role: ${role}) { memoryMember { role user { id } } } }`,
-      userId,
-    );
-  const rm = (memoryRef: string, userRef: string, userId: string) =>
-    run(
-      `mutation { removeMemoryMember(memoryRef: ${JSON.stringify(memoryRef)}, userRef: ${JSON.stringify(userRef)}) { memoryId userId } }`,
-      userId,
-    );
-  const member = () =>
-    db.memoryMember.findUnique({
-      where: { memoryId_userId: { memoryId: group.id, userId: grantee.id } },
-    });
+  const add = addMember;
+  const upd = updateMember;
+  const rm = removeMember;
+  const member = memberRow;
 
   it('the owner adds, updates and removes by URN and by PK', async () => {
     expect((await add(group.urn, grantee.handle, owner.id)).errors).toBeUndefined();
@@ -322,12 +333,16 @@ describe('an ambiguous legacy memory URN is concealed like an unknown ref (#4137
     expect(await db.memoryShare.count()).toBe(0);
   });
 
-  it('deleteMemoryShare: a non-principal gets the unknown-ref FORBIDDEN for an ambiguous memory ref (Celine QA)', async () => {
-    const del = (memoryRef: string, userId: string) =>
-      run(`mutation { deleteMemoryShare(memoryRef: ${JSON.stringify(memoryRef)}, granteeRef: ${JSON.stringify(grantee.handle)}) { memoryId } }`, userId);
-    const unknown = refusal(await del('cnonexistentnonexistent12', stranger.id));
-    expect(JSON.parse(unknown)[0].c).toBe('FORBIDDEN');
-    expect(refusal(await del(AMBIGUOUS, stranger.id))).toBe(unknown);
+  // #4799 (Christopher P3): the unknown and the ambiguous ref both leave through the
+  // lookup-miss fold, so comparing only those two passes even if the refusal for a
+  // REAL memory (the principal-gate branch) differs.
+  it('deleteMemoryShare: a non-principal gets one FORBIDDEN for a known, an unknown and an ambiguous memory ref (Celine QA)', async () => {
+    const answers = [];
+    for (const ref of [personal.id, personal.urn, 'cnonexistentnonexistent12', AMBIGUOUS]) {
+      answers.push(refusal(await deleteShare(ref, grantee.handle, stranger.id)));
+    }
+    expect(new Set(answers).size).toBe(1);
+    expect(JSON.parse(answers[0])[0].c).toBe('FORBIDDEN');
   });
 
   it('the member mutations: a non-owner gets the unknown-ref FORBIDDEN', async () => {
@@ -412,5 +427,116 @@ describe('the resolver error taxonomy behind the concealment folds (#4137 blind 
     const ambiguous = await cls(() => resolveUserRefOrEmail(db, lower.replace('taxo', 'Taxo')));
     expect(ambiguous).toBeInstanceOf(AmbiguousUserRefError);
     for (const e of [unknown, ambiguous]) expect(e).not.toBeInstanceOf(GraphQLError);
+  });
+});
+
+// #4799: a blank ref is refused on its shape alone, before any lookup or gate, so the
+// owner and a stranger must get the same bytes (cor:api:140:02). The exact message is
+// the discriminator: without the guard a blank memoryRef answers URN_NOT_QUALIFIED and
+// a blank userRef answers FORBIDDEN or NOT_FOUND.
+describe('a blank or whitespace ref is a shape refusal (#4799)', () => {
+  const BLANKS = ['', '   ', '\t\n'];
+  const required = (arg: 'memoryRef' | 'userRef') =>
+    JSON.stringify([{ m: `${arg} is required.`, c: 'BAD_USER_INPUT' }]);
+
+  it.each([
+    ['createMemoryShare', createShare],
+    ['updateMemoryShareRole', updateShare],
+    ['deleteMemoryShare', deleteShare],
+    ['addMemoryMember', addMember],
+    ['updateMemoryMemberRole', updateMember],
+    ['removeMemoryMember', removeMember],
+  ] as const)('%s: a blank memoryRef answers "memoryRef is required." to the owner and a stranger', async (_name, op) => {
+    for (const blank of BLANKS) {
+      for (const caller of [owner, stranger]) {
+        expect(refusal(await op(blank, grantee.handle, caller.id)), JSON.stringify(blank)).toBe(required('memoryRef'));
+      }
+    }
+  });
+
+  // removeMemoryMember is the one member mutation a non-owner may pass the memory step
+  // of (self-removal), so the two callers reach two different guards.
+  it('removeMemoryMember, owner branch: a blank userRef answers "userRef is required."', async () => {
+    await db.memoryMember.create({ data: { memoryId: group.id, userId: grantee.id, role: 'reader' } });
+    for (const blank of BLANKS) {
+      expect(refusal(await removeMember(group.id, blank, owner.id)), JSON.stringify(blank)).toBe(required('userRef'));
+    }
+    expect(await memberRow()).not.toBeNull();
+  });
+
+  it('removeMemoryMember, non-owner branch: a blank userRef answers the same "userRef is required."', async () => {
+    await db.memoryMember.create({ data: { memoryId: group.id, userId: grantee.id, role: 'reader' } });
+    for (const blank of BLANKS) {
+      for (const caller of [stranger, grantee]) {
+        expect(refusal(await removeMember(group.id, blank, caller.id)), JSON.stringify(blank)).toBe(required('userRef'));
+      }
+    }
+    expect(await memberRow()).not.toBeNull();
+  });
+});
+
+// #4799 (Bradley P3): the control for the ambiguous-ref pins above. Same caller, same
+// URN; the only change is whether a second row claims it (cor:urn:010:04). Without it
+// those pins would pass if the legacy URN never resolved at all.
+describe('the same legacy URN resolves when only one memory claims it (#4799)', () => {
+  const LEGACY = 'amb-org:amb-mem';
+  const claim = (id: string, legacyUrn: string | null) =>
+    db.memory.update({ where: { id }, data: { legacyUrn } });
+  const forbidden = (r: { errors?: readonly any[] }) =>
+    expect(JSON.parse(refusal(r))[0]?.c).toBe('FORBIDDEN');
+
+  // The second claimant is the SAME kind of memory, held by the same owner: whichever
+  // row a broken resolver picked, the mutation would go through, so the ambiguous
+  // refusal cannot be the gate refusing a wrong-class row.
+  const secondClaimant = async (memoryClass: 'personal' | 'group') => {
+    const m = await (resolvers.Mutation as any).createMemory(
+      {},
+      memoryClass === 'group'
+        ? { orgRef: groupOrgId, name: 'member-s1-twin', memoryClass, visibility: 'GROUP' }
+        : { name: 'share-s1-twin', memoryClass },
+      { db, userId: owner.id, roles: ['ADMIN'] },
+    );
+    await claim(m.id, LEGACY);
+    return m.id as string;
+  };
+
+  it('the share mutations: ambiguous refuses the principal, a single claimant is created, updated and deleted', async () => {
+    await claim(personal.id, LEGACY);
+    const twin = await secondClaimant('personal');
+    forbidden(await createShare(LEGACY, grantee.handle, owner.id));
+    expect(await db.memoryShare.count()).toBe(0);
+    await claim(twin, null);
+    expect((await createShare(LEGACY, grantee.handle, owner.id)).errors).toBeUndefined();
+    expect((await shareRow())?.role).toBe('reader');
+
+    await claim(twin, LEGACY);
+    forbidden(await updateShare(LEGACY, grantee.handle, owner.id));
+    forbidden(await deleteShare(LEGACY, grantee.handle, owner.id));
+    expect((await shareRow())?.role).toBe('reader');
+    await claim(twin, null);
+    expect((await updateShare(LEGACY, grantee.handle, owner.id)).errors).toBeUndefined();
+    expect((await shareRow())?.role).toBe('writer');
+    expect((await deleteShare(LEGACY, grantee.handle, owner.id)).errors).toBeUndefined();
+    expect(await shareRow()).toBeNull();
+  });
+
+  it('the member mutations: ambiguous refuses the owner, a single claimant is added, updated and removed', async () => {
+    await claim(group.id, LEGACY);
+    const twin = await secondClaimant('group');
+    forbidden(await addMember(LEGACY, grantee.handle, owner.id));
+    expect(await db.memoryMember.count({ where: { userId: grantee.id } })).toBe(0);
+    await claim(twin, null);
+    expect((await addMember(LEGACY, grantee.handle, owner.id)).errors).toBeUndefined();
+    expect((await memberRow())?.role).toBe('reader');
+
+    await claim(twin, LEGACY);
+    forbidden(await updateMember(LEGACY, grantee.handle, owner.id));
+    forbidden(await removeMember(LEGACY, grantee.handle, owner.id));
+    expect((await memberRow())?.role).toBe('reader');
+    await claim(twin, null);
+    expect((await updateMember(LEGACY, grantee.handle, owner.id)).errors).toBeUndefined();
+    expect((await memberRow())?.role).toBe('writer');
+    expect((await removeMember(LEGACY, grantee.handle, owner.id)).errors).toBeUndefined();
+    expect(await memberRow()).toBeNull();
   });
 });

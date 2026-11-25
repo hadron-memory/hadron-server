@@ -100,7 +100,7 @@ export interface SearchPrincipal {
    * slices are additionally constrained to `memory.organizationId === orgScopeId`
    * (AND-ed onto the access scope, so it never widens access), and the caller
    * sets `orgIds: [orgScopeId]` to confine the org-rooted slices. Null/undefined
-   * ⇒ the default cross-org union. Set by the GraphQL `globalSearch(orgId:)`
+   * ⇒ the default cross-org union. Set by the GraphQL `globalSearch(orgRef:)`
    * arg; the MCP surface leaves it unset. Membership is verified by the caller
    * before this is set — the engine trusts it as an already-authorized scope.
    */
