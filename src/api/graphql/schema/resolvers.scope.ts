@@ -4,7 +4,7 @@
  * Thin on purpose: every rule lives in `lib/scopes.ts` so the MCP tools and
  * these resolvers are two entry points over ONE computation. What is here is
  * the `cor:api:120` shape (find-one by ref, `{ items, total }` find-many with
- * the `cor:api:100:01` orgId scope), `cor:api:140` ref naming, and the
+ * the `cor:api:100:01` orgRef scope), `cor:api:140` ref naming, and the
  * create/update/delete trio.
  *
  * Authorization (plan §8):
@@ -108,10 +108,10 @@ export const scopeQueries = {
 
   scopes: async (
     _: unknown,
-    { filter, orgId, limit, offset }: { filter?: ScopeFilterInput | null; orgId?: string | null; limit?: number | null; offset?: number | null },
+    { filter, orgRef, limit, offset }: { filter?: ScopeFilterInput | null; orgRef?: string | null; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
-    const scope = await resolveOrgScope(ctx, orgId);
+    const scope = await resolveOrgScope(ctx, orgRef);
     if (!scope) return EMPTY_PAGE;
     const where: Prisma.ScopeWhereInput[] = [await readableScopesWhere(ctx, scope.memberOrgIds)];
     if (scope.scopedOrgId) {

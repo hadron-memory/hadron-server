@@ -4934,7 +4934,7 @@ export function createMcpServerInstance(
             // (subsumes the old matchesQuery "*" / "" path).
             query: isSurvey ? undefined : safeQuery,
             mode: effectiveMode,
-            orgId: scopeOrgId,
+            orgRef: scopeOrgId,
             filter: {
               memoryIds: filterMemoryIds,
               isRunnable: isRunnable ?? undefined,

@@ -373,7 +373,7 @@ describe('#4865 authorize first: the sender\'s own read gate, and no new access 
     const sender = await createSender();
     expect(await resolvers.Query.resendSender({}, { ref: sender.id }, ctxFor(outsider.id))).toBeNull();
     expect(await resolvers.Query.resendSender({}, { ref: 'missing' }, ctxFor(member.id))).toBeNull();
-    expect(await resolvers.Query.resendSenders({}, { orgId: org.id }, ctxFor(outsider.id))).toEqual({
+    expect(await resolvers.Query.resendSenders({}, { orgRef: org.id }, ctxFor(outsider.id))).toEqual({
       items: [],
       total: 0,
     });

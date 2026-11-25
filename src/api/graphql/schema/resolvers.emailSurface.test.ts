@@ -216,7 +216,7 @@ describe('spec 002 email mutations', () => {
 
 describe('connection management stays org-ADMIN', () => {
   it('org ADMIN lists connections; a plain member cannot', async () => {
-    const admin = await run(`query { exchangeConnections(orgId: "${orgId}") { id provider mailboxEmail } }`, {
+    const admin = await run(`query { exchangeConnections(orgRef: "${orgId}") { id provider mailboxEmail } }`, {
       userId: orgAdmin.id,
       roles: ['READER'],
     });
@@ -225,7 +225,7 @@ describe('connection management stays org-ADMIN', () => {
       { id: connectionId, provider: 'ms-exchange', mailboxEmail: 'owner@example.com' },
     ]);
 
-    const member = await run(`query { exchangeConnections(orgId: "${orgId}") { id } }`, {
+    const member = await run(`query { exchangeConnections(orgRef: "${orgId}") { id } }`, {
       userId: owner.id, // CONTRIBUTOR, not org ADMIN
       roles: ['READER'],
     });

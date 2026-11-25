@@ -823,7 +823,7 @@ describe('#876 — identity-scoped read surfaces are denied under impersonation'
     await expect(q('connectionGrants')({}, {}, impCtx)).resolves.toMatchObject({ total: 0 });
     await expect(q('principalGrants')({}, {}, impCtx)).resolves.toMatchObject({ total: 0 });
     // The audit surface is administrative, not part of the impersonated view.
-    await expect(q('impersonationSessions')({}, { orgId: orgA.id }, impCtx)).rejects.toThrow(
+    await expect(q('impersonationSessions')({}, { orgRef: orgA.id }, impCtx)).rejects.toThrow(
       /Forbidden/,
     );
   });
@@ -843,12 +843,12 @@ describe('authContext + audit list', () => {
 
   it('org admins list their org sessions; members are refused; platform admin unscoped', async () => {
     const { session } = await startAsAdmin();
-    const forAdmin = await impersonationSessions({}, { orgId: orgA.id }, userCtx(admin));
+    const forAdmin = await impersonationSessions({}, { orgRef: orgA.id }, userCtx(admin));
     expect(forAdmin.items.map((s) => s.id)).toContain(session.id);
-    await expect(impersonationSessions({}, { orgId: orgA.id }, userCtx(reader))).rejects.toThrow(
+    await expect(impersonationSessions({}, { orgRef: orgA.id }, userCtx(reader))).rejects.toThrow(
       /Forbidden/,
     );
-    await expect(impersonationSessions({}, {}, userCtx(reader))).rejects.toThrow(/orgId is required/);
+    await expect(impersonationSessions({}, {}, userCtx(reader))).rejects.toThrow(/orgRef is required/);
     const forPlatform = await impersonationSessions({}, {}, userCtx(platformAdmin, ['ADMIN']));
     expect(forPlatform.total).toBeGreaterThan(0);
   });

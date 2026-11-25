@@ -30,10 +30,10 @@ const caught = async (p: Promise<unknown>) => {
   try { await p; return { ok: true as const }; } catch (e: any) { return { ok: false as const, code: e?.extensions?.code as string, message: e?.message as string }; }
 };
 const status = () => db.organization.findUniqueOrThrow({ where: { id: org.id }, select: { bootPromptSigningRequired: true } }).then((o) => o.bootPromptSigningRequired);
-const preview = (c: Context = ctxOf(admin), args: Record<string, unknown> = {}) => Q.orgBootPromptSigningPreview({}, { org: org.id, ...args }, c);
+const preview = (c: Context = ctxOf(admin), args: Record<string, unknown> = {}) => Q.orgBootPromptSigningPreview({}, { orgRef: org.id, ...args }, c);
 const turnOn = (token: string | null | undefined, c: Context = ctxOf(admin), orgRef = org.id) =>
-  M.setOrgBootPromptSigning({}, { org: orgRef, required: true, previewToken: token }, c);
-const turnOff = (c: Context = ctxOf(admin), orgRef = org.id) => M.setOrgBootPromptSigning({}, { org: orgRef, required: false }, c);
+  M.setOrgBootPromptSigning({}, { orgRef, required: true, previewToken: token }, c);
+const turnOff = (c: Context = ctxOf(admin), orgRef = org.id) => M.setOrgBootPromptSigning({}, { orgRef, required: false }, c);
 
 const prov = (): CompiledProvenance => ({
   version: 1,
@@ -133,7 +133,7 @@ describe('G1 audience (rulings:0262): who may read, preview and switch', () => {
   it.each(shapes)('%s is refused FORBIDDEN on read, preview, switch-on and switch-off, and nothing changes', async (_n, mk) => {
     const token = (await preview()).previewToken as string;
     for (const call of [
-      () => Q.orgBootPromptSigning({}, { org: org.id }, mk()),
+      () => Q.orgBootPromptSigning({}, { orgRef: org.id }, mk()),
       () => preview(mk()),
       () => turnOn(token, mk()),
       () => turnOff(mk()),
@@ -145,8 +145,8 @@ describe('G1 audience (rulings:0262): who may read, preview and switch', () => {
   });
 
   it('an admin on a missing organisation is refused byte-identically to a non-member of a real one (no existence oracle)', async () => {
-    const real = await caught(Q.orgBootPromptSigning({}, { org: org.id }, ctxOf(outsider)));
-    const missing = await caught(Q.orgBootPromptSigning({}, { org: nonexistent.includes('.') ? `urn:org:${nonexistent}` : nonexistent }, ctxOf(outsider)));
+    const real = await caught(Q.orgBootPromptSigning({}, { orgRef: org.id }, ctxOf(outsider)));
+    const missing = await caught(Q.orgBootPromptSigning({}, { orgRef: nonexistent.includes('.') ? `urn:orgRef:${nonexistent}` : nonexistent }, ctxOf(outsider)));
     expect(missing).toEqual(real);
     const realOn = await caught(turnOn(null, ctxOf(outsider)));
     const missingOn = await caught(turnOn(null, ctxOf(outsider), `urn:org:${nonexistent}`));
@@ -163,11 +163,11 @@ describe('G1 audience (rulings:0262): who may read, preview and switch', () => {
 
 describe('the read', () => {
   it('reports the stored switch and the truth: enforced is false while the deployment does not ship signing', async () => {
-    expect(await Q.orgBootPromptSigning({}, { org: org.id }, ctxOf(admin))).toEqual({ required: false, enforced: false, deploymentSigns: false });
+    expect(await Q.orgBootPromptSigning({}, { orgRef: org.id }, ctxOf(admin))).toEqual({ required: false, enforced: false, deploymentSigns: false });
     await db.organization.update({ where: { id: org.id }, data: { bootPromptSigningRequired: true } });
-    expect(await Q.orgBootPromptSigning({}, { org: org.id }, ctxOf(admin))).toEqual({ required: true, enforced: false, deploymentSigns: false });
+    expect(await Q.orgBootPromptSigning({}, { orgRef: org.id }, ctxOf(admin))).toEqual({ required: true, enforced: false, deploymentSigns: false });
     process.env.PASSKEY_SIGNING_ENABLED = 'true';
-    expect(await Q.orgBootPromptSigning({}, { org: org.id }, ctxOf(admin))).toEqual({ required: true, enforced: true, deploymentSigns: true });
+    expect(await Q.orgBootPromptSigning({}, { orgRef: org.id }, ctxOf(admin))).toEqual({ required: true, enforced: true, deploymentSigns: true });
   });
 });
 
@@ -300,7 +300,7 @@ describe('switch-on: the preview token (C4)', () => {
     expect(await turnOn(token)).toEqual({ required: true, enforced: false, deploymentSigns: false });
     expect(await status()).toBe(true);
     process.env.PASSKEY_SIGNING_ENABLED = 'true';
-    expect(await Q.orgBootPromptSigning({}, { org: org.id }, ctxOf(admin))).toMatchObject({ required: true, enforced: true });
+    expect(await Q.orgBootPromptSigning({}, { orgRef: org.id }, ctxOf(admin))).toMatchObject({ required: true, enforced: true });
   });
 
   it('refuses PREVIEW_STALE, changing nothing, for a missing token', async () => {
@@ -323,7 +323,7 @@ describe('switch-on: the preview token (C4)', () => {
 
   it("refuses another organisation's token and another caller's token", async () => {
     const token = (await preview()).previewToken as string; // admin, org
-    const otherOrgToken = (await Q.orgBootPromptSigningPreview({}, { org: other.id }, ctxOf(outsider))).previewToken as string;
+    const otherOrgToken = (await Q.orgBootPromptSigningPreview({}, { orgRef: other.id }, ctxOf(outsider))).previewToken as string;
     expect(await caught(turnOn(otherOrgToken))).toMatchObject(stale);
     expect(await caught(turnOn(token, ctxOf(owner)))).toMatchObject(stale); // minted for admin
     expect(await status()).toBe(false);

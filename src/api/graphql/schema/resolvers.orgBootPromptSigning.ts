@@ -74,14 +74,14 @@ const statusOf = async (tx: Prisma.TransactionClient, orgId: string) =>
   signingSwitchStatus(await tx.organization.findUniqueOrThrow({ where: { id: orgId }, select: { bootPromptSigningRequired: true } }));
 
 export const orgBootPromptSigningQueries = {
-  orgBootPromptSigning: (_: unknown, { org }: { org: string }, ctx: Context) =>
-    inAudienceSnapshot(ctx, org, (tx, orgId) => statusOf(tx, orgId)),
+  orgBootPromptSigning: (_: unknown, { orgRef }: { orgRef: string }, ctx: Context) =>
+    inAudienceSnapshot(ctx, orgRef, (tx, orgId) => statusOf(tx, orgId)),
 
   orgBootPromptSigningPreview: (
     _: unknown,
-    { org, first, after }: { org: string; first?: number | null; after?: string | null },
+    { orgRef, first, after }: { orgRef: string; first?: number | null; after?: string | null },
     ctx: Context,
-  ) => inAudienceSnapshot(ctx, org, async (tx, orgId, userId) => {
+  ) => inAudienceSnapshot(ctx, orgRef, async (tx, orgId, userId) => {
     // Validate the page arguments only for a caller already inside the audience.
     const status = await statusOf(tx, orgId);
     const rows = await computeSigningPreviewRows(tx, orgId);
@@ -101,11 +101,11 @@ export const orgBootPromptSigningQueries = {
 export const orgBootPromptSigningMutations = {
   setOrgBootPromptSigning: async (
     _: unknown,
-    { org, required, previewToken }: { org: string; required: boolean; previewToken?: string | null },
+    { orgRef, required, previewToken }: { orgRef: string; required: boolean; previewToken?: string | null },
     ctx: Context,
   ) => {
     if (typeof required !== 'boolean') throw new GraphQLError('required must be true or false.', { extensions: { code: 'BAD_USER_INPUT' } });
-    const { userId, orgId } = await audienceOrgId(ctx, org);
+    const { userId, orgId } = await audienceOrgId(ctx, orgRef);
     return retryOnSerializationFailure(() => withAuthorizedTx(
       ctx,
       [{ kind: 'org', id: orgId }],

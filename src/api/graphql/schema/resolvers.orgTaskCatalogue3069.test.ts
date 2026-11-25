@@ -91,7 +91,7 @@ beforeEach(async () => {
 
 describe('#3069 what the portal filter relies on', () => {
   it('the portal can select appId on that list: the document it needs validates against the schema', () => {
-    const document = parse('query($orgId: ID!) { memories(orgId: $orgId, filter: { memoryClasses: [system] }) { items { id appId } total } }');
+    const document = parse('query($orgRef: ID!) { memories(orgRef: $orgId, filter: { memoryClasses: [system] }) { items { id appId } total } }');
     expect(validate(buildSchema(typeDefs), document)).toEqual([]);
   });
 

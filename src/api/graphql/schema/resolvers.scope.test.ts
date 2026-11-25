@@ -156,8 +156,8 @@ describe('read gate and projection — a scope never grants', () => {
 
   it('orgId collapses to an empty page for a non-member (no disclosure)', async () => {
     await orgScope();
-    expect(await Q.scopes({}, { orgId: orgA.urn }, ctx(stranger.id))).toEqual({ items: [], total: 0 });
-    expect((await Q.scopes({}, { orgId: orgA.urn }, ctx(reader.id))).total).toBe(1);
+    expect(await Q.scopes({}, { orgRef: orgA.urn }, ctx(stranger.id))).toEqual({ items: [], total: 0 });
+    expect((await Q.scopes({}, { orgRef: orgA.urn }, ctx(reader.id))).total).toBe(1);
   });
 });
 

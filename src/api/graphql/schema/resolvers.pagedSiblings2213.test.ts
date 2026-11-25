@@ -388,11 +388,11 @@ describe('exchangeConnectionsPage', () => {
   });
 
   it('answers over GraphQL with no extensions.warnings', async () => {
-    const page = await gql(`query { exchangeConnectionsPage(orgId: "${orgId}", limit: 5) { total hasMore items { id mailboxEmail } } }`, ctxFor('admin'));
+    const page = await gql(`query { exchangeConnectionsPage(orgRef: "${orgId}", limit: 5) { total hasMore items { id mailboxEmail } } }`, ctxFor('admin'));
     expect(page.errors).toBeUndefined();
     expect(page.extensions?.warnings).toBeUndefined();
     expect(page.data!.exchangeConnectionsPage).toMatchObject({ total: 45, hasMore: true });
-    const denied = await gql(`query { exchangeConnectionsPage(orgId: "${orgId}") { total } }`, ctxFor('reader'));
+    const denied = await gql(`query { exchangeConnectionsPage(orgRef: "${orgId}") { total } }`, ctxFor('reader'));
     expect(denied.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
   });
 });

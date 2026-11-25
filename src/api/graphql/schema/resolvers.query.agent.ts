@@ -244,13 +244,13 @@ export const agentQueries = {
 
     // #473 — the uniform paginated agent list. Scope: Agents owned by the
     // caller's member orgs; platform ADMIN/OWNER unscoped get every live
-    // Agent. orgId follows cor:api:100:01 (member -> scope, non-member ->
+    // Agent. orgRef follows cor:api:100:01 (member -> scope, non-member ->
     // empty page, no disclosure, no admin bypass).
     agents: async (
       _: unknown,
       {
         filter,
-        orgId,
+        orgRef,
         limit,
         offset,
       }: {
@@ -259,7 +259,7 @@ export const agentQueries = {
           visibility?: string | null;
           ownedByMe?: boolean | null;
         } | null;
-        orgId?: string | null;
+        orgRef?: string | null;
         limit?: number | null;
         offset?: number | null;
       },
@@ -278,7 +278,7 @@ export const agentQueries = {
         // #782 — the caller's OWN user-owned (org-less) agents only, for ALL
         // callers INCLUDING platform ADMIN/OWNER: owner scope is never an
         // admin-bypass surface (mirrors the owner-only personal/private
-        // memories slice). Org-less by definition, so orgId is not consulted;
+        // memories slice). Org-less by definition, so orgRef is not consulted;
         // App-key callers (no ctx.userId) get an empty page.
         // #876: user-owned agents are identity-scoped, so an impersonated
         // session sees none — matching callerReadableAgentFilter, which drops
@@ -288,10 +288,10 @@ export const agentQueries = {
         if (!ctx.userId || ctx.impersonation) return { items: [], total: 0 };
         where = { ...filters, organizationId: null, ownerUserId: ctx.userId };
       } else {
-        const scope = await resolveOrgScope(ctx, orgId);
+        const scope = await resolveOrgScope(ctx, orgRef);
         if (!scope) return { items: [], total: 0 };
         const scopedToOrg = scope.scopedOrgId != null;
-        // Admin unscoped reach applies only WITHOUT an orgId — the active-org
+        // Admin unscoped reach applies only WITHOUT an orgRef — the active-org
         // selection is a membership concept (cor:api:100:01).
         if (isPlatformAdmin(ctx) && !scopedToOrg) {
           // Every live agent EXCEPT another user's user-owned agent — spec 047
@@ -305,14 +305,14 @@ export const agentQueries = {
             OR: [{ ownerUserId: null }, { ownerUserId: ctx.userId ?? '__none__' }],
           };
         } else {
-          // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
+          // Org-scoped view. In the DEFAULT (no orgRef) view, also surface the
           // caller's OWN user-owned agents (org NULL) — otherwise a personal
           // agent the caller just created is invisible in their agent list. A
           // specific-org selection excludes them (they belong to no org).
           const ownerClauses: Record<string, unknown>[] = [
             { organizationId: { in: scope.memberOrgIds } },
           ];
-          // #876: the DEFAULT view (no orgId) folded the caller's user-owned
+          // #876: the DEFAULT view (no orgRef) folded the caller's user-owned
           // agents in too, so the leak did not require filter.ownedByMe —
           // an unfiltered `agents { items }`, which is what the portal issues,
           // exposed them. Identity-scoped ⇒ dropped under impersonation.

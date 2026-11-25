@@ -311,12 +311,12 @@ export const memoryQueries = {
 
     // #473 — the uniform paginated memory list. Replaces myMemories (the
     // caller's union), publicMemories (filter.visibility: PUBLIC), and
-    // orgSystemMemories (orgId + filter.memoryClasses: [system]).
+    // orgSystemMemories (orgRef + filter.memoryClasses: [system]).
     memories: async (
       _: unknown,
       {
         filter,
-        orgId,
+        orgRef,
         limit,
         offset,
       }: {
@@ -326,7 +326,7 @@ export const memoryQueries = {
           sharedWithMe?: boolean | null;
           ownedByMe?: boolean | null;
         } | null;
-        orgId?: string | null;
+        orgRef?: string | null;
         limit?: number | null;
         offset?: number | null;
       },
@@ -379,8 +379,8 @@ export const memoryQueries = {
       // this one, `chk_personal_visibility_user` for the other).
       //
       // Ahead of `resolveOrgScope` because the slice is org-less by definition,
-      // so `orgId` is not consulted — matching the sibling filters, which skip
-      // the scope resolution entirely. A foreign orgId therefore neither empties
+      // so `orgRef` is not consulted — matching the sibling filters, which skip
+      // the scope resolution entirely. A foreign orgRef therefore neither empties
       // this slice nor discloses anything: every row it returns is the caller's
       // own and belongs to no org.
       if (f.ownedByMe) {
@@ -442,7 +442,7 @@ export const memoryQueries = {
       // #463 / cor:api:100:01 — optional single-org narrowing ("active
       // organization"): member -> scope, non-member/unresolvable -> empty
       // page with no org-existence disclosure, no platform-admin bypass.
-      const scope = await resolveOrgScope(ctx, orgId);
+      const scope = await resolveOrgScope(ctx, orgRef);
       if (!scope) return empty;
 
       // #778 — filter.sharedWithMe: the distinct set of personal memories shared
@@ -575,8 +575,8 @@ export const memoryQueries = {
         // #3595: the group membership clause is bounded to the shared org
         // under impersonation (the session sees ONE org — the target's
         // MemoryMember rows elsewhere must not list) and to the explicitly
-        // selected org when `orgId` is supplied (a slice is a filter — an
-        // orgId=A page must not include the caller's group memory in B).
+        // selected org when `orgRef` is supplied (a slice is a filter — an
+        // orgRef=A page must not include the caller's group memory in B).
         // Ordinary unscoped calls stay unbounded: cross-org MemoryMember
         // reach, mirroring the shared read gate's restrictToOrgId posture.
         const groupOrgBound = scope.scopedOrgId ?? ctx.impersonation?.orgId ?? null;
@@ -602,7 +602,7 @@ export const memoryQueries = {
             // #2044: an install memory is NOT an org-wide record (its customisation is the App's):
             // the org clause skips it, and the clause below lists it to its own audience alone.
             { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any }, isInstallMemory: false },
-            // #4181 / cor:api:100, cor:acl:010:01: with `orgId` the install clause is narrowed like its org
+            // #4181 / cor:api:100, cor:acl:010:01: with `orgRef` the install clause is narrowed like its org
             // neighbour: the memory sits in its App's own org (user-owned Apps' install memories have no org
             // and reach their owner through the user-owned clause below, pinned in the #4181 test). A ternary on
             // `scopedOrgId`, not `orgIds`: unscoped, `orgIds` is the caller's MEMBER orgs, which would drop an App
@@ -658,7 +658,7 @@ export const memoryQueries = {
                   // above: cor:api:120:03 — "selecting an active org must not
                   // hide your own notes". This is where the memory surface
                   // deliberately differs from `agents()`, which drops its
-                  // user-owned fold under an explicit orgId; a memory the
+                  // user-owned fold under an explicit orgRef; a memory the
                   // caller owns is theirs in every org context.
                   //
                   // NON-personal classes only (@codex, PR #1215). The two owner

@@ -252,7 +252,13 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // A lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation (ship order per precedent
 // 0274: notices, server, companions). The export's contents, gating and refusals are unchanged; only the argument that
 // names the node changed. (0.38.0 is #4782, entity refs S7, merged first.)
-export const HADRON_SERVER_VERSION = '0.39.0';
+// 0.40.0 — BREAKING, entity refs gap 3 (#5081): the organization argument on 21 fields is `orgRef`, no alias. The 18 Query
+// arguments named `orgId` (findNodes, globalSearch, edges, impersonationSessions, memories, exchangeConnections,
+// exchangeConnectionsPage, slackConnections, telegramConnections, mcpServers, homeAssistantInstances, resendSenders, apps,
+// agents, scopes, channels, registerEntries, assets) and the 3 named `org` (orgBootPromptSigning,
+// orgBootPromptSigningPreview, setOrgBootPromptSigning) are renamed. Scalars and gates are unchanged (impersonationSessions
+// keeps `String`); a lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation.
+export const HADRON_SERVER_VERSION = '0.40.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
