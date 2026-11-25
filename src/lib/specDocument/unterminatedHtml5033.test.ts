@@ -387,6 +387,29 @@ describe('escapeUnterminatedHtml', () => {
     // Outside an HTML block the same tag is inline HTML and a `>` at a line start ends its paragraph.
     expect(escapeUnterminatedHtml('x <a\n- b\n>')).toBe('x &lt;a\n- b\n>');
   });
+  it('a type 7 block (a complete tag alone on its line) starts wherever there is no paragraph to interrupt: after a blank line, a heading, a thematic break, a fence or indented code', () => {
+    const starts: Array<[string, string]> = [
+      ['a heading', '# h\n<b>\n```\n<i x=\n```\nz'],
+      ['a thematic break', '***\n<b>\n```\n<i x=\n```\nz'],
+      ['a closed fence', '```\nc\n```\n<b>\n```\n<i x=\n```\nz'],
+      ['indented code', '    code\n<b>\n```\n<i x=\n```\nz'],
+      ['a block that has ended', '<!-- c -->\n<b>\n```\n<i x=\n```\nz'],
+    ];
+    for (const [label, body] of starts) expect(escapeUnterminatedHtml(body), label).toBe(body.replace('<i x=', '&lt;i x='));
+    // After a paragraph line (a lazy continuation of a quote or a list item included) a type 7 tag cannot interrupt: the fence is a fence.
+    for (const body of ['a\n<b>\n```\n<i x=\n```\nz', '> a\n<b>\n```\n<i x=\n```\nz', '- a\n<b>\n```\n<i x=\n```\nz']) {
+      expect(escapeUnterminatedHtml(body), body).toBe(body);
+    }
+    // A closed code span cannot hide the interior of such a block.
+    expect(escapeUnterminatedHtml('# h\n<b>\n`x\n<script>\ny` z')).toBe('# h\n<b>\n`x\n&lt;script>\ny` z');
+  });
+  it('the restart does not lose a raw region: every pass scans the escaped text from its start', () => {
+    const body = '<div>\n<b x=\n```\n<script> a';
+    const once = escapeUnterminatedHtml(body);
+    expect(escapeUnterminatedHtml(once)).toBe(once);
+    // `<b x=` runs to the `>` of `<script>`: one complete tag to a browser, so there is nothing to escape, and the raw region is intact.
+    expect(once).toBe(body);
+  });
   it('a line-head pre block runs raw to its end tag, blank lines and fences included', () => {
     // The tag that opens in the interior ends at the `>` of the end tag: one complete tag to a browser, nothing swallowed.
     expect(escapeUnterminatedHtml('<pre>\na\n\n```\n<b x=\n```\n</pre>')).toBe('<pre>\na\n\n```\n<b x=\n```\n</pre>');
