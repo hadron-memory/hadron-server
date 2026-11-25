@@ -1,11 +1,12 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, readdirSync, rmSync, mkdirSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { resolve, join, sep } from 'node:path';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { saveNodeToFs } from '../../../integrations/localFs/saveNodeToFs.js';
+import { memoryLocalPath } from '../../../integrations/github/gitMirrorCheckout.js';
 
 const projection = await vi.hoisted(async () => {
   const fs = await import('node:fs');
@@ -41,13 +42,23 @@ const create = (door: string, name: string) => door === 'personal'
 const inputs = ['..:escaped', 'a:..:b', '.:current', 'a:.', '..:..:escaped', String.raw`a\..`, String.raw`..\x`];
 for (const door of ['personal', 'app', 'installed']) {
   describe(`projection input ${door}`, () => {
-    it.each(inputs.map((name, i) => [i, name] as const))('refuses invalid case %i before persistence', async (_i, name) => {
+    // #5149: the name is not a path, so a traversal-shaped one is an ordinary name; it must still reach no path.
+    it.each(inputs.map((name, i) => [i, name] as const))('creates case %i as a plain name that reaches no path', async (_i, name) => {
       const target = resolve(projection.root, ...name.split(':'));
-      expect(existsSync(join(target, '.node'))).toBe(false);
-      await expect(create(door, name)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
-      expect(await db.memory.count()).toBe(0);
+      const before = readdirSync(projection.base, { recursive: true });
+      const memory = await create(door, name);
+      expect(memory.name).toBe(name);
+      expect(memory.urn.split(':')).toHaveLength(2);
       expect(await db.node.count()).toBe(0);
       expect(existsSync(join(target, '.node'))).toBe(false);
+      expect(readdirSync(projection.base, { recursive: true })).toEqual(before);
+      // The mirror checkout is placed by the URN, inside the graph root.
+      const checkout = memoryLocalPath(memory.urn.split(':')[0]!, memory.urn);
+      expect(checkout.startsWith(`${projection.root}${sep}`)).toBe(true);
+    });
+    it.each(['..', '.:..', ':'])('refuses a name with no slug, %j, before persistence', async name => {
+      await expect(create(door, name)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+      expect(await db.memory.count()).toBe(0);
       expect(readdirSync(projection.root)).toEqual([]);
     });
     it.each(['a..b', 'x.y', 'Has Space', 'ünï', String.raw`back\slash`])('preserves ordinary input %s', async name => {

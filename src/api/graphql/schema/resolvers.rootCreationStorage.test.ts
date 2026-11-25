@@ -84,7 +84,7 @@ beforeEach(async () => {
   fixture.observing = false; fixture.operations.length = 0; fixture.write.mockClear();
 });
 for (const door of ['personal', 'organization', 'app', 'installed'] as const) describe(`database-only root creation: ${door}`, () => {
-  it.each(['Ordinary', 'own:legal:multi', 'a::b', 'other-storage.test', 'other-storage.test:notes', 'other-storage.test:notes:deep'])('keeps filesystem byte-identical for legal name %s', async name => {
+  it.each(['Ordinary', 'own:legal:multi', 'a::b', '..:x', '.:x', 'a/b', 'a:', 'a'.repeat(256), 'other-storage.test', 'other-storage.test:notes', 'other-storage.test:notes:deep'])('keeps filesystem byte-identical for legal name %s', async name => {
     const before = snapshot();
     const memory = await create(door, name);
     const organizationId = door === 'personal' ? null : org.id;
@@ -95,7 +95,8 @@ for (const door of ['personal', 'organization', 'app', 'installed'] as const) de
     expect(snapshot()).toEqual(before);
     noParticipants();
   });
-  it.each(['..:x', '.:x', 'a/b', 'a:', 'a\0b', 'a'.repeat(256)])('preserves invalid-name refusal %j before database writes', async name => {
+  // #5149: only a name that cannot be stored or yields no slug still refuses.
+  it.each(['..', '.:..', '/', ':', 'a\0b'])('preserves invalid-name refusal %j before database writes', async name => {
     const before = snapshot();
     await expect(create(door, name)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     expect(await db.memory.count()).toBe(0); expect(await db.node.count()).toBe(0);
