@@ -192,15 +192,18 @@ describe('#5081 — behaviour through real GraphQL', () => {
     });
 
     it('findNodes and globalSearch under scope:"global" apply the org (scope-lens path)', async () => {
-      await db.node.create({ data: { id: generateId(), memoryId: memA.id, loc: 'n-a', name: 'zzz-5081 in A', type: 'info', content: 'zzz-5081' } as any }).catch(() => null);
-      await db.node.create({ data: { id: generateId(), memoryId: memB.id, loc: 'n-b', name: 'zzz-5081 in B', type: 'info', content: 'zzz-5081' } as any }).catch(() => null);
+      await db.node.create({ data: { id: generateId(), memoryId: memA.id, loc: 'n-a', name: 'zzz-5081 in A', content: 'zzz-5081' } as any });
+      await db.node.create({ data: { id: generateId(), memoryId: memB.id, loc: 'n-b', name: 'zzz-5081 in B', content: 'zzz-5081' } as any });
       const c = ctx(both.id);
       const nodes = `{ hits { node { memoryId } } }`;
       const f = await run(`query { findNodes(query: "zzz-5081", scope: "global", orgRef: ${lit(orgA.urn)}) ${nodes} }`, c);
       expect(f.errors).toBeUndefined();
-      expect((f.data as any).findNodes.hits.map((h: any) => h.node.memoryId)).not.toContain(memB.id);
+      const memIds = (f.data as any).findNodes.hits.map((h: any) => h.node.memoryId);
+      expect(memIds).toContain(memA.id);
+      expect(memIds).not.toContain(memB.id);
       const g = await run(`query { globalSearch(query: "zzz-5081", scope: "global", orgRef: ${lit(orgA.urn)}) { hits { __typename } total } }`, c);
       expect(g.errors).toBeUndefined();
+      expect((g.data as any).globalSearch.total).toBeGreaterThan(0);
     });
   });
 
@@ -270,7 +273,6 @@ describe('#5081 — behaviour through real GraphQL', () => {
     });
 
     it.each(['findNodes', 'globalSearch'])('%s with scope:"global": unknown and non-member orgRef differ today (ORG_REQUIRED memberOrgIds) — pinned, URN and PK', async (name) => {
-      const c = ctx(both.id);
       const withScope = (ref: string) =>
         `query { ${name}(query: "zzz-5081", scope: "global", orgRef: ${lit(ref)}) { total } }`;
       // `both` is a member of A and B, so use a caller of ONE org against the other for the real non-member case.
@@ -283,7 +285,6 @@ describe('#5081 — behaviour through real GraphQL', () => {
         expect(rReal.errors?.[0].extensions?.memberOrgIds).toEqual([orgA.id]);
         expect(rUnknown.errors?.[0].extensions?.memberOrgIds).toEqual([]);
       }
-      void c;
     });
   });
 });
