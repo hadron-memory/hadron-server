@@ -393,6 +393,14 @@ describe('escapeUnterminatedHtml', () => {
     // The rest of the line that holds the end tag is raw too: a backtick there opens no code span.
     expect(escapeUnterminatedHtml('<pre>\na\n</pre> `a <b x= b` c')).toBe('<pre>\na\n</pre> `a &lt;b x= b` c');
   });
+  it('an end tag whose first `>` sits inside a quoted value is ambiguous (a browser reads attributes on it, htmlparser2 ends at the `>`): it is escaped', () => {
+    expect(escapeUnterminatedHtml('</textarea<div class="><xmp><noscript>"<pre>')).toBe('&lt;/textarea<div class="><xmp><noscript>"<pre>');
+    expect(escapeUnterminatedHtml('</b x=">">')).toBe('&lt;/b x=">">');
+    // An ordinary end tag, and an end tag with a harmless attribute-like tail, are unchanged.
+    expect(escapeUnterminatedHtml('</b>')).toBe('</b>');
+    expect(escapeUnterminatedHtml('</b >')).toBe('</b >');
+    expect(escapeUnterminatedHtml('</b x=y>')).toBe('</b x=y>');
+  });
   it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag', () => {
     expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');
     expect(escapeUnterminatedHtml('<b y= <template>')).toBe('<b y= <template>'); // one complete tag: the value is `<template`
