@@ -18,6 +18,8 @@ import { upsertPlatformActions } from '../lib/grants/actions.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { createGrantSelectionInTransaction } from '../lib/signing/grantSelectionRequests.js';
 import { createGrantSigningRequestInTransaction } from '../lib/signing/grantRequests.js';
+import { loadGrantSignatureStatuses } from '../lib/signing/grantStatus.js';
+import { clearSignatureVerifyCache, grantSignatureRecordVerifies } from '../lib/signing/verify.js';
 
 const ORIGIN = 'https://sign.example.test';
 const RP = 'example.test';
@@ -443,5 +445,87 @@ describe('R10: decline turns the whole selection down', () => {
     expect(await selState(sel.id)).toBe('declined');
     expect((await itemStates(sel.id)).map((i) => i.state)).toEqual(['declined', 'declined']);
     for (const g of gs) expect((await grantRow(g)).activated_at).toBeNull();
+  });
+});
+
+/** Change a stored record the way only someone outside the platform could: the table's user triggers are off for this one statement. */
+async function forge(table: 'grant_signatures' | 'grant_selection_signatures', set: string, where: string, ...params: unknown[]): Promise<void> {
+  await db.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`ALTER TABLE ${table} DISABLE TRIGGER USER`);
+    await tx.$executeRawUnsafe(`UPDATE ${table} SET ${set} WHERE ${where}`, ...params);
+    await tx.$executeRawUnsafe(`ALTER TABLE ${table} ENABLE TRIGGER USER`);
+  });
+}
+
+describe('P3 + P5 + P12: each record re-verifies alone, from the touch record\'s kept item list', () => {
+  async function signed(n = 3) {
+    const gs: string[] = [];
+    for (let i = 0; i < n; i++) gs.push(await scheduleGrant());
+    const sel = await openSelection(gs);
+    const p = await prove(sel.id, admin);
+    expect((await post(sel.id, 'complete', signingBody(p, admin), p.cookie)).status).toBe(200);
+    clearSignatureVerifyCache();
+    return { gs: [...gs].sort(), sel };
+  }
+
+  it('P5: every record of the selection reads CURRENT through the shared status loader', async () => {
+    const { gs } = await signed();
+    const statuses = await loadGrantSignatureStatuses(db, gs);
+    for (const g of gs) {
+      const st = statuses.get(g)!;
+      expect(st.integrityProblems, g).toBe(0);
+      expect(st.state, g).toBe('CURRENT');
+      expect(st.signatures).toHaveLength(1);
+      expect(st.signatures[0]!.payloadVersion).toBe('hadron-grant-selection-signature-v1');
+    }
+  });
+
+  it('P5: a record altered to claim other terms than the touch record signed counts ONE integrity problem, for that grant alone', async () => {
+    const { gs } = await signed();
+    await forge('grant_signatures', `terms_hash = $2`, `grant_id = $1`, gs[1], '0'.repeat(64));
+    clearSignatureVerifyCache();
+    const statuses = await loadGrantSignatureStatuses(db, gs);
+    expect(statuses.get(gs[1]!)!.integrityProblems).toBe(1);
+    expect(statuses.get(gs[0]!)).toMatchObject({ integrityProblems: 0, state: 'CURRENT' });
+    expect(statuses.get(gs[2]!)).toMatchObject({ integrityProblems: 0, state: 'CURRENT' });
+  });
+
+  it('P5: the kept item list is the signed bytes: altering it invalidates every record that rests on it', async () => {
+    const { gs, sel } = await signed(2);
+    const touch = await db.grantSelectionSignature.findFirstOrThrow({ where: { selectionId: sel.id } });
+    const items = (touch.items as Array<{ grantId: string; version: number; termsHash: string }>).map((i, k) => (k === 0 ? { ...i, termsHash: '1'.repeat(64) } : i));
+    await forge('grant_selection_signatures', `items = $2::jsonb`, `id = $1`, touch.id, JSON.stringify(items));
+    clearSignatureVerifyCache();
+    const statuses = await loadGrantSignatureStatuses(db, gs);
+    for (const g of gs) expect(statuses.get(g)!.integrityProblems, g).toBe(1);
+  });
+
+  it('P3: a selection record never verifies as a one-grant record, and a one-grant record never as a selection record', async () => {
+    const { gs, sel } = await signed(2);
+    const rec = await db.grantSignature.findFirstOrThrow({ where: { grantId: gs[0]! }, include: { passkey: true, selectionSignature: true } });
+    const base = {
+      id: rec.id, grantId: rec.grantId, recordVersion: rec.version, termsHash: rec.termsHash, requestId: rec.signingRequestId,
+      authenticatorData: Buffer.from(rec.authenticatorData), clientDataJson: Buffer.from(rec.clientDataJson), signature: Buffer.from(rec.signature),
+    };
+    const cred = { credentialId: Buffer.from(rec.passkey.credentialId), publicKey: Buffer.from(rec.passkey.publicKey), counter: 0n };
+    const items = (rec.selectionSignature!.items as Array<{ grantId: string; version: number; termsHash: string }>);
+    const selection = { selectionId: sel.id, items };
+    expect(await grantSignatureRecordVerifies({ ...base, payloadVersion: 'hadron-grant-selection-signature-v1', selection }, cred, rec.rpId)).toBe(true);
+    // No kept item list: it cannot be judged, and it is never judged as v1.
+    expect(await grantSignatureRecordVerifies({ ...base, payloadVersion: 'hadron-grant-selection-signature-v1' }, cred, rec.rpId)).toBe(false);
+    expect(await grantSignatureRecordVerifies({ ...base, payloadVersion: 'hadron-grant-signature-v1' }, cred, rec.rpId)).toBe(false);
+    // A one-grant record that names a selection is refused; the selection builder is never reached by a v1 version.
+    expect(await grantSignatureRecordVerifies({ ...base, payloadVersion: 'hadron-grant-signature-v1', selection }, cred, rec.rpId)).toBe(false);
+    // A kept list that does not hold the record's own pins is refused.
+    expect(await grantSignatureRecordVerifies({ ...base, payloadVersion: 'hadron-grant-selection-signature-v1', selection: { selectionId: sel.id, items: items.filter((i) => i.grantId !== gs[0]) } }, cred, rec.rpId)).toBe(false);
+  });
+
+  it('P12: an activated grant\'s terms cannot change (append-only), and a later end of one grant leaves every record verifying from what was signed', async () => {
+    const { gs } = await signed(2);
+    await expect(db.$executeRawUnsafe(`UPDATE grants SET reason = 'a different reason', version = version + 1 WHERE id = $1`, gs[0])).rejects.toThrow(/append-only/);
+    await revoke(gs[0]!);
+    clearSignatureVerifyCache();
+    const statuses = await loadGrantSignatureStatuses(db, gs);
+    for (const g of gs) expect(statuses.get(g), g).toMatchObject({ state: 'CURRENT', integrityProblems: 0 });
   });
 });
