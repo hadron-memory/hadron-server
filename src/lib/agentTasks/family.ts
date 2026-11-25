@@ -63,21 +63,36 @@ export function familySpellings(family: string): string[] {
  * The mapping is a list of DELIBERATE model-id shapes, not a search for a tier word: the checked gate says an unknown
  * model returns null, so a string that merely CONTAINS `opus`/`sonnet`/`haiku` (`octopus-v1`, `my-sonnet-finetune`,
  * `gpt-opus-5`) or only names the tier (`opus`, `claude-opus`) is null, and `deriveFamily` (which is permissive on
- * purpose, to classify a worker) is never a witness here. Only Anthropic's own id shapes are listed — current
+ * purpose, to classify a worker) is never a witness here. Anthropic's id shapes are current
  * `claude-<tier>-<version>` and legacy `claude-<version>-<tier>`, with an optional Bedrock/Vertex `[region.]anthropic.`
- * prefix — and R189 authorizes owning the mapping, not guessing another family's equivalents. The server team adds a
- * shape here when a model appears. Advisory like the family: self-declared, never authorization.
+ * prefix; other vendors' shapes are listed in {@link VENDOR_TIER_SHAPES} (#5175, placements Proposed). The server team
+ * adds a shape here when a model appears. Advisory like the family: self-declared, never authorization.
  */
 export type ModelTier = 'high' | 'mid' | 'low';
-const TIER_BY_NAME: Readonly<Record<string, ModelTier>> = { opus: 'high', sonnet: 'mid', haiku: 'low' };
+const TIER_BY_NAME: Readonly<Record<string, ModelTier>> = { opus: 'high', sonnet: 'mid', haiku: 'low', fable: 'high' };
 const CLAUDE_ID_PREFIX = '(?:(?:[a-z]{2}\\.)?anthropic\\.)?claude-';
-const CURRENT_ID = new RegExp(`^${CLAUDE_ID_PREFIX}(opus|sonnet|haiku)-\\d`);
+const CURRENT_ID = new RegExp(`^${CLAUDE_ID_PREFIX}(opus|sonnet|haiku|fable)-\\d`);
 const LEGACY_ID = new RegExp(`^${CLAUDE_ID_PREFIX}\\d+(?:-\\d+)?-(opus|sonnet|haiku)(?:-|$)`);
+/**
+ * #5175 — other vendors' deliberate id shapes, placed by the vendor's own line-up (Holger, 2026-11-25, "Vendor
+ * positioning"): flagship `high`, standard `mid`, small or fast `low`. EVERY placement here is PROPOSED and Holger may
+ * overrule one. Anchored whole-id shapes like the Claude ones, so a string that merely contains `glm` or `gpt` is null.
+ * A model with no entry stays null and `TIER_UNKNOWN` under a floor (R190). Anthropic's `fable` line is `high` above.
+ */
+const VENDOR_TIER_SHAPES: ReadonlyArray<readonly [RegExp, ModelTier]> = [
+  [/^glm-\d+(?:\.\d+)?$/, 'mid'],
+  [/^glm-\d+(?:\.\d+)?-(?:air|flash)$/, 'low'],
+  [/^gpt-\d+(?:\.\d+)?(?:-(?:luna|codex))?$/, 'mid'],
+  [/^gpt-\d+(?:\.\d+)?-(?:mini|nano)$/, 'low'],
+  [/^deepseek-v\d+(?:\.\d+)?-pro$/, 'high'],
+  [/^deepseek-v\d+(?:\.\d+)?-flash$/, 'low'],
+];
 export function tierOf(llmModel: string | null | undefined): ModelTier | null {
   const model = llmModel?.trim().toLowerCase();
   if (!model) return null;
   const name = (CURRENT_ID.exec(model) ?? LEGACY_ID.exec(model))?.[1];
-  return name ? TIER_BY_NAME[name] ?? null : null;
+  if (name) return TIER_BY_NAME[name] ?? null;
+  return VENDOR_TIER_SHAPES.find(([shape]) => shape.test(model))?.[1] ?? null;
 }
 
 /**
