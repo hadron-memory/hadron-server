@@ -384,6 +384,40 @@ describe('#5015 cloneMemory and extractParentNodeToMemory', () => {
     expect(code(r)).toBe('OWNER_LIMIT_REACHED');
     expect(await db.memory.count({ where: { urn: `${orgUrn}:extracted` } })).toBe(0);
   });
+
+  // #5145 (follow-up to #5127): a move that crosses owners adds every moved row to the target owner (cor:acl:150:04: a node moved in
+  // from another owner's memory adds). Red under `addsNodes = !args.move` in extractParentNode.ts (every move free).
+  it('a cross-owner extract-and-move of two nodes: room for one refuses and writes nothing, room for exactly two succeeds', async () => {
+    const p = await node(mU1, 'p');
+    await node(mU1, 'p:q');
+    const sources = { memoryId: mU1, loc: { in: ['p', 'p:q'] }, deletedAt: null };
+    const target = `${orgUrn}:xo`;
+    await capWithRoom({ organizationId: orgId }, 1n);
+    const r = await gql(EXTRACT, asU(), { ref: p.id, urn: `hrn:mem:${target}`, move: true });
+    expect(code(r)).toBe('OWNER_LIMIT_REACHED');
+    expect(err(r)?.extensions?.limitKey).toBe('nodes');
+    expect(await db.memory.count({ where: { urn: target } })).toBe(0);
+    expect(await db.node.count({ where: sources })).toBe(2);
+    await db.ownerLimit.updateMany({ where: { organizationId: orgId, key: 'nodes' }, data: { limitValue: (await liveCount({ organizationId: orgId })) + 2n } });
+    expect((await gql(EXTRACT, asU(), { ref: p.id, urn: `hrn:mem:${target}`, move: true })).errors).toBeUndefined();
+    expect(await db.memory.count({ where: { urn: target } })).toBe(1);
+    expect(await db.node.count({ where: sources })).toBe(0);
+  });
+
+  // #5145: a same-owner move adds 0 and `requireOwnerHeadroomMany` skips a zero amount, so an owner already OVER its limit (a
+  // downgrade) can still reorganise. At the cap an unskipped zero would also pass; only below the count tells the two apart.
+  it('succeeds below the cap: a same-owner extract-and-move by an owner already over its nodes limit', async () => {
+    const p = await node(mO, 'p');
+    await node(mO, 'p:q');
+    await node(mO, 'stays');
+    const at = await capAtCurrent({ organizationId: orgId });
+    await db.ownerLimit.updateMany({ where: { organizationId: orgId, key: 'nodes' }, data: { limitValue: at - 2n } });
+    expect(await liveCount({ organizationId: orgId })).toBeGreaterThan(at - 2n);
+    const r = await gql(EXTRACT, ctxOf(orgAdmin), { ref: p.id, urn: `hrn:mem:${orgUrn}:over`, move: true });
+    expect(r.errors).toBeUndefined();
+    expect(await db.memory.count({ where: { urn: `${orgUrn}:over` } })).toBe(1);
+    expect(await liveCount({ organizationId: orgId })).toBe(at);
+  });
 });
 
 describe('#5015 a negative amount is a door bug', () => {
