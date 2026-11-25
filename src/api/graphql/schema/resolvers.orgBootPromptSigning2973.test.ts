@@ -146,7 +146,7 @@ describe('G1 audience (rulings:0262): who may read, preview and switch', () => {
 
   it('an admin on a missing organisation is refused byte-identically to a non-member of a real one (no existence oracle)', async () => {
     const real = await caught(Q.orgBootPromptSigning({}, { orgRef: org.id }, ctxOf(outsider)));
-    const missing = await caught(Q.orgBootPromptSigning({}, { orgRef: nonexistent.includes('.') ? `urn:orgRef:${nonexistent}` : nonexistent }, ctxOf(outsider)));
+    const missing = await caught(Q.orgBootPromptSigning({}, { orgRef: nonexistent.includes('.') ? `urn:org:${nonexistent}` : nonexistent }, ctxOf(outsider)));
     expect(missing).toEqual(real);
     const realOn = await caught(turnOn(null, ctxOf(outsider)));
     const missingOn = await caught(turnOn(null, ctxOf(outsider), `urn:org:${nonexistent}`));

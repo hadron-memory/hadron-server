@@ -332,7 +332,7 @@ describe('impersonation token resolution (middleware)', () => {
 
       const active = await impersonationSessions(
         {},
-        { orgId: orgA.id, filter: { activeOnly: true } },
+        { orgRef: orgA.id, filter: { activeOnly: true } },
         userCtx(admin),
       );
       expect(active.items.map((s) => s.id)).not.toContain(session.id);
@@ -858,7 +858,7 @@ describe('authContext + audit list', () => {
     await stopImpersonation({}, { id: session.id }, userCtx(admin));
     const active = await impersonationSessions(
       {},
-      { orgId: orgA.id, filter: { activeOnly: true } },
+      { orgRef: orgA.id, filter: { activeOnly: true } },
       userCtx(admin),
     );
     expect(active.items.map((s) => s.id)).not.toContain(session.id);

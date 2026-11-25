@@ -299,9 +299,9 @@ describe('agentTask global search (#3945)', () => {
     expect(all.hits.some((h: any) => h.entityType === 'agentTask' && h.id === taskX.id)).toBe(true);
     const other = await db.organization.create({ data: { id: generateId(), name: 'o2', urn: `o2-${generateId()}.com` } });
     await db.orgMember.create({ data: { id: generateId(), organizationId: other.id, userId: participant.id, role: 'ADMIN' } });
-    const narrowed = await search(userCtx(participant), 'zebra', { orgId: other.id });
+    const narrowed = await search(userCtx(participant), 'zebra', { orgRef: other.id });
     expect(narrowed.hits).toEqual([]);
-    expect(agentTaskHits(await search(userCtx(participant), 'zebra', { orgId })).map((h: any) => h.id)).toEqual([taskX.id]); // own org: still only the gated task
+    expect(agentTaskHits(await search(userCtx(participant), 'zebra', { orgRef: orgId })).map((h: any) => h.id)).toEqual([taskX.id]); // own org: still only the gated task
   });
 });
 
