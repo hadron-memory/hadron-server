@@ -187,7 +187,14 @@ export const hadronStoreFile: RunToolDef = {
     // #5017: the owner's file-bytes cap, answered BEFORE any byte is written (no object, no row, no reference node). The final
     // check runs under the owner-limit lock where the row is inserted, below. A run with no on-behalf-of user gets the unattended form.
     const limitCaller = assetLimitCaller({ userId: ctx.principal.userId ?? null });
-    await checkAssetBytesHeadroom(ctx.db, memory.id, body.byteLength, limitCaller);
+    try {
+      await checkAssetBytesHeadroom(ctx.db, memory.id, body.byteLength, limitCaller);
+    } catch (err) {
+      // #5015: an owner-limit refusal is returned to the model like the final check's below (nothing was written yet).
+      const refused = ownerLimitToolError(err);
+      if (refused) return { stored: false, nodeUrn: urn, ...refused };
+      throw err;
+    }
 
     await putObject({ key: storageKey, body, contentType: mimeType });
     try {
@@ -242,7 +249,8 @@ export const hadronStoreFile: RunToolDef = {
       // original error is what the author needs to see.
       await ctx.db.asset.delete({ where: { id: assetId } }).catch(() => {});
       await deleteObject(storageKey).catch(() => {});
-      // #5015: the owner's `nodes` limit is the model's to react to, not the end of the run (nothing is left behind).
+      // #5015: an owner limit (`nodes`, or #5017's `assetBytes` under the lock) is the model's to react to, not the end of
+      // the run (nothing is left behind).
       const refused = ownerLimitToolError(err);
       if (refused) return { stored: false, nodeUrn: urn, ...refused };
       if (err instanceof GraphQLError && err.extensions?.code === 'NodeLocConflictError') {

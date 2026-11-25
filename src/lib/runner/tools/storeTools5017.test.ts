@@ -2,6 +2,7 @@
  * #5017 (Billing A10): `hadron_store_file` and the `assetBytes` owner limit. The cap is answered BEFORE any byte is written (no object,
  * no Asset row, no reference node) and again, under the owner-limit lock, where the row is inserted; the run goes on with the tool's error.
  * Red on main: the over-cap store succeeds.
+ * #5015: both refusals are RETURNED (`stored: false`, `error`), never thrown: a handler throw ends the run (TOOL_FAILED).
  */
 
 import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest';
@@ -105,8 +106,8 @@ describe('#5017 hadron_store_file and the assetBytes cap', () => {
     limits({ organization: { assetBytes: CAP } });
     await seedFile(600 * KB);
     const run = await mintRun(writerId);
-    const err = await store(run, 'over', 600 * KB).then(() => null, (e: unknown) => e as { extensions?: Record<string, unknown> });
-    expect(err).toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED', limitKey: 'assetBytes' } });
+    const out = await store(run, 'over', 600 * KB) as Record<string, any>;
+    expect(out).toMatchObject({ stored: false, error: { code: 'OWNER_LIMIT_REACHED', limitKey: 'assetBytes' } });
     expect(putObject).not.toHaveBeenCalled();
     expect(await db.asset.count({ where: { memoryId } })).toBe(1); // only the seeded file
     expect(await db.node.count({ where: { memoryId, loc: 'files:over' } })).toBe(0);
@@ -117,10 +118,10 @@ describe('#5017 hadron_store_file and the assetBytes cap', () => {
     const run = await mintRun(writerId);
     await expect(store(run, 'fits', 100 * KB)).resolves.toMatchObject({ stored: true });
     await seedFile(1000 * KB); // now over for anyone
-    const behalf = await store(run, 'behalf', 100 * KB).then(() => null, (e: unknown) => e as { extensions?: Record<string, unknown> });
-    expect(behalf).toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED', callerCanManageOwner: false } });
-    expect(behalf?.extensions).not.toHaveProperty('limit');
-    expect(behalf?.extensions).not.toHaveProperty('ownerId');
+    const behalf = await store(run, 'behalf', 100 * KB) as Record<string, any>;
+    expect(behalf).toMatchObject({ stored: false, error: { code: 'OWNER_LIMIT_REACHED', callerCanManageOwner: false } });
+    expect(behalf.error).not.toHaveProperty('limit');
+    expect(behalf.error).not.toHaveProperty('ownerId');
   });
 
   it('the FINAL check, where the row is inserted: another file landing while the bytes are written refuses the store, and its object is removed', async () => {
@@ -128,8 +129,8 @@ describe('#5017 hadron_store_file and the assetBytes cap', () => {
     const run = await mintRun(writerId);
     // The pre-check passes (nothing is stored yet); the other file lands between it and the row.
     vi.mocked(putObject).mockImplementationOnce(async () => { await seedFile(600 * KB); });
-    const err = await store(run, 'parked', 600 * KB).then(() => null, (e: unknown) => e as { extensions?: Record<string, unknown> });
-    expect(err).toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED', limitKey: 'assetBytes' } });
+    const out = await store(run, 'parked', 600 * KB) as Record<string, any>;
+    expect(out).toMatchObject({ stored: false, error: { code: 'OWNER_LIMIT_REACHED', limitKey: 'assetBytes' } });
     expect(putObject).toHaveBeenCalledOnce();
     expect(deleteObject).toHaveBeenCalledOnce(); // the compensation removes the written object
     expect(await db.asset.count({ where: { memoryId, filename: 'parked.txt' } })).toBe(0);
