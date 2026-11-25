@@ -72,8 +72,9 @@ for (const door of ['memory', 'installed', 'app'] as const) describe(`database r
     expect(await db.node.count({ where: { memoryId: made.id } })).toBe(0);
     expect(existsSync(yaml(`Root-${door}`))).toBe(false);
   });
-  // The failure is injected at the org-default step, which only the memory door runs; the rollback of the other
-  // doors is pinned in resolvers.noRootNode3952.test.ts (agent grant, group owner row).
+  // The failure is injected at the org-default step, which only the memory door runs. The installed door's rollback
+  // (agent grant) and the group owner row are pinned in resolvers.noRootNode3952.test.ts; the app door writes only the
+  // memory row, so it has nothing to roll back.
   it.runIf(door === 'memory')('a later failure rolls its memory back, and a retry creates exactly one', async () => {
     const before = await db.memory.count();
     vi.spyOn(defaults, 'applyOrgDefaultsAtCreation').mockRejectedValueOnce(new Error('synthetic database failure'));

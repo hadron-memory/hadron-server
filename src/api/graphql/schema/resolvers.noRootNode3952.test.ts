@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -8,6 +8,9 @@ import * as nodeMutations from '../../../controller/operations/createNode.js';
 // display name (createMemory, createAppMemory, createMemoryInApp) no longer do; the memory row, a group's
 // owner row and a knowledge memory's agent grant are still written in the same transaction. A memory that
 // already has a root keeps it (no migration, no data change).
+// Isolation: every vitest worker runs against its own database clone (CLAUDE.md, "Common commands"), so a trigger
+// here cannot fail another file's inserts. A run that died between CREATE and DROP leaves the trigger in that clone
+// only, and the clones are dropped at teardown; beforeAll still drops any leftover so a rerun starts clean.
 let failingTable: string | null = null;
 /** A real database failure on the next insert into `table`, so a step AFTER the memory row can be made to fail. */
 const failInsertsInto = async (table: string) => {
@@ -20,7 +23,11 @@ const stopFailing = async () => {
   await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS fail_insert_3952 ON "${failingTable}"`);
   failingTable = null;
 };
+beforeAll(async () => {
+  for (const table of ['agent_memory_items', 'memory_members']) await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS fail_insert_3952 ON "${table}"`);
+});
 afterEach(async () => { vi.restoreAllMocks(); await stopFailing(); });
+afterAll(async () => { await db.$executeRawUnsafe('DROP FUNCTION IF EXISTS fail_insert_3952() CASCADE'); });
 const M = resolvers.Mutation as any;
 let org: any, admin: any, app: any, agent: any;
 const ctx = (): Context => ({ db, userId: admin.id, roles: ['READER'] });

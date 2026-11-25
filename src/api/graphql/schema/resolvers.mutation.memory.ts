@@ -708,7 +708,8 @@ export const memoryMutations = {
       }
 
       // #2730: refuse an unprojectable name here, after the gates and before ensureUserHandle,
-      // the tombstone reclaim or any create. Kept by #3952 (no root node is made from the name any more).
+      // the tombstone reclaim or any create. Kept unchanged by #3952 ("touch nothing else"): no root node is made from the name any more, so this is now
+      // stricter than creation needs; relaxing it (and renaming assertMemoryRootLoc) is a follow-up.
       assertMemoryRootLoc(name);
       assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
 

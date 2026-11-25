@@ -319,7 +319,8 @@ export const appMemoryMutations = {
     const app = await loadAppAndAuthorize(ctx, appRef, klass);
     const agent = await resolveInstalledAgent(ctx, app.id, agentRef);
     // #2730: refuse an unprojectable name after the gates and before the tombstone reclaim or any create.
-    // Kept by #3952 (no root node is made from the name any more; the name is still a projection input).
+    // Kept unchanged by #3952 ("touch nothing else"): no root node is made from the name any more, so this is now
+    // stricter than creation needs; relaxing it is a follow-up. The function keeps its #2730 name for the same reason.
     assertMemoryRootLoc(name);
     assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
     const agentSlug = agentSlugFromUrn(agent.urn);
