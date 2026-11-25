@@ -212,9 +212,11 @@ export interface NodeRetrievalProvider {
    * `stoppedEarly` also means a named node with an eligible vector lies past it (the ranks
    * found stand), besides the work budget ending the lookup. Hybrid search certifies its fused page with it, and never
    * certifies a page whose lookup stopped early. `memo` (#4994) lets
-   * the lookups of ONE fused ranking, over the same options, share one computed ranking.
+   * the lookups of ONE fused ranking, over the same options, share one computed ranking. #5162: `exact` says the ranks
+   * come from the exact ranking of a scope within the bound; without it they may come from a second approximate walk, so
+   * hybrid search certifies only when they agree with its vector leg.
    */
-  vectorRanks(opts: Omit<VectorSearchOpts, 'limit' | 'onWindow'> & { nodeIds: string[]; memo?: VectorRankMemo }): Promise<{ ranks: Map<string, number>; stoppedEarly: boolean }>;
+  vectorRanks(opts: Omit<VectorSearchOpts, 'limit' | 'onWindow'> & { nodeIds: string[]; memo?: VectorRankMemo }): Promise<{ ranks: Map<string, number>; stoppedEarly: boolean; exact?: boolean }>;
   /**
    * No-query filtered browse (cor:api:090:02): the structured filter (incl. a
    * `where` predicate) applied + sorted + paged in SQL, returning ordered node
