@@ -1105,5 +1105,17 @@ ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_sta
 -- #5009 (Billing A7a): the owner-limit rows.
 \ir owner-limit-invariants.sql
 
+-- #5078 (Billing A7d): per-memory live node totals: the triggers, then a refill no node write can fall into.
+\ir memory-node-total-invariants.sql
+BEGIN;
+LOCK TABLE nodes IN SHARE ROW EXCLUSIVE MODE;
+DELETE FROM memory_node_pending;
+INSERT INTO memory_node_totals (memory_id, live_nodes)
+  SELECT memory_id, count(*) FILTER (WHERE deleted_at IS NULL) FROM nodes GROUP BY memory_id
+  ON CONFLICT (memory_id) DO UPDATE SET live_nodes = EXCLUDED.live_nodes;
+UPDATE memory_node_totals t SET live_nodes = 0
+  WHERE t.live_nodes <> 0 AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.memory_id = t.memory_id);
+COMMIT;
+
 -- #5096: pin every guard function's search path; LAST, after every file above that (re)creates a function.
 \ir guard-search-path-invariants.sql

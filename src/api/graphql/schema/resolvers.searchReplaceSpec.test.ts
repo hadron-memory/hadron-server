@@ -111,10 +111,18 @@ describe('searchReplaceInSpecNodes', () => {
       .rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_PLAN_STALE' } });
     expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).content).toBe('cat revised');
 
+    // #5088 F8: the first plan is already stale after the content change, so judging the mint against it proves
+    // nothing. Take a FRESH preview of the revised content (it applies, so the only thing that can stale it now is
+    // the mint), then mint, then assert stale.
+    // (The direct content write left unrevisioned drift; a canonical raw read reconciles it, as the drift test below does.)
+    await resolvers.Query.node({}, { ref: spec.id, raw: true }, ctx());
+    const fresh = await call(request([spec.id]));
+    expect(fresh).toMatchObject({ dryRun: true, nodesChanged: 1 });
     // Minting is not exposed by #1451 yet; mint only this disposable fixture's node.
     await db.node.update({ where: { id: spec.id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
-    await expect(call(request([spec.id], { dryRun: false, expectedPlan: preview.plan })))
+    await expect(call(request([spec.id], { dryRun: false, expectedPlan: fresh.plan })))
       .rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_PLAN_STALE' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).content).toBe('cat revised');
   });
 
   it('keeps drifted previews read-only and recovers through a canonical node read', async () => {

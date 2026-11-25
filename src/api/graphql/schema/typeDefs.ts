@@ -10421,11 +10421,22 @@ export const typeDefs = `#graphql
       tables (a value that is not an object prints as a fenced JSON block), Edges as a list, Metadata as a list, a section with nothing in it
       left out. No sections named prints the content only. Comments is not a
       section yet.
-    Auth: same node-read gate as node(ref:). (HTML + asUrl delivery land
+    Edges: an outgoing edge is exported only when the caller can read its
+    TARGET's memory (the Edge.target rule, denied ≡ absent), so a
+    partial-access caller's file — full: true included — omits those edges.
+    The round trip is additive: "hadron node import --with-edges" wires the
+    edges the file carries and never deletes an edge the file lacks, so an
+    omitted edge survives a restore into a memory that still has it. The
+    PDF's Edges section applies the same readability rule and additionally
+    drops soft-deleted targets (it prints locs, so it keeps only live ones).
+    ref: the node's PK or URN (hrn:node:hadronmemory.com:specs:cor:api:140). Auth: the same node-read gate as
+    node(ref:), including read-only PUBLIC knowledge for an App key or userless
+    run (hrn:node:hadronmemory.com:specs:cor:acl:010:01). A node the caller can't read, a missing ref and a
+    soft-deleted node all refuse as NODE_NOT_FOUND. (HTML + asUrl delivery land
     later; the result shape is forward-compatible.)
     """
     nodeExport(
-      id: ID!
+      ref: ID!
       format: NodeExportFormat = MD
       full: Boolean = true
       sections: [NodeExportSection!]
@@ -14500,7 +14511,7 @@ export const typeDefs = `#graphql
       is per node, and every new node starts unminted, with draft rights, in
       any memory.
       """
-      draftCorpus: Boolean
+      draftCorpus: Boolean @deprecated(reason: "Accepted and ignored since #1591: a memory's draft or minted state is derived from its nodes.")
     ): Memory!
 
     """

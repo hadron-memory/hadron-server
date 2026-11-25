@@ -31,8 +31,10 @@ const printed = () => {
   const calls = vi.mocked(renderMarkdownToPdf).mock.calls;
   return calls[calls.length - 1]![0] as string;
 };
+// #4139: nodeExport takes `ref` (the ruled hard rename, PR #4763); this test arrived
+// from main (#5095) still spelling the old `id` argument, so the call site carries the rename.
 const exportPdf = (args: Record<string, unknown> = {}, id = nodeId, c = ctx()) =>
-  Q.nodeExport({}, { id, format: 'PDF', ...args }, c);
+  Q.nodeExport({}, { ref: id, format: 'PDF', ...args }, c);
 /** Index of a section heading in the printed Markdown, so an order can be asserted. */
 const at = (heading: string) => printed().indexOf(`## ${heading}`);
 
@@ -273,8 +275,11 @@ describe('#395 `full` is ignored for a PDF; read access is unchanged', () => {
   });
 
   it('a caller who may not read the node gets NOT_FOUND and no PDF is rendered', async () => {
+    // #4139: the refusal is the typed NodeNotFoundError (code NODE_NOT_FOUND, top-level on the
+    // instance; formatError maps it to extensions at the wire boundary) — carried from main's
+    // old NOT_FOUND-in-extensions spelling by the ruled rename in PR #4763.
     await expect(exportPdf({ sections: ['ABSTRACT', 'DATA', 'EDGES', 'METADATA'] }, nodeId, ctx(strangerId)))
-      .rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
+      .rejects.toMatchObject({ code: 'NODE_NOT_FOUND' });
     expect(renderMarkdownToPdf).not.toHaveBeenCalled();
   });
 
