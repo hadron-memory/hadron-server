@@ -90,13 +90,17 @@ export async function expireCreditGrants(
   const settle = options.settle ?? settleExpiredGrants;
   const out: ExpireCreditGrantsResult = { owners: 0, settlements: 0, failures: 0 };
   // #5014 (local review P2): entries a merge raced past are re-pointed to the survivor BEFORE settling, so a settlement is
-  // computed over the whole ledger. A failure logs and the run goes on (the next run, or the survivor's own read, retries).
+  // computed over the whole ledger. A failure logs and the PERSON leg is skipped this run (a settlement over a partial ledger could
+  // leave an expired credit unsettled for good); the organization leg is unaffected, and the next run retries.
+  let repointed = true;
   try {
     await repointMergedLedgerOwners(db);
   } catch (err) {
+    repointed = false;
     console.error(`${TAG}.repoint_failed`, { code: safeErrorCode(err) });
   }
   for (const leg of OWNER_LEGS) {
+    if (leg === 'user' && !repointed) continue;
     let passes = 0;
     let after: string | null = null;
     while (passes < maxPasses) {

@@ -7,8 +7,10 @@
  *
  * The append-only trigger (prisma/credit-ledger-invariants.sql) already allows exactly one move of `owner_user_id`: from a person
  * to the person they were merged into, along a `user_merges` row. This re-applies that move to every entry still owned by a merge
- * source, which covers every interleaving: the survivor's own read runs it first (so the survivor's balance is current), and
- * the hourly job runs it for everyone. It writes `owner_user_id` and nothing else (the other columns, `updated_at` included, are
+ * source, which covers every interleaving: the survivor's own read runs it first for the entries of its DIRECT merge sources (a
+ * chain S into T into U reaches U only after the hourly job has followed it hop by hop), and the hourly job runs it for everyone.
+ * Moving an entry changes only its owner, never `(source_type, source_id)`, the one unique key, so it cannot collide with a
+ * settlement the survivor already holds; `user_merges.source_user_id` is the table's primary key, so an entry matches one row. It writes `owner_user_id` and nothing else (the other columns, `updated_at` included, are
  * frozen by the trigger), and it is idempotent: with nothing stranded it changes no row.
  */
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
@@ -33,6 +35,7 @@ export async function repointMergedLedgerOwners(db: PrismaClient, opts: { surviv
          ${survivorFilter}`);
     moved += n;
     if (n === 0 || opts.survivor !== undefined) break;
+    if (hop === MAX_HOPS - 1) console.warn('credit_ledger.repoint_hop_cap', { moved });
   }
   return moved;
 }

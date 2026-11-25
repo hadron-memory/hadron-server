@@ -6,7 +6,7 @@
  * which is the state either race leaves behind.
  */
 import { ApolloServer } from '@apollo/server';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { mergeUsers } from '../../test/mergeConsent.js';
@@ -114,5 +114,20 @@ describe('the global re-point (the hourly job)', () => {
     await expireCreditGrants(db);
     expect(await db.creditLedgerEntry.count({ where: { ownerUserId: s } })).toBe(0);
     expect(await db.creditLedgerEntry.count({ where: { sourceType: 'grant-expiry', ownerUserId: t } })).toBe(1);
+  });
+  it('a failed re-point skips the person leg of the run (no settlement over a partial ledger) and leaves the organization leg alone', async () => {
+    await entry(t, { amountMicroCents: 100n, createdAt: new Date(Date.now() - 3 * DAY), expiresAt: new Date(Date.now() - DAY) });
+    const failing = new Proxy(db, {
+      get: (target, prop, recv) =>
+        prop === '$executeRaw' ? async () => { throw new Error('boom'); } : Reflect.get(target, prop, recv),
+    }) as typeof db;
+    const settled: unknown[] = [];
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expireCreditGrants(failing, { settle: async (_d, owner) => { settled.push(owner); return []; } });
+    } finally {
+      quiet.mockRestore();
+    }
+    expect(settled.filter((o) => 'userId' in (o as object))).toEqual([]);
   });
 });
