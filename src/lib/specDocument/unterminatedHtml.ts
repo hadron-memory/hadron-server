@@ -136,8 +136,8 @@ function firstUnterminated(text: string, from: number): number {
   // The kind of the line before the one being read (`prev` is already the current line's kind once its head is handled).
   let prevBefore: LineKind = 'blank';
   // A link reference definition may spread over lines: its destination (and then its title) can sit on the next line. 1: the line before was a
-  // label alone (`[a]:`), so this line is the destination; 2: the line before was a definition with a destination, so a title may follow.
-  let lrd: 0 | 1 | 2 = 0;
+  // label alone (`[a]:`), so this line is the destination; 2: the line before was a definition with a destination, so a title may follow; 3: inside a title that opened on an earlier line.
+  let lrd: 0 | 1 | 2 | 3 = 0;
   // A raw-text element opened in the middle of a line is inline HTML: Markdown goes on parsing after it, so only an end tag
   // that Markdown also reads as HTML (outside code, a fence and a backslash escape) closes it. -1 when none is open.
   let rawStart = -1;
