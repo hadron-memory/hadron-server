@@ -211,7 +211,7 @@ describe('#5175 tierOf: fable and the vendor lines, versions enumerated (placeme
   it.each([
     ['claude-fable-5-2', 'high'], ['claude-fable-5-1', 'high'], ['us.anthropic.claude-fable-5-2-v1:0', 'high'],
     ['glm-5.3', 'mid'], ['GLM-4.6', 'mid'], ['glm-4.5-air', 'low'], ['glm-4.7-flash', 'low'],
-    ['gpt-6-luna', 'mid'], ['gpt-5.1-codex', 'mid'], ['gpt-5-mini', 'low'], ['gpt-5-nano', 'low'],
+    ['gpt-6-luna', 'mid'], ['gpt-5', 'mid'], ['gpt-5.1-codex', 'mid'], ['gpt-5-mini', 'low'], ['gpt-5-nano', 'low'],
     ['deepseek-v4-pro', 'high'], ['deepseek/deepseek-v4-pro-0813', 'high'], ['deepseek/deepseek-v4-flash-0813', 'low'], ['deepseek-v4-flash', 'low'],
   ])('%s is %s', (model, tier) => expect(tierOf(model)).toBe(tier));
   it.each(['glm-sonnet-1', 'my-glm-5', 'gpt-opus-5', 'glm-6', 'gpt-7', 'gpt-4', 'deepseek-v5-pro', 'deepseek-v4-pro-max', 'deepseek-pro', 'other/deepseek-v4-pro-0813', 'deepseek-v4-pro-08130'])('%s stays null', (m) =>

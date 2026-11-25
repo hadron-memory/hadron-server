@@ -74,12 +74,14 @@ const CLAUDE_ID_PREFIX = '(?:(?:[a-z]{2}\\.)?anthropic\\.)?claude-';
 const CURRENT_ID = new RegExp(`^${CLAUDE_ID_PREFIX}(opus|sonnet|haiku|fable)-\\d`);
 const LEGACY_ID = new RegExp(`^${CLAUDE_ID_PREFIX}\\d+(?:-\\d+)?-(opus|sonnet|haiku)(?:-|$)`);
 /**
- * #5175 — other vendors' deliberate id shapes, placed by the vendor's own line-up (Holger, 2026-11-25, "Vendor
- * positioning"): flagship `high`, standard `mid`, small or fast `low`. EVERY placement here is PROPOSED and Holger may
- * overrule one (this PR is the proposal; its pins are expected to change if one is overruled). Anchored whole-id shapes
- * like the Claude ones, so a string that merely contains `glm` or `gpt` is null. Versions are ENUMERATED, not open: a
- * model appears here only once someone has placed it, so `glm-6` or `gpt-7` stays null and `TIER_UNKNOWN` under a
- * floor (R190, cor:agt:060:04) until the server team adds it. Anthropic's `fable` line is `high` above.
+ * #5175 — other vendors' deliberate id shapes, placed by each vendor's own line-up as the CHECKED records it
+ * (hadron-server#5175 comment 7170251620; Holger 2026-11-25, "Vendor positioning"): Anthropic's fable line `high`; the
+ * glm and gpt STANDARD lines `mid` (glm-5.3 is GLM's standard line, so `mid`; the gpt luna/codex lines likewise); a
+ * vendor's small or fast variants (`air`, `flash`, `mini`, `nano`) `low`; deepseek's `pro` line `high` per its vendor's
+ * positioning. EVERY placement is PROPOSED and Holger may overrule one; this PR is the proposal and its pins change if
+ * one is overruled. Anchored whole-id shapes like the Claude ones, so a string that merely contains `glm` or `gpt` is
+ * null. Versions are ENUMERATED, not open: a model appears here only once someone has placed it, so `glm-6` or `gpt-7`
+ * stays null and `TIER_UNKNOWN` under a floor (R190, cor:agt:060:04) until the server team adds it.
  */
 const GLM_VERSIONS = '(?:4\\.5|4\\.6|4\\.7|5|5\\.3)';
 const GPT_VERSIONS = '(?:5|5\\.1|6)';
