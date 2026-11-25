@@ -335,6 +335,25 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('<script>"</script <plaintext><style></template></script><noscript>')).toBe('<script>"</script <plaintext>&lt;style></template></script>&lt;noscript>');
     expect(escapeUnterminatedHtml('<script></script <pre><!--</title><a</script></textarea')).toBe('<script></script <pre>&lt;!--</title><a</script>&lt;/textarea');
   });
+  it('a tag that would swallow a fence opener is no tag: a line-head end tag or non-block tag cannot span a block boundary (QA delta P2-2)', () => {
+    expect(escapeUnterminatedHtml('<script>\nx\n</script\n```\n>\n```\nq <textarea>z')).toBe('&lt;script>\nx\n&lt;/script\n```\n>\n```\nq &lt;textarea>z');
+    expect(escapeUnterminatedHtml('<b\n```\n>\n```\nq <textarea>z')).toBe('&lt;b\n```\n>\n```\nq &lt;textarea>z');
+    expect(escapeUnterminatedHtml('x\n</b\n```\n>\n```\nq <textarea>z')).toBe('x\n&lt;/b\n```\n>\n```\nq &lt;textarea>z');
+  });
+  it('inside an HTML block (types 1 to 7) Markdown reads no fence, code span or indented code, so a construct there is live markup', () => {
+    // Type 6: a block-level tag at the head of a line runs to the next blank line.
+    expect(escapeUnterminatedHtml('<div>\n```\n<b x=\n```\nz')).toBe('<div>\n```\n&lt;b x=\n```\nz');
+    expect(escapeUnterminatedHtml('<div>\n    <b x=\n\nz')).toBe('<div>\n    &lt;b x=\n\nz');
+    expect(escapeUnterminatedHtml('<div>\n`a\n<b x=\nb`\n\nz')).toBe('<div>\n`a\n&lt;b x=\nb`\n\nz');
+    // Type 7: a complete tag alone on a line starts one when it does not interrupt a paragraph.
+    expect(escapeUnterminatedHtml('<b>\n```\n<i x=\n```\nz')).toBe('<b>\n```\n&lt;i x=\n```\nz');
+    expect(escapeUnterminatedHtml('a\n<b>\n```\n<i x=\n```\nz')).toBe('a\n<b>\n```\n<i x=\n```\nz');
+    // Types 1 to 5 run to their closer's line; after it Markdown is back.
+    expect(escapeUnterminatedHtml('<!-- c\n```\n<b x=\n-->\n<i x=')).toBe('<!-- c\n```\n<b x=\n-->\n&lt;i x=');
+    expect(escapeUnterminatedHtml('<!-- c -->\n```\n<b x=\n```\nz')).toBe('<!-- c -->\n```\n<b x=\n```\nz');
+    // After a blank line the block is over and Markdown is back: the fence is a fence again.
+    expect(escapeUnterminatedHtml('<div>\n\n```\n<b x=\n```\nz')).toBe('<div>\n\n```\n<b x=\n```\nz');
+  });
   it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag (BLIND delta pin)', () => {
     expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');
     expect(escapeUnterminatedHtml('<b y= <template>')).toBe('<b y= <template>'); // one complete tag: the value is `<template`
