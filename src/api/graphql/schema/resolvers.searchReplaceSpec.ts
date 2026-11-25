@@ -47,7 +47,7 @@ export interface SpecSearchReplaceInput {
   /** #1328 — one claim for every changed spec. */
   authoredWith?: AuthoredWith | null;
   memoryRef: string;
-  nodeIds: string[];
+  nodeRefs: string[];
   oldText: string;
   newText: string;
   fields: Array<'content' | 'abstract'>;
@@ -117,7 +117,7 @@ export async function searchReplaceInSpecNodes(
   { input }: { input: SpecSearchReplaceInput },
   ctx: Context,
 ) {
-  if (!Array.isArray(input.nodeIds) || input.nodeIds.length === 0) {
+  if (!Array.isArray(input.nodeRefs) || input.nodeRefs.length === 0) {
     throw error('Select at least one spec node.', 'SEARCH_REPLACE_NO_SELECTION');
   }
   if (!Array.isArray(input.fields) || input.fields.length === 0 ||
@@ -163,7 +163,7 @@ export async function searchReplaceInSpecNodes(
   // Resolve the exact selection before the transaction, reading only metadata.
   // The apply transaction rechecks the current memory before loading plaintext.
   const ids = new Set<string>();
-  for (const ref of input.nodeIds) {
+  for (const ref of input.nodeRefs) {
     let id: string;
     try {
       ({ id } = await resolveNodeRefForCaller(ctx, ref));

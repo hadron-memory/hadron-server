@@ -98,7 +98,7 @@ export const appQueries = {
         limit,
         offset,
       }: {
-        filter?: { ownedByMe?: boolean | null; agentId?: string | null } | null;
+        filter?: { ownedByMe?: boolean | null; agentRef?: string | null } | null;
         orgId?: string | null;
         limit?: number | null;
         offset?: number | null;
@@ -117,10 +117,10 @@ export const appQueries = {
       let agentClause: Record<string, unknown> = {};
       // Omitted and null skip the filter; an explicit value, including the empty
       // string, must resolve or answer the empty page.
-      if (f.agentId != null) {
+      if (f.agentRef != null) {
         let target: { id: string } | null = null;
         try {
-          const { id } = await resolveAgentRef(ctx.db, f.agentId);
+          const { id } = await resolveAgentRef(ctx.db, f.agentRef);
           target = await readableNestedAgent(ctx, await ctx.db.agent.findUnique({
             where: { id },
             select: { id: true, deletedAt: true, visibility: true, organizationId: true, ownerUserId: true },
@@ -162,7 +162,7 @@ export const appQueries = {
             { ownerUserId: null },
             { ownerUserId: ctx.userId ?? '__none__' },
           ];
-          if (ctx.userId && !ctx.impersonation && f.agentId == null) adminClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
+          if (ctx.userId && !ctx.impersonation && f.agentRef == null) adminClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
           where = { deletedAt: null, OR: adminClauses, ...agentClause };
         } else {
           // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
@@ -179,7 +179,7 @@ export const appQueries = {
             // member. In the `where` itself, so count and paging see them.
             // Not under an agent filter: that would answer the install question
             // App.agents WITHHOLDS from this reader (Riana's P3).
-            if (f.agentId == null) ownerClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
+            if (f.agentRef == null) ownerClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
           }
           where = { deletedAt: null, OR: ownerClauses, ...agentClause };
         }

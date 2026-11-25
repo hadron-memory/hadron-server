@@ -4936,7 +4936,7 @@ export function createMcpServerInstance(
             mode: effectiveMode,
             orgId: scopeOrgId,
             filter: {
-              memoryIds: filterMemoryIds,
+              memoryRefs: filterMemoryIds,
               isRunnable: isRunnable ?? undefined,
               hasOpenThreads: hasOpenThreads ?? undefined,
               role: role ?? undefined,
@@ -7910,7 +7910,7 @@ export function createMcpServerInstance(
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
       )[doorName](
         {},
-        { input: { memoryId: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}), ...(taskIndex ? { index: taskIndex } : {}), ...(taskSkill ? { skill: taskSkill } : {}) },
+        { input: { memoryRef: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}), ...(taskIndex ? { index: taskIndex } : {}), ...(taskSkill ? { skill: taskSkill } : {}) },
         ctx,
       );
       return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${taskIndex ? ` · listed in the tasks index of ${taskIndex.agent} (trigger: ${taskIndex.trigger.trim()})` : ''}${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
@@ -8179,8 +8179,8 @@ export function createMcpServerInstance(
               authoredWith,
               oldText,
               newText,
-              nodeIds: nodeUrns,
-              memoryIds: memoryUrns,
+              nodeRefs: nodeUrns,
+              memoryRefs: memoryUrns,
               prefix,
               fields,
               caseInsensitive: caseInsensitive ?? false,

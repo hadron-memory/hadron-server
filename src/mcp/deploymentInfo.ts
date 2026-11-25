@@ -252,7 +252,19 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // A lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation (ship order per precedent
 // 0274: notices, server, companions). The export's contents, gating and refusals are unchanged; only the argument that
 // names the node changed. (0.38.0 is #4782, entity refs S7, merged first.)
-export const HADRON_SERVER_VERSION = '0.39.0';
+//
+// 0.40.0 — BREAKING, entity refs gap 2 (#5080): 21 input-type fields on 17 input types, plus `createAiServiceConfig(ownerId:)`,
+// take refs, no alias (`*Id` -> `*Ref`): `NodeFilter.memoryRefs`, `EdgeFilter.memoryRef` / `sourceRef` / `targetRef`,
+// `AppFilter.agentRef`, `AiServiceConfigFilter.ownerRef`, `CreateNodeInput` / `UpdateNodeInput` / `ImportNodeInput` /
+// `NodeAuthoringCheckInput` / `BeginAssetUploadV2Input` `.memoryRef`, `UpdateNodeInput.ref`, `NodeEdgeInput.targetRef`,
+// `SearchReplaceInNodesInput` `.nodeRefs` / `.memoryRefs`, `SpecSearchReplaceInput.nodeRefs`, `CreateAgentTaskInput` /
+// `CloneAgentTaskInput` `.parentTaskRef`, `TickerInput` / `TickerPatch` `.channelRefs`, `BatchThrough.channelRef`, and
+// `createAiServiceConfig(ownerRef:)`. A lagging client's old name is an UNKNOWN field or argument and GraphQL refuses the whole
+// operation (ship order per precedent 0274: notices, server, companions). Three of them close a gap: ticker channels and
+// `BatchThrough` now resolve a URN as well as an id. `NodeInput` (the retired `replaceSubtree` shape) keeps `memoryId` and
+// its edges keep `targetId`; `ResumeSessionInput.expectedWorkerId` stays (#5163). MCP tool inputs are unchanged. (0.39.0 is
+// #4139, entity refs S3, merged first.)
+export const HADRON_SERVER_VERSION = '0.40.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

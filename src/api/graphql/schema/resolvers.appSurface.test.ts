@@ -1492,7 +1492,7 @@ describe('appNodes', () => {
     await db.appAgent.create({ data: { appId: app.id, agentId } });
 
     await expect(
-      resolvers.Query.appNodes({}, { appRef: app.id, filter: { memoryIds: [memoryId] } }, adminCtx()),
+      resolvers.Query.appNodes({}, { appRef: app.id, filter: { memoryRefs: [memoryId] } }, adminCtx()),
     ).rejects.toThrow(/not supported/);
     await expect(
       resolvers.Query.appNodes({}, { appRef: app.id, filter: { memoryClasses: ['system'] } }, adminCtx()),

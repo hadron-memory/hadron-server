@@ -446,8 +446,10 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       'A CHILD task names parentTaskId; only the parent\'s assignee may create one, and owns it. Omit assignee to leave ' +
       'it queued; pass status BACKLOG to park it instead.',
     SHAPE_HADRON_TASK_CREATE,
-    async ({ session, ...input }) =>
-      write('hadron_task_create', session, 'Created', (ctx) => M.createAgentTask({}, { input }, ctx)),
+    async ({ session, parentTaskId, ...rest }) =>
+      // #5080: the tool keeps `parentTaskId`; the GraphQL input names it `parentTaskRef`.
+      write('hadron_task_create', session, 'Created', (ctx) =>
+        M.createAgentTask({}, { input: { ...rest, ...(parentTaskId !== undefined ? { parentTaskRef: parentTaskId } : {}) } }, ctx)),
   );
 
   off('hadron_task_blocker_add',

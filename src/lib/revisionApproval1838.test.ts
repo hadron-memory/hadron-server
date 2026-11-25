@@ -242,7 +242,7 @@ describe('a hashless record authorizes nothing, on any surface (#1838)', () => {
     for (const viaSql of [false, true]) {
       for (const state of ['APPROVED', 'NOT_APPROVED', 'SUPERSEDED'] as const) {
         const res = await resolvers.Query.findNodes(null, {
-          filter: { memoryIds: [memory.id], approvalState: state, ...(viaSql ? { where: { path: ['marker'], eq: 'yes' } } : {}) },
+          filter: { memoryRefs: [memory.id], approvalState: state, ...(viaSql ? { where: { path: ['marker'], eq: 'yes' } } : {}) },
         }, as());
         const ids = res.hits.map((h: { node: { id: string } }) => h.node.id);
         expect(ids.includes(ended.id)).toBe(state === 'NOT_APPROVED');

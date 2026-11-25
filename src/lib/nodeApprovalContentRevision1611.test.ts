@@ -35,7 +35,7 @@ const statusOf = async (id: string) => {
 };
 const rowOf = (id: string) => db.node.findUniqueOrThrow({ where: { id } });
 const filterLocs = async (approvalState: NodeApprovalState) => {
-  const res = await resolvers.Query.findNodes(null, { filter: { memoryIds: [memory.id], approvalState } }, as());
+  const res = await resolvers.Query.findNodes(null, { filter: { memoryRefs: [memory.id], approvalState } }, as());
   return res.hits.map((h: { node: { loc: string } }) => h.node.loc).filter((l: string) => l !== 'approvals').sort();
 };
 

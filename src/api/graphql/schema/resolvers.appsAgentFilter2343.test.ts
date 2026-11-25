@@ -75,19 +75,19 @@ const asMember = () => ctx({ userId: member, roles: ['READER'] });
 
 describe('Query.apps(filter.agentId)', () => {
   it('returns only the Apps that install the Agent, with a consistent total', async () => {
-    const res = await resolvers.Query.apps(null, { filter: { agentId: agentG } }, asMember());
+    const res = await resolvers.Query.apps(null, { filter: { agentRef: agentG } }, asMember());
     expect(ids(res)).toEqual([a1, a3].sort());
     expect(res.total).toBe(2);
   });
 
   it('matches the join, not a primary agent: G installed second still matches', async () => {
-    const res = await resolvers.Query.apps(null, { filter: { agentId: agentG } }, asMember());
+    const res = await resolvers.Query.apps(null, { filter: { agentRef: agentG } }, asMember());
     expect(ids(res)).toContain(a3);
     expect(ids(res)).not.toContain(a2);
   });
 
   it('still returns an App whose other installed Agent the caller cannot read, and leaves the unfiltered list unchanged', async () => {
-    const filtered = await resolvers.Query.apps(null, { filter: { agentId: agentG } }, asMember());
+    const filtered = await resolvers.Query.apps(null, { filter: { agentRef: agentG } }, asMember());
     expect(ids(filtered)).toContain(a3);
     const all = await resolvers.Query.apps(null, {}, asMember());
     expect(ids(all)).toEqual([a1, a2, a3, a4].sort());
@@ -96,15 +96,15 @@ describe('Query.apps(filter.agentId)', () => {
 
   it('accepts a fully-qualified URN as well as an id', async () => {
     const row = await db.agent.findUniqueOrThrow({ where: { id: agentG }, select: { urn: true } });
-    const res = await resolvers.Query.apps(null, { filter: { agentId: `hrn:agent:${row.urn}` } }, asMember());
+    const res = await resolvers.Query.apps(null, { filter: { agentRef: `hrn:agent:${row.urn}` } }, asMember());
     expect(ids(res)).toEqual([a1, a3].sort());
   });
 
   it('answers the identical empty page for an unreadable, deleted, nonexistent or malformed agent', async () => {
-    const unreadable = await resolvers.Query.apps(null, { filter: { agentId: agentS } }, asMember());
-    const deleted = await resolvers.Query.apps(null, { filter: { agentId: agentDeleted } }, asMember());
-    const missing = await resolvers.Query.apps(null, { filter: { agentId: generateId() } }, asMember());
-    const malformed = await resolvers.Query.apps(null, { filter: { agentId: 'not a ref' } }, asMember());
+    const unreadable = await resolvers.Query.apps(null, { filter: { agentRef: agentS } }, asMember());
+    const deleted = await resolvers.Query.apps(null, { filter: { agentRef: agentDeleted } }, asMember());
+    const missing = await resolvers.Query.apps(null, { filter: { agentRef: generateId() } }, asMember());
+    const malformed = await resolvers.Query.apps(null, { filter: { agentRef: 'not a ref' } }, asMember());
     expect(unreadable).toEqual(EMPTY);
     expect(deleted).toEqual(unreadable);
     expect(missing).toEqual(unreadable);
@@ -112,10 +112,10 @@ describe('Query.apps(filter.agentId)', () => {
   });
 
   it('an explicit empty or blank agentId is a malformed ref, not an omitted filter', async () => {
-    const unreadable = await resolvers.Query.apps(null, { filter: { agentId: agentS } }, asMember());
+    const unreadable = await resolvers.Query.apps(null, { filter: { agentRef: agentS } }, asMember());
     for (const blank of ['', '   ']) {
-      expect(await resolvers.Query.apps(null, { filter: { agentId: blank } }, asMember())).toEqual(unreadable);
-      expect(await resolvers.Query.apps(null, { filter: { ownedByMe: true, agentId: blank } }, asMember())).toEqual(unreadable);
+      expect(await resolvers.Query.apps(null, { filter: { agentRef: blank } }, asMember())).toEqual(unreadable);
+      expect(await resolvers.Query.apps(null, { filter: { ownedByMe: true, agentRef: blank } }, asMember())).toEqual(unreadable);
     }
     expect(unreadable).toEqual(EMPTY);
   });
@@ -125,7 +125,7 @@ describe('Query.apps(filter.agentId)', () => {
     const legacy = `${org.urn}:legacy-${generateId()}`;
     await seedAgent(orgO, { legacyUrn: legacy });
     await seedAgent(orgO, { legacyUrn: legacy });
-    const res = await resolvers.Query.apps(null, { filter: { agentId: `hrn:agent:${legacy}` } }, asMember());
+    const res = await resolvers.Query.apps(null, { filter: { agentRef: `hrn:agent:${legacy}` } }, asMember());
     expect(res).toEqual(EMPTY);
   });
 
@@ -136,15 +136,15 @@ describe('Query.apps(filter.agentId)', () => {
         : Reflect.get(target, key)),
     });
     await expect(
-      resolvers.Query.apps(null, { filter: { agentId: agentG } }, { db: broken, userId: member, roles: ['READER'] } as Context),
+      resolvers.Query.apps(null, { filter: { agentRef: agentG } }, { db: broken, userId: member, roles: ['READER'] } as Context),
     ).rejects.toThrow('boom');
   });
 
   it('scopes to the org with orgId, and a non-member of that org gets an empty page', async () => {
-    const scoped = await resolvers.Query.apps(null, { orgId: orgO, filter: { agentId: agentG } }, asMember());
+    const scoped = await resolvers.Query.apps(null, { orgId: orgO, filter: { agentRef: agentG } }, asMember());
     expect(ids(scoped)).toEqual([a1, a3].sort());
     const outside = await resolvers.Query.apps(
-      null, { orgId: orgO, filter: { agentId: agentG } }, ctx({ userId: outsider, roles: ['READER'] }),
+      null, { orgId: orgO, filter: { agentRef: agentG } }, ctx({ userId: outsider, roles: ['READER'] }),
     );
     expect(outside).toEqual(EMPTY);
   });
@@ -154,19 +154,19 @@ describe('Query.apps(filter.agentId)', () => {
     const othersOwned = await seedApp(null, { ownerUserId: outsider });
     await install(a2, shared, new Date('2026-01-03'));
     await install(othersOwned, shared, new Date('2026-01-03'));
-    const res = await resolvers.Query.apps(null, { filter: { agentId: shared } }, ctx({ userId: admin, roles: ['ADMIN'] }));
+    const res = await resolvers.Query.apps(null, { filter: { agentRef: shared } }, ctx({ userId: admin, roles: ['ADMIN'] }));
     expect(ids(res)).toEqual([a2]);
     expect(res.total).toBe(1);
   });
 
   it('paginates the filtered set; limit 0 returns the count only', async () => {
-    const first = await resolvers.Query.apps(null, { filter: { agentId: agentG }, limit: 1, offset: 0 }, asMember());
-    const second = await resolvers.Query.apps(null, { filter: { agentId: agentG }, limit: 1, offset: 1 }, asMember());
+    const first = await resolvers.Query.apps(null, { filter: { agentRef: agentG }, limit: 1, offset: 0 }, asMember());
+    const second = await resolvers.Query.apps(null, { filter: { agentRef: agentG }, limit: 1, offset: 1 }, asMember());
     expect(first.items).toHaveLength(1);
     expect(second.items).toHaveLength(1);
     expect(first.items[0].id).not.toBe(second.items[0].id);
     expect(first.total).toBe(2);
-    const countOnly = await resolvers.Query.apps(null, { filter: { agentId: agentG }, limit: 0 }, asMember());
+    const countOnly = await resolvers.Query.apps(null, { filter: { agentRef: agentG }, limit: 0 }, asMember());
     expect(countOnly).toEqual({ items: [], total: 2 });
   });
 
@@ -174,7 +174,7 @@ describe('Query.apps(filter.agentId)', () => {
     const none = await resolvers.Query.apps(null, {}, asMember());
     expect(ids(none)).toEqual([a1, a2, a3, a4].sort());
     expect(await resolvers.Query.apps(null, { filter: {} }, asMember())).toEqual(none);
-    expect(await resolvers.Query.apps(null, { filter: { agentId: null } }, asMember())).toEqual(none);
+    expect(await resolvers.Query.apps(null, { filter: { agentRef: null } }, asMember())).toEqual(none);
   });
 });
 
@@ -195,7 +195,7 @@ describe('Query.apps(filter: { ownedByMe, agentId })', () => {
   });
 
   it('AND-combines: only the caller’s own org-less Apps that install the Agent', async () => {
-    const res = await resolvers.Query.apps(null, { filter: { ownedByMe: true, agentId: publicAgent } }, asMember());
+    const res = await resolvers.Query.apps(null, { filter: { ownedByMe: true, agentRef: publicAgent } }, asMember());
     expect(ids(res)).toEqual([mineWithG]);
     expect(res.total).toBe(1);
   });
@@ -206,25 +206,25 @@ describe('Query.apps(filter: { ownedByMe, agentId })', () => {
     const adminOther = await seedApp(null, { ownerUserId: admin });
     await install(adminOther, agentH, new Date('2026-01-01'));
     const res = await resolvers.Query.apps(
-      null, { filter: { ownedByMe: true, agentId: publicAgent } }, ctx({ userId: admin, roles: ['ADMIN'] }),
+      null, { filter: { ownedByMe: true, agentRef: publicAgent } }, ctx({ userId: admin, roles: ['ADMIN'] }),
     );
     expect(ids(res)).toEqual([adminApp]);
   });
 
   it('an App-key caller and an impersonated caller get an empty page', async () => {
     const key = await resolvers.Query.apps(
-      null, { filter: { ownedByMe: true, agentId: publicAgent } }, ctx({ appId: mineWithG, roles: ['READER'] }),
+      null, { filter: { ownedByMe: true, agentRef: publicAgent } }, ctx({ appId: mineWithG, roles: ['READER'] }),
     );
     expect(key).toEqual(EMPTY);
     const impersonated = await resolvers.Query.apps(
-      null, { filter: { ownedByMe: true, agentId: publicAgent } },
+      null, { filter: { ownedByMe: true, agentRef: publicAgent } },
       ctx({ userId: member, roles: ['READER'], impersonation: { orgId: orgO } as never }),
     );
     expect(impersonated).toEqual(EMPTY);
   });
 
   it('an unreadable agent is the same empty page here too', async () => {
-    const res = await resolvers.Query.apps(null, { filter: { ownedByMe: true, agentId: agentS } }, asMember());
+    const res = await resolvers.Query.apps(null, { filter: { ownedByMe: true, agentRef: agentS } }, asMember());
     expect(res).toEqual(EMPTY);
   });
 });

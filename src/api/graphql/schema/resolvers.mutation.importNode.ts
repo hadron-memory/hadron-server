@@ -34,10 +34,10 @@ import { type Context, requireMemoryWriteAccess, withoutRequestCaches } from './
 export interface ImportNodeInput {
   /** #1328 — import always attests, from any surface. */
   authoredWith?: AuthoredWith | null;
-  // Target — (memoryId + loc) XOR nodeUrn. The URN may name a
+  // Target — (memoryRef + loc) XOR nodeUrn. The URN may name a
   // not-yet-existing node (import creates it), so it is SPLIT into
   // memory-URN + loc rather than resolved via resolveNodeRef.
-  memoryId?: string | null;
+  memoryRef?: string | null;
   loc?: string | null;
   nodeUrn?: string | null;
   // Source — exactly one of:
@@ -70,23 +70,23 @@ export const importNodeMutations = {
       });
     }
 
-    // ── Target dispatch: (memoryId + loc) XOR nodeUrn ──────────────────
+    // ── Target dispatch: (memoryRef + loc) XOR nodeUrn ──────────────────
     // Empty strings normalize to absent across all three selectors so a
     // client serializing unset fields as '' gets the intended
     // BAD_USER_INPUT instead of a downstream URN-qualification error
     // (PR-486 review).
-    const memoryIdIn = input.memoryId != null && input.memoryId !== '' ? input.memoryId : null;
+    const memoryIdIn = input.memoryRef != null && input.memoryRef !== '' ? input.memoryRef : null;
     const locIn = input.loc != null && input.loc !== '' ? input.loc : null;
     const hasUrn = input.nodeUrn != null && input.nodeUrn !== '';
     if (hasUrn && (memoryIdIn != null || locIn != null)) {
       throw new GraphQLError(
-        'importNode: identify the target by `nodeUrn` OR by `memoryId` + `loc`, not both.',
+        'importNode: identify the target by `nodeUrn` OR by `memoryRef` + `loc`, not both.',
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }
     if (!hasUrn && (memoryIdIn == null || locIn == null)) {
       throw new GraphQLError(
-        'importNode: supply `nodeUrn` or both `memoryId` and `loc`.',
+        'importNode: supply `nodeUrn` or both `memoryRef` and `loc`.',
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }

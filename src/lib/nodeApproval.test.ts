@@ -341,7 +341,7 @@ describe('findNodes approvalState filter (#1591)', () => {
         ...(opts.limit ? { limit: opts.limit } : {}),
         // A `where` predicate routes the no-query browse through the SQL path.
         filter: {
-          memoryIds: [memory.id], approvalState,
+          memoryRefs: [memory.id], approvalState,
           ...(opts.viaSql ? { where: { path: ['k'], eq: 'v' } } : {}),
         },
       }, as());
@@ -463,12 +463,12 @@ describe('approvals on an encrypted memory (#1591)', () => {
 
     for (const viaSql of [false,true]) {
       for (const minted of [false,true]) {
-        const result = await resolvers.Query.findNodes(null,{filter:{memoryIds:[memory.id],minted,...(viaSql?{where:{path:['marker'],eq:'yes'}}:{})}},as());
+        const result = await resolvers.Query.findNodes(null,{filter:{memoryRefs:[memory.id],minted,...(viaSql?{where:{path:['marker'],eq:'yes'}}:{})}},as());
         expect(result.hits.some((h:{node:{id:string}})=>h.node.id===n.id)).toBe(!minted);
       }
 
       for (const state of ['APPROVED','SUPERSEDED','NOT_APPROVED','NOT_APPLICABLE'] as NodeApprovalState[]) {
-        const result = await resolvers.Query.findNodes(null, {filter:{memoryIds:[memory.id],approvalState:state,...(viaSql?{where:{path:['marker'],eq:'yes'}}:{})}}, as());
+        const result = await resolvers.Query.findNodes(null, {filter:{memoryRefs:[memory.id],approvalState:state,...(viaSql?{where:{path:['marker'],eq:'yes'}}:{})}}, as());
         expect(result.hits.some((h: {node:{id:string}})=>h.node.id===n.id)).toBe(state==='NOT_APPLICABLE');
       }
     }

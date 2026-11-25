@@ -798,7 +798,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
 
     const listedPage = await resolvers.Query.aiServiceConfigs(
       {},
-      { filter: { ownerType: 'AGENT', ownerId: agent.id } },
+      { filter: { ownerType: 'AGENT', ownerRef: agent.id } },
       ctxFor(admin.id),
     );
     const listed = listedPage!.items;
@@ -861,7 +861,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     await expect(
       resolvers.Query.aiServiceConfigs(
         {},
-        { filter: { ownerType: 'ORGANIZATION', ownerId: org.id } },
+        { filter: { ownerType: 'ORGANIZATION', ownerRef: org.id } },
         ctxFor(outsider.id),
       ),
     ).rejects.toThrow(/Forbidden/);

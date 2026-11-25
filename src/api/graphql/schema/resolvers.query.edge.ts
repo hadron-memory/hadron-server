@@ -14,9 +14,9 @@ import {
 } from './resolvers.helpers.js';
 
 export interface EdgeFilterInput {
-  memoryId?: string | null;
-  sourceNodeId?: string | null;
-  targetNodeId?: string | null;
+  memoryRef?: string | null;
+  sourceRef?: string | null;
+  targetRef?: string | null;
   isRunnable?: boolean | null;
   includeDeleted?: boolean | null;
 }
@@ -71,12 +71,12 @@ export const edgeQueries = {
 
     const accessible = await getAccessibleMemoryIds(ctx);
 
-    // Memory clause: readable set ∩ filter.memoryId ∩ org scope.
+    // Memory clause: readable set ∩ filter.memoryRef ∩ org scope.
     let memoryWhere: Record<string, unknown>;
-    if (f.memoryId != null) {
+    if (f.memoryRef != null) {
       let resolvedMemoryId: string;
       try {
-        ({ id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, f.memoryId));
+        ({ id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, f.memoryRef));
       } catch {
         return empty;
       }
@@ -91,17 +91,17 @@ export const edgeQueries = {
 
     // Endpoint clauses — node refs accept PK or fully-qualified URN.
     let endpointWhere: Record<string, unknown> = {};
-    if (f.sourceNodeId != null) {
+    if (f.sourceRef != null) {
       try {
-        const { id } = await resolveNodeRef(ctx.db, f.sourceNodeId);
+        const { id } = await resolveNodeRef(ctx.db, f.sourceRef);
         endpointWhere = { ...endpointWhere, sourceId: id };
       } catch {
         return empty;
       }
     }
-    if (f.targetNodeId != null) {
+    if (f.targetRef != null) {
       try {
-        const { id } = await resolveNodeRef(ctx.db, f.targetNodeId);
+        const { id } = await resolveNodeRef(ctx.db, f.targetRef);
         endpointWhere = { ...endpointWhere, targetId: id };
       } catch {
         return empty;

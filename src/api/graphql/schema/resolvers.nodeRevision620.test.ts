@@ -266,7 +266,7 @@ describe('#1323 current revision contract', () => {
 
     const result = await resolvers.Query.findNodes(
       {},
-      { filter: { memoryIds: [memory.id] } },
+      { filter: { memoryRefs: [memory.id] } },
       ctx(),
     );
     const hit = result.hits.find((candidate) => candidate.node.id === n.id)!;

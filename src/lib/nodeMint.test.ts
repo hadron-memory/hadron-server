@@ -235,7 +235,7 @@ describe('mint status reads (#1591)', () => {
     await spec('pas:020', { properties: { k: 'v' } });
     const locs = async (minted: boolean, viaSql: boolean) => {
       const res = await resolvers.Query.findNodes(null, {
-        filter: { memoryIds: [memory.id], minted, ...(viaSql ? { where: { path: ['k'], eq: 'v' } } : {}) },
+        filter: { memoryRefs: [memory.id], minted, ...(viaSql ? { where: { path: ['k'], eq: 'v' } } : {}) },
         ...(viaSql ? { limit: 1 } : {}),
       }, as());
       return res.hits.map((h: { node: { loc: string } }) => h.node.loc).filter((l: string) => l !== 'specs').sort();
