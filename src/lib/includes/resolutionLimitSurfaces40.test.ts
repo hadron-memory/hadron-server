@@ -175,7 +175,7 @@ describe('#40 external artefacts refuse before the external call', () => {
     await fixtures();
     const p = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'p' } });
     await heldExportWriter(async (entered, release) => {
-      expect((await Q.nodeExport({}, { id: p.id }, ctx())).data).toContain('{{> t}}');
+      expect((await Q.nodeExport({}, { ref: p.id }, ctx())).data).toContain('{{> t}}');
       await bounded(entered); // The resolver returned although the real usage insert is still held.
       expect(await readEvents()).toBe(0);
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -197,7 +197,7 @@ describe('#40 external artefacts refuse before the external call', () => {
     await fixtures();
     const p = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'p' } });
     await heldExportWriter(async (entered) => {
-      await Q.nodeExport({}, { id: p.id }, ctx());
+      await Q.nodeExport({}, { ref: p.id }, ctx());
       await bounded(entered);
       await expect(drainNodeUsage(db, { timeoutMs: 25 })).rejects.toThrow('Timed out draining asynchronous usage-event writes');
       expect(await readEvents()).toBe(0);
@@ -208,15 +208,15 @@ describe('#40 external artefacts refuse before the external call', () => {
   it('nodeExport PDF calls no PDF service', async () => {
     await fixtures();
     const p = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'p' } });
-    await expect(Q.nodeExport({}, { id: p.id, format: 'PDF' }, ctx()))
+    await expect(Q.nodeExport({}, { ref: p.id, format: 'PDF' }, ctx()))
       .rejects.toMatchObject({ extensions: { code: CONTENT_RESOLUTION_LIMIT_EXCEEDED, limit: 'bytes' }, message: expect.stringContaining('Export it after shortening the content, or read the stored text instead.') });
     expect(vi.mocked(renderMarkdownToPdf)).not.toHaveBeenCalled();
-    await expect(Q.nodeExport({}, { id: p.id, full: false }, ctx()))
+    await expect(Q.nodeExport({}, { ref: p.id, full: false }, ctx()))
       .rejects.toMatchObject({ extensions: { code: CONTENT_RESOLUTION_LIMIT_EXCEEDED } });
     await settleExportUsage();
     expect(await readEvents()).toBe(0);
     // The restore export reads with resolution off and is unaffected.
-    expect((await Q.nodeExport({}, { id: p.id }, ctx())).data).toContain('{{> t}}');
+    expect((await Q.nodeExport({}, { ref: p.id }, ctx())).data).toContain('{{> t}}');
     await settleExportUsage();
     expect(await readEvents()).toBe(1);
   });

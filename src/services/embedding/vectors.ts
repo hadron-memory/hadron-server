@@ -386,6 +386,13 @@ export function iterativeScanSupported(
     if (!iterativeScanOverride) logIterativeUnsupported('stubbed');
     return Promise.resolve(iterativeScanOverride);
   }
+  // #5002 — the cold probe is ONE shared promise. It runs on the FIRST caller's client (inside a search, that caller's own
+  // transaction), and every caller that arrives while it is in flight awaits the same promise instead of probing on its
+  // own connection. If that first transaction dies mid-probe (its deadline, a cancel, a lost connection), the catch below
+  // answers `false` to all of them: each of those waiters runs the exact scan for that ONE call. That is safe (the exact
+  // scan is correct at any size and still under the budget), it is not cached (the next search probes again), and it is
+  // not an "unsupported pgvector" answer: it never logs `vector.iterative_scan_unsupported` (cor:api:090:04), only the
+  // `iterative_scan_probe_failed` line.
   iterativeScanProbe ??= (async () => {
     let version: string | null;
     // #4938 BLIND P2 (Billie, at 548c0cb9): inside a transaction a failed statement aborts it (25P02), so the caught
@@ -743,7 +750,7 @@ export interface NodeVectorScope {
 
 /**
  * ONE eligibility fragment (`FROM … WHERE …` over `node_embeddings ne` joined to `nodes n`) per scope, so the walk, the
- * count, the exact statement, the COMMENTS statement and the #4779 rank lookup can never disagree on what is eligible
+ * count, the exact statement, the COMMENTS statement and the #4779 rank lookup (its #4994 probe included) can never disagree on what is eligible
  * (#3054). The structured filters and the access scope ride in it, before any offset/limit picks the page (#2772,
  * cor:api:090:04).
  */
@@ -771,29 +778,100 @@ function nodeVectorEligibility(opts: NodeVectorScope): Prisma.Sql {
 }
 
 /**
- * #4779 (P3-4, Vera's FIT condition 4c; certified fusion accepted in team chat #140476) — the EXACT node-level vector rank
- * of each named node: its 1-based position in the order {@link vectorSearchNodes}' exact statement uses (best distance,
- * then node id) over the SAME eligibility. Hybrid search asks it for keyword hits the vector page did not reach, so their
- * vector RRF term is known rather than bounded and the fused page can be certified. A node with no eligible vector is
- * absent from the map (its vector term is exactly zero). One statement under the work budget; a timeout is `stopped`.
- * Its cost is one exact ranking of the scope, the same as the deep-page exact statement.
+ * #4994 — how deep the rank lookup reads, in nodes: the deepest page the walk can stand behind
+ * ({@link VECTOR_INDEX_ORDER_WINDOW}). A certification bound only, never a page bound: the page is still chosen from every
+ * match (cor:api:090:04, no candidate cap).
+ */
+export const VECTOR_RANK_LOOKUP_DEPTH = VECTOR_INDEX_ORDER_WINDOW;
+
+/**
+ * #4994 — what one rank lookup computed, kept for the next one. The caller holds it for exactly ONE fused ranking and
+ * passes it only with the SAME scope options (a different scope needs a new memo). A cut ranking is never kept.
+ */
+export interface VectorRankMemo { ranking?: { ranks: Map<string, number>; complete: boolean } }
+
+/** The ranking a lookup answers from: node id → 1-based rank. `complete` = it holds every eligible node. Null when cut. */
+async function rankingForLookup(db: PrismaClient, opts: NodeVectorScope, deadlineAt: number): Promise<VectorRankMemo['ranking'] | null> {
+  const cap = vectorSmallScopeRows();
+  const sized = await oneStatementUnderBudget(db, (tx) => tx.$queryRaw<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM (SELECT 1 ${nodeVectorEligibility(opts)} LIMIT ${cap + 1}) capped`, deadlineAt);
+  if (sized.stopped) return null;
+  if (Number(sized.rows[0]?.n ?? 0) <= cap) {
+    const qvec = toVectorLiteral(opts.queryEmbedding);
+    const { rows, stopped } = await oneStatementUnderBudget(db, (tx) => tx.$queryRaw<{ node_id: string; rank: number }[]>`
+      WITH best AS MATERIALIZED (
+        SELECT ne.node_id, MIN(ne.embedding <=> ${qvec}::vector) AS distance
+        ${nodeVectorEligibility(opts)}
+        GROUP BY ne.node_id
+      )
+      SELECT node_id, ROW_NUMBER() OVER (ORDER BY distance ASC, node_id ASC)::int AS rank FROM best`, deadlineAt);
+    return stopped ? null : { ranks: new Map(rows.map((r) => [r.node_id, Number(r.rank)])), complete: true };
+  }
+  let exhausted = false;
+  let cut = false;
+  const hits = await vectorSearchNodes(db, {
+    ...opts,
+    deadlineAt,
+    limit: VECTOR_RANK_LOOKUP_DEPTH,
+    // The walk proves a page only once it has read past the last distance, so ask for slightly more than the depth: one
+    // LIMIT in the common case (one vector per node), the ordinary widening otherwise.
+    candidateFactor: 1.1,
+    knownLargeScope: true, // counted just above
+    onWindow: (w) => { exhausted = w.exhausted; cut = !!w.stoppedEarly; },
+  });
+  if (cut) return null;
+  return { ranks: new Map(hits.map((h, i) => [h.nodeId, i + 1])), complete: exhausted || hits.length < VECTOR_RANK_LOOKUP_DEPTH };
+}
+
+/**
+ * #4779 (P3-4, Vera's FIT condition 4c; certified fusion accepted in team chat #140476) — the node-level vector rank of
+ * each named node: its 1-based position in {@link vectorSearchNodes}' ranking (best distance, then node id) over the SAME
+ * eligibility. Hybrid search asks it for keyword hits the vector page did not reach, so their vector RRF term is known
+ * rather than bounded and the fused page can be certified. A node with no eligible vector is absent from the map (its
+ * vector term is exactly zero).
+ *
+ * #4994 — the cost is bounded. The lookup used to rank the whole eligible scope on every call (1-7 s at 200k vectors, the
+ * #4938 F3 measurement). A scope of at most {@link vectorSmallScopeRows} eligible vectors still is: that cost is bounded
+ * by the threshold and every rank is exact. A larger scope reads {@link vectorSearchNodes} itself to
+ * {@link VECTOR_RANK_LOOKUP_DEPTH}: the same code path, tie order and work budget as the page's own vector leg. Like that
+ * leg it normally reads the HNSW walk, whose order is approximate. A rank is the node's position in `vectorSearchNodes`
+ * called with the LOOKUP's options; the page's leg asks the walk for a different candidate window, so the two walks can
+ * place the same node a few positions apart (about 1-2% several hundred deep at 200k vectors, #5155 QA).
+ *
+ * With a `memo`, the lookups of one fused ranking share one computed ranking: only the first pays for it.
+ *
+ * `stopped` means the answer is incomplete, and the caller must not certify the page:
+ * - in a larger scope, a named node HAS an eligible vector but lies past the depth (it is only known to rank below it): the ranks found inside
+ *   the depth are returned;
+ * - the work budget ended the count or the ranking: no rank is returned (a cut walk's rows are not promised to be a prefix);
+ * - the budget ended the existence probe that tells "past the depth" from "no eligible vector": the found ranks stand.
  */
 export async function vectorRanksOf(
-  db: PrismaClient, opts: NodeVectorScope & { nodeIds: string[] },
+  db: PrismaClient, opts: NodeVectorScope & { nodeIds: string[]; memo?: VectorRankMemo },
 ): Promise<{ ranks: Map<string, number>; stopped: boolean }> {
   if (opts.memoryIds.length === 0 || opts.nodeIds.length === 0) return { ranks: new Map(), stopped: false };
-  const qvec = toVectorLiteral(opts.queryEmbedding);
-  const { rows, stopped } = await oneStatementUnderBudget(db, (tx) => tx.$queryRaw<{ node_id: string; rank: number }[]>`
-    WITH best AS MATERIALIZED (
-      SELECT ne.node_id, MIN(ne.embedding <=> ${qvec}::vector) AS distance
-      ${nodeVectorEligibility(opts)}
-      GROUP BY ne.node_id
-    )
-    SELECT node_id, rank FROM (
-      SELECT node_id, ROW_NUMBER() OVER (ORDER BY distance ASC, node_id ASC)::int AS rank FROM best
-    ) ranked
-    WHERE node_id IN (${Prisma.join(opts.nodeIds)})`, opts.deadlineAt);
-  return { ranks: new Map(rows.map((r) => [r.node_id, Number(r.rank)])), stopped };
+  // One deadline for the ranking and the probe, never more than the request's own.
+  const own = Date.now() + vectorSearchTimeoutMs();
+  const deadlineAt = opts.deadlineAt == null ? own : Math.min(own, opts.deadlineAt);
+  let ranking = opts.memo?.ranking;
+  if (!ranking) {
+    const computed = await rankingForLookup(db, opts, deadlineAt);
+    if (!computed) return { ranks: new Map(), stopped: true };
+    ranking = computed;
+    if (opts.memo) opts.memo.ranking = ranking;
+  }
+  const wanted = new Set(opts.nodeIds);
+  const ranks = new Map<string, number>();
+  for (const id of wanted) { const r = ranking.ranks.get(id); if (r !== undefined) ranks.set(id, r); }
+  const missing = [...wanted].filter((id) => !ranks.has(id));
+  // A complete ranking holds every eligible node, so a missing one has no eligible vector.
+  if (!missing.length || ranking.complete) return { ranks, stopped: false };
+  // Otherwise ask whether any missing node is eligible at all: if so it is past the depth, not absent. The statement reads
+  // only the named nodes' vectors.
+  const probe = await oneStatementUnderBudget(db, (tx) => tx.$queryRaw<{ present: number }[]>`
+    SELECT 1 AS present ${nodeVectorEligibility(opts)} AND ne.node_id IN (${Prisma.join(missing)})
+    LIMIT 1`, deadlineAt);
+  return { ranks, stopped: probe.stopped || probe.rows.length > 0 };
 }
 
 /**
@@ -811,6 +889,8 @@ export async function vectorSearchNodes(
   opts: NodeVectorScope & {
     limit: number;
     candidateFactor?: number;
+    /** #4994 — the caller has just counted this scope above {@link vectorSmallScopeRows}: do not count it again. */
+    knownLargeScope?: boolean;
     /** #1345 / #2772 — told whether the ranking is provably complete, and whether the search stopped early (work budget). */
     onWindow?: (w: { exhausted: boolean; stoppedEarly?: boolean }) => void;
   },
@@ -872,7 +952,8 @@ export async function vectorSearchNodes(
         ${eligibleFrom}
       )
       SELECT node_id, MIN(distance) AS distance FROM cand GROUP BY node_id ORDER BY distance ASC, node_id ASC LIMIT ${kAsk}`,
-    count: async (tx, cap) => Number((await tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM (SELECT 1 ${eligibleFrom} LIMIT ${cap}) capped`)[0]?.n ?? 0),
+    count: async (tx, cap) => opts.knownLargeScope ? cap
+      : Number((await tx.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM (SELECT 1 ${eligibleFrom} LIMIT ${cap}) capped`)[0]?.n ?? 0),
   });
   const best = new Map<string, number>();
   for (const r of ranked.rows) if (!best.has(r.node_id)) best.set(r.node_id, Number(r.distance));

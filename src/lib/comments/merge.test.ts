@@ -28,7 +28,7 @@ const errorOf = async (p: Promise<unknown>): Promise<GraphQLError> => {
 };
 // Batch and page size 1: every relocated node commits in its own transaction,
 // so a thread that didn't travel WITH its target would break the invariants.
-const merge = (fields: string[] = []) => mergeMemoryGraph(db, {
+const merge = (fields: string[] = []) => mergeMemoryGraph(db, { ownerLimitCaller: null,
   sourceMemoryId: src.id, targetMemoryId: dst.id, fields: new Set(fields as never[]),
   deleteSourceMem: false, editor: { userId: admin.id, info: null, workerId: null, agentId: null } as never,
   batchSize: 1, classifyPageSize: 1,

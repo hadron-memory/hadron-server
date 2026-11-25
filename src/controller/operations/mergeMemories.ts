@@ -1,4 +1,5 @@
 import { ENGINE_KEYS } from '../../lib/chatRootEngineState.js';
+import { softDeleteMemoryAssets } from '../../lib/asset/memoryDelete.js';
 import { resetEmbeddingObligations, stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { memoryIsVectorIndexed } from '../../lib/embedding/indexing.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptMergeCollisions, assertNoBootPromptRows, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
@@ -15,6 +16,7 @@ import {
   preflightNoMintedCorpusRemoval,
 } from '../../lib/mintedSpecPermanence.js';
 import { lockMemoriesForChannelChange, lockMemoryForChannelChange } from '../../lib/channels.js';
+import { requireNodeHeadroom, sameMemoryOwner } from '../../lib/ownerLimits/nodes.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import { clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import {
@@ -125,6 +127,13 @@ export interface MergeMemoryArgs {
    * Omitted only by server-authored callers.
    */
   principal?: RoleWriterPrincipal;
+  /**
+   * #5015 (cor:acl:150:04) — the person whose act this merge is, for the owner-limit refusal's form (null for an
+   * unattended or impersonated caller). REQUIRED so a new caller states it. A merge from a memory of ANOTHER owner
+   * relocates nodes (and their carried live comments) to the target's owner and is refused at its `nodes` limit; folds
+   * add nothing, and a merge inside one owner is never judged.
+   */
+  ownerLimitCaller: { userId: string } | null;
   /** Nodes folded / edges drained per inner transaction. Test seam; defaults to MERGE_BATCH_SIZE. */
   batchSize?: number;
   /** Source nodes scanned per classify+relocate page. Test seam; defaults to CLASSIFY_PAGE. */
@@ -418,6 +427,8 @@ async function runMerge(
   // locks, the batch rechecks its own rows and its carried threads; a
   // tombstone that appears after this scan refuses there, but batches that
   // committed before it stay committed (the merge is resumable, not atomic).
+  // #5015 — the live nodes Phase 1 would hand to the target's owner: relocating nodes plus their live carried comments.
+  let relocatingLive = 0n;
   {
     const tombstoned: string[] = [];
     let count = 0;
@@ -440,9 +451,10 @@ async function runMerge(
       const carried = moving.length
         ? await db.node.findMany({
             where: { commentMeta: { targetNodeId: { in: moving.map((n) => n.id) } } },
-            select: { loc: true },
+            select: { loc: true, deletedAt: true },
           })
         : [];
+      relocatingLive += BigInt(moving.length + carried.filter((c) => c.deletedAt == null).length);
       const candidates = [...moving.map((n) => n.loc), ...carried.map((c) => c.loc)];
       const held = candidates.length
         ? await db.node.findMany({
@@ -455,6 +467,17 @@ async function runMerge(
       if (page.length < classifyPage) break;
     }
     if (count > 0) throw mergeTargetLocTombstonedError(targetMemoryId, tombstoned, count);
+  }
+
+  // #5015 (gate ruling 4, option b) — a merge across owners is judged for the whole relocation before the first batch,
+  // so the usual case refuses with nothing written; each relocate batch judges itself again under its own locks, so a
+  // race (a node created in the source, a transfer of either memory) still cannot take the target's owner past its cap.
+  // Fail-fast like the preflights above: it takes no memory row lock (a merge's batches take those in their own order),
+  // so an owner read here can be stale; the batch's check under its locks is the authoritative one. A merge inside one
+  // owner opens no transaction for it.
+  if (relocatingLive > 0n && !(await sameMemoryOwner(db, sourceMemoryId, targetMemoryId))) {
+    await db.$transaction((tx) =>
+      requireNodeHeadroom(tx, { memoryId: targetMemoryId, amount: relocatingLive, caller: args.ownerLimitCaller }));
   }
 
   // === Phase 1: classify + relocate, in one keyset-paged scan. ===
@@ -636,10 +659,30 @@ async function runMerge(
             });
           }
           await resetRelocatedVectors(tx, relocationIds);
+          // #5015 — this batch hands its rows and their live carried comments to the target's owner when the two
+          // memories' owners differ (read under the memory locks held above). The check runs once every row is held:
+          // inside the carry, after it has locked the final thread set, or after it when there are no threads. The
+          // owner-limit key is the batch's last lock (gate ruling 5); a refusal rolls back this batch only, and the
+          // partial-merge report names what earlier batches committed.
+          const crossOwner = !(await sameMemoryOwner(tx, sourceMemoryId, targetMemoryId));
+          let ownerChecked = false;
+          const checkOwnerHeadroom = async (threadIds: string[]) => {
+            ownerChecked = true;
+            if (!crossOwner) return;
+            const liveThreads = threadIds.length
+              ? await tx.node.count({ where: { id: { in: threadIds }, deletedAt: null } })
+              : 0;
+            // The rows were re-homed above, so the owner's count already holds them; the threads have not moved yet.
+            await requireNodeHeadroom(tx, {
+              memoryId: targetMemoryId, amount: BigInt(rows.length + liveThreads), alreadyWritten: BigInt(rows.length),
+              caller: args.ownerLimitCaller,
+            });
+          };
           // #1664 — the batch's threads move in the same transaction as their targets.
           // #1684 — its final member set, read under the carry's locks, is
           // rechecked against the target's TOTAL occupancy before it moves.
           await carryThreadsInTx(tx, relocationIds, targetMemoryId, async (threadIds) => {
+            await checkOwnerHeadroom(threadIds);
             const threadLocs = (await tx.node.findMany({ where: { id: { in: threadIds } }, select: { loc: true } }))
               .map((c) => c.loc);
             const occupied = await tx.node.findMany({
@@ -653,6 +696,7 @@ async function runMerge(
             }
             await resetRelocatedVectors(tx, threadIds);
           });
+          if (!ownerChecked) await checkOwnerHeadroom([]);
           return rows.length;
         }, BATCH_TX_OPTS);
         progress.relocatedCount += moved;
@@ -1024,7 +1068,10 @@ async function runMerge(
       await assertNoProtectedReach(tx, sourceMemoryId, 'all', 'delete');
       // #1468 — the source memory's deletion: whatever the batches left.
       await assertNoMintedCorpusRemoval(tx, sourceMemoryId, 'merge out of its corpus', { includeTombstones: false });
-      await tx.memory.update({ where: { id: sourceMemoryId }, data: { deletedAt: new Date() } });
+      const deletedAt = new Date();
+      await tx.memory.update({ where: { id: sourceMemoryId }, data: { deletedAt } });
+      // #5124: a merge does not move files, so the source memory's files are deleted with it, at the same instant.
+      await softDeleteMemoryAssets(tx, sourceMemoryId, deletedAt);
     });
   }
 

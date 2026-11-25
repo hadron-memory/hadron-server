@@ -202,3 +202,8 @@ test('compose.yaml: the worker default is the relayed switch, and the scheduler 
   assert.match(compose, /^\s+DISABLE_RUN_WORKER: \$\{E2E_DISABLE_RUN_WORKER:-true\}$/m);
   assert.match(compose, /^\s+DISABLE_SCHEDULER: 'true'$/m);
 });
+
+test('compose.yaml: OWNER_DEFAULT_LIMITS is mapped from E2E_OWNER_DEFAULT_LIMITS, empty by default (#5134)', () => {
+  const compose = readFileSync(new URL('./compose.yaml', import.meta.url), 'utf8');
+  assert.match(compose, /^\s+OWNER_DEFAULT_LIMITS: \$\{E2E_OWNER_DEFAULT_LIMITS:-\}$/m);
+});

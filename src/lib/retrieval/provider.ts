@@ -9,7 +9,7 @@
 import type { ContentScope } from '../comments/scope.js';
 import type { NodeApprovalState } from '../nodeApproval.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import type { VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
+import type { VectorRankMemo, VectorHit, ChunkHit } from '../../services/embedding/vectors.js';
 import type { NodeWhere, NodePropertySort } from './nodeWhere.js';
 
 export type { VectorHit, ChunkHit };
@@ -206,11 +206,15 @@ export interface NodeRetrievalProvider {
   vectorSearch(opts: VectorSearchOpts): Promise<VectorHit[]>;
   vectorSearchChunks(opts: VectorSearchOpts): Promise<ChunkHit[]>;
   /**
-   * #4779 — the exact node-level vector rank (1-based, in the exact ranking's order) of each of `nodeIds`, over the SAME
-   * eligibility as {@link vectorSearch} with these options (`limit` and `onWindow` are ignored). A node with no eligible
-   * vector is absent. `stoppedEarly` when the work budget ended the lookup. Hybrid search certifies its fused page with it.
+   * #4779 — the node-level vector rank (1-based) of each of `nodeIds` in the ranking {@link vectorSearch} returns with these
+   * options (`limit` and `onWindow` are ignored). A node with no eligible vector is absent. #4994: ranks are exact only in
+   * a scope of at most 20000 eligible vectors; in a larger one the lookup reads that ranking only to a bounded depth, so
+   * `stoppedEarly` also means a named node with an eligible vector lies past it (the ranks
+   * found stand), besides the work budget ending the lookup. Hybrid search certifies its fused page with it, and never
+   * certifies a page whose lookup stopped early. `memo` (#4994) lets
+   * the lookups of ONE fused ranking, over the same options, share one computed ranking.
    */
-  vectorRanks(opts: Omit<VectorSearchOpts, 'limit' | 'onWindow'> & { nodeIds: string[] }): Promise<{ ranks: Map<string, number>; stoppedEarly: boolean }>;
+  vectorRanks(opts: Omit<VectorSearchOpts, 'limit' | 'onWindow'> & { nodeIds: string[]; memo?: VectorRankMemo }): Promise<{ ranks: Map<string, number>; stoppedEarly: boolean }>;
   /**
    * No-query filtered browse (cor:api:090:02): the structured filter (incl. a
    * `where` predicate) applied + sorted + paged in SQL, returning ordered node

@@ -175,6 +175,7 @@ import { attachIncludePinWarnings, carryIncludePinWarnings, captureIncludePinWar
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 import { memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
+import { ownerLimitCaller, requireNodeHeadroom, type NodeOwnerLimit } from '../../../lib/ownerLimits/nodes.js';
 
 
 /**
@@ -358,6 +359,12 @@ async function writeNodeCoreRaw(
      * omission (`src/lib/authoringAttestation.ts`).
      */
     authoring: AuthoringContext;
+    /**
+     * #5015 (Billing A7b, cor:acl:150:04) — what this write does at the memory owner's `nodes` limit when it adds a live
+     * node (a fresh insert, or a create that revives a tombstone): `'refuse'` or `'count-only'`. REQUIRED like
+     * `authoring`, so a new call site states it; never read on an update or on an upsert onto an existing row.
+     */
+    ownerLimit: NodeOwnerLimit;
     /** Reuse a caller's lock transaction; effects wait for its commit. */
     transaction?: {
       tx: Prisma.TransactionClient;
@@ -1837,6 +1844,12 @@ async function writeNodeCoreRaw(
             const isRoot = !input.loc.includes(':');
             if (autoSeq && isRoot) await lockRootSiblings(tx, input.memoryId);
             const nestedSeq = autoSeq ? await nextSiblingSeq(tx, input.memoryId, input.loc) : null;
+            // #5015 — a fresh insert or a revive adds a live node to the memory's owner. The owner is read under the
+            // memory row lock `assertMemoryWriteStateStable` holds, and the owner-limit key is the LAST lock this write
+            // takes (gate ruling 5): after it the write only touches the row it holds and the loc whose key it holds.
+            if ((!authoritative || reviving) && opts.ownerLimit === 'refuse') {
+              await requireNodeHeadroom(tx, { memoryId: input.memoryId, caller: ownerLimitCaller(opts?.transaction?.requestContext ?? ctx) });
+            }
             const upserted = await tx.node.upsert({
               ...upsertArgs,
               create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
@@ -2159,6 +2172,7 @@ async function updateNodeCore(
   // move (which frees the loc for reuse) can't make the loc-keyed
   // write hit a different node.
   return writeNodeCore({ ...fields, memoryId: targetMemoryId, loc: targetLoc }, ctx, 'update', {
+    ownerLimit: 'count-only',
     authoring: authoringFromRequest(ctx, input.authoredWith),
     targetNodeId,
     guardRevSeq: expectedRevision ?? undefined,
@@ -2280,6 +2294,7 @@ async function mergePropertiesAndWrite(a: {
           withoutRequestCaches(ctx, lockTx),
           'update',
           {
+            ownerLimit: 'count-only',
             authoring: authoringFromRequest(ctx, fields.authoredWith),
             targetNodeId: nodeId,
             guardRevSeq: a.expectedRevision ?? undefined,
@@ -2441,6 +2456,7 @@ export async function updateNodePropertiesWith(
       withoutRequestCaches(ctx, lockTx),
       'update',
       {
+        ownerLimit: 'count-only',
         authoring: authoringFromRequest(ctx, authoredWith),
         targetNodeId: meta.id,
         governedMerge: 'properties',
@@ -2648,6 +2664,7 @@ export const nodeMoveOps = {
               authorizeLockedMemory: (memoryId) =>
                 requireMemoryWriteAccess(txCtx, memoryId),
               principal: txCtx,
+              ownerLimitCaller: ownerLimitCaller(ctx),
             });
             relocated = result.moved;
             linkWarnings = result.linkWarnings;
@@ -2747,6 +2764,7 @@ async function createNodeInInstallMemory(input: CreateNodeArgs, ctx: Context) {
   const effects: Array<() => void> = [];
   const written = await withInstallMemory(ctx, install!, (tx, txCtx, memory) =>
     writeNodeCore({ ...rest, memoryId: memory.id } as CreateNodeInput, txCtx, 'create', {
+      ownerLimit: 'refuse',
       authoring: authoringFromRequest(ctx, input.authoredWith),
       governedContext: 'node-write',
       // #3651: response-only state (the include-pin warnings) is keyed by the exact request Context, and `txCtx`
@@ -2803,6 +2821,7 @@ export const nodeMutations = {
       if (input.install) return createNodeInInstallMemory(input, ctx);
       assertMemoryTargeted(input.memoryId, 'createNode');
       return writeNodeCore(input as CreateNodeInput, ctx, 'create', {
+        ownerLimit: 'refuse',
         authoring: authoringFromRequest(ctx, input.authoredWith),
         governedContext: 'node-write',
         concealUnreadable: { entity: 'memory', ref: input.memoryId! },
@@ -2856,6 +2875,7 @@ export const nodeMutations = {
               ? { ...input, properties: withClaudeSkillExport(input.properties, skill, { loc: input.loc, content: input.content ?? '' }) }
               : input;
             return writeNodeCore(written, ctx, 'create', {
+              ownerLimit: 'refuse',
               authoring: authoringFromRequest(ctx, input.authoredWith),
               ownsKind: entry.kind,
               governedContext: 'node-write',
@@ -3030,7 +3050,7 @@ export const nodeMutations = {
         },
         ctx,
         'update',
-        { authoring: authoringFromRequest(ctx, authoredWith), targetNodeId: meta.id, governedMerge: 'data', governedContext: 'node-write' },
+        { ownerLimit: 'count-only', authoring: authoringFromRequest(ctx, authoredWith), targetNodeId: meta.id, governedMerge: 'data', governedContext: 'node-write' },
       );
     },
 
@@ -4472,7 +4492,7 @@ export const nodeMutations = {
           srcPlain.abstract == null ||
           srcPlain.abstractOriginHash === computeContentHash(srcPlain.content)
         ) ? carryNodeAuthorship(source) : clearNodeAuthorship();
-        return writeNodeCore(input, txCtx, 'create', { authoring: { kind: 'carry' }, copiedAuthorship, copiesSeq: true,
+        return writeNodeCore(input, txCtx, 'create', { ownerLimit: 'refuse', authoring: { kind: 'carry' }, copiedAuthorship, copiesSeq: true,
           transaction: { tx, pooledDb: ctx.db, coordinationMemories: [selectedSource.memoryId, destMemoryId], afterCommit: effect => effects.push(effect) },
         });
       });

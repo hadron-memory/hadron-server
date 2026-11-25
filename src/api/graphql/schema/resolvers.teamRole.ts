@@ -481,6 +481,7 @@ async function writeTeamRole(
         mode === 'update'
           ? {
               authoring,
+              ownerLimit: 'count-only',
               targetNodeId: existing!.id,
               // Only when this write carries data. A description-only edit stays
               // last-write-wins like any other node field, as it was before
@@ -496,7 +497,8 @@ async function writeTeamRole(
             // The refusal itself is correct; the residue is an audit artifact.
             ...(wantsRepoWrite ? { guardRevSeq: existing!.revSeq } : {}),
             }
-          : { authoring },
+          // #5015: a team role node counts and is never refused (gate ruling 13-a).
+          : { authoring, ownerLimit: 'count-only' },
       );
     } catch (e) {
       // #1024: the guard fired. Translate rather than leak the generic node

@@ -6,6 +6,7 @@ import { admitRate, RateLimited } from '../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../lib/rateLimit/identity.js';
 import { respondOAuthServerError } from '../lib/internalFault.js';
 import { AUTH_COOKIE_NAME } from './cookieName.js';
+import { ceremonyShell } from '../api/ceremonyShell.js';
 
 /** #419: authentication evidence is never a claimed body/query user, OAuth client id or one-use code.
  * JWT-authenticated routes use exactly their handler’s credential source (cookie OR bearer);
@@ -16,8 +17,27 @@ import { AUTH_COOKIE_NAME } from './cookieName.js';
  */
 export type CredentialSource = 'none' | 'bearer' | 'cookie';
 export type RefusalProtocol = 'rest' | 'oauth';
-/** #4677 (item 4): both choices are named at every mount; there are no positional defaults to swap by accident. */
-export interface AuthRateOptions { protocol: RefusalProtocol; credential: CredentialSource }
+/** #4675: `page` mounts a ruled browser navigation (sign-in start or callback, verification link, authorize page),
+ * which may answer a refusal with the HTML page; `json` mounts never do, whatever the request's Accept says. */
+export type RefusalForm = 'page' | 'json';
+/** #4677 (item 4): every choice is named at every mount; there are no positional defaults to swap by accident. */
+export interface AuthRateOptions { protocol: RefusalProtocol; credential: CredentialSource; form: RefusalForm }
+
+/** #4675 (hrn:node:hadronmemory.com:specs:cor:api:260:03): a request asks for a page only when its Accept header
+ * NAMES text/html (a wildcard or a missing header does not) and does not prefer JSON. Equal quality is decided by
+ * the order the header lists them in. */
+function asksForPage(req: Request): boolean {
+  return req.accepts().some(type => type.toLowerCase() === 'text/html') && req.accepts(['json', 'html']) === 'html';
+}
+const PAGE_HEADERS = {
+  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
+};
+/** The page's only variable is the validated integer wait: no request, provider, class or counter reaches it. */
+const refusalPage = (seconds: number) => ceremonyShell({
+  title: 'Too many requests',
+  body: `<h1>Too many requests</h1><p>Please wait ${seconds} ${seconds === 1 ? 'second' : 'seconds'} before you try again.</p>`,
+});
 async function authRateIdentity(req: Request, db: PrismaClient, source: CredentialSource) {
   const bearer = req.headers.authorization;
   const token = source === 'cookie' ? req.cookies?.[AUTH_COOKIE_NAME]
@@ -45,7 +65,7 @@ async function authRateIdentity(req: Request, db: PrismaClient, source: Credenti
  * owns policy modes, windows, HMAC subjects, atomic counters and store-outage decisions.
  * This adapter changes no policy and grants no permission to activate ENFORCING.
  */
-export function buildAuthRateAdmission(db: PrismaClient, { protocol, credential }: AuthRateOptions): RequestHandler {
+export function buildAuthRateAdmission(db: PrismaClient, { protocol, credential, form }: AuthRateOptions): RequestHandler {
   const handler: RequestHandler = async (req, res, next) => {
     let refusal: RateLimited | undefined;
     try {
@@ -86,6 +106,10 @@ export function buildAuthRateAdmission(db: PrismaClient, { protocol, credential 
       return;
     }
     res.set({ 'Retry-After': String(retryAfterSeconds), 'Cache-Control': 'no-store' });
+    if (form === 'page' && asksForPage(req)) {
+      res.set(PAGE_HEADERS).status(429).type('html').send(refusalPage(retryAfterSeconds));
+      return;
+    }
     res.status(429).json({
       error: protocol === 'oauth' ? 'temporarily_unavailable' : 'RATE_LIMITED',
       ...(protocol === 'oauth' ? { error_description: 'Too many requests.' } : {}),
@@ -93,9 +117,9 @@ export function buildAuthRateAdmission(db: PrismaClient, { protocol, credential 
     });
   };
   // #4677 (item 4/16): the name carries the choices, so the route inventory test reads them off the mounted stack.
-  Object.defineProperty(handler, 'name', { value: authRateAdmissionName(protocol, credential) });
+  Object.defineProperty(handler, 'name', { value: authRateAdmissionName(protocol, credential, form) });
   return handler;
 }
 export const AUTH_RATE_ADMISSION_PREFIX = 'authRateAdmission';
-export const authRateAdmissionName = (protocol: RefusalProtocol, credential: CredentialSource) =>
-  `${AUTH_RATE_ADMISSION_PREFIX}:${protocol}:${credential}`;
+export const authRateAdmissionName = (protocol: RefusalProtocol, credential: CredentialSource, form: RefusalForm) =>
+  `${AUTH_RATE_ADMISSION_PREFIX}:${protocol}:${credential}:${form}`;

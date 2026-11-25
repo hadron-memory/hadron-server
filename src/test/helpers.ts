@@ -752,3 +752,26 @@ export async function createDbRunConsentPrincipal(db: PrismaClient, organization
   await db.orgMember.create({ data: { organizationId, userId: user.id, role: 'READER' } });
   return { userId: user.id, appId, organizationId, roles: [] as Role[] };
 }
+
+/**
+ * #5088 F10: a MINT RECORD for a memory, written the one way the schema admits it. A tombstoned, minted node whose
+ * mint stands on its own: `minted_at` set, owner-info only, no mint revision or hash. That is the shape
+ * `chk_node_mint_complete` admits for a backfilled marker, so a change to that constraint is fixed here once, not in
+ * every suite. Always tombstoned (there is no live option), so no live-loc assertion sees it; `role: null` by default (a non-spec node).
+ * `client` is the Prisma client or a transaction client, for a mint driven inside a transaction.
+ */
+export async function createMintMarker(
+  client: Pick<PrismaClient, 'node'>,
+  memoryId: string,
+  opts: { loc?: string; mintedAt?: Date; role?: string | null; nodeType?: string } = {},
+) {
+  const loc = opts.loc ?? 'zz:mint-marker';
+  const mintedAt = opts.mintedAt ?? new Date();
+  return client.node.create({
+    data: {
+      id: generateId(), memoryId, loc, name: loc, content: 'minted elsewhere; tombstoned',
+      role: opts.role ?? null, ...(opts.nodeType !== undefined ? { nodeType: opts.nodeType } : {}), tags: [],
+      mintedAt, mintedByInfo: 'test', deletedAt: mintedAt,
+    },
+  });
+}

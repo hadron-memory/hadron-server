@@ -225,8 +225,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // configured keyring refuses boot without echoing secret values.
   readTeamRecordKeys();
   const app = express();
-  const authRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'none' });
-  const userAuthRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'bearer' });
+  // #4675: the sign-in and verification navigations may answer a refusal with the page; the API routes never do.
+  const authRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'none', form: 'page' });
+  const sessionAuthRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'none', form: 'json' });
+  const userAuthRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'bearer', form: 'json' });
 
   // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
   // which upstream proxies it can trust so `req.protocol` resolves to
@@ -1136,7 +1138,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // cookie on the portal origin. The JWT never rides in a browser-visible URL.
   // `clientState` (GitHub flow) is the raw browser nonce the portal read from
   // its HttpOnly cookie; the code's stored hash must match (session fixation).
-  app.post('/auth/session', authRate, async (req, res) => {
+  app.post('/auth/session', sessionAuthRate, async (req, res) => {
     const body = (req.body ?? {}) as { code?: unknown; clientState?: unknown };
     const code = typeof body.code === 'string' ? body.code : '';
     const clientState = typeof body.clientState === 'string' ? body.clientState : undefined;
@@ -1780,7 +1782,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
           // Skip if the memory tracks a specific branch that doesn't match
           if (memory.readBranch && ref !== `refs/heads/${memory.readBranch}`) continue;
           console.log(`[webhook] Push to ${fullName}/${defaultBranch} → syncing memory "${memory.name}"`);
-          syncGraphFromGithub(memory).catch((err) => {
+          // #5015 — an unattended sync: nobody to tell, so the owner-limit refusal takes the no-number form.
+          syncGraphFromGithub(memory, { ownerLimitCaller: null }).catch((err) => {
             console.error(`[webhook] Sync failed for memory "${memory.name}":`, err);
           });
         }

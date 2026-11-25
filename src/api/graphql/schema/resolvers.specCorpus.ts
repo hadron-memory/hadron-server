@@ -167,6 +167,7 @@ export const specCorpusMutations = {
             txCtx,
             'create',
             {
+              ownerLimit: 'refuse',
               authoring: { kind: 'platform', record: 'spec-reservation' },
               ownsKind: 'spec',
               governedContext: 'node-write',
@@ -335,6 +336,7 @@ export const specCorpusMutations = {
         txCtx,
         'create',
         {
+          ownerLimit: 'refuse',
           authoring: { kind: 'platform', record: 'spec-reservation' },
           ownsKind: 'spec',
           governedContext: 'node-write',
@@ -1338,7 +1340,7 @@ async function rewriteWithRetry(
         { memoryId: corpus.id, loc: node.loc, ...plan.patch, reason: `renumber ${fromLoc} → ${toLoc}` },
         ctx,
         'update',
-        { authoring: { kind: 'platform', record: 'spec-renumber' }, targetNodeId: node.id, guardRevSeq: node.revSeq, ownsKind: 'spec', governedContext: 'node-write' },
+        { ownerLimit: 'count-only', authoring: { kind: 'platform', record: 'spec-renumber' }, targetNodeId: node.id, guardRevSeq: node.revSeq, ownsKind: 'spec', governedContext: 'node-write' },
       );
       return { fields: Object.keys(plan.patch), count: plan.count, loc: node.loc };
     } catch (e) {
