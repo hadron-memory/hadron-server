@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb } from '../../test/helpers.js';
+import { cleanDb, seedRootNode } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { mergeMemoryGraph } from '../../controller/operations/mergeMemories.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
@@ -42,6 +42,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   src = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'merge-src' }, as());
   dst = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'merge-dst' }, as());
+  await seedRootNode(db, src.id, 'merge-src'); await seedRootNode(db, dst.id, 'merge-dst');
 });
 
 describe('mergeMemories carries threads (cor:dmo:110:02)', () => {

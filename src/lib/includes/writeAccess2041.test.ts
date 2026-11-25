@@ -270,14 +270,12 @@ describe('every principal writer runs the check', () => {
     expect(await contentOf('v')).toBe('v2');
   });
 
-  it('git sync and the root-node seam are the only callers without the check (source guard)', async () => {
+  it('git sync is the only caller without the check (the root-node seam is gone, #3952) (source guard)', async () => {
     const { execSync } = await import('child_process');
     const importers = execSync(
       "git grep -l \"operations/createNode\" -- 'src/**/*.ts' ':!src/**/*.test.ts'", { encoding: 'utf8' },
     ).trim().split('\n').sort();
     expect(importers).toEqual([
-      'src/api/graphql/schema/resolvers.mutation.appMemory.ts',
-      'src/api/graphql/schema/resolvers.mutation.memory.ts',
       'src/controller/controller.ts',
     ]);
     const systemCallers = execSync(

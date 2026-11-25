@@ -175,6 +175,8 @@ describe('#5016 extractParentNodeToMemory', () => {
     const src = await orgMemory();
     const parent = await db.node.create({ data: { id: generateId(), memoryId: src.id, loc: 'p', name: 'p', tags: [] } });
     await db.node.create({ data: { id: generateId(), memoryId: src.id, loc: 'p:c', name: 'c', tags: [] } });
+    // A new memory has no root node (#3952), so the source needs a node outside the subtree or the move is refused as emptying it.
+    await db.node.create({ data: { id: generateId(), memoryId: src.id, loc: 'keep', name: 'keep', tags: [] } });
     defaults({ organization: { memories: 1 } });
     await orgMemory(org2.id);
     const liveBefore = await db.node.count({ where: { memoryId: src.id, deletedAt: null } });

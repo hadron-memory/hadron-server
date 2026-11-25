@@ -753,6 +753,14 @@ export async function createDbRunConsentPrincipal(db: PrismaClient, organization
 }
 
 /**
+ * #3952: a new memory no longer gets a root node. Tests whose fixture relied on that auto root (a node at
+ * the memory's own name, "Root node for this memory.") seed one explicitly with this helper.
+ */
+export async function seedRootNode(db: PrismaClient, memoryId: string, loc: string) {
+  return db.node.create({ data: { memoryId, loc, name: loc.split(':').pop() ?? loc, description: 'Root node for this memory.' } });
+}
+
+/**
  * #5088 F10: a MINT RECORD for a memory, written the one way the schema admits it. A tombstoned, minted node whose
  * mint stands on its own: `minted_at` set, owner-info only, no mint revision or hash. That is the shape
  * `chk_node_mint_complete` admits for a backfilled marker, so a change to that constraint is fixed here once, not in

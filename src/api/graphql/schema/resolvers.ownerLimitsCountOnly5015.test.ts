@@ -64,12 +64,13 @@ describe('#5015 count-only doors succeed at the owner\'s nodes limit, and what t
     expect(await count(owner)).toBeGreaterThan(before);
   });
 
-  it('a new memory\'s root node', async () => {
+  // #3952: a new memory no longer gets a root node, so it adds nothing to the owner's nodes total; it still succeeds at the limit.
+  it('a new memory adds no node (no root node since #3952), and succeeds at the limit', async () => {
     const owner = { userId: u };
     await capAtCurrent(owner);
     const before = await count(owner);
     await M.createMemory(null, { name: 'fresh', memoryClass: 'private' }, ctx());
-    expect(await count(owner)).toBeGreaterThan(before);
+    expect(await count(owner)).toBe(before);
   });
 
   it('a question log and a question asked', async () => {

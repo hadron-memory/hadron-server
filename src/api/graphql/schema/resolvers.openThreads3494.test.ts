@@ -1,7 +1,7 @@
 /** #3494: the same open-root state set must be filtered before candidate caps and counted once. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb, createDbAppWithKey } from '../../../test/helpers.js';
+import { seedRootNode, cleanDb, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { postgresRetrievalProvider as provider } from '../../../lib/retrieval/postgres.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -24,6 +24,7 @@ beforeEach(async () => {
   [userId, otherId] = await Promise.all([0, 1].map(async i => (await db.user.create({ data: { handle: `groom-${i}-${generateId()}` } })).id));
   await db.orgMember.createMany({ data: [userId, otherId].map(id => ({ organizationId: org.id, userId: id, role: 'ADMIN' as const })) });
   const mem = await M.createMemory(null, { orgRef: org.id, name: 'groom' }, ctx()); memoryId = mem.id;
+  await seedRootNode(db, mem.id, 'groom');
   nodes = Object.fromEntries(await Promise.all(['A','B','B2','C','D','E','F'].map(async k => [k, await create(`case:${k}`)])));
   await comment(nodes.A.id); await comment(nodes.A.id, otherId);
   for (const k of ['B','B2','F']) {
