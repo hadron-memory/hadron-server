@@ -709,8 +709,9 @@ export const memoryMutations = {
       }
 
       // #2730: refuse an unprojectable name here, after the gates and before ensureUserHandle,
-      // the tombstone reclaim or any create. Kept unchanged by #3952 ("touch nothing else"): no root node is made from the name any more, so this is now
-      // stricter than creation needs; relaxing it (and renaming assertMemoryRootLoc) is a follow-up.
+      // the tombstone reclaim or any create. Kept unchanged by #3952 ("touch nothing else"): no root node
+      // is made from the name any more, so this is now stricter than creation needs; relaxing it and
+      // renaming assertMemoryRootLoc is a follow-up (#5149).
       assertMemoryRootLoc(name);
       assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
 
@@ -1648,7 +1649,9 @@ export const memoryMutations = {
       }
 
       // A move must leave at least one live node OUTSIDE the subtree, else it
-      // empties the source (and orphans its root). Checked by node set, NOT by
+      // empties the source (and orphans its root, where it has one). Since #3952 a
+      // new memory has no root, so its only subtree can no longer be moved out whole;
+      // that refusal is kept on purpose (#5148 asks whether to allow it). Checked by node set, NOT by
       // `parent.loc === source.name`: Memory.name is mutable (updateMemory) and
       // a rename does not rename the root node loc, so a name-based guard is
       // wrong both ways (misses a renamed root, false-flags a node at the new

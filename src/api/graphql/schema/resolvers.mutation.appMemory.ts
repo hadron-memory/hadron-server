@@ -261,7 +261,9 @@ export const appMemoryMutations = {
         visibility: null, isInstallMemory: false, installOfAgentId: null,
         createdBy: ctx.userId,
       }, include: MEMORY_INCLUDE });
-      // #3952 (R11): no root node on create.
+      // #3952 (R11): no root node on create. The memory row is this door's ONLY write: no org defaults, owner or
+      // member row, agent grant or audit row follows it, so there is no later step whose failure needs a rollback pin
+      // (resolvers.noRootNode3952.test.ts pins the doors that do have one). A write added after this row needs that pin.
       return memory;
     }));
   },
@@ -320,7 +322,7 @@ export const appMemoryMutations = {
     const agent = await resolveInstalledAgent(ctx, app.id, agentRef);
     // #2730: refuse an unprojectable name after the gates and before the tombstone reclaim or any create.
     // Kept unchanged by #3952 ("touch nothing else"): no root node is made from the name any more, so this is now
-    // stricter than creation needs; relaxing it is a follow-up. The function keeps its #2730 name for the same reason.
+    // stricter than creation needs; relaxing it is a follow-up (#5149). The function keeps its #2730 name for the same reason.
     assertMemoryRootLoc(name);
     assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
     const agentSlug = agentSlugFromUrn(agent.urn);

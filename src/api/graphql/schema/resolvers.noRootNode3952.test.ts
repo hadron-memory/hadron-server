@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
+import { generateId } from '../../../lib/id.js';
 import * as nodeMutations from '../../../controller/operations/createNode.js';
 
 // #3952 (rulings R11/R12): no memory gets a root node on create. The three paths that built one from the
@@ -96,8 +97,9 @@ describe('#3952 a new memory has no root node', () => {
 });
 
 // Blind review P2s on #5129: with the root gone, the failure that proves atomicity must come from a step that still
-// runs AFTER the memory row is written. createAppMemory has no such step (the memory row is its only write), so
-// there is nothing to roll back there; createMemory (group owner row) and createMemoryInApp (knowledge agent grant) do.
+// runs AFTER the memory row is written. createAppMemory and createMemory (personal) have no such step (the memory
+// row is their only write), so there is nothing to roll back there; createMemory (group owner row) and
+// createMemoryInApp (knowledge agent grant) do.
 describe('#3952 a failure after the memory row rolls everything back, is a server fault, and a retry mints one', () => {
   it('createMemoryInApp (knowledge): the agent grant fails', async () => {
     await failInsertsInto('agent_memory_items');
@@ -121,5 +123,37 @@ describe('#3952 a failure after the memory row rolls everything back, is a serve
     const made = await M.createMemory({}, { name: 'AtomicGrp3952', orgRef: org.id, memoryClass: 'group' }, ctx());
     expect(await db.memory.count()).toBe(1);
     expect(await db.memoryMember.count({ where: { memoryId: made.id } })).toBe(1);
+  });
+});
+
+// Ruled by the team lead on #5129 (N4): with no root node to survive, extractParentNodeToMemory(move: true) of a
+// memory's only subtree is refused as emptying the source. Before #3952 the root kept the source non-empty and the
+// same move succeeded. The refusal stays (it fails safe, workaround cloneMemory + deleteMemory); whether an emptied
+// source should be allowed is #5148.
+describe('#3952 extractParentNodeToMemory(move) of a rootless memory\'s only subtree is refused', () => {
+  const extract = (parentId: string, slug: string) =>
+    M.extractParentNodeToMemory({}, { parentRef: parentId, targetUrn: `hrn:mem:${org.urn}:${slug}`, move: true }, ctx());
+  const live = (memoryId: string) => db.node.count({ where: { memoryId, deletedAt: null } });
+  async function sourceWithOneSubtree() {
+    const src = await M.createMemory({}, { name: 'Src3952', orgRef: org.id }, ctx());
+    expect(await nodesOf(src.id)).toEqual([]);
+    const parent = await db.node.create({ data: { id: generateId(), memoryId: src.id, loc: 'p', name: 'p', tags: [] } });
+    await db.node.create({ data: { id: generateId(), memoryId: src.id, loc: 'p:c', name: 'c', tags: [] } });
+    return { src, parent };
+  }
+  it('refuses BAD_USER_INPUT, moves no node and creates no target memory', async () => {
+    const { src, parent } = await sourceWithOneSubtree();
+    const err = await extract(parent.id, 'out3952a').catch((e: any) => e);
+    expect(err.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(err.message).toContain('would empty the source memory');
+    expect(await live(src.id)).toBe(2);
+    expect(await db.memory.count({ where: { urn: `${org.urn}:out3952a` } })).toBe(0);
+  });
+  it('the same move succeeds once a node outside the subtree remains (the survivor is what the guard needs)', async () => {
+    const { src, parent } = await sourceWithOneSubtree();
+    await db.node.create({ data: { id: generateId(), memoryId: src.id, loc: 'keep', name: 'keep', tags: [] } });
+    await extract(parent.id, 'out3952b');
+    expect(await live(src.id)).toBe(1);
+    expect(await db.memory.count({ where: { urn: `${org.urn}:out3952b` } })).toBe(1);
   });
 });

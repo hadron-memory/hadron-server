@@ -102,7 +102,9 @@ for (const door of ['personal', 'organization', 'app', 'installed'] as const) de
     expect(snapshot()).toEqual(before); noParticipants();
   });
   // #3952: no root node is written, so the database-stage failure is injected at the org-default step, which only
-  // the organization door runs; the other doors' rollback is pinned in resolvers.noRootNode3952.test.ts (agent grant for a knowledge memory in an App; createAppMemory has no step after the memory row). The skip is visible, not a pass.
+  // the organization door runs. The other doors' rollback is pinned in resolvers.noRootNode3952.test.ts: the agent
+  // grant of a knowledge memory in an App, and the group owner row. The personal door and createAppMemory write
+  // nothing after the memory row, so they have no step to fail. The skip is visible, not a pass.
   it.runIf(door === 'organization')('rolls back the memory without reading or restoring existing projection bytes', async () => {
     const before = snapshot();
     const fail = vi.spyOn(defaults, 'applyOrgDefaultsAtCreation').mockRejectedValueOnce(new Error('synthetic database-stage failure'));
