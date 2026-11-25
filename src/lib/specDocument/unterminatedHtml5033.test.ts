@@ -240,7 +240,7 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('<![CDATA[ x ]> y')).toBe('&lt;![CDATA[ x ]> y');
     expect(escapeUnterminatedHtml('<![CDATA[ x ]]> y')).toBe('<![CDATA[ x ]]> y');
   });
-  it('CDATA and a processing instruction end for the browser at the first `>`, so what follows them is still read', () => {
+  it('CDATA and a processing instruction are complete only when their first `>` is the closer: otherwise they are escaped, and what follows is still read', () => {
     expect(escapeUnterminatedHtml('<?><style>?>')).toBe('<?>&lt;style>?>');
     // A `>` before the closer: a browser ends the construct there, CommonMark and htmlparser2 at the closer. Neither may be left open.
     expect(escapeUnterminatedHtml('<![CDATA[ a > b <style> ]]>')).toBe('&lt;![CDATA[ a > b &lt;style> ]]>');
@@ -282,8 +282,8 @@ describe('escapeUnterminatedHtml', () => {
     const FENCED = (open: string, inner: string): string => `a ${open}\n\`\`\`\n${inner}\n\`\`\`\nq <textarea>z`;
     for (const [open, inner] of [['<?x', '?>'], ['<![CDATA[x', ']]>'], ['<!-- x', '-->'], ['<!DOCTYPE x', '>'], ['</ x', '>'], ['<b y="', '">']] as const) {
       const out = escapeUnterminatedHtml(FENCED(open, inner));
-      expect(out, open).toContain('&lt;textarea>');
-      expect(out, open).toContain(`a &lt;${open.slice(1)}`);
+      // Exactly the opener and the textarea escaped, nothing else.
+      expect(out, open).toBe(FENCED(open, inner).replace('<', '&lt;').replace('<textarea>', '&lt;textarea>'));
       expect(escapeUnterminatedHtml(out), open).toBe(out);
     }
     // At the head of a line the HTML block of type 2 to 5 is not bounded by a block boundary: it runs to its closer.
@@ -299,6 +299,28 @@ describe('escapeUnterminatedHtml', () => {
     expect(out).toContain('&lt;/script');
     expect(out).toContain('&lt;textarea>');
     expect(escapeUnterminatedHtml(out)).toBe(out);
+  });
+  it('a line-head HTML block opener ends the paragraph, so a code span cannot close across it (BLIND delta P2, CommonMark types 1 to 6)', () => {
+    const cases: Array<[string, string, string]> = [
+      ['textarea', "a `x\n<textarea> y\nz` q", "a `x\n&lt;textarea> y\nz` q"],
+      ['script', "a `x\n<script>\nz` q", "a `x\n&lt;script>\nz` q"],
+      ['pre', "a `x\n<pre>\nz` q", "a `x\n&lt;pre>\nz` q"],
+      ['style', "a `x\n<style>\nz` q", "a `x\n&lt;style>\nz` q"],
+      ['a comment', "a `x\n<!-- c\nz` q", "a `x\n&lt;!-- c\nz` q"],
+      ['a processing instruction', "a `x\n<?x\nz` q", "a `x\n&lt;?x\nz` q"],
+      ['a declaration', "a `x\n<!DOCTYPE x\nz` q", "a `x\n&lt;!DOCTYPE x\nz` q"],
+      ['CDATA', "a `x\n<![CDATA[x\nz` q", "a `x\n&lt;![CDATA[x\nz` q"],
+      ['a block tag (type 6)', "a `x\n<div>\n<b x='\ny` w", "a `x\n<div>\n&lt;b x='\ny` w"],
+      ['a block end tag (type 6)', "a `x\n</div>\n<b x='\ny` w", "a `x\n</div>\n&lt;b x='\ny` w"],
+    ];
+    for (const [label, body, want] of cases) expect(escapeUnterminatedHtml(body), label).toBe(want);
+    // An inline tag that is not a block-level name does not end the paragraph (type 7 cannot interrupt one): the span runs on.
+    expect(escapeUnterminatedHtml("a `x\n<span>\n<b x='\ny` w")).toBe("a `x\n<span>\n<b x='\ny` w");
+  });
+  it('a type 1 block at the head of a line ends only at a literal `</name>`; a partial end tag leaves it open', () => {
+    expect(escapeUnterminatedHtml('<script>\nx\n</script\n```\n>\n```\nq <textarea>z')).toContain('&lt;script>');
+    expect(escapeUnterminatedHtml('<script>\nx\n</script >\ny')).toBe('&lt;script>\nx\n</script >\ny');
+    expect(escapeUnterminatedHtml('<script>\nx\n</script>\ny')).toBe('<script>\nx\n</script>\ny');
   });
   it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag (BLIND delta pin)', () => {
     expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');
