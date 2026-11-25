@@ -106,3 +106,47 @@ describe('#5168: MCP boundary legs', () => {
     expect(inner.message).toBe(outer.message);
   });
 });
+
+describe('#5168 fix head: the wrapper edge and the source-wide class (BLIND P2-1, P3)', () => {
+  it('a wrapper still holding the quoted copy is rewritten after the inner refusal was concealed first', () => {
+    const inner = thrown(() => assertFullyQualifiedUrn(SECRET, 'node')) as Error;
+    const quoted = inner.message;
+    concealRefEcho(inner); // e.g. the MCP boundary saw it first
+    const outer = new GraphQLError(quoted, { originalError: inner });
+    concealRefEcho(outer);
+    expect(outer.message).toBe(inner.message);
+    expect(outer.message).not.toContain('SECRET_5168');
+  });
+
+  /**
+   * The door probe reaches GraphQL fields with a top-level ref; MCP handlers and refs inside input objects it does not.
+   * This guard reads the source instead: no refusal text in the server quotes an interpolated value as the thing that
+   * was not found. `src/lib/runner` is excluded (its errors go to the run's model, not a caller's terminal).
+   */
+  it('no not-found or no-match refusal in src quotes an interpolated value', async () => {
+    const { readdirSync, readFileSync, statSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const root = new URL('../', import.meta.url).pathname;
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        if (statSync(p).isDirectory()) { if (!p.endsWith('/lib/runner') && !p.endsWith('/generated')) walk(p); continue; }
+        if (p.endsWith('.ts') && !p.endsWith('.test.ts') && !p.endsWith('.d.ts')) files.push(p);
+      }
+    };
+    walk(root);
+    const CLASS = [
+      /`[A-Z][\w ]* "\$\{[^}`]+\}" not found/,
+      /`[A-Z][\w ]* not found: \$\{[^}`]+\}`/,
+      /`[A-Z][\w ]* \$\{[^}`]+\} not found\.?`/,
+      /No match for [\w ]*"\$\{/,
+      /No readable [\w ]*"\$\{/,
+    ];
+    const hits = files.flatMap((f) => readFileSync(f, 'utf8').split('\n')
+      .map((line, i) => ({ line, at: `${f.slice(root.length)}:${i + 1}` }))
+      .filter(({ line }) => CLASS.some((re) => re.test(line)))
+      .map(({ at, line }) => `${at} ${line.trim().slice(0, 120)}`));
+    expect(hits).toEqual([]);
+  });
+});

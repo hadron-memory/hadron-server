@@ -47,8 +47,9 @@ function grantNotFound(grantRef: string): GraphQLError {
   return new GraphQLError('Grant not found', { extensions: { code: 'GRANT_NOT_FOUND' } }); // #5168: no caller ref relayed
 }
 
-function requestNotFound(id: string): GraphQLError {
-  return new GraphQLError('Signing request not found', { extensions: { code: 'SIGNING_REQUEST_NOT_FOUND', id } });
+function requestNotFound(_id: string): GraphQLError {
+  // #5168: the miss does not relay the caller's id.
+  return new GraphQLError('Signing request not found', { extensions: { code: 'SIGNING_REQUEST_NOT_FOUND' } });
 }
 
 function refusalToGraphQL(error: GrantSigningRefusal, ref: Record<string, string>): GraphQLError {

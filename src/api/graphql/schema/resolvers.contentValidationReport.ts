@@ -42,7 +42,7 @@ function badInput(message: string): GraphQLError {
   return new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
 }
 
-function nodeNotFound(nodeRef: string): GraphQLError {
+function nodeNotFound(_nodeRef: string): GraphQLError {
   return new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
 }
 

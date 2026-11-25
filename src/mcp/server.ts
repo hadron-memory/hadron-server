@@ -1468,7 +1468,7 @@ async function resolveParentForRead(
   | { ok: true; loc: string; memoryId?: string }
   | { ok: false; kind: 'invalid' | 'notFound'; message: string }
 > {
-  const missing = () => ({ ok: false as const, kind: 'notFound' as const, message: `Node "${parentRel}" not found.` });
+  const missing = () => ({ ok: false as const, kind: 'notFound' as const, message: 'Node not found.' });
   const readable = async (id: string) =>
     await canReadMemory(db, auth, id, EXPLICIT_REF);
   try {
@@ -4101,7 +4101,7 @@ export function createMcpServerInstance(
       e instanceof OrganizationNotFoundError ||
       e instanceof MemoryNotFoundError
     ) {
-      return refusalResult(`[not_found] No match for "${(e as { ref?: string }).ref ?? ''}".`);
+      return refusalResult('[not_found] No match for the given ref.');
     }
     if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${refusalText(e)}`);
     throw e;
@@ -4456,7 +4456,7 @@ export function createMcpServerInstance(
         row = r.winner;
       }
       if (!row || !(await canReadScope(ctx, row))) {
-        return refusalResult(`[not_found] No readable scope matches "${scope}"${auth.appId ? '' : ' — a bare name needs an active App; pass the scope id or select an App first'}. See hadron_list_scopes.`);
+        return refusalResult(`[not_found] No readable scope matches${auth.appId ? '' : ' — a bare name needs an active App; pass the scope id or select an App first'}. See hadron_list_scopes.`);
       }
       activeScopeId = row.id;
       await saveActiveScope(db, auth, clientKey, row.id);
@@ -5365,12 +5365,12 @@ export function createMcpServerInstance(
         // An inherited node was admitted through the child's memory above.
         (!o.inheritedFrom && !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF)))
       ) {
-        return refusalResult(`Node "${o.rawUrn}" not found.`);
+        return refusalResult('Node not found.');
       }
       // The version actually served must still be the child's to show
       // (Diego, #1891 P2-1): not turned boot prompt, not overridden since.
       if (o.inheritedFrom && !(await stillInherited(db, o.inheritedFrom, current))) {
-        return refusalResult(`Node "${o.rawUrn}" not found.`);
+        return refusalResult('Node not found.');
       }
       if (o.inheritedFrom) markInherited([current], new Map([[current.memoryId, o.inheritedFrom]]));
       // Spec 041: decrypt when this session holds the key; mark locked
@@ -5447,7 +5447,7 @@ export function createMcpServerInstance(
       // surfaces cannot drift.
       if (ACTION_REF_RE.test(rawUrn)) {
         const entry = await resolveActionEntryRef(rawUrn);
-        if (!entry) return refusalResult(`Node "${rawUrn}" not found.`);
+        if (!entry) return refusalResult('Node not found.');
         return serveNodeReadProjection(entry, { rawUrn, contentScope, raw });
       }
 
@@ -5474,7 +5474,7 @@ export function createMcpServerInstance(
       });
       const sourceReadable = !!memory && await canReadMemory(db, auth, memory.id, EXPLICIT_REF);
       const missing = () => refusalResult(sourceReadable
-        ? `Node "${rawUrn}" not found.`
+        ? 'Node not found.'
         : 'Memory not found.');
 
       // The projection's include, named so the two candidate lookups below
@@ -6118,7 +6118,7 @@ export function createMcpServerInstance(
         }
         const idx = children.findIndex((n) => n.loc === currentLoc);
         if (idx === -1) {
-          return refusalResult(`Current node "${currentLoc}" not found among children of "${parentLoc}".`);
+          return refusalResult('Current node not found among the parent\'s children.');
         }
         if (idx + 1 >= children.length) {
           return textResult(`No more nodes after "${currentLoc}".`);
@@ -6505,7 +6505,7 @@ export function createMcpServerInstance(
           })
         : null;
       if (!row || row.userId !== auth.userId) {
-        return refusalResult(`Memory "${memoryUrn}" not found.`);
+        return refusalResult('Memory not found.');
       }
       if (!row.isEncrypted) {
         return textResult(`Memory "${row.urn}" is not encrypted.`);
@@ -6547,7 +6547,7 @@ export function createMcpServerInstance(
         ? await db.memory.findUnique({ where: { id: mem.id }, select: { id: true, userId: true } })
         : null;
       if (!row || row.userId !== auth.userId) {
-        return refusalResult(`Memory "${memoryUrn}" not found.`);
+        return refusalResult('Memory not found.');
       }
       sessionKeyCache.release(`mcp:${sid}`, row.id);
       return textResult(`Memory locked for this session: ${memoryUrn}.`);
@@ -8399,12 +8399,12 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       if (fragRefusal) return refusalResult(fragRefusal);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
-        return refusalResult(`Node "${rawUrn}" not found.`);
+        return refusalResult('Node not found.');
       }
       if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
         // Match the "not found" phrasing used elsewhere on access denial
         // so the response doesn't distinguish absence from denial.
-        return refusalResult(`Node "${rawUrn}" not found.`);
+        return refusalResult('Node not found.');
       }
 
       // Find the node by (loc, memoryId). Already-tombstoned nodes are
@@ -8413,7 +8413,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       const existing = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: memory.id } },
       });
-      if (!existing) return refusalResult(`Node "${rawUrn}" not found.`);
+      if (!existing) return refusalResult('Node not found.');
       if (existing.deletedAt && !hard) {
         return textResult(
           `Node "${rawUrn}" is already soft-deleted. Pass hard: true to remove the row entirely.`,
@@ -8589,7 +8589,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
 
       if ('refused' in result) {
         if (result.refused === 'access') {
-          return refusalResult(`Node "${rawUrn}" not found.`);
+          return refusalResult('Node not found.');
         }
         if (result.refused === 'crossMemAccess') {
           return textResult(
@@ -8715,7 +8715,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const existing = await db.node.findUnique({
         where: { loc_memoryId: { loc: fromLoc, memoryId: fromMemory.id } },
       });
-      if (!existing) return refusalResult(`Node "${rawFrom}" not found.`);
+      if (!existing) return refusalResult('Node not found.');
 
       if (!(await canWriteToMemory(db, auth, fromMemory.id, EXPLICIT_REF))) {
         return refusalResult(`Write access denied for source memory.${await explainWriteRefusal(db, auth, fromMemory.id)}`);
@@ -9133,7 +9133,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // ONE message naming nothing (cor:api:140:03): other tenant, unreadable
       // memory, unknown Agent, missing or malformed code all read alike.
       if (ACTION_REF_RE.test(rawUrn)) {
-        const unreadable = () => refusalResult(`Node "${rawUrn}" not found.`);
+        const unreadable = () => refusalResult('Node not found.');
         const entry = await resolveActionEntryRef(rawUrn, { agentGate: false });
         if (!entry) return unreadable();
         // Carry the RESOLVED entry's id, never a re-emitted node URN: the emitted
@@ -9184,7 +9184,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       return { error: 'Memory not found.' };
     }
     const node = await findRunNode({ loc_memoryId: { loc, memoryId: memory.id } });
-    if (!node) return { error: `Node "${rawUrn}" not found.` };
+    if (!node) return { error: 'Node not found.' };
     return { node, loc };
   }
 
@@ -9727,7 +9727,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         if (/^(Forbidden|Unauthenticated)/.test((e as Error)?.message ?? '')) run = null;
         else throw e;
       }
-      if (!run) return refusalResult(`Run "${runRef}" not found.`);
+      if (!run) return refusalResult('Run not found.');
       return textResult(renderAppRun(run));
     },
   );
@@ -10217,7 +10217,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (appScopeError) return appScopeError;
 
       const session = await db.session.findUnique({ where: { id } });
-      if (!session) return refusalResult(`Session "${id}" not found.`);
+      if (!session) return refusalResult('Session not found.');
       // #931: same write gate as the GraphQL endSession — previously this raw
       // update was ungated, so any App-scoped caller holding a session id
       // could end another App's (or user's) session. Allowed: a PURE App-key
@@ -11759,7 +11759,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           { ref: trimmed, appRef: refNamesItsApp ? null : appRef },
           ctx,
         );
-        if (!worker) return refusalResult(`Worker not found: ${workerRef}`);
+        if (!worker) return refusalResult('Worker not found');
 
         // Resolved through the SAME field resolvers GraphQL serves, so this
         // surface and the briefing hadron_start_session prints cannot drift —
@@ -12010,7 +12010,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           { ref: trimmed, appRef: refNamesItsApp ? null : appRef },
           ctx,
         );
-        if (!target) return refusalResult(`Worker not found: ${workerRef}`);
+        if (!target) return refusalResult('Worker not found');
 
         // Forward a key ONLY when the caller supplied it (PR #1019 review,
         // Copilot): the resolver distinguishes omitted-preserves by PRESENCE.
@@ -12079,7 +12079,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       };
       try {
         const target = await resolvers.Query.worker({}, { ref: trimmed, appRef: refNamesItsApp ? null : appRef }, ctx);
-        if (!target) return textResult(`Worker not found: ${workerRef}`);
+        if (!target) return textResult('Worker not found');
         const worker = await resolvers.Mutation.changeWorkerAgent({}, { workerRef: target.id, agentRef: agent }, ctx);
         return textResult(
           `**${worker.name}** now casts agent ${worker.agentId}${worker.role ? ` (role ${worker.role})` : ''}. ` +
@@ -12123,7 +12123,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       try {
         const resolveRef = async (ref: string) => {
           const w = await resolvers.Query.worker({}, { ref, appRef: isId(ref) || hasSchemePrefix(ref) ? null : appRef }, ctx);
-          if (!w) throw new Error(`Worker not found: ${ref}`);
+          if (!w) throw new Error('Worker not found');
           return w.id as string;
         };
         const workerId = await resolveRef(trimmed);

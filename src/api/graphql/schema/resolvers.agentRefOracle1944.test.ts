@@ -294,7 +294,7 @@ describe('#1944 startSession\'s optional agentRef: an unreadable Agent answers l
     query: 'mutation($input: SessionInput!) { startSession(input: $input) { id } }',
     variables: { input: { id: generateId(), agentRef: ref } },
   });
-  const absent = (ref: string): Answer => ({ data: null, error: { message: 'Agent not found', extensions: { code: 'BAD_USER_INPUT' } } });
+  const absent = (_ref: string): Answer => ({ data: null, error: { message: 'Agent not found', extensions: { code: 'BAD_USER_INPUT' } } });
 
   it('another org\'s ADMIN gets exactly the absent answer for a real Agent and a guessed one, and no session is written', async () => {
     expect(await askWith(ctx(foreignAdmin), start(nobody()))).toEqual(absent(nobody()));

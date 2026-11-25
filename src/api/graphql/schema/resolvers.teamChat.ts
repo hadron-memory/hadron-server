@@ -490,7 +490,7 @@ async function resolveSessionAuthor(
     select: { id: true, appId: true, userId: true, workerId: true, agentId: true, endedAt: true, expiresAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true, memoryId: true },
   });
   if (!session) {
-    throw new GraphQLError(`Session "${sessionRef}" not found.`, {
+    throw new GraphQLError('Session not found.', {
       extensions: { code: 'SESSION_NOT_FOUND' },
     });
   }

@@ -625,7 +625,7 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
           // Named rather than silently dropped: a caller who asked for a
           // memory by name and got an empty plan would read it as "nothing
           // declared here", which is the same wrong answer as a short read.
-          throw new GraphQLError(`skillPlan: memory "${ref}" is not accessible.`, {
+          throw new GraphQLError('skillPlan: the memory is not accessible.', {
             extensions: { code: 'FORBIDDEN' },
           });
         }

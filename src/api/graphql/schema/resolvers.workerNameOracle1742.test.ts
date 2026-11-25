@@ -121,16 +121,16 @@ describe('#1742 the oracle is closed: an unreadable App answers like an absent w
         it(`${surface}, ${who}: reads the profile instead (#1149)`, async () => {
           expect(((await call(as(), danUrn())) as { id: string }).id).toBe(dan.id);
           expect(await envelopeOf(call(as(), nobodyUrn())))
-            .toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND'} });
+            .toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND' } });
         });
         continue;
       }
       it(`${surface}, ${who}: a real name and a guessed one get the same refusal`, async () => {
         const real = await envelopeOf(call(as(), danUrn()));
         const guessed = await envelopeOf(call(as(), nobodyUrn()));
-        expect(guessed).toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND'} });
+        expect(guessed).toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND' } });
         // #5168: no ref is echoed any more, so the two answers are byte-identical.
-        expect(real).toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND'} });
+        expect(real).toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND' } });
       });
     }
 
@@ -145,8 +145,8 @@ describe('#1742 the oracle is closed: an unreadable App answers like an absent w
       const real = await envelopeOf(call(outsiderFor(surface), dan.id));
       const absentId = generateId();
       const absent = await envelopeOf(call(outsiderFor(surface), absentId));
-      expect(real).toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND'} });
-      expect(absent).toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND'} });
+      expect(real).toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND' } });
+      expect(absent).toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND' } });
     });
   }
 
@@ -154,7 +154,7 @@ describe('#1742 the oracle is closed: an unreadable App answers like an absent w
     await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
     for (const [, call] of SURFACES) {
       expect(await envelopeOf(call(ctx(member.id), danUrn())))
-        .toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND'} });
+        .toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND' } });
     }
   });
 
@@ -181,7 +181,7 @@ describe('#1742 controls: readers keep their answers', () => {
   it('a participant still resolves the worker, and an absent one is still WORKER_NOT_FOUND', async () => {
     expect((await Q.worker({}, { ref: danUrn() }, ctx(member.id))).id).toBe(dan.id);
     expect(await envelopeOf(Q.worker({}, { ref: nobodyUrn() }, ctx(member.id))))
-      .toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND'} });
+      .toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND' } });
   });
 
   it('a staffer still makes the change', async () => {

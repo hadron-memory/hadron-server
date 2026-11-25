@@ -589,7 +589,7 @@ describe('#4142 S6 chunk D — agent mutations', () => {
     for (const ref of [agent.id, agent.urn]) {
       await expect(
         resolvers.Mutation.restoreRevision({}, { agentRef: ref, revisionLoc: 'revisions:none' }, adminCtx()),
-      ).rejects.toThrow(/Revision not found: revisions:none/);
+      ).rejects.toThrow(/^Revision not found$/); // #5168: the loc is not quoted back
     }
     await expect(
       resolvers.Mutation.restoreRevision({}, { agentRef: generateId(), revisionLoc: 'revisions:none' }, adminCtx()),

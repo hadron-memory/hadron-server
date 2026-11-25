@@ -600,7 +600,7 @@ export async function resolveSearchScope(
       scope = row && (await canReadScope(ctx, row)) ? row : null;
     }
     if (!scope) {
-      throw new GraphQLError(`No readable scope matches "${named}".`, { extensions: { code: 'NOT_FOUND' } });
+      throw new GraphQLError('No readable scope matches.', { extensions: { code: 'NOT_FOUND' } });
     }
     return scopeView(ctx, scope, 'call');
   }
@@ -785,7 +785,7 @@ export async function resolveNamedScopeForQuery(
   }
   const r = await resolveSearchScope(ctx, { scopeArg, appId, ambient: false, activeOrg });
   // Unreachable: a named scope always resolves or throws.
-  if (!r) throw new GraphQLError(`No readable scope matches "${scopeArg}".`, { extensions: { code: 'NOT_FOUND' } });
+  if (!r) throw new GraphQLError('No readable scope matches.', { extensions: { code: 'NOT_FOUND' } });
   return r;
 }
 

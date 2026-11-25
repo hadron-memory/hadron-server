@@ -228,7 +228,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
       const ctx = ctxOf();
       try {
         const c = await Q.comment({}, { ref }, ctx);
-        if (!c) return textResult(`[comment_not_found] No readable comment "${ref}".`);
+        if (!c) return textResult('[comment_not_found] No readable comment.');
         const target = await (C.target(c, {}, ctx) as Promise<{ urn: string; name: string }>);
         return textResult(`Comment on ${target.urn} (${target.name}).\n${COMMENT_FRAMING}\n\n${await renderComment(c, ctx)}`);
       } catch (e) {

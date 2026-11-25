@@ -703,7 +703,7 @@ async function writeRevisionRow(
 /** A supplied family must be a valid token; checked before any write (and, on a resume, before the claim is spent). */
 /** #4244: an Agent revision that is not there (unknown or retired loc), refused before any write. */
 function revisionNotFound(revisionLoc: string): GraphQLError {
-  return new GraphQLError(`Revision not found: ${revisionLoc}`, { extensions: { code: 'BAD_USER_INPUT' } });
+  return new GraphQLError('Revision not found', { extensions: { code: 'BAD_USER_INPUT' } });
 }
 
 function explicitFamilyOrThrow(family: string | null | undefined): string | null {
@@ -769,7 +769,7 @@ async function ownSessionForClaim(ctx: Context, sessionId: string) {
     select: { id: true, userId: true, appId: true, workerId: true, endedAt: true, deletedAt: true },
   });
   if (!session || session.deletedAt || !ctx.userId || ctx.impersonation || session.userId !== ctx.userId || !session.appId) {
-    throw new GraphQLError(`Session not found: ${sessionId}`, { extensions: { code: 'BAD_USER_INPUT' } });
+    throw new GraphQLError('Session not found', { extensions: { code: 'BAD_USER_INPUT' } });
   }
   if (!session.workerId) {
     throw new GraphQLError(
@@ -1859,7 +1859,7 @@ export const sessionMutations = {
     ) => {
       const session = await ctx.db.session.findUnique({ where: { id } });
       if (!session || session.deletedAt) {
-        throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
+        throw new GraphQLError('Session not found', { extensions: { code: 'BAD_USER_INPUT' } });
       }
       await requireSessionWriteAccess(ctx, session);
       // #1931: refresh a binding without guessing a model family from its host.
@@ -1908,7 +1908,7 @@ export const sessionMutations = {
         case 'no_credential':
           throw new GraphQLError('A credential is required', { extensions: { code: 'UNAUTHENTICATED' } });
         case 'not_found':
-          throw new GraphQLError(`Session not found: ${sessionId}`, { extensions: { code: 'BAD_USER_INPUT' } });
+          throw new GraphQLError('Session not found', { extensions: { code: 'BAD_USER_INPUT' } });
         case 'forbidden':
           throw authorizationDenied();
         case 'ok':
@@ -1936,7 +1936,7 @@ export const sessionMutations = {
       // "taken" derives from active sessions post-#928).
       const session = await ctx.db.session.findUnique({ where: { id } });
       if (!session || session.deletedAt) {
-        throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
+        throw new GraphQLError('Session not found', { extensions: { code: 'BAD_USER_INPUT' } });
       }
       await requireSessionWriteAccess(ctx, session);
 
@@ -3512,7 +3512,7 @@ export const sessionMutations = {
           include: { outgoingEdges: { where: { deletedAt: null, target: { deletedAt: null } }, include: { target: true }, orderBy: edgeRunOrder() } },
         });
         if (!node) {
-          throw new GraphQLError(`Node "${targetNodeUrn}" not found.`, {
+          throw new GraphQLError('Node not found.', {
             extensions: { code: 'NOT_FOUND' },
           });
         }
@@ -3698,7 +3698,7 @@ export const sessionMutations = {
         select: { loc: true, memory: { select: { urn: true } } },
       });
       if (!resolved) {
-        throw new GraphQLError(`Node "${ref}" not found.`, {
+        throw new GraphQLError('Node not found.', {
           extensions: { code: 'NOT_FOUND' },
         });
       }

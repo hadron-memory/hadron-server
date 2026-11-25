@@ -52,8 +52,11 @@ function unqualifiedMessage(err: UrnNotQualifiedError): string {
   return `The ref is not a fully qualified ${kind}URN.${hint ? ` ${hint}` : ''}`;
 }
 
-/** Refusals whose message this module already rewrote: their text is the concealed one and is returned as is. */
-const concealed = new WeakSet<object>();
+/**
+ * Refusals whose message this module already rewrote, with the quoted message each one had: their text is the concealed
+ * one and is returned as is, and a wrapper still holding the quoted copy is rewritten on a later pass.
+ */
+const concealed = new WeakMap<object, string>();
 
 /** The concealed text for a URN library refusal, or null when the error is not one. */
 export function concealedUrnRefusalMessage(err: unknown): string | null {
@@ -86,12 +89,10 @@ function concealChain(error: unknown): void {
     seen.add(current);
     const text = concealedUrnRefusalMessage(current);
     if (text !== null) {
-      const original = (current as Error).message;
-      if (original !== text) {
-        for (const w of wrappers) if (w.message === original) setMessage(w, text);
-        setMessage(current as Error, text);
-      }
-      concealed.add(current);
+      const original = concealed.get(current) ?? (current as Error).message;
+      for (const w of wrappers) if (w.message === original) setMessage(w, text);
+      if ((current as Error).message !== text) setMessage(current as Error, text);
+      if (!concealed.has(current)) concealed.set(current, original);
       break;
     }
     if (typeof (current as { message?: unknown }).message === 'string') wrappers.push(current as { message: string });

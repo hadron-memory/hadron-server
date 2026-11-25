@@ -56,7 +56,7 @@ const row = () => db.app.findUniqueOrThrow({ where: { id: app.id } });
 
 describe('#3982 updateApp reach versus act (Holger model A)', () => {
   const update = (ref: string, c = ctx(stranger.id), input = {}) => M.updateApp({}, { ref, name: 'changed', ...input }, c);
-  const unknown = (ref: string) => ({ code: 'APP_NOT_FOUND', message: 'APP_NOT_FOUND: nothing found for the given ref.' });
+  const unknown = (_ref: string) => ({ code: 'APP_NOT_FOUND', message: 'APP_NOT_FOUND: nothing found for the given ref.' });
   const denied = { code: 'FORBIDDEN', message: 'Forbidden' };
 
   it.each(['id', 'urn'] as const)('unreachable existing and missing %s use the same unknown envelope, with only the supplied ref', async kind => {
