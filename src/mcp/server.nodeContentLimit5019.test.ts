@@ -130,6 +130,7 @@ describe('#5019 MCP content doors', () => {
       expect(await call('hadron_create_parent_node', { urn: p('s'), name: 's', description: a(201) })).toEqual(REFUSED);
       await db.node.updateMany({ where: { memoryId: mem, loc: 's' }, data: { deletedAt: new Date() } });
       expect(await call('hadron_create_parent_node', { urn: p('s'), name: 's', description: a(201) })).toEqual(REFUSED);
+      ok(await call('hadron_create_parent_node', { urn: p('s'), name: 's', description: a(200) }));
     });
 
     it('with no ceiling set, a tombstone that does not decrypt is not read for its size', async () => {
