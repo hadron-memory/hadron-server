@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { respondSessionSuperseded } from './sessionSuperseded.js';
-import { authStoreBusyMessage, isAuthStoreBusyError } from './authStoreBusy.js';
+import { authStoreBusyMessage, isAuthStoreBusyError, normalizeAuthStoreBusyReason } from './authStoreBusy.js';
 import { currentRequestId } from './requestContext.js';
 
 export const INTERNAL_ERROR_CODE = 'INTERNAL_SERVER_ERROR';
@@ -88,8 +88,8 @@ export function respondAuthStoreBusy(res: Response, error: unknown): boolean {
   logInternalFault('http', 'auth-store-busy', requestId, error);
   if (res.headersSent) return false; // Delegate to Express's final handler, as #3818 does.
   // Normalize at the boundary: instanceof proves the class, not that a subclass or late
-  // mutation kept its extensions intact. The default matches authStoreBusyMessage's fixed prose.
-  const reason = error.extensions.reason === 'STORE_UNREACHABLE' ? 'STORE_UNREACHABLE' : 'POOL_WAIT';
+  // mutation kept its extensions intact. The GraphQL boundary reads the same normalizer (#4591).
+  const reason = normalizeAuthStoreBusyReason(error.extensions.reason);
   res.status(503).json({
     error: authStoreBusyMessage(reason),
     code: 'AUTH_STORE_BUSY',
