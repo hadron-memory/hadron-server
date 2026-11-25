@@ -222,9 +222,10 @@ describe('#74 a capped read and an App scope', () => {
     const page = await run(`{ appNodesPage(appRef: "${app.id}", limit: 50) { items { id outgoingEdges { name } } } }`, context(member));
     expect((page.data as any).appNodesPage.items.find((n: any) => n.id === n1).outgoingEdges.map((e: any) => e.name)).toEqual(['in-scope']);
     // The base's own row reads through its child (#1893): its edge to a node of that child is listed there.
-    for (const rows of [(r.data as any).appNodes, (page.data as any).appNodesPage.items]) expect(rows.some((n: any) => n.id === nb)).toBe(true);
-    const inherited = await run(`{ appNodes(appRef: "${app.id}", limit: 50) { id incomingEdges { name } } }`, context(member));
-    expect((inherited.data as any).appNodes.find((n: any) => n.id === nb).incomingEdges.map((e: any) => e.name)).toEqual(['to-base']);
+    const inherited = await run(`{ appNodes(appRef: "${app.id}", limit: 50) { id incomingEdges { name } } appNodesPage(appRef: "${app.id}", limit: 50) { items { id incomingEdges { name } } } }`, context(member));
+    for (const rows of [(inherited.data as any).appNodes, (inherited.data as any).appNodesPage.items]) {
+      expect(rows.find((n: any) => n.id === nb).incomingEdges.map((e: any) => e.name)).toEqual(['to-base']);
+    }
   });
 
   it('an inherited node lists no edge whose memory the reader may not read, in both directions', async () => {

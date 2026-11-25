@@ -78,17 +78,26 @@ export function markAdmittedMemories(nodes: object[], memoryIds: ReadonlySet<str
   for (const node of nodes) admittedMemories.set(node, memoryIds);
 }
 
-/** Of `memoryIds`, those whose edges and nodes may be listed on `parent`: its own (the read that returned it was gated), an admitted one, or one the reader may read. */
-async function listableMemories(parent: Parent, ctx: Context, memoryIds: Iterable<string>): Promise<Set<string>> {
+/**
+ * Of `memoryIds`, those whose edges and nodes may be listed: one the reader may read, and for a list on a `parent` node also its own (the read
+ * that returned it was gated) or an admitted one. The one predicate of the node lists, `edge` and `edges` (hadron-internal#79).
+ */
+export async function listableMemories(parent: Parent | null, ctx: Context, memoryIds: Iterable<string>): Promise<Set<string>> {
   const ids = [...new Set(memoryIds)];
-  const ok = await Promise.all(ids.map((id) => id === parent.memoryId || admittedMemories.get(parent)?.has(id) || isMemoryReadableCached(ctx, id)));
+  const ok = await Promise.all(ids.map((id) => id === parent?.memoryId || (parent && admittedMemories.get(parent)?.has(id)) || isMemoryReadableCached(ctx, id)));
   return new Set(ids.filter((_id, i) => ok[i]));
 }
+
+/** An edge held in one of `ids`, with each of `ends` in one of them. */
+export const edgeWithin = (ids: string[], ends: ReadonlyArray<'source' | 'target'>) => ({
+  memoryId: { in: ids }, ...Object.fromEntries(ends.map((end) => [end, { memoryId: { in: ids } }])),
+});
 
 /**
  * hadron-internal#74 (cor:api:140:03, cor:acl:010:02) — a node lists an edge when the reader may list both the memory that HOLDS the
  * edge and the memory of its far node ({@link listableMemories}); any other edge is absent, as in MCP. Every read of the two fields comes
- * here, batch or not, but an inherited node's, which `resolveInheritedEdges` answers with the same two questions. Both are asked: a stored `Edge.memoryId` is the source side,
+ * here, batch or not, but an inherited node's, which `resolveInheritedEdges` answers with the same two questions over
+ * its inheritance chain (no admitted set there). Both are asked: a stored `Edge.memoryId` is the source side,
  * and may differ from either end after a move.
  */
 export async function batchReadEdges(parent: Parent, ctx: Context, direction: 'out' | 'in'): Promise<unknown> {
@@ -105,7 +114,7 @@ export async function batchReadEdges(parent: Parent, ctx: Context, direction: 'o
     ]);
     const ids = [...await listableMemories(parent, ctx, [...holderMemories, ...farMemories].map((r) => r.memoryId))];
     return ctx.db.edge.findMany({
-      where: { AND: [where, { memoryId: { in: ids } }, { [far]: { memoryId: { in: ids } } }] },
+      where: { AND: [where, edgeWithin(ids, [far])] },
       // #2967 — order before the take, so the overflow probe sees the same edges in the same order
       // as the single `node` read (cor:api:040:01 parity).
       orderBy: edgeDisplayOrder(),

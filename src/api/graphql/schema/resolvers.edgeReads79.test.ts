@@ -125,6 +125,10 @@ describe.each(SHAPES)('#79 a far node in a %s memory', (_shape, shape) => {
     const third = (await edge('third', mem, sibling, near)).id;
     expect((await page(`targetNodeId: "${near}"`, context(member))).names).toEqual(['same-in']);
     expect(await one(third, context(member))).toBeNull();
+    // Held in the readable memory although its source is not there (a stored memoryId can differ from its ends).
+    const stale = (await edge('stale', shared, far, near)).id;
+    expect((await page(`targetNodeId: "${near}"`, context(member))).names).toEqual(['same-in']);
+    expect(await one(stale, context(member))).toBeNull();
     await db.node.update({ where: { id: far }, data: { deletedAt: new Date() } });
     expect((await page(`sourceNodeId: "${near}"`, context(member))).names).toEqual(['same-out']);
     expect(await one(farOut, context(member))).toBeNull();
