@@ -2204,13 +2204,16 @@ export const typeDefs = `#graphql
   }
 
   """
-  046-usage-metering: append-only org credit ledger row. Signed
-  micro-cents as a base-10 integer string (grants +, debits -,
-  adjustments either sign).
+  046-usage-metering: append-only credit ledger row of an organization or a
+  person (hrn:node:hadronmemory.com:specs:cor:dmo:170:01). Signed micro-cents
+  as a base-10 integer string (grants +, debits -, adjustments either sign).
   """
   type CreditLedgerEntry {
     id: ID!
-    organizationId: ID!
+    "The owning organization, or null when the entry belongs to a person."
+    organizationId: ID
+    "The owning person, or null when the entry belongs to an organization. An account merge moves a merged-away person's entries to the survivor."
+    ownerUserId: ID
     kind: String!
     amountMicroCents: String!
     expiresAt: DateTime
@@ -2227,7 +2230,10 @@ export const typeDefs = `#graphql
   }
 
   type CreditBalance {
-    organizationId: ID!
+    "The organization the balance is of, or null for a person's."
+    organizationId: ID
+    "The person the balance is of, or null for an organization's."
+    ownerUserId: ID
     balanceMicroCents: String!
   }
 
@@ -2348,7 +2354,18 @@ export const typeDefs = `#graphql
   }
 
   input GrantCreditsInput {
-    orgRef: String!
+    """
+    Exactly one of orgRef and userRef (BAD_USER_INPUT for both or neither).
+    The organization to credit.
+    """
+    orgRef: String
+    """
+    The person to credit: an id, a handle or a hrn:user: URN
+    (hrn:node:hadronmemory.com:specs:cor:api:140:01). A soft-deleted person is
+    not found. Allowed to the same callers as for an organization: a platform
+    admin or the BILLING platform role.
+    """
+    userRef: ID
     """
     Positive micro-cents, base-10 integer string.
     """
@@ -2377,13 +2394,23 @@ export const typeDefs = `#graphql
   }
 
   """
-  A signed correction on an organization's credit ledger, such as a refund
+  A signed correction on an organization's or a person's credit ledger, such as a refund
   (hrn:node:hadronmemory.com:specs:cor:dmo:170:03). It is written as a new
   adjustment entry, never as an edit of another
   (hrn:node:hadronmemory.com:specs:cor:dmo:170:08).
   """
   input AdjustCreditsInput {
-    orgRef: String!
+    """
+    Exactly one of orgRef and userRef (BAD_USER_INPUT for both or neither).
+    The organization whose ledger is corrected.
+    """
+    orgRef: String
+    """
+    The person whose ledger is corrected: an id, a handle or a hrn:user: URN
+    (hrn:node:hadronmemory.com:specs:cor:api:140:01). A soft-deleted person is
+    not found.
+    """
+    userRef: ID
     """
     Signed, non-zero micro-cents, base-10 integer string within int8 (a
     leading minus lowers the balance; no plus sign or fraction).
@@ -12603,10 +12630,10 @@ export const typeDefs = `#graphql
     aiModelPrice(ref: ID!): AiModelPrice
     "Provider rate rows, newest effective first, optional provider/model filter (spec 046). Authenticated read."
     aiModelPrices(provider: String, model: String, tier: Int, limit: Int, offset: Int): AiModelPriceList!
-    "One org's append-only credit-ledger page, newest first (spec 046). Org-ADMIN."
-    creditLedgerEntries(orgRef: String!, limit: Int, offset: Int): CreditLedgerEntryList!
-    "One org's credit balance - SUM over the append-only ledger (spec 046). Org-ADMIN."
-    creditBalance(orgRef: String!): CreditBalance!
+    "One account's append-only credit-ledger page, newest first (spec 046). Give exactly one of orgRef and userRef (BAD_USER_INPUT for both or neither). An organization's: its ADMIN or OWNER, or a platform admin. A person's: that person in their own session, or a platform admin; an impersonated session and an App key are refused, and a caller who is not a platform admin gets FORBIDDEN whether or not the named person exists (hrn:node:hadronmemory.com:specs:cor:dmo:170:01)."
+    creditLedgerEntries(orgRef: String, userRef: ID, limit: Int, offset: Int): CreditLedgerEntryList!
+    "One account's credit balance - SUM over its append-only ledger (spec 046). Give exactly one of orgRef and userRef; gated as creditLedgerEntries."
+    creditBalance(orgRef: String, userRef: ID): CreditBalance!
     "The owner limits of an organization or a person, one row per measure (hadron-server issue 5009). Give exactly one ref. An organization's: its ADMIN or OWNER. A person's: that person in their own session. A platform admin reads any."
     ownerLimits(orgRef: String, userRef: ID): [OwnerLimitUsage!]!
     """
@@ -14170,13 +14197,13 @@ export const typeDefs = `#graphql
     setQuotaLimit(input: SetQuotaLimitInput!): QuotaCounter!
     "Append an effective-dated provider rate row (spec 046). PLATFORM ADMIN - org admins must never set the prices they are billed at."
     setAiModelPrice(input: SetAiModelPriceInput!): AiModelPrice!
-    "Mint credits for an org - a positive grant ledger row (spec 046). PLATFORM ADMIN or the BILLING platform role only (self-grant risk; #5012); processor top-ups land here."
+    "Mint credits for an organization or a person (give exactly one of orgRef and userRef) - a positive grant ledger row (spec 046). PLATFORM ADMIN or the BILLING platform role only (self-grant risk; #5012); processor top-ups land here."
     grantCredits(input: GrantCreditsInput!): CreditLedgerEntry!
     "Set an owner's limits (hadron-server issue 5009). PLATFORM ADMIN ONLY. Returns the owner's limits after the change."
     setOwnerLimits(input: SetOwnerLimitsInput!): [OwnerLimitUsage!]!
     "Delete an owner's limits, so the deployment default applies again (hadron-server issue 5009). PLATFORM ADMIN ONLY. Returns the owner's limits after the change."
     clearOwnerLimits(input: ClearOwnerLimitsInput!): [OwnerLimitUsage!]!
-    "Write a signed adjustment entry on an org's credit ledger, e.g. a refund (hrn:node:hadronmemory.com:specs:cor:dmo:170:03; a correction is a new entry, hrn:node:hadronmemory.com:specs:cor:dmo:170:08). PLATFORM ADMIN or the BILLING platform role only (#5012). Idempotent on (sourceType, sourceId); a different account, amount or kind on that pair is IDEMPOTENCY_CONFLICT."
+    "Write a signed adjustment entry on an organization's or a person's credit ledger (give exactly one of orgRef and userRef), e.g. a refund (hrn:node:hadronmemory.com:specs:cor:dmo:170:03; a correction is a new entry, hrn:node:hadronmemory.com:specs:cor:dmo:170:08). PLATFORM ADMIN or the BILLING platform role only (#5012). Idempotent on (sourceType, sourceId); a different account, amount or kind on that pair is IDEMPOTENCY_CONFLICT."
     adjustCredits(input: AdjustCreditsInput!): CreditLedgerEntry!
     "Author YOUR user-layer action-policy link (cor:acl:040:02, #510). Null clears (= no restriction)."
     updateMyPolicy(policy: JSON): User!

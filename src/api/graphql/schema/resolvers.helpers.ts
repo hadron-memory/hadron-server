@@ -73,7 +73,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveAiConfigByUrn } from '../../../lib/entityRef/aiConfigRef.js';
 import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
-import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
+import { resolveUserRef, resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import {
   UserNotFoundError,
@@ -1557,6 +1557,38 @@ export async function requireOwnerOrOrgRole(
     await requireOrgRole(ctx, entity.organizationId, required);
     return;
   }
+  throw authorizationDenied();
+}
+
+/**
+ * #5014 (Billing A6): may this caller read ONE PERSON's money records (their credit ledger), and which person is it?
+ * Resolves `userRef` (cor:api:140:01: an id, a handle or a `hrn:user:` URN) and returns the user id. Admits the person
+ * themselves in an ordinary user session, and a platform ADMIN/OWNER (hrn:node:hadronmemory.com:specs:cor:acl:100:03,
+ * Proposed access notes of cor:api:010:01, ruling 3). Everyone else is refused with the one `FORBIDDEN`, and a caller who
+ * is not a platform admin gets that SAME answer whether the named person exists, so the refusal is no user-existence
+ * oracle (cor:api:140:02). A platform admin, for whom nothing is concealed, gets the typed not-found for a missing
+ * person, and may name a soft-deleted one (their entries are kept, cor:dmo:170:08, so a dispute after deletion can still
+ * be answered; ruling 4).
+ *
+ * Why this is NOT `requireOwnerOrOrgRole`: that gate is strictly owner-only for a user-owned entity, with no
+ * platform-admin arm (spec 047). A ledger is a money record an operator must read for refunds and disputes; it holds no
+ * content. A7a's `ownerLimits(userRef:)` and A13's `aiSpend(userRef:)` reuse this rule.
+ *
+ * Judged on the CREDENTIAL, before the ref is resolved: an impersonated session (the target's identity does not admit
+ * the shared-org-only support session, cor:acl:100:03) and an App key (acts for an App, never for a person, even when its
+ * context carries a userId) are refused first, so neither learns anything from the lookup.
+ */
+export async function requirePersonRecordRead(ctx: Context, userRef: string): Promise<string> {
+  if (ctx.impersonation || ctx.appKeyId || ctx.appId) throw authorizationDenied();
+  const admin = isPlatformAdmin(ctx);
+  let id: string;
+  try {
+    ({ id } = await resolveUserRef(ctx.db, userRef, { includeDeleted: admin }));
+  } catch (e) {
+    if (e instanceof UserNotFoundError && !admin) throw authorizationDenied();
+    throw e;
+  }
+  if (admin || isStrictOwner(ctx, id)) return id;
   throw authorizationDenied();
 }
 

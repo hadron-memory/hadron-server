@@ -4,7 +4,8 @@
 // at, and grantCredits / adjustCredits move money — the org-ADMIN bar of
 // setQuotaLimit does NOT carry over (self-grant risk). The two ledger writes also
 // admit the BILLING platform role (#5012, mayWriteLedger); rates do not. Ledger
-// reads are org-ADMIN (requireOrgRole).
+// reads are org-ADMIN (requireOrgRole). Since #5014 every ledger call takes `orgRef` OR `userRef`: a person has a ledger
+// too, read by that person or a platform admin (requirePersonRecordRead) and written by the same writers.
 import { GraphQLError } from 'graphql';
 import {
   type Context,
@@ -12,9 +13,12 @@ import {
   isPlatformAdmin,
   mayWriteLedger,
   requireOrgRole,
+  requirePersonRecordRead,
   toISO,
 } from './resolvers.helpers.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
+import { ownerWhere, type OwnerRef } from '../../../lib/owner.js';
 import { OrganizationNotFoundError } from '../../../lib/entityRef/errors.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { generateId } from '../../../lib/id.js';
@@ -92,6 +96,31 @@ function refuseServerWrittenSource(sourceType: string | null | undefined): void 
   }
 }
 
+/**
+ * #5014: the account a ledger call names, from exactly one of `orgRef` and `userRef`. Both or neither is BAD_USER_INPUT,
+ * judged before any lookup. `read` applies the read gate of the named kind (an organization's ADMIN or a platform admin,
+ * unchanged; a person themselves or a platform admin, {@link requirePersonRecordRead}); `write` resolves only, because
+ * the write gate ({@link mayWriteLedger}) is the caller's first act and is the same for both kinds. A soft-deleted person
+ * is not found by a write (resolveUserRef excludes them), so nothing is granted to an erased account.
+ */
+async function resolveLedgerOwner(
+  ctx: Context,
+  refs: { orgRef?: string | null; userRef?: string | null },
+  mode: 'read' | 'write',
+): Promise<OwnerRef> {
+  const hasOrg = refs.orgRef != null;
+  const hasUser = refs.userRef != null;
+  if (hasOrg === hasUser) throw badInput('Give exactly one of orgRef and userRef.');
+  if (hasOrg) {
+    const { id: organizationId } = await resolveOrgRef(ctx.db, refs.orgRef!);
+    if (mode === 'read') await requireOrgRole(ctx, organizationId, 'ADMIN');
+    return { organizationId };
+  }
+  if (mode === 'read') return { userId: await requirePersonRecordRead(ctx, refs.userRef!) };
+  const { id: userId } = await resolveUserRef(ctx.db, refs.userRef!);
+  return { userId };
+}
+
 /** Map the ledger library's typed refusals; anything else propagates. */
 function ledgerRefusal(err: unknown): never {
   if (err instanceof InvalidLedgerAmountError) throw badInput(err.message);
@@ -128,6 +157,7 @@ function projectLedgerEntry(e: CreditLedgerEntry) {
   return {
     id: e.id,
     organizationId: e.organizationId,
+    ownerUserId: e.ownerUserId,
     kind: e.kind,
     amountMicroCents: e.amountMicroCents.toString(),
     expiresAt: toISO(e.expiresAt),
@@ -187,15 +217,17 @@ export const meteringQueries = {
     return { items: items.map(projectPrice), total };
   },
 
-  /** Org ledger page, newest first. Org-ADMIN (or platform admin). */
+  /**
+   * An account's ledger page, newest first: an organization's (org-ADMIN or platform admin) or a person's (that person
+   * or a platform admin; #5014).
+   */
   creditLedgerEntries: async (
     _: unknown,
-    { orgRef, limit, offset }: { orgRef: string; limit?: number | null; offset?: number | null },
+    { orgRef, userRef, limit, offset }: { orgRef?: string | null; userRef?: string | null; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
-    const { id: orgId } = await resolveOrgRef(ctx.db, orgRef);
-    await requireOrgRole(ctx, orgId, 'ADMIN');
-    const where = { organizationId: orgId, deletedAt: null };
+    const owner = await resolveLedgerOwner(ctx, { orgRef, userRef }, 'read');
+    const where = { ...ownerWhere(owner), deletedAt: null };
     const [items, total] = await Promise.all([
       ctx.db.creditLedgerEntry.findMany({
         where,
@@ -208,12 +240,15 @@ export const meteringQueries = {
     return { items: items.map(projectLedgerEntry), total };
   },
 
-  /** Org balance = SUM over the append-only ledger. Org-ADMIN. */
-  creditBalance: async (_: unknown, { orgRef }: { orgRef: string }, ctx: Context) => {
-    const { id: orgId } = await resolveOrgRef(ctx.db, orgRef);
-    await requireOrgRole(ctx, orgId, 'ADMIN');
-    const balance = await creditBalance(ctx.db, orgId);
-    return { organizationId: orgId, balanceMicroCents: balance.toString() };
+  /** An account's balance = SUM over its append-only ledger. Gated as {@link creditLedgerEntries}. */
+  creditBalance: async (_: unknown, { orgRef, userRef }: { orgRef?: string | null; userRef?: string | null }, ctx: Context) => {
+    const owner = await resolveLedgerOwner(ctx, { orgRef, userRef }, 'read');
+    const balance = await creditBalance(ctx.db, owner);
+    return {
+      organizationId: 'organizationId' in owner ? owner.organizationId : null,
+      ownerUserId: 'userId' in owner ? owner.userId : null,
+      balanceMicroCents: balance.toString(),
+    };
   },
 
   /**
@@ -328,7 +363,7 @@ export const meteringMutations = {
   },
 
   /**
-   * Mint credits for an org (positive `grant` row). PLATFORM ADMIN ONLY —
+   * Mint credits for an organization or a person (positive `grant` row). PLATFORM ADMIN ONLY —
    * this creates money; org admins must not self-grant. Top-ups from a payment
    * service land here with sourceType 'stripe-checkout' + the Checkout session
    * id: (sourceType, sourceId) is ledger-unique and the mutation is IDEMPOTENT
@@ -342,7 +377,8 @@ export const meteringMutations = {
       input,
     }: {
       input: {
-        orgRef: string;
+        orgRef?: string | null;
+        userRef?: string | null;
         amountMicroCents: string;
         expiresAt?: string | null;
         sourceType?: string | null;
@@ -354,7 +390,7 @@ export const meteringMutations = {
   ) => {
     // #5012: a platform admin or the BILLING role (mayWriteLedger), judged before the organization resolves.
     if (!mayWriteLedger(ctx)) throw forbidden();
-    const { id: orgId } = await resolveOrgRef(ctx.db, input.orgRef);
+    const owner = await resolveLedgerOwner(ctx, input, 'write');
     const amount = parseMicroCents(input.amountMicroCents, 'amountMicroCents');
     const expiresAt = input.expiresAt ? new Date(input.expiresAt) : null;
     if (expiresAt && Number.isNaN(expiresAt.getTime())) {
@@ -363,7 +399,7 @@ export const meteringMutations = {
     refuseServerWrittenSource(input.sourceType);
     try {
       const entry = await grantCredits(ctx.db, {
-        organizationId: orgId,
+        owner,
         amountMicroCents: amount,
         expiresAt,
         // Missing reaches the library as blank, which refuses it (#5007 ruling 1).
@@ -379,7 +415,7 @@ export const meteringMutations = {
   },
 
   /**
-   * Write a signed correction on an org's ledger (an `adjustment` row), such as
+   * Write a signed correction on an organization's or a person's ledger (an `adjustment` row), such as
    * a refund (#5007; hrn:node:hadronmemory.com:specs:cor:dmo:170:03). A
    * correction is a new entry, never an edit
    * (hrn:node:hadronmemory.com:specs:cor:dmo:170:08). PLATFORM ADMIN ONLY, the
@@ -395,7 +431,8 @@ export const meteringMutations = {
       input,
     }: {
       input: {
-        orgRef: string;
+        orgRef?: string | null;
+        userRef?: string | null;
         amountMicroCents: string;
         sourceType: string;
         sourceId: string;
@@ -406,12 +443,12 @@ export const meteringMutations = {
   ) => {
     // #5012: a platform admin or the BILLING role (mayWriteLedger), judged before the organization resolves.
     if (!mayWriteLedger(ctx)) throw forbidden();
-    const { id: orgId } = await resolveOrgRef(ctx.db, input.orgRef);
+    const owner = await resolveLedgerOwner(ctx, input, 'write');
     const amount = parseSignedMicroCents(input.amountMicroCents, 'amountMicroCents');
     refuseServerWrittenSource(input.sourceType);
     try {
       const entry = await adjustCredits(ctx.db, {
-        organizationId: orgId,
+        owner,
         amountMicroCents: amount,
         sourceType: input.sourceType,
         sourceId: input.sourceId,

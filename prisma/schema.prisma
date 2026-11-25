@@ -512,6 +512,8 @@ model User {
   mergedInto                    UserMerge?                  @relation("UserMergeSource")
   /// #1715 — accounts merged into this one.
   mergedFrom                    UserMerge[]                 @relation("UserMergeTarget")
+  /// #5014 - this person's credit ledger entries (kept when the person is deleted: the relation restricts).
+  creditLedgerEntries           CreditLedgerEntry[]         @relation("CreditLedgerOwner")
 
   // #4335: users_external_app_id_external_id_key is a PARTIAL unique (WHERE external_id IS NOT NULL), as migration
   // 20260519180903 builds it (cor:dmo:040:01's App-provisioned identity key). Prisma cannot model an index predicate and
@@ -673,7 +675,7 @@ model DashboardWidgetPreset {
 ///   (an Agent another organization owns).
 /// - Principal: `principalId` points at the row that reserves the organization's name in the namespace it shares
 ///   with user handles.
-/// - Billing: UsageEvent and CreditLedgerEntry rows are attributed to the organization.
+/// - Billing: UsageEvent rows are attributed to the organization; a CreditLedgerEntry belongs to an organization or a person.
 ///
 /// Behaviour: `policy` is the organization's layer of the action-policy chain, an allow-list that is copied into
 /// each run when the run is created, so an edit applies to later runs only. The GitHub App fields let the server
@@ -6355,11 +6357,13 @@ model AiModelPrice {
   @@map("ai_model_prices")
 }
 
-/// One entry in an organization's ledger of AI credits: an amount added or taken away. The balance of an organization
-/// is the sum of its entries; no balance is stored anywhere.
+/// One entry in the ledger of AI credits of an organization or a person: an amount added or taken away. The balance of
+/// an account is the sum of its entries; no balance is stored anywhere (hrn:node:hadronmemory.com:specs:cor:dmo:170:01).
 ///
-/// Relationships: belongs to one Organization and is kept when the organization is deleted (the relation restricts,
-/// it does not cascade). `sourceType` and `sourceId` name where the entry came from as plain values, for example a
+/// Relationships: belongs to exactly one owner, an Organization (`organizationId`) or a person (`ownerUserId`), never
+/// both and never more than one (`chk_credit_ledger_one_owner`). It is kept when either is deleted (both relations
+/// restrict, they do not cascade; a deleted person's User row is kept and scrubbed). An account merge moves the
+/// merged-away person's entries to the survivor (the trigger allows that move only along a `user_merges` row). `sourceType` and `sourceId` name where the entry came from as plain values, for example a
 /// UsageEvent or the administrator who granted it.
 ///
 /// Behaviour:
@@ -6381,7 +6385,11 @@ model AiModelPrice {
 /// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:170:08. Background (history, not law): the Spec Kit spec 046.
 model CreditLedgerEntry {
   id               String    @id
-  organizationId   String    @map("organization_id")
+  /// The owning organization; null for a person's entry. Exactly one of this and `ownerUserId` is set
+  /// (`chk_credit_ledger_one_owner`, prisma/credit-ledger-invariants.sql). It may become null only along the trigger's rule.
+  organizationId   String?   @map("organization_id")
+  /// The owning person; null for an organization's entry (hadron-server#5014).
+  ownerUserId      String?   @map("owner_user_id")
   /// 'grant' | 'debit' | 'adjustment' (validated in src/lib/metering).
   kind             String
   /// Signed micro-cents (1e-8 USD). Grants positive, debits negative.
@@ -6400,13 +6408,15 @@ model CreditLedgerEntry {
   deletedAt        DateTime? @map("deleted_at")
   deletedBy        String?   @map("deleted_by")
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  owner        User?         @relation("CreditLedgerOwner", fields: [ownerUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   // Idempotency for at-least-once payment webhooks (a payment service):
   // one ledger row per (sourceType, sourceId); NULL-source rows unaffected
   // (Postgres unique treats NULLs as distinct).
   @@unique([sourceType, sourceId])
   @@index([organizationId, createdAt])
+  @@index([ownerUserId, createdAt])
   @@map("credit_ledger_entries")
 }
 

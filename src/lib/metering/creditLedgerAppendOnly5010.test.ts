@@ -53,7 +53,7 @@ beforeEach(async () => {
 
 describe('#5010 restrict, not cascade', () => {
   it('pin 1: a hard delete of an organization with entries is refused and the entries remain', async () => {
-    await grantCredits(db, { organizationId: orgId, amountMicroCents: 1n, sourceType: 'admin', sourceId: 'second' });
+    await grantCredits(db, { owner: { organizationId: orgId }, amountMicroCents: 1n, sourceType: 'admin', sourceId: 'second' });
     expect(await code('DELETE FROM organizations WHERE id = $1', [orgId])).toBe('23503');
     await expect(db.organization.delete({ where: { id: orgId } })).rejects.toThrow();
     expect((await pg.query('SELECT count(*)::int AS n FROM credit_ledger_entries WHERE organization_id = $1', [orgId])).rows[0].n).toBe(2);
@@ -61,7 +61,7 @@ describe('#5010 restrict, not cascade', () => {
 
   it('pin 8 (guard): deleteOrganization, the product path, keeps every entry and the balance', async () => {
     const server = new ApolloServer<Context>({ typeDefs, resolvers });
-    const before = await creditBalance(db, orgId);
+    const before = await creditBalance(db, { organizationId: orgId });
     const res = await server.executeOperation(
       { query: 'mutation($ref: ID!) { deleteOrganization(ref: $ref) }', variables: { ref: orgId } },
       { contextValue: { db, userId: admin, roles: ['ADMIN'] } as Context },
@@ -69,7 +69,7 @@ describe('#5010 restrict, not cascade', () => {
     if (res.body.kind !== 'single') throw new Error('unexpected');
     expect(res.body.singleResult.errors).toBeUndefined();
     expect((await pg.query('SELECT count(*)::int AS n FROM credit_ledger_entries WHERE organization_id = $1', [orgId])).rows[0].n).toBe(1);
-    expect(await creditBalance(db, orgId)).toBe(before);
+    expect(await creditBalance(db, { organizationId: orgId })).toBe(before);
   });
 });
 
@@ -104,8 +104,10 @@ describe('#5010 the trigger refuses every edit and delete', () => {
     expect((await entryRow()).organization_id).toBe(orgId);
   });
 
-  it('pin 7 (guard): organization_id to NULL passes the trigger and meets NOT NULL (23502), not 23514', async () => {
-    expect(await code('UPDATE credit_ledger_entries SET organization_id = NULL WHERE id = $1', [entryId])).toBe('23502');
+  it('pin 7 (guard, flipped by #5014 A6): organization_id to NULL passes the trigger and the now-nullable column (no error)', async () => {
+    // A12 pinned 23502 here: the column was still NOT NULL, so the trigger's NULL arm was unreachable. A6 (#5014) makes the
+    // column nullable, so the arm is exercised and the update succeeds; the person-owner transitions are in personLedger5014.test.ts.
+    expect(await code('UPDATE credit_ledger_entries SET organization_id = NULL WHERE id = $1', [entryId])).toBeNull();
   });
 
   it('pin 13: an entry that arrives soft-deleted is refused', async () => {
@@ -182,7 +184,7 @@ describe('#5010 the other audit columns, a mixed edit, and the real merge path',
   });
 
   it('pin 15 (guard): a repeated grantCredits with the same source is one row and no error (webhook replay)', async () => {
-    const args = { organizationId: orgId, amountMicroCents: 7n, sourceType: 'stripe-checkout', sourceId: 'cs_5010' };
+    const args = { owner: { organizationId: orgId }, amountMicroCents: 7n, sourceType: 'stripe-checkout', sourceId: 'cs_5010' };
     const first = await grantCredits(db, args);
     const second = await grantCredits(db, args);
     expect(second.id).toBe(first.id);

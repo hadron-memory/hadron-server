@@ -15,10 +15,11 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { mergeUsers } from '../../../test/mergeConsent.js';
 import { generateId } from '../../../lib/id.js';
+import { formatGraphQLError } from '../formatError.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 
-const server = new ApolloServer<Context>({ typeDefs, resolvers });
+const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
 async function gql(query: string, ctx: Partial<Context>, variables?: Record<string, unknown>) {
   const res = await server.executeOperation({ query, variables }, { contextValue: { db, ...ctx } as Context });
   if (res.body.kind !== 'single') throw new Error('unexpected');

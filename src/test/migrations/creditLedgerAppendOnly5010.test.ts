@@ -1,5 +1,5 @@
 /** #5010: the migration refuses with HDPRF on a soft-deleted entry, applies cleanly otherwise, and shares one SQL source. */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { Client } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -68,8 +68,14 @@ describe('#5010 migration', () => {
     }
   });
 
-  it('pin 11: the migration ends with the shared invariants file, which post-push.sql includes', () => {
-    expect(MIGRATION.endsWith(SOURCE)).toBe(true);
+  it('pin 11: the newest migration to carry the shared invariants file ends with it, and post-push.sql includes it', () => {
+    // #5014 (A6) edits the file, so a later migration carries it: the newest one whose text contains the first line is the carrier.
+    const migrations = new URL('../../../prisma/migrations/', import.meta.url);
+    const first = SOURCE.split('\n')[0]!;
+    const dir = readdirSync(migrations).sort().reverse()
+      .find((d) => { try { return readFileSync(new URL(`${d}/migration.sql`, migrations), 'utf8').includes(first); } catch { return false; } });
+    expect(dir).toBeTruthy();
+    expect(readFileSync(new URL(`${dir}/migration.sql`, migrations), 'utf8').endsWith(SOURCE)).toBe(true);
     expect(read('post-push.sql')).toContain('\\ir credit-ledger-invariants.sql');
   });
 
