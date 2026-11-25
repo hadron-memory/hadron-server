@@ -329,6 +329,31 @@ describe('R57 own-live-session batches', () => {
     } finally { await server.stop(); }
   });
 
+  it('BatchThrough.channelRef: unknown, malformed and not-in-batch refs get one refusal, apart from the echoed ref (#5080)', async () => {
+    const s = await ownSession(); await postForBoth(); const [b] = (await selfRead(s)).batches;
+    const seq = b.ranges[0].seqs[0];
+    const outside = await ensureChannelWithRoot(db, { memoryId: channel.memoryId, loc: 'chats:other', name: 'other', createdBy: manager.id });
+    const { ApolloServer } = await import('@apollo/server');
+    const { typeDefs } = await import('./typeDefs.js');
+    const server = new ApolloServer<Context>({ typeDefs, resolvers: resolvers as any });
+    try {
+      const answers = [];
+      for (const channelRef of [
+        outside.channel.id, `hrn:node:${org.urn}:team-shared:chats:other`,
+        generateId(), `hrn:node:${org.urn}:team-shared:chats:missing`, 'not a ref at all',
+      ]) {
+        const a = await server.executeOperation({ query: 'mutation($ids: [String!]!, $t: [BatchThrough!]) { acknowledgeDeliveryBatches(batchIds: $ids, through: $t) { acknowledged } }', variables: { ids: [b.id], t: [{ channelRef, seq }] } }, { contextValue: selfCtx(s) });
+        if (a.body.kind !== 'single') throw new Error('expected single response');
+        const e = a.body.singleResult.errors![0]!;
+        expect(e.message).toContain(channelRef);
+        answers.push({ message: e.message.replace(channelRef, '<ref>'), code: e.extensions?.code });
+      }
+      expect(answers[0]).toEqual({ message: 'Channel <ref> is not in this delivery batch.', code: 'BAD_USER_INPUT' });
+      for (const x of answers) expect(x).toEqual(answers[0]);
+      expect(await db.workerDeliveryChannel.count()).toBe(0);
+    } finally { await server.stop(); }
+  });
+
   it('a userless own-session key can read but cannot borrow a human session or survive key revocation', async () => {
     const s = await ownSession({ userId: null });
     const context = keyCtx(bareKey, app.id, { sessionId: s.id });

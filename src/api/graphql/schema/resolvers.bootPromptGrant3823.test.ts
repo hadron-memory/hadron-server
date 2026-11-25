@@ -354,7 +354,7 @@ describe('the lift is the update door only, in place, signer re-judged (#3823 Ri
   it('Andi P2-1: a text edit that names another loc or memory is not in place: refused, unspent', async () => {
     const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
     const g = await grant(s.id);
-    for (const extra of [{ loc: `boot:workers:${workerId}:moved` }, { memoryId: agentMemoryId }]) {
+    for (const extra of [{ loc: `boot:workers:${workerId}:moved` }, { memoryRef: agentMemoryId }]) {
       const out = await codeOf(asWorker(() => resolvers.Mutation.updateNode(null, { input: { ref: s.id, content: 'x', ...extra } as never }, ctx())));
       expect(out).not.toBe('NO_ERROR');
     }
