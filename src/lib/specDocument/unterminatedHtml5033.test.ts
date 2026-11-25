@@ -373,6 +373,23 @@ describe('escapeUnterminatedHtml', () => {
     // After a blank line the block is over and Markdown is back: the fence is a fence again.
     expect(escapeUnterminatedHtml('<div>\n\n```\n<b x=\n```\nz')).toBe('<div>\n\n```\n<b x=\n```\nz');
   });
+  it('inside an HTML block a complete multi-line tag or comment is not cut by a Markdown block start: the interior is raw to the end of the block', () => {
+    const same = [
+      '<div>\n  <a\n    href="x"\n  >link</a>\n</div>',
+      '<div>\n<img src="x"\n alt="a\n- b">\n</div>',
+      '<div>\n<span title="a\n# b">x</span>\n</div>',
+      '<div>\n  a <!--\n# x\n--> b\n</div>',
+      '<p class="a"\n>text</p>',
+    ];
+    for (const body of same) expect(escapeUnterminatedHtml(body), body).toBe(body);
+    // The block ends at its blank line: a tag that is still open there is unterminated.
+    expect(escapeUnterminatedHtml('<div>\n<a href="x\n\n">z')).toBe('<div>\n&lt;a href="x\n\n">z');
+    // Outside an HTML block the same tag is inline HTML and a `>` at a line start ends its paragraph.
+    expect(escapeUnterminatedHtml('x <a\n- b\n>')).toBe('x &lt;a\n- b\n>');
+  });
+  it('a line-head pre block runs raw to its end tag, blank lines and fences included', () => {
+    expect(escapeUnterminatedHtml('<pre>\na\n\n```\n<b x=\n```\n</pre>')).toBe('<pre>\na\n\n```\n&lt;b x=\n```\n</pre>');
+  });
   it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag', () => {
     expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');
     expect(escapeUnterminatedHtml('<b y= <template>')).toBe('<b y= <template>'); // one complete tag: the value is `<template`
