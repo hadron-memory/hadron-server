@@ -357,7 +357,7 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
 
   async vectorRanks(opts) {
     // #4779 (BLIND P2-3): the SAME scope mapping as vectorSearch, so ranks and pages share one eligibility.
-    const { ranks, stopped } = await vectorRanksOf(opts.db, { ...nodeVectorScopeOf(opts), nodeIds: opts.nodeIds });
+    const { ranks, stopped } = await vectorRanksOf(opts.db, { ...nodeVectorScopeOf(opts), nodeIds: opts.nodeIds, memo: opts.memo });
     return { ranks, stoppedEarly: stopped };
   },
 

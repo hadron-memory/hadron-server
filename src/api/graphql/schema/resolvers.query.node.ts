@@ -2299,9 +2299,10 @@ export const nodeQueries = {
       /**
        * #4779 (P3-4) — the hybrid ranking for a page of `pageN` nodes, CERTIFIED (`certifiedHybridRanking`): both legs are
        * read to the keyword leg's depth, then, while the fused order up to the page could still change, the keyword hits
-       * the vector page did not reach get their exact vector rank (one budgeted lookup), and the keyword leg widens up to
-       * its ceiling (KEYWORD_FETCH_CAP, ruling 0150 lifted no cap on it). If the order still is not certain, the vector
-       * budget ran out or the keyword ceiling was reached first: the page is flagged `stopped_early` (cor:api:090:04
+       * the vector page did not reach get their vector rank (one budgeted lookup; #4994: in a large scope it reads the
+       * vector ranking only to a bounded depth), and the keyword leg widens up to its ceiling (KEYWORD_FETCH_CAP, ruling
+       * 0150 lifted no cap on it). If the order still is not certain, the vector budget ran out, a hit lay past the
+       * lookup's depth, or the keyword ceiling was reached first: the page is flagged `stopped_early` (cor:api:090:04
        * Proposed), never presented as the true page.
        */
       const hybridRanking = async (pageN: number) => {
@@ -2313,6 +2314,8 @@ export const nodeQueries = {
         let kwHits = await runKeywordRanked({ limit: dk });
         const ranks = new Map<string, number>();
         const looked = new Set<string>();
+        // #4994: this ranking's lookups share one computed vector ranking (same options). A re-ranking starts afresh.
+        const rankMemo = {};
         for (;;) {
           // BLIND P2-1 (Bianca): a short keyword leg IS an exhausted one. `lexicalSearch` is one `LIMIT dk OFFSET 0`
           // statement with no cap, timeout or post-filter of its own (postgres.ts), and `hybridKeywordCandidates` only
@@ -2323,10 +2326,14 @@ export const nodeQueries = {
           if (r.certified) return { fused: r.ranked, vecHits, exhausted: kwLeg.exhausted && vecLeg.exhausted };
           const lookup = vecLeg.exhausted ? [] : r.vecLookup.filter((id) => !looked.has(id));
           if (lookup.length) {
-            const res = await provider.vectorRanks({ ...vectorOpts, nodeIds: lookup });
+            const res = await provider.vectorRanks({ ...vectorOpts, nodeIds: lookup, memo: rankMemo });
             for (const id of lookup) looked.add(id);
             for (const [id, rank] of res.ranks) ranks.set(id, rank);
             if (!res.stoppedEarly) continue;
+            // #4994: an incomplete lookup (a node past its depth, or the budget) is never certified. The ranks it did
+            // return still order the page, which is flagged.
+            rankingIncomplete = true;
+            return { fused: certifiedHybridRanking(kwLeg, vecLeg, pageN, ranks, looked).ranked, vecHits, exhausted: false };
           } else if (r.kwUncertain && dk < kwCeiling && Date.now() < vectorDeadlineAt) {
             // BLIND F3 (Elena): the widening spends the request's one budget too; past its deadline the page stops early.
             dk = Math.min(dk * 2, kwCeiling);
