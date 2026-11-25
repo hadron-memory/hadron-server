@@ -46,7 +46,6 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
-import { createNode } from '../../../controller/operations/createNode.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
@@ -262,8 +261,9 @@ export const appMemoryMutations = {
         visibility: null, isInstallMemory: false, installOfAgentId: null,
         createdBy: ctx.userId,
       }, include: MEMORY_INCLUDE });
-      await createNode({ memoryId: memory.id, loc: name, name: name.split(':').pop() ?? name,
-        description: 'Root node for this memory.' }, tx);
+      // #3952 (R11): no root node on create. The memory row is this door's ONLY write: no org defaults, owner or
+      // member row, agent grant or audit row follows it, so there is no later step whose failure needs a rollback pin
+      // (resolvers.noRootNode3952.test.ts pins the doors that do have one). A write added after this row needs that pin.
       return memory;
     }));
   },
@@ -320,8 +320,9 @@ export const appMemoryMutations = {
 
     const app = await loadAppAndAuthorize(ctx, appRef, klass);
     const agent = await resolveInstalledAgent(ctx, app.id, agentRef);
-    // #2730: the root node's loc is `name`; refuse an unprojectable one after the
-    // gates and before the tombstone reclaim or any create.
+    // #2730: refuse an unprojectable name after the gates and before the tombstone reclaim or any create.
+    // Kept unchanged by #3952 ("touch nothing else"): no root node is made from the name any more, so this is now
+    // stricter than creation needs; relaxing it is a follow-up (#5149). The function keeps its #2730 name for the same reason.
     assertMemoryRootLoc(name);
     assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
     const agentSlug = agentSlugFromUrn(agent.urn);
@@ -420,10 +421,7 @@ export const appMemoryMutations = {
           },
         });
       }
-      // #2728: the root node joins the anchored transaction (as createAppMemory's does), so a root failure rolls
-      // the Memory back and a retry cannot mint a second one.
-      await createNode({ memoryId: created.id, loc: name, name: name.split(':').pop() ?? name,
-        description: 'Root node for this memory.' }, tx);
+      // #3952 (R11): no root node on create.
       return created;
       }));
     } catch (err) {
