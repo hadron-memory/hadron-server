@@ -63,27 +63,31 @@ beforeEach(async () => {
   await createDbAppMember(db, app.id, admin.id, 'owner');
 });
 
-const unprojectable: [string, string][] = [
-  ['a trailing colon', 'abc:'],
-  ['a 300-character atom', 'x'.repeat(300)],
-  ['a 256-byte atom', 'x'.repeat(256)],
-  ['a multibyte atom over 255 bytes', 'é'.repeat(128)],
-  ['a long atom after a legal one', `ok:${'y'.repeat(256)}`],
+// #5149: the name is no longer a root loc, so only a name that cannot be stored or yields no slug refuses. The names
+// #2730 refused and creation now admits are pinned in resolvers.memoryName5149.test.ts.
+const refusedNames: [string, string][] = [
+  ['a name with no slug', ':'],
+  ['a parent directory', '..'],
   ['a NUL', 'a\0b'],
-  ['a slash', 'a/b'],
 ];
 const admitted: [string, string][] = [
   ['spaces', 'Has Space'],
   ['unicode', 'ünï notes'],
   ['an internal empty atom', 'a::b'],
+  ['a trailing colon', 'abc:'],
+  ['a slash', 'a/b'],
+  ['a 300-character atom', 'x'.repeat(300)],
+  ['a 256-byte atom', 'x'.repeat(256)],
+  ['a multibyte atom over 255 bytes', 'a' + 'é'.repeat(128)],
+  ['a long atom after a legal one', `ok:${'y'.repeat(256)}`],
   ['a 255-byte atom', 'z'.repeat(255)],
   ['a multibyte 253-byte atom', 'a' + 'é'.repeat(126)],
 ];
 
 for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
-  describe(`#2730 ${door} root loc`, () => {
+  describe(`#2730 ${door} name`, () => {
     const d = () => doors().find(x => x.label === door)!;
-    for (const [label, name] of unprojectable) {
+    for (const [label, name] of refusedNames) {
       it(`refuses ${label} as BAD_USER_INPUT and leaves no residue`, async () => {
         await refusedWithoutResidue(() => d().create(name));
       });
@@ -104,13 +108,13 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
       // The run's graph root is shared by every worker (#1951); simulate a concurrent file writing a node.
       const other = join(process.env.GRAPHS_PATH!, `other-worker-2796-${generateId()}`);
       try {
-        await refusedWithoutResidue(() => d().create('abc:'), () => mkdirSync(other));
+        await refusedWithoutResidue(() => d().create(':'), () => mkdirSync(other));
       } finally {
         rmSync(other, { recursive: true, force: true });
       }
     });
     it('keeps the authorization refusal ahead of the name refusal', async () => {
-      const code = await d().create('abc:', outsider.id).catch(e => e.extensions?.code);
+      const code = await d().create(':', outsider.id).catch(e => e.extensions?.code);
       expect(code).not.toBe('BAD_USER_INPUT');
       expect(code).toBeDefined();
       expect(await db.memory.count()).toBe(0);
@@ -120,14 +124,14 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
 
 describe('#2730 MCP delegates', () => {
   const auth = () => ({ userId: admin.id, roles: [] as any[], clientId: `user:${admin.id}` });
-  it('hadron_create_memory refuses an unprojectable name with the input message', async () => {
-    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_memory', { name: 'abc:', org: org.id });
-    expect(text).toMatch(/^Error: .*loc|segment|empty/i);
+  it('hadron_create_memory refuses a name with no slug with the input message', async () => {
+    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_memory', { name: ':', org: org.id });
+    expect(text).toMatch(/^Error: Invalid memory name/);
     expect(text).not.toMatch(/internal/i);
     expect(await db.memory.count()).toBe(0);
   });
-  it('hadron_create_app_memory refuses an unprojectable name with the input message', async () => {
-    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_app_memory', { app: app.id, name: 'x'.repeat(300) });
+  it('hadron_create_app_memory refuses a name with no slug with the input message', async () => {
+    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_app_memory', { app: app.id, name: ':' });
     expect(text).not.toMatch(/internal/i);
     expect(text).toMatch(/^Error: /);
     expect(await db.memory.count()).toBe(0);

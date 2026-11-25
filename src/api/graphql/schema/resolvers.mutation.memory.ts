@@ -166,7 +166,7 @@ import {
   resolveRequiredMemoryRef,
   getAccessibleMemoryIds,
   type MergeMemoriesInput,
-  assertMemoryRootLoc,
+  deriveMemorySlug,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
@@ -711,11 +711,8 @@ export const memoryMutations = {
         );
       }
 
-      // #2730: refuse an unprojectable name here, after the gates and before ensureUserHandle,
-      // the tombstone reclaim or any create. Kept unchanged by #3952 ("touch nothing else"): no root node
-      // is made from the name any more, so this is now stricter than creation needs; relaxing it and
-      // renaming assertMemoryRootLoc is a follow-up (#5149).
-      assertMemoryRootLoc(name);
+      // #5149: the name's only refusals, after the gates and before ensureUserHandle, the tombstone reclaim or any create.
+      const memorySlug = deriveMemorySlug(name);
       assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
 
       // The URN root is the owner principal's bare namespace atom — an org
@@ -730,7 +727,7 @@ export const memoryMutations = {
         : (await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId! }, select: { urn: true } })).urn;
       // #574: slugify the display name — a raw name would persist a
       // case-sensitive / space-bearing URN that can't round-trip through parseUrn.
-      const memoryUrn = `${memRoot}:${deriveSlugFromName(name)}`;
+      const memoryUrn = `${memRoot}:${memorySlug}`;
       // Check for existing memory with the same URN
       const existing = await ctx.db.memory.findUnique({ where: { urn: memoryUrn } });
       if (existing) {

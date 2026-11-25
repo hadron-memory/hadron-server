@@ -76,7 +76,7 @@ describe('#2843 owner creation and boundaries', () => {
     if (state === 'uninstalled-app') await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
     await denied(ctx(), {}, state.endsWith('agent') ? 'AGENT_NOT_INSTALLED' : 'FORBIDDEN');
   });
-  it('retains name validation after owner authorization', async () => { await denied(ctx(), {name:'../invalid'}, 'BAD_USER_INPUT'); });
+  it('retains name validation after owner authorization', async () => { await denied(ctx(), {name:'..'}, 'BAD_USER_INPUT'); });
 });
 
 describe('#2843 committed competing writes under real authority anchor waits', () => {
