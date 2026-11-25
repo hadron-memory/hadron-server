@@ -945,7 +945,7 @@ model Memory {
   /// chk_memory_class_app_id: class='system' with an app_id ⇔ TRUE.
   isInstallMemory       Boolean @default(false) @map("is_install_memory")
 
-  /// #5183 (cor:dmo:060:20): TRUE only for a personal or private memory `createMemoryInApp` made under the
+  /// #5183 (hrn:node:hadronmemory.com:specs:cor:dmo:060:20): TRUE only for a personal or private memory `createMemoryInApp` made under the
   /// one-per-class rule (derived name, the user's own tenancy). It is the limit's marker: the door counts live rows
   /// carrying it per (app, user, class). Pre-rule memories, attached, session, chat and `linkMemoryToUser` rows stay
   /// FALSE and never count (R4). Deliberately NOT unique: an account merge may leave one user two holders and must

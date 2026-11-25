@@ -45,19 +45,19 @@ export const edgeQueries = {
   },
 
   // Uniform paginated edge list. Scope: the caller's readable memories,
-  // AND-narrowed by the filter and the cor:api:100:01 orgId scope. Every
+  // AND-narrowed by the filter and the cor:api:100:01 orgRef scope. Every
   // unresolvable filter ref collapses to an empty page (no existence
-  // disclosure — consistent with the orgId contract on this surface).
+  // disclosure — consistent with the orgRef contract on this surface).
   edges: async (
     _: unknown,
     {
       filter,
-      orgId,
+      orgRef,
       limit,
       offset,
     }: {
       filter?: EdgeFilterInput | null;
-      orgId?: string | null;
+      orgRef?: string | null;
       limit?: number | null;
       offset?: number | null;
     },
@@ -66,7 +66,7 @@ export const edgeQueries = {
     const empty = { items: [], total: 0 };
     const f = filter ?? {};
 
-    const scope = await resolveOrgScope(ctx, orgId);
+    const scope = await resolveOrgScope(ctx, orgRef);
     if (!scope) return empty;
 
     const accessible = await getAccessibleMemoryIds(ctx);
