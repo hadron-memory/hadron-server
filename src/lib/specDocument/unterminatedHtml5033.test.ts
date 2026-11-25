@@ -414,6 +414,12 @@ describe('escapeUnterminatedHtml', () => {
     for (const m of ['-', '*', '+', '1.', '2)']) {
       expect(escapeUnterminatedHtml(`${m}\n<span>\nuse \`<pre x=\` here`)).toBe(`${m}\n<span>\nuse \`&lt;pre x=\` here`);
     }
+    // After a bare list marker an indented line is the item's content, not indented code: a tag there is read (Celine's QA delta).
+    for (const m of ['-', '*', '+', '1.', '2)']) {
+      expect(escapeUnterminatedHtml(`${m}\n    <script>\nuse`)).toBe(`${m}\n    &lt;script>\nuse`);
+      expect(escapeUnterminatedHtml(`${m}\n\t<!--\nuse`)).toBe(`${m}\n\t&lt;!--\nuse`);
+      expect(escapeUnterminatedHtml(`${m}\n    <div x='\nuse`)).toBe(`${m}\n    &lt;div x='\nuse`);
+    }
     // A blank line after a lone label ends it: the next tag line starts a block of its own.
     expect(escapeUnterminatedHtml('[a]:\n\n<span>\nuse `<pre x=` here')).toBe('[a]:\n\n<span>\nuse `&lt;pre x=` here');
     // A backtick fence after a lone label is a fence (it interrupts the label's paragraph), so its lines stay code.
