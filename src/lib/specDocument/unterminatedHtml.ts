@@ -100,12 +100,6 @@ function tagEndOf(text: string, i: number, nameFrom: number): number {
   return -1;
 }
 
-/** True when the `<` at `i` is the first non-space of its line, within three spaces of indent (where CommonMark starts an HTML block). */
-function startsLine(text: string, i: number): boolean {
-  const lineStart = text.lastIndexOf('\n', i - 1) + 1;
-  return i - lineStart <= 3 && /^ *$/.test(text.slice(lineStart, i));
-}
-
 /** The index of the `<` that opens the first unterminated construct at or after `from`, or -1. */
 function firstUnterminated(text: string, from: number): number {
   const n = text.length;
@@ -142,8 +136,24 @@ function firstUnterminated(text: string, from: number): number {
     blankTo = m ? m.index : n;
     return blankTo;
   };
-  const tagLimit = (j: number): number => (startsLine(text, j) ? blankBound(j) : inlineBound(j));
-  const blockLimit = (j: number): number => (startsLine(text, j) ? n : inlineBound(j));
+  // Whether the `<` at `j` is the first non-space of its line, within three spaces of indent (where CommonMark starts an HTML block). The
+  // facts of a line are found once, so a line of many constructs costs its length once, not once per construct.
+  let lineFrom = -1;
+  let lineTo = -2;
+  let lineFirst = -1;
+  const startsLine = (j: number): boolean => {
+    if (j < lineFrom || j > lineTo) {
+      lineFrom = text.lastIndexOf('\n', j - 1) + 1;
+      const nl = text.indexOf('\n', j);
+      lineTo = nl === -1 ? n : nl;
+      let f = lineFrom;
+      while (f < lineTo && text[f] === ' ') f += 1;
+      lineFirst = f;
+    }
+    return j - lineFrom <= 3 && lineFirst === j;
+  };
+  const tagLimit = (j: number): number => (startsLine(j) ? blankBound(j) : inlineBound(j));
+  const blockLimit = (j: number): number => (startsLine(j) ? n : inlineBound(j));
   // A backtick run of length N that found no closer in its paragraph: no later run of N in the same paragraph has one either.
   const noCloser = new Map<number, number>();
   let i = from;
@@ -252,7 +262,7 @@ function firstUnterminated(text: string, from: number): number {
 
     if (name === 'plaintext') return i;
     if (RAW_TEXT.has(name)) {
-      if (startsLine(text, i) && (name === 'script' || name === 'style' || name === 'textarea')) {
+      if (startsLine(i) && (name === 'script' || name === 'style' || name === 'textarea')) {
         // CommonMark type 1: the block runs raw to the first line that holds an end tag, code or not.
         const closer = new RegExp(`</${name}(?=[\\s>])`, 'gi');
         closer.lastIndex = tagEnd;
@@ -268,7 +278,7 @@ function firstUnterminated(text: string, from: number): number {
       }
       continue;
     }
-    if (name === 'pre' && startsLine(text, i)) {
+    if (name === 'pre' && startsLine(i)) {
       // CommonMark type 1 ends at a line holding any one of these four end tags.
       const closer = /<\/(?:pre|script|style|textarea)>/gi;
       closer.lastIndex = i;
