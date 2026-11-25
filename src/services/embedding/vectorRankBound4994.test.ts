@@ -147,6 +147,18 @@ describe('#4994: the rank lookup is bounded', () => {
     expect(res.stoppedEarly).toBe(false);
   }, 60_000);
 
+  it('the threshold is inclusive: exactly that many vectors is exact; one more is read to the depth', async () => {
+    setVectorSmallScopeRowsForTests(TOTAL);
+    const atThreshold = await lookup([at(1006)]);
+    expect(Object.fromEntries(atThreshold.ranks)).toEqual({ [at(1006)]: 1006 });
+    expect(atThreshold.stoppedEarly).toBe(false);
+    setVectorSmallScopeRowsForTests(TOTAL - 1);
+    const r = recorder();
+    const over = await provider.vectorRanks({ ...opts(), db: r.handle, nodeIds: [at(1006)] });
+    expect(over).toEqual({ ranks: new Map(), stoppedEarly: true });
+    expect(r.seen.filter((s) => /ROW_NUMBER|MATERIALIZED/.test(s))).toEqual([]);
+  }, 60_000);
+
   it('the small scope\'s exact ranking cut by the budget is stoppedEarly, and is not kept', async () => {
     const memo = {};
     const r = recorder((s) => (s.includes('ROW_NUMBER') ? Object.assign(new Error('canceling statement due to statement timeout'), { meta: { code: '57014' } }) : undefined));

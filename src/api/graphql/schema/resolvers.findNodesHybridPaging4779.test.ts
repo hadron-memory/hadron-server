@@ -182,6 +182,21 @@ describe('#4779 P3-4: hybrid pages are slices of one fused order (no repeat, no 
     const memos = new Set(spy.mock.calls.map((c) => c[0].memo));
     expect(memos.size).toBe(1);
     expect([...memos][0]).toBeDefined();
+
+    // Now force the one re-ranking: C (the first keyword hit) is deleted after the first ranking, so hydration drops it.
+    spy.mockClear();
+    const original = provider.vectorSearch.bind(provider);
+    let rankings = 0;
+    vi.spyOn(provider, 'vectorSearch').mockImplementation(async (a) => {
+      const hits = await original(a);
+      if (rankings++ === 0) await db.node.update({ where: { id: id.C! }, data: { deletedAt: new Date() } });
+      return hits;
+    });
+    try {
+      await findNodes({ query: 'q', mode: 'hybrid', limit: 2 });
+      expect(rankings).toBe(2);
+      expect(new Set(spy.mock.calls.map((c) => c[0].memo)).size).toBe(2);
+    } finally { await db.node.update({ where: { id: id.C! }, data: { deletedAt: null } }); }
   }, 60_000);
 
   it('#4994: ranks a stopped lookup DID return order the page, which is still flagged stopped_early', async () => {
