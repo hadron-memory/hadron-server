@@ -1,4 +1,5 @@
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
+import { ownerLimitCaller, requireNodeHeadroom } from '../../../lib/ownerLimits/nodes.js';
 import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import { edgeRunOrder } from '../../../lib/edgeOrder.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
@@ -537,7 +538,7 @@ export async function writeSessionHandoff(
         },
         writerCtx,
         'create',
-        { authoring: { kind: 'platform', record: 'session-handoff' } },
+        { ownerLimit: 'count-only', authoring: { kind: 'platform', record: 'session-handoff' } },
       );
     }
 
@@ -557,7 +558,7 @@ export async function writeSessionHandoff(
       },
       writerCtx,
       'create',
-      { authoring: { kind: 'platform', record: 'session-handoff' } },
+      { ownerLimit: 'count-only', authoring: { kind: 'platform', record: 'session-handoff' } },
     );
   } catch (e) {
     throw new GraphQLError(
@@ -631,6 +632,13 @@ async function writeRevisionRow(
   snapshot: RevisionSnapshotRead,
   description: string | undefined,
   createdBy: string | null,
+  /**
+   * #5015 (cor:acl:150:04) — REQUIRED, so a new caller states it. `refuse` (createRevision, an admin's own snapshot):
+   * the nodes this row adds (the `revisions` parent when no row holds its loc, plus the revision node) are judged
+   * against the system memory owner's `nodes` limit. `count-only` (restoreRevision's auto-save): counted, never judged,
+   * and no owner-limit key is taken, which keeps #3587's rule that the restore takes no advisory key after a row lock.
+   */
+  ownerLimit: { mode: 'refuse'; caller: { userId: string } | null } | { mode: 'count-only' },
 ): Promise<{ label: string; revLoc: string }> {
   // #664/#752: revLoc is `revisions:<label>`, so a concurrent non-recursive delete of the `revisions` parent could
   // count zero descendants and then orphan this row. Hold the ancestor-path lock across the insert (advisory before
@@ -641,7 +649,8 @@ async function writeRevisionRow(
   await lockPathForCreateUnder(tx, sysMemId, 'revisions');
   // The parent ensure must not abort the transaction (#3587 D5): inside one, a unique violation aborts it whatever
   // is caught, so this is ON CONFLICT DO NOTHING, which waits for a competing insert and then does nothing.
-  await tx.node.createMany({
+  // #5015 — its count says whether it inserted one (a row at the loc, a tombstone included, makes it a no-op).
+  const { count: parentAdded } = await tx.node.createMany({
     data: [{ id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' }],
     skipDuplicates: true,
   });
@@ -662,6 +671,15 @@ async function writeRevisionRow(
   const label = `rev-${revNum}`;
   const revLoc = `revisions:${label}`;
   await lockAncestorsForCreate(tx, sysMemId, revLoc);
+  if (ownerLimit.mode === 'refuse') {
+    // The memory row FOR SHARE pins its owner against a concurrent transfer (finding `node-write-owner-transfer-race`);
+    // the owner-limit key is then the save's last lock (gate ruling 5), and a refusal rolls back the parent ensure.
+    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${sysMemId} FOR SHARE`;
+    // The parent is already written, so the owner's count already holds it.
+    await requireNodeHeadroom(tx, {
+      memoryId: sysMemId, amount: BigInt(1 + parentAdded), alreadyWritten: BigInt(parentAdded), caller: ownerLimit.caller,
+    });
+  }
   await tx.node.create({
     data: {
       id: generateId(), memoryId: sysMemId, loc: revLoc, name: label,
@@ -2529,7 +2547,7 @@ export const sessionMutations = {
       // #3587 (D6): a restore now holds the `revisions` key for up to its 30 s, so this save, which waits behind it,
       // gets an explicit bound above that rather than Prisma's 5 s default.
       const { label, revLoc } = await ctx.db.$transaction(
-        (tx) => writeRevisionRow(tx, sysMemId, snapshotRead, description, ctx.userId ?? null),
+        (tx) => writeRevisionRow(tx, sysMemId, snapshotRead, description, ctx.userId ?? null, { mode: 'refuse', caller: ownerLimitCaller(ctx) }),
         { timeout: STANDALONE_REVISION_TX_TIMEOUT_MS },
       );
 
@@ -2694,6 +2712,7 @@ export const sessionMutations = {
           // Auto-save current state before restoring, in this transaction.
           await writeRevisionRow(
             tx, sysMemId, await readRevisionSnapshot(tx, sysMemId), `Auto-save before restoring ${revisionLoc}`, ctx.userId ?? null,
+            { mode: 'count-only' },
           );
           if (restorePauseBeforeRetirementCheck) await restorePauseBeforeRetirementCheck();
           // #3587 (ruling 0220): the authoritative check, under the row locks and before the soft-delete.

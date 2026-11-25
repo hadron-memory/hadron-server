@@ -41,7 +41,7 @@ async function fixture() {
 }
 
 const create = (ctx: unknown, memoryId: string, loc: string) =>
-  writeNodeCore({ memoryId, loc, name: loc.split(':').pop()!, nodeType: 'record', content: 'You are {{worker.name}}.' } as never, ctx as never, 'create', { authoring: attestedAuthoring(null) });
+  writeNodeCore({ memoryId, loc, name: loc.split(':').pop()!, nodeType: 'record', content: 'You are {{worker.name}}.' } as never, ctx as never, 'create', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) });
 
 describe('#2710 a write grant never covers a class=system memory', () => {
   it('setting a grant on an Agent system memory is refused, and nothing is recorded', async () => {

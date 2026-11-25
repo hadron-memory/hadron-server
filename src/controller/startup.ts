@@ -72,7 +72,8 @@ const runStartup = async (): Promise<'ran'> => {
     // spec 047: user-owned memories have no org and aren't git-synced.
     if (!memory.organization) continue;
     const orgUrn = memory.organization.urn;
-    const result = await syncGraphFromGithub(memory);
+    // #5015 — an unattended sync: nobody to tell, so the owner-limit refusal takes the no-number form.
+    const result = await syncGraphFromGithub(memory, { ownerLimitCaller: null });
     if (result.notAttemptedReason) continue; // No attempt: neither a success nor a failure to report.
     if (result.error) {
       console.error(`  [FAIL] ${orgUrn}/${memory.name}: ${result.error}`);
