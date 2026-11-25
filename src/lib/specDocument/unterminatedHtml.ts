@@ -198,15 +198,22 @@ function firstUnterminated(text: string, from: number): number {
   // line or the last line of an HTML block. A line is judged after its block quote markers are taken off (`> # h`, a bare `>`); the lines
   // of a quote or list item that continue a paragraph lazily are paragraph lines. A line that only looks like one of these
   // is taken for it: an extra raw region means extra escaping, the safe side. 'marker' is a bare list marker (`-`, `1.`): no paragraph is open, so a
-  // type 7 tag at the line head starts a block, but an indented line after it is the item's content, never indented code.
+  // type 7 tag at the line head starts a block, but an indented line after it is the item's content. Content four
+  // columns past the marker is code in the item; it is still read (more `<` are judged), and leaves no paragraph open.
   let prev: LineKind = 'blank';
   // The kind of the line before the one being read (`prev` is already the current line's kind once its head is handled).
   let prevBefore: LineKind = 'blank';
   // A link reference definition may spread over lines: its destination (and then its title) can sit on the next line. 1: the line before was a
   // label alone (`[a]:`), so this line is the destination; 2: the line before was a definition with a destination, so a title may follow; 3: inside a title that opened on an earlier line.
   let lrd: 0 | 1 | 2 | 3 = 0;
-  // The delimiter that closes the title lrd 3 is inside.
-  let titleClose = '';
+  // The closing delimiter of the title that is open (lrd 3).
+  let titleCloser = '';
+  // Whether the line before was a line of a link reference definition: to Markdown a paragraph is still open there.
+  let inDefinition = false;
+  // How wide the last bare list marker is, with its one blank: content that much plus four columns in is code in its item.
+  let markerWidth = 0;
+  // Whether the line before was in a list, so that an item with any number continues it.
+  let inList = false;
   // A raw-text element opened in the middle of a line is inline HTML: Markdown goes on parsing after it, so only an end tag
   // that Markdown also reads as HTML (outside code, a fence and a backslash escape) closes it. -1 when none is open.
   let rawStart = -1;
@@ -331,7 +338,12 @@ function firstUnterminated(text: string, from: number): number {
       const line = text.slice(i, end);
       // Block quote markers do not change what is code inside them.
       const inner = line.replace(/^ {0,3}(?:> ?)+/, '');
-      const here = containersOf(line);
+      let here = containersOf(line);
+      const listed = here.list.some((c) => !c.quote);
+      // A number other than 1 starts no list in the middle of a paragraph; it is an item only where a list is open already.
+      if (listed && prev === 'other' && !inList && /^ {0,3}(?:> ?)*(?!0*1[.)])\d/.test(line)) here = { list: [], at: 0 };
+      if (here.list.some((c) => !c.quote)) inList = true;
+      else if (line.trim() !== '' && prev === 'blank' && !/^[ \t]{2}/.test(line)) inList = false;
       const content = line.slice(here.at);
       // A fence lives in the containers of the line that opened it, and ends with them.
       const within = fence === null ? null : contentInside(line, fenceContainers);
@@ -346,23 +358,32 @@ function firstUnterminated(text: string, from: number): number {
       const from = columnAfter(quotes);
       // A tab right after a quote marker gives its first column to the marker.
       const indent = columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0], from) - from - (quotes.endsWith('>') && inner.startsWith('\t') ? 1 : 0);
-      if (indent >= 4 && inner.trim() !== '' && prev !== 'other' && prev !== 'marker') { prev = 'code'; lrd = 0; i = end + 1; continue; }
+      // A line right after a definition's line continues its paragraph, so its indent makes no code of it.
+      const afterDefinition = inDefinition;
+      inDefinition = false;
+      if (indent >= 4 && inner.trim() !== '' && prev !== 'other' && prev !== 'marker' && !afterDefinition) { prev = 'code'; lrd = 0; i = end + 1; continue; }
       if (lrd === 3) {
         // Inside a title that opened on an earlier line: still the definition, until the line that closes it (or a blank line, which ends the attempt).
-        if (inner.trim() === '') { prev = 'blank'; lrd = 0; } else { prev = 'nonpara'; lrd = hasCloser(inner, titleClose) ? 0 : 3; }
+        if (inner.trim() === '') { prev = prev === 'code' ? 'code' : 'blank'; lrd = 0; } else { prev = 'nonpara'; inDefinition = true; lrd = hasCloser(inner, titleCloser) ? 0 : 3; }
       } else if (lrd === 1 && inner.trim() !== '') {
         prev = 'nonpara';
-        titleClose = titleOpens(inner);
-        lrd = titleClose ? 3 : 2;
-      } else if (lrd === 2 && /^ {0,3}["'(]/.test(inner)) {
+        inDefinition = true;
+        titleCloser = titleOpens(inner);
+        lrd = titleCloser ? 3 : 2;
+      } else if (lrd === 2 && /^[ \t]*["'(]/.test(inner)) {
         prev = 'nonpara';
-        titleClose = titleOpens(inner);
-        lrd = titleClose ? 3 : 0;
+        inDefinition = true;
+        titleCloser = titleOpens(inner);
+        lrd = titleCloser ? 3 : 0;
       } else {
         const label = /^ {0,3}\[(?:[^\]\\]|\\.)+\]:([ \t]*)/.exec(content);
-        titleClose = label && label[0].length !== content.length ? titleOpens(content.slice(label[0].length)) : '';
-        lrd = label ? (label[0].length === content.length ? 1 : titleClose ? 3 : 2) : 0;
-        prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|=+[ \t]*$)/.test(inner) || /^ {0,3}#{1,6}(?:[ \t]|$)/.test(content) ? 'nonpara' : /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]*$/.test(inner) ? 'marker' : 'other';
+        titleCloser = label && label[0].length !== content.length ? titleOpens(content.slice(label[0].length)) : '';
+        inDefinition = label !== null;
+        lrd = label ? (label[0].length === content.length ? 1 : titleCloser ? 3 : 2) : 0;
+        prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|=+[ \t]*$)/.test(inner) || /^ {0,3}#{1,6}(?:[ \t]|$)/.test(content) ? 'nonpara' : /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]*$/.test(inner)
+          ? (prev === 'other' ? 'other' : 'marker')
+          : prev === 'marker' && indent >= markerWidth + 4 ? 'marker' : 'other';
+        if (prev === 'marker' && indent < 4) markerWidth = inner.trim().length + 1;
       }
     }
     const c = text[i];
