@@ -1,5 +1,7 @@
-import { assetLimitCaller, requireAssetBytesHeadroom } from '../../../lib/asset/ownerBytes.js';
+import { assetLimitCaller } from '../../../lib/asset/ownerBytes.js';
 import { GraphQLError } from 'graphql';
+import { ownerHeadroomRefusals, requireOwnerHeadroomMany } from '../../../lib/ownerLimits/gate.js';
+import { memoryCountsAgainstOwner } from '../../../lib/ownerLimits/keys.js';
 import { Prisma, type Memory } from '../../../generated/prisma/index.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -107,6 +109,19 @@ function targetClassOf(memory: Memory, requested: TransferClass | null | undefin
   return requested ?? current;
 }
 
+/** What the receiving owner takes on: the memory itself when its target class counts, and its live nodes. */
+async function transferLimitChecks(tx: TransferDb, memory: Memory, targetClass: TransferClass) {
+  const live = BigInt(await tx.node.count({ where: { memoryId: memory.id, deletedAt: null } }));
+  const [{ n: bytes }] = await tx.$queryRaw<Array<{ n: bigint }>>`
+    SELECT COALESCE(sum(size_bytes), 0)::bigint AS n FROM assets
+    WHERE memory_id = ${memory.id} AND deleted_at IS NULL AND scan_status <> 'BLOCKED'`;
+  return [
+    { key: 'memories' as const, amount: memoryCountsAgainstOwner({ class: targetClass, appId: memory.appId, isInstallMemory: memory.isInstallMemory }) ? 1n : 0n },
+    { key: 'nodes' as const, amount: live },
+    { key: 'assetBytes' as const, amount: bytes },
+  ];
+}
+
 async function transferPreview(
   tx: TransferDb,
   memory: Memory,
@@ -114,6 +129,7 @@ async function transferPreview(
   requestedClass: TransferClass | null | undefined,
   resetGroupMembers: boolean | null | undefined,
   actorUserId: string | undefined,
+  limits?: { caller: { userId: string } | null },
 ) {
   const oldRoot = memory.urn.slice(0, memory.urn.indexOf(':'));
   const desiredSlug = memory.urn.slice(memory.urn.lastIndexOf(':') + 1);
@@ -225,6 +241,15 @@ async function transferPreview(
       (destination.kind === 'user' && memory.ownerUserId === destination.id)) {
     blockers.unshift({ code: 'MEMORY_TRANSFER_SAME_OWNER', message: 'The memory already belongs to that owner.' });
   }
+  // #5016 (ruling 4): a `dryRun` shows an owner limit as one more blocker, in the caller's own form. The apply path judges it under
+  // the lock instead (`transferLimitChecks`), so this read is advisory.
+  if (limits && !blockers.some((b) => b.code === 'MEMORY_TRANSFER_SAME_OWNER')) {
+    const refusals = await ownerHeadroomRefusals(tx as Prisma.TransactionClient, {
+      owner: destination.kind === 'organization' ? { organizationId: destination.id } : { userId: destination.id },
+      checks: await transferLimitChecks(tx, memory, targetClass), caller: limits.caller,
+    });
+    for (const r of refusals) blockers.push({ code: 'OWNER_LIMIT_REACHED', message: r.message });
+  }
   return {
     memoryId: id, oldUrn: memory.urn, newUrn,
     fromOwner: memory.organizationId ?? memory.ownerUserId!,
@@ -241,7 +266,7 @@ export const memoryTransferMutations = {
     const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
     await authorizeSource(ctx, memory, input.memoryRef);
     const destination = await resolveDestination(ctx, input, memory);
-    if (input.dryRun === true) return transferPreview(ctx.db as TransferDb, memory, destination, input.targetClass, input.resetGroupMembers, ctx.userId);
+    if (input.dryRun === true) return transferPreview(ctx.db as TransferDb, memory, destination, input.targetClass, input.resetGroupMembers, ctx.userId, { caller: assetLimitCaller({ userId: ctx.userId, impersonation: ctx.impersonation }) });
 
     try {
       let current: Memory;
@@ -274,19 +299,14 @@ export const memoryTransferMutations = {
         if (input.expectedNewUrn != null && input.expectedNewUrn !== plan.newUrn) {
           throw refusal('STALE_TRANSFER_PREVIEW', 'The target URN changed since the preview; run a new dryRun.');
         }
-        // #5017: the receiving owner takes the memory's live files with it, so their bytes must fit that owner's file-bytes cap. Before
-        // any change, so a refusal changes nothing. A7c's multi-key call (nodes, ...) joins this one when it lands.
-        {
-          const [{ n }] = await tx.$queryRaw<Array<{ n: bigint }>>`
-            SELECT COALESCE(sum(size_bytes), 0)::bigint AS n FROM assets
-            WHERE memory_id = ${id} AND deleted_at IS NULL AND scan_status <> 'BLOCKED'`;
-          await requireAssetBytesHeadroom(
-            tx,
-            currentDestination.kind === 'organization' ? { organizationId: currentDestination.id } : { userId: currentDestination.id },
-            n,
-            assetLimitCaller({ userId: ctx.userId, impersonation: ctx.impersonation }),
-          );
-        }
+        // #5016 and #5017: the receiving owner takes the memory, its live nodes and its live files' bytes with it; ONE multi-key call, so the
+        // owner-limit locks are taken together in resolved order. The owner differs here (a same-owner transfer is a blocker above); before any
+        // change, so a refusal leaves the source unchanged. The caller is the asset door's own (no number for impersonation or a headless run).
+        await requireOwnerHeadroomMany(tx, {
+          owner: currentDestination.kind === 'organization' ? { organizationId: currentDestination.id } : { userId: currentDestination.id },
+          checks: await transferLimitChecks(tx, current, plan.targetClass),
+          caller: assetLimitCaller({ userId: ctx.userId, impersonation: ctx.impersonation }),
+        });
         if (current.class === 'group' && input.resetGroupMembers === true) {
           await tx.memoryMember.deleteMany({ where: { memoryId: id } });
         }
