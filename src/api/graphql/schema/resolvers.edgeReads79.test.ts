@@ -109,7 +109,8 @@ describe.each(SHAPES)('#79 a far node in a %s memory', (_shape, shape) => {
     for (const ctx of [context(outsider), context()]) {
       const r = await run(`{ edges(filter: { sourceNodeId: "${near}" }) { total items { ${FIELDS} } } edge(ref: "${farOut}") { id } }`, ctx);
       nothingFar(JSON.stringify(r.data ?? {}));
-      if (!r.errors) expect([(r.data as any).edges.items.map((e: any) => e.name).filter((n: string) => n.startsWith('far')), (r.data as any).edge]).toEqual([[], null]);
+      expect(r.errors).toBeUndefined();
+      expect([(r.data as any).edges.items.map((e: any) => e.name), (r.data as any).edges.total, (r.data as any).edge]).toEqual([['same-out'], 1, null]);
     }
   });
 
@@ -147,6 +148,13 @@ describe('#79 readable memories', () => {
       expect((await page(`sourceNodeId: "${n}"`, ctx())).names).toEqual(['other-in']);
       expect((await one(out, ctx())).target.id).toBe(n);
     }
+    // A memory or organization filter narrows the holder, never the ends.
+    expect((await page(`memoryId: "${shared}"`, context(member))).names).toEqual(['other-out', 'same-in', 'same-out']);
+    const own = await memory('own', { class: 'private', userId: member, ownerUserId: member });
+    await edge('own-out', shared, near, (await createDbNode(db, { loc: 'o', memoryId: own })).id);
+    const inOrg = await run(`{ edges(orgId: "${orgId}") { items { name } } }`, context(member));
+    expect((inOrg.data as any).edges.items.map((e: any) => e.name).sort()).toEqual(['other-in', 'other-out', 'own-out', 'same-in', 'same-out']);
+    await db.edge.deleteMany({ where: { name: 'own-out' } });
     await db.node.update({ where: { id: n }, data: { deletedAt: new Date() } });
     const got = await one(out, context(member));
     expect([got.id, got.target]).toEqual([out, null]);
@@ -156,6 +164,10 @@ describe('#79 readable memories', () => {
   it('a page counts and pages returned edges only', async () => {
     const mem = await memory('far-slug', { class: 'private', userId: alice, ownerUserId: alice });
     for (let i = 0; i < 3; i += 1) await edge(`a-far-${i}`, shared, near, (await createDbNode(db, { loc: `far-loc-${i}`, memoryId: mem })).id);
-    expect(await page(`memoryId: "${shared}"`, context(member), ', limit: 2')).toMatchObject({ names: ['same-in', 'same-out'], total: 2 });
+    // They sort first, so a page cut before the rule would be short.
+    await db.$executeRaw`UPDATE edges SET loc = 'a:' || name WHERE name LIKE 'a-far-%'`;
+    expect(await page(`memoryId: "${shared}"`, context(member), ', limit: 1')).toMatchObject({ names: ['same-in'], total: 2 });
+    expect(await page(`memoryId: "${shared}"`, context(member), ', limit: 1, offset: 1')).toMatchObject({ names: ['same-out'], total: 2 });
+    expect(await page(`memoryId: "${shared}"`, context(member), ', limit: 0')).toMatchObject({ names: [], total: 2 });
   });
 });
