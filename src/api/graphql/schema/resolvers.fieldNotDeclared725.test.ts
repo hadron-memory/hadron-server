@@ -28,7 +28,7 @@ const admin = (): Context => ({ db, roles: ['ADMIN'], userId: adminId } as Conte
 const stranger = (): Context => ({ db, roles: ['READER'], userId: strangerId } as Context);
 const find = (input: Record<string, unknown>, ctx: Context = admin()) =>
   Q().findObjects(null, { memoryRef: memId, ...input }, ctx);
-const outcome = async (p: Promise<any>) => p.then((v) => ({ ok: v }), (e) => ({ error: e }));
+const outcome = async (p: Promise<any>): Promise<{ ok?: any; error?: any }> => p.then((v) => ({ ok: v }), (e) => ({ error: e }));
 const codeOf = (r: { error?: any }) => r.error?.extensions?.code;
 
 const schema = {
@@ -108,7 +108,7 @@ describe('#725 a strict collection refuses an undeclared field', () => {
   it('reaches the wire as FIELD_NOT_DECLARED with its extensions (not an internal fault)', async () => {
     const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
     const res = await server.executeOperation(
-      { query: 'query($m: ID!) { findObjects(memoryRef: $m, type: "rec", match: { nope: "x" }) { total } }', variables: { m: memId } },
+      { query: 'query($m: String!, $match: JSON) { findObjects(memoryRef: $m, type: "rec", match: $match) { total } }', variables: { m: memId, match: { nope: 'x' } } },
       { contextValue: admin() },
     );
     const err = res.body.kind === 'single' ? res.body.singleResult.errors?.[0] : null;
