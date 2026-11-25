@@ -399,6 +399,11 @@ describe('escapeUnterminatedHtml', () => {
       ['a link reference definition', '[a]: http://x\n<b>\n```\n<i x=\n```\nz'],
     ];
     for (const [label, body] of starts) expect(escapeUnterminatedHtml(body), label).toBe(body.replace('<i x=', '&lt;i x='));
+    // A link reference definition may put its destination on the next line, and its label may hold an escaped bracket.
+    expect(escapeUnterminatedHtml('[a]:\n/u\n<b>\n`x\n<script> y')).toBe('[a]:\n/u\n<b>\n`x\n&lt;script> y');
+    expect(escapeUnterminatedHtml('[a\\]b]: /u\n<b>\n`x\n<script> y')).toBe('[a\\]b]: /u\n<b>\n`x\n&lt;script> y');
+    // A quote's own heading line leaves no paragraph open either.
+    expect(escapeUnterminatedHtml('> # h\n<b>\n```\n<i x=\n```\nz')).toBe('> # h\n<b>\n```\n&lt;i x=\n```\nz');
     // After a paragraph line (a lazy continuation of a quote or a list item included) a type 7 tag cannot interrupt: the fence is a fence.
     for (const body of ['a\n<b>\n```\n<i x=\n```\nz', '> a\n<b>\n```\n<i x=\n```\nz', '- a\n<b>\n```\n<i x=\n```\nz']) {
       expect(escapeUnterminatedHtml(body), body).toBe(body);
@@ -414,11 +419,11 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('<! a > `x <b x= y` z')).toBe('<! a > `x <b x= y` z');
   });
   it('the restart does not lose a raw region: every pass scans the escaped text from its start', () => {
-    const body = '<div>\n<b x=\n```\n<script> a';
+    const body = '<div>\n<b x=\n```\n<script a';
     const once = escapeUnterminatedHtml(body);
     expect(escapeUnterminatedHtml(once)).toBe(once);
-    // `<b x=` runs to the `>` of `<script>`: one complete tag to a browser, so there is nothing to escape, and the raw region is intact.
-    expect(once).toBe(body);
+    // The tag opened by `<b x=` reaches the end of the text with no `>`: both constructs are escaped, over two passes that each start from the top.
+    expect(once).toBe('<div>\n&lt;b x=\n```\n&lt;script a');
   });
   it('a line-head pre block runs raw to its end tag, blank lines and fences included', () => {
     // The tag that opens in the interior ends at the `>` of the end tag: one complete tag to a browser, nothing swallowed.
