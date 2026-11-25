@@ -56,6 +56,9 @@ const EXEMPT_AUDIT_COLUMNS = new Set([
   // signed a grant are sealed (a merged-away requester fails closed: it cannot withdraw).
   'grant_signing_requests.requester_user_id',
   'grant_signatures.signer_id',
+  // #5001 — a grant selection and its one touch record are the same guarded history: who asked and who signed are sealed.
+  'grant_signing_selections.requester_user_id',
+  'grant_selection_signatures.signer_id',
   // #3997 — who stored an App secret's version and who acted on it are sealed: the events are append-only, and a version is never edited in place.
   'secret_events.actor_user_id',
   'secret_versions.written_by_user_id',
@@ -100,6 +103,8 @@ describe('mergeUsers audit actor registry', () => {
           OR (table_name = 'node_signatures' AND column_name = 'signer_id')
           OR (table_name = 'grant_signing_requests' AND column_name = 'requester_user_id')
           OR (table_name = 'grant_signatures' AND column_name = 'signer_id')
+          OR (table_name = 'grant_signing_selections' AND column_name = 'requester_user_id')
+          OR (table_name = 'grant_selection_signatures' AND column_name = 'signer_id')
           OR (table_name = 'secret_events' AND column_name = 'actor_user_id')
           OR (table_name = 'secret_versions' AND column_name = 'written_by_user_id')
           OR (table_name = 'secret_read_clients' AND column_name = 'issuer_user_id'))

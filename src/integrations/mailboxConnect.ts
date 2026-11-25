@@ -335,8 +335,8 @@ function sendConnectConfirmPage(
 /** Mount the three mailbox-connect routes for one provider. */
 export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfig): void {
   connectProviders.set(cfg.provider, cfg);
-  const authRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'none' });
-  const startAuthRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'bearer' });
+  const authRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'none', form: 'json' });
+  const startAuthRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'bearer', form: 'json' });
   const pendingStates = new Map<
     string,
     { orgId: string; userId: string; redirect: string; origin: ExchangeStartOrigin; flowId: string | null; expiresAt: number }

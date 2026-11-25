@@ -70,7 +70,7 @@ async function expectCode(p: Promise<unknown>, code: string): Promise<GraphQLErr
 /** The update under test, reached at the core so both selector shapes are drivable. */
 async function update(input: Record<string, unknown>, targetNodeId?: string) {
   const { writeNodeCore } = await import('./resolvers.mutation.node.js');
-  return writeNodeCore(input as never, ctx(), 'update', { authoring: attestedAuthoring(null), ...(targetNodeId ? { targetNodeId } : {}) });
+  return writeNodeCore(input as never, ctx(), 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null), ...(targetNodeId ? { targetNodeId } : {}) });
 }
 
 beforeEach(async () => {

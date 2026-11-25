@@ -969,15 +969,6 @@ model Memory {
   /// `properties`/`objectType` are validated against it in the enforcement
   /// phase (a later PR) — free-form until then.
   schema               Json?
-  /// #1591 — legacy whole-corpus flag retained for compatibility. Draft rights
-  /// now belong to each node and end at its first mint; false does not mean
-  /// every node in this memory is minted. Minting still clears this flag.
-  corpusDraft          Boolean           @default(false) @map("corpus_draft")
-  /// #1591 — legacy record of the latest nonempty mint in this memory and its
-  /// actor. Node mint records determine mint state; this stamp confers no
-  /// memory-wide removal protection or draft rights.
-  corpusMintedAt       DateTime?         @map("corpus_minted_at")
-  corpusMintedBy       String?           @map("corpus_minted_by")
   /// Classification tags for search and filtering.
   tags                 String[]
   /// License identifier (e.g. "MIT", "CC-BY-4.0", "proprietary").
@@ -1616,6 +1607,15 @@ model Node {
   /// edit with no user behind it clears it. Null = unknown (nodes edited before
   /// #2176 are not backfilled). No FK, like the audit stamps (hrn:node:hadronmemory.com:specs:cor:dmo:010:01).
   updatedByUserId     String?             @map("updated_by_user_id")
+  /// #5018 (Billing A14, hrn:node:hadronmemory.com:specs:cor:dmo:060:18) — the bytes this node's content, description, data and
+  /// properties take as stored (the ciphertext in an encrypted memory; `data` and `properties` as their jsonb text). Kept by the
+  /// `nodes_record_stored_bytes` trigger, never by a writer, and capped at the Int range. Null means not measured yet (a row
+  /// written before the trigger; the hand-run backfill fills it).
+  storedBytes         Int?                @map("stored_bytes")
+  /// #5018 — the same figure summed over this node's rows in `node_revisions`, kept by the triggers on that table; a node
+  /// starts at 0 and a not-measured (null) node stays null until the backfill. A BigInt, so the client leaves it out of every
+  /// default select (src/integrations/db/client.ts) and only the readers that need it ask.
+  revisionBytes       BigInt?             @map("revision_bytes")
 
   memory                   Memory                        @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   includeReferences        IncludeReference[]
@@ -4180,6 +4180,7 @@ model App {
   automationReadGrantEvents AppAutomationReadGrantEvent[]
   automationTeamSnapshotGrants AppAutomationTeamSnapshotGrant[]
   automationTeamSnapshotGrantEvents AppAutomationTeamSnapshotGrantEvent[]
+  grantSigningSelections GrantSigningSelection[]
   /// #3668 — grants issued in this App, the grants THIS App holds, and the grant events.
   grants                  Grant[]      @relation("GrantApp")
   secretReadClients       SecretReadClient[]
@@ -5135,6 +5136,12 @@ model AuthCode {
   /// #1897: the recorded SignIn this code descends from (null = the approving session has no SignIn row, which is
   /// every ordinary sign-in, hrn:node:hadronmemory.com:specs:cor:aut:030:03; never inferred). Immutable, same owner as `userId`.
   signInId      String?   @map("sign_in_id")
+  /// #5125: set when the code is shown on the code page (hrn:node:hadronmemory.com:specs:cor:aut:030:01); null for a
+  /// code delivered by redirect. The code reads `<handle>.<secret>` and `codeHash` covers all of it; the handle alone is
+  /// not a secret, it is what a wrong entry is counted against.
+  entryHandle   String?   @unique @map("entry_handle")
+  /// Wrong entries against `entryHandle`. The fifth also sets `redeemedAt`, so the code is dead for every reader.
+  entryFailures Int       @default(0) @map("entry_failures")
 
   user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   client OAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
@@ -5426,6 +5433,7 @@ model PasskeyCredential {
   owner             User                       @relation(fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   signatures        NodeSignature[]
   grantSignatures   GrantSignature[]
+  grantSelectionSignatures GrantSelectionSignature[]
   signIns           SignIn[]
   cancelToken       PasskeyCancelToken?
   notice            PasskeyRegistrationNotice?
@@ -6350,8 +6358,9 @@ model AiModelPrice {
 /// One entry in an organization's ledger of AI credits: an amount added or taken away. The balance of an organization
 /// is the sum of its entries; no balance is stored anywhere.
 ///
-/// Relationships: belongs to one Organization and is deleted with it. `sourceType` and `sourceId` name where the
-/// entry came from as plain values, for example a UsageEvent or the administrator who granted it.
+/// Relationships: belongs to one Organization and is kept when the organization is deleted (the relation restricts,
+/// it does not cascade). `sourceType` and `sourceId` name where the entry came from as plain values, for example a
+/// UsageEvent or the administrator who granted it.
 ///
 /// Behaviour:
 /// - `kind` is `grant` (a positive amount), `debit` (negative) or `adjustment` (either). `amountMicroCents` is
@@ -6359,8 +6368,10 @@ model AiModelPrice {
 /// - Grants and adjustments are written by a platform admin (`grantCredits`, `adjustCredits`) and debits by usage
 ///   metering (`debitCredits`, src/lib/metering/index.ts). A debit is written only when `BILLING_DEBIT_ENABLED` is
 ///   on, and only for usage on the platform's own provider key (hrn:node:hadronmemory.com:specs:cor:dmo:170:07).
-/// - Entries are never edited or reset. A correction is a new `adjustment` entry. Soft-deleting an entry is an
-///   emergency measure for operators only; the balance leaves soft-deleted entries out.
+/// - Entries are never edited and never deleted, not even by an operator: a trigger refuses every UPDATE and DELETE
+///   (prisma/credit-ledger-invariants.sql), except that an audit user id follows an account merge. A correction is a new
+///   `adjustment` entry. Soft delete is retired: a CHECK refuses an entry that carries `deletedAt`
+///   (hrn:node:hadronmemory.com:specs:cor:dmo:170:08).
 /// - At most one entry per (`sourceType`, `sourceId`), so a payment notification that arrives twice produces one
 ///   entry; the same pair with another organization, amount or kind is refused. A grant or an adjustment must name
 ///   its source (hadron-server#5007); entries with no source (a debit written without one, or a grant written
@@ -6389,7 +6400,7 @@ model CreditLedgerEntry {
   deletedAt        DateTime? @map("deleted_at")
   deletedBy        String?   @map("deleted_by")
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
   // Idempotency for at-least-once payment webhooks (a payment service):
   // one ledger row per (sourceType, sourceId); NULL-source rows unaffected
@@ -10590,12 +10601,85 @@ model GrantSigningRequest {
   endedAt            DateTime? @map("ended_at")
   /// #4546: latest verified ineligible proof on an open request; no signer identity and no state change.
   lastRefusedAt      DateTime? @map("last_refused_at")
+  /// #5001: set when this request is one item of a selection (then `positionInSelection` is its place, 0-based, in
+  /// ascending grant id); NULL for a one-grant request. Both set or both NULL (chk_grant_signing_request_shape).
+  selectionId        String?   @map("selection_id")
+  positionInSelection Int?     @map("position_in_selection")
 
-  grant     Grant           @relation(fields: [grantId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  grant     Grant                 @relation(fields: [grantId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  selection GrantSigningSelection? @relation(fields: [selectionId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   signature GrantSignature?
 
   @@index([grantId, createdAt])
+  @@unique([selectionId, grantId])
+  @@index([selectionId])
   @@map("grant_signing_requests")
+}
+
+/// One request for ONE passkey touch over a SELECTION of one App's pending grants (#5001; ruling 0255 item 19).
+///
+/// Relationships: belongs to one App and is deleted with it. `items` are the per-grant GrantSigningRequest rows
+/// (one per grant, each with its own version and terms-hash pin, so a grant that changes ends only its own item).
+/// `signature` is the one touch record once the selection completes.
+///
+/// Behaviour:
+/// - Begins `open`, ends exactly once: `completed`, `declined`, `expired` or `withdrawn`. There is no `stale`
+///   state, because staleness is per item (the item request goes `stale`; the selection stays open).
+/// - Every time is the database clock. A trigger sets the times and enforces the fixed fields and the single end
+///   (prisma/grant-selection-signing-invariants.sql).
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:acl:140:07. Payload: hrn:node:hadronmemory.com:specs:cor:acl:140:09. Background: #5001.
+model GrantSigningSelection {
+  /// 128 bits of randomness, base64url (the node-signing id mint).
+  id                 String    @id
+  appId              String    @map("app_id")
+  payloadVersion     String    @map("payload_version")
+  requesterUserId    String?   @map("requester_user_id")
+  requesterAppId     String?   @map("requester_app_id")
+  requesterWorkerId  String?   @map("requester_worker_id")
+  requesterSessionId String?   @map("requester_session_id")
+  /// open | completed | declined | expired | withdrawn
+  state              String    @default("open")
+  createdAt          DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  expiresAt          DateTime  @map("expires_at")
+  endedAt            DateTime? @map("ended_at")
+  lastRefusedAt      DateTime? @map("last_refused_at")
+
+  app       App                       @relation(fields: [appId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  items     GrantSigningRequest[]
+  signature GrantSelectionSignature?
+
+  @@index([appId, createdAt])
+  @@map("grant_signing_selections")
+}
+
+/// The record of one person's ONE passkey touch over a selection of grants (#5001). It keeps the signed item list
+/// (each item's grant id, version and terms hash, in signed order) so that a later read rebuilds the bytes from what
+/// was signed, never from the grants as they are now. Each activated item also has its own GrantSignature row.
+///
+/// Append-only (prisma/grant-selection-signing-invariants.sql); deleted only with its App.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:acl:140:09. Background: #5001.
+model GrantSelectionSignature {
+  id                  String   @id @default(cuid())
+  selectionId         String   @unique @map("selection_id")
+  /// A person, always. Sealed history: no FK.
+  signerId            String   @map("signer_id")
+  passkeyCredentialId String   @map("passkey_credential_id")
+  payloadVersion      String   @map("payload_version")
+  /// The signed items in signed order: [{grantId, version, termsHash}], ascending grant id.
+  items               Json
+  rpId                String   @map("rp_id")
+  authenticatorData   Bytes    @map("authenticator_data")
+  clientDataJson      Bytes    @map("client_data_json")
+  signature           Bytes
+  verifiedAt          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("verified_at")
+
+  selection       GrantSigningSelection @relation(fields: [selectionId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  passkey         PasskeyCredential     @relation(fields: [passkeyCredentialId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  grantSignatures GrantSignature[]
+
+  @@map("grant_selection_signatures")
 }
 
 /// The record of one person's passkey signature on one Grant. It proves that this person, with this passkey,
@@ -10642,7 +10726,10 @@ model GrantSignature {
   clientDataJson      Bytes    @map("client_data_json")
   signature           Bytes
   verifiedAt          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("verified_at")
+  /// #5001: the touch record this one came from when the grant was signed as part of a selection; NULL for a one-grant signature.
+  selectionSignatureId String? @map("selection_signature_id")
 
+  selectionSignature GrantSelectionSignature? @relation(fields: [selectionSignatureId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   grant          Grant               @relation("GrantSignatures", fields: [grantId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   signingRequest GrantSigningRequest @relation(fields: [signingRequestId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   passkey        PasskeyCredential   @relation(fields: [passkeyCredentialId], references: [id], onDelete: Restrict, onUpdate: Restrict)

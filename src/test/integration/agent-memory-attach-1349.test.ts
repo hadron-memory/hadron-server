@@ -19,7 +19,7 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../helpers.js';
+import { cleanDb, seedRootNode, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../helpers.js';
 import { getPrincipalAppMemoryAccess } from '../../mcp/access-control.js';
 import { generateId } from '../../lib/id.js';
 import { mintUserApiKey } from '../../middleware/auth.js';
@@ -1908,7 +1908,7 @@ describe('#1357 Claude review — licensed cross-org App knowledge survives a vi
     expect(created.errors, JSON.stringify(created.errors)).toBeUndefined();
     const memoryId = created.data!.createMemoryInApp.id as string;
     const memoryUrn = created.data!.createMemoryInApp.urn as string;
-    const node = await db.node.findFirstOrThrow({ where: { memoryId } });
+    const node = await seedRootNode(db, memoryId, 'cross-org-runbook'); // #3952: createMemoryInApp no longer makes a root node, so the test makes its own node
     await db.node.update({ where: { id: node.id }, data: { content: 'CROSS ORG RUNBOOK' } });
     expect((await gql(appKey, READ, { r: node.id })).data?.node ?? null).toBeNull(); // #1376: an item is no grant to a bare key; the link rows above are the proof
 

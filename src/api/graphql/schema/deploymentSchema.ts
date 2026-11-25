@@ -9,6 +9,8 @@ const signingTypes = new Set([
   'SigningRequest', 'SigningRequestsPage', 'NodeSignature', 'NodeSignatureStatus',
   // #3649 slice B: grant signing rides the same switch (ruling 0255, item 17).
   'GrantSigningRequestState', 'GrantSigningRequest',
+  // #5001: a selection of grants signed with one touch rides the same switch.
+  'GrantSigningSelectionState', 'GrantSigningSelection',
   // #3690 PR 2: creating a grant rides the same switch, so none can be made where it could not be signed.
   'CreateGrantInput', 'IssueSecretReadClientInput', 'SecretReadClientIssued', 'SecretRevealed',
   // #3649 slice D: Grant.signatureStatus goes with them (its type is in this set).

@@ -152,9 +152,11 @@ export type ResumeVerdict = 'OK' | 'DORMANT' | 'REFUSED';
 /**
  * #5000: WHY a resume was refused, as a code a client can print. It names the condition and never another worker or
  * session (cor:agt:020:09). A caller who does not own the session (or names none) always gets NOT_OWNER, so the code is
- * no existence oracle: ENDED, OTHER_SESSION_LIVE and DORMANT are told only to the session's own holder.
+ * no existence oracle: ENDED, OTHER_SESSION_LIVE, LIVENESS_UNKNOWN and DORMANT are told only to the session's own
+ * holder. LIVENESS_UNKNOWN (#5121) means the scan overflowed and found no live row: it claims nothing about the rest
+ * (hrn:node:hadronmemory.com:specs:cor:agt:020:11, unknown is its own answer), and carries no count and no id.
  */
-export type ResumeRefusalReason = 'NOT_OWNER' | 'ENDED' | 'OTHER_SESSION_LIVE' | 'DORMANT';
+export type ResumeRefusalReason = 'NOT_OWNER' | 'ENDED' | 'OTHER_SESSION_LIVE' | 'LIVENESS_UNKNOWN' | 'DORMANT';
 export type ResumeDecision = { verdict: 'OK' } | { verdict: 'DORMANT' | 'REFUSED'; reason: ResumeRefusalReason };
 
 /** The principals that may resume at all: an ordinary user, or a pure App key (DY-1). */
@@ -179,7 +181,9 @@ function resumingPrincipal(ctx: Context): 'user' | 'appKey' | null {
  *  (iii) the name: a user must HOLD it (cor:agt:020:09); an App key resumes
  *        only an UNHELD worker, since a held name is a person's;
  *  (iv)  no other session on that worker is live. A scan that hits the cap
- *        refuses rather than decide on a truncated set (#1625 review, P3);
+ *        refuses rather than decide on a truncated set (#1625 review, P3), as
+ *        OTHER_SESSION_LIVE only if a scanned row is live, else
+ *        LIVENESS_UNKNOWN (#5121);
  *  (v)   DY-5: the session is not DORMANT, meaning idle for less than its
  *        App's `sessionDormancyDays`. Past that, no agent act resumes it;
  *        only its human holder's explicit rebind brings the worker back.
@@ -219,9 +223,10 @@ async function resumeDecision(ctx: Context, db: Context['db'], sessionId: string
     select: { id: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
     take: OPEN_SESSION_SCAN_CAP + 1,
   });
-  if (others.length > OPEN_SESSION_SCAN_CAP) return { verdict: 'REFUSED', reason: 'OTHER_SESSION_LIVE' };
   const events = await loadLastEventBySession(db as never, others.map((o) => o.id));
-  return others.some((o) => isSessionLive(o, events.get(o.id), now)) ? { verdict: 'REFUSED', reason: 'OTHER_SESSION_LIVE' } : { verdict: 'OK' };
+  if (others.some((o) => isSessionLive(o, events.get(o.id), now))) return { verdict: 'REFUSED', reason: 'OTHER_SESSION_LIVE' };
+  // A truncated set never resumes; with nothing live among the rows read, the rest is unknown, not live (#5121).
+  return others.length > OPEN_SESSION_SCAN_CAP ? { verdict: 'REFUSED', reason: 'LIVENESS_UNKNOWN' } : { verdict: 'OK' };
 }
 
 /** #5000: the lock-free verdict with its refusal reason, for a gate that must say why. */

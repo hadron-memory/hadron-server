@@ -214,6 +214,8 @@ export async function retireSpecDoor(input: RetireSpecInput, ctx: Context) {
       txCtx,
       'update',
       {
+        ownerLimit: 'count-only',
+        sizeCeiling: 'skip',
         authoring: authoringFromRequest(ctx, input.authoredWith),
         targetNodeId: specId,
         guardRevSeq: input.expectedRevision,

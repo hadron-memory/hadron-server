@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../integrations/db/client.js';
-import { cleanDb, tombstoneNodes } from '../test/helpers.js';
+import { cleanDb, seedRootNode, tombstoneNodes } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { computeContentHash } from './contentHash.js';
 import { computeApprovalHash } from './approvalHash.js';
@@ -85,6 +85,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
   draft = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft', draftCorpus: true }, as());
+  await seedRootNode(db, draft.id, 'specs-draft');
   await spec('pas:010', `Feature. See [Rule [pas:010:01]](https://h/app/u/hrn:node:${draft.urn}:pas:010:01).`);
   await spec('pas:010:01', 'Rule body.');
 });
@@ -137,9 +138,25 @@ describe('mintSpecCorpus: a clean corpus (#1448)', () => {
   });
 });
 
+describe('a fresh memory has no root node to block its first mint (#3952, R11)', () => {
+  it('the first dry run of a new memory with one approved spec lists no blocker, and the memory has only that node', async () => {
+    const fresh = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'QA Specs', draftCorpus: true }, as());
+    const n = await db.node.create({ data: { id: generateId(), memoryId: fresh.id, loc: 'qas:010', name: 'qas:010', content: 'Rule body.', role: 'spec', nodeType: 'info', tags: ['spec'] } });
+    const [row] = await db.$queryRaw<Array<{ rev_seq: number }>>`SELECT rev_seq FROM nodes WHERE id = ${n.id}`;
+    await db.node.update({ where: { id: n.id }, data: {
+      approvedRevNo: row!.rev_seq, approvedByInfo: 'test', approvedAt: new Date(),
+      approvalHash: computeApprovalHash({ title: n.name, abstract: n.abstract, content: n.content }),
+    } });
+    expect((await db.node.findMany({ where: { memoryId: fresh.id } })).map((x) => x.loc)).toEqual(['qas:010']);
+    const dry = await specCorpusMintMutations.mintSpecCorpus(null, { memoryRef: fresh.id, dryRun: true }, as());
+    expect(dry).toMatchObject({ dryRun: true, blockers: [] });
+  });
+});
+
 describe('mintSpecCorpus lints exactly the CLI --all scope (ruling (a); @codex P2s on #1462)', () => {
   it('lints a memory root that sits at a citation-shaped name, as the CLI does', async () => {
     const pas = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'pas', draftCorpus: true }, as());
+    await seedRootNode(db, pas.id, 'pas');
     expect((await mint(true, admin.id, pas.id)).blockers.map((b) => [b.loc, b.rule])).toEqual([['pas', 'tag-spec']]);
     // Marked as the module's spec, it passes like any spec.
     await db.node.updateMany({ where: { memoryId: pas.id, loc: 'pas' }, data: { tags: ['spec'] } });
@@ -426,6 +443,7 @@ describe('mintSpecCorpus: who may mint (#1448)', () => {
 
   it('mints a memory that was never asked to be a draft: minting is per node (#1591)', async () => {
     const plain = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'plain' }, as());
+    await seedRootNode(db, plain.id, 'plain');
     expect(await resolvers.Memory.corpusState({ id: plain.id }, {}, as())).toBe('DRAFT');
     expect(await mint(false, admin.id, plain.id)).toMatchObject({ minted: true, mintedCount: 1 });
     expect(await resolvers.Memory.corpusState({ id: plain.id }, {}, as())).toBe('MINTED');

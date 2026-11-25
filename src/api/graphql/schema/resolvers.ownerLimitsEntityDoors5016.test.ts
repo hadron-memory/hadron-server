@@ -161,6 +161,10 @@ describe('#5016 cloneMemory and cloneAgent', () => {
     const before = { agents: await db.agent.count(), memories: await db.memory.count() };
     await expect(call('cloneAgent', { source: src.urn, target: org2.urn })).rejects.toMatchObject(REACHED);
     expect({ agents: await db.agent.count(), memories: await db.memory.count() }).toEqual(before);
+    // #5015: the system memory copy's nodes are asked in the same call, so a clone with room for the Agent alone is refused too.
+    defaults({ organization: { agents: 5, memories: 0, nodes: 0 } });
+    await expect(call('cloneAgent', { source: src.urn, target: org2.urn })).rejects.toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED', limitKey: 'nodes' } });
+    expect({ agents: await db.agent.count(), memories: await db.memory.count() }).toEqual(before);
     defaults({ organization: { agents: 5, memories: 0 } });
     await expect(call('cloneAgent', { source: src.urn, target: org2.urn })).resolves.toBeTruthy();
   });
@@ -171,6 +175,8 @@ describe('#5016 extractParentNodeToMemory', () => {
     const src = await orgMemory();
     const parent = await db.node.create({ data: { id: generateId(), memoryId: src.id, loc: 'p', name: 'p', tags: [] } });
     await db.node.create({ data: { id: generateId(), memoryId: src.id, loc: 'p:c', name: 'c', tags: [] } });
+    // A new memory has no root node (#3952), so the source needs a node outside the subtree or the move is refused as emptying it.
+    await db.node.create({ data: { id: generateId(), memoryId: src.id, loc: 'keep', name: 'keep', tags: [] } });
     defaults({ organization: { memories: 1 } });
     await orgMemory(org2.id);
     const liveBefore = await db.node.count({ where: { memoryId: src.id, deletedAt: null } });

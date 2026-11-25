@@ -172,7 +172,7 @@ import {
   mcpPrincipalKey,
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
-import { unstorableTextRefusal, refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { ownerLimitResult, unstorableTextRefusal, refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
 import { edgeTextFields, findUnstorableText, unstorableTextMessage, unstorableTextText } from '../lib/unstorableTextInput.js';
 import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
@@ -428,6 +428,8 @@ import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import { edgeDisplayOrder, edgeRunOrder } from '../lib/edgeOrder.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
 import { memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
+import { ownerLimitCaller, requireNodeHeadroom } from '../lib/ownerLimits/nodes.js';
+import { assertNodeContentSize, resultingNodeContent } from '../lib/nodeContentLimit.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -4646,6 +4648,8 @@ export function createMcpServerInstance(
               ...upsertArgs.update, content,
             });
             if (changes.length === 0) return current.id;
+            // #5019 (cor:dmo:060:19) — the section stores its description as its body too, so both count.
+            assertNodeContentSize(resultingNodeContent({ content, description: description ?? null }, currentForDiff));
             sectionChanged = authoredContentChanged(changes);
             // #1328 — a re-save is an update whatever the tool is called
             // (`findings:parent-node-upsert-is-authoring`).
@@ -4665,7 +4669,15 @@ export function createMcpServerInstance(
           }
           if (!prior || prior.deletedAt) {
             await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted, auth);
+            const kept = prior ? await tx.node.findUnique({ where: { id: prior.id } }) : null;
+            assertNodeContentSize(resultingNodeContent(
+              { content, description: description ?? null }, kept && parentKey ? decryptNodeFieldsWithKey({ ...kept }, parentKey) : kept,
+            ));
           }
+          // #5015 (cor:acl:150:04) — only a fresh insert adds a live node here: the upsert leaves a tombstone deleted and
+          // a live section is an update. The memory row is held FOR SHARE just above, so the owner read is the one at
+          // commit; the owner-limit key is this write's last lock (gate ruling 5).
+          if (!prior) await requireNodeHeadroom(tx, { memoryId, caller: ownerLimitCaller(auth) });
           const row = await tx.node.upsert({
             ...upsertArgs,
             update: { ...upsertArgs.update, ...(sectionChanged ? (sectionStamp ?? clearNodeAuthorship()) : {}), revisionContentHash: revisionStateHashRefreshMarker() },
@@ -5015,7 +5027,7 @@ export function createMcpServerInstance(
         // #2772 (cor:api:090:04): the vector work budget ended the search before it found a page; never a silent empty.
         // #4779 adds two causes: an uncertified hybrid order (budget or keyword ceiling) and a page still short after one re-ranking.
         return textResult(
-          `${scopePrefix}Note: the search stopped early (the vector work budget ran out, the offset+limit window passed 20000 rows, a hybrid ranking could not be certified inside the budget or the keyword ceiling, or a page stayed short after one re-ranking, before a page was found); narrow the filters or lower the offset. [stopped_early]\n\nFound 0 node(s).`,
+          `${scopePrefix}Note: the search stopped early (the vector work budget ran out, the offset+limit window passed 20000 rows, a hybrid ranking could not be certified inside the budget, the vector rank depth or the keyword ceiling, or a page stayed short after one re-ranking, before a page was found); narrow the filters or lower the offset. [stopped_early]\n\nFound 0 node(s).`,
         );
       }
       if (result.reason === 'embedding_unavailable') {
@@ -5033,7 +5045,7 @@ export function createMcpServerInstance(
       const noteLines: string[] = [];
       if (degradedFlags.has('stopped_early')) {
         noteLines.push(
-          'Note: the search stopped early (the vector work budget ran out, the offset+limit window was cut at 20000 rows, a hybrid ranking could not be certified inside the budget or the keyword ceiling, or a page stayed short after one re-ranking), so this page may be shorter than, or ordered differently from, the true page. [degraded:stopped_early]',
+          'Note: the search stopped early (the vector work budget ran out, the offset+limit window was cut at 20000 rows, a hybrid ranking could not be certified inside the budget, the vector rank depth or the keyword ceiling, or a page stayed short after one re-ranking), so this page may be shorter than, or ordered differently from, the true page. [degraded:stopped_early]',
         );
       }
       if (degradedFlags.has('no_vector_index')) {
@@ -6916,6 +6928,13 @@ export function createMcpServerInstance(
           objectType !== undefined ? (objectType.trim() || null) : pre?.objectType,
           properties !== undefined ? properties : pre?.properties,
         );
+        // #5019 (cor:dmo:060:19) — the resulting node in plaintext, before the snapshot: this tool clears an omitted body or
+        // description, and a revived tombstone keeps its omitted data and properties.
+        const sizeKey = memEncRow?.isEncrypted ? sessionKeyCache.getByMemoryId(memoryId) : null;
+        assertNodeContentSize(resultingNodeContent(
+          { content: content ?? null, description: description ?? null, data: nodeData, properties },
+          pre && sizeKey ? decryptNodeFieldsWithKey({ ...pre }, sizeKey) : pre,
+        ));
         if (!pre) return null;
         await ensureCurrentNodeRevisionInTransaction(tx, pre.id, { expectedMemoryId: memoryId });
         pre = await tx.node.findUniqueOrThrow({ where: { id: pre.id } });
@@ -7070,6 +7089,10 @@ export function createMcpServerInstance(
           const autoSeq = seq === undefined && pre == null;
           if (autoSeq && !loc.includes(':')) await lockRootSiblings(tx, memoryId);
           const nestedSeq = autoSeq ? await nextSiblingSeq(tx, memoryId, loc) : null;
+          // #5015 (cor:acl:150:04) — every write that reaches here adds a live node (a live loc refused above): an insert,
+          // or a tombstone revived. The memory row is held FOR SHARE (assertMemoryEncryptionStateForWrite), so the owner
+          // read is the one at commit; the owner-limit key is this write's last lock (gate ruling 5).
+          await requireNodeHeadroom(tx, { memoryId, caller: ownerLimitCaller(auth) });
           const written = await tx.node.upsert({
             ...upsertArgs,
             create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
@@ -7601,6 +7624,8 @@ export function createMcpServerInstance(
               : current;
             const changedFields = diffNodeChanges(currentForDiff, plaintextUpdates);
             if (changedFields.length === 0 && !edgeWrite) return;
+            // #5019 (cor:dmo:060:19) — parity with writeNodeCore: the resulting node, before the snapshot; edges are not content.
+            if (changedFields.length > 0) assertNodeContentSize(resultingNodeContent(plaintextUpdates, currentForDiff));
             // #1328 — parity with writeNodeCore, before the snapshot.
             const authoredChange = authoredContentChanged(changedFields);
             const authoredStamp = await assertAuthoring(tx, memory.id, {
@@ -8906,6 +8931,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, attemptAuth, memoryId),
                 principal: attemptAuth,
                 canReadMemoryId: memoryId => canReadMemory(tx as typeof db, attemptAuth, memoryId, EXPLICIT_REF),
+                ownerLimitCaller: ownerLimitCaller(auth),
               });
               relocated = subtreeResult.moved;
               linkWarnings = subtreeResult.linkWarnings;
@@ -12341,10 +12367,12 @@ function ageOf(at: Date, now: Date = new Date()): string {
       if (!memory) return refusalResult('Memory not found.');
       // Import and call syncGraphFromGithub
       const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
-      const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
+      const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0], { ownerLimitCaller: ownerLimitCaller(auth) });
       if (result.notAttemptedReason) return refusalResult(`[${SYNC_NOT_ATTEMPTED}] ${syncNotAttemptedMessage(result.notAttemptedReason)}`);
 
       if (result.fault) throw new Error(result.error ?? 'sync fault');
+      // #5015 — the owner-limit refusal in this caller's own form, as the trusted refusal its GraphQL twin throws.
+      if (result.ownerLimitError) return ownerLimitResult(result.ownerLimitError);
       if (result.error) return refusalResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);
       // #1061 — one write per node the sync actually wrote. This tool is the
       // ONE entry point to a git sync that has a principal to attribute to; the

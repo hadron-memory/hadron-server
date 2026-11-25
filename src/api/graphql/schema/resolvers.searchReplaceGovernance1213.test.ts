@@ -117,13 +117,13 @@ const input = () => ({ memoryIds: [memoryId], nodeIds: [nodeId, nodeId, ordinary
 const replace = (context: Context) => resolvers.Mutation.searchReplaceInNodes({}, { input: input() }, context);
 function promote(context: Context, signal: 'review' | 'task') {
   return writeNodeCore({ memoryId, loc: 'candidate', ...(signal === 'review' ? { role: 'review' } : { isRunnable: true }) },
-    context, 'update', { targetNodeId: nodeId, ownsKind: signal,
+    context, 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', targetNodeId: nodeId, ownsKind: signal,
       authoring: { kind: 'trustedHuman', authenticatedUserId: userId } });
 }
 /** The review door clearing its own kind (#4725: the demotion race case). */
 function demote(context: Context) {
   return writeNodeCore({ memoryId, loc: 'candidate', role: null }, context, 'update',
-    { targetNodeId: nodeId, ownsKind: 'review', authoring: { kind: 'trustedHuman', authenticatedUserId: userId } });
+    { ownerLimit: 'refuse', sizeCeiling: 'check', targetNodeId: nodeId, ownsKind: 'review', authoring: { kind: 'trustedHuman', authenticatedUserId: userId } });
 }
 async function drain(results: PromiseSettledResult<unknown>[]) {
   for (const result of results) if (result.status === 'rejected') throw result.reason;

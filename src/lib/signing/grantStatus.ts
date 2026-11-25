@@ -66,6 +66,19 @@ function pinsOf(g: {
   }
 }
 
+/** The kept signed item list of a touch record, as stored (a malformed entry yields none, so the record reads invalid). */
+function keptItems(json: unknown): Array<{ grantId: string; version: number; termsHash: string }> {
+  if (!Array.isArray(json)) return [];
+  const out: Array<{ grantId: string; version: number; termsHash: string }> = [];
+  for (const i of json) {
+    if (!i || typeof i !== 'object') return [];
+    const o = i as Record<string, unknown>;
+    if (typeof o.grantId !== 'string' || typeof o.version !== 'number' || typeof o.termsHash !== 'string') return [];
+    out.push({ grantId: o.grantId, version: o.version, termsHash: o.termsHash });
+  }
+  return out;
+}
+
 /** The status of each grant in `grantIds`; a grant with no records gets the empty status. */
 export async function loadGrantSignatureStatuses(db: Db, grantIds: string[]): Promise<Map<string, GrantSignatureStatusView>> {
   const out = new Map<string, GrantSignatureStatusView>();
@@ -74,7 +87,7 @@ export async function loadGrantSignatureStatuses(db: Db, grantIds: string[]): Pr
   if (ids.length === 0) return out;
   const records = await db.grantSignature.findMany({
     where: { grantId: { in: ids } },
-    include: { passkey: { select: { ownerId: true, credentialId: true, publicKey: true, label: true, revokedAt: true, windowEndsAt: true, windowEndedAt: true, windowOutcome: true } } },
+    include: { selectionSignature: { select: { selectionId: true, items: true } }, passkey: { select: { ownerId: true, credentialId: true, publicKey: true, label: true, revokedAt: true, windowEndsAt: true, windowEndedAt: true, windowOutcome: true } } },
   });
   if (records.length === 0) return out;
   const rows = await db.grant.findMany({
@@ -92,7 +105,9 @@ export async function loadGrantSignatureStatuses(db: Db, grantIds: string[]): Pr
     if (!row) continue;
     const verifies = await grantSignatureRecordVerifies(
       { id: r.id, payloadVersion: r.payloadVersion, grantId: r.grantId, recordVersion: r.version, termsHash: r.termsHash, requestId: r.signingRequestId,
-        authenticatorData: Buffer.from(r.authenticatorData), clientDataJson: Buffer.from(r.clientDataJson), signature: Buffer.from(r.signature) },
+        authenticatorData: Buffer.from(r.authenticatorData), clientDataJson: Buffer.from(r.clientDataJson), signature: Buffer.from(r.signature),
+        // #5001: a selection record is rebuilt from its touch record's KEPT item list, never from the grants as they are now.
+        ...(r.selectionSignature ? { selection: { selectionId: r.selectionSignature.selectionId, items: keptItems(r.selectionSignature.items) } } : {}) },
       { credentialId: Buffer.from(r.passkey.credentialId), publicKey: Buffer.from(r.passkey.publicKey), counter: 0n },
       // The record's own RP ID, never the current config (#10470 mirror).
       r.rpId,

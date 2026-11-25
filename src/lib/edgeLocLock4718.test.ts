@@ -186,7 +186,7 @@ describe('lock order against moveNodeSubtree (#4718)', () => {
       moverHoldsNodes();
       // Go on once the writer has committed, or is blocked on a lock this transaction holds (a cycle then closes below).
       await Promise.race([writerCommitted, waitForRowLockWaiter().catch(() => undefined)]);
-      await moveNodeSubtree(tx, { source: sourceRow, destLoc: 'moved', destMemoryId: dest.id, editor: { userId: user.id } });
+      await moveNodeSubtree(tx, { ownerLimitCaller: null, source: sourceRow, destLoc: 'moved', destMemoryId: dest.id, editor: { userId: user.id } });
     }, { timeout: 15_000 });
 
     await nodesHeld;
@@ -243,7 +243,7 @@ describe('KNOWN, ACCEPTED: a writer key-sharing two edges against a mover re-key
     const args = (t: typeof t1) => ({ memoryId: graph.id, sourceId: source.id, targetId: t.id, sourceLoc: 'root', targetLoc: t.loc, name: NAME });
     const sourceRow = await db.node.findUniqueOrThrow({ where: { id: source.id } });
     const move = (tx: Parameters<typeof moveNodeSubtree>[0]) =>
-      moveNodeSubtree(tx, { source: sourceRow, destLoc: 'moved', destMemoryId: dest.id, editor: { userId: user.id } });
+      moveNodeSubtree(tx, { ownerLimitCaller: null, source: sourceRow, destLoc: 'moved', destMemoryId: dest.id, editor: { userId: user.id } });
 
     let moverHolds!: () => void;
     const moverHoldsNodes = new Promise<void>((r) => { moverHolds = r; });

@@ -175,6 +175,8 @@ import { attachIncludePinWarnings, carryIncludePinWarnings, captureIncludePinWar
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 import { memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
+import { ownerLimitCaller, requireNodeHeadroom, type NodeOwnerLimit } from '../../../lib/ownerLimits/nodes.js';
+import { assertNodeContentSize, resultingNodeContent, withEncryptedSizes, type NodeContentFields, type NodeSizeCeiling } from '../../../lib/nodeContentLimit.js';
 
 
 /**
@@ -358,6 +360,18 @@ async function writeNodeCoreRaw(
      * omission (`src/lib/authoringAttestation.ts`).
      */
     authoring: AuthoringContext;
+    /**
+     * #5015 (Billing A7b, cor:acl:150:04) — what this write does at the memory owner's `nodes` limit when it adds a live
+     * node (a fresh insert, or a create that revives a tombstone): `'refuse'` or `'count-only'`. REQUIRED like
+     * `authoring`, so a new call site states it; never read on an update or on an upsert onto an existing row.
+     */
+    ownerLimit: NodeOwnerLimit;
+    /**
+     * #5019 (Billing A11, cor:dmo:060:19) — whether this write is judged by the deployment's ceiling on one node's content:
+     * `'check'` for caller content (the RESULTING node is measured, in plaintext), `'skip'` for what the platform composed or
+     * copied. REQUIRED like `ownerLimit`, so a new call site states it.
+     */
+    sizeCeiling: NodeSizeCeiling;
     /** Reuse a caller's lock transaction; effects wait for its commit. */
     transaction?: {
       tx: Prisma.TransactionClient;
@@ -962,6 +976,11 @@ async function writeNodeCoreRaw(
         suppliedForDiff.abstractOriginHash = nextAbstractOriginHash;
       }
 
+      // #5019 — judged on the locked, decrypted row, before the revision snapshot and the write. `input` is the caller's plaintext.
+      const assertSizeCeiling = (stored: NodeContentFields | null): void => {
+        if (opts.sizeCeiling === 'check') assertNodeContentSize(resultingNodeContent(input as NodeContentFields, stored));
+      };
+
       /** Recompute against the locked row when an abstract-only write follows a concurrent body edit. */
       const hashAgainstLockedContent = (lockedContent: string | null): string | null | undefined => {
         if (input.abstract === undefined) return undefined;
@@ -1495,6 +1514,9 @@ async function writeNodeCoreRaw(
               return { conflict: false, node: unchanged };
             }
 
+            // #5019 — an edit that leaves the node over the ceiling is refused, whichever field it changes; inline edges are not node content.
+            if (changes.length > 0 || changesUnversionedField) assertSizeCeiling(currentForDiff);
+
             // #1328 — before the first write of this edit, and judged on the
             // locked row: the role before and after, the claim, the current
             // task revision. A write that changes no authored field needs no
@@ -1727,6 +1749,7 @@ async function writeNodeCoreRaw(
             let authoritativeChanges: string[] = [];
             let storedForIncludes: string | null = null;
             let authoritativeAbstractHash = nextAbstractOriginHash;
+            if (!authoritative) assertSizeCeiling(null);
             if (authoritative) {
               // Row lock + drift reconciled as its own revision BEFORE this
               // snapshot (@copilot, PR #1339): the address lock binds only
@@ -1748,6 +1771,7 @@ async function writeNodeCoreRaw(
               const authoritativeForDiff = memEncInfo.isEncrypted
                 ? decryptNodeFields({ ...authoritative }, memEncInfo)
                 : authoritative;
+              assertSizeCeiling(authoritativeForDiff); // #5019 — a revive keeps the fields it omits
               // A tombstone's text is not the includer's stored text (#2041 S2b).
               if (!authoritative.deletedAt) storedForIncludes = authoritativeForDiff.content ?? null;
               authoritativeAbstractHash = hashAgainstLockedContent(authoritative.content);
@@ -1837,6 +1861,12 @@ async function writeNodeCoreRaw(
             const isRoot = !input.loc.includes(':');
             if (autoSeq && isRoot) await lockRootSiblings(tx, input.memoryId);
             const nestedSeq = autoSeq ? await nextSiblingSeq(tx, input.memoryId, input.loc) : null;
+            // #5015 — a fresh insert or a revive adds a live node to the memory's owner. The owner is read under the
+            // memory row lock `assertMemoryWriteStateStable` holds, and the owner-limit key is the LAST lock this write
+            // takes (gate ruling 5): after it the write only touches the row it holds and the loc whose key it holds.
+            if ((!authoritative || reviving) && opts.ownerLimit === 'refuse') {
+              await requireNodeHeadroom(tx, { memoryId: input.memoryId, caller: ownerLimitCaller(opts?.transaction?.requestContext ?? ctx) });
+            }
             const upserted = await tx.node.upsert({
               ...upsertArgs,
               create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
@@ -2159,6 +2189,8 @@ async function updateNodeCore(
   // move (which frees the loc for reuse) can't make the loc-keyed
   // write hit a different node.
   return writeNodeCore({ ...fields, memoryId: targetMemoryId, loc: targetLoc }, ctx, 'update', {
+    ownerLimit: 'count-only',
+    sizeCeiling: 'check',
     authoring: authoringFromRequest(ctx, input.authoredWith),
     targetNodeId,
     guardRevSeq: expectedRevision ?? undefined,
@@ -2280,6 +2312,8 @@ async function mergePropertiesAndWrite(a: {
           withoutRequestCaches(ctx, lockTx),
           'update',
           {
+            ownerLimit: 'count-only',
+            sizeCeiling: 'check',
             authoring: authoringFromRequest(ctx, fields.authoredWith),
             targetNodeId: nodeId,
             guardRevSeq: a.expectedRevision ?? undefined,
@@ -2441,6 +2475,8 @@ export async function updateNodePropertiesWith(
       withoutRequestCaches(ctx, lockTx),
       'update',
       {
+        ownerLimit: 'count-only',
+        sizeCeiling: 'check',
         authoring: authoringFromRequest(ctx, authoredWith),
         targetNodeId: meta.id,
         governedMerge: 'properties',
@@ -2648,6 +2684,7 @@ export const nodeMoveOps = {
               authorizeLockedMemory: (memoryId) =>
                 requireMemoryWriteAccess(txCtx, memoryId),
               principal: txCtx,
+              ownerLimitCaller: ownerLimitCaller(ctx),
             });
             relocated = result.moved;
             linkWarnings = result.linkWarnings;
@@ -2747,6 +2784,8 @@ async function createNodeInInstallMemory(input: CreateNodeArgs, ctx: Context) {
   const effects: Array<() => void> = [];
   const written = await withInstallMemory(ctx, install!, (tx, txCtx, memory) =>
     writeNodeCore({ ...rest, memoryId: memory.id } as CreateNodeInput, txCtx, 'create', {
+      ownerLimit: 'refuse',
+      sizeCeiling: 'check',
       authoring: authoringFromRequest(ctx, input.authoredWith),
       governedContext: 'node-write',
       // #3651: response-only state (the include-pin warnings) is keyed by the exact request Context, and `txCtx`
@@ -2803,6 +2842,8 @@ export const nodeMutations = {
       if (input.install) return createNodeInInstallMemory(input, ctx);
       assertMemoryTargeted(input.memoryId, 'createNode');
       return writeNodeCore(input as CreateNodeInput, ctx, 'create', {
+        ownerLimit: 'refuse',
+        sizeCeiling: 'check',
         authoring: authoringFromRequest(ctx, input.authoredWith),
         governedContext: 'node-write',
         concealUnreadable: { entity: 'memory', ref: input.memoryId! },
@@ -2856,6 +2897,8 @@ export const nodeMutations = {
               ? { ...input, properties: withClaudeSkillExport(input.properties, skill, { loc: input.loc, content: input.content ?? '' }) }
               : input;
             return writeNodeCore(written, ctx, 'create', {
+              ownerLimit: 'refuse',
+              sizeCeiling: 'check',
               authoring: authoringFromRequest(ctx, input.authoredWith),
               ownsKind: entry.kind,
               governedContext: 'node-write',
@@ -3030,7 +3073,7 @@ export const nodeMutations = {
         },
         ctx,
         'update',
-        { authoring: authoringFromRequest(ctx, authoredWith), targetNodeId: meta.id, governedMerge: 'data', governedContext: 'node-write' },
+        { ownerLimit: 'count-only', sizeCeiling: 'check', authoring: authoringFromRequest(ctx, authoredWith), targetNodeId: meta.id, governedMerge: 'data', governedContext: 'node-write' },
       );
     },
 
@@ -3347,6 +3390,8 @@ export const nodeMutations = {
         }
 
         if (total > 0) {
+          // #5019 — the resulting node, for the whole batch before any write, as the abstract cap above.
+          assertNodeContentSize(resultingNodeContent(changed, pt));
           plans.push({
             raw,
             isEncrypted: memEnc.isEncrypted,
@@ -4472,7 +4517,7 @@ export const nodeMutations = {
           srcPlain.abstract == null ||
           srcPlain.abstractOriginHash === computeContentHash(srcPlain.content)
         ) ? carryNodeAuthorship(source) : clearNodeAuthorship();
-        return writeNodeCore(input, txCtx, 'create', { authoring: { kind: 'carry' }, copiedAuthorship, copiesSeq: true,
+        return writeNodeCore(input, txCtx, 'create', { ownerLimit: 'refuse', authoring: { kind: 'carry' }, sizeCeiling: 'skip', copiedAuthorship, copiesSeq: true,
           transaction: { tx, pooledDb: ctx.db, coordinationMemories: [selectedSource.memoryId, destMemoryId], afterCommit: effect => effects.push(effect) },
         });
       });
@@ -4677,6 +4722,12 @@ export const nodeMutations = {
           });
         }
         throw e;
+      }
+
+      // #5019 — the merged target, before any write. A merge that touches no encrypted field holds no key, so the stored
+      // body is then measured from its envelope.
+      if (Object.keys(changed).length > 0) {
+        assertNodeContentSize(resultingNodeContent(changed, tgtEnc.isEncrypted && !touchesEncrypted ? withEncryptedSizes(target) : tgtPt));
       }
 
       // Post-merge plaintext content drives the spec-032 abstract hash.
@@ -5273,6 +5324,8 @@ export const nodeMutations = {
           decryptNodeFieldsWithKey(logicalCurrent, requireKey(current.memoryId));
         }
         const changes = diffNodeChanges(logicalCurrent, logicalRestoreFields);
+        // #5019 — a restore is checked like an update (the gate; exempting it is cor:dmo:060:19's Open Question).
+        assertNodeContentSize(resultingNodeContent(logicalRestoreFields, logicalCurrent));
         const restoreFields = { ...logicalRestoreFields };
         if (selectedDestination.isEncrypted) {
           Object.assign(restoreFields, encryptNodeFieldsWithKey(plaintextFields, requireKey(current.memoryId)));

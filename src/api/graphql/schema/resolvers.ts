@@ -190,6 +190,7 @@ export const resolvers = {
   SigningRequest: signingFieldResolvers.SigningRequest,
   NodeSignature: signingFieldResolvers.NodeSignature,
   GrantSigningRequest: grantSigningFieldResolvers.GrantSigningRequest,
+  GrantSigningSelection: grantSigningFieldResolvers.GrantSigningSelection,
   Grant: grantFieldResolvers.Grant,
   GrantSignature: grantFieldResolvers.GrantSignature,
   Comment: commentFieldResolvers.Comment,

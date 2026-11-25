@@ -20,12 +20,12 @@
  * fingerprint includes the rows' `xmin`, so a change that is reverted before the second read still differs
  * (a reverted update is a new tuple version); an `xmin` freeze mid-transaction can only cause a spurious retry.
  */
+import { ownerLimitCaller } from '../ownerLimits/nodes.js';
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { requireOrgRole, requireReadableAgent, getAccessibleMemoryIds, type Context, AGENT_INCLUDE } from '../../api/graphql/schema/resolvers.helpers.js';
 import { withAuthorizedTx } from '../../api/graphql/schema/authorizedTx.js';
 import { AgentUrnTakenError } from '../../api/graphql/schema/resolvers.mutation.agent.js';
-import { requireOwnerHeadroom } from '../ownerLimits/gate.js';
 import { cloneMemoryGraphInTx, reconcileStampedSourceNodes } from '../../controller/operations/cloneMemory.js';
 import { ensureAgentOrgGrant } from '../../controller/operations/ensureAgentOrgGrant.js';
 import { subscribeOrgToPublicAgentInTx } from '../../controller/operations/subscribeOrgToPublicAgent.js';
@@ -270,10 +270,11 @@ async function writeClone(
   const urn = `${targetUrn}:${slug}`;
   await claimUrn(tx, urn);
 
-  // #5016: one Agent more for the target organization, after every anchor and row lock and before the first insert. The copy's own
-  // memory is a `system` one and free; slice A7b adds `nodes` to this call as one multi-key check.
-  await requireOwnerHeadroom(tx, { owner: { organizationId: target.orgId }, key: 'agents', caller: ctx.userId ? { userId: ctx.userId } : null });
+  // #5015/#5016: one Agent more for the target organization, and its system memory copy's nodes, asked in the clone's one multi-key call
+  // after every anchor and row lock and before the first insert. The copy's own memory is a `system` one and free.
   const memoryCopy = await cloneMemoryGraphInTx(tx, {
+    extraOwnerChecks: [{ key: 'agents', amount: 1n }],
+    ownerLimitCaller: ownerLimitCaller(ctx),
     sourceMemoryId: plan.systemMemoryId,
     name: `${name} System`,
     newUrn: `${urn}-system`,

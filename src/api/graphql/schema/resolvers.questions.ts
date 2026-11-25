@@ -768,7 +768,7 @@ export const questionMutations = {
         },
         txCtx,
         'create',
-        { authoring: { kind: 'platform', record: 'question' }, ownsKind: 'question', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' }, ownsKind: 'question', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
       );
       const row = await tx.node.findUniqueOrThrow({ where: { id: (node as { id: string }).id }, select: LOG_ROW_SELECT });
       return { row, data };
@@ -812,7 +812,7 @@ export const questionMutations = {
         { memoryId: log.memoryId, loc: row.loc, ...logContentOf(row.name, data), reason },
         txCtx,
         'update',
-        { authoring: { kind: 'platform', record: 'question' },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' },
           targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'question', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -892,7 +892,7 @@ export const questionMutations = {
         },
         txCtx,
         'create',
-        { authoring: { kind: 'platform', record: 'question' }, ownsKind: 'question', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' }, ownsKind: 'question', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
       );
       // The counter, as chat roots keep theirs: a sanctioned direct write that
       // asks for a fingerprint refresh, so it is not reconciled as drift. The
@@ -998,7 +998,7 @@ export const questionMutations = {
         { memoryId: target.memoryId, loc: row.loc, ...renderedFields(final), reason },
         txCtx,
         'update',
-        { authoring: { kind: 'platform', record: 'question' },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' },
           targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'question', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -1044,7 +1044,7 @@ export const questionMutations = {
         { memoryId: target.memoryId, loc: row.loc, ...renderedFields(next), reason },
         txCtx,
         'update',
-        { authoring: { kind: 'platform', record: 'question' },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' },
           targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'question', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -1153,7 +1153,7 @@ export const questionMutations = {
         { memoryId: target.memoryId, loc: lockedLog.loc, ...logContentOf(lockedLog.name, data), reason: `purge ${purgedCode}: ${reason}`.slice(0, REASON_MAX) },
         txCtx,
         'update',
-        { authoring: { kind: 'platform', record: 'question' },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' },
           targetNodeId: lockedLog.id, ownsKind: 'question', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -1567,7 +1567,7 @@ async function answerAct(
       { memoryId: target.memoryId, loc: row.loc, ...renderedFields(final), reason: act.label },
       txCtx,
       'update',
-      { authoring: { kind: 'platform', record: 'question' },
+      { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' },
         targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'question', governedContext: 'node-write',
         transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
       },
