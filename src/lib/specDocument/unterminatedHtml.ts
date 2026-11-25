@@ -112,6 +112,9 @@ function tagEndOf(text: string, i: number, nameFrom: number): number {
   return -1;
 }
 
+/** What a line of the text was, for the rules that depend on whether a paragraph is open. */
+type LineKind = 'blank' | 'code' | 'nonpara' | 'other';
+
 /** The index of the `<` that opens the first unterminated construct at or after `from`, or -1. */
 function firstUnterminated(text: string, from: number): number {
   const n = text.length;
@@ -120,9 +123,9 @@ function firstUnterminated(text: string, from: number): number {
   // What the previous line was. 'other' is a line of a paragraph (or anything that a following line can continue); every other kind leaves
   // no paragraph open: after it a four-space line is indented code and a type 7 tag may start an HTML block. 'nonpara' is a heading, a
   // thematic break, a fence line or the last line of an HTML block.
-  let prev: 'blank' | 'code' | 'nonpara' | 'other' = 'blank';
+  let prev: LineKind = 'blank';
   // The kind of the line before the one being read (`prev` is already the current line's kind once its head is handled).
-  let prevBefore: typeof prev = 'blank';
+  let prevBefore: LineKind = 'blank';
   // A raw-text element opened in the middle of a line is inline HTML: Markdown goes on parsing after it, so only an end tag
   // that Markdown also reads as HTML (outside code, a fence and a backslash escape) closes it. -1 when none is open.
   let rawStart = -1;
