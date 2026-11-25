@@ -2556,6 +2556,8 @@ export const typeDefs = `#graphql
     expiresAt: DateTime!
     "Null while OPEN. EXPIRED ends at expiresAt; every other end at the moment it happened (DB clock)."
     endedAt: DateTime
+    "Latest verified signing-proof attempt by someone who may issue none of the grants, while OPEN, if any. Visible only through the selection's read gate; contains no signer identity and does not end the selection (#4546, #5001; hrn:node:hadronmemory.com:specs:cor:acl:140:07)."
+    lastRefusedAt: DateTime
     "The server-hosted ceremony page: the server origin plus /grant-selection-signing/<id>, with no token. Copy it verbatim; never compose it. One passkey touch there signs every grant the signer may issue; no GraphQL or MCP call takes an assertion."
     ceremonyUrl: String!
   }

@@ -8,6 +8,7 @@
  */
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { Client } from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
@@ -19,6 +20,8 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { createGrantSelectionInTransaction } from '../lib/signing/grantSelectionRequests.js';
 import { createGrantSigningRequestInTransaction } from '../lib/signing/grantRequests.js';
 import { loadGrantSignatureStatuses } from '../lib/signing/grantStatus.js';
+import * as grantLocks from '../lib/signing/grantActivationLocks.js';
+import { waitForLockWaitersBlockedBy } from '../test/lockWait.js';
 import { clearSignatureVerifyCache, grantSignatureRecordVerifies } from '../lib/signing/verify.js';
 
 const ORIGIN = 'https://sign.example.test';
@@ -528,4 +531,166 @@ describe('P3 + P5 + P12: each record re-verifies alone, from the touch record\'s
     const statuses = await loadGrantSignatureStatuses(db, gs);
     for (const g of gs) expect(statuses.get(g), g).toMatchObject({ state: 'CURRENT', integrityProblems: 0 });
   });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// P13: the lock order. Every completion locks its grants in ascending id; a race pin pauses each completion right after its
+// FIRST grant lock (through the grantActivationLocks module export), so the second lock is taken with the first held.
+
+/** Pause every completion transaction after the first grant lock it takes; `nextHeld` resolves with that backend's pid, `release` frees all. */
+function pauseEachAfterFirstGrantLock(only?: string) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const seen = new Set<number>();
+  const waiters: Array<(pid: number) => void> = [];
+  const real = grantLocks.lockGrantForSigning;
+  vi.spyOn(grantLocks, 'lockGrantForSigning').mockImplementation(async (tx, id, appIdArg) => {
+    const out = await real(tx, id, appIdArg);
+    const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    if (!seen.has(pid) && (only === undefined || id === only)) {
+      seen.add(pid);
+      waiters.shift()?.(pid);
+      await gate;
+    }
+    return out;
+  });
+  return { nextHeld: () => new Promise<number>((r) => waiters.push(r)), release: () => release() };
+}
+async function blockerConn(): Promise<{ c: Client; pid: number }> {
+  const c = new Client({ connectionString: process.env.DATABASE_URL });
+  await c.connect();
+  await c.query('BEGIN');
+  return { c, pid: (await c.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number };
+}
+const outcomesOf = async (r: Response) => Object.fromEntries(((await r.json()) as { outcomes: Array<{ grantId: string; outcome: string }> }).outcomes.map((o) => [o.grantId, o.outcome]));
+const sortedGrants = async (n: number) => (await Promise.all(Array.from({ length: n }, () => scheduleGrant()))).sort();
+
+describe('P13: completions lock their grants in ascending id, so overlapping ones neither deadlock nor double-activate', () => {
+  it('{G1,G2} and {G2,G3}, each paused after its first lock: both finish, no 40P01, G2 activated exactly once', async () => {
+    const [g1, g2, g3] = await sortedGrants(3) as [string, string, string];
+    const admin2 = await person('sel-admin2', 'ADMIN');
+    const selA = await openSelection([g1, g2]);
+    const selB = await openSelection([g2, g3]);
+    const pA = await prove(selA.id, admin);
+    const pB = await prove(selB.id, admin2);
+    const pause = pauseEachAfterFirstGrantLock();
+    const heldA = pause.nextHeld();
+    const doneA = post(selA.id, 'complete', signingBody(pA, admin), pA.cookie);
+    const pidA = await heldA;
+    const heldB = pause.nextHeld();
+    const doneB = post(selB.id, 'complete', signingBody(pB, admin2), pB.cookie);
+    const pidB = await heldB;
+    expect(pidA).not.toBe(pidB);
+    pause.release();
+    const [rA, rB] = await Promise.all([doneA, doneB]);
+    expect(rA.status).toBe(200);
+    expect(rB.status).toBe(200);
+    const oA = await outcomesOf(rA);
+    const oB = await outcomesOf(rB);
+    expect(oA[g1]).toBe('ACTIVATED');
+    expect(oB[g3]).toBe('ACTIVATED');
+    expect([oA[g2], oB[g2]].filter((o) => o === 'ACTIVATED')).toHaveLength(1);
+    for (const g of [g1, g2, g3]) { expect((await grantRow(g)).activated_at).not.toBeNull(); expect(await activateEvents(g)).toBe(1); }
+    expect(await selState(selA.id)).toBe('completed');
+    expect(await selState(selB.id)).toBe('completed');
+  });
+
+  it('the same two grants in two selections: the second completion waits on the first; one activation and one record each', async () => {
+    const [g1, g2] = await sortedGrants(2) as [string, string];
+    const admin2 = await person('sel-admin2', 'ADMIN');
+    const selA = await openSelection([g1, g2]);
+    const selB = await openSelection([g1, g2]);
+    const pA = await prove(selA.id, admin);
+    const pB = await prove(selB.id, admin2);
+    const pause = pauseEachAfterFirstGrantLock();
+    const heldA = pause.nextHeld();
+    const doneA = post(selA.id, 'complete', signingBody(pA, admin), pA.cookie);
+    const pidA = await heldA;
+    const doneB = post(selB.id, 'complete', signingBody(pB, admin2), pB.cookie);
+    await waitForLockWaitersBlockedBy(db, pidA, 1);
+    pause.release();
+    const rA = await doneA;
+    const rB = await doneB;
+    expect(rA.status).toBe(200);
+    expect([200, 409]).toContain(rB.status);
+    for (const g of [g1, g2]) {
+      expect((await grantRow(g)).activated_at).not.toBeNull();
+      expect(await activateEvents(g)).toBe(1);
+      expect(await db.grantSignature.count({ where: { grantId: g } })).toBe(1);
+    }
+  });
+
+  it('against a concurrent revocation of G2: the completion waits on the revoker, then reads G2 ended; G1 activates', async () => {
+    const [g1, g2] = await sortedGrants(2) as [string, string];
+    const sel = await openSelection([g1, g2]);
+    const p = await prove(sel.id, admin);
+    const pause = pauseEachAfterFirstGrantLock();
+    const held = pause.nextHeld();
+    const done = post(sel.id, 'complete', signingBody(p, admin), p.cookie);
+    await held;
+    const b = await blockerConn();
+    try {
+      await b.c.query(`UPDATE grants SET revoked_at = (clock_timestamp() AT TIME ZONE 'UTC'), revoked_by = $2 WHERE id = $1`, [g2, admin.id]);
+      pause.release();
+      await waitForLockWaitersBlockedBy(db, b.pid, 1);
+      await b.c.query('COMMIT');
+      const r = await done;
+      expect(r.status).toBe(200);
+      const o = await outcomesOf(r);
+      expect(o[g1]).toBe('ACTIVATED');
+      expect(['STALE', 'EXPIRED']).toContain(o[g2]);
+    } finally { pause.release(); await b.c.query('ROLLBACK').catch(() => undefined); await b.c.end(); }
+    expect((await grantRow(g2)).activated_at).toBeNull();
+    expect(await activateEvents(g2)).toBe(0);
+    expect(await activateEvents(g1)).toBe(1);
+  });
+
+  // Both orders: the selection holds G1 (paused) while the single path takes G2 whole; and the single path holds G2 (paused)
+  // while the selection, past G1, waits on it. The pause applies only to the transaction that locks `only` first.
+  for (const order of ['selection first', 'single path first'] as const) {
+    it(`against a single-path completion of G2 (${order}): exactly one activation of G2`, async () => {
+      const [g1, g2] = await sortedGrants(2) as [string, string];
+      const admin2 = await person('sel-admin2', 'ADMIN');
+      const sel = await openSelection([g1, g2]);
+      const single = await db.$transaction((tx) => createGrantSigningRequestInTransaction(tx, g2, { appId, requester: { userId: requester.id, appId: null, workerId: null, sessionId: null } }));
+      const p = await prove(sel.id, admin);
+      // The one-grant ceremony, driven by hand on its own routes.
+      const c = await post(single.id, 'proof/challenge', {}, undefined, ORIGIN, 'grant-signing');
+      const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
+      const sCookie = (c.headers.get('set-cookie') ?? '').split(';')[0]!;
+      const pa = admin2.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: 1 });
+      const pr = await post(single.id, 'proof', assertionBody(ceremonyId, admin2.key, pa), sCookie, ORIGIN, 'grant-signing');
+      expect(pr.status).toBe(200);
+      const sCookie2 = (pr.headers.get('set-cookie') ?? '').split(';')[0] || sCookie;
+      const sc = await (await post(single.id, 'challenge', {}, sCookie2, ORIGIN, 'grant-signing')).json() as { ceremonyId: string; challenge: string };
+      const sa = admin2.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(sc.challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: 2 });
+      const startSingle = () => post(single.id, 'complete', assertionBody(sc.ceremonyId, admin2.key, sa), sCookie2, ORIGIN, 'grant-signing');
+      const startSel = () => post(sel.id, 'complete', signingBody(p, admin), p.cookie);
+      let rSel: Response; let rSingle: Response;
+      if (order === 'selection first') {
+        const pause = pauseEachAfterFirstGrantLock(g1);
+        const held = pause.nextHeld();
+        const doneSel = startSel();
+        await held;
+        rSingle = await startSingle();
+        pause.release();
+        rSel = await doneSel;
+      } else {
+        const pause = pauseEachAfterFirstGrantLock(g2);
+        const held = pause.nextHeld();
+        const doneSingle = startSingle();
+        const pid = await held;
+        const doneSel = startSel();
+        await waitForLockWaitersBlockedBy(db, pid, 1);
+        pause.release();
+        [rSel, rSingle] = await Promise.all([doneSel, doneSingle]);
+      }
+      expect(rSel.status).toBe(200);
+      expect(rSingle.status).toBe(200);
+      expect((await grantRow(g2)).activated_at).not.toBeNull();
+      expect(await activateEvents(g2)).toBe(1);
+      expect(await db.grantSignature.count({ where: { grantId: g2 } })).toBe(1);
+      expect(await activateEvents(g1)).toBe(1);
+    }, 30_000);
+  }
 });
