@@ -118,6 +118,13 @@ function tagEndOf(text: string, i: number, nameFrom: number): number {
   return -1;
 }
 
+/** The column `s` ends at when it starts at column `col` (tab stops of four). */
+function columnAfter(s: string, col = 0): number {
+  let c = col;
+  for (const ch of s) c += ch === '\t' ? 4 - (c % 4) : 1;
+  return c;
+}
+
 /** A container a line sits in: a block quote, or a list item whose content starts `width` columns further in. */
 type Container = { quote: true } | { quote: false; width: number };
 
@@ -248,10 +255,11 @@ function firstUnterminated(text: string, from: number): number {
       lineContainers = c.list;
       lineContent = lineFrom + c.at;
       let f = lineContent;
-      while (f < lineTo && text[f] === ' ') f += 1;
-      lineFirst = f;
+      while (f < lineTo && (text[f] === ' ' || text[f] === '\t')) f += 1;
+      const from = columnAfter(text.slice(lineFrom, lineContent));
+      lineFirst = columnAfter(text.slice(lineContent, f), from) - from <= 3 ? f : -1;
     }
-    return j - lineContent <= 3 && lineFirst === j;
+    return lineFirst === j;
   };
   // Where the containers of the line at `j` end (`blank`: or the first line that is blank inside them). `startsLine(j)` was asked first. A line
   // in the same containers below a known end has the same end, so a long quote is walked once.
@@ -334,7 +342,11 @@ function firstUnterminated(text: string, from: number): number {
       fence = step.open;
       if (step.fenceLine || wasOpen) { prev = 'nonpara'; lrd = 0; i = end + 1; continue; }
       // An indented code block: a line of four spaces or a tab, after a blank line, the start of the text or another such line.
-      if (/^(?: {4}|\t)/.test(inner) && inner.trim() !== '' && prev !== 'other' && prev !== 'marker') { prev = 'code'; lrd = 0; i = end + 1; continue; }
+      const quotes = line.slice(0, line.length - inner.length);
+      const from = columnAfter(quotes);
+      // A tab right after a quote marker gives its first column to the marker.
+      const indent = columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0], from) - from - (quotes.endsWith('>') && inner.startsWith('\t') ? 1 : 0);
+      if (indent >= 4 && inner.trim() !== '' && prev !== 'other' && prev !== 'marker') { prev = 'code'; lrd = 0; i = end + 1; continue; }
       if (lrd === 3) {
         // Inside a title that opened on an earlier line: still the definition, until the line that closes it (or a blank line, which ends the attempt).
         if (inner.trim() === '') { prev = 'blank'; lrd = 0; } else { prev = 'nonpara'; lrd = hasCloser(inner, titleClose) ? 0 : 3; }

@@ -45,6 +45,9 @@ describe('#5151 item 5: an HTML block inside a block quote or list item', () => 
     ['a type 1 block whose end tag is outside the quote', '> §script>\n\n```\n</script>\n```'],
     ['a type 1 pre block whose end tag is outside the item', '- §pre>\n\nz `</pre>`'],
     ['a tab after the list marker', '-\t<div>\n\tuse `§pre x=` here'],
+    ['a tab after a quote marker is two columns of indent, not code', '> \t§textarea>\n> x'],
+    ['a tab right after a quote marker', '>\t§textarea>\n> x'],
+    ['four columns after a quote marker are code', '>     <textarea>\n\nx'],
     // Where the block ends: the code span is a code span again.
     ['a quote ends at a line with no marker', '> <div>\nuse `<pre x=` here'],
     ['a quote block ends at a bare marker', '> <div>\n>\n> use `<pre x=` here'],
