@@ -7,7 +7,7 @@ import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 
 const read = (p: string) => readFileSync(new URL(`../../../prisma/${p}`, import.meta.url), 'utf8');
-const MIGRATION = read('migrations/20261124200000_credit_ledger_append_only/migration.sql');
+const MIGRATION = read('migrations/20261125130000_credit_ledger_append_only/migration.sql');
 const SOURCE = read('credit-ledger-invariants.sql');
 
 let pg: Client;

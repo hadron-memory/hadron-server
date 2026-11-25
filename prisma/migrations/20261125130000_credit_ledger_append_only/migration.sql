@@ -22,7 +22,7 @@ ALTER TABLE "credit_ledger_entries" ADD CONSTRAINT "credit_ledger_entries_organi
 
 -- #5010 (billing A12, hrn:node:hadronmemory.com:specs:cor:dmo:170:08): a credit ledger entry is never edited and never deleted,
 -- not even by an operator; a correction is a new entry. One source, shared verbatim with migration
--- 20261124200000_credit_ledger_append_only (pinned by src/test/migrations/creditLedgerAppendOnly5010.test.ts), applied by
+-- 20261125130000_credit_ledger_append_only (pinned by src/test/migrations/creditLedgerAppendOnly5010.test.ts), applied by
 -- post-push.sql and the test globalSetup.
 --
 -- DELETE: always refused (the owner relation is ON DELETE RESTRICT, so the owner can never be gone first).

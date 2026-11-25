@@ -783,7 +783,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir user-api-key-deletion-invariants.sql
 
 -- #5010: the credit ledger is append-only. One source, shared verbatim with migration
--- 20261124200000_credit_ledger_append_only (pinned by src/test/migrations/creditLedgerAppendOnly5010.test.ts).
+-- 20261125130000_credit_ledger_append_only (pinned by src/test/migrations/creditLedgerAppendOnly5010.test.ts).
 \ir credit-ledger-invariants.sql
 
 -- #430: the Git-mirror obligation's shape (closed error classes) and its attempt sequence.
