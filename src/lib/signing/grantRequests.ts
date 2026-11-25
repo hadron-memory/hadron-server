@@ -111,8 +111,9 @@ export async function createGrantSigningRequestInTransaction(
  * the true state. A request whose grant is outside `appId` is NOT_FOUND, the same as an unknown id.
  */
 async function lockRequest(tx: Prisma.TransactionClient, requestId: string, appId: string) {
-  const peek = await tx.grantSigningRequest.findUnique({ where: { id: requestId }, select: { grantId: true } });
-  if (!peek) throw new GrantSigningRefusal('SIGNING_REQUEST_NOT_FOUND', 'Signing request not found');
+  const peek = await tx.grantSigningRequest.findUnique({ where: { id: requestId }, select: { grantId: true, selectionId: true } });
+  // #5001: an item ends with its selection (withdrawGrantSigningSelection), never alone.
+  if (!peek || peek.selectionId) throw new GrantSigningRefusal('SIGNING_REQUEST_NOT_FOUND', 'Signing request not found');
   const [grant] = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT id FROM grants WHERE id = ${peek.grantId} AND app_id = ${appId} FOR UPDATE`;
   if (!grant) throw new GrantSigningRefusal('SIGNING_REQUEST_NOT_FOUND', 'Signing request not found');

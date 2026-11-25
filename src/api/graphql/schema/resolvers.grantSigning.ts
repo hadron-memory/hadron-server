@@ -242,7 +242,7 @@ export const grantSigningMutations = {
   withdrawGrantSigningRequest: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     refuseImpersonation(ctx);
     const row = await ctx.db.grantSigningRequest.findUnique({ where: { id } });
-    const reach = row ? await readableGrantReach(ctx, row.grantId) : null;
+    const reach = row && !row.selectionId ? await readableGrantReach(ctx, row.grantId) : null;
     if (!row || !reach) throw requestNotFound(id);
     const caller = { userId: ctx.userId ?? null, appId: !ctx.userId && ctx.appKeyId ? ctx.appId ?? null : null };
     try {
