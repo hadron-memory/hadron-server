@@ -8,11 +8,11 @@ export async function requireCurrentAssetMemoryWrite(
   tx: Prisma.TransactionClient,
   caller: AssetCallerContextV2,
   memoryId: string,
-): Promise<{ id: string; isEncrypted: boolean; organizationId: string | null }> {
+): Promise<{ id: string; isEncrypted: boolean; organizationId: string | null; ownerUserId: string | null }> {
   const rows = await tx.$queryRaw<Array<{
-    id: string; is_encrypted: boolean; organization_id: string | null;
+    id: string; is_encrypted: boolean; organization_id: string | null; owner_user_id: string | null;
   }>>`
-    SELECT id, is_encrypted, organization_id FROM memories
+    SELECT id, is_encrypted, organization_id, owner_user_id FROM memories
     WHERE id = ${memoryId} AND deleted_at IS NULL FOR SHARE
   `;
   const memory = rows[0];
@@ -33,6 +33,6 @@ export async function requireCurrentAssetMemoryWrite(
   }
   return {
     id: memory.id, isEncrypted: memory.is_encrypted,
-    organizationId: memory.organization_id,
+    organizationId: memory.organization_id, ownerUserId: memory.owner_user_id,
   };
 }
