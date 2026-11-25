@@ -22,6 +22,8 @@ const server = new ApolloServer<Context>({ typeDefs, resolvers: resolvers as nev
 
 let manager: { id: string };
 let reader: { id: string };
+let contributor: { id: string };
+let owner: { id: string };
 let outsider: { id: string };
 let agent: { id: string; systemMemoryId: string | null };
 
@@ -33,7 +35,7 @@ async function wireError(userId: string | undefined, ref = agent.id) {
   );
   if (r.body.kind !== 'single') throw new Error('expected a single result');
   const { errors, data } = r.body.singleResult;
-  expect(data ?? null).toBeNull();
+  expect(data ?? null).toBeNull(); // agentRevisions is non-null, so a refusal nulls the whole data (#5130 BLIND F8)
   expect(errors).toHaveLength(1);
   return { message: errors![0].message, extensions: errors![0].extensions };
 }
@@ -45,9 +47,13 @@ beforeEach(async () => {
   manager = await user(85110, 'rev5110-mgr');
   reader = await user(85111, 'rev5110-reader');
   outsider = await user(85112, 'rev5110-out');
+  contributor = await user(85113, 'rev5110-contrib');
+  owner = await user(85114, 'rev5110-owner');
   const org = await db.organization.create({ data: { id: generateId(), name: 'rev5110', urn: 'rev5110' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: manager.id, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'READER' } });
+  await db.orgMember.create({ data: { organizationId: org.id, userId: contributor.id, role: 'CONTRIBUTOR' } });
+  await db.orgMember.create({ data: { organizationId: org.id, userId: owner.id, role: 'OWNER' } });
   agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'agent-5110', visibility: 'ORGANIZATION' }, { db, roles: ['READER'], userId: manager.id } as Context);
   expect(agent.systemMemoryId).toBeTruthy();
 });
@@ -74,6 +80,19 @@ describe('#5110: the code is reached only past the gates (cor:dmo:050:23 S5, S6)
     expect(before.extensions?.code).toBe('FORBIDDEN');
     await dropSystemMemory();
     expect(await wireError(reader.id)).toEqual(before);
+  });
+
+  // #5130 BLIND F3: the role just below the gate, so lowering ADMIN to CONTRIBUTOR is caught.
+  it('a CONTRIBUTOR, the role just below the gate, is refused FORBIDDEN, the same as when it has its system memory', async () => {
+    const before = await wireError(contributor.id);
+    expect(before.extensions?.code).toBe('FORBIDDEN');
+    await dropSystemMemory();
+    expect(await wireError(contributor.id)).toEqual(before);
+  });
+
+  it('an org OWNER, above the gate, gets the new code', async () => {
+    await dropSystemMemory();
+    expect((await wireError(owner.id)).extensions?.code).toBe('AGENT_HAS_NO_SYSTEM_MEMORY');
   });
 
   it('an outsider gets the not-found answer, the same as when it has its system memory', async () => {
