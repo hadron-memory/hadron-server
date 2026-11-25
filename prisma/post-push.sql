@@ -786,6 +786,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- 20261125130000_credit_ledger_append_only (pinned by src/test/migrations/creditLedgerAppendOnly5010.test.ts).
 \ir credit-ledger-invariants.sql
 
+-- #5021: price rows are kept (no DELETE, no content UPDATE; audit ids follow a recorded merge). One source, shared
+-- verbatim with migration 20261125170400_ai_model_prices_kept (pinned by src/test/migrations/priceRowKept5021.test.ts).
+\ir ai-model-price-invariants.sql
+
 -- #430: the Git-mirror obligation's shape (closed error classes) and its attempt sequence.
 \ir git-mirror-obligation-invariants.sql
 

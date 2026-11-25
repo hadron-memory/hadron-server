@@ -182,6 +182,34 @@ describe('#5021 every process switches to a new row at its effective instant', (
     expect(event!.createdAt.getTime()).toBe(T.getTime() + 1_000);
     expect((await unitRow(event!.id)).price_row_id).toBe(next.id);
   });
+
+  it('pin 6c (gate ruling 5): the row that priced a unit is the row in force at its recorded instant, even when the clock passes a new row during the lookup', async () => {
+    const T = new Date(Date.now() + 120_000);
+    const old = await mkPrice(new Date('2026-01-01T00:00:00Z'), { inRate: 1n });
+    const next = await mkPrice(T);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(T.getTime() - 1_000));
+    // The clock crosses T while the price lookup runs, as it can on a busy server.
+    const slow = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== 'aiModelPrice') return Reflect.get(target, prop, receiver);
+        return new Proxy(target.aiModelPrice, {
+          get(model, method, r) {
+            const fn = Reflect.get(model, method, r);
+            if (method !== 'findFirst') return fn;
+            return async (...args: unknown[]) => {
+              const out = await (fn as (...a: unknown[]) => Promise<unknown>).apply(model, args);
+              vi.setSystemTime(new Date(T.getTime() + 1_000));
+              return out;
+            };
+          },
+        });
+      },
+    }) as typeof db;
+    const event = await recordLlmUsage(slow, { ...BASE, organizationId: orgId });
+    const inForceAtStamp = event!.createdAt.getTime() >= T.getTime() ? next.id : old.id;
+    expect((await unitRow(event!.id)).price_row_id).toBe(inForceAtStamp);
+  });
 });
 
 describe('#5021 price rows are kept', () => {

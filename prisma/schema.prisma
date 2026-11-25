@@ -2240,6 +2240,19 @@ model UsageEvent {
   /// AiModelPrice row effective at event time. NULL = no price known (or the
   /// event carries no tokens). Never recomputed — prices change (FR-003).
   costMicroCents   BigInt?   @map("cost_micro_cents")
+  /// #5021 (hrn:node:hadronmemory.com:specs:cor:dmo:170:06): the AiModelPrice row that priced this unit. Null when
+  /// the unit is unpriced (no row in force, a host-priced provider, no tokens) and on every unit recorded before the
+  /// column: it is never filled in by matching effective dates. Price rows are never deleted (the relation restricts).
+  priceRowId       String?   @map("price_row_id")
+  /// #5021 (hrn:node:hadronmemory.com:specs:cor:dmo:170:06): the markup applied to this unit's charge, in basis
+  /// points (2500 = 25%): the price row's own markup, else the fleet-wide `CREDIT_MARKUP_PERCENT` default at the
+  /// moment of recording. Set exactly when the unit meets the debit condition (debits on, the platform's own key, a
+  /// positive cost, a billable organization) and null otherwise. It is written with the unit, before the debit, so a
+  /// debit that then fails leaves a markup and no ledger entry: whether a unit was charged is read from the ledger.
+  markupBasisPoints Int?     @map("markup_basis_points")
+  /// #5021 (gate ruling 9): the AppRun this unit was spent by, written in the same insert. Null for spend outside a
+  /// run and for every unit recorded before the column (no backfill). Set null if the run row is deleted.
+  appRunId         String?   @map("app_run_id")
   /// #1653 / ruling DY-2: whether this event counts as ACTIVITY for its
   /// session's liveness. True only when the session was live AND owned by the
   /// recording principal at write time (`usageEventCountsAsActivity`), so a
@@ -2261,6 +2274,8 @@ model UsageEvent {
   appKey       AppKey?       @relation(fields: [appKeyId], references: [id], onDelete: SetNull)
   user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  priceRow     AiModelPrice? @relation(fields: [priceRowId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  appRun       AppRun?       @relation(fields: [appRunId], references: [id], onDelete: SetNull)
 
   @@index([nodeLoc])
   @@index([type])
@@ -2278,6 +2293,10 @@ model UsageEvent {
   @@index([organizationId, createdAt])
   /// #2944: the key-filtered read (usageEvents(appKey:)), newest first within a window.
   @@index([appKeyId, createdAt])
+  /// #5021: cost corrections (A15) select units by their price row.
+  @@index([priceRowId])
+  /// #5021: a run hard delete nulls this FK (SET NULL); without it each delete scans the firehose (#451).
+  @@index([appRunId])
   // #1903: session liveness also needs the PARTIAL index
   // usage_events_session_activity_idx (session_id, created_at) WHERE
   // counts_as_activity. Prisma can't model a partial index, so it lives in
@@ -6152,6 +6171,8 @@ model AppRun {
 
   webFetchPollBindings  WebFetchPollBinding[]  @relation("WebFetchPollSourceRun")
   webFetchEventReceipts WebFetchEventReceipt[] @relation("WebFetchEventRoutedRun")
+  /// #5021 (gate ruling 9): the usage units spent by this run.
+  usageEvents           UsageEvent[]
 
   @@index([status, publishedAt])
   @@index([appId, createdAt])
@@ -6304,15 +6325,18 @@ model ActionTicket {
 /// The price of one AI model from one provider, from a given moment on. The platform uses it to work out what a unit
 /// of model usage cost, and what markup applies when that cost is charged to an organization's credits.
 ///
-/// Relationships: none. UsageEvent rows store the cost that was computed from a price; they do not point at the price
-/// row.
+/// Relationships: a UsageEvent names the row that priced it (`priceRowId`, #5021); the relation restricts, so a
+/// referenced row cannot be deleted.
 ///
 /// Behaviour:
 /// - One row per `provider`, `model`, `tier` and `effectiveAt`. A lookup takes the newest row whose `effectiveAt` is
-///   not after the time of the usage and that is not soft-deleted (`getAiModelPrice`, src/lib/metering/index.ts).
-/// - A price change adds a new row and never edits an old one, so the rate in force at the time of the work stays on
-///   record. A cost stored on a usage event is a snapshot and is never recomputed, which is why soft-deleting a wrong
-///   row is safe.
+///   not after the time of the usage (`getAiModelPrice`, src/lib/metering/index.ts). A row takes effect no sooner
+///   than one price-cache lifetime (60 seconds) after it is written, and an omitted `effectiveAt` is set to that
+///   instant, so every server process switches to it at its effective instant (#5021).
+/// - Rows are kept: a price change adds a new row, and no row is ever changed or deleted, not even by an operator. A
+///   trigger refuses every DELETE and every UPDATE (prisma/ai-model-price-invariants.sql), except that an audit user
+///   id follows a recorded account merge. A wrong row is corrected by a cost correction on each unit it priced, never
+///   by editing or retiring the row (hrn:node:hadronmemory.com:specs:cor:dmo:170:06).
 /// - Prices are in micro-cents (1e-8 USD) per million tokens, separately for input and output. `markupBasisPoints` is
 ///   the markup at this tier (2500 = 25%); null falls back to `CREDIT_MARKUP_PERCENT`.
 /// - `tier` is 1 to 3 and everything resolves tier 1 today. The columns are strings and integers with no enum or
@@ -6349,6 +6373,8 @@ model AiModelPrice {
   updatedBy               String?   @map("updated_by")
   deletedAt               DateTime? @map("deleted_at")
   deletedBy               String?   @map("deleted_by")
+
+  usageEvents UsageEvent[]
 
   @@unique([provider, model, tier, effectiveAt])
   @@index([provider, model, tier])
