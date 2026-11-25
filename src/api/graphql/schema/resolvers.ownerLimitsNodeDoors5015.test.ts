@@ -15,6 +15,7 @@ import { reloadOwnerDefaultLimitsForTests } from '../../../lib/ownerLimits/defau
 import { OWNER_LIMIT_KEYS } from '../../../lib/ownerLimits/keys.js';
 import type { OwnerRef } from '../../../lib/owner.js';
 import { formatGraphQLError } from '../formatError.js';
+import { mergeMemoryGraph } from '../../../controller/operations/mergeMemories.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -54,6 +55,13 @@ async function capAtCurrent(owner: OwnerRef) {
       key: 'nodes', limitValue, sourceType: 'manual', sourceId: 't', note: 't' },
   });
   return limitValue;
+}
+/** Cap an owner with room for exactly `room` more nodes. */
+async function capWithRoom(owner: OwnerRef, room: bigint) {
+  const limitValue = (await capAtCurrent(owner)) + room;
+  await db.ownerLimit.updateMany({
+    where: { ...('userId' in owner ? { ownerUserId: owner.userId } : { organizationId: owner.organizationId }), key: 'nodes' }, data: { limitValue },
+  });
 }
 const node = (memoryId: string, loc: string, extra: Record<string, unknown> = {}) =>
   db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, ...extra } });
@@ -200,6 +208,13 @@ describe('#5015 moveNode and cloneNode', () => {
     expect(await db.node.count({ where: { memoryId: mO, loc: { in: ['x', 'x:child'] }, deletedAt: null } })).toBe(2);
   });
 
+  it('a cross-owner subtree move of two nodes into room for exactly two succeeds', async () => {
+    const x = await node(mO, 'x');
+    await node(mO, 'x:child');
+    await capWithRoom({ userId: u }, 2n);
+    expect((await gql(MOVE, asU(), { src: x.id, to: mU1 })).errors).toBeUndefined();
+  });
+
   it('succeeds at the cap: a move between two memories of the same owner', async () => {
     const z = await node(mU2, 'z');
     await capAtCurrent({ userId: u });
@@ -232,6 +247,75 @@ describe('#5015 mergeMemories', () => {
     await capAtCurrent({ userId: u });
     const r = await gql(MERGE, asU(), { input: { source: mU2, target: mU1 } });
     expect(r.errors).toBeUndefined();
+  });
+});
+
+describe('#5015 mergeMemories judges each batch once, at an exact fit', () => {
+  const merge = (target: string, batchSize?: number) => mergeMemoryGraph(db, {
+    ownerLimitCaller: { userId: u }, sourceMemoryId: mO, targetMemoryId: target,
+    fields: new Set(['CONTENT', 'EDGES']), deleteSourceMem: false, editor: { userId: u }, batchSize,
+  });
+  const inMemory = (memoryId: string) => db.node.count({ where: { memoryId, deletedAt: null } });
+
+  it('a cross-owner merge of two nodes into room for exactly two succeeds', async () => {
+    await node(mO, 'x');
+    await node(mO, 'y');
+    await capWithRoom({ userId: u }, 2n);
+    const r = await gql(MERGE, asU(), { input: { source: mO, target: mU1 } });
+    expect(r.errors).toBeUndefined();
+    expect(await inMemory(mU1)).toBe(4);
+  });
+
+  it('it also succeeds across batches (batch size 1), so a merge that fits never stops half way', async () => {
+    await node(mO, 'x');
+    await node(mO, 'y');
+    await capWithRoom({ userId: u }, 2n);
+    await merge(mU1, 1);
+    expect([await inMemory(mO), await inMemory(mU1)]).toEqual([0, 4]);
+  });
+
+  it('counts a carried thread once too: one node and its comment into room for exactly two succeeds, for one refuses', async () => {
+    const x = await node(mO, 'x');
+    await M.createComment({}, { targetRef: x.id, body: 'carried with the merge' }, { db, userId: u, roles: ['READER'] } as Context);
+    const mK = (await db.memory.create({
+      data: { id: generateId(), name: 'k', urn: 'nd5015-k:knowledge', class: 'knowledge', ownerUserId: u, vectorIndexEnabled: false },
+    })).id;
+    await capWithRoom({ userId: u }, 1n);
+    await expect(merge(mK)).rejects.toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: x.id } })).memoryId).toBe(mO);
+    const limit = { ownerUserId: u, key: 'nodes' };
+    await db.ownerLimit.updateMany({ where: limit, data: { limitValue: (await liveCount({ userId: u })) + 2n } });
+    await merge(mK);
+    expect((await db.node.findUniqueOrThrow({ where: { id: x.id } })).memoryId).toBe(mK);
+  });
+
+  it('refuses in the batch when the room went away after the preflight (only the per-batch check can refuse)', async () => {
+    await node(mO, 'x');
+    await node(mO, 'y');
+    await capWithRoom({ userId: u }, 2n);
+    // The limit drops between the preflight's transaction and the first batch's: the preflight is this merge's first one.
+    const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    let calls = 0;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((async (...a: unknown[]) => {
+      const out = await real(...a);
+      calls += 1;
+      if (calls === 1) await db.ownerLimit.updateMany({ where: { ownerUserId: u, key: 'nodes' }, data: { limitValue: 2n } });
+      return out;
+    }) as never);
+    const outcome = await merge(mU1).then(() => null, (e: unknown) => e);
+    spy.mockRestore();
+    // Two transactions ran: the preflight's (it passed) and the batch's (it refused).
+    expect(calls).toBe(1);
+    expect(outcome).toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED' } });
+    expect([await inMemory(mO), await inMemory(mU1)]).toEqual([2, 2]);
+  });
+
+  it('refuses before the first batch commits anything (only the preflight can: each batch alone would fit at first)', async () => {
+    await node(mO, 'x');
+    await node(mO, 'y');
+    await capWithRoom({ userId: u }, 1n);
+    await expect(merge(mU1, 1)).rejects.toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED' } });
+    expect([await inMemory(mO), await inMemory(mU1)]).toEqual([2, 2]);
   });
 });
 
@@ -279,6 +363,19 @@ describe('#5015 Agent revisions', () => {
   async function makeAgent() {
     return resolvers.Mutation.createAgent({}, { orgRef: orgId, name: 'nd5015-agent', visibility: 'PERSONAL' }, { db, roles: ['READER'], userId: orgAdmin } as Context);
   }
+  it('the first createRevision adds two nodes (the parent and the revision): room for exactly two succeeds, for one refuses', async () => {
+    const asAdmin = { db, roles: ['READER'], userId: orgAdmin } as Context;
+    const agent = await makeAgent();
+    await capWithRoom({ organizationId: orgId }, 1n);
+    const before = await liveCount({ organizationId: orgId });
+    await expect(resolvers.Mutation.createRevision({}, { agentRef: agent.id }, asAdmin))
+      .rejects.toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED' } });
+    expect(await liveCount({ organizationId: orgId })).toBe(before);
+    await db.ownerLimit.updateMany({ where: { organizationId: orgId, key: 'nodes' }, data: { limitValue: before + 2n } });
+    await resolvers.Mutation.createRevision({}, { agentRef: agent.id }, asAdmin);
+    expect(await liveCount({ organizationId: orgId })).toBe(before + 2n);
+  });
+
   it('refuses createRevision at the cap; restoreRevision (its auto-save included) succeeds at the cap', async () => {
     const agent = await makeAgent();
     const asAdmin = { db, roles: ['READER'], userId: orgAdmin } as Context;

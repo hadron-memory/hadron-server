@@ -101,4 +101,23 @@ describe('#5015 owner-limit races at the node write', { timeout: 20_000 }, () =>
     expect(await parked).toBe('OWNER_LIMIT_REACHED');
     expect(await db.node.count({ where: { memoryId: mO, loc: 'x' } })).toBe(0);
   });
+
+  it('a createRevision that meets an uncommitted change of its system memory\'s owner is judged against the NEW owner', async () => {
+    const agent = await resolvers.Mutation.createAgent({}, { orgRef: orgId, name: 'race5015-agent', visibility: 'PERSONAL' } as never, ctx(u)) as { id: string };
+    const sys = (await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).systemMemoryId!;
+    const capped = (await db.organization.create({ data: { id: generateId(), name: 'race5015-b', urn: 'race5015-b' } })).id;
+    await limitRow({ organizationId: capped }, 0);
+    // The owner column is not a key, so this update leaves the node insert's FK lock free: only the door's FOR SHARE waits on it.
+    const h = await holder(async (tx) => { await tx.$executeRaw`UPDATE memories SET organization_id = ${capped} WHERE id = ${sys}`; });
+    const parked = resolvers.Mutation.createRevision({}, { agentRef: agent.id } as never, ctx(u))
+      .then(() => 'ok', (e: { extensions?: { code?: string } }) => e?.extensions?.code ?? String(e));
+    try {
+      await waitForLockWaitersBlockedBy(db, h.pid, 1);
+    } finally {
+      h.release();
+      await h.done;
+    }
+    expect(await parked).toBe('OWNER_LIMIT_REACHED');
+    expect(await db.node.count({ where: { memoryId: sys, loc: { startsWith: 'revisions' } } })).toBe(0);
+  });
 });
