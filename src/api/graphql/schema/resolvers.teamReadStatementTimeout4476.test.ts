@@ -21,7 +21,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { withRosterAppRead } from './resolvers.agentTaskMatching.js';
 import { TEAM_READ_TX_BACKSTOP_MARGIN_MS, TEAM_READ_TX_MAX_WAIT_MS, TEAM_READ_TX_TIMEOUT_MS, TeamReadBusyError, isPrismaBusyExhaustion, busyReason } from '../../../lib/agentTasks/teamReadBudget.js';
-import { Prisma } from '../../../generated/prisma/index.js';
+import { Prisma, PrismaClient } from '../../../generated/prisma/index.js';
 
 // No mocks: these pins run the real transaction, the real SET LOCALs and the real Postgres cancel.
 
@@ -201,28 +201,59 @@ describe('#4476 red — the budget bites on the statement, per statement kind (b
   }, 25_000);
 });
 
-describe('#4476 — SET LOCAL scoping (acceptance 2)', () => {
-  it('neither GUC reaches the pooled connections: after a cancelled read the pool still answers the defaults', async () => {
-    const before = (await db.$queryRawUnsafe('SHOW statement_timeout')) as { statement_timeout: string }[];
-    const beforeTx = HAS_TX_TIMEOUT
-      ? ((await db.$queryRawUnsafe('SHOW transaction_timeout')) as { transaction_timeout: string }[])[0]!.transaction_timeout
-      : null; // SHOW itself errors on engines without the GUC (pg16 CI lanes)
-    // A read that hits the cancel — both GUCs must leave the pool's defaults alone afterwards.
-    await withRosterAppRead(ctx(mia.id), app.id, async (readCtx) => {
-      await readCtx.db.$executeRaw`SELECT pg_sleep(${SLEEP_S})`;
-    }).catch(() => { /* the refusal itself is pinned above */ });
-    const after = (await db.$queryRawUnsafe('SHOW statement_timeout')) as { statement_timeout: string }[];
-    expect(after[0]!.statement_timeout).toBe(before[0]!.statement_timeout);
-    // The pool serves many connections; sample it so a session-level leak on ANY connection is
-    // likely to surface (set_config with is_local is transaction-scoped by construction — this
-    // pin catches an implementation that accidentally used the session-scoped form).
-    for (let i = 0; i < 4; i++) {
-      const s = (await db.$queryRawUnsafe('SHOW statement_timeout')) as { statement_timeout: string }[];
-      expect(s[0]!.statement_timeout).toBe(before[0]!.statement_timeout);
+describe('#4476 — SET LOCAL scoping (acceptance 2; #5084 round-1 P3 3: checked on the very backend the read used)', () => {
+  it('neither GUC reaches the pooled connections: after a cancelled read the connection the read ran on still answers the defaults', async () => {
+    // #5084 O / round-1 P3 3: a SHOW on the shared pool lands on ANY free connection, so the old
+    // 4x sampling loop could only probabilistically catch a session-level leak and never proved
+    // the check examined the connection the read actually used. A dedicated connection_limit=1
+    // client (the fold comment's own remedy) answers both: the read, the cancel and the post-read
+    // check all share the ONE backend, and pg_backend_pid() captured inside the read pins that
+    // identity — a pool that handed the check a different connection reddens the pid assert, and
+    // a session-scoped set_config mutant (is_local dropped) reddens the value asserts on the very
+    // session that leaked, deterministically instead of with 1-in-N sampling luck.
+    const url = new URL(process.env.DATABASE_URL!);
+    url.searchParams.set('connection_limit', '1');
+    url.searchParams.set('pool_timeout', '5');
+    const one = new PrismaClient({ datasourceUrl: url.toString() });
+    try {
+      const before = (await one.$queryRawUnsafe('SHOW statement_timeout')) as { statement_timeout: string }[];
+      const beforeTx = HAS_TX_TIMEOUT
+        ? ((await one.$queryRawUnsafe('SHOW transaction_timeout')) as { transaction_timeout: string }[])[0]!.transaction_timeout
+        : null; // SHOW itself errors on engines without the GUC (pg16 CI lanes)
+      // A read that hits the cancel — both GUCs must leave the connection's defaults alone after.
+      let readPid = -1;
+      await withRosterAppRead({ ...ctx(mia.id), db: one }, app.id, async (readCtx) => {
+        readPid = ((await readCtx.db.$queryRawUnsafe('SELECT pg_backend_pid() AS pid')) as { pid: number }[])[0]!.pid;
+        await readCtx.db.$executeRaw`SELECT pg_sleep(${SLEEP_S})`;
+      }).catch(() => { /* the refusal itself is pinned above */ });
+      // set_config with is_local is transaction-scoped by construction; this pin catches an
+      // implementation that accidentally used the session-scoped form — on the read's own backend.
+      const after = (await one.$queryRawUnsafe(
+        'SELECT pg_backend_pid() AS pid, current_setting(\'statement_timeout\') AS statement_timeout',
+      )) as { pid: number; statement_timeout: string }[];
+      expect(after[0]!.pid, 'the post-read check must run on the very backend the read used (connection_limit=1)').toBe(readPid);
+      expect(after[0]!.statement_timeout).toBe(before[0]!.statement_timeout);
       if (HAS_TX_TIMEOUT) {
-        const t = (await db.$queryRawUnsafe('SHOW transaction_timeout')) as { transaction_timeout: string }[];
+        const t = (await one.$queryRawUnsafe('SHOW transaction_timeout')) as { transaction_timeout: string }[];
         expect(t[0]!.transaction_timeout).toBe(beforeTx);
       }
+      // A cancelled read ROLLS BACK, and a rollback reverts even a session-scoped set_config, so the check
+      // above alone cannot tell the two forms apart. A read that COMMITS keeps a session-scoped value:
+      // run one and check the same backend again (the is_local-dropped mutant reddens here).
+      await withRosterAppRead({ ...ctx(mia.id), db: one }, app.id, async (readCtx) => {
+        await readCtx.db.$queryRaw`SELECT 1`;
+      });
+      const committed = (await one.$queryRawUnsafe(
+        'SELECT pg_backend_pid() AS pid, current_setting(\'statement_timeout\') AS statement_timeout',
+      )) as { pid: number; statement_timeout: string }[];
+      expect(committed[0]!.pid).toBe(readPid);
+      expect(committed[0]!.statement_timeout, 'a committed read must not leave statement_timeout on its backend').toBe(before[0]!.statement_timeout);
+      if (HAS_TX_TIMEOUT) {
+        const t = (await one.$queryRawUnsafe('SHOW transaction_timeout')) as { transaction_timeout: string }[];
+        expect(t[0]!.transaction_timeout, 'a committed read must not leave transaction_timeout on its backend').toBe(beforeTx);
+      }
+    } finally {
+      await one.$disconnect();
     }
   }, 25_000);
 });
@@ -414,6 +445,16 @@ describe('#4476 unit — the 57014 classifier (binding condition 1: structured c
     // and Prisma's interactive timer far past it, so the only thing that can end this read is
     // the backstop — firing while a findMany WAITS on another session's table lock.
     const BACKSTOP_MS = TEAM_READ_TX_TIMEOUT_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS;
+    // #5084 item O (AT0.8482.10 F4): the victim and the follow-up probe below share one
+    // dedicated connection_limit=1 client, so the probe CANNOT land on a different free pooled
+    // connection — the one backend it can use is the FATAL-killed one. An immediate answer
+    // proves the pool evicted the dead socket instead of handing it back; the old probe ran on
+    // the shared pool and only proved evict-OR-reuse (the fold comment's accepted limit, closed
+    // here by its own named remedy).
+    const url = new URL(process.env.DATABASE_URL!);
+    url.searchParams.set('connection_limit', '1');
+    url.searchParams.set('pool_timeout', '5');
+    const one = new PrismaClient({ datasourceUrl: url.toString() });
     let holderDone = false;
     const holder = db.$transaction(
       async (tx) => {
@@ -424,43 +465,49 @@ describe('#4476 unit — the 57014 classifier (binding condition 1: structured c
     ).finally(() => { holderDone = true; });
     let caught: unknown;
     try {
-      await new Promise((r) => setTimeout(r, 300)); // let the lock land first
-      await db.$transaction(
-        async (tx) => {
-          await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS * 2)}, true) AS statement_timeout,
-                             CASE WHEN current_setting('transaction_timeout', true) IS NOT NULL
-                                  THEN set_config('transaction_timeout', ${String(BACKSTOP_MS)}, true) END AS transaction_timeout`;
-          // Burns past the budget (inside its own 2x cap) so the typed statement below is still
-          // WAITING when the backstop expires.
-          await tx.$executeRawUnsafe(`SELECT pg_sleep(${Math.floor(BUDGET_MS / 1000 * 1.1)})`);
-          return tx.user.findMany({ take: 1, select: { id: true } });
-        },
-        { timeout: BACKSTOP_MS * 4, maxWait: TEAM_READ_TX_MAX_WAIT_MS },
-      ).then(
-        (v) => { throw new Error(`resolved instead: ${JSON.stringify(v?.length ?? null)}`); },
-        (e) => { caught = e; },
-      );
+      try {
+        await new Promise((r) => setTimeout(r, 300)); // let the lock land first
+        await one.$transaction(
+          async (tx) => {
+            await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS * 2)}, true) AS statement_timeout,
+                               CASE WHEN current_setting('transaction_timeout', true) IS NOT NULL
+                                    THEN set_config('transaction_timeout', ${String(BACKSTOP_MS)}, true) END AS transaction_timeout`;
+            // Burns past the budget (inside its own 2x cap) so the typed statement below is still
+            // WAITING when the backstop expires.
+            await tx.$executeRawUnsafe(`SELECT pg_sleep(${Math.floor(BUDGET_MS / 1000 * 1.1)})`);
+            return tx.user.findMany({ take: 1, select: { id: true } });
+          },
+          { timeout: BACKSTOP_MS * 4, maxWait: TEAM_READ_TX_MAX_WAIT_MS },
+        ).then(
+          (v) => { throw new Error(`resolved instead: ${JSON.stringify(v?.length ?? null)}`); },
+          (e) => { caught = e; },
+        );
+      } finally {
+        await holder.catch(() => {});
+        expect(holderDone).toBe(true);
+      }
+      const diag = `real error: name=${(caught as object)?.constructor?.name} ${String((caught as Error)?.message).slice(0, 400)}`;
+      expect(caught, 'the typed statement must have been terminated by the backstop').toBeDefined();
+      expect(isPrismaBusyExhaustion(caught), `classifier must convert the real typed backstop shape — ${diag}`).toBe(true);
+      expect(busyReason(caught), diag).toBe('TRANSACTION_BUDGET');
+      // #4482 BLIND L: name the arm that matched. Only the backstop can fire in this construction
+      // (the statement cap sits at 2x, Prisma's interactive timer at 4x) and it fires mid-statement,
+      // so the escaped object IS the model arm — Prisma's UnknownRequestError rendering the FATAL
+      // 25P04. Freezing the arm is what keeps this pin about TYPED statements: if the construction
+      // ever regressed to a raw victim (P2010 + meta) or a re-wrapping, the conversions above would
+      // still pass and the arm identity would redden here.
+      expect(caught, `the escaped object must be the model arm (UnknownRequestError), not a raw or re-wrapped shape — ${diag}`).toBeInstanceOf(Prisma.PrismaClientUnknownRequestError);
+      expect((caught as Prisma.PrismaClientUnknownRequestError).message, `the model arm renders the FATAL 25P04 — ${diag}`).toMatch(/code: "25P04"/);
+      // The pool must not hand the KILLED connection to the next caller: an ordinary query on the
+      // SAME single-connection client answers immediately afterwards — on a connection_limit=1 pool
+      // that query has nowhere else to land, so answering at all proves the dead socket was evicted
+      // (delta review cannot-judge, closed by #5084 O: eviction, not evict-or-reuse).
+      const t1 = Date.now();
+      await one.$queryRaw`SELECT 1`;
+      expect(Date.now() - t1).toBeLessThan(1_000);
     } finally {
-      await holder.catch(() => {});
-      expect(holderDone).toBe(true);
+      await one.$disconnect();
     }
-    const diag = `real error: name=${(caught as object)?.constructor?.name} ${String((caught as Error)?.message).slice(0, 400)}`;
-    expect(caught, 'the typed statement must have been terminated by the backstop').toBeDefined();
-    expect(isPrismaBusyExhaustion(caught), `classifier must convert the real typed backstop shape — ${diag}`).toBe(true);
-    expect(busyReason(caught), diag).toBe('TRANSACTION_BUDGET');
-    // #4482 BLIND L: name the arm that matched. Only the backstop can fire in this construction
-    // (the statement cap sits at 2x, Prisma's interactive timer at 4x) and it fires mid-statement,
-    // so the escaped object IS the model arm — Prisma's UnknownRequestError rendering the FATAL
-    // 25P04. Freezing the arm is what keeps this pin about TYPED statements: if the construction
-    // ever regressed to a raw victim (P2010 + meta) or a re-wrapping, the conversions above would
-    // still pass and the arm identity would redden here.
-    expect(caught, `the escaped object must be the model arm (UnknownRequestError), not a raw or re-wrapped shape — ${diag}`).toBeInstanceOf(Prisma.PrismaClientUnknownRequestError);
-    expect((caught as Prisma.PrismaClientUnknownRequestError).message, `the model arm renders the FATAL 25P04 — ${diag}`).toMatch(/code: "25P04"/);
-    // The pool must not hand the KILLED connection to the next caller: an ordinary query
-    // answers immediately afterwards (delta review cannot-judge: dead-connection eviction).
-    const t1 = Date.now();
-    await db.$queryRaw`SELECT 1`;
-    expect(Date.now() - t1).toBeLessThan(1_000);
   });
 
   it.skipIf(!HAS_TX_TIMEOUT)('BLIND P2 A (narrowed), real engine: through the WRAPPER with Prisma\'s real 5 s timer, a fast statement then a blocked TYPED one still refuses typed TEAM_READ_BUSY (the 5 s/6 s ordering never escapes untyped)', { timeout: 30_000 }, async () => {
@@ -469,7 +516,23 @@ describe('#4476 unit — the 57014 classifier (binding condition 1: structured c
     // then the backstop force-ends the read at budget+margin. Whatever arm wins the race, the
     // wrapper must surface the typed refusal — never the untyped connection-closed prose the
     // boundary pin freezes out below.
+    //
+    // #5084 item M (AT0.8482.10 F2): the proof is the ORDERING at real values, with the same
+    // fixed-slack discipline as the P2-1 pin above (#4482 BLIND N). The refusal must land a
+    // scheduling slack BENEATH budget+margin+slack, and the statement-cap-only refusal — what a
+    // wrapper that dropped transaction_timeout would surface, the blocked statement starting
+    // after the fast sleep and getting a full budget of its own — must stay a scheduling slack
+    // BEYOND it. The old bound (BACKSTOP_MS * 1.5 = 9 s) also admitted that ~7 s refusal, so the
+    // no-transaction_timeout mutant survived this pin green; the fast sleep is 0.6x budget (3 s,
+    // not the 0.3x the old comment mislabeled "~1.5 s" while Math.ceil made it 2 s) precisely to
+    // open a full slack window on both sides.
     const BACKSTOP_MS = TEAM_READ_TX_TIMEOUT_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS;
+    const SCHEDULING_SLACK_MS = 1_000;
+    const refusedWithin = BACKSTOP_MS + SCHEDULING_SLACK_MS;
+    const fastSleepS = Math.ceil(BUDGET_MS / 1000 * 0.6); // 3 s: inside its own cap and the budget
+    const capOnlyRefusalMs = fastSleepS * 1_000 + BUDGET_MS; // the no-transaction_timeout outcome
+    expect(refusedWithin - BACKSTOP_MS, 'scheduling headroom above the backstop refusal').toBeGreaterThanOrEqual(SCHEDULING_SLACK_MS);
+    expect(capOnlyRefusalMs - refusedWithin, 'the statement-cap-only refusal must stay beyond the bound').toBeGreaterThanOrEqual(SCHEDULING_SLACK_MS);
     let holderDone = false;
     const holder = db.$transaction(
       async (tx) => {
@@ -482,7 +545,7 @@ describe('#4476 unit — the 57014 classifier (binding condition 1: structured c
       await new Promise((r) => setTimeout(r, 300)); // let the lock land first
       const t0 = Date.now();
       const refusal: { resolved?: string; thrown?: unknown } = await withRosterAppRead(ctx(mia.id), app.id, async (readCtx) => {
-        await readCtx.db.$executeRawUnsafe(`SELECT pg_sleep(${Math.ceil(BUDGET_MS / 1000 * 0.3)})`); // ~1.5 s: completes well inside every bound
+        await readCtx.db.$executeRawUnsafe(`SELECT pg_sleep(${fastSleepS})`); // 3 s: completes inside every bound; pushes a cap-only refusal a full slack past the bound
         await readCtx.db.user.findMany({ take: 1, select: { id: true } }); // blocks on the lock
         return 'the blocked findMany completed';
       }).then(
@@ -494,7 +557,7 @@ describe('#4476 unit — the 57014 classifier (binding condition 1: structured c
       const err = refusal.thrown as TeamReadBusyError;
       expect(err).toBeInstanceOf(TeamReadBusyError);
       expect(err.extensions).toMatchObject({ code: 'TEAM_READ_BUSY', retryable: true, reason: 'TRANSACTION_BUDGET' });
-      expect(elapsed, `refusal after ${elapsed} ms — the whole read is bounded by budget+margin (${BACKSTOP_MS} ms), not by the blocked statement's return`).toBeLessThan(BACKSTOP_MS * 1.5);
+      expect(elapsed, `refusal after ${elapsed} ms — the whole read is bounded by budget+margin (${BACKSTOP_MS} ms), not at the statement-cap-only ${capOnlyRefusalMs} ms a dropped backstop would surface`).toBeLessThan(refusedWithin);
     } finally {
       await holder.catch(() => {});
       expect(holderDone).toBe(true);

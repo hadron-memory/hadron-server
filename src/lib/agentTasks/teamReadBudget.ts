@@ -54,9 +54,11 @@ export const TEAM_READ_TX_TIMEOUT_MS = 5_000;
  *     margin still pays it;
  *   - time idled BETWEEN statements is bounded by Prisma's own interactive timer at the same
  *     budget (P2028, #4455) before the backstop's margin expires.
- * The margin buys no safety (the statement cap alone already bounds every statement); it buys
- * kept connections for the reads whose runaway statement starts early enough that the
- * non-fatal cancel can win the race.
+ * The statement cap bounds each statement on its own, but not the read as a whole (several
+ * statements, or time spent waiting on a lock); the backstop is what bounds the whole transaction.
+ * The margin adds no protection beyond that: it only decides which of the two ends a runaway
+ * statement first, so a statement that starts early enough is cancelled non-fatally and its
+ * connection is kept.
  */
 export const TEAM_READ_TX_BACKSTOP_MARGIN_MS = 1_000;
 /** The explicit pool wait before the transaction even starts (ms). Prisma's own default, pinned so it cannot drift. */
