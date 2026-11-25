@@ -1116,3 +1116,6 @@ INSERT INTO memory_node_totals (memory_id, live_nodes)
 UPDATE memory_node_totals t SET live_nodes = 0
   WHERE t.live_nodes <> 0 AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.memory_id = t.memory_id);
 COMMIT;
+
+-- #5096: pin every guard function's search path; LAST, after every file above that (re)creates a function.
+\ir guard-search-path-invariants.sql

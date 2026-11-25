@@ -59,7 +59,7 @@ async function seedConfig() {
 
 function clone(opts: { target?: string; newUrn?: string; readable?: string[] | null } = {}) {
   return db.$transaction((tx) =>
-    cloneMemoryGraphInTx(tx, {
+    cloneMemoryGraphInTx(tx, { ownerLimitCaller: null,
       sourceMemoryId: srcId, name: 'copy', newUrn: opts.newUrn ?? 'c1-a:copy', targetOrganizationId: opts.target ?? orgId,
       ownerUserId: null, groupOwnerUserId: null, actorId: 'cloner', copierReadableMemoryIds: opts.readable === undefined ? null : opts.readable,
     }),
@@ -141,7 +141,7 @@ describe('#1337 clone carries the rulebook', () => {
   it('a failure after the copy leaves no memory and no config', async () => {
     await seedConfig();
     await expect(db.$transaction(async (tx) => {
-      await cloneMemoryGraphInTx(tx, {
+      await cloneMemoryGraphInTx(tx, { ownerLimitCaller: null,
         sourceMemoryId: srcId, name: 'copy', newUrn: 'c1-a:copy', targetOrganizationId: orgId,
         ownerUserId: null, groupOwnerUserId: null, actorId: 'cloner', copierReadableMemoryIds: null,
       });

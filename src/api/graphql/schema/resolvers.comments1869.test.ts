@@ -7,6 +7,7 @@
  * The scrub pins run the real migration file, as `prisma migrate deploy` does:
  * one multi-statement script on its own connection.
  */
+import { restoreGuardSearchPath } from '../../../test/restoreGuardSearchPath5096.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
@@ -64,6 +65,7 @@ const migrate = async (): Promise<number> => {
     // current ones, as the later migrations do in prod, so no later test file
     // on this worker's database runs against a stale check (#1935).
     await client.query(INVARIANTS);
+    await restoreGuardSearchPath(client); // #5096: and the pinned search_path the replay reset
     const updates = results.filter((r) => r.command === 'UPDATE');
     expect(updates).toHaveLength(1);
     return updates[0].rowCount ?? 0;

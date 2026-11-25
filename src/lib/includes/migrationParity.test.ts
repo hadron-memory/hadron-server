@@ -6,8 +6,12 @@ import { describe, expect, it } from 'vitest';
 
 const sql = readFileSync(fileURLToPath(new URL('../../../prisma/migrations/20261018230100_include_edges_lifecycle/migration.sql', import.meta.url)), 'utf8');
 
+// #5096: a post-push-built database ends with every function's search_path pinned (prisma/guard-search-path-invariants.sql, applied last),
+// and the migration's CREATE OR REPLACE FUNCTION (no SET clause) resets it, so the pinned line is left out of the comparison. In a
+// migrate-built database this migration ran long before the pinning migration, so nothing is lost there.
+const PINNED = `E'\\n SET search_path TO ''public'', ''pg_temp'''`;
 const DEFS = `
-  SELECT 'fn:' || p.proname AS k, pg_get_functiondef(p.oid) AS d FROM pg_proc p
+  SELECT 'fn:' || p.proname AS k, regexp_replace(pg_get_functiondef(p.oid), ${PINNED}, '') AS d FROM pg_proc p
     WHERE p.proname IN ('hadron_edges_governed_immutable', 'hadron_check_comment_node', 'hadron_comment_node_changed', 'hadron_comment_meta_immutable')
   UNION ALL
   SELECT 'tg:' || t.tgname, pg_get_triggerdef(t.oid) FROM pg_trigger t

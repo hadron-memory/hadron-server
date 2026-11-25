@@ -1,6 +1,8 @@
 import { encryptChatEngineStateWithKey, buildEngineStateIncompleteError } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { softDeleteMemoryAssets } from '../../../lib/asset/memoryDelete.js';
 import { requireOwnerHeadroom } from '../../../lib/ownerLimits/gate.js';
+import { ownerLimitCaller } from '../../../lib/ownerLimits/nodes.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../../../integrations/github/syncNotAttempted.js';
 import { applyOrgDefaultsAtCreation } from './resolvers.memoryConfigOrgDefault.js';
@@ -491,6 +493,7 @@ export const memoryMutations = {
           deleteSourceMem,
           editor,
           principal: ctx,
+          ownerLimitCaller: ownerLimitCaller(ctx),
         });
       } catch (e) {
         // Surface the same typed error mergeNodes does, with the offending loc.
@@ -1414,10 +1417,13 @@ export const memoryMutations = {
         if (row && row.deleted_at === null) {
           await assertNoMintedCorpusRemoval(tx, resolvedId, 'delete the corpus', { includeTombstones: false });
         }
-        await tx.memory.updateMany({
+        const deletedAt = new Date();
+        const { count } = await tx.memory.updateMany({
           where: { id: resolvedId, deletedAt: null },
-          data: { deletedAt: new Date() },
+          data: { deletedAt },
         });
+        // #5124: the memory's files go with it, at the same instant, so the janitor reclaims them. A re-delete touches nothing.
+        if (count === 1) await softDeleteMemoryAssets(tx, resolvedId, deletedAt);
       });
       return true;
     },
@@ -1563,6 +1569,7 @@ export const memoryMutations = {
 
       const isUserOwned = source.class === 'personal' || source.class === 'private';
       const { memoryId } = await cloneMemoryGraph(ctx.db, {
+        ownerLimitCaller: ownerLimitCaller(ctx),
         sourceMemoryId: source.id,
         name,
         newUrn,
@@ -1790,6 +1797,7 @@ export const memoryMutations = {
       // slug (a valid loc), and the display name is the slug the caller chose.
       const vectorIndexEnabled = newClass === 'knowledge';
       const { memoryId } = await extractParentNodeGraph(ctx.db, {
+        ownerLimitCaller: ownerLimitCaller(ctx),
         sourceMemoryId: source.id,
         parentLoc: parent.loc,
         newUrn,
@@ -2222,7 +2230,7 @@ export const memoryMutations = {
       });
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory, 'CONTRIBUTOR'));
 
-      const result = await syncGraphFromGithub(memory);
+      const result = await syncGraphFromGithub(memory, { ownerLimitCaller: ownerLimitCaller(ctx) });
       if (result.notAttemptedReason) {
         throw new GraphQLError(syncNotAttemptedMessage(result.notAttemptedReason), {
           extensions: { code: SYNC_NOT_ATTEMPTED, reason: result.notAttemptedReason },
@@ -2231,6 +2239,8 @@ export const memoryMutations = {
       // `fault` is judged on its own: an exception with an empty message must not read as success.
       if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) {
+        // #5015 — the owner-limit refusal in this caller's own form, extensions included (the stored record keeps the no-number form).
+        if (result.ownerLimitError) throw result.ownerLimitError;
         if (result.errorCode) throw new GraphQLError(result.error, { extensions: { code: result.errorCode } });
         // #1789: the text is the stored `Memory.syncError` the caller can already read, so it keeps its text; it needs a code
         // of its own to be a typed refusal rather than a fault.

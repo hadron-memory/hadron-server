@@ -1,6 +1,8 @@
 import type { SyncNotAttemptedReason } from './syncNotAttempted.js';
 import { acquireSyncRunLock } from './syncRunLock.js';
 import { committedSyncReport, failedSyncReport, type SyncReportEntry } from './syncReport.js';
+import { requireNodeHeadroom } from '../../lib/ownerLimits/nodes.js';
+import { OWNER_LIMIT_NO_NUMBER_MESSAGE, OwnerLimitReachedError } from '../../lib/ownerLimits/errors.js';
 import { GitCommandError } from './execGit.js';
 import { syncFailureText } from './syncErrorText.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
@@ -326,12 +328,20 @@ export async function updateNodeFromGitSync(
  */
 const syncGraphFromGithubAsSystem = async (
   graph: MemoryWithOrg,
+  /**
+   * #5015 (cor:acl:150:04) — `ownerLimitCaller`: the person whose act this sync is, for the form of the owner-limit
+   * refusal it RETURNS (`ownerLimitError`). The user from `syncMemory` and `hadron_sync_graph`; null (the default) from
+   * the push webhook and the boot sync, which have nobody to tell. What the memory stores is the no-number form either way.
+   */
+  opts: { ownerLimitCaller?: { userId: string } | null } = {},
   edgeEndpointPreflightAttempt = 0,
 ): Promise<{
   /** Configuration refused an attempt; callers must not serve an old report as this run's outcome. */
   notAttemptedReason?: SyncNotAttemptedReason;
   error?: string;
-  errorCode?: 'BAD_USER_INPUT' | typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
+  errorCode?: 'BAD_USER_INPUT' | 'OWNER_LIMIT_REACHED' | typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
+  /** #5015 — the owner-limit refusal in the caller's own form (its extensions), for `syncMemory` and `hadron_sync_graph` to throw. */
+  ownerLimitError?: OwnerLimitReachedError;
   /** #1789: `error` is an unexpected exception's text (driver, filesystem, git), not a typed refusal; callers must not echo it. */
   fault?: true;
   nodeCount?: number;
@@ -578,6 +588,10 @@ const syncGraphFromGithubAsSystem = async (
     }
     pendingSourceMemories = [];
     correctionCheckCompleted = false;
+    // #5015 — the live nodes this attempt adds (inserts; an update never revives a tombstone) and removes (the cleanup's
+    // hard delete of live rows and of their live comment threads).
+    let liveNodesAdded = 0n;
+    let liveNodesRemoved = 0n;
     try {
       await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       // #4039 (B4): a conversation node whose entry condition is invalid, or reads a variable with no value at chat start,
@@ -1431,6 +1445,7 @@ const syncGraphFromGithubAsSystem = async (
               },
               select: { id: true },
             });
+            liveNodesAdded += 1n;
             rowId = row.id;
           }
         }
@@ -1547,6 +1562,11 @@ const syncGraphFromGithubAsSystem = async (
           // #449 — PendingEdges aimed at the pruned rows: targetId is not a
           // foreign key, so the row cascade never reaches them.
           pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, pruned.map((n) => n.id));
+          // #5015 — what the hard deletes below free: the live pruned rows and their live comment threads.
+          liveNodesRemoved += BigInt(await tx.node.count({ where: { ...cleanupWhere, deletedAt: null } }));
+          liveNodesRemoved += BigInt(pruned.length
+            ? await tx.node.count({ where: { deletedAt: null, commentMeta: { targetNodeId: { in: pruned.map((n) => n.id) } } } })
+            : 0);
           // #1606 — a pruned (hard-deleted) target takes its comment threads.
           await hardDeleteThreadsOfTargets(tx, pruned.map((n) => n.id));
           await tx.node.deleteMany({ where: cleanupWhere });
@@ -1794,6 +1814,14 @@ const syncGraphFromGithubAsSystem = async (
           }
         }
         await reconcilePendingEdgeCount(tx, graph.id);
+        // #5015 (cor:acl:150:04, gate ruling 7) — a sync is judged once, on its NET: the live nodes it added less those its
+        // cleanup removed. The net is known only now (the loop's skips decide which files insert), so the judgement is the
+        // last thing before the outcome is recorded; the memory row has been held FOR SHARE since the start, so the owner
+        // is the one at commit. A refusal rolls back the whole sync (cor:int:010:01): nothing it wrote commits.
+        const net = liveNodesAdded - liveNodesRemoved;
+        if (net > 0n) {
+          await requireNodeHeadroom(tx, { memoryId: graph.id, amount: net, alreadyWritten: net, caller: opts.ownerLimitCaller ?? null });
+        }
         // #1507: the graph and its outcome commit together. A metadata failure
         // must roll back the graph, never leave a falsely clean old report.
         const recordedAt = new Date();
@@ -1824,7 +1852,7 @@ const syncGraphFromGithubAsSystem = async (
         // absent would strand a resolvable PendingEdge after the target sync's
         // promotion pass already ran. Abort this transaction and rerun the
         // whole preflight so the new endpoint memory joins the stable lock set.
-        return syncGraphFromGithub(graph, edgeEndpointPreflightAttempt + 1);
+        return syncGraphFromGithub(graph, opts, edgeEndpointPreflightAttempt + 1);
       }
       throw error;
     }
@@ -1873,6 +1901,16 @@ const syncGraphFromGithubAsSystem = async (
     }
     return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedAttestations, skippedInvalidIncludes, deferredLateRows, heldMoves };
   } catch (error) {
+    // #5015 — an owner-limit refusal is recorded with its code and in the form that names no owner and no number,
+    // whoever started the sync: every reader of the memory reads these fields. The caller's own form is returned.
+    if (error instanceof OwnerLimitReachedError) {
+      await db.memory.update({
+        where: { id: graph.id },
+        data: { syncStatus: 'ERROR', syncError: OWNER_LIMIT_NO_NUMBER_MESSAGE, lastSyncReport: failedSyncReport('OWNER_LIMIT_REACHED') },
+      }).catch(() => {});
+      console.warn(`Sync of "${graph.name}" refused: the owner's nodes limit (OWNER_LIMIT_REACHED)`);
+      return { error: error.message, errorCode: 'OWNER_LIMIT_REACHED' as const, ownerLimitError: error };
+    }
     // Update sync status to ERROR
     await db.memory.update({
       where: { id: graph.id },

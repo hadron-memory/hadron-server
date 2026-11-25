@@ -84,7 +84,7 @@ describe('Memory.schema — carried through a memory clone', () => {
   it('cloneMemoryGraph copies the schema to the clone', async () => {
     await updateMemory({ ref: memId, schema: validSchema });
     const orgId = (await db.memory.findUniqueOrThrow({ where: { id: memId } })).organizationId!;
-    const { memoryId: cloneId } = await cloneMemoryGraph(db, {
+    const { memoryId: cloneId } = await cloneMemoryGraph(db, { ownerLimitCaller: null,
       sourceMemoryId: memId,
       name: 'intel-copy',
       newUrn: 'ms-org:intel-copy',
@@ -113,7 +113,7 @@ describe('Memory.schema — carried through a memory clone', () => {
     await make('unchanged', 'stable body', 'competitor');
     await db.node.update({ where: { id: drifted.id }, data: { content: 'raw edited body' } });
     const orgId = (await db.memory.findUniqueOrThrow({ where: { id: memId } })).organizationId!;
-    const { memoryId: cloneId } = await cloneMemoryGraph(db, {
+    const { memoryId: cloneId } = await cloneMemoryGraph(db, { ownerLimitCaller: null,
       sourceMemoryId: memId, name: 'intel-copy', newUrn: 'ms-org:intel-copy',
       targetOrganizationId: orgId, ownerUserId: null, groupOwnerUserId: null, actorId: adminId, copierReadableMemoryIds: null,
     });

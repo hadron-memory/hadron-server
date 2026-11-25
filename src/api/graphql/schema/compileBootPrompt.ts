@@ -472,6 +472,7 @@ async function decide(
       txCtx,
       existing ? 'update' : 'create',
       {
+        ownerLimit: 'count-only',
         authoring: { kind: 'platform', record: 'boot-prompt-compile' },
         transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
         ...(existing ? { targetNodeId: existing.id } : {}),

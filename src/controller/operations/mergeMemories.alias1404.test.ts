@@ -36,7 +36,7 @@ const makeNode = (memoryId: string, loc: string) => db.node.create({
 const aliasesFor = (nodeId: string) => db.urnAlias.findMany({
   where: { entityType: 'NODE', entityId: nodeId },
 });
-const merge = (deleteSourceMem = false) => mergeMemoryGraph(db, {
+const merge = (deleteSourceMem = false) => mergeMemoryGraph(db, { ownerLimitCaller: null,
   sourceMemoryId: source.id,
   targetMemoryId: target.id,
   fields: new Set(['CONTENT', 'EDGES']),
