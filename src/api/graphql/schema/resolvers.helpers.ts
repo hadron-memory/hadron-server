@@ -4,7 +4,6 @@ import { endGrantsOfAgentsNoLongerInstalled, importedPairsOfParent } from '../..
 import { lockAppInstallation, readInstallBootPrompt, lockAppAgentCustomization, resolveAppInstallation } from '../../../lib/appInstallations.js';
 import type { AuthoredWith, TaskReadGate } from '../../../lib/authoringAttestation.js';
 import { cachedManagerOrgRole } from '../../../lib/auth/managerOrgRoles.js';
-import { hasReservedProjectionComponent } from '../../../integrations/localFs/pathUnderGraphsRoot.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
 import { PAGE_ARGS_DEFAULT, PAGE_ARGS_MAX, pageTake } from '../pageBounds.js';
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
@@ -54,11 +53,14 @@ import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { foreignIdentityScopedMemoryFilter } from '../../../lib/auth/memoryOwnership.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
+import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
+  deriveSlugFromName,
   formatCanonicalUrn,
   UrnNotQualifiedError,
+  UrnParseError,
   type CanonicalUrnType,
 } from '../../../lib/urn.js';
 import { safeEntityUrnV2 } from '../../../lib/urnEmit.js';
@@ -4464,27 +4466,21 @@ export interface UsageEventInput {
   tokensOut?: number;
 }
 
-/** The longest filesystem path component the root projection can write. */
-const ROOT_LOC_ATOM_MAX_BYTES = 255;
-
 /**
- * #2730: a memory's root node takes the caller's `name` as its loc, and the
- * projection throws a server fault for a loc it cannot write. Refuse exactly
- * those inputs as BAD_USER_INPUT before any write: an empty last atom, an atom
- * over the filesystem's component limit, a reserved path component, or a NUL
- * or slash. Other inputs (spaces, Unicode, internal empty atoms) stay legal,
- * so this is not the shared loc grammar (`validateLoc`).
+ * #5149 — the slug a new memory takes from the caller's display name, or a typed BAD_USER_INPUT before any write.
+ * The name itself has no grammar (hrn:node:hadronmemory.com:specs:cor:dmo:060:01) and reaches no path: the mirror checkout
+ * is placed by the memory's URN, so only the slug is judged (hrn:node:hadronmemory.com:specs:cor:urn:010:02). Two names
+ * still refuse: one that cannot be stored (a NUL or an unpaired surrogate), and one that yields no slug.
+ * Call it after the authorization gates and before the door's first write.
  */
-export function assertMemoryRootLoc(name: string): void {
-  const atoms = name.split(':');
-  let reason: string | null = null;
-  if (atoms[atoms.length - 1] === '') reason = 'its last ":"-separated segment is empty';
-  else if (atoms.some(hasReservedProjectionComponent)) reason = 'it contains a reserved path segment';
-  else if (/[\0/]/.test(name)) reason = 'it contains a NUL or "/" character';
-  else if (atoms.some(a => Buffer.byteLength(a, 'utf8') > ROOT_LOC_ATOM_MAX_BYTES)) {
-    reason = `a ":"-separated segment is longer than ${ROOT_LOC_ATOM_MAX_BYTES} bytes`;
-  }
-  if (reason) {
-    throw new GraphQLError(`Invalid memory name: ${reason}.`, { extensions: { code: 'BAD_USER_INPUT' } });
+export function deriveMemorySlug(name: string): string {
+  assertStorableText({ name });
+  try {
+    return deriveSlugFromName(name);
+  } catch (err) {
+    if (!(err instanceof UrnParseError)) throw err;
+    throw new GraphQLError('Invalid memory name: it must contain at least one ASCII letter or digit.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
   }
 }
