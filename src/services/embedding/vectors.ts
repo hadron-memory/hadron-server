@@ -833,8 +833,10 @@ async function rankingForLookup(db: PrismaClient, opts: NodeVectorScope, deadlin
  * #4994 — the cost is bounded. The lookup used to rank the whole eligible scope on every call (1-7 s at 200k vectors, the
  * #4938 F3 measurement). A scope of at most {@link vectorSmallScopeRows} eligible vectors still is: that cost is bounded
  * by the threshold and every rank is exact. A larger scope reads {@link vectorSearchNodes} itself to
- * {@link VECTOR_RANK_LOOKUP_DEPTH}: the same statements, tie order and work budget as the page's own vector leg. Like that
- * leg it normally reads the HNSW walk, whose order is approximate.
+ * {@link VECTOR_RANK_LOOKUP_DEPTH}: the same code path, tie order and work budget as the page's own vector leg. Like that
+ * leg it normally reads the HNSW walk, whose order is approximate. A rank is the node's position in `vectorSearchNodes`
+ * called with the LOOKUP's options; the page's leg asks the walk for a different candidate window, so the two walks can
+ * place the same node a few positions apart (about 1-2% several hundred deep at 200k vectors, #5155 QA).
  *
  * With a `memo`, the lookups of one fused ranking share one computed ranking: only the first pays for it.
  *
