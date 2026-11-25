@@ -6360,8 +6360,8 @@ model AiModelPrice {
 /// One entry in the ledger of AI credits of an organization or a person: an amount added or taken away. The balance of
 /// an account is the sum of its entries; no balance is stored anywhere (hrn:node:hadronmemory.com:specs:cor:dmo:170:01).
 ///
-/// Relationships: belongs to exactly one owner, an Organization (`organizationId`) or a person (`ownerUserId`), never
-/// both and never more than one (`chk_credit_ledger_one_owner`). It is kept when either is deleted (both relations
+/// Relationships: belongs to one owner, an Organization (`organizationId`) or a person (`ownerUserId`), never both
+/// (`chk_credit_ledger_one_owner` is "at most one", so the link to a deleted owner can later be cleared; every writer sets one). It is kept when either is deleted (both relations
 /// restrict, they do not cascade; a deleted person's User row is kept and scrubbed). An account merge moves the
 /// merged-away person's entries to the survivor (the trigger allows that move only along a `user_merges` row). `sourceType` and `sourceId` name where the entry came from as plain values, for example a
 /// UsageEvent or the administrator who granted it.
@@ -6389,8 +6389,8 @@ model AiModelPrice {
 /// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:170:08. Background (history, not law): the Spec Kit spec 046.
 model CreditLedgerEntry {
   id               String    @id
-  /// The owning organization; null for a person's entry. Exactly one of this and `ownerUserId` is set
-  /// (`chk_credit_ledger_one_owner`, prisma/credit-ledger-invariants.sql). It may become null only along the trigger's rule.
+  /// The owning organization; null for a person's entry. At most one of this and `ownerUserId` is set
+  /// (`chk_credit_ledger_one_owner`, prisma/credit-ledger-invariants.sql); the writers set exactly one. It may become null.
   organizationId   String?   @map("organization_id")
   /// The owning person; null for an organization's entry (hadron-server#5014).
   ownerUserId      String?   @map("owner_user_id")

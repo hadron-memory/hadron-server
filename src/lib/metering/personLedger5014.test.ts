@@ -43,9 +43,13 @@ describe('pin 3: the database refuses an entry with two owners', () => {
 });
 
 describe('pin 4: the library refuses an owner that names neither, before any insert', () => {
-  const neither = {} as unknown as OwnerRef;
-  const both = { organizationId: orgId, userId: a } as unknown as OwnerRef;
   it('grantCredits, adjustCredits and debitCredits throw and write nothing', async () => {
+    // built INSIDE the test: orgId and a are assigned in beforeEach, so a value built in the describe body holds undefined
+    // ids and would test "neither" twice (blind review F2 at 601ab494).
+    const neither = {} as unknown as OwnerRef;
+    const both = { organizationId: orgId, userId: a } as unknown as OwnerRef;
+    expect(orgId).toBeTruthy();
+    expect(a).toBeTruthy();
     for (const owner of [neither, both]) {
       await expect(grantCredits(db, { owner, amountMicroCents: 5n, sourceType: 't', sourceId: 'x' })).rejects.toThrow(/owner/i);
       await expect(adjustCredits(db, { owner, amountMicroCents: 5n, sourceType: 't', sourceId: 'x', note: 'n' })).rejects.toThrow(/owner/i);
@@ -97,6 +101,10 @@ describe('pin 12: the link may be cleared (plan section 13 item 18 is not built,
     const oid = (await insert({ org: orgId })).rows[0].id;
     await pg.query('UPDATE credit_ledger_entries SET owner_user_id = NULL WHERE id = $1', [pid]);
     await pg.query('UPDATE credit_ledger_entries SET organization_id = NULL WHERE id = $1', [oid]);
+    // and the cleared link is what it says: no owner at all, which the CHECK ("at most one") admits (blind review F10)
+    const rows = (await pg.query('SELECT id, organization_id, owner_user_id FROM credit_ledger_entries WHERE id = ANY($1)', [[pid, oid]])).rows;
+    expect(rows).toHaveLength(2);
+    for (const r of rows) expect([r.organization_id, r.owner_user_id]).toEqual([null, null]);
   });
 });
 

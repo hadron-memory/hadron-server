@@ -101,6 +101,14 @@ describe('pin 2: exactly one of orgRef and userRef', () => {
   });
 });
 
+describe('pin 2b: an empty orgRef is a given ref (blind review F7)', () => {
+  it('orgRef "" beside userRef is BAD_USER_INPUT, not a silent fall-through to the person', async () => {
+    await gql(GRANT, adminCtx(), { input: grant() });
+    expect(code(await gql(BALANCE, adminCtx(), { orgRef: '', userRef: p }))).toBe('BAD_USER_INPUT');
+    expect(code(await gql(LEDGER, adminCtx(), { orgRef: '', userRef: p }))).toBe('BAD_USER_INPUT');
+  });
+});
+
 describe('pin 5: a person does not read another person\'s ledger, and the refusal does not tell who exists', () => {
   it('P reads Q: FORBIDDEN; P reads a missing id and a missing handle: the same error, byte for byte', async () => {
     await gql(GRANT, adminCtx(), { input: grant({ userRef: q, sourceId: 'cs_q' }) });
@@ -149,6 +157,18 @@ describe('pin 6: an impersonated session and an App key read nobody\'s person le
     };
     expect(code(await gql(BALANCE, impersonatedAdmin, { userRef: p }))).toBe('FORBIDDEN');
     expect(code(await gql(LEDGER, impersonatedAdmin, { userRef: p }))).toBe('FORBIDDEN');
+  });
+
+  it('a person\'s context that names an App (appId, no key) is refused too: the ledger is read as the person, as mayWriteLedger refuses it for writes (local review P3-1)', async () => {
+    await gql(GRANT, adminCtx(), { input: grant() });
+    const inApp: Partial<Context> = { userId: p, appId: generateId(), roles: ['READER'] };
+    expect(code(await gql(BALANCE, inApp, { userRef: p }))).toBe('FORBIDDEN');
+  });
+
+  it('a caller with no user and no key reads nobody\'s ledger (blind review F10)', async () => {
+    await gql(GRANT, adminCtx(), { input: grant() });
+    expect(code(await gql(BALANCE, { roles: [] }, { userRef: p }))).toBe('FORBIDDEN');
+    expect(code(await gql(LEDGER, { roles: [] }, { userRef: p }))).toBe('FORBIDDEN');
   });
 
   it('an App-key context that carries a userId is still refused (the arm is judged on the credential, not on userId)', async () => {

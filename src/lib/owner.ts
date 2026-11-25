@@ -46,15 +46,14 @@ export function ownerColumns(owner: OwnerRef): { organizationId: string | null; 
 
 /**
  * #5014: is a stored row owned by `owner`? Branches on the OWNER'S class first, then compares that one column, so two NULL
- * columns (an organization's entry and a person's entry both have one) are never "the same owner" (finding
- * org-xor-owner-null-comparison-bypass): comparing both columns with `===` would call a person's entry the same as another
+ * columns (an organization's entry and a person's entry both have one) are never "the same owner" (Hadron finding
+ * hrn:node:hadronmemory.com:hadron-server:findings:org-xor-owner-null-comparison-bypass): comparing both columns with `===` would call a person's entry the same as another
  * person's whenever both organization columns are null.
  */
 export function sameOwner(row: OwnedRow, owner: OwnerRef): boolean {
   const cols = ownerColumns(owner);
   return cols.ownerUserId != null ? row.ownerUserId === cols.ownerUserId : row.organizationId === cols.organizationId;
 }
-
 /** #5014: the Prisma `where` that selects an owner's rows by the ONE column it sets (never both: a cleared link must not hide a row). */
 export function ownerWhere(owner: OwnerRef): { organizationId: string } | { ownerUserId: string } {
   const cols = ownerColumns(owner);

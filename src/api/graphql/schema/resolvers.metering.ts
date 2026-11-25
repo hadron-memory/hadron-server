@@ -18,6 +18,7 @@ import {
 } from './resolvers.helpers.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
+import { repointMergedLedgerOwners } from '../../../lib/metering/repointMergedOwners.js';
 import { ownerWhere, type OwnerRef } from '../../../lib/owner.js';
 import { OrganizationNotFoundError } from '../../../lib/entityRef/errors.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
@@ -262,6 +263,9 @@ export const meteringQueries = {
     const asOf = await databaseNow(ctx.db);
     if (!isReadOnlyImpersonation(ctx)) {
       try {
+        // #5014 (local review P2): first bring in any entry still named by a person merged into this one, so the figure
+        // and the settlement below see the whole ledger whatever the interleaving of a merge and a write.
+        if ('userId' in owner) await repointMergedLedgerOwners(ctx.db, { survivor: owner.userId });
         await settleExpiredGrants(ctx.db, owner, { now: asOf });
       } catch (err) {
         console.error('credit_expiry.settle_failed', {
@@ -509,6 +513,7 @@ export const meteringTypeResolvers = {
       ctx: Context,
     ) => {
       // #5014: the owner the balance was read for, one column set (a person's balance has no organization).
+      if (parent.ownerUserId == null && parent.organizationId == null) throw new Error('A balance names an owner.');
       const owner: OwnerRef = parent.ownerUserId != null ? { userId: parent.ownerUserId } : { organizationId: parent.organizationId as string };
       const parts = await expiringCredit(ctx.db, owner, parent.asOf);
       return parts.map((p) => ({ amountMicroCents: p.remaining.toString(), expiresAt: p.expiresAt.toISOString() }));

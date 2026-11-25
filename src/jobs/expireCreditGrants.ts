@@ -18,6 +18,7 @@
 import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
 import { GRANT_EXPIRY_SOURCE_TYPE } from '../lib/metering/expiry.js';
 import type { OwnerRef } from '../lib/owner.js';
+import { repointMergedLedgerOwners } from '../lib/metering/repointMergedOwners.js';
 import {
   SETTLE_DELAY_MS,
   databaseNow,
@@ -88,6 +89,13 @@ export async function expireCreditGrants(
   const maxPasses = options.maxPasses ?? MAX_PASSES;
   const settle = options.settle ?? settleExpiredGrants;
   const out: ExpireCreditGrantsResult = { owners: 0, settlements: 0, failures: 0 };
+  // #5014 (local review P2): entries a merge raced past are re-pointed to the survivor BEFORE settling, so a settlement is
+  // computed over the whole ledger. A failure logs and the run goes on (the next run, or the survivor's own read, retries).
+  try {
+    await repointMergedLedgerOwners(db);
+  } catch (err) {
+    console.error(`${TAG}.repoint_failed`, { code: safeErrorCode(err) });
+  }
   for (const leg of OWNER_LEGS) {
     let passes = 0;
     let after: string | null = null;
