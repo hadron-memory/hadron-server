@@ -80,16 +80,15 @@ export function markAdmittedMemories(nodes: object[], memoryIds: ReadonlySet<str
 
 /** Of `memoryIds`, those whose edges and nodes may be listed on `parent`: its own (the read that returned it was gated), an admitted one, or one the reader may read. */
 async function listableMemories(parent: Parent, ctx: Context, memoryIds: Iterable<string>): Promise<Set<string>> {
-  const out = new Set<string>();
-  for (const id of new Set(memoryIds)) {
-    if (id === parent.memoryId || admittedMemories.get(parent)?.has(id) || await isMemoryReadableCached(ctx, id)) out.add(id);
-  }
-  return out;
+  const ids = [...new Set(memoryIds)];
+  const ok = await Promise.all(ids.map((id) => id === parent.memoryId || admittedMemories.get(parent)?.has(id) || isMemoryReadableCached(ctx, id)));
+  return new Set(ids.filter((_id, i) => ok[i]));
 }
 
 /**
  * hadron-internal#74 (cor:api:140:03, cor:acl:010:02) — a node lists an edge when the reader may list both the memory that HOLDS the
- * edge and the memory of its far node; any other edge is absent, as in MCP. Both are asked: a stored `Edge.memoryId` is the source side,
+ * edge and the memory of its far node ({@link listableMemories}); any other edge is absent, as in MCP. Every read of the two fields comes
+ * here, batch or not, but an inherited node's, which `resolveInheritedEdges` answers with the same two questions. Both are asked: a stored `Edge.memoryId` is the source side,
  * and may differ from either end after a move.
  */
 export async function batchReadEdges(parent: Parent, ctx: Context, direction: 'out' | 'in'): Promise<unknown> {
@@ -100,12 +99,11 @@ export async function batchReadEdges(parent: Parent, ctx: Context, direction: 'o
     : { targetId: parent.id, target: { memoryId: parent.memoryId, deletedAt: null } };
   const pending = loadBatchReadEdges(parent, direction, async (remaining) => {
     // The filter is in the query, so a capped read counts and returns listed edges only. The grouping runs in the database.
-    const held = await ctx.db.edge.groupBy({ by: ['memoryId'], where });
-    const ends = await ctx.db.node.groupBy({
-      by: ['memoryId'],
-      where: direction === 'out' ? { incomingEdges: { some: where } } : { outgoingEdges: { some: where } },
-    });
-    const ids = [...await listableMemories(parent, ctx, [...held, ...ends].map((r) => r.memoryId))];
+    const [holderMemories, farMemories] = await Promise.all([
+      ctx.db.edge.groupBy({ by: ['memoryId'], where }),
+      ctx.db.node.groupBy({ by: ['memoryId'], where: direction === 'out' ? { incomingEdges: { some: where } } : { outgoingEdges: { some: where } } }),
+    ]);
+    const ids = [...await listableMemories(parent, ctx, [...holderMemories, ...farMemories].map((r) => r.memoryId))];
     return ctx.db.edge.findMany({
       where: { AND: [where, { memoryId: { in: ids } }, { [far]: { memoryId: { in: ids } } }] },
       // #2967 — order before the take, so the overflow probe sees the same edges in the same order

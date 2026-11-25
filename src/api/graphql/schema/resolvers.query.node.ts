@@ -67,7 +67,7 @@ import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { foreignIncludeReader } from '../../../lib/includes/foreignIncludeReader.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { appMemoryScopePage, resolveAppNodeScope } from './resolvers.appMemoryScope.js';
+import { appMemoryScopePage, resolveAppNodeScope, type AppMemorySourceKind } from './resolvers.appMemoryScope.js';
 // Spec 049 Phase 3 — the search ladder's GraphQL entry + disclosure envelope.
 import { resolveNamedScopeForQuery, scopeInfoOf, mergeDegraded as mergeDegradedCodes, SCOPE_NARROWED } from '../../../lib/scopes.js';
 import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
@@ -372,10 +372,12 @@ async function appNodesRead(ctx: Context, appRef: string, filter: AppNodesFilter
       ...(inheritance.excludeNodeIds.length > 0 ? [{ id: { notIn: inheritance.excludeNodeIds } }] : []),
     ],
   };
-  // An inherited base is in scope through its child only; it admits no edge of its own.
-  const admitted = new Set([...scope.sources].filter(([, s]) => s.some((x) => x.kind !== 'INHERITED_BASE')).map(([id]) => id));
+  const admitted = new Set([...scope.sources].filter(([, s]) => s.some((x) => ADMITTING_SOURCES.has(x.kind))).map(([id]) => id));
   return { where, inheritance, admitted };
 }
+
+/** The scope sources that admit a memory itself; an inherited base is in scope through its child only. */
+const ADMITTING_SOURCES: ReadonlySet<string> = new Set<AppMemorySourceKind>(['AGENT_SYSTEM', 'AGENT_LINK', 'TEAM_SPACE', 'APP_MEMORY']);
 
 /** Everything a returned `appNodes` / `appNodesPage` row carries. */
 const APP_NODES_INCLUDE = {

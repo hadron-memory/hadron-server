@@ -136,6 +136,18 @@ describe('#74 readable memories', () => {
       const got = await list(near, ctx());
       expect([got.incoming, got.outgoing]).toEqual([['other-in', 'same-in'], ['other-out', 'same-out']]);
     }
+    const r = await run(batch(near), context(member));
+    const n2 = (r.data as any).nodeBatch.nodes[0];
+    expect([n2.incomingEdges.map((e: any) => e.name).sort(), n2.outgoingEdges.map((e: any) => e.name).sort()])
+      .toEqual([['other-in', 'same-in'], ['other-out', 'same-out']]);
+  });
+
+  it('an edge a third readable memory holds between two nodes of this one is listed, batch too', async () => {
+    const other = await memory('other', { organizationId: orgId, class: 'knowledge', visibility: 'ORGANIZATION' });
+    await edge('third-in', other, sibling, near);
+    expect((await list(near, context(member))).incoming).toEqual(['same-in', 'third-in']);
+    const r = await run(batch(near), context(member));
+    expect((r.data as any).nodeBatch.nodes[0].incomingEdges.map((e: any) => e.name).sort()).toEqual(['same-in', 'third-in']);
   });
 });
 
