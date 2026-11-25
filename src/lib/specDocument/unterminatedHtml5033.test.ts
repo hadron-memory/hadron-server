@@ -345,7 +345,7 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('<script>\nx\n</script>\ny')).toBe('<script>\nx\n</script>\ny');
     // The browser ends the element at the first `</script ` and reads what follows as markup, inside the Markdown block (found by fuzz).
     expect(escapeUnterminatedHtml('<script>"</script <plaintext><style></template></script><noscript>')).toBe('<script>"</script <plaintext>&lt;style></template></script>&lt;noscript>');
-    expect(escapeUnterminatedHtml('<script></script <pre><!--</title><a</script></textarea')).toBe('<script></script <pre>&lt;!--</title><a</script>&lt;/textarea');
+    expect(escapeUnterminatedHtml('<script></script <pre><!--</title><a</script></textarea')).toBe('<script></script <pre>&lt;!--</title>&lt;a</script>&lt;/textarea');
   });
   it('a tag that would swallow a fence opener is no tag: a line-head end tag or non-block tag cannot span a block boundary', () => {
     expect(escapeUnterminatedHtml('<script>\nx\n</script\n```\n>\n```\nq <textarea>z')).toBe('&lt;script>\nx\n&lt;/script\n```\n>\n```\nq &lt;textarea>z');

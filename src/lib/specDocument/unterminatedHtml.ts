@@ -295,6 +295,8 @@ function firstUnterminated(text: string, from: number): number {
     while (nameEnd < n && !isBlank(text[nameEnd]) && text[nameEnd] !== '/' && text[nameEnd] !== '>') nameEnd += 1;
     const name = text.slice(nameStart, nameEnd).toLowerCase();
     const opensBlock = BLOCK6_NAMES.has(name) || (!isEnd && TYPE1_NAMES.has(name));
+    // A name that holds `=`, `<` or a quote is read as a name by a browser and fails in htmlparser2: ambiguous, so unterminated.
+    if (/[=<"'`]/.test(name)) return i;
     const tagEnd = tagEndOf(text, i, nameStart);
     if (tagEnd === -1 || tagEnd > tagLimit(i, opensBlock)) return i;
     // An end tag takes attributes in a browser (a quote hides a `>`) but htmlparser2 ends it at the first `>`; where the two ends differ the
