@@ -140,8 +140,12 @@ describe('#5019 an encrypted memory is measured in plaintext', () => {
     refusedAt(await gql(UPDATE, { input: { id: n.id, description: 'd' } }));
     ok(await gql(UPDATE, { input: { id: n.id, content: a(990), description: a(10) } }));
     // A merge of a plaintext field needs no session key: the stored body is measured from its envelope.
+    // Fits only in plaintext: the stored ciphertext alone is over the ceiling.
+    ok(await gql(UPDATE, { input: { id: n.id, description: a(5) } }));
     const src = await node('src', { description: a(20) });
+    const small = await node('small', { description: 'b' });
     sessionKeyCache.clear();
+    ok(await gql(MERGE, { input: { source: small.id, target: n.id, include: ['DESCRIPTION'] } }));
     refusedAt(await gql(MERGE, { input: { source: src.id, target: n.id, include: ['DESCRIPTION'] } }));
   });
 });
