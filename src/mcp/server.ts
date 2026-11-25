@@ -4650,7 +4650,7 @@ export function createMcpServerInstance(
             });
             if (changes.length === 0) return current.id;
             // #5019 (cor:dmo:060:19) — the section stores its description as its body too, so both count.
-            assertNodeContentSize(resultingNodeContent({ content, description: description ?? null }, currentForDiff));
+            assertNodeContentSize(() => resultingNodeContent({ content, description: description ?? null }, currentForDiff));
             sectionChanged = authoredContentChanged(changes);
             // #1328 — a re-save is an update whatever the tool is called
             // (`findings:parent-node-upsert-is-authoring`).
@@ -4671,7 +4671,7 @@ export function createMcpServerInstance(
           if (!prior || prior.deletedAt) {
             await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted, auth);
             const kept = prior ? await tx.node.findUnique({ where: { id: prior.id } }) : null;
-            assertNodeContentSize(resultingNodeContent(
+            assertNodeContentSize(() => resultingNodeContent(
               { content, description: description ?? null }, kept && parentKey ? decryptNodeFieldsWithKey({ ...kept }, parentKey) : kept,
             ));
           }
@@ -6929,13 +6929,6 @@ export function createMcpServerInstance(
           objectType !== undefined ? (objectType.trim() || null) : pre?.objectType,
           properties !== undefined ? properties : pre?.properties,
         );
-        // #5019 (cor:dmo:060:19) — the resulting node in plaintext, before the snapshot: this tool clears an omitted body or
-        // description, and a revived tombstone keeps its omitted data and properties.
-        const sizeKey = memEncRow?.isEncrypted ? sessionKeyCache.getByMemoryId(memoryId) : null;
-        assertNodeContentSize(resultingNodeContent(
-          { content: content ?? null, description: description ?? null, data: nodeData, properties },
-          pre && sizeKey ? decryptNodeFieldsWithKey({ ...pre }, sizeKey) : pre,
-        ));
         if (!pre) return null;
         await ensureCurrentNodeRevisionInTransaction(tx, pre.id, { expectedMemoryId: memoryId });
         pre = await tx.node.findUniqueOrThrow({ where: { id: pre.id } });
@@ -7068,6 +7061,17 @@ export function createMcpServerInstance(
             runnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
             mintHuman: true, authoredChange: true,
           }, attestedAuthoring(recoveryCtx(), authoredWith));
+          // #5019 (cor:dmo:060:19) — the resulting node in plaintext: this tool clears an omitted body or description, and a
+          // revived tombstone keeps its omitted data and properties. #5160: after the role and authoring gates, as in
+          // writeNodeCore; the snapshot above rolls back with a refusal. A kept field is measured at rest (ciphertext, never
+          // smaller than its plaintext) only when the key lapses during this call: without one the call was refused above.
+          assertNodeContentSize(() => {
+            const sizeKey = memEncRow?.isEncrypted ? sessionKeyCache.getByMemoryId(memoryId) : null;
+            return resultingNodeContent(
+              { content: content ?? null, description: description ?? null, data: nodeData, properties },
+              pre && sizeKey ? decryptNodeFieldsWithKey({ ...pre }, sizeKey) : pre,
+            );
+          });
           // #1460 — the locked tombstone can retain vectors from its old
           // plaintext. Purge both kinds before the upsert makes it searchable.
           if (pre?.deletedAt) {
