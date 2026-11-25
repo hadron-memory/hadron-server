@@ -2302,8 +2302,8 @@ export const nodeQueries = {
        * the vector page did not reach get their vector rank (one budgeted lookup; #4994: in a large scope it reads the
        * vector ranking only to a bounded depth), and the keyword leg widens up to its ceiling (KEYWORD_FETCH_CAP, ruling
        * 0150 lifted no cap on it). If the order still is not certain, the vector budget ran out, a hit lay past the
-       * lookup's depth, or the keyword ceiling was reached first: the page is flagged `stopped_early` (cor:api:090:04
-       * Proposed), never presented as the true page.
+       * lookup's depth, the lookup disagreed with the vector leg (#5162), or the keyword ceiling was reached first: the page
+       * is flagged `stopped_early` (cor:api:090:04 Proposed), never presented as the true page.
        */
       const hybridRanking = async (pageN: number) => {
         const depth0 = hasStructuredFilters ? Math.min(pageN * 5, KEYWORD_FETCH_CAP) : pageN;
@@ -2316,20 +2316,33 @@ export const nodeQueries = {
         const looked = new Set<string>();
         // #4994: this ranking's lookups share one computed vector ranking (same options). A re-ranking starts afresh.
         const rankMemo = {};
+        let exactLookup = false; // #5162: set from the lookup's own answer; absent, its ranks must agree with the leg
         for (;;) {
           // BLIND P2-1 (Bianca): a short keyword leg IS an exhausted one. `lexicalSearch` is one `LIMIT dk OFFSET 0`
           // statement with no cap, timeout or post-filter of its own (postgres.ts), and `hybridKeywordCandidates` only
           // swaps the query (a literal fallback, itself one such statement; true hybrid never relaxes), so fewer than
           // `dk` rows means nothing deeper matches. A lexical failure throws; it never comes back short.
           const kwLeg = { ids: kwHits.map((h) => h.nodeId), exhausted: kwHits.length < dk };
-          const r = certifiedHybridRanking(kwLeg, vecLeg, pageN, ranks, looked);
+          const r = certifiedHybridRanking(kwLeg, vecLeg, pageN, ranks, looked, exactLookup);
           if (r.certified) return { fused: r.ranked, vecHits, exhausted: kwLeg.exhausted && vecLeg.exhausted };
           const lookup = vecLeg.exhausted ? [] : r.vecLookup.filter((id) => !looked.has(id));
           if (lookup.length) {
             const res = await provider.vectorRanks({ ...vectorOpts, nodeIds: lookup, memo: rankMemo });
             for (const id of lookup) looked.add(id);
             for (const [id, rank] of res.ranks) ranks.set(id, rank);
-            if (!res.stoppedEarly) continue;
+            exactLookup = res.exact === true;
+            if (!res.stoppedEarly) {
+              // #5162: a walked lookup is asked about the leg's own nodes too (the same computed ranking), so one that
+              // disagrees with the leg is seen and never certified. A call of its own: a leg node it cannot place is
+              // that disagreement, not a reason to stop reading.
+              const legIds = exactLookup ? [] : vecLeg.ids.filter((id) => !looked.has(id));
+              if (legIds.length) {
+                const ofLeg = await provider.vectorRanks({ ...vectorOpts, nodeIds: legIds, memo: rankMemo });
+                for (const id of legIds) looked.add(id);
+                for (const [id, rank] of ofLeg.ranks) ranks.set(id, rank);
+              }
+              continue;
+            }
             // #4994: an incomplete lookup (a node past its depth, or the budget) is never certified. The ranks it did
             // return still order the page, which is flagged.
             rankingIncomplete = true;
@@ -2349,7 +2362,8 @@ export const nodeQueries = {
             }
             continue;
           }
-          rankingIncomplete = true; // the order up to the page could not be certified inside the budget / ceiling
+          // The order could not be certified inside the budget / ceiling, or (#5162) it rests on a lookup that disagrees.
+          rankingIncomplete = true;
           return { fused: r.ranked, vecHits, exhausted: false };
         }
       };

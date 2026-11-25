@@ -788,9 +788,12 @@ export const VECTOR_RANK_LOOKUP_DEPTH = VECTOR_INDEX_ORDER_WINDOW;
  * #4994 — what one rank lookup computed, kept for the next one. The caller holds it for exactly ONE fused ranking and
  * passes it only with the SAME scope options (a different scope needs a new memo). A cut ranking is never kept.
  */
-export interface VectorRankMemo { ranking?: { ranks: Map<string, number>; complete: boolean } }
+export interface VectorRankMemo { ranking?: { ranks: Map<string, number>; complete: boolean; exact?: boolean } }
 
-/** The ranking a lookup answers from: node id → 1-based rank. `complete` = it holds every eligible node. Null when cut. */
+/**
+ * The ranking a lookup answers from: node id → 1-based rank. `complete` = it holds every eligible node. `exact` (#5162) =
+ * it is the exact ranking of a scope within the bound, never a walk. Null when cut.
+ */
 async function rankingForLookup(db: PrismaClient, opts: NodeVectorScope, deadlineAt: number): Promise<VectorRankMemo['ranking'] | null> {
   const cap = vectorSmallScopeRows();
   const sized = await oneStatementUnderBudget(db, (tx) => tx.$queryRaw<{ n: number }[]>`
@@ -805,7 +808,7 @@ async function rankingForLookup(db: PrismaClient, opts: NodeVectorScope, deadlin
         GROUP BY ne.node_id
       )
       SELECT node_id, ROW_NUMBER() OVER (ORDER BY distance ASC, node_id ASC)::int AS rank FROM best`, deadlineAt);
-    return stopped ? null : { ranks: new Map(rows.map((r) => [r.node_id, Number(r.rank)])), complete: true };
+    return stopped ? null : { ranks: new Map(rows.map((r) => [r.node_id, Number(r.rank)])), complete: true, exact: true };
   }
   let exhausted = false;
   let cut = false;
@@ -836,7 +839,9 @@ async function rankingForLookup(db: PrismaClient, opts: NodeVectorScope, deadlin
  * {@link VECTOR_RANK_LOOKUP_DEPTH}: the same code path, tie order and work budget as the page's own vector leg. Like that
  * leg it normally reads the HNSW walk, whose order is approximate. A rank is the node's position in `vectorSearchNodes`
  * called with the LOOKUP's options; the page's leg asks the walk for a different candidate window, so the two walks can
- * place the same node a few positions apart (about 1-2% several hundred deep at 200k vectors, #5155 QA).
+ * place the same node a few positions apart (about 1-2% several hundred deep at 200k vectors, #5155 QA). The caller does
+ * not certify a page on a walked lookup that disagrees with its leg (#5162, `certifiedHybridRanking`); `exact` in the
+ * answer marks a ranking that was not walked.
  *
  * With a `memo`, the lookups of one fused ranking share one computed ranking: only the first pays for it.
  *
@@ -848,7 +853,7 @@ async function rankingForLookup(db: PrismaClient, opts: NodeVectorScope, deadlin
  */
 export async function vectorRanksOf(
   db: PrismaClient, opts: NodeVectorScope & { nodeIds: string[]; memo?: VectorRankMemo },
-): Promise<{ ranks: Map<string, number>; stopped: boolean }> {
+): Promise<{ ranks: Map<string, number>; stopped: boolean; exact?: boolean }> {
   if (opts.memoryIds.length === 0 || opts.nodeIds.length === 0) return { ranks: new Map(), stopped: false };
   // One deadline for the ranking and the probe, never more than the request's own.
   const own = Date.now() + vectorSearchTimeoutMs();
@@ -865,13 +870,14 @@ export async function vectorRanksOf(
   for (const id of wanted) { const r = ranking.ranks.get(id); if (r !== undefined) ranks.set(id, r); }
   const missing = [...wanted].filter((id) => !ranks.has(id));
   // A complete ranking holds every eligible node, so a missing one has no eligible vector.
-  if (!missing.length || ranking.complete) return { ranks, stopped: false };
+  const exact = ranking.exact ? { exact: true } : {};
+  if (!missing.length || ranking.complete) return { ranks, stopped: false, ...exact };
   // Otherwise ask whether any missing node is eligible at all: if so it is past the depth, not absent. The statement reads
   // only the named nodes' vectors.
   const probe = await oneStatementUnderBudget(db, (tx) => tx.$queryRaw<{ present: number }[]>`
     SELECT 1 AS present ${nodeVectorEligibility(opts)} AND ne.node_id IN (${Prisma.join(missing)})
     LIMIT 1`, deadlineAt);
-  return { ranks, stopped: probe.stopped || probe.rows.length > 0 };
+  return { ranks, stopped: probe.stopped || probe.rows.length > 0, ...exact };
 }
 
 /**

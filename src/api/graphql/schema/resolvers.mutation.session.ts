@@ -538,7 +538,7 @@ export async function writeSessionHandoff(
         },
         writerCtx,
         'create',
-        { ownerLimit: 'count-only', authoring: { kind: 'platform', record: 'session-handoff' } },
+        { ownerLimit: 'count-only', authoring: { kind: 'platform', record: 'session-handoff' }, sizeCeiling: 'skip' },
       );
     }
 
@@ -558,7 +558,7 @@ export async function writeSessionHandoff(
       },
       writerCtx,
       'create',
-      { ownerLimit: 'count-only', authoring: { kind: 'platform', record: 'session-handoff' } },
+      { ownerLimit: 'count-only', authoring: { kind: 'platform', record: 'session-handoff' }, sizeCeiling: 'skip' },
     );
   } catch (e) {
     throw new GraphQLError(

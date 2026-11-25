@@ -170,7 +170,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.hadronServer.deleteMany();
   // Spec 046 — usage metering (prices are FK-free; ledger FKs org only).
   await db.aiModelPrice.deleteMany();
-  await db.creditLedgerEntry.deleteMany();
+  // #5010: the ledger is append-only by trigger (a row DELETE is refused); TRUNCATE fires no row trigger.
+  await db.$executeRawUnsafe('TRUNCATE credit_ledger_entries');
   // Spec 043 — Slack integration (receipts have no FK; connections FK org + app).
   await db.slackEventReceipt.deleteMany();
   await db.slackConnection.deleteMany();
@@ -215,7 +216,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // fires no row triggers. #1706: agent_team_alarm_schedule references the events, so it is
   // truncated with them. #1708: so is worker_delivery_task_events, for the same reason.
   // #2022: a task's stop holds go with it.
-  await db.$executeRawUnsafe('TRUNCATE alarm_escalation_ends, dark_worker_episodes, lead_cadence_episodes, lead_cadence_clocks, post_limit_episodes, host_sweep_episodes, saturation_episodes, team_dark_episodes, host_sweep_runs, start_failing_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, secret_read_clients, grant_events, grant_signatures, grant_signing_requests, grants, agent_task_stop_holds, agent_match_outcomes, agent_task_counters, agent_task_blockers, agent_tasks');
+  await db.$executeRawUnsafe('TRUNCATE alarm_escalation_ends, dark_worker_episodes, lead_cadence_episodes, lead_cadence_clocks, post_limit_episodes, host_sweep_episodes, saturation_episodes, team_dark_episodes, host_sweep_runs, start_failing_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, secret_read_clients, grant_events, grant_signatures, grant_selection_signatures, grant_signing_selections, grant_signing_requests, grants, agent_task_stop_holds, agent_match_outcomes, agent_task_counters, agent_task_blockers, agent_tasks');
   // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
   await db.worker.deleteMany();
   await db.node.deleteMany();

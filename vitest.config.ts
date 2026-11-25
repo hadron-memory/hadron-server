@@ -58,6 +58,7 @@ export default defineConfig({
       GRAPH_VIEW_DISABLED: 'false',
       // #5009 — a dev machine's default owner limits must not refuse a fixture's creation.
       OWNER_DEFAULT_LIMITS: '',
+      NODE_CONTENT_MAX_BYTES: '',
       EMBEDDING_API_URL: '',
       EMBEDDING_SAGEMAKER_ENDPOINT_NAME: '',
       NATS_URL: '',

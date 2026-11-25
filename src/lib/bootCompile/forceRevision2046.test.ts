@@ -26,7 +26,7 @@ beforeEach(async () => {
 
 const revCount = (nodeId: string) => db.nodeRevision.count({ where: { nodeId } });
 const resave = (loc: string, force: boolean) =>
-  writeNodeCore({ memoryId, loc, name: 'N', content: 'same' } as never, ctx, 'update', { ownerLimit: 'refuse', authoring: attestedAuthoring(null), forceRevision: force });
+  writeNodeCore({ memoryId, loc, name: 'N', content: 'same' } as never, ctx, 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null), forceRevision: force });
 
 describe('#2046 S9-4 — forceRevision', () => {
   it('inside the compile an identical save leaves one more revision and advances revSeq', async () => {
