@@ -38,7 +38,7 @@ describe('#4677 item 1: next() runs outside the admission try', () => {
     const boom = new Error('downstream threw synchronously');
     const next = vi.fn(() => { throw boom; });
     const res = fakeRes();
-    await expect(run(buildAuthRateAdmission(liveDb, { protocol: 'rest', credential: 'none' }), {}, res, next)).rejects.toBe(boom);
+    await expect(run(buildAuthRateAdmission(liveDb, { protocol: 'rest', credential: 'none', form: 'json' }), {}, res, next)).rejects.toBe(boom);
     expect(admit).toHaveBeenCalledTimes(1);
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.status).not.toHaveBeenCalled();
@@ -47,7 +47,7 @@ describe('#4677 item 1: next() runs outside the admission try', () => {
     const boom = new Error('downstream threw synchronously');
     const next = vi.fn(() => { throw boom; });
     const res = fakeRes();
-    await expect(run(buildAuthRateAdmission(liveDb, { protocol: 'oauth', credential: 'none' }), {}, res, next)).rejects.toBe(boom);
+    await expect(run(buildAuthRateAdmission(liveDb, { protocol: 'oauth', credential: 'none', form: 'json' }), {}, res, next)).rejects.toBe(boom);
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.status).not.toHaveBeenCalled();
   });
@@ -65,7 +65,7 @@ describe('#4677 item 2: the retry-seconds invariant', () => {
         admit.mockRejectedValueOnce(withRetry(value));
         const res = fakeRes();
         const next = vi.fn();
-        await run(buildAuthRateAdmission(liveDb, { protocol, credential: 'none' }), {}, res, next);
+        await run(buildAuthRateAdmission(liveDb, { protocol, credential: 'none', form: 'json' }), {}, res, next);
         expect(res.set).not.toHaveBeenCalled();
         if (protocol === 'rest') {
           expect(next).toHaveBeenCalledTimes(1);
@@ -82,7 +82,7 @@ describe('#4677 item 2: the retry-seconds invariant', () => {
     admit.mockRejectedValueOnce(new RateLimited('CREDENTIALS', 42));
     const res = fakeRes();
     const next = vi.fn();
-    await run(buildAuthRateAdmission(liveDb, { protocol: 'rest', credential: 'none' }), {}, res, next);
+    await run(buildAuthRateAdmission(liveDb, { protocol: 'rest', credential: 'none', form: 'json' }), {}, res, next);
     expect(next).not.toHaveBeenCalled();
     expect(res.set).toHaveBeenCalledWith({ 'Retry-After': '42', 'Cache-Control': 'no-store' });
     expect(res.status).toHaveBeenCalledWith(429);
@@ -94,7 +94,7 @@ describe('#4677 item 3: one cookie-name source', () => {
   it('the consent cookie supplies the principal under the shared constant\'s current name, and the old literal does not', async () => {
     (liveDb.user.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'user-4677' });
     const token = await signJwt({ sub: 'user-4677', roles: ['READER'] });
-    const handler = buildAuthRateAdmission(liveDb, { protocol: 'oauth', credential: 'cookie' });
+    const handler = buildAuthRateAdmission(liveDb, { protocol: 'oauth', credential: 'cookie', form: 'json' });
     await run(handler, { cookies: { renamed_session_4677: token } }, fakeRes());
     expect(admit.mock.calls[0][2]).toMatchObject({ principal: 'USER:user-4677' });
     admit.mockClear();
@@ -105,8 +105,8 @@ describe('#4677 item 3: one cookie-name source', () => {
 
 describe('#4677 item 4: explicit credential and protocol choices', () => {
   it('the handler is named for its choices and the choices are honored independently', async () => {
-    const handler = buildAuthRateAdmission(liveDb, { protocol: 'oauth', credential: 'bearer' });
-    expect(handler.name).toBe(authRateAdmissionName('oauth', 'bearer'));
+    const handler = buildAuthRateAdmission(liveDb, { protocol: 'oauth', credential: 'bearer', form: 'json' });
+    expect(handler.name).toBe(authRateAdmissionName('oauth', 'bearer', 'json'));
     (liveDb.user.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'user-4677' });
     const token = await signJwt({ sub: 'user-4677', roles: ['READER'] });
     await run(handler, { headers: { authorization: `Bearer ${token}` }, cookies: { renamed_session_4677: 'ignored' } }, fakeRes());
@@ -115,5 +115,32 @@ describe('#4677 item 4: explicit credential and protocol choices', () => {
     const res = fakeRes();
     await run(handler, {}, res);
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'temporarily_unavailable' }));
+  });
+});
+
+describe('#4675: the page form', () => {
+  const pageRun = async (seconds: unknown) => {
+    const error = new RateLimited('CREDENTIALS', 1);
+    (error.extensions as Record<string, unknown>).retryAfterSeconds = seconds;
+    admit.mockRejectedValueOnce(error);
+    const res = { ...fakeRes(), type: vi.fn(), send: vi.fn() };
+    for (const fn of [res.set, res.status, res.type]) fn.mockReturnValue(res);
+    const next = vi.fn();
+    const accepts = (types?: string[]) => (types ? 'html' : ['text/html']);
+    await run(buildAuthRateAdmission(liveDb, { protocol: 'rest', credential: 'none', form: 'page' }), { accepts } as unknown as Partial<Request>, res, next);
+    return { res, next };
+  };
+  it.each([[1, 'Please wait 1 second before'], [2, 'Please wait 2 seconds before'], [900, 'Please wait 900 seconds before']])(
+    'says the wait of %s in words', async (seconds, words) => {
+      const { res } = await pageRun(seconds);
+      expect(res.status).toHaveBeenCalledWith(429);
+      expect(res.send).toHaveBeenCalledWith(expect.stringContaining(words));
+      expect(res.json).not.toHaveBeenCalled();
+    });
+  it.each([[0], [1.5], ['<script>'], [undefined]])('an invalid wait of %s is a loud fault, never a page', async (seconds) => {
+    const { res, next } = await pageRun(seconds);
+    expect(res.send).not.toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+    expect(next.mock.calls[0][0]).toBeInstanceOf(Error);
   });
 });
