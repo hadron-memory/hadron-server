@@ -180,6 +180,49 @@ describe('#5081 — behaviour through real GraphQL', () => {
       for (const id of inB()) expect(ids(scopedB, name)).toContain(id);
     });
 
+    // The other scope-gated list fields (#5081 local P3-1, QA P2): one row that lives ONLY in org B per entity. A resolver
+    // that reads the wrong name gets `undefined` and serves the union, which includes B's row for a caller of both orgs.
+    describe('every other scope-gated list field applies the org (a row of B only)', () => {
+      const rowsOfB: Record<string, () => Promise<string>> = {
+        slackConnections: async () =>
+          (await db.slackConnection.create({ data: { id: generateId(), organizationId: orgB.id, defaultAppId: appB.id, toolConnectionId: `tc-${generateId()}`, teamId: `T${generateId()}`, teamName: 'tb', botUserId: 'ub', botId: 'bb' } as any })).id,
+        telegramConnections: async () =>
+          (await db.telegramConnection.create({ data: { id: generateId(), organizationId: orgB.id, appId: appB.id, toolConnectionId: `tc-${generateId()}`, botId: `b${generateId()}`, botUsername: 'bbot', displayName: 'bb' } as any })).id,
+        mcpServers: async () =>
+          (await db.mcpServer.create({ data: { id: generateId(), organizationId: orgB.id, slug: 'mb', name: 'mb', url: 'https://mcp.example.test' } as any })).id,
+        homeAssistantInstances: async () =>
+          (await db.homeAssistantInstance.create({ data: { id: generateId(), organizationId: orgB.id, slug: 'hb', name: 'hb', url: 'https://ha.example.test', tokenEncrypted: 'x' } as any })).id,
+        resendSenders: async () =>
+          (await db.resendSender.create({ data: { id: generateId(), organizationId: orgB.id, fromAddress: 'b@example.test', apiKeyEncrypted: 'x' } as any })).id,
+        scopes: async () => (await db.scope.create({ data: { id: generateId(), organizationId: orgB.id, name: 'sb' } as any })).id,
+        channels: async () => (await seedChannelOfB()).id,
+        registerEntries: async () =>
+          (await db.registerEntry.create({ data: { id: generateId(), organizationId: orgB.id, channelId: (await seedChannelOfB()).id } as any })).id,
+        edges: async () => {
+          const n = (loc: string) => db.node.create({ data: { id: generateId(), memoryId: memB.id, loc, name: loc } as any });
+          const [a, b] = [await n('ea'), await n('eb')];
+          return (await db.edge.create({ data: { id: generateId(), memoryId: memB.id, sourceId: a.id, targetId: b.id, loc: 'e-b' } as any })).id;
+        },
+        assets: async () =>
+          (await db.asset.create({ data: { id: generateId(), memoryId: memB.id, filename: 'b.txt', mimeType: 'text/plain', sizeBytes: 1, storageKey: `k-${generateId()}`, scanStatus: 'CLEAN' } as any })).id,
+      };
+      const seedChannelOfB = async () => {
+        const root = await db.node.create({ data: { id: generateId(), memoryId: memB.id, loc: `chat-${generateId()}`, name: 'chat' } as any });
+        return db.channel.create({ data: { id: generateId(), memoryId: memB.id, loc: root.loc, name: 'cb', chatRootNodeId: root.id } as any });
+      };
+
+      it.each(Object.keys(rowsOfB))('%s: orgRef A hides the row of B; orgRef B shows it', async (name) => {
+        const rowId = await rowsOfB[name]();
+        const c = ctx(both.id);
+        const inA = await run(docWith(name, 'orgRef', lit(orgA.urn)), c);
+        expect(inA.errors, name).toBeUndefined();
+        expect(ids(inA, name), name).not.toContain(rowId);
+        const inB = await run(docWith(name, 'orgRef', lit(orgB.urn)), c);
+        expect(inB.errors, name).toBeUndefined();
+        expect(ids(inB, name), name).toContain(rowId);
+      });
+    });
+
     it.each(['apps', 'agents'])('%s: a platform admin who passes an org they are not a member of gets an empty page, not every row', async (name) => {
       const c = ctx(platform.id, ['ADMIN']);
       const unscoped = await run(`query { ${name} { total } }`, c);
