@@ -400,8 +400,11 @@ describe('escapeUnterminatedHtml', () => {
     ];
     for (const [label, body] of starts) expect(escapeUnterminatedHtml(body), label).toBe(body.replace('<i x=', '&lt;i x='));
     // A link reference definition may put its destination on the next line, and its label may hold an escaped bracket.
-    expect(escapeUnterminatedHtml('[a]:\n/u\n<b>\n`x\n<script> y')).toBe('[a]:\n/u\n<b>\n`x\n&lt;script> y');
-    expect(escapeUnterminatedHtml('[a\\]b]: /u\n<b>\n`x\n<script> y')).toBe('[a\\]b]: /u\n<b>\n`x\n&lt;script> y');
+    expect(escapeUnterminatedHtml('[a]:\n/u\n<b>\nuse `<pre x=` here')).toBe('[a]:\n/u\n<b>\nuse `&lt;pre x=` here');
+    expect(escapeUnterminatedHtml('[a\\]b]: /u\n<b>\nuse `<pre x=` here')).toBe('[a\\]b]: /u\n<b>\nuse `&lt;pre x=` here');
+    // A title on the line after a definition, and a definition followed by an ordinary paragraph line, are told apart.
+    expect(escapeUnterminatedHtml('[a]: /u\n"title"\n<b>\nuse `<pre x=` here')).toBe('[a]: /u\n"title"\n<b>\nuse `&lt;pre x=` here');
+    expect(escapeUnterminatedHtml('[a]: /u\ntext\n<b>\nuse `<pre x=` here')).toBe('[a]: /u\ntext\n<b>\nuse `<pre x=` here');
     // A quote's own heading line leaves no paragraph open either.
     expect(escapeUnterminatedHtml('> # h\n<b>\n```\n<i x=\n```\nz')).toBe('> # h\n<b>\n```\n&lt;i x=\n```\nz');
     // After a paragraph line (a lazy continuation of a quote or a list item included) a type 7 tag cannot interrupt: the fence is a fence.
