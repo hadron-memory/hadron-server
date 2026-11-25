@@ -58,7 +58,7 @@ const isAsciiPunct = (c: string | undefined): boolean => c !== undefined && /[!-
  * a quote, a list item, a thematic break or an HTML block of CommonMark's types 1 to 6 (type 7 cannot interrupt a paragraph). A heading is one line, so a span that opens in one ends with it. Where a line only
  * looks like a block start the run is cut short, which means fewer code spans are skipped and more `<` are judged: the safe side.
  */
-const BLOCK_START = /\n(?: {0,3}(?:#{1,6}(?:[ \t\r]|$)|`{3,}|~{3,}|>|[-+*][ \t]+\S|1[.)][ \t]+\S|(?:[-*_][ \t]*){3,}\r?(?:\n|$))|<(?:script|pre|style|textarea)(?:[ \t>\r]|$)|<!--|<\?|<![A-Za-z]|<!\[CDATA\[|<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t>\r]|\/>|$)|[ \t\r]*\n)/gim;
+const BLOCK_START = /\n(?: {0,3}(?:#{1,6}(?:[ \t\r]|$)|`{3,}|~{3,}|>|[-+*][ \t]+\S|1[.)][ \t]+\S|(?:[-*_][ \t]*){3,}\r?(?:\n|$)|<(?:script|pre|style|textarea)(?:[ \t>\r]|$)|<!--|<\?|<![A-Za-z]|<!\[CDATA\[|<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t>\r]|\/>|$))|[ \t\r]*\n)/gim;
 function paragraphEnd(text: string, i: number): number {
   const lineStart = text.lastIndexOf('\n', i - 1) + 1;
   const eol = text.indexOf('\n', i);
