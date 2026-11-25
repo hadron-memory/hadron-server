@@ -935,6 +935,12 @@ CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx
 CREATE INDEX IF NOT EXISTS agent_team_events_person_activity_idx
   ON agent_team_events (actor_user_id, app_id, created_at) WHERE actor_worker_id IS NULL AND task_id IS NOT NULL;
 
+-- #5011 (Billing A4): expiring grants by organization, for the settlement probe and the hourly expiry job. Partial, so
+-- Prisma's schema language can't model it. Same definition as migration
+-- 20261125140000_credit_ledger_expiring_grants_idx, which builds it CONCURRENTLY for production.
+CREATE INDEX IF NOT EXISTS credit_ledger_entries_expiring_grants_idx
+  ON credit_ledger_entries (organization_id, expires_at) WHERE expires_at IS NOT NULL;
+
 -- #4273: the worker-liveness read (workerActivitySql) keeps a worker's open sessions and the ended ones that end at or after
 -- its latest start; these two partial indexes serve those ranges. Same definitions as migrations
 -- 20261115290000_sessions_worker_ended_idx and 20261115291000_sessions_worker_started_idx (built CONCURRENTLY there).
