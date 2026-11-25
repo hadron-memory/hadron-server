@@ -26,6 +26,11 @@ export class GrantSigningRefusal extends Error {
       | 'SIGNING_REQUEST_NOT_FOUND'
       | 'SIGNING_REQUEST_NOT_REQUESTER'
       | 'SIGNING_REQUEST_ENDED'
+      // #5001: refused at a selection request, before any write.
+      | 'SELECTION_EMPTY'
+      | 'SELECTION_TOO_LARGE'
+      | 'SELECTION_DUPLICATE_GRANT'
+      | 'SELECTION_MIXED_APPS'
       // #3649 slice C: refused at the ceremony's completion (src/lib/signing/grantCeremony.ts).
       | 'SECRET_AUTO_DELETE_NEEDS_LIMIT'
       | 'SIGNATURE_NOT_VERIFIED'

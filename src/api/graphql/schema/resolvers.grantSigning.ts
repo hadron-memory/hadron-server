@@ -32,12 +32,15 @@ import {
   createGrantSigningRequestInTransaction, GrantSigningRefusal, withdrawGrantSigningRequestInTransaction,
 } from '../../../lib/signing/grantRequests.js';
 import { effectiveRequestState, type SigningRequester } from '../../../lib/signing/requests.js';
-import { grantSigningCeremonyUrl } from '../../../lib/signing/ceremonyUrl.js';
+import { grantSigningCeremonyUrl, grantSelectionSigningCeremonyUrl } from '../../../lib/signing/ceremonyUrl.js';
+import {
+  createGrantSelectionInTransaction, normalizeSelectionRefs, withdrawGrantSelectionInTransaction,
+} from '../../../lib/signing/grantSelectionRequests.js';
 
 type GrantSigningRequestRow = {
   id: string; grantId: string; version: number; termsHash: string; payloadVersion: string; state: string;
   requesterUserId: string | null; requesterAppId: string | null; requesterWorkerId: string | null; requesterSessionId: string | null;
-  createdAt: Date; expiresAt: Date; endedAt: Date | null;
+  createdAt: Date; expiresAt: Date; endedAt: Date | null; selectionId?: string | null;
 };
 
 function grantNotFound(grantRef: string): GraphQLError {
@@ -119,7 +122,101 @@ function requesterOf(ctx: Context): SigningRequester {
   };
 }
 
+type GrantSigningSelectionRow = {
+  id: string; appId: string; payloadVersion: string; state: string;
+  requesterUserId: string | null; requesterAppId: string | null; requesterWorkerId: string | null; requesterSessionId: string | null;
+  createdAt: Date; expiresAt: Date; endedAt: Date | null; lastRefusedAt: Date | null;
+};
+
+/**
+ * The App and the one reach a caller has over EVERY grant of a selection, or null: one unreadable item, or two Apps, is null (one
+ * shape for unknown and unreadable, so a selection is never partly visible). `locks` is the transaction, as for one grant.
+ */
+async function readableSelectionReach(ctx: Context, grantIds: readonly string[], locks?: Prisma.TransactionClient): Promise<Reach | null> {
+  let first: Reach | null = null;
+  for (const id of grantIds) {
+    const reach = await readableGrantReach(ctx, id, locks);
+    if (!reach) return null;
+    if (first && !sameReach(first, reach)) return null;
+    first ??= reach;
+  }
+  return first;
+}
+
+async function readableSelection(ctx: Context, id: string): Promise<(GrantSigningSelectionRow & { appId: string; grantIds: string[] }) | null> {
+  const row = await ctx.db.grantSigningSelection.findUnique({ where: { id }, include: { items: { select: { grantId: true } } } });
+  if (!row) return null;
+  const grantIds = row.items.map((i) => i.grantId).sort();
+  const reach = await readableSelectionReach(ctx, grantIds);
+  return reach && reach.appId === row.appId ? { ...row, grantIds } : null;
+}
+
 export const grantSigningMutations = {
+  /**
+   * #5001 (cor:acl:140:07): open ONE signing request over a selection of pending grants of one App, one passkey touch. Every ref
+   * must be readable by the caller through the same gate as `requestGrantSignature`; the first one that is not (in ascending id
+   * order) is GRANT_NOT_FOUND, the same answer as an unknown id. GraphQL only (the one-grant request has no MCP tool).
+   */
+  requestGrantSelectionSignature: async (_: unknown, { grantRefs }: { grantRefs: string[] }, ctx: Context) => {
+    refuseImpersonation(ctx);
+    let ids: string[];
+    try { ids = normalizeSelectionRefs(grantRefs); } catch (error) {
+      if (error instanceof GrantSigningRefusal) throw refusalToGraphQL(error, {});
+      throw error;
+    }
+    const reaches = new Map<string, Reach>();
+    for (const id of ids) {
+      const reach = await readableGrantReach(ctx, id);
+      if (!reach) throw grantNotFound(id);
+      reaches.set(id, reach);
+    }
+    const first = reaches.get(ids[0]!)!;
+    if (ids.some((id) => reaches.get(id)!.appId !== first.appId)) {
+      throw refusalToGraphQL(new GrantSigningRefusal('SELECTION_MIXED_APPS', 'A selection holds grants of one App.'), {});
+    }
+    const appId = first.appId;
+    try {
+      return await withAuthorizedTx(
+        ctx, [{ kind: 'app', id: appId }],
+        async (txCtx, tx) => {
+          for (const id of ids) if (!sameReach(await readableGrantReach(txCtx, id, tx), reaches.get(id)!)) throw grantNotFound(id);
+        },
+        (tx) => createGrantSelectionInTransaction(tx, ids, { appId, requester: requesterOf(ctx) }),
+      );
+    } catch (error) {
+      if (error instanceof GrantSigningRefusal) {
+        const ref = typeof error.details.grantRef === 'string' ? error.details.grantRef : null;
+        throw error.code === 'GRANT_NOT_FOUND' && ref ? grantNotFound(ref) : refusalToGraphQL(error, {});
+      }
+      if (isDenial(error)) throw grantNotFound(ids[0]!);
+      throw error;
+    }
+  },
+
+  /** #5001: withdraw an open grant signing selection; only the account that asked. Its open items end with it. */
+  withdrawGrantSigningSelection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    refuseImpersonation(ctx);
+    const row = await readableSelection(ctx, id);
+    if (!row) throw requestNotFound(id);
+    const caller = { userId: ctx.userId ?? null, appId: !ctx.userId && ctx.appKeyId ? ctx.appId ?? null : null };
+    try {
+      return await withAuthorizedTx(
+        ctx, [{ kind: 'app', id: row.appId }],
+        async (txCtx, tx) => {
+          const reach = await readableSelectionReach(txCtx, row.grantIds, tx);
+          if (!reach || reach.appId !== row.appId) throw requestNotFound(id);
+        },
+        (tx) => withdrawGrantSelectionInTransaction(tx, id, { appId: row.appId, caller }),
+      );
+    } catch (error) {
+      if (error instanceof GrantSigningRefusal) {
+        throw error.code === 'SIGNING_REQUEST_NOT_FOUND' ? requestNotFound(id) : refusalToGraphQL(error, { id });
+      }
+      if (isDenial(error)) throw requestNotFound(id);
+      throw error;
+    }
+  },
+
   /** #3649 slice B: open a signing request on one pending grant the caller may read (cor:acl:140:07). */
   requestGrantSignature: async (_: unknown, { grantRef }: { grantRef: string }, ctx: Context) => {
     refuseImpersonation(ctx);
@@ -166,7 +263,13 @@ export const grantSigningMutations = {
 
 export const grantSigningQueries = {
   /** #3649 slice B: one grant signing request by id; null when unknown or its grant is not readable (one shape). */
-  grantSigningRequest: (_: unknown, { id }: { id: string }, ctx: Context) => readableRequest(ctx, id),
+  grantSigningRequest: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    const row = await readableRequest(ctx, id);
+    // #5001: an item of a selection is read through its selection only; the one-grant read answers as for an unknown id.
+    return row && !row.selectionId ? row : null;
+  },
+  /** #5001: one grant signing selection by id; null when unknown or any of its grants is not readable (one shape). */
+  grantSigningSelection: (_: unknown, { id }: { id: string }, ctx: Context) => readableSelection(ctx, id),
 };
 
 /**
@@ -180,6 +283,13 @@ function effectiveState(r: GrantSigningRequestRow) {
   return effectiveRequestState(r, at);
 }
 
+const selectionObservedAt = new WeakMap<GrantSigningSelectionRow, Date>();
+function selectionEffectiveState(r: GrantSigningSelectionRow) {
+  let at = selectionObservedAt.get(r);
+  if (!at) { at = new Date(); selectionObservedAt.set(r, at); }
+  return effectiveRequestState(r, at);
+}
+
 export const grantSigningFieldResolvers = {
   GrantSigningRequest: {
     state: (r: GrantSigningRequestRow) => effectiveState(r).toUpperCase(),
@@ -187,6 +297,17 @@ export const grantSigningFieldResolvers = {
     requestedBy: (r: GrantSigningRequestRow) => ({
       userId: r.requesterUserId, appId: r.requesterAppId, workerId: r.requesterWorkerId, sessionId: r.requesterSessionId,
     }),
-    ceremonyUrl: (r: GrantSigningRequestRow) => grantSigningCeremonyUrl(r.id),
+    // An item of a selection signs on its selection's page, never on a one-grant page of its own.
+    ceremonyUrl: (r: GrantSigningRequestRow) => (r.selectionId ? grantSelectionSigningCeremonyUrl(r.selectionId) : grantSigningCeremonyUrl(r.id)),
+  },
+  GrantSigningSelection: {
+    state: (r: GrantSigningSelectionRow) => selectionEffectiveState(r).toUpperCase(),
+    endedAt: (r: GrantSigningSelectionRow) => (selectionEffectiveState(r) === 'expired' && r.state === 'open' ? r.expiresAt : r.endedAt),
+    requestedBy: (r: GrantSigningSelectionRow) => ({
+      userId: r.requesterUserId, appId: r.requesterAppId, workerId: r.requesterWorkerId, sessionId: r.requesterSessionId,
+    }),
+    ceremonyUrl: (r: GrantSigningSelectionRow) => grantSelectionSigningCeremonyUrl(r.id),
+    items: (r: GrantSigningSelectionRow & { items?: GrantSigningRequestRow[] }, _a: unknown, ctx: Context) =>
+      r.items ?? ctx.db.grantSigningRequest.findMany({ where: { selectionId: r.id }, orderBy: { positionInSelection: 'asc' } }),
   },
 };
