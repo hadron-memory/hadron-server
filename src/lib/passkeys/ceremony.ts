@@ -6,7 +6,7 @@
  * transaction, so a later refusal rolls it back.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '../../generated/prisma/index.js';
 import { verifyAssertionOverChallenge, type AssertionParts, type VerifierCredential } from '../signing/verify.js';
 
 /**
