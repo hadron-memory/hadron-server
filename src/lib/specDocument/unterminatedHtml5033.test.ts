@@ -317,6 +317,13 @@ describe('escapeUnterminatedHtml', () => {
     ['a block end tag (type 6)', "a `x\n</div>\n<b x='\ny` w", "a `x\n</div>\n&lt;b x='\ny` w"],
     ];
     for (const [label, body, want] of cases) expect(escapeUnterminatedHtml(body), label).toBe(want);
+    // An opener may be indented by one to three spaces (LOCAL delta P2); four spaces is a paragraph continuation, not an opener.
+    for (const sp of [' ', '  ', '   ']) {
+      expect(escapeUnterminatedHtml(`see \`a\n${sp}<div> b <pre x= \` c`), `${sp.length} spaces`).toBe(`see \`a\n${sp}<div> b &lt;pre x= \` c`);
+      expect(escapeUnterminatedHtml(`see \`a\n${sp}<p> b <b x=' \` c`), `${sp.length} spaces, p`).toBe(`see \`a\n${sp}<p> b &lt;b x=' \` c`);
+      expect(escapeUnterminatedHtml(`a <!-- c\n${sp}<div>\nd --> e`), `${sp.length} spaces, comment cut`).toBe(`a &lt;!-- c\n${sp}<div>\nd --> e`);
+    }
+    expect(escapeUnterminatedHtml("see `a\n    <div> b <pre x= ` c")).toBe("see `a\n    <div> b <pre x= ` c");
     // An inline tag that is not a block-level name does not end the paragraph (type 7 cannot interrupt one): the span runs on.
     expect(escapeUnterminatedHtml("a `x\n<span>\n<b x='\ny` w")).toBe("a `x\n<span>\n<b x='\ny` w");
   });
