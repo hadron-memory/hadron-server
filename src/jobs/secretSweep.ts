@@ -14,7 +14,8 @@
  *   pnpm tsx src/jobs/secretSweep.ts
  */
 import { pathToFileURL } from 'node:url';
-import { safeErrorCode, sweepSecretAutoDelete } from '../lib/secrets/autoDelete.js';
+import { safeErrorCode } from '../lib/safeErrorCode.js';
+import { sweepSecretAutoDelete } from '../lib/secrets/autoDelete.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { purgeExpiredSecretEvents, purgeSupersededVersions } from '../lib/secrets/purge.js';
 

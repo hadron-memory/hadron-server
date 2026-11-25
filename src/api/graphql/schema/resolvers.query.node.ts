@@ -179,7 +179,7 @@ export interface FindNodesArgs {
   sortProperty?: NodePropertySort | null;
   expand?: number | null;
   granularity?: 'node' | 'chunk' | null;
-  orgId?: string | null;
+  orgRef?: string | null;
   limit?: number | null;
   offset?: number | null;
 }
@@ -651,7 +651,7 @@ export const nodeQueries = {
       } catch (e) {
         // Genuine miss → NOT_FOUND; a malformed ref propagates as itself.
         if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+          throw new GraphQLError('Node not found', {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
@@ -677,7 +677,7 @@ export const nodeQueries = {
       });
       // Denied and missing share one message — no existence oracle.
       const denied = () =>
-        new GraphQLError(`Node not found: "${nodeRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+        new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       if (!node) throw denied();
       if (!(await isMemoryReadableCached(ctx, node.memoryId))) throw denied();
 
@@ -1582,7 +1582,7 @@ export const nodeQueries = {
       // at the bottom can re-enter it without a self-reference (which would
       // leave TypeScript unable to infer the return type).
       const core = async ({
-        query, mode, filter, fields, sort, sortProperty, expand, granularity, orgId, limit, offset, minScore, includeTotal,
+        query, mode, filter, fields, sort, sortProperty, expand, granularity, orgRef, limit, offset, minScore, includeTotal,
       }: FindNodesArgs) => {
       const f = filter ?? {};
       const nodeTypes = nodeTypesOrRefuse(f, 'findNodes'); // #3113 — already refused above; the validated list
@@ -1644,10 +1644,10 @@ export const nodeQueries = {
       // "runnable task nodes in one org" query (there is no separate myTasks).
       const emptyResult = { hits: [], passages: [], total: 0, reason: null, degraded: null };
       let orgScopeId: string | null = null;
-      if (orgId != null) {
+      if (orgRef != null) {
         let resolvedOrgId: string;
         try {
-          ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
+          ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef));
         } catch {
           return emptyResult;
         }
@@ -2434,18 +2434,18 @@ export const nodeQueries = {
       // D-004) and, for `global`, the organization narrowing; add the
       // disclosure envelope on the way out. `filter.memoryRefs` narrows WITHIN
       // the scope. Omitted ⇒ the pre-049 semantics are untouched: the portal
-      // and the CLI pass orgId and filters explicitly and never this argument,
+      // and the CLI pass orgRef and filters explicitly and never this argument,
       // so their results do not change under them from a flag they never passed
       // (`cor:acl:020:03` rule 5's surprise). The ambient rungs (session,
       // active App, active org) live on the MCP surface, which has session state.
       if (scope == null || scope.trim() === '') return core(coreArgs);
 
       const f = coreArgs.filter ?? {};
-      const scopeRes = await resolveNamedScopeForQuery(ctx, scope, appRef ?? null, coreArgs.orgId ?? null);
+      const scopeRes = await resolveNamedScopeForQuery(ctx, scope, appRef ?? null, coreArgs.orgRef ?? null);
       const info = await scopeInfoOf(ctx, scopeRes);
       const narrowed = scopeRes.droppedCount > 0 ? SCOPE_NARROWED : null;
       let innerFilter = f;
-      let innerOrgId = coreArgs.orgId;
+      let innerOrgId = coreArgs.orgRef;
       if (scopeRes.memoryIds !== null) {
         let requested = scopeRes.memoryIds;
         if (f.memoryRefs && f.memoryRefs.length > 0) {
@@ -2467,7 +2467,7 @@ export const nodeQueries = {
       // runnable catalogue); the list is already within that org, so for every
       // other query the extra organizationId clause changes nothing.
       if (scopeRes.kind === 'global') innerOrgId = scopeRes.orgScopeId;
-      const inner = await core({ ...coreArgs, filter: innerFilter, orgId: innerOrgId });
+      const inner = await core({ ...coreArgs, filter: innerFilter, orgRef: innerOrgId });
       return { ...inner, scope: info, degraded: mergeDegradedCodes(inner.degraded, narrowed) };
     },
 

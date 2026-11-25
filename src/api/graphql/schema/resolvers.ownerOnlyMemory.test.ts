@@ -442,7 +442,7 @@ describe('myMemories — active-org scope (#463)', () => {
     // Active org A: category (1) — the caller's OWN personal memories always
     // show, independent of the active org. So BOTH personalA and the org-B
     // personalB appear (they're user-owned, not org-owned).
-    const scoped = (await resolvers.Query.memories(null, { orgId: org.id }, asOwner())).items.map((m: any) => m.id);
+    const scoped = (await resolvers.Query.memories(null, { orgRef: org.id }, asOwner())).items.map((m: any) => m.id);
     expect(scoped).toContain(personalA.id);
     expect(scoped).toContain(personalB.id);
 
@@ -450,7 +450,7 @@ describe('myMemories — active-org scope (#463)', () => {
     const strangerOrg = await db.organization.create({
       data: { id: generateId(), name: 'stranger', urn: `stranger-${generateId()}` },
     });
-    expect(await resolvers.Query.memories(null, { orgId: strangerOrg.id }, asOwner())).toEqual({ items: [], total: 0 });
+    expect(await resolvers.Query.memories(null, { orgRef: strangerOrg.id }, asOwner())).toEqual({ items: [], total: 0 });
   });
 
   it('active org shows the org own + subscribed memories, but not another member org own memory', async () => {
@@ -462,7 +462,7 @@ describe('myMemories — active-org scope (#463)', () => {
     await db.orgMember.create({ data: { organizationId: bKnowledge.org.id, userId: owner.id, role: 'READER' } });
 
     // Active org = A: A's own memory (2) is in; B's own memory is NOT.
-    const scoped = (await resolvers.Query.memories(null, { orgId: aKnowledge.org.id }, asOwner())).items.map((m: any) => m.id);
+    const scoped = (await resolvers.Query.memories(null, { orgRef: aKnowledge.org.id }, asOwner())).items.map((m: any) => m.id);
     expect(scoped).toContain(aKnowledge.graph.id);
     expect(scoped).not.toContain(bKnowledge.graph.id);
   });

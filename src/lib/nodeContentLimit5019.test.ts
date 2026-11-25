@@ -49,3 +49,17 @@ describe('#5019 the measure', () => {
     expect(isExpectedClientError(e)).toBe(true);
   });
 });
+
+describe('#5160 a lazy measure', () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  it('is not computed when no ceiling is set, and is judged when one is', () => {
+    const fields = vi.fn(() => ({ content: 'a'.repeat(11) }));
+    vi.stubEnv('NODE_CONTENT_MAX_BYTES', '');
+    assertNodeContentSize(fields);
+    expect(fields).not.toHaveBeenCalled();
+    vi.stubEnv('NODE_CONTENT_MAX_BYTES', '10');
+    expect(() => assertNodeContentSize(fields)).toThrow(NodeContentTooLargeError);
+    vi.stubEnv('NODE_CONTENT_MAX_BYTES', '11');
+    assertNodeContentSize(fields);
+  });
+});

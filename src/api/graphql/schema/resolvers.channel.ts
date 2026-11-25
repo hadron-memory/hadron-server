@@ -58,7 +58,7 @@ async function readableChannel(ctx: Context, ref: string): Promise<Channel | nul
 
 async function writableChannel(ctx: Context, ref: string): Promise<Channel> {
   const row = await readableChannel(ctx, ref);
-  if (!row) throw new GraphQLError(`No match for channelRef "${ref}".`, { extensions: { code: 'NOT_FOUND' } });
+  if (!row) throw new GraphQLError('No match for channelRef.', { extensions: { code: 'NOT_FOUND' } });
   await requireMemoryWriteAccess(ctx, row.memoryId);
   return row;
 }
@@ -68,11 +68,11 @@ export const channelQueries = {
 
   channels: async (
     _: unknown,
-    { filter, orgId, limit, offset }: { filter?: { appRef?: string | null; memoryRef?: string | null } | null; orgId?: string | null; limit?: number | null; offset?: number | null },
+    { filter, orgRef, limit, offset }: { filter?: { appRef?: string | null; memoryRef?: string | null } | null; orgRef?: string | null; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
     const empty = { items: [] as Channel[], total: 0 };
-    const scope = await resolveOrgScope(ctx, orgId);
+    const scope = await resolveOrgScope(ctx, orgRef);
     if (!scope) return empty;
     const memoryWhere: Prisma.MemoryWhereInput[] = [{ deletedAt: null }, await readableMemoryWhere(ctx)];
     if (scope.scopedOrgId) memoryWhere.push({ organizationId: scope.scopedOrgId });
@@ -193,7 +193,7 @@ export const channelMutations = {
         current.deletedAt ||
         current.incarnation !== row.incarnation
       ) {
-        throw new GraphQLError(`No match for channelRef "${ref}".`, { extensions: { code: 'NOT_FOUND' } });
+        throw new GraphQLError('No match for channelRef.', { extensions: { code: 'NOT_FOUND' } });
       }
       // Row and root together; the address stays protected while either
       // exists (a tombstoned Channel still guards — protectedLoc.ts).

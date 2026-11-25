@@ -105,7 +105,7 @@ beforeEach(async () => {
   })).id;
 });
 
-const DIRECT = () => `query { exchangeConnections(orgId: "${orgId}") { id } }`;
+const DIRECT = () => `query { exchangeConnections(orgRef: "${orgId}") { id } }`;
 const BY_REF = () => `query { organization(ref: "${orgId}") { id name members { id } exchangeConnections { id } } }`;
 const LIST = () => `query { organizations { items { id name exchangeConnections { id } } } }`;
 const VIA_MEMORY = () => `query { memory(ref: "${memoryId}") { id organization { id exchangeConnections { id } } } }`;

@@ -211,7 +211,7 @@ describe('hadron_update_node — soft-deleted node is not-found (#543)', () => {
     // #1316: the viewer cannot read the memory, so both answer as a missing
     // MEMORY does — "access denied" would confirm the memory exists. Neither
     // names the node, so the node-existence guarantee below is unchanged.
-    expect(existingLoc).toBe(`Memory not found: "${fx.memory.urn}".`);
+    expect(existingLoc).toBe('Memory not found.');
     // Identical response for both — no existence signal.
     expect(missingLoc).toBe(existingLoc);
   });

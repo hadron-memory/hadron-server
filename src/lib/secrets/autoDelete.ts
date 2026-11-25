@@ -1,12 +1,7 @@
 /** #4001 / cor:sec:060:03: a signed deletion deadline survives every client end. No values are read by the sweep. */
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import { safeErrorCode } from '../safeErrorCode.js';
 import { recordSecretEvent, type SecretActor } from './appSecrets.js';
-
-/** A database error code safe to log: a Prisma `P####` or a five-character SQLSTATE, else UNKNOWN. Never a message, id or value. */
-export function safeErrorCode(err: unknown): string {
-  const raw = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
-  return typeof raw === 'string' && /^(P\d{4}|[0-9A-Z]{5})$/.test(raw) ? raw : 'UNKNOWN';
-}
 
 /**
  * The signed, activated delete mark that is due, as ONE fragment for the candidate statement and the after-lock recheck

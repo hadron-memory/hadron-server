@@ -381,16 +381,16 @@ describe('findNodes — orgId scope (#463); with filter.isRunnable = the tasks-i
     const memberCtx = ctx({ userId: member.id, roles: [] });
 
     // Scoped to orgA (member) + isRunnable → only orgA's runnable node.
-    const inA = await findNodes({ orgId: orgA.id, filter: { isRunnable: true } }, memberCtx);
+    const inA = await findNodes({ orgRef: orgA.id, filter: { isRunnable: true } }, memberCtx);
     expect(inA.hits.map((h: any) => h.node.loc)).toEqual(['org.taskA']);
 
     // Scoped to orgB the caller is NOT a member of → empty (no existence disclosure).
-    const inB = await findNodes({ orgId: b.org.id, filter: { isRunnable: true } }, memberCtx);
+    const inB = await findNodes({ orgRef: b.org.id, filter: { isRunnable: true } }, memberCtx);
     expect(inB).toMatchObject({ hits: [], total: 0 });
 
     // Uniform member-only: `admin()` (admin-fn) is a member of no org, so even a
     // platform admin gets an empty page for orgB — no admin bypass.
-    const adminB = await findNodes({ orgId: b.org.id, filter: { isRunnable: true } }, admin());
+    const adminB = await findNodes({ orgRef: b.org.id, filter: { isRunnable: true } }, admin());
     expect(adminB).toMatchObject({ hits: [], total: 0 });
 
     // A real admin who IS a member of orgB can scope to it — membership, not the
@@ -398,7 +398,7 @@ describe('findNodes — orgId scope (#463); with filter.isRunnable = the tasks-i
     const adminUser = await db.user.create({ data: { githubId: 6101, githubUsername: 'fn-admin', roles: ['ADMIN'] } });
     await db.orgMember.create({ data: { organizationId: b.org.id, userId: adminUser.id, role: 'READER' } });
     const adminMemberB = await findNodes(
-      { orgId: b.org.id, filter: { isRunnable: true } },
+      { orgRef: b.org.id, filter: { isRunnable: true } },
       ctx({ userId: adminUser.id, roles: ['ADMIN'] }),
     );
     expect(adminMemberB.hits.map((h: any) => h.node.loc)).toEqual(['org.taskB']);
@@ -434,12 +434,12 @@ describe('findNodes — orgId scope (#463); with filter.isRunnable = the tasks-i
 
     // (#1987: the runnable listing excludes App-scoped memory, so this org gate is proven on the plain scope.)
     // Own org (orgA) → authorized; the session's memory is in orgA → its node shows.
-    const own = await findNodes({ orgId: orgA.id }, appCtx);
+    const own = await findNodes({ orgRef: orgA.id }, appCtx);
     expect(own.hits.map((h: any) => h.node.loc)).toEqual(['app.task']);
 
     // A different org → gate rejects (empty), no disclosure.
     const other = await createDbOrgAndGraph(db, { orgName: 'fn-other', graphName: 'other/graph' });
-    const cross = await findNodes({ orgId: other.org.id }, appCtx);
+    const cross = await findNodes({ orgRef: other.org.id }, appCtx);
     expect(cross).toMatchObject({ hits: [], total: 0 });
   });
 });

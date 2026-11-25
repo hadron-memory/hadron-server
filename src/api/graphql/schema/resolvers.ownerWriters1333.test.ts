@@ -130,7 +130,7 @@ describe('the refusal is the OWNER writer level, not the base write gate (blind 
     await db.memoryShare.create({ data: { memoryId, granteeId: user.grantee!, grantorId: user.owner!, role: 'writer' as never } });
     // The base gate (memory visibility and write access) refuses the grantee of an org memory before any level is read.
     expect(await code(resolvers.Mutation.createNode(null, { input: { memoryRef: memoryId, loc: 'ctl', name: 'ctl', content: 'x' } }, as('grantee'))))
-      .toBe('MEMORY_NOT_FOUND: ' + memoryId);
+      .toBe('MEMORY_NOT_FOUND: nothing found for the given ref.');
     // So the level is pinned where it is judged: the grantee is outside the OWNER audience.
     expect(await refusal({ userId: user.grantee!, roles: [], clientId: `user:${user.grantee}` } as never)).toBe(REFUSED);
   });

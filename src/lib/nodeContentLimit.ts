@@ -80,11 +80,11 @@ export function exceedsNodeContentLimit(fields: NodeContentFields): boolean {
   return max !== null && nodeContentBytes(fields) > max;
 }
 
-/** Refuse a node over the ceiling. Costs nothing when none is set. */
-export function assertNodeContentSize(fields: NodeContentFields): void {
+/** Refuse a node over the ceiling. Costs nothing when none is set: fields that must be decrypted or sized first are passed as a function. */
+export function assertNodeContentSize(fields: NodeContentFields | (() => NodeContentFields)): void {
   const max = nodeContentMaxBytes();
   if (max === null) return;
-  if (nodeContentBytes(fields) > max) throw new NodeContentTooLargeError(max);
+  if (nodeContentBytes(typeof fields === 'function' ? fields() : fields) > max) throw new NodeContentTooLargeError(max);
 }
 
 /**

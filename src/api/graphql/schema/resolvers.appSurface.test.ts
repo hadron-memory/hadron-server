@@ -420,7 +420,7 @@ describe('apps (the uniform member list, #473)', () => {
       // Unscoped: both orgs' apps.
       expect((await resolvers.Query.apps({}, {}, ctx({ userId: user.id }))).items.length).toBe(2);
       // Scoped to org A: only org A's app.
-      const scoped = await resolvers.Query.apps({}, { orgId }, ctx({ userId: user.id }));
+      const scoped = await resolvers.Query.apps({}, { orgRef: orgId }, ctx({ userId: user.id }));
       expect(scoped.items.length).toBe(1);
       expect(scoped.total).toBe(1);
       expect(scoped.items[0].organizationId).toBe(orgId);
@@ -432,9 +432,9 @@ describe('apps (the uniform member list, #473)', () => {
         data: { id: generateId(), name: 'apps-stranger', urn: `apps-stranger-${generateId()}` },
       });
       // Non-member org → empty page.
-      expect(await resolvers.Query.apps({}, { orgId: stranger.id }, ctx({ userId: user.id }))).toEqual({ items: [], total: 0 });
+      expect(await resolvers.Query.apps({}, { orgRef: stranger.id }, ctx({ userId: user.id }))).toEqual({ items: [], total: 0 });
       // Unresolvable orgId → empty page (no disclosure).
-      expect(await resolvers.Query.apps({}, { orgId: 'no-such-org' }, ctx({ userId: user.id }))).toEqual({ items: [], total: 0 });
+      expect(await resolvers.Query.apps({}, { orgRef: 'no-such-org' }, ctx({ userId: user.id }))).toEqual({ items: [], total: 0 });
     });
   });
 });
@@ -589,14 +589,14 @@ describe('memories — App-key orgId', () => {
 
     // orgId == the App's own org → same memories (a match-or-empty gate, NOT a
     // per-memory ownership filter — so subscribed-in memories would survive too).
-    const scoped = await resolvers.Query.memories({}, { orgId }, appCtx);
+    const scoped = await resolvers.Query.memories({}, { orgRef: orgId }, appCtx);
     expect(scoped.items.some((m: { id: string }) => m.id === own.id)).toBe(true);
 
     // A different org → empty page (the App has no other active-org context).
     const other = await db.organization.create({
       data: { id: generateId(), name: 'mm-other', urn: `mm-other-${generateId()}` },
     });
-    expect(await resolvers.Query.memories({}, { orgId: other.id }, appCtx)).toEqual({ items: [], total: 0 });
+    expect(await resolvers.Query.memories({}, { orgRef: other.id }, appCtx)).toEqual({ items: [], total: 0 });
   });
 });
 

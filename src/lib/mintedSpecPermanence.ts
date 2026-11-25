@@ -421,6 +421,18 @@ export async function assertNoMintedCorpusRemoval(
 }
 
 /**
+ * Whether `callerUserId` may reuse this soft-deleted memory's URN (hadron-internal#70; cor:dmo:010:04, cor:acl:010:02). A personal or
+ * private memory (the rows that carry a `userId`) is reused by that user only; org-shared memories (no `userId`) keep the door's own gate.
+ * Any other caller gets the answer a live holder of the URN gets.
+ */
+export function tombstoneReclaimableBy(
+  tombstone: { userId: string | null },
+  callerUserId: string | null | undefined,
+): boolean {
+  return tombstone.userId === null || tombstone.userId === callerUserId;
+}
+
+/**
  * Hard-delete a SOFT-DELETED memory to reclaim its URN for a new one (#1468):
  * the tombstone-reclaim step of createMemory, cloneMemory, extract, App-memory
  * provisioning and owner-namespace merges. The FK cascade erases its nodes, so

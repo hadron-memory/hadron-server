@@ -546,7 +546,7 @@ describe('globalSearch — GraphQL resolver wiring', () => {
     const found = await resolvers.Query.globalSearch({}, params, ctxFor(fx.viewer));
     expect(ids(found.hits)).toEqual(new Set([fx.nodeA]));
     expect(found.total).toBe(1);
-    const scopedOut = await resolvers.Query.globalSearch({}, { ...params, orgId: fx.orgB }, ctxFor(fx.viewer));
+    const scopedOut = await resolvers.Query.globalSearch({}, { ...params, orgRef: fx.orgB }, ctxFor(fx.viewer));
     expect(scopedOut.hits).toEqual([]);
     expect(scopedOut.total).toBe(0);
   });
@@ -563,15 +563,15 @@ describe('globalSearch — GraphQL resolver wiring', () => {
   });
 
   it('orgId narrows a member to that org (accepts id or URN)', async () => {
-    const byId = await resolvers.Query.globalSearch({}, { query: 'Alpha', orgId: fx.orgA }, ctxFor(fx.viewer));
+    const byId = await resolvers.Query.globalSearch({}, { query: 'Alpha', orgRef: fx.orgA }, ctxFor(fx.viewer));
     expect(byId.hits.some((h) => h.id === fx.memoryA)).toBe(true);
 
-    const byUrn = await resolvers.Query.globalSearch({}, { query: 'Alpha', orgId: 'org-a' }, ctxFor(fx.viewer));
+    const byUrn = await resolvers.Query.globalSearch({}, { query: 'Alpha', orgRef: 'org-a' }, ctxFor(fx.viewer));
     expect(byUrn.hits.some((h) => h.id === fx.memoryA)).toBe(true);
   });
 
   it('orgId the caller is not a member of returns an empty page (no disclosure)', async () => {
-    const r = await resolvers.Query.globalSearch({}, { query: 'Beta', orgId: fx.orgB }, ctxFor(fx.viewer));
+    const r = await resolvers.Query.globalSearch({}, { query: 'Beta', orgRef: fx.orgB }, ctxFor(fx.viewer));
     expect(r.hits).toHaveLength(0);
     expect(r.total).toBe(0);
   });
@@ -579,13 +579,13 @@ describe('globalSearch — GraphQL resolver wiring', () => {
   it('is membership-gated even for a platform admin (no admin bypass)', async () => {
     // fx.admin is a member of no org → scoping to orgB is empty despite the
     // platform role (uniform member-only).
-    const denied = await resolvers.Query.globalSearch({}, { query: 'Beta', orgId: fx.orgB }, ctxFor(fx.admin, true));
+    const denied = await resolvers.Query.globalSearch({}, { query: 'Beta', orgRef: fx.orgB }, ctxFor(fx.admin, true));
     expect(denied.hits).toHaveLength(0);
     expect(denied.total).toBe(0);
 
     // Once that admin joins orgB, the same scope resolves.
     await db.orgMember.create({ data: { organizationId: fx.orgB, userId: fx.admin, role: 'READER' } });
-    const scoped = await resolvers.Query.globalSearch({}, { query: 'Beta', orgId: fx.orgB }, ctxFor(fx.admin, true));
+    const scoped = await resolvers.Query.globalSearch({}, { query: 'Beta', orgRef: fx.orgB }, ctxFor(fx.admin, true));
     expect(scoped.hits.some((h) => h.id === fx.memoryB)).toBe(true);
   });
 });

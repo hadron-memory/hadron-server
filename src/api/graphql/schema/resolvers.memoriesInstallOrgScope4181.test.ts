@@ -1,5 +1,5 @@
 /**
- * #4181 — Query.memories(orgId: A, memoryClasses: [system]) must not list an
+ * #4181 — Query.memories(orgRef: A, memoryClasses: [system]) must not list an
  * App install memory that belongs to another org (cor:api:100, cor:api:100:01,
  * cor:api:120:03, cor:acl:010:01). The install clause once ignored `orgId`.
  */
@@ -44,7 +44,7 @@ beforeEach(async () => {
 
 const user = (name: string) => db.user.create({ data: { id: generateId(), name } });
 const idsFor = async (ctx: Context, org?: string, classes: string[] | null = ['system']) =>
-  ((await Q.memories({}, { ...(classes ? { filter: { memoryClasses: classes } } : {}), ...(org ? { orgId: org } : {}), limit: 100 }, ctx)).items as Array<{ id: string }>).map((m) => m.id);
+  ((await Q.memories({}, { ...(classes ? { filter: { memoryClasses: classes } } : {}), ...(org ? { orgRef: org } : {}), limit: 100 }, ctx)).items as Array<{ id: string }>).map((m) => m.id);
 
 describe('#4181 memories(orgId) install-memory clause is org-scoped', () => {
   it('(a) an admin of both orgs: orgId=A lists A\'s install memory, not B\'s; orgId=B the reverse', async () => {

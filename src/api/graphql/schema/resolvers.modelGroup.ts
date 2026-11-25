@@ -173,7 +173,7 @@ export const modelGroupMutations = {
     const participated = await resolveParticipatedApp(ctx, appRef);
     const { app } = participated;
     const actor = withInstruction(participated.actor, instruction);
-    return inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
+    return inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, freshApp) => {
       if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError('APP_MANAGER_REQUIRED', 'Only whoever manages the App declares its model groups.');
       }
@@ -197,7 +197,7 @@ export const modelGroupMutations = {
     const participated = await resolveParticipatedApp(ctx, appRef);
     const { app } = participated;
     const actor = withInstruction(participated.actor, instruction);
-    return inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
+    return inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, freshApp) => {
       if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError('APP_MANAGER_REQUIRED', 'Only whoever manages the App declares its model groups.');
       }

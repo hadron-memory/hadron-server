@@ -1,3 +1,4 @@
+import { assertMoveWithinSizeLimit, SubtreeMoveTooLargeError } from '../../../lib/moveSizeLimit.js';
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { assertNoGenericMessageSeqWrite } from '../../../lib/legacyMessageSeq.js';
@@ -260,20 +261,20 @@ export async function deleteEdgeInDoorTx(
 ): Promise<void> {
   const { edgeId, edgeRef, memoryId, expectedSourceId } = args;
   if (!(await isMemoryReadableCached(txCtx, memoryId))) {
-    throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-      extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+    throw new GraphQLError('Edge not found', {
+      extensions: { code: 'EDGE_NOT_FOUND' },
     });
   }
   await requireMemoryWriteAccess(txCtx, memoryId);
   // Writer level of the edge's current source, locked before the edge.
   const lockedEdge = await lockEdgeUnderSourceWriters(tx, txCtx, edgeId);
   if (!lockedEdge || lockedEdge.deleted_at) {
-    throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
+    throw new GraphQLError('Edge not found', { extensions: { code: 'EDGE_NOT_FOUND' } });
   }
   // #860: a caller scoped to one source's own edges (hadron_update_node removeEdges) re-checks it on the LOCKED edge: the
   // preflight read it without a lock, and an edge re-sourced since then is another node's, so not found here.
   if (expectedSourceId !== undefined && lockedEdge.source_id !== expectedSourceId) {
-    throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
+    throw new GraphQLError('Edge not found', { extensions: { code: 'EDGE_NOT_FOUND' } });
   }
   await assertEdgeWriteMemory(tx, edgeId, memoryId);
   await assertNoBootPromptRows(tx, [lockedEdge.source_id], 'update');
@@ -850,8 +851,8 @@ async function writeNodeCoreRaw(
             // The denial reuses the not-found wording so it can't be used as a
             // cross-memory existence oracle.
             if (!tgt || !(await isMemoryReadableCached(ctx, tgt.memoryId))) {
-              throw new GraphQLError(`Edge target not found: "${e.targetId}"`, {
-                extensions: { code: 'NODE_NOT_FOUND', ref: e.targetId },
+              throw new GraphQLError('Edge target not found', {
+                extensions: { code: 'NODE_NOT_FOUND' },
               });
             }
             resolvedEdges.push({
@@ -865,8 +866,8 @@ async function writeNodeCoreRaw(
             });
           } catch (err) {
             if (err instanceof NodeNotFoundError) {
-              throw new GraphQLError(`Edge target not found: "${err.ref}"`, {
-                extensions: { code: err.name, ref: err.ref },
+              throw new GraphQLError('Edge target not found', {
+                extensions: { code: err.name }, // #5168: the caller's ref is not relayed
               });
             }
             throw err;
@@ -982,7 +983,7 @@ async function writeNodeCoreRaw(
 
       // #5019 — judged on the locked, decrypted row, before the revision snapshot and the write. `input` is the caller's plaintext.
       const assertSizeCeiling = (stored: NodeContentFields | null): void => {
-        if (opts.sizeCeiling === 'check') assertNodeContentSize(resultingNodeContent(input as NodeContentFields, stored));
+        if (opts.sizeCeiling === 'check') assertNodeContentSize(() => resultingNodeContent(input as NodeContentFields, stored));
       };
 
       /** Recompute against the locked row when an abstract-only write follows a concurrent body edit. */
@@ -1186,14 +1187,14 @@ async function writeNodeCoreRaw(
         };
         const live = await liveEdgeEndpointSet(tx, [sourceSnapshot, ...inlineEdgeTargets]);
         if (!live.has(sourceSnapshot.id)) {
-          throw new GraphQLError(`Source node not found: "${writtenNode.id}"`, {
+          throw new GraphQLError('Source node not found', {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         const missing = resolvedEdges.find((edge) => !live.has(edge.targetNodeId));
         if (missing) {
-          throw new GraphQLError(`Edge target not found: "${missing.targetNodeId}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: missing.targetNodeId },
+          throw new GraphQLError('Edge target not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
 
@@ -1753,7 +1754,7 @@ async function writeNodeCoreRaw(
             let authoritativeChanges: string[] = [];
             let storedForIncludes: string | null = null;
             let authoritativeAbstractHash = nextAbstractOriginHash;
-            if (!authoritative) assertSizeCeiling(null);
+            let sizedAgainst: NodeContentFields | null = null;
             if (authoritative) {
               // Row lock + drift reconciled as its own revision BEFORE this
               // snapshot (@copilot, PR #1339): the address lock binds only
@@ -1775,7 +1776,7 @@ async function writeNodeCoreRaw(
               const authoritativeForDiff = memEncInfo.isEncrypted
                 ? decryptNodeFields({ ...authoritative }, memEncInfo)
                 : authoritative;
-              assertSizeCeiling(authoritativeForDiff); // #5019 — a revive keeps the fields it omits
+              sizedAgainst = authoritativeForDiff; // #5019 — a revive keeps the fields it omits
               // A tombstone's text is not the includer's stored text (#2041 S2b).
               if (!authoritative.deletedAt) storedForIncludes = authoritativeForDiff.content ?? null;
               authoritativeAbstractHash = hashAgainstLockedContent(authoritative.content);
@@ -1824,6 +1825,9 @@ async function writeNodeCoreRaw(
               runnable: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
               mintHuman: true, authoredChange: authoredByWrite,
             }, opts.authoring);
+            // #5019, #5160 — after the role and authoring gates: a size refusal counts stored fields, so a writer those gates
+            // refuse must not learn it. The revision above rolls back with it.
+            assertSizeCeiling(sizedAgainst);
 
             // #1460 — a tombstone still owns its old abstract and chunk
             // vectors. Remove them in this transaction before making the row
@@ -2009,15 +2013,15 @@ async function resolveExistingNode(ctx: Context, ref: string, opts?: { forWrite?
     ({ id } = await resolveNodeRefForCaller(ctx, ref));
   } catch (e) {
     if (e instanceof NodeNotFoundError)
-      throw new GraphQLError(`Node not found: "${ref}"`, {
-        extensions: { code: 'NODE_NOT_FOUND', ref },
+      throw new GraphQLError('Node not found', {
+        extensions: { code: 'NODE_NOT_FOUND' },
       });
     throw e;
   }
   const node = await ctx.db.node.findUnique({ where: { id } });
   if (!node || node.deletedAt)
-    throw new GraphQLError(`Node not found: "${ref}"`, {
-      extensions: { code: 'NODE_NOT_FOUND', ref },
+    throw new GraphQLError('Node not found', {
+      extensions: { code: 'NODE_NOT_FOUND' },
     });
   // #1381: a node the caller will WRITE, in a memory it can neither write nor
   // read, answers here — at resolution — exactly as a missing one. Refusing at
@@ -2152,8 +2156,8 @@ async function updateNodeCore(
       ({ id: targetNodeId } = await resolveNodeRefForCaller(ctx, id));
     } catch (e) {
       if (e instanceof NodeNotFoundError) {
-        throw new GraphQLError(`Node not found: "${id}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: id },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
       throw e;
@@ -2167,8 +2171,8 @@ async function updateNodeCore(
     // already says (it requires a live memory); falling through would answer
     // MEMORY_NOT_FOUND with the memory's own id (#1316, @copilot PR #1319).
     if (!row || row.memory.deletedAt) {
-      throw new GraphQLError(`Node not found: "${id}"`, {
-        extensions: { code: 'NODE_NOT_FOUND', ref: id },
+      throw new GraphQLError('Node not found', {
+        extensions: { code: 'NODE_NOT_FOUND' },
       });
     }
     targetMemoryId = row.memoryId;
@@ -2220,16 +2224,16 @@ async function nodeWriteCoordinationMemories(ctx: Context, memoryId: string, inp
     } catch (err) {
       // The transaction-entry scope pass must preserve the shared inline-edge refusal shape.
       if (err instanceof NodeNotFoundError) {
-        throw new GraphQLError(`Edge target not found: "${err.ref}"`, {
-          extensions: { code: err.name, ref: err.ref },
+        throw new GraphQLError('Edge target not found', {
+          extensions: { code: err.name }, // #5168: the caller's ref is not relayed
         });
       }
       throw err;
     }
     const target = await ctx.db.node.findUnique({ where: { id }, select: { memoryId: true } });
     if (!target || !(await isMemoryReadableCached(ctx, target.memoryId))) {
-      throw new GraphQLError(`Edge target not found: "${edge.targetId}"`, {
-        extensions: { code: 'NODE_NOT_FOUND', ref: edge.targetId },
+      throw new GraphQLError('Edge target not found', {
+        extensions: { code: 'NODE_NOT_FOUND' },
       });
     }
     ids.add(target.memoryId);
@@ -2281,8 +2285,8 @@ async function mergePropertiesAndWrite(a: {
   }
 
   const notFound = () =>
-    new GraphQLError(`Node not found: "${a.ref}"`, {
-      extensions: { code: 'NODE_NOT_FOUND', ...(a.hasId ? { ref: a.ref } : { loc: a.targetLoc, memoryId: resolvedMemoryId }) },
+    new GraphQLError('Node not found', {
+      extensions: { code: 'NODE_NOT_FOUND', ...(a.hasId ? {} : { loc: a.targetLoc, memoryId: resolvedMemoryId }) },
     });
   // An id selector is anchored on the PK, as the plain door is: one attempt. A loc selector names whatever lives at
   // (memory, loc) NOW, so the id it resolved to before the lock can be stale when the lock is granted (the node moved
@@ -2378,8 +2382,8 @@ export async function updateNodePropertiesWith(
     ({ id: resolvedId } = await resolveNodeRefForCaller(ctx, nodeRef));
   } catch (e) {
     if (e instanceof NodeNotFoundError) {
-      throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-        extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+      throw new GraphQLError('Node not found', {
+        extensions: { code: 'NODE_NOT_FOUND' },
       });
     }
     throw e;
@@ -2391,8 +2395,8 @@ export async function updateNodePropertiesWith(
     select: { id: true, memoryId: true, deletedAt: true },
   });
   if (!meta || meta.deletedAt) {
-    throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-      extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+    throw new GraphQLError('Node not found', {
+      extensions: { code: 'NODE_NOT_FOUND' },
     });
   }
   // #1316: a node in a memory the caller cannot read answers as a missing one.
@@ -2448,8 +2452,8 @@ export async function updateNodePropertiesWith(
     });
     if (!fresh) {
       // Lost a race with a concurrent delete.
-      throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-        extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+      throw new GraphQLError('Node not found', {
+        extensions: { code: 'NODE_NOT_FOUND' },
       });
     }
 
@@ -2636,6 +2640,9 @@ export const nodeMoveOps = {
             // #3031: moving content requires the source read reach again after the authority wait.
             // Match resolveExistingNode's refusal; install-memory audiences remain in their own gate.
             if (await isWriteBeyondRead(tx as never, txCtx, source.memoryId)) throw nodeNotFoundError(sourceRef);
+            // #5128 (cor:api:190:01): an over-limit subtree is refused here, after every gate above (so the count tells a
+            // caller nothing about a subtree they could not move) and before any lock or write.
+            if (!isSameSlot) await assertMoveWithinSizeLimit(tx, source);
             // #1187 — DECLARE the complete key set first, in the one global
             // order: the destination ancestor path AND the source path that
             // `lockSourceForMove` takes further down. Previously those were two
@@ -2745,6 +2752,9 @@ export const nodeMoveOps = {
         }
         if (e instanceof SubtreeMoveIntoSelfError) {
           throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT', loc: e.loc } });
+        }
+        if (e instanceof SubtreeMoveTooLargeError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'MOVE_TOO_LARGE', limit: e.limit, count: e.count } });
         }
         if (e instanceof SubtreeMoveMintedError) {
           throw new GraphQLError(e.message, {
@@ -2983,8 +2993,8 @@ export const nodeMutations = {
         ({ id: resolvedId } = await resolveNodeRefForCaller(ctx, nodeRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+          throw new GraphQLError('Node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         throw e;
@@ -2998,8 +3008,8 @@ export const nodeMutations = {
         select: { id: true, memoryId: true, deletedAt: true },
       });
       if (!meta || meta.deletedAt) {
-        throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
       // #1316: a node in a memory the caller cannot read answers as a missing one.
@@ -3036,8 +3046,8 @@ export const nodeMutations = {
       });
       if (!row) {
         // Lost a race with a concurrent delete between the two reads.
-        throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
       const fields: { abstract: null; content: null; data: unknown } = {
@@ -3714,8 +3724,8 @@ export const nodeMutations = {
         }));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+          throw new GraphQLError('Node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         throw e;
@@ -3725,8 +3735,8 @@ export const nodeMutations = {
         select: { memoryId: true, loc: true, deletedAt: true },
       });
       if (!node) {
-        throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
       // One check covers the subtree too: every descendant shares this memory.
@@ -3918,8 +3928,8 @@ export const nodeMutations = {
               // 0 rows → NODE_NOT_FOUND rather than a cross-memory write (TOCTOU).
               const res = await tx.node.deleteMany({ where: { id: resolvedId, memoryId } });
               if (res.count === 0) {
-                throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-                  extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+                throw new GraphQLError('Node not found', {
+                  extensions: { code: 'NODE_NOT_FOUND' },
                 });
               }
             }
@@ -3941,8 +3951,8 @@ export const nodeMutations = {
               data: { deletedAt: now, deletedBy },
             });
             if (res.count === 0) {
-              throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-                extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+              throw new GraphQLError('Node not found', {
+                extensions: { code: 'NODE_NOT_FOUND' },
               });
             }
           }
@@ -3962,8 +3972,8 @@ export const nodeMutations = {
         // typed NODE_NOT_FOUND instead of leaking as INTERNAL_SERVER_ERROR
         // (mirrors moveNode; issue #100).
         if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
-          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+          throw new GraphQLError('Node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         throw e;
@@ -4042,14 +4052,14 @@ export const nodeMutations = {
         ({ id: resolvedSourceId } = await resolveNodeRefForCaller(ctx, sourceRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError)
-          throw new GraphQLError(`Source node not found: "${sourceRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+          throw new GraphQLError('Source node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
         throw e;
       }
       // Spec 037: an edge carries a memory-unique `loc` (its identity + URN
       // suffix), with `memoryId` denormalized from the source node.
       const src = await ctx.db.node.findUnique({ where: { id: resolvedSourceId }, select: { loc: true, memoryId: true } });
       if (!src || !(await isMemoryReadableCached(ctx, src.memoryId))) {
-        throw new GraphQLError(`Source node not found: "${sourceRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+        throw new GraphQLError('Source node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       }
       // PR-348 (Gemini, critical): write access to the SOURCE memory is the
       // authorization — since #1300 there is no platform-role gate in front.
@@ -4061,7 +4071,7 @@ export const nodeMutations = {
         ({ id: resolvedTargetId } = await resolveNodeRefForCaller(ctx, targetRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError)
-          throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+          throw new GraphQLError('Target node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
         throw e;
       }
       const tgt = await ctx.db.node.findUnique({ where: { id: resolvedTargetId }, select: { loc: true, memoryId: true } });
@@ -4071,7 +4081,7 @@ export const nodeMutations = {
       // `canReadMemory` it used ignored MemoryShare, so a share grantee who
       // could read a node back through an edge could not create that edge.
       if (!tgt || !(await isMemoryReadableCached(ctx, tgt.memoryId))) {
-        throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+        throw new GraphQLError('Target node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       }
       // #4106: caller text a NUL or lone surrogate would make Postgres reject (22021 / 22P05 in jsonb) is refused typed,
       // after the gates above and before the loc derives from `name` or anything is written. `loc` and `condition`
@@ -4093,12 +4103,12 @@ export const nodeMutations = {
           { id: resolvedTargetId, ...tgt },
         );
         if (!locked.source) {
-          throw new GraphQLError(`Source node not found: "${sourceRef}"`, {
+          throw new GraphQLError('Source node not found', {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         if (!locked.target) {
-          throw new GraphQLError(`Target node not found: "${targetRef}"`, {
+          throw new GraphQLError('Target node not found', {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
@@ -4109,13 +4119,13 @@ export const nodeMutations = {
         }
         const txCtx = await nodeDoorTxContext(ctx, tx, [src.memoryId, tgt.memoryId]);
         if (!(await isMemoryReadableCached(txCtx, src.memoryId))) {
-          throw new GraphQLError(`Source node not found: "${sourceRef}"`, {
+          throw new GraphQLError('Source node not found', {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         await requireMemoryWriteAccess(txCtx, src.memoryId);
         if (!(await isMemoryReadableCached(txCtx, tgt.memoryId))) {
-          throw new GraphQLError(`Target node not found: "${targetRef}"`, {
+          throw new GraphQLError('Target node not found', {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
@@ -4227,8 +4237,8 @@ export const nodeMutations = {
         ({ id: resolvedEdgeId } = await resolveEdgeRef(ctx.db, edgeRef));
       } catch (e) {
         if (e instanceof EdgeNotFoundError) {
-          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          throw new GraphQLError('Edge not found', {
+            extensions: { code: 'EDGE_NOT_FOUND' },
           });
         }
         throw e;
@@ -4243,16 +4253,16 @@ export const nodeMutations = {
         select: { memoryId: true },
       });
       if (!edgeMem) {
-        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        throw new GraphQLError('Edge not found', {
+          extensions: { code: 'EDGE_NOT_FOUND' },
         });
       }
       // #1300 / @codex P2 on PR #1307: a caller who cannot READ the edge's
       // memory gets the same EDGE_NOT_FOUND as a missing edge, so the refusal
       // is not an existence oracle; a reader who may not write gets Forbidden.
       if (!(await isMemoryReadableCached(ctx, edgeMem.memoryId))) {
-        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        throw new GraphQLError('Edge not found', {
+          extensions: { code: 'EDGE_NOT_FOUND' },
         });
       }
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, edgeMem.memoryId);
@@ -4262,8 +4272,8 @@ export const nodeMutations = {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;
         const txCtx = await nodeDoorTxContext(ctx, tx, [edgeMem.memoryId]);
         if (!(await isMemoryReadableCached(txCtx, edgeMem.memoryId))) {
-          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          throw new GraphQLError('Edge not found', {
+            extensions: { code: 'EDGE_NOT_FOUND' },
           });
         }
         await requireMemoryWriteAccess(txCtx, edgeMem.memoryId);
@@ -4273,8 +4283,8 @@ export const nodeMutations = {
         // Source node first, then the edge row (the order node writes take); the source is revalidated under the edge lock.
         const current = await lockEdgeUnderSourceWriters(tx, txCtx, resolvedEdgeId);
         if (!current || current.deleted_at) {
-          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          throw new GraphQLError('Edge not found', {
+            extensions: { code: 'EDGE_NOT_FOUND' },
           });
         }
         await assertEdgeWriteMemory(tx, resolvedEdgeId, edgeMem.memoryId);
@@ -4321,8 +4331,8 @@ export const nodeMutations = {
         ({ id: resolvedEdgeId } = await resolveEdgeRef(ctx.db, edgeRef));
       } catch (e) {
         if (e instanceof EdgeNotFoundError) {
-          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          throw new GraphQLError('Edge not found', {
+            extensions: { code: 'EDGE_NOT_FOUND' },
           });
         }
         throw e;
@@ -4340,16 +4350,16 @@ export const nodeMutations = {
         },
       });
       if (!edgeMem) {
-        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        throw new GraphQLError('Edge not found', {
+          extensions: { code: 'EDGE_NOT_FOUND' },
         });
       }
       // #1300 / @codex P2 on PR #1307: a caller who cannot READ the edge's
       // memory gets the same EDGE_NOT_FOUND as a missing edge, so the refusal
       // is not an existence oracle; a reader who may not write gets Forbidden.
       if (!(await isMemoryReadableCached(ctx, edgeMem.memoryId))) {
-        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        throw new GraphQLError('Edge not found', {
+          extensions: { code: 'EDGE_NOT_FOUND' },
         });
       }
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, edgeMem.memoryId);
@@ -4413,8 +4423,8 @@ export const nodeMutations = {
       // memory, or the URN-widened input becomes a cross-tenant exfiltration
       // path (review:entity-ref-args #3). Denial reads as not-found (no oracle).
       if (!(await canReadMemory(ctx.db, ctx, selectedSource.memoryId))) {
-        throw new GraphQLError(`Node not found: "${sourceRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
       const { destMemoryId, destLoc } = await resolveRelocationTarget(ctx, selectedSource, targetUrn, targetMemoryRef);
@@ -4439,8 +4449,8 @@ export const nodeMutations = {
           return current && !current.deletedAt && current.loc === selectedSource.loc ? current : null;
         })();
         if (!source) {
-          throw new GraphQLError(`Node not found: "${sourceRef}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
+          throw new GraphQLError('Node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
 
@@ -4555,8 +4565,8 @@ export const nodeMutations = {
         ({ id: sourceId } = await resolveNodeRefForCaller(ctx, rawSource));
       } catch (e) {
         if (e instanceof NodeNotFoundError)
-          throw new GraphQLError(`Source node not found: "${rawSource}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: rawSource },
+          throw new GraphQLError('Source node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         throw e;
       }
@@ -4564,8 +4574,8 @@ export const nodeMutations = {
         ({ id: targetId } = await resolveNodeRefForCaller(ctx, rawTarget));
       } catch (e) {
         if (e instanceof NodeNotFoundError)
-          throw new GraphQLError(`Target node not found: "${rawTarget}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: rawTarget },
+          throw new GraphQLError('Target node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         throw e;
       }
@@ -4580,22 +4590,22 @@ export const nodeMutations = {
         ctx.db.node.findUnique({ where: { id: targetId } }),
       ]);
       if (!source || source.deletedAt)
-        throw new GraphQLError(`Source node not found: "${rawSource}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: rawSource },
+        throw new GraphQLError('Source node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       if (!target || target.deletedAt)
-        throw new GraphQLError(`Target node not found: "${rawTarget}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: rawTarget },
+        throw new GraphQLError('Target node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       // #2206 (B): a merge folds one node's content into the other and returns the result, so a node in a memory the
       // caller may write but not read answers exactly as a missing one, on either end, before any gate.
       if (await isWriteBeyondRead(ctx.db, ctx, source.memoryId))
-        throw new GraphQLError(`Source node not found: "${rawSource}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: rawSource },
+        throw new GraphQLError('Source node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       if (await isWriteBeyondRead(ctx.db, ctx, target.memoryId))
-        throw new GraphQLError(`Target node not found: "${rawTarget}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: rawTarget },
+        throw new GraphQLError('Target node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
 
       // Auth. The target is mutated → write access always. The source is
@@ -4629,8 +4639,8 @@ export const nodeMutations = {
           writeMemories.add(source.memoryId);
           await nodeDoorWritePreflight(ctx, source.memoryId, () => nodeNotFoundError(rawSource));
         } else if (!(await canReadMemory(ctx.db, ctx, source.memoryId))) {
-          throw new GraphQLError(`Source node not found: "${rawSource}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: rawSource },
+          throw new GraphQLError('Source node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
       }
@@ -4733,7 +4743,7 @@ export const nodeMutations = {
       // #5019 — the merged target, before any write. A merge that touches no encrypted field holds no key, so the stored
       // body is then measured from its envelope.
       if (Object.keys(changed).length > 0) {
-        assertNodeContentSize(resultingNodeContent(changed, tgtEnc.isEncrypted && !touchesEncrypted ? withEncryptedSizes(target) : tgtPt));
+        assertNodeContentSize(() => resultingNodeContent(changed, tgtEnc.isEncrypted && !touchesEncrypted ? withEncryptedSizes(target) : tgtPt));
       }
 
       // Post-merge plaintext content drives the spec-032 abstract hash.
@@ -5153,7 +5163,7 @@ export const nodeMutations = {
       ctx: Context,
     ) => {
       const notFound = () => new GraphQLError('Node revision not found', {
-        extensions: { code: 'NOT_FOUND', nodeRevRef },
+        extensions: { code: 'NOT_FOUND' },
       });
       const revisionId = await resolveRevisionIdOrNotFound(ctx, nodeRevRef, notFound);
       // Resolve only provenance before the read gate: a moved node's snapshot
@@ -5487,7 +5497,7 @@ export const nodeMutations = {
     // (as restoreNodeRevision) — the memory you own the live node in, even if the
     // snapshot was captured in another memory before a move.
     deleteNodeRevision: async (_: unknown, { nodeRevRef }: { nodeRevRef: string }, ctx: Context) => {
-      const notFound = () => new GraphQLError('Node revision not found', { extensions: { code: 'NOT_FOUND', nodeRevRef } });
+      const notFound = () => new GraphQLError('Node revision not found', { extensions: { code: 'NOT_FOUND' } }); // #5168: no caller ref relayed
       const revisionId = await resolveRevisionIdOrNotFound(ctx, nodeRevRef, notFound);
       // #3329: a revision whose node's memory is soft-deleted is answered as missing, in the same single lookup,
       // before any access gate (no FORBIDDEN-vs-NOT_FOUND oracle). withNodeHistoryWrite re-checks under lock.
@@ -5526,7 +5536,7 @@ export const nodeMutations = {
     ) => {
       const notFound = () =>
         new GraphQLError('Node revision not found', {
-          extensions: { code: 'NOT_FOUND', nodeRevRef },
+          extensions: { code: 'NOT_FOUND' },
         });
       const revisionId = await resolveRevisionIdOrNotFound(ctx, nodeRevRef, notFound);
       const revision = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
@@ -5563,7 +5573,7 @@ export const nodeMutations = {
     // #617 — delete ALL snapshots for a node, returning the count deleted. Write-
     // gated on the node's current memory. nodeRef is a PK or fully-qualified URN.
     clearNodeHistory: async (_: unknown, { nodeRef }: { nodeRef: string }, ctx: Context) => {
-      const notFound = () => new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+      const notFound = () => new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       let nodeId: string;
       try {
         // includeDeleted: a soft-deleted node still owns residual history an
@@ -5614,18 +5624,18 @@ export const nodeMutations = {
         ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+          throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
         }
         throw e;
       }
       const node = await ctx.db.node.findUnique({ where: { id: nodeId } });
       if (!node || node.deletedAt) {
-        throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+        throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       }
       const accessibleIds = await getAccessibleMemoryIds(ctx);
       if (!accessibleIds.includes(node.memoryId)) {
         // Denied and not-found are indistinguishable on purpose (nodeById parity).
-        throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+        throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       }
       // A locked encrypted node must be a typed refusal, never a silent
       // ciphertext export — decryptNodesBatch's leave-as-ciphertext posture

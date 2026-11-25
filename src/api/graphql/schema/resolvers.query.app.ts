@@ -86,20 +86,20 @@ export const appQueries = {
     },
 
     // #473 — the uniform paginated app list; replaces the org-ADMIN
-    // apps(orgId!) and the member myApps. App doesn't carry a userId, so org
+    // apps(orgRef!) and the member myApps. App doesn't carry a userId, so org
     // membership is the routing; platform ADMIN/OWNER unscoped get every
-    // live App. orgId follows cor:api:100:01 (member -> scope, non-member ->
+    // live App. orgRef follows cor:api:100:01 (member -> scope, non-member ->
     // empty page, no disclosure, no admin bypass).
     apps: async (
       _: unknown,
       {
         filter,
-        orgId,
+        orgRef,
         limit,
         offset,
       }: {
         filter?: { ownedByMe?: boolean | null; agentRef?: string | null } | null;
-        orgId?: string | null;
+        orgRef?: string | null;
         limit?: number | null;
         offset?: number | null;
       },
@@ -136,7 +136,7 @@ export const appQueries = {
         // #782 — the caller's OWN user-owned (org-less) Apps only, for ALL
         // callers INCLUDING platform ADMIN/OWNER: owner scope is never an
         // admin-bypass surface (mirrors the owner-only personal/private
-        // memories slice). Org-less by definition, so orgId is not consulted;
+        // memories slice). Org-less by definition, so orgRef is not consulted;
         // App-key callers (no ctx.userId) get an empty page.
         // #876: identical to the agents list — user-owned Apps are
         // identity-scoped and invisible under impersonation. These carry the
@@ -145,12 +145,12 @@ export const appQueries = {
         if (!ctx.userId || ctx.impersonation) return { items: [], total: 0 };
         where = { deletedAt: null, organizationId: null, ownerUserId: ctx.userId, ...agentClause };
       } else {
-        const scope = await resolveOrgScope(ctx, orgId);
+        const scope = await resolveOrgScope(ctx, orgRef);
         if (!scope) return { items: [], total: 0 };
         const isPlatformAdmin =
           !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
         const scopedToOrg = scope.scopedOrgId != null;
-        // Admin unscoped reach applies only WITHOUT an orgId — the active-org
+        // Admin unscoped reach applies only WITHOUT an orgRef — the active-org
         // selection is a membership concept (cor:api:100:01).
         if (isPlatformAdmin && !scopedToOrg) {
           // Every live App EXCEPT another user's user-owned App — spec 047
@@ -165,7 +165,7 @@ export const appQueries = {
           if (ctx.userId && !ctx.impersonation && f.agentRef == null) adminClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
           where = { deletedAt: null, OR: adminClauses, ...agentClause };
         } else {
-          // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
+          // Org-scoped view. In the DEFAULT (no orgRef) view, also surface the
           // caller's OWN user-owned Apps (org NULL) so a personal App the caller
           // just created is visible. A specific-org selection excludes them.
           const ownerClauses: Record<string, unknown>[] = [

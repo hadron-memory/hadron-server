@@ -107,8 +107,9 @@ import {
 // ── Errors ────────────────────────────────────────────────────────────────
 
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
-const tickerNotFound = (ref: string): GraphQLError => taskError('TICKER_NOT_FOUND', 'Ticker not found.', { ref });
-const workerNotFound = (ref: string): GraphQLError => taskError('WORKER_NOT_FOUND', 'Worker not found.', { ref });
+// #5168: neither refusal relays the caller's ref (their own text, possibly a pasted secret).
+const tickerNotFound = (_ref: string): GraphQLError => taskError('TICKER_NOT_FOUND', 'Ticker not found.');
+const workerNotFound = (_ref: string): GraphQLError => taskError('WORKER_NOT_FOUND', 'Worker not found.');
 
 // ── Rows ──────────────────────────────────────────────────────────────────
 

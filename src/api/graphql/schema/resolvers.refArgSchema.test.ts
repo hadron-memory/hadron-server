@@ -127,6 +127,8 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   parkAgentTask: ['taskRef'],
   cloneAgentTask: ['taskRef'],
   makeAgentTaskReady: ['taskRef'],
+  // #5081 (gap 3): the signing switch's organization argument is `orgRef`, not `org`.
+  setOrgBootPromptSigning: ['orgRef'],
 };
 
 /**
@@ -156,6 +158,27 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   agentTasksPage: ['appRef', 'parentTaskRef'], // shares agentTasks' ListArgs (Bridget's LOCAL P2-1)
   agentTeamEvents: ['appRef', 'taskRef'],
   agentTeamEventsPage: ['appRef', 'taskRef'],
+  // #5081 (gap 3): the 20 Query fields whose organization argument was `orgId` (18) or `org` (2) are `orgRef`.
+  findNodes: ['orgRef'],
+  globalSearch: ['orgRef'],
+  edges: ['orgRef'],
+  impersonationSessions: ['orgRef'],
+  memories: ['orgRef'],
+  exchangeConnections: ['orgRef'],
+  exchangeConnectionsPage: ['orgRef'],
+  slackConnections: ['orgRef'],
+  telegramConnections: ['orgRef'],
+  mcpServers: ['orgRef'],
+  homeAssistantInstances: ['orgRef'],
+  resendSenders: ['orgRef'],
+  apps: ['orgRef'],
+  agents: ['orgRef'],
+  scopes: ['orgRef'],
+  channels: ['orgRef'],
+  registerEntries: ['orgRef'],
+  assets: ['orgRef'],
+  orgBootPromptSigning: ['orgRef'],
+  orgBootPromptSigningPreview: ['orgRef'],
 };
 
 /**
@@ -189,7 +212,7 @@ const ALLOWED_ID_ARGS = new Set([
 
 /** The legacy-`Id` check, one (field, arg) at a time, against a per-field allow-list. */
 const isStrayLegacyIdArg = (field: string, arg: string, allowed: ReadonlySet<string> = ALLOWED_ID_ARGS): boolean =>
-  /^(id|.*Id)$/.test(arg) && !allowed.has(`${field}.${arg}`);
+  /^(id|org|.*Id)$/.test(arg) && !allowed.has(`${field}.${arg}`);
 
 type Root = 'Query' | 'Mutation';
 
@@ -486,3 +509,18 @@ describe('#4357 P3-8 — the legacy-Id allowance is per field', () => {
   });
 });
 
+
+describe('#5081 (gap 3) — the 21 organization-scope arguments stay named in the guard tables', () => {
+  const QUERY = ['findNodes', 'globalSearch', 'edges', 'impersonationSessions', 'memories', 'exchangeConnections', 'exchangeConnectionsPage', 'slackConnections', 'telegramConnections', 'mcpServers', 'homeAssistantInstances', 'resendSenders', 'apps', 'agents', 'scopes', 'channels', 'registerEntries', 'assets', 'orgBootPromptSigning', 'orgBootPromptSigningPreview'];
+  it.each(QUERY)('Query.%s is in EXPECTED_QUERY_REF_ARGS with orgRef', (name) => {
+    expect(EXPECTED_QUERY_REF_ARGS[name]).toContain('orgRef');
+  });
+  it('Mutation.setOrgBootPromptSigning is in EXPECTED_REF_ARGS with orgRef', () => {
+    expect(EXPECTED_REF_ARGS.setOrgBootPromptSigning).toContain('orgRef');
+  });
+  it('a bare `org` argument is a stray legacy arg, as is orgId', () => {
+    expect(isStrayLegacyIdArg('Query.orgBootPromptSigning', 'org')).toBe(true);
+    expect(isStrayLegacyIdArg('Query.apps', 'orgId')).toBe(true);
+    expect(isStrayLegacyIdArg('Query.apps', 'orgRef')).toBe(false);
+  });
+});

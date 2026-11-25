@@ -72,7 +72,7 @@ for (const door of ['moveNode', 'searchReplaceInNodes'] as const) {
       const f = await ownedSystem(); const before = await state([f.memory.id, f.destination.id]);
       const seam = beforeTransaction(f.ctx, f.removeRead);
       await expect(call(f, seam.ctx)).rejects.toMatchObject(door === 'moveNode'
-        ? { extensions: { code: 'NODE_NOT_FOUND', ref: f.node.id } }
+        ? { extensions: { code: 'NODE_NOT_FOUND'} }
         : { name: 'MemoryNotFoundError' });
       expect(seam.crossed()).toBe(true);
       expect(await state([f.memory.id, f.destination.id])).toEqual(before);
@@ -112,7 +112,7 @@ describe('#3031 restore current and provenance readability independently', () =>
         let ctx = f.ctx; let crossed = () => false;
         if (interleave) { const seam = beforeTransaction(ctx, removeRead); ctx = seam.ctx; crossed = seam.crossed; }
         else await removeRead();
-        await expect(M.restoreNodeRevision({}, { nodeRevRef: f.revision.id }, ctx)).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND', nodeRevRef: f.revision.id } });
+        await expect(M.restoreNodeRevision({}, { nodeRevRef: f.revision.id }, ctx)).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND'} });
         expect(crossed()).toBe(interleave);
         expect(await state([f.current.node.memoryId, f.provenance.node.memoryId])).toEqual(before);
       });

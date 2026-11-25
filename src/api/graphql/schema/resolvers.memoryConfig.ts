@@ -266,7 +266,8 @@ const REF_COLUMNS: Record<RefKind, { id: 'authorTaskId' | 'validationTaskId' | '
   descriptionNode: { id: 'descriptionNodeId' },
 };
 
-export type ResolvedRef = { kind: RefKind; id: string; ref: string };
+/** `label`: server-authored text a refusal may name (a template rule's role and field); never the caller's ref (#5168). */
+export type ResolvedRef = { kind: RefKind; id: string; ref: string; label?: string };
 
 /**
  * The column writes for the references present in `input`. A given ref sets
@@ -320,7 +321,7 @@ export async function lockRuleRefs(ctx: Context, tx: Prisma.TransactionClient, r
     SELECT "id", "is_runnable", "deleted_at", "memory_id" FROM "nodes"
     WHERE "id" IN (${Prisma.join(ids)}) ORDER BY "id" FOR SHARE`;
   const byId = new Map(rows.map((r) => [r.id, r]));
-  for (const { kind, id, ref } of resolved) {
+  for (const { kind, id, ref, label } of resolved) {
     const row = byId.get(id);
     // The shared read gate, asked FRESH: the pre-check memoized this memory's
     // answer, so a cached re-check of an unmoved node would check nothing, and
@@ -329,7 +330,7 @@ export async function lockRuleRefs(ctx: Context, tx: Prisma.TransactionClient, r
     // membership is locked, so access revoked after this point and before
     // commit still saves; that is every authorize-then-write surface's window.
     if (!row || row.deleted_at || !(await isMemoryReadableFresh(ctx, row.memory_id, tx))) {
-      throw new NodeNotFoundError(ref);
+      throw new NodeNotFoundError(ref, label);
     }
     if (kind !== 'descriptionNode' && row.is_runnable !== true) throw notATask(kind);
   }

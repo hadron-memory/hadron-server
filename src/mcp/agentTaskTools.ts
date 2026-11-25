@@ -37,6 +37,7 @@ import { runAsActor } from '../lib/requestActor.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
+import { refusalText } from '../lib/refEcho.js';
 
 type TaskRow = Record<string, any> & { id: string; status: string };
 type EventRow = Record<string, any> & { id: string; type: string; createdAt: Date };
@@ -182,7 +183,7 @@ function refusal(e: unknown) {
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
   }
-  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`, true);
+  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${refusalText(e)}`, true);
   throw e;
 }
 
@@ -559,11 +560,11 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       read(session, async (ctx) => {
         if (tree) {
           const rows = await Q.agentTaskTree({}, { root: id }, ctx);
-          if (!rows) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
+          if (!rows) return textResult('[task_not_found] Task not found.', true); // #5168: the caller's id is not echoed
           return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset })))).join('\n'));
         }
         const t = await Q.agentTask({}, { ref: id }, ctx);
-        if (!t) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
+        if (!t) return textResult('[task_not_found] Task not found.', true); // #5168: the caller's id is not echoed
         return textResult(await renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset }));
       }),
   );

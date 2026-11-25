@@ -129,7 +129,7 @@ describe('a scope named in the call', () => {
   });
 
   it('`global` is the organization view: orgId, else the single membership, else ORG_REQUIRED', async () => {
-    const named = await Q.findNodes({}, { scope: 'global', orgId: orgA.urn }, ctx(twoOrgs.id));
+    const named = await Q.findNodes({}, { scope: 'global', orgRef: orgA.urn }, ctx(twoOrgs.id));
     expect(named.scope).toMatchObject({ kind: 'global', label: orgA.urn });
     expect(locsOf(named)).toEqual([`${memA1.id}:alpha`, `${memA2.id}:alpha`].sort());
     const single = await Q.findNodes({}, { scope: 'global' }, ctx(reader.id));
@@ -138,7 +138,7 @@ describe('a scope named in the call', () => {
     expect(new Set(single.scope.memoryUrns)).toEqual(new Set([memA1.urn, memA2.urn]));
     await expect(Q.findNodes({}, { scope: 'global' }, ctx(twoOrgs.id))).rejects.toMatchObject({ extensions: { code: 'ORG_REQUIRED' } });
     // An orgId that names nothing is a FINAL refusal — never the single membership instead (Codex on #1161).
-    await expect(Q.findNodes({}, { scope: 'global', orgId: `no-such-${generateId()}` }, ctx(reader.id))).rejects.toMatchObject({ extensions: { code: 'ORG_REQUIRED' } });
+    await expect(Q.findNodes({}, { scope: 'global', orgRef: `no-such-${generateId()}` }, ctx(reader.id))).rejects.toMatchObject({ extensions: { code: 'ORG_REQUIRED' } });
   });
 
   it("an App key's `global` is its own App's organization, on both surfaces (Codex on #1161)", async () => {
@@ -217,7 +217,7 @@ describe('#1173 — a refusal states the condition, never another surface\'s rem
     const outside = await db.organization.create({
       data: { id: generateId(), name: 'ss-outside', urn: `ss-outside-${generateId()}` },
     });
-    const foreign = await refusalOf(Q.findNodes({}, { scope: 'global', orgId: outside.urn }, ctx(twoOrgs.id)));
+    const foreign = await refusalOf(Q.findNodes({}, { scope: 'global', orgRef: outside.urn }, ctx(twoOrgs.id)));
     expect(foreign.extensions?.code).toBe('ORG_REQUIRED');
     expect(foreign.extensions).not.toHaveProperty('missing');
     expect((foreign.extensions?.memberOrgIds as string[]).length).toBeGreaterThan(0);
@@ -225,7 +225,7 @@ describe('#1173 — a refusal states the condition, never another surface\'s rem
     // A ref that names nothing takes the same branch, so it must not gain the
     // hint either. (Its `memberOrgIds` comes back empty — a separate, older
     // inconsistency in the same refusal, reported rather than changed here.)
-    const unknown = await refusalOf(Q.findNodes({}, { scope: 'global', orgId: `no-such-${generateId()}` }, ctx(twoOrgs.id)));
+    const unknown = await refusalOf(Q.findNodes({}, { scope: 'global', orgRef: `no-such-${generateId()}` }, ctx(twoOrgs.id)));
     expect(unknown.extensions?.code).toBe('ORG_REQUIRED');
     expect(unknown.extensions).not.toHaveProperty('missing');
   });
