@@ -21,8 +21,8 @@
  *     Wiring ceilings into management actions is a future product decision.
  *   - The platform ADMIN/OWNER bypass stays OUTSIDE the evaluator (same
  *     position as requireOrgRole), per the package's evaluation order.
- *   - cloneMemory's cross-org DESTINATION gate (#604: actual non-reader
- *     membership, no bypass) keeps its bespoke rule — the destination-side
+ *   - cloneMemory's and extractParentNodeToMemory's DESTINATION gate (#604: actual non-reader
+ *     membership of the target org on every arm, no bypass) keeps its bespoke rule — the destination-side
  *     verb has no bundle mapping yet.
  */
 

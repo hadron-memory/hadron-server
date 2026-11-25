@@ -1583,27 +1583,23 @@ export const memoryMutations = {
         select: { urn: true },
       });
 
-      // Cross-org gate (#604): dropping a memory into a DIFFERENT org requires
-      // the caller to be an ACTUAL member of the target org whose role is not
-      // READER. findFirst + deletedAt:null so a revoked membership can't
-      // authorize (findings:revoked-membership-auth-gates); no global-role
-      // bypass — "member and not read-only" means real membership.
-      if (targetOrgId !== source.organizationId) {
-        if (!ctx.userId) {
-          throw new GraphQLError(
-            'Cloning into another organization requires an authenticated user.',
-            { extensions: { code: 'UNAUTHENTICATED' } },
-          );
-        }
-        const membership = await ctx.db.orgMember.findFirst({
-          where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
-        });
-        if (!membership || membership.role === 'READER') {
-          throw new GraphQLError(
-            'Forbidden: cloning into an organization requires a non-reader membership there.',
-            { extensions: { code: 'FORBIDDEN' } },
-          );
-        }
+      // Target-org gate, on EVERY arm and before any URN collision is looked at (#604; hadron-internal#78): the
+      // caller must be an ACTUAL, non-READER member of the target org. findFirst + deletedAt:null so a revoked
+      // membership can't authorize (findings:revoked-membership-auth-gates); no global-role bypass.
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'Cloning into an organization requires an authenticated user.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      const membership = await ctx.db.orgMember.findFirst({
+        where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
+      });
+      if (!membership || membership.role === 'READER') {
+        throw new GraphQLError(
+          'Forbidden: cloning into an organization requires a non-reader membership there.',
+          { extensions: { code: 'FORBIDDEN' } },
+        );
       }
 
       const newUrn = `${targetOrg.urn}:${targetSlug}`;
@@ -1615,6 +1611,8 @@ export const memoryMutations = {
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
       if (existing) {
         if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
+          // Reusing an org-owned memory's URN takes the authority createMemory's org-shared reuse takes (hadron-internal#78).
+          if (existing.userId === null) await requireOrgAction(ctx, targetOrgId, 'memory.create');
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
@@ -1780,9 +1778,9 @@ export const memoryMutations = {
         const membership = await ctx.db.orgMember.findFirst({
           where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
         });
-        if (!membership) {
+        if (!membership || membership.role === 'READER') {
           throw new GraphQLError(
-            'You must be a member of the organization to extract a personal/private subtree into it.',
+            'Forbidden: extracting a personal/private subtree into an organization requires a non-reader membership there.',
             { extensions: { code: 'FORBIDDEN' } },
           );
         }
@@ -1843,6 +1841,8 @@ export const memoryMutations = {
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
       if (existing) {
         if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
+          // Reusing an org-owned memory's URN takes the authority createMemory's org-shared reuse takes (hadron-internal#78).
+          if (existing.userId === null) await requireOrgAction(ctx, targetOrgId, 'memory.create');
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {

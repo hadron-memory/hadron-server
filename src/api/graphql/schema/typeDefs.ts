@@ -14889,9 +14889,9 @@ export const typeDefs = `#graphql
     only the authored tag and nothing is created.
 
     Authorization: the SOURCE side requires (personal/private →
-    owner only; knowledge/group → source-org memory.clone grant). When \`targetUrn\` names a
-    DIFFERENT org, the caller must additionally be a non-reader member of that
-    target org. system/app-class sources and encrypted memories are rejected.
+    owner only; knowledge/group → source-org memory.clone grant). The caller must also be a
+    non-reader member of the target org (any target, the source's own org included);
+    reusing the URN of a soft-deleted org-owned memory additionally requires memory.create there. system/app-class sources and encrypted memories are rejected.
     """
     cloneMemory(ref: ID!, targetUrn: String!): Memory!
 
@@ -14923,7 +14923,7 @@ export const typeDefs = `#graphql
     NODE_NOT_FOUND). For knowledge/group sources the caller needs the SOURCE
     org's memory.clone grant (an export) AND the destination org's memory.create
     (plus a non-reader membership for a cross-org drop); a personal/private
-    extract instead requires the owner to be a member of the destination org.
+    extract instead requires the owner to be a non-reader member of the destination org; reusing the URN of a soft-deleted org-owned memory additionally requires memory.create there.
     'move' additionally requires source write access and must leave a live
     node outside the extracted subtree; otherwise it would empty the source
     (clone + deleteMemory instead). The guard uses node membership, not the
