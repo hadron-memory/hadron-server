@@ -1171,6 +1171,7 @@ model Memory {
   /// #2883 — automation read grants on this memory.
   automationReadGrants AppAutomationReadGrant[]
   gitMirrorObligations GitMirrorObligation[]
+  nodeTotal           MemoryNodeTotal?
 
   // #723: ONE shared app-class memory per (App, Agent) — the find-or-create key
   // that replaced the deterministic `…:shared` URN. Spans soft-deleted rows (the
@@ -6430,6 +6431,45 @@ model OwnerLimit {
   @@unique([organizationId, key])
   @@unique([ownerUserId, key])
   @@map("owner_limits")
+}
+
+/// How many live nodes one memory holds, so an owner's node total is a sum over its memories and not a scan of `nodes` (#5078).
+///
+/// Relationships: belongs to exactly one Memory and ends with it.
+///
+/// Behaviour:
+/// - Written only by the triggers of `prisma/memory-node-total-invariants.sql` and the reconcile script. No application code
+///   writes it, and no API serves it: it is only an input to the owner's sum
+///   (hrn:node:hadronmemory.com:specs:cor:acl:150:03).
+/// - A transaction's changes wait in MemoryNodePending and are folded in at its commit, so a figure is this row plus the pending rows.
+/// - Who owns the memory and whether it is live are joined when read, so a soft delete, a transfer or an account merge
+///   needs no write here. A memory without a row has never held a live node.
+/// - No CHECK keeps it non-negative: a drifted figure must never make a node delete fail. The script reports it.
+model MemoryNodeTotal {
+  memoryId  String @id @map("memory_id")
+  liveNodes BigInt @map("live_nodes")
+
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@map("memory_node_totals")
+}
+
+/// A change to a memory's live-node figure that its transaction has not folded into MemoryNodeTotal yet (#5078).
+///
+/// Behaviour:
+/// - The triggers on `nodes` insert rows here, and a deferred trigger moves the transaction's own rows into the totals as the
+///   commit's last step, in memory order. So no counter row is locked while a transaction still takes other locks.
+/// - Empty in every committed state. Left-over rows (the fold trigger was off) still count in every figure, so it stays exact.
+/// - No foreign key: a memory deleted in the same transaction leaves nothing to fold.
+model MemoryNodePending {
+  id       String @id
+  /// The writing transaction (`pg_current_xact_id`), so a fold takes only its own rows.
+  txId     BigInt @map("tx_id")
+  memoryId String @map("memory_id")
+  delta    BigInt
+
+  @@index([txId])
+  @@map("memory_node_pending")
 }
 
 /// A trigger that starts a headless run when an outside system calls a URL. Each accepted call creates one AppRun.

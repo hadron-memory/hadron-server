@@ -10,6 +10,7 @@
  * uploader or an admin of the Memory's current organization.
  */
 
+import { assetLimitCaller, memoryOwnerRef, requireAssetBytesHeadroom } from '../../lib/asset/ownerBytes.js';
 import type { Asset, PrismaClient } from '../../generated/prisma/index.js';
 import { headObject } from '../../integrations/objectstore/index.js';
 import { reportAssetBytesMissing } from '../../lib/asset/bytesMissingAlarm.js';
@@ -116,7 +117,7 @@ export async function restoreAsset(
       throw new AssetUploadError('NOT_FOUND', 'asset restore is not supported for a user-owned memory yet');
     }
     const current = await tx.asset.findUnique({
-      where: { id: asset.id }, select: { id: true, memoryId: true, deletedAt: true, uploadedBy: true },
+      where: { id: asset.id }, select: { id: true, memoryId: true, deletedAt: true, uploadedBy: true, sizeBytes: true, scanStatus: true },
     });
     if (!current || current.memoryId !== memory.id) {
       throw new AssetUploadError('NOT_FOUND', 'asset not found');
@@ -131,6 +132,11 @@ export async function restoreAsset(
     const isCurrentAdmin = isCurrentUploader ? false : await isAdminFor(tx as PrismaClient, caller.userId, memory.organizationId);
     if (!isCurrentUploader && !isCurrentAdmin) {
       throw new AssetUploadError('PERMISSION_DENIED', 'caller is not the uploader or an org admin');
+    }
+    // #5017: an un-delete adds live bytes, so the owner's file-bytes cap is judged here, before the row comes back. A BLOCKED file
+    // is never counted, so restoring one adds nothing and is not checked.
+    if (current.scanStatus !== 'BLOCKED') {
+      await requireAssetBytesHeadroom(tx, memoryOwnerRef(memory), current.sizeBytes, assetLimitCaller(caller));
     }
     return tx.asset.update({
       where: { id: current.id }, data: { deletedAt: null },

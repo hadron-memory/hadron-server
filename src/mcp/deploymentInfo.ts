@@ -247,7 +247,12 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation (ship order per precedent
 // 0274: notices, server, companions). Gates and refusals are unchanged; `agentTasks(externalId)` keeps its name (an
 // external-system label). (0.36.0 is #5066, #1796, and 0.37.0 is #5064, Billing A1, both merged first.)
-export const HADRON_SERVER_VERSION = '0.38.0';
+//
+// 0.39.0 — BREAKING, entity refs S3 (#4139): `nodeExport(id)` → `nodeExport(ref)` (the node's PK or URN), no alias.
+// A lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation (ship order per precedent
+// 0274: notices, server, companions). The export's contents, gating and refusals are unchanged; only the argument that
+// names the node changed. (0.38.0 is #4782, entity refs S7, merged first.)
+export const HADRON_SERVER_VERSION = '0.39.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

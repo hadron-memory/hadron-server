@@ -199,6 +199,21 @@ describe('#5016 transferMemoryOwnership', () => {
     expect(await db.memory.findUniqueOrThrow({ where: { id: m.id } })).toMatchObject({ organizationId: org.id, urn: m.urn });
   });
 
+  it('shows a dryRun blocker without the number to a platform admin who cannot manage the receiving organization', async () => {
+    defaults({ organization: { memories: 1 } });
+    await orgMemory(org2.id);
+    const m = await mk();
+    const outsider = await db.user.create({ data: { id: generateId(), handle: 'door-platform', roles: ['ADMIN'] } });
+    const preview = await resolvers.Mutation.transferMemoryOwnership(null, { ...input(m.id), dryRun: true } as never, { db, userId: outsider.id, roles: ['ADMIN'] } as Context)
+      .catch((e: unknown) => e as { message: string });
+    // Either the destination is refused to this caller outright, or the blocker carries the no-number form; never the numbered one.
+    const text = JSON.stringify(preview);
+    expect(text).not.toMatch(/limit of 1 memor/);
+    if ((preview as { blockers?: unknown[] }).blockers) {
+      expect((preview as { blockers: Array<{ code: string; message: string }> }).blockers).toEqual([{ code: 'OWNER_LIMIT_REACHED', message: 'The owner of this memory has reached a limit of their account.' }]);
+    }
+  });
+
   it('is refused when the live nodes it brings exceed nodes', async () => {
     defaults({ organization: { nodes: 2 } });
     const m = await mk(3);

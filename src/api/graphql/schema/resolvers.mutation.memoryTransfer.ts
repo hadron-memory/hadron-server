@@ -1,3 +1,4 @@
+import { assetLimitCaller } from '../../../lib/asset/ownerBytes.js';
 import { GraphQLError } from 'graphql';
 import { ownerHeadroomRefusals, requireOwnerHeadroomMany } from '../../../lib/ownerLimits/gate.js';
 import { memoryCountsAgainstOwner } from '../../../lib/ownerLimits/keys.js';
@@ -111,9 +112,13 @@ function targetClassOf(memory: Memory, requested: TransferClass | null | undefin
 /** What the receiving owner takes on: the memory itself when its target class counts, and its live nodes. */
 async function transferLimitChecks(tx: TransferDb, memory: Memory, targetClass: TransferClass) {
   const live = BigInt(await tx.node.count({ where: { memoryId: memory.id, deletedAt: null } }));
+  const [{ n: bytes }] = await tx.$queryRaw<Array<{ n: bigint }>>`
+    SELECT COALESCE(sum(size_bytes), 0)::bigint AS n FROM assets
+    WHERE memory_id = ${memory.id} AND deleted_at IS NULL AND scan_status <> 'BLOCKED'`;
   return [
     { key: 'memories' as const, amount: memoryCountsAgainstOwner({ class: targetClass, appId: memory.appId, isInstallMemory: memory.isInstallMemory }) ? 1n : 0n },
     { key: 'nodes' as const, amount: live },
+    { key: 'assetBytes' as const, amount: bytes },
   ];
 }
 
@@ -294,11 +299,13 @@ export const memoryTransferMutations = {
         if (input.expectedNewUrn != null && input.expectedNewUrn !== plan.newUrn) {
           throw refusal('STALE_TRANSFER_PREVIEW', 'The target URN changed since the preview; run a new dryRun.');
         }
-        // #5016: the receiving owner takes on the memory and its live nodes; the owner differs here (a same-owner transfer is a blocker above).
-        // Under the lock the destination root lock above already took, and before the first write; the refusal leaves the source unchanged.
+        // #5016 and #5017: the receiving owner takes the memory, its live nodes and its live files' bytes with it; ONE multi-key call, so the
+        // owner-limit locks are taken together in resolved order. The owner differs here (a same-owner transfer is a blocker above); before any
+        // change, so a refusal leaves the source unchanged. The caller is the asset door's own (no number for impersonation or a headless run).
         await requireOwnerHeadroomMany(tx, {
           owner: currentDestination.kind === 'organization' ? { organizationId: currentDestination.id } : { userId: currentDestination.id },
-          checks: await transferLimitChecks(tx, current, plan.targetClass), caller: ctx.userId ? { userId: ctx.userId } : null,
+          checks: await transferLimitChecks(tx, current, plan.targetClass),
+          caller: assetLimitCaller({ userId: ctx.userId, impersonation: ctx.impersonation }),
         });
         if (current.class === 'group' && input.resetGroupMembers === true) {
           await tx.memoryMember.deleteMany({ where: { memoryId: id } });
