@@ -128,7 +128,6 @@ import { validateMemorySource, GitSourceError } from '../../../lib/gitSource.js'
 import { validateGitBranch, GitRefError } from '../../../lib/gitRef.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 import { recordNodeUsage } from '../../../lib/usageRecorder.js';
-import { createNode } from '../../../controller/operations/createNode.js';
 import {
   ALL_NODE_MERGE_FIELDS,
   type NodeMergeField,
@@ -167,7 +166,7 @@ import {
   resolveRequiredMemoryRef,
   getAccessibleMemoryIds,
   type MergeMemoriesInput,
-  assertMemoryRootLoc,
+  deriveMemorySlug,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
@@ -712,10 +711,8 @@ export const memoryMutations = {
         );
       }
 
-      // #2730: the root node's loc is `name`; refuse an unprojectable one here,
-      // after the gates and before ensureUserHandle, the tombstone reclaim or
-      // any create.
-      assertMemoryRootLoc(name);
+      // #5149: the name's only refusals, after the gates and before ensureUserHandle, the tombstone reclaim or any create.
+      const memorySlug = deriveMemorySlug(name);
       assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
 
       // The URN root is the owner principal's bare namespace atom — an org
@@ -730,7 +727,7 @@ export const memoryMutations = {
         : (await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId! }, select: { urn: true } })).urn;
       // #574: slugify the display name — a raw name would persist a
       // case-sensitive / space-bearing URN that can't round-trip through parseUrn.
-      const memoryUrn = `${memRoot}:${deriveSlugFromName(name)}`;
+      const memoryUrn = `${memRoot}:${memorySlug}`;
       // Check for existing memory with the same URN
       const existing = await ctx.db.memory.findUnique({ where: { urn: memoryUrn } });
       if (existing) {
@@ -834,19 +831,13 @@ export const memoryMutations = {
             },
           });
         }
-        // #2728: the root node is created in the Memory's own transaction, so a root failure rolls the Memory
-        // (and a group's owner row) back instead of leaving a rootless row a retry would duplicate.
-        const rootName = name.split(':').pop() ?? name;
-        await createNode({
-          memoryId: created.id,
-          loc: name,
-          name: rootName,
-          description: 'Root node for this memory.',
-        }, tx);
+        // #3952 (R11): a new memory has no root node. It was built from the display name, so a name with a space
+        // gave a loc no client can address (D-2026-05-11-013) and an unapproved node that blocked the first mint
+        // (cor:dmo:120:06/:07). Existing roots are left alone (R12).
         // #3426 (C3): the ONE site where the org's default templates are applied — an org-owned knowledge or group memory
         // created here. Not personal/private (the owner alone manages those), not user-owned, and no other creation path
         // (App, install, agent, chat, worker, clone, extract). No flag opts a caller out, so `source` changes nothing.
-        // Inside this transaction: a failure rolls the memory, its root node and its rules back together.
+        // Inside this transaction: a failure rolls the memory and its rules back together.
         if (resolvedOrgId && (requestedClass === 'knowledge' || requestedClass === 'group')) {
           await applyOrgDefaultsAtCreation(tx, { memoryId: created.id, orgId: resolvedOrgId, actor: ctx.userId ?? ctx.clientId ?? 'system' });
         }
@@ -1662,7 +1653,9 @@ export const memoryMutations = {
       }
 
       // A move must leave at least one live node OUTSIDE the subtree, else it
-      // empties the source (and orphans its root). Checked by node set, NOT by
+      // empties the source (and orphans its root, where it has one). Since #3952 a
+      // new memory has no root, so its only subtree can no longer be moved out whole;
+      // that refusal is kept on purpose (#5148 asks whether to allow it). Checked by node set, NOT by
       // `parent.loc === source.name`: Memory.name is mutable (updateMemory) and
       // a rename does not rename the root node loc, so a name-based guard is
       // wrong both ways (misses a renamed root, false-flags a node at the new

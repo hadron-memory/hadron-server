@@ -370,6 +370,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_credit_ledger_not_soft_deleted",
+      "kind": "check-constraint",
+      "file": "credit-ledger-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_dark_worker_episodes_shape",
       "kind": "check-constraint",
       "file": "dark-alarm-invariants.sql",
@@ -400,6 +406,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_grant_selection_signature_shape",
+      "kind": "check-constraint",
+      "file": "grant-selection-signing-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_grant_signature_shape",
       "kind": "check-constraint",
       "file": "grant-signing-invariants.sql",
@@ -409,6 +421,12 @@
       "name": "chk_grant_signing_request_shape",
       "kind": "check-constraint",
       "file": "grant-signing-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_grant_signing_selection_shape",
+      "kind": "check-constraint",
+      "file": "grant-selection-signing-invariants.sql",
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
@@ -1264,6 +1282,18 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_credit_ledger_entries_append_only",
+      "kind": "function",
+      "file": "credit-ledger-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_credit_ledger_user_merged",
+      "kind": "function",
+      "file": "credit-ledger-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_departure_cause_fits",
       "kind": "function",
       "file": "grant-invariants.sql",
@@ -1321,6 +1351,12 @@
       "name": "hadron_end_open_signing_requests",
       "kind": "function",
       "file": "signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_end_selection_items",
+      "kind": "function",
+      "file": "grant-selection-signing-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -1396,6 +1432,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_guard_grant_selection_signature",
+      "kind": "function",
+      "file": "grant-selection-signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_guard_grant_signature",
       "kind": "function",
       "file": "grant-signing-invariants.sql",
@@ -1405,6 +1447,12 @@
       "name": "hadron_guard_grant_signing_request",
       "kind": "function",
       "file": "grant-signing-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_guard_grant_signing_selection",
+      "kind": "function",
+      "file": "grant-selection-signing-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -1549,6 +1597,12 @@
       "name": "hadron_node_revision_state_hash",
       "kind": "function",
       "file": "post-push.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_node_state_bytes",
+      "kind": "function",
+      "file": "node-bytes-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -1798,6 +1852,18 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "node_revisions_record_bytes",
+      "kind": "function",
+      "file": "node-bytes-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes_record_stored_bytes",
+      "kind": "function",
+      "file": "node-bytes-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "team_stop_signal_end_once",
       "kind": "function",
       "file": "stop-signal-invariants.sql",
@@ -1901,6 +1967,12 @@
     },
     {
       "name": "assets_uploaded_by_staged_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "credit_ledger_entries_expiring_grants_idx",
       "kind": "index",
       "file": "post-push.sql",
       "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
@@ -2476,6 +2548,12 @@
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
+      "name": "credit_ledger_entries.credit_ledger_entries_append_only",
+      "kind": "trigger",
+      "file": "credit-ledger-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "dark_worker_episodes.worker_reference_fence_1162",
       "kind": "trigger",
       "file": "dark-alarm-invariants.sql",
@@ -2524,6 +2602,12 @@
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
+      "name": "grant_selection_signatures.grant_selection_signature_guard",
+      "kind": "trigger",
+      "file": "grant-selection-signing-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "grant_signatures.grant_signature_guard",
       "kind": "trigger",
       "file": "grant-signing-invariants.sql",
@@ -2539,6 +2623,24 @@
       "name": "grant_signing_requests.worker_reference_fence_1162",
       "kind": "trigger",
       "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grant_signing_selections.grant_signing_selection_end_items",
+      "kind": "trigger",
+      "file": "grant-selection-signing-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grant_signing_selections.grant_signing_selection_guard",
+      "kind": "trigger",
+      "file": "grant-selection-signing-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "grant_signing_selections.worker_reference_fence_1162",
+      "kind": "trigger",
+      "file": "grant-selection-signing-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
@@ -2674,6 +2776,24 @@
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
+      "name": "node_revisions.node_revisions_record_bytes_delete",
+      "kind": "trigger",
+      "file": "node-bytes-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "node_revisions.node_revisions_record_bytes_insert",
+      "kind": "trigger",
+      "file": "node-bytes-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "node_revisions.node_revisions_record_bytes_update",
+      "kind": "trigger",
+      "file": "node-bytes-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "node_revisions.worker_reference_fence_1162",
       "kind": "trigger",
       "file": "worker-reference-invariants.sql",
@@ -2767,6 +2887,12 @@
       "name": "nodes.nodes_initialize_revision_content_hash",
       "kind": "trigger",
       "file": "post-push.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.nodes_record_stored_bytes",
+      "kind": "trigger",
+      "file": "node-bytes-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {

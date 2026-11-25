@@ -56,15 +56,15 @@ export const GRANT_SIGN_PROOF_TTL_SECONDS = 300;
 /** Long enough to read the terms before signing; the ceremony is single-use and bound, so a longer window adds no replay. */
 export const GRANT_SIGN_TTL_SECONDS = 600;
 
-const sha256 = (b: Uint8Array | string) => createHash('sha256').update(b).digest();
-const sha256Hex = (b: Uint8Array | string) => sha256(b).toString('hex');
+export const sha256 = (b: Uint8Array | string) => createHash('sha256').update(b).digest();
+export const sha256Hex = (b: Uint8Array | string) => sha256(b).toString('hex');
 
 /** The proof challenge: its own prefix (never node signing's), bound to the request AND the ceremony id. */
 export function grantProofChallenge(requestId: string, ceremonyId: string): Buffer {
   return sha256(`hadron-grant-signing-proof\nrequest ${requestId}\nceremony ${ceremonyId}\n`);
 }
 
-interface RequestPins { id: string; grantId: string; version: number; termsHash: string; payloadVersion: string }
+export interface RequestPins { id: string; grantId: string; version: number; termsHash: string; payloadVersion: string }
 
 /** The signing challenge of a request: SHA-256 of its grant signature payload. Throws for a pin the payload cannot hold. */
 function grantSigningChallenge(r: RequestPins): Buffer {
@@ -86,19 +86,19 @@ export async function openGrantProofCeremony(
   return { ceremonyId, challenge: challenge.toString('base64url') };
 }
 
-interface CredentialRow {
+export interface CredentialRow {
   id: string; owner_id: string; credential_id: Buffer; public_key: Buffer; counter: bigint;
   revoked_at: Date | null; enrollment_rp_id: string;
 }
 
-async function loadCredential(db: PrismaClient, credentialId: Buffer): Promise<CredentialRow | null> {
+export async function loadCredential(db: PrismaClient, credentialId: Buffer): Promise<CredentialRow | null> {
   const [row] = await db.$queryRaw<CredentialRow[]>`SELECT id, owner_id, credential_id, public_key, counter, revoked_at, enrollment_rp_id
     FROM passkey_credentials WHERE credential_id = ${credentialId}`;
   return row ?? null;
 }
 
 /** A person's context for the shared gates, on the transaction's own client. */
-async function personContext(tx: Prisma.TransactionClient, userId: string): Promise<Context | null> {
+export async function personContext(tx: Prisma.TransactionClient, userId: string): Promise<Context | null> {
   const user = await tx.user.findFirst({ where: { id: userId, deletedAt: null }, select: { id: true, roles: true } });
   return user ? ({ db: tx, userId: user.id, roles: user.roles } as unknown as Context) : null;
 }
@@ -108,7 +108,7 @@ async function personContext(tx: Prisma.TransactionClient, userId: string): Prom
  * GraphQLError, and any of them is "no". Anything else (a database failure) is not an answer about eligibility and propagates
  * (Gloria P3-2, #3805): it must not read as SIGNER_NOT_ELIGIBLE.
  */
-async function mayIssue(ctx: Context, action: string, appId: string, grantId: string): Promise<boolean> {
+export async function mayIssue(ctx: Context, action: string, appId: string, grantId: string): Promise<boolean> {
   try {
     // #3998: an issuer rule may depend on what the grant names (one secret), so the gate reads the stored values.
     const grant = await ctx.db.grant.findUnique({ where: { id: grantId }, select: { values: true } });
@@ -120,14 +120,14 @@ async function mayIssue(ctx: Context, action: string, appId: string, grantId: st
   }
 }
 
-interface GrantRow {
+export interface GrantRow {
   id: string; app_id: string; user_id: string | null; agent_id: string | null; worker_id: string | null; grantee_app_id: string | null;
   action: string; action_values: unknown; starts_at: Date | null; expires_at: Date | null; max_uses: number | null; reason: string;
   version: number; activated_at: Date | null; revoked_at: Date | null; holder_departed_at: Date | null;
   requested_by_user_id: string | null; requested_by_worker_id: string | null; requested_by_run_id: string | null;
 }
 
-async function readGrant(tx: Prisma.TransactionClient, grantId: string, appId: string): Promise<GrantRow | null> {
+export async function readGrant(tx: Prisma.TransactionClient, grantId: string, appId: string): Promise<GrantRow | null> {
   const [row] = await tx.$queryRaw<GrantRow[]>`
     SELECT id, app_id, user_id, agent_id, worker_id, grantee_app_id, action, action_values, starts_at, expires_at, max_uses, reason,
            version, activated_at, revoked_at, holder_departed_at, requested_by_user_id, requested_by_worker_id, requested_by_run_id
@@ -152,7 +152,7 @@ function termsHashOf(g: GrantRow): string | null {
  * ONE clock read (`now`, taken after the completion's last lock), never on a clock sampled earlier: a lock wait that crosses
  * the deadline must read EXPIRED here, not reach the activation guard and fail as a raw refusal (Anne P2, #3805).
  */
-function grantEnded(g: GrantRow, req: RequestPins, now: Date): 'STALE' | 'EXPIRED' | null {
+export function grantEnded(g: GrantRow, req: RequestPins, now: Date): 'STALE' | 'EXPIRED' | null {
   if (g.activated_at || g.revoked_at || g.holder_departed_at) return 'STALE';
   // A grant past its expiry can never be signed (ruling 0255 item 16).
   if (g.expires_at !== null && g.expires_at.getTime() <= now.getTime()) return 'EXPIRED';
@@ -160,7 +160,7 @@ function grantEnded(g: GrantRow, req: RequestPins, now: Date): 'STALE' | 'EXPIRE
   return null;
 }
 
-const holderOf = (g: GrantRow): { kind: 'user' | 'agent' | 'worker' | 'app'; id: string } =>
+export const holderOf = (g: GrantRow): { kind: 'user' | 'agent' | 'worker' | 'app'; id: string } =>
   g.user_id ? { kind: 'user', id: g.user_id }
     : g.agent_id ? { kind: 'agent', id: g.agent_id }
       : g.worker_id ? { kind: 'worker', id: g.worker_id }
@@ -190,7 +190,7 @@ export type GrantProofResult =
   | { outcome: 'open'; view: GrantCeremonyView; canSign: boolean; /** For the route's cookie; never in the body. */ sessionNonce?: string }
   | { outcome: 'ended'; state: string };
 
-async function requesterOf(tx: Prisma.TransactionClient, r: { requesterUserId: string | null; requesterAppId: string | null; requesterWorkerId: string | null }) {
+export async function requesterOf(tx: Prisma.TransactionClient, r: { requesterUserId: string | null; requesterAppId: string | null; requesterWorkerId: string | null }) {
   const [user, app, worker] = await Promise.all([
     r.requesterUserId ? tx.user.findUnique({ where: { id: r.requesterUserId }, select: { handle: true } }) : null,
     r.requesterAppId ? tx.app.findUnique({ where: { id: r.requesterAppId }, select: { name: true } }) : null,
@@ -203,7 +203,7 @@ async function requesterOf(tx: Prisma.TransactionClient, r: { requesterUserId: s
  * Who asked for the grant, and so wrote its reason: the person by handle (null once erased) and the worker the request came through; or, when
  * a headless run asked (#3753, `requested_by_run_id`), `run: true` with no name, so the page never calls a run's request an erased person's.
  */
-async function reasonAuthorOf(tx: Prisma.TransactionClient, g: Pick<GrantRow, 'requested_by_user_id' | 'requested_by_worker_id' | 'requested_by_run_id'>) {
+export async function reasonAuthorOf(tx: Prisma.TransactionClient, g: Pick<GrantRow, 'requested_by_user_id' | 'requested_by_worker_id' | 'requested_by_run_id'>) {
   const [user, worker] = await Promise.all([
     g.requested_by_user_id ? tx.user.findFirst({ where: { id: g.requested_by_user_id, deletedAt: null }, select: { handle: true } }) : null,
     g.requested_by_worker_id ? tx.worker.findUnique({ where: { id: g.requested_by_worker_id }, select: { name: true } }) : null,
@@ -211,7 +211,7 @@ async function reasonAuthorOf(tx: Prisma.TransactionClient, g: Pick<GrantRow, 'r
   return { name: user?.handle ?? null, via: worker?.name ?? null, run: g.requested_by_run_id !== null };
 }
 
-async function holderName(tx: Prisma.TransactionClient, h: { kind: string; id: string }): Promise<string | null> {
+export async function holderName(tx: Prisma.TransactionClient, h: { kind: string; id: string }): Promise<string | null> {
   switch (h.kind) {
     case 'user': return (await tx.user.findUnique({ where: { id: h.id }, select: { handle: true } }))?.handle ?? null;
     case 'agent': return (await tx.agent.findUnique({ where: { id: h.id }, select: { name: true } }))?.name ?? null;
@@ -225,7 +225,7 @@ async function holderName(tx: Prisma.TransactionClient, h: { kind: string; id: s
  * gate. A node the prover cannot read, a deleted one, or a summary that cannot be written is null: the page then shows no
  * sentence and offers no signing (a person never signs terms they could not read).
  */
-async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: GrantRow, appUrn: string): Promise<string | null> {
+export async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: GrantRow, appUrn: string): Promise<string | null> {
   const action = PLATFORM_ACTIONS.find((a) => a.name === g.action);
   if (!action || !g.action_values || typeof g.action_values !== 'object' || Array.isArray(g.action_values)) return null;
   const values = g.action_values as Record<string, unknown>;
@@ -311,7 +311,8 @@ export async function proveForGrantSigning(db: PrismaClient, a: {
     if (!decided || decided.ownerId !== cred.owner_id) throw new CeremonyRefused();
 
     const row = await tx.grantSigningRequest.findUnique({ where: { id: a.requestId } });
-    if (!row) return { outcome: 'refused' };
+    // #5001: an item of a selection is signed only on its selection's page; here it is unknown, with no observation.
+    if (!row || row.selectionId) return { outcome: 'refused' };
     const grantApp = await tx.grant.findUnique({ where: { id: row.grantId }, select: { appId: true, action: true } });
     if (!grantApp) return { outcome: 'refused' };
     // The issuer gate before anything about the grant: someone who may not issue it learns nothing, not even that it exists.
@@ -396,7 +397,8 @@ interface Located { request: RequestPins & { state: string; expiresAt: Date }; a
 /** The unlocked pre-read that NAMES the anchors and rows to lock. It authorizes nothing: everything is read again under the locks. */
 async function locate(db: PrismaClient, a: { requestId: string; ceremonyId: string }): Promise<Located> {
   const request = await db.grantSigningRequest.findUnique({ where: { id: a.requestId } });
-  if (!request) throw new CeremonyRefused();
+  // #5001: a selection item never completes or declines through the one-grant ceremony.
+  if (!request || request.selectionId) throw new CeremonyRefused();
   const grant = await db.grant.findUnique({ where: { id: request.grantId }, select: { appId: true, action: true } });
   if (!grant) throw new CeremonyRefused();
   const app = await db.app.findUnique({ where: { id: grant.appId }, select: { organizationId: true, ownerUserId: true } });
@@ -547,7 +549,7 @@ export async function completeGrantSigning(db: PrismaClient, a: {
  * creates it: the signer is the issuer, fixed here and never changed; the client is self-issued when the holder is that person.
  * Idempotent for a grant `issueSecretReadClient` already gave a row.
  */
-async function ensureSecretReadClient(tx: Prisma.TransactionClient, g: GrantRow, signerId: string): Promise<void> {
+export async function ensureSecretReadClient(tx: Prisma.TransactionClient, g: GrantRow, signerId: string): Promise<void> {
   if (g.action !== 'secret.reveal' && g.action !== 'secret.use') return;
   const values = (g.action_values ?? {}) as Record<string, unknown>;
   const secretId = typeof values.secret === 'string' ? values.secret : null;

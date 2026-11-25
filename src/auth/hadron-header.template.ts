@@ -1,4 +1,4 @@
-/** #3451 — static branding shared by all six OAuth pages.
+/** #3451 — static branding shared by the OAuth pages.
  * Embedded 128px marks from hadron-portal/static/img; eXIf/iTXt source metadata
  * removed without re-encoding. IHDR, IDAT, iCCP/cICP color data and pHYs retained byte-exact; data images
  * preserve the actual light/dark artwork without a network request. These

@@ -20,6 +20,14 @@ export function grantSigningCeremonyUrl(requestId: string): string {
   return `${getProjectBaseUrl()}${GRANT_SIGNING_CEREMONY_PATH}/${requestId}`;
 }
 
+/** #5001 (cor:acl:140:07): the grant SELECTION ceremony's path prefix; its own cookie path, so neither grant ceremony stands in for the other. */
+export const GRANT_SELECTION_SIGNING_CEREMONY_PATH = '/grant-selection-signing';
+
+/** The absolute link a grant selection hands over: the server origin plus the selection id. No token, query or fragment. */
+export function grantSelectionSigningCeremonyUrl(selectionId: string): string {
+  return `${getProjectBaseUrl()}${GRANT_SELECTION_SIGNING_CEREMONY_PATH}/${selectionId}`;
+}
+
 /** #3998 (cor:sec:060): the person read-client reveal page's path prefix; its own cookie path. The client id is the only parameter. */
 export const SECRET_REVEAL_PATH = '/secret-reveal';
 

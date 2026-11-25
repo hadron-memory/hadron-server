@@ -60,6 +60,7 @@ import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
 import { mountSigningCeremonyRoutes } from './api/signingCeremonyRoutes.js';
 import { mountSecretChangeCeremonyRoutes } from './api/secretChangeCeremonyRoutes.js';
 import { mountGrantSigningCeremonyRoutes } from './api/grantSigningCeremonyRoutes.js';
+import { mountGrantSelectionSigningCeremonyRoutes } from './api/grantSelectionSigningCeremonyRoutes.js';
 import { mountSecretRevealRoutes } from './api/secretRevealRoutes.js';
 import { mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
 import { signingSurfacePolicy } from './lib/signing/surface.js';
@@ -84,6 +85,7 @@ import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
 import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
 import { loadOwnerDefaultLimits } from './lib/ownerLimits/defaults.js';
+import { nodeContentMaxBytes } from './lib/nodeContentLimit.js';
 import { complexityAdmissionPlugin } from './api/graphql/admissionComplexity.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
@@ -102,6 +104,7 @@ import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories
 import { startSecretChangeSweepLoop } from './jobs/sweepSecretChanges.js';
 import { startPasskeyCeremonySweepLoop } from './jobs/sweepPasskeyCeremonies.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
+import { creditExpirySweepDisabledReason, startCreditExpirySweepLoop } from './jobs/expireCreditGrants.js';
 import { startChatToolTeardownSweepLoop } from './jobs/sweepChatToolTeardown.js';
 import { secretSweepDisabledReason, startSecretSweepLoop } from './jobs/secretSweep.js';
 import { startGitMirrorObligationSweepLoop } from './jobs/sweepGitMirrorObligations.js';
@@ -1127,6 +1130,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   mountSigningCeremonyRoutes(app);
   // #3649 slice C: the grant signing ceremony, on the same switch.
   mountGrantSigningCeremonyRoutes(app);
+  mountGrantSelectionSigningCeremonyRoutes(app);
   mountSecretChangeCeremonyRoutes(app);
   mountSecretRevealRoutes(app);
   mountPasskeySignInRoutes(app);
@@ -1226,6 +1230,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   const admission = readGraphqlAdmissionConfig();
   // #5009: the deployment's default owner limits; a malformed value refuses boot.
   loadOwnerDefaultLimits();
+  nodeContentMaxBytes(); // #5019: a malformed ceiling refuses boot
   // The effective L4 configuration, on one line, so ops can confirm the mode a deploy actually booted with.
   console.log(JSON.stringify({
     event: 'graphql.admission.config', mode: admission.complexityMode, maxDepth: admission.maxDepth,
@@ -1956,6 +1961,14 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
 
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
     startMergeConsentSweepLoop(db);
+  }
+
+  // #5011 (Billing A4, cor:dmo:170:10): settle expired credit grants hourly for owners no read has reached. Reads
+  // settle the owner at hand whatever this switch says.
+  {
+    const off = creditExpirySweepDisabledReason();
+    if (off === null) startCreditExpirySweepLoop(db);
+    else if (off !== 'NODE_ENV=test') console.warn(`credit_expiry_sweep.disabled reason=${off}`);
   }
 
   // Background job (#4847, cor:int:030:03): reconcile, cap and retry the chat tool teardown intents (Telegram, Slack) every 5 minutes.

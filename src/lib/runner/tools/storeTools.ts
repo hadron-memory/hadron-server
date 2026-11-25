@@ -241,7 +241,7 @@ export const hadronStoreFile: RunToolDef = {
         } as never,
         ctx.principal,
         'create',
-        { ownerLimit: 'refuse', authoring: runAuthoring(ctx.principal, ctx.run) },
+        { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: runAuthoring(ctx.principal, ctx.run) },
       );
     } catch (err) {
       // Compensate: no asset without its reference node, no bytes without

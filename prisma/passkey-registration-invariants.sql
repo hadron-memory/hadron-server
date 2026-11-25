@@ -8,7 +8,7 @@ ALTER TABLE "passkey_cancel_tokens" ADD CONSTRAINT "chk_passkey_cancel_token_sha
   "token_hash" ~ '^[0-9a-f]{64}$' AND ("used_at" IS NULL OR "used_at" >= "created_at")
 );
 CREATE OR REPLACE FUNCTION hadron_guard_passkey_cancel_token() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE db_now timestamp(3) := (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3);
 BEGIN
   IF TG_OP = 'DELETE' THEN
@@ -55,11 +55,12 @@ ALTER TABLE "passkey_ceremonies" ADD CONSTRAINT "chk_passkey_ceremony_registrati
   -- #1632 S2b-2 (cor:dmo:130:08): a SIGN ceremony is bound to the person the proof ceremony proved, set once. It
   -- carries no registration field. The proof ceremony itself (SIGN_PROOF) is never bound: it is spent proving.
   -- #3649 slice C (cor:acl:140:07): a grant's signing ceremony (GRANT_SIGN) is bound the same way; GRANT_SIGN_PROOF never is.
-  OR ("purpose" IN ('SIGN', 'GRANT_SIGN') AND "user_id" IS NOT NULL AND "kind" IS NOT NULL AND "kind" = 'sign' AND "registration_method" IS NULL
+  -- #5001: a selection's signing ceremony (GRANT_SELECTION_SIGN) is bound the same way; GRANT_SELECTION_SIGN_PROOF never is.
+  OR ("purpose" IN ('SIGN', 'GRANT_SIGN', 'GRANT_SELECTION_SIGN') AND "user_id" IS NOT NULL AND "kind" IS NOT NULL AND "kind" = 'sign' AND "registration_method" IS NULL
     AND "sign_in_browser_hash" IS NULL AND "vouch_passkey_id" IS NULL AND "user_handle" IS NULL)
 );
 CREATE OR REPLACE FUNCTION hadron_guard_passkey_ceremony_binding() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF OLD.user_id IS NOT NULL AND ROW(NEW.user_id, NEW.kind, NEW.registration_method, NEW.sign_in_browser_hash, NEW.vouch_passkey_id, NEW.user_handle)
     IS DISTINCT FROM ROW(OLD.user_id, OLD.kind, OLD.registration_method, OLD.sign_in_browser_hash, OLD.vouch_passkey_id, OLD.user_handle) THEN
@@ -83,7 +84,7 @@ ALTER TABLE "passkey_registration_notices" ADD CONSTRAINT "chk_passkey_registrat
   AND ("sent_at" IS NULL OR "failed_at" IS NULL)
 );
 CREATE OR REPLACE FUNCTION hadron_guard_passkey_registration_notice() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'Passkey registration notices are never deleted' USING ERRCODE = '23514';

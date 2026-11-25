@@ -8,6 +8,8 @@ import { textResult } from './textResult.js';
 import { attestationRefusalResult } from '../lib/authoringAttestation.js';
 import { isContentResolutionLimitError, type ContentResolutionLimitError } from '../lib/includes/resolutionBudget.js';
 import { OwnerLimitReachedError } from '../lib/ownerLimits/errors.js';
+import { NodeContentTooLargeError } from '../lib/nodeContentLimit.js';
+import { FieldNotDeclaredError } from '../lib/objectStore.js';
 
 // Backstop for wrappers that copied the diagnostic and discarded its class.
 // Use distinctive ORM signatures, not broad words like "query" or "database",
@@ -93,6 +95,19 @@ export function ownerLimitResult(error: OwnerLimitReachedError) {
   return refusalResult(`[owner_limit_reached] ${error.message}`);
 }
 
+/** #5019 (cor:dmo:060:19): the node-size refusal, in the same shape, whichever tool's door raised it. */
+export function nodeContentLimitResult(error: NodeContentTooLargeError) {
+  return refusalResult(`[node_content_too_large] ${error.message}`);
+}
+
+/**
+ * #725 (cor:api:170:03): a query named a field a strict collection does not declare. The message already names only the caller's own
+ * field and the collection the caller named, so nothing here adds or removes detail.
+ */
+export function fieldNotDeclaredResult(error: FieldNotDeclaredError) {
+  return refusalResult(`[field_not_declared] ${error.message}`);
+}
+
 function supersededResult(error: import('graphql').GraphQLError) {
   return { ...refusalResult('Session superseded.'), structuredContent: { error: sessionSupersededEnvelope(error) } };
 }
@@ -112,6 +127,8 @@ export function toolErrorResult(
   if (error instanceof RateLimited) return rateLimitedResult(error);
   if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
   if (error instanceof OwnerLimitReachedError) return ownerLimitResult(error);
+  if (error instanceof NodeContentTooLargeError) return nodeContentLimitResult(error);
+  if (error instanceof FieldNotDeclaredError) return fieldNotDeclaredResult(error);
   const attestation = attestationRefusalResult(error);
   if (attestation) return attestation;
   if (containsDatabaseDiagnostic(error) || !isTrustedRefusal(error)) return toolFaultResult(error, site);
@@ -131,6 +148,8 @@ export function withToolErrorBoundary(
       if (error instanceof RateLimited) return rateLimitedResult(error);
       if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
       if (error instanceof OwnerLimitReachedError) return ownerLimitResult(error);
+      if (error instanceof NodeContentTooLargeError) return nodeContentLimitResult(error);
+      if (error instanceof FieldNotDeclaredError) return fieldNotDeclaredResult(error);
       const attestation = attestationRefusalResult(error);
       if (attestation) return attestation;
       // A typed refusal retains the SDK's existing error handling; any other throw is a fault.

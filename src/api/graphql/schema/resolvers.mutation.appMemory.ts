@@ -45,12 +45,11 @@ import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
-import { createNode } from '../../../controller/operations/createNode.js';
+import { agentSlugFromUrn } from '../../../lib/urn.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
-import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, assertMemoryRootLoc } from './resolvers.helpers.js';
+import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
 type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
@@ -227,8 +226,8 @@ export const appMemoryMutations = {
     if (observed.deletedAt || observed.uninstalledAt) throw authorizationDenied();
     await requireAppMemoryCreator(ctx, observed);
     if (!name.trim()) throw new GraphQLError('Memory name must not be empty.', { extensions: { code: 'BAD_USER_INPUT' } });
-    // #2730: refuse an unprojectable root after authorization, before any write.
-    assertMemoryRootLoc(name);
+    // #5149: the name's only refusals besides empty, after authorization and before any write.
+    const desiredSlug = deriveMemorySlug(name);
     assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
     return withFsProjectionRollback(() => withAuthorizedTx(ctx, [
       ...(observed.organizationId ? [{ kind: 'org' as const, id: observed.organizationId }] : []),
@@ -254,7 +253,7 @@ export const appMemoryMutations = {
         ? (await tx.organization.findUniqueOrThrow({ where: { id: locked.organizationId }, select: { urn: true } })).urn
         : locked.urn.split(':')[0]!;
       const urn = await mintMemoryUrnV2(tx, {
-        root, desiredSlug: deriveSlugFromName(name), authorRoot: locked.urn.split(':').pop()!,
+        root, desiredSlug, authorRoot: locked.urn.split(':').pop()!,
       });
       const memory = await tx.memory.create({ data: {
         id: generateId(), organizationId: observed.organizationId, ownerUserId: observed.ownerUserId, appId: id,
@@ -262,8 +261,9 @@ export const appMemoryMutations = {
         visibility: null, isInstallMemory: false, installOfAgentId: null,
         createdBy: ctx.userId,
       }, include: MEMORY_INCLUDE });
-      await createNode({ memoryId: memory.id, loc: name, name: name.split(':').pop() ?? name,
-        description: 'Root node for this memory.' }, tx);
+      // #3952 (R11): no root node on create. The memory row is this door's ONLY write: no org defaults, owner or
+      // member row, agent grant or audit row follows it, so there is no later step whose failure needs a rollback pin
+      // (resolvers.noRootNode3952.test.ts pins the doors that do have one). A write added after this row needs that pin.
       return memory;
     }));
   },
@@ -320,12 +320,11 @@ export const appMemoryMutations = {
 
     const app = await loadAppAndAuthorize(ctx, appRef, klass);
     const agent = await resolveInstalledAgent(ctx, app.id, agentRef);
-    // #2730: the root node's loc is `name`; refuse an unprojectable one after the
-    // gates and before the tombstone reclaim or any create.
-    assertMemoryRootLoc(name);
+    // #5149: the name's only refusals, after the gates and before the tombstone reclaim or any create. A personal or
+    // private memory's slug is an opaque id, but its name is judged by the same rule.
+    const slug = deriveMemorySlug(name);
     assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
     const agentSlug = agentSlugFromUrn(agent.urn);
-    const slug = deriveSlugFromName(name);
 
     // URN uses a registered role marker so :↔:: canonicalization stays correct
     // (MEMORY_ROLE_MARKERS). app-class is shared and name-addressable, hung under
@@ -420,10 +419,7 @@ export const appMemoryMutations = {
           },
         });
       }
-      // #2728: the root node joins the anchored transaction (as createAppMemory's does), so a root failure rolls
-      // the Memory back and a retry cannot mint a second one.
-      await createNode({ memoryId: created.id, loc: name, name: name.split(':').pop() ?? name,
-        description: 'Root node for this memory.' }, tx);
+      // #3952 (R11): no root node on create.
       return created;
       }));
     } catch (err) {

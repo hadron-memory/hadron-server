@@ -88,8 +88,8 @@ describe('createMemoryInApp', () => {
     // #697 Stage 3: flat single-atom v2 urn `<org>:<slug>` (scope lives in the
     // columns, not the URN path); root is the owning org.
     expect(mem.urn).toBe(`${org.urn}:shared-runbook`);
-    // Root node exists.
-    expect(await db.node.count({ where: { memoryId: mem.id } })).toBe(1);
+    // #3952: no root node on create.
+    expect(await db.node.count({ where: { memoryId: mem.id } })).toBe(0);
   });
 
   it('creates a personal memory for a plain App member (not org admin)', async () => {
@@ -284,7 +284,7 @@ describe('#1405 — createMemoryInApp inherits a user-owned App tenant', () => {
         userId: null,
       });
       expect(stored.urn).toBe(`${owner.handle}:${memoryClass}-notes`);
-      expect(await db.node.count({ where: { memoryId: mem.id } })).toBe(1);
+      expect(await db.node.count({ where: { memoryId: mem.id } })).toBe(0);
 
       expect(await resolvers.Query.memory(null, { ref: mem.id }, asUser(owner.id))).toMatchObject({ id: mem.id });
       expect(await resolvers.Query.memory(null, { ref: mem.id }, asUser(outsiderUser.id))).toBeNull();

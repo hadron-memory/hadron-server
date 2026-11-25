@@ -77,7 +77,7 @@ describe('#5015 GitHub sync at the owner\'s nodes limit', () => {
     const row = await memoryRow();
     expect(row.syncStatus).toBe('ERROR');
     expect(row.syncError).toBe(OWNER_LIMIT_NO_NUMBER_MESSAGE);
-    expect(JSON.parse(row.lastSyncReport!)).toMatchObject({ version: 1, outcome: 'failed', entries: [], code: 'OWNER_LIMIT_REACHED' });
+    expect(JSON.parse(row.lastSyncReport!)).toMatchObject({ version: 3, outcome: 'failed', entries: [], code: 'OWNER_LIMIT_REACHED' });
   });
 
   it('with no caller (webhook, boot) the returned refusal names no owner and no number', async () => {

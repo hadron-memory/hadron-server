@@ -63,7 +63,7 @@ describe('#1326 content provenance reads', () => {
     await writeNodeCore(
       { memoryId: nodeMemoryId, loc: 'authored', content: 'new body' },
       { db, userId: readerId, roles: ['ADMIN'] } as Context,
-      'update', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) },
+      'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null) },
     );
     const live = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     expect(live).toMatchObject({
@@ -97,7 +97,7 @@ describe('#1326 content provenance reads', () => {
     await writeNodeCore(
       { memoryId: nodeMemoryId, loc: 'authored', abstract: 'A summary.' },
       { db, userId: readerId, roles: ['ADMIN'] } as Context,
-      'update', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) },
+      'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null) },
     );
     expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
       abstractOriginHash: computeContentHash('body'),
@@ -168,7 +168,7 @@ describe('#1326 content provenance reads', () => {
     await writeNodeCore(
       { memoryId: nodeMemoryId, loc: 'authored', content: 'body' },
       { db, userId: readerId, roles: ['ADMIN'] } as Context,
-      'update', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) },
+      'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null) },
     );
     expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toMatchObject({
       authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 4, authoredAt: at,
@@ -223,7 +223,7 @@ describe('#1326 content provenance reads', () => {
     await writeNodeCore(
       { memoryId: nodeMemoryId, loc: 'authored', content: 'newer body' },
       { db, userId: readerId, roles: ['ADMIN'] } as Context,
-      'update', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) },
+      'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null) },
     );
 
     expect(await typeResolvers.Node.authorship(staleParent, null, reader())).toBeNull();

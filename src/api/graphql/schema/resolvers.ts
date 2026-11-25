@@ -60,7 +60,7 @@ import { dashboardQueries, dashboardMutations } from './resolvers.dashboard.js';
 import { nodeMutations } from './resolvers.mutation.node.js';
 import { objectQueries, objectMutations } from './resolvers.object.js';
 import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
-import { meteringMutations, meteringQueries } from './resolvers.metering.js';
+import { meteringMutations, meteringQueries, meteringTypeResolvers } from './resolvers.metering.js';
 import { ownerLimitMutations, ownerLimitQueries } from './resolvers.ownerLimits.js';
 import { connectionGrantMutations, connectionGrantQueries } from './resolvers.connectionGrant.js';
 import { principalGrantMutations, principalGrantQueries } from './resolvers.principalGrant.js';
@@ -187,9 +187,11 @@ export const resolvers = {
   // #2064: a non-participant's install-memory write response reads empty (installMemory.ts).
   Node: withInstallConcealment(withInheritedNodeProjection({ ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node, ...signingFieldResolvers.Node })),
   // #1632: signing requests and signatures.
+  CreditBalance: meteringTypeResolvers.CreditBalance,
   SigningRequest: signingFieldResolvers.SigningRequest,
   NodeSignature: signingFieldResolvers.NodeSignature,
   GrantSigningRequest: grantSigningFieldResolvers.GrantSigningRequest,
+  GrantSigningSelection: grantSigningFieldResolvers.GrantSigningSelection,
   Grant: grantFieldResolvers.Grant,
   GrantSignature: grantFieldResolvers.GrantSignature,
   Comment: commentFieldResolvers.Comment,

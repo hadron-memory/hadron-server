@@ -1,0 +1,518 @@
+/**
+ * #5033 / cor:spc:030:02 (ruling 0206, option (b) as Proposed): a part body that ends in an unterminated raw-HTML construct must
+ * not absorb the NEXT block's server anchor. The pass escapes the opening `<` of such a construct as `&lt;`, so it shows as the
+ * same text and never opens.
+ *
+ * The acceptance is judged by an HTML5 parser (linkedom, the repo's devDependency) reading the rendered document, apart from
+ * the implementation: exactly one live element with the part's id, it is the server's own `<a>` (an `id` and nothing else), it
+ * is not inside an authored raw-text element, and the heading after it is visible text.
+ */
+import { parseHTML } from 'linkedom';
+import { describe, expect, it } from 'vitest';
+import { escapeUnterminatedHtml } from './unterminatedHtml.js';
+import { renderSpecDocument, type DocInput, type DocPart } from './render.js';
+
+const part = (loc: string, body: string | null, name = 'Rule: Entry'): DocPart => ({
+  loc, name, body, isPlaceholder: false, superseded: false, supersededBy: [], approval: { state: 'NOT_APPROVED' }, minted: false,
+});
+const doc = (parts: DocPart[], feature: DocPart = part('fx:110', 'Feature body.', 'Feature: F')): DocInput =>
+  ({ memory: 'synthetic:specs', renderedAt: new Date('2026-11-06T00:00:00Z'), feature, parts, links: new Map() });
+const RAW_TEXT_ANCESTORS = 'pre,textarea,script,style,title,xmp,iframe,noembed,noframes,noscript,plaintext';
+
+/** What an HTML5 parser makes of the document, for the anchor of `loc`. */
+function probe(html: string, id: string) {
+  const { document } = parseHTML(`<!doctype html><html><body>${html}</body></html>`);
+  const hits = document.querySelectorAll(`[id="${id}"]`);
+  const el = document.getElementById(id);
+  return {
+    count: hits.length,
+    tag: el?.tagName,
+    attrs: el ? [...el.attributes].map((a: { name: string }) => a.name) : [],
+    insideAuthored: el ? el.closest(RAW_TEXT_ANCESTORS) !== null : null,
+    text: document.body.textContent ?? '',
+  };
+}
+
+const THREE = (aBody: string, extra: Partial<DocPart> = {}): DocInput =>
+  doc([part('fx:110:a', aBody, 'Rule: First'), part('fx:110:b', 'second body', 'Rule: Second'), part('fx:110:c', 'third body', 'Rule: Third')].map((p, i) => (i === 0 ? { ...p, ...extra } : p)));
+
+function expectNextAnchorSurvives(out: string): void {
+  for (const id of ['fx-110-b', 'fx-110-c']) {
+    const r = probe(out, id);
+    expect({ id: id, ...r }).toMatchObject({ id: id, count: 1, tag: 'A', attrs: ['id'], insideAuthored: false });
+  }
+  const b = probe(out, 'fx-110-b');
+  expect(b.text).toContain('Rule: Second [fx:110:b]');
+  expect(b.text).toContain('Rule: Third [fx:110:c]');
+  // The server's own block, unchanged: the anchor on its own line before the heading (ruling 0206).
+  expect(out).toContain('<a id="fx-110-b"></a>\n\n## Rule: Second [fx:110:b]\nApproval: NOT_APPROVED');
+}
+
+describe('#5033 the filing\'s three outcomes', () => {
+  it('control: a body ending in plain text keeps one anchor', () => {
+    expectNextAnchorSurvives(renderSpecDocument(THREE('authored text')));
+  });
+  it('`<pre x=` no longer absorbs the anchor as an attribute of the authored element', () => {
+    expectNextAnchorSurvives(renderSpecDocument(THREE('authored <pre x=')));
+  });
+  it('`<pre x=\'` no longer swallows the anchor and the next heading', () => {
+    expectNextAnchorSurvives(renderSpecDocument(THREE("authored <pre x='")));
+  });
+});
+
+describe('#5033 the class, not two spellings', () => {
+  const OPEN: Array<[string, string]> = [
+    ['an open tag with no attributes', 'text <div'],
+    ['an open tag, double-quoted value', 'text <a href="x'],
+    ['an open tag after a closed one', '<b>bold</b> then <i class='],
+    ['a quoted value that holds a `>`, then an open attribute', 'text <a title=">" x='],
+    ['an unclosed quoted value that holds a `>`', 'text <a title="a > b'],
+    ['a bare textarea', 'text <textarea>'],
+    ['a bare script', 'text <script>'],
+    ['a bare style', 'text <style>'],
+    ['a bare title', 'text <title>'],
+    ['a bare xmp', 'text <xmp>'],
+    ['plaintext', 'text <plaintext>'],
+    ['an uppercase raw-text tag', 'text <TEXTAREA rows="2">content'],
+    ['an end tag left open', 'text </div'],
+    ['a comment', 'text <!-- a note'],
+    ['a comment that holds a `>`', 'text <!-- a > b'],
+    ['a declaration', 'text <!DOCTYPE html'],
+    ['a CDATA section', 'text <![CDATA[ data'],
+    ['a processing instruction', 'text <?xml version="1.0"'],
+    ['a line-start pre block', '<pre>\ncode lines\nmore'],
+    ['a line-start tag spanning lines', 'text <a\nhref="x"\nclass='],
+    ['a tag that a blank-line paragraph does not close', 'one <b\n\ntwo'],
+    // BLIND P1-1: a partial end tag matches the closer lookahead but never reaches `>`.
+    ['a raw-text element whose end tag has no `>`', 'a <script>b</script c'],
+    ['a textarea whose end tag stops at an attribute', 'a <textarea>b</textarea attr='],
+    // BLIND P1-2 (a closer inside a code span, a fence or after a backslash is no closer) is a Markdown-level reading; the
+    // harness here parses the raw string, where it would pass vacuously, so it is pinned on the scanner below.
+    // LOCAL P2-1: `</` and a non-letter is a bogus comment up to the next `>`.
+    ['`</` at the end', 'a </'],
+    ['`</` and a blank', 'a </ b'],
+    ['`</` and a digit', 'x </3'],
+    ['`</` and a quote', 'x </"'],
+    ['`</` and a bang', 'a </!'],
+    ['`<//`', 'a <//'],
+    ['`</` and a question mark', 'a </? b'],
+    // LOCAL P3-2: an unclosed template holds the anchor in its inert content.
+    ['an unclosed template', 'a <template>'],
+    // LOCAL delta P2-2: an unclosed template that comes BEFORE another escaped construct must not be forgotten by the restart.
+    ['an unclosed template, then an unterminated PI', '<template><?x>'],
+    ['an unclosed template, then an unterminated comment', '<template><!--'],
+    ['an unclosed template, then an open tag', '<template> a <b'],
+    ['an unclosed template, then an unterminated CDATA', '<template><![CDATA[x'],
+    ['an unclosed template, then an open tag', 'a <template>x <b y='],
+    ['an unclosed template, then an open tag, at the head of the line', '<template><div class='],
+  ];
+  it.each(OPEN)('%s at a body end keeps the next anchor', (_label, body) => {
+    const out = renderSpecDocument(THREE(body));
+    expectNextAnchorSurvives(out);
+  });
+
+  it('the Feature body ending open does not absorb the first group heading or the first anchor', () => {
+    const out = renderSpecDocument(doc([part('fx:110:b', 'second body', 'Rule: Second')], part('fx:110', "Feature body <pre x='", 'Feature: F')));
+    expect(probe(out, 'fx-110-b')).toMatchObject({ count: 1, tag: 'A', attrs: ['id'], insideAuthored: false });
+    expect(probe(out, 'fx-110-b').text).toContain('Rule: Second [fx:110:b]');
+  });
+
+  it('a heading (a spec name) that ends open does not absorb its own state line, body or the next anchor', () => {
+    const out = renderSpecDocument(doc([
+      part('fx:110:a', 'a body', "Rule: First <pre x='"),
+      part('fx:110:b', 'second body', 'Rule: Second'),
+    ]));
+    expect(probe(out, 'fx-110-b')).toMatchObject({ count: 1, tag: 'A', attrs: ['id'], insideAuthored: false });
+    expect(probe(out, 'fx-110-b').text).toContain('Approval: NOT_APPROVED');
+  });
+
+  it('shows the same text: the escape is a character reference to the same `<`', () => {
+    const out = renderSpecDocument(THREE('authored <pre x='));
+    expect(out).toContain('authored &lt;pre x=');
+    expect(probe(out, 'fx-110-a').text).toContain('authored <pre x=');
+  });
+
+  it('#4512 still holds: an authored id equal to an assigned anchor, inside the open construct, is not live', () => {
+    const out = renderSpecDocument(THREE('<pre id="fx-110-b" x='));
+    expect(probe(out, 'fx-110-b')).toMatchObject({ count: 1, tag: 'A', attrs: ['id'] });
+  });
+});
+
+describe('#5033 refusals: nothing else changes', () => {
+  const UNCHANGED = [
+    'plain text',
+    '<b>bold</b> and <i>italic</i>',
+    '<pre>done</pre>',
+    'x <pre>unclosed inline pre is harmless in an HTML5 reader',
+    '<div class="x">y</div>',
+    '<a title="a > b">link</a>',
+    'a </> stays',
+    'a </b> and </i> stay',
+    'a <script>b</script> and <style>c</style>',
+    'a <script>b</SCRIPT >c',
+    'a <template>x</template>',
+    'text\n    <pre>\nx (a four-space continuation line is not a pre block)',
+    '> quoted\n>\n>     <pre x= (a code sample in a blockquote)',
+    '>     <pre x= (a code sample in a blockquote)',
+    '<!-- closed -->',
+    '<!-- a > b -->',
+    '<!---->',
+    '<!-->',
+    '<![CDATA[ x ]]>',
+    '<?php echo 1 ?>',
+    '<textarea>x</textarea>',
+    '<SCRIPT>alert(1)</SCRIPT>',
+    'a < b and c > d',
+    'if x <= y then',
+    'ends with a lone <',
+    'inline code `<pre x=` stays as written',
+    'double backticks `` <pre x= `` stay as written',
+    'escaped \\<pre x= stays as written',
+    '```html\n<pre x=\n```',
+    '~~~\n<textarea>\n~~~',
+    '    <pre x= (an indented code sample is left alone)',
+    'text\n\n```html\n<div\n```\n\nmore',
+  ];
+  it.each(UNCHANGED)('left byte-for-byte: %j', (body) => {
+    expect(escapeUnterminatedHtml(body)).toBe(body);
+    const out = renderSpecDocument(THREE(body));
+    expect(out).toContain(body.replace(/\n+$/, ''));
+  });
+
+  it('a document with no unterminated construct renders as the plain-text control does, per part', () => {
+    const base = renderSpecDocument(THREE('authored text'));
+    expect(base).not.toContain('&lt;');
+  });
+});
+
+describe('escapeUnterminatedHtml', () => {
+  it('escapes only the opening `<` of the open construct', () => {
+    expect(escapeUnterminatedHtml("a <b>ok</b> then <pre x='")).toBe("a <b>ok</b> then &lt;pre x='");
+  });
+  it('a construct after an escaped one is judged on its own', () => {
+    expect(escapeUnterminatedHtml('<a <b <c')).toBe('&lt;a &lt;b &lt;c');
+    expect(escapeUnterminatedHtml("<a x='1 <b>ok</b> <c")).toBe("&lt;a x='1 <b>ok</b> &lt;c");
+  });
+  it('is idempotent', () => {
+    for (const s of ["x <pre x='", 'a <!-- b', '<a <b', 'y <textarea>z', 'plain']) {
+      const once = escapeUnterminatedHtml(s);
+      expect(escapeUnterminatedHtml(once)).toBe(once);
+    }
+  });
+  it('a raw-text element closed by its own end tag is complete; another element\'s end tag does not close it', () => {
+    expect(escapeUnterminatedHtml('<textarea>x</textarea>')).toBe('<textarea>x</textarea>');
+    expect(escapeUnterminatedHtml('<textarea>x</script>')).toBe('&lt;textarea>x</script>');
+    expect(escapeUnterminatedHtml('<script>x</scriptx>')).toBe('&lt;script>x</scriptx>');
+  });
+  it('the block rule: a line-start pre needs one of the four closers; an inline pre needs none', () => {
+    expect(escapeUnterminatedHtml('<pre>\nx')).toBe('&lt;pre>\nx');
+    expect(escapeUnterminatedHtml('<pre>\nx\n</pre>')).toBe('<pre>\nx\n</pre>');
+    expect(escapeUnterminatedHtml('  <pre>\nx')).toBe('  &lt;pre>\nx');
+    expect(escapeUnterminatedHtml('word <pre>\nx')).toBe('word <pre>\nx');
+  });
+  it('a partial end tag leaves the element open, so BOTH the element and the end tag are escaped', () => {
+    expect(escapeUnterminatedHtml('a <script>b</script c')).toBe('a &lt;script>b&lt;/script c');
+    expect(escapeUnterminatedHtml('<textarea>x</textarea attr=')).toBe('&lt;textarea>x&lt;/textarea attr=');
+  });
+  it('an inline raw-text element is closed only by an end tag outside code and not escaped by a backslash', () => {
+    expect(escapeUnterminatedHtml('a <script>b `</script>` c')).toBe('a &lt;script>b `</script>` c');
+    expect(escapeUnterminatedHtml('a <script>b ``</script>`` c</script>')).toBe('a <script>b ``</script>`` c</script>');
+    expect(escapeUnterminatedHtml('a <script>b \\</script>')).toBe('a &lt;script>b \\</script>');
+    expect(escapeUnterminatedHtml('a <script>b</script>')).toBe('a <script>b</script>');
+  });
+  it('a line-start raw-text block is closed by a closer anywhere after it (CommonMark type 1)', () => {
+    expect(escapeUnterminatedHtml('<script>\nx `</script>` y')).toBe('<script>\nx `</script>` y');
+  });
+  it('`</` and a non-letter is closed by a later `>`; `</>` is complete', () => {
+    expect(escapeUnterminatedHtml('a </ b >c')).toBe('a </ b >c');
+    expect(escapeUnterminatedHtml('a </ b')).toBe('a &lt;/ b');
+    expect(escapeUnterminatedHtml('a </>')).toBe('a </>');
+  });
+  it('the restart cap: a later complete tag survives up to the cap, and the bulk escape past it covers every `<` left', () => {
+    expect(escapeUnterminatedHtml('<a x=\'1 <b x="2 <i>ok</i> <c')).toBe('&lt;a x=\'1 &lt;b x="2 <i>ok</i> &lt;c');
+    for (const n of [31, 32, 33, 40]) expect(escapeUnterminatedHtml('<a '.repeat(n))).toBe('&lt;a '.repeat(n));
+  });
+  it('a line-start pre block starts within three spaces of indent, not four', () => {
+    expect(escapeUnterminatedHtml('   <pre>\nx')).toBe('   &lt;pre>\nx');
+    expect(escapeUnterminatedHtml('text\n    <pre>\nx')).toBe('text\n    <pre>\nx');
+  });
+  it('a CDATA section is closed by `]]>`, not by `]>`', () => {
+    expect(escapeUnterminatedHtml('<![CDATA[ x ]> y')).toBe('&lt;![CDATA[ x ]> y');
+    expect(escapeUnterminatedHtml('<![CDATA[ x ]]> y')).toBe('<![CDATA[ x ]]> y');
+  });
+  it('CDATA and a processing instruction are complete only when their first `>` is the closer: otherwise they are escaped, and what follows is still read', () => {
+    expect(escapeUnterminatedHtml('<?><style>?>')).toBe('<?>&lt;style>?>');
+    // A `>` before the closer: a browser ends the construct there, CommonMark and htmlparser2 at the closer. Neither may be left open.
+    expect(escapeUnterminatedHtml('<![CDATA[ a > b <style> ]]>')).toBe('&lt;![CDATA[ a > b &lt;style> ]]>');
+    expect(escapeUnterminatedHtml('<?x a > b ?>')).toBe('&lt;?x a > b ?>');
+    expect(escapeUnterminatedHtml('<![CDATA[ x ]]> y')).toBe('<![CDATA[ x ]]> y');
+    expect(escapeUnterminatedHtml('<?xml version="1.0"?> <b>x</b>')).toBe('<?xml version="1.0"?> <b>x</b>');
+  });
+  it('a template is open until its own end tag, and its content is read as usual', () => {
+    expect(escapeUnterminatedHtml('a <template>x</template>')).toBe('a <template>x</template>');
+    expect(escapeUnterminatedHtml('a <template><template>x</template>')).toBe('a &lt;template><template>x</template>');
+    expect(escapeUnterminatedHtml('a <template><style></template>')).toBe('a &lt;template>&lt;style></template>');
+  });
+  it('an end tag is `</name` and a blank or `>`: `</name/` closes nothing', () => {
+    expect(escapeUnterminatedHtml('a <textarea>x</textarea/>')).toBe('a &lt;textarea>x</textarea/>');
+    expect(escapeUnterminatedHtml('a <textarea>x</textarea >')).toBe('a <textarea>x</textarea >');
+  });
+  it('an unclosed template before another escaped construct is escaped too, and the result is a fixed point', () => {
+    for (const body of ['<template><?x>', '<template><!--', '<template> a <b', '<template><![CDATA[x']) {
+      const once = escapeUnterminatedHtml(body);
+      expect([body, once]).toEqual([body, expect.stringMatching(/^&lt;template>/)]);
+      expect([body, escapeUnterminatedHtml(once)]).toEqual([body, once]);
+    }
+  });
+  it('a code span never crosses a block boundary: a heading, a fence or a quote ends the paragraph', () => {
+    const cases: Array<[string, string]> = [
+      ['a heading', 'a `x\n## H\n<b x=\'\ny`'],
+      ['a fence', 'a `x\n```\nc\n```\n<b x=\'\ny`'],
+      ['a quote', 'a `x\n> q\n<b x=\'\ny`'],
+      ['a list item', 'a `x\n- item\n<b x=\'\ny`'],
+      ['a thematic break', 'a `x\n***\n<b x=\'\ny`'],
+      ['a span opened inside a heading line', '## a `b\n<b x=\'\nd` w'],
+      ['a CRLF blank line', 'a `x\r\n\r\n<b x=\'\r\ny`'],
+    ];
+    for (const [label, body] of cases) expect([label, escapeUnterminatedHtml(body)]).toEqual([label, body.replace('<b x=', '&lt;b x=')]);
+    // One paragraph with no interrupting line is still one span: the construct inside it is code.
+    expect(escapeUnterminatedHtml("a `x\n<b x='\ny` w")).toBe("a `x\n<b x='\ny` w");
+  });
+  it('a construct that Markdown reads as text because it would cross a block boundary is unterminated, and cannot skip a fence opener', () => {
+    const FENCED = (open: string, inner: string): string => `a ${open}\n\`\`\`\n${inner}\n\`\`\`\nq <textarea>z`;
+    for (const [open, inner] of [['<?x', '?>'], ['<![CDATA[x', ']]>'], ['<!-- x', '-->'], ['<!DOCTYPE x', '>'], ['</ x', '>'], ['<b y="', '">']] as const) {
+      const out = escapeUnterminatedHtml(FENCED(open, inner));
+      // Exactly the opener and the textarea escaped, nothing else.
+      expect([open, out]).toEqual([open, FENCED(open, inner).replace('<', '&lt;').replace('<textarea>', '&lt;textarea>')]);
+      expect([open, escapeUnterminatedHtml(out)]).toEqual([open, out]);
+    }
+    // At the head of a line the HTML block of type 2 to 5 is not bounded by a block boundary: it runs to its closer.
+    expect(escapeUnterminatedHtml('<!-- x\n\n```\n-->')).toBe('<!-- x\n\n```\n-->');
+    expect(escapeUnterminatedHtml('<?x\n\n```\n?>')).toBe('<?x\n\n```\n?>');
+    // A paragraph that runs on keeps a multi-line construct whole.
+    expect(escapeUnterminatedHtml('a <!-- x\ny --> b')).toBe('a <!-- x\ny --> b');
+    expect(escapeUnterminatedHtml('a <b\n  y="z"\n  w>')).toBe('a <b\n  y="z"\n  w>');
+  });
+  it('an inline raw-text element whose end tag would cross a block boundary stays open, and the fence opener is not skipped', () => {
+    const out = escapeUnterminatedHtml('a <script>x </script\n```\n>\n```\nq <textarea>z');
+    expect(out).toContain('a &lt;script>');
+    expect(out).toContain('&lt;/script');
+    expect(out).toContain('&lt;textarea>');
+    expect(escapeUnterminatedHtml(out)).toBe(out);
+  });
+  it('a line-head HTML block opener ends the paragraph, so a code span cannot close across it', () => {
+    const cases: Array<[string, string, string]> = [
+      ['textarea', "a `x\n<textarea> y\nz` q", "a `x\n&lt;textarea> y\nz` q"],
+      ['script', "a `x\n<script>\nz` q", "a `x\n&lt;script>\nz` q"],
+      ['pre', "a `x\n<pre>\nz` q", "a `x\n&lt;pre>\nz` q"],
+      ['style', "a `x\n<style>\nz` q", "a `x\n&lt;style>\nz` q"],
+      ['a comment', "a `x\n<!-- c\nz` q", "a `x\n&lt;!-- c\nz` q"],
+      ['a processing instruction', "a `x\n<?x\nz` q", "a `x\n&lt;?x\nz` q"],
+      ['a declaration', "a `x\n<!DOCTYPE x\nz` q", "a `x\n&lt;!DOCTYPE x\nz` q"],
+      ['CDATA', "a `x\n<![CDATA[x\nz` q", "a `x\n&lt;![CDATA[x\nz` q"],
+      ['a block tag (type 6)', "a `x\n<div>\n<b x='\ny` w", "a `x\n<div>\n&lt;b x='\ny` w"],
+      ['an uppercase block opener', "a `x\n<TEXTAREA> y\nz` q", "a `x\n&lt;TEXTAREA> y\nz` q"],
+    ['an uppercase block tag (type 6)', "a `x\n<DIV>\n<b x='\ny` w", "a `x\n<DIV>\n&lt;b x='\ny` w"],
+    ['a block tag that is not the first of the list (table)', "a `x\n<table>\n<b x='\ny` w", "a `x\n<table>\n&lt;b x='\ny` w"],
+    ['a block end tag (type 6)', "a `x\n</div>\n<b x='\ny` w", "a `x\n</div>\n&lt;b x='\ny` w"],
+    ];
+    for (const [label, body, want] of cases) expect([label, escapeUnterminatedHtml(body)]).toEqual([label, want]);
+    // An opener may be indented by one to three spaces; four spaces is a paragraph continuation, not an opener.
+    for (const sp of [' ', '  ', '   ']) {
+      expect([`${sp.length} spaces`, escapeUnterminatedHtml(`see \`a\n${sp}<div> b <pre x= \` c`)]).toEqual([`${sp.length} spaces`, `see \`a\n${sp}<div> b &lt;pre x= \` c`]);
+      expect([`${sp.length} spaces, p`, escapeUnterminatedHtml(`see \`a\n${sp}<p> b <b x=' \` c`)]).toEqual([`${sp.length} spaces, p`, `see \`a\n${sp}<p> b &lt;b x=' \` c`]);
+      expect([`${sp.length} spaces, comment cut`, escapeUnterminatedHtml(`a <!-- c\n${sp}<div>\nd --> e`)]).toEqual([`${sp.length} spaces, comment cut`, `a &lt;!-- c\n${sp}<div>\nd --> e`]);
+    }
+    expect(escapeUnterminatedHtml("see `a\n    <div> b <pre x= ` c")).toBe("see `a\n    <div> b <pre x= ` c");
+    // An inline tag that is not a block-level name does not end the paragraph (type 7 cannot interrupt one): the span runs on.
+    expect(escapeUnterminatedHtml("a `x\n<span>\n<b x='\ny` w")).toBe("a `x\n<span>\n<b x='\ny` w");
+  });
+  it('an end tag that ends in a slash (`</name/>`) is a form the readers disagree on: the element stays open and is escaped, at the head of a line and inline', () => {
+    const lineHead = '<script> a </script/> <textarea> c </script> d [link](#x)';
+    expect(escapeUnterminatedHtml(lineHead)).toBe('&lt;script> a </script/> &lt;textarea> c </script> d [link](#x)');
+    const inline = 'a <script> b </script/> <textarea> c </script> d';
+    expect(escapeUnterminatedHtml(inline)).toBe('a &lt;script> b </script/> &lt;textarea> c </script> d');
+    for (const body of [lineHead, inline]) expect([body, escapeUnterminatedHtml(escapeUnterminatedHtml(body))]).toEqual([body, escapeUnterminatedHtml(body)]);
+    // The ordinary closers are unchanged.
+    expect(escapeUnterminatedHtml('a <script> b </script> c')).toBe('a <script> b </script> c');
+    expect(escapeUnterminatedHtml('<script> a </script > b </script>')).toBe('<script> a </script > b </script>');
+  });
+  it('a type 1 block at the head of a line ends only at a literal `</name>`; a partial end tag leaves it open', () => {
+    const partial = '<script>\nx\n</script\n```\n>\n```\nq <textarea>z';
+    expect(escapeUnterminatedHtml(partial)).toBe('&lt;script>\nx\n&lt;/script\n```\n>\n```\nq &lt;textarea>z');
+    expect(escapeUnterminatedHtml(escapeUnterminatedHtml(partial))).toBe(escapeUnterminatedHtml(partial));
+    expect(escapeUnterminatedHtml('<script>\nx\n</script >\ny')).toBe('&lt;script>\nx\n</script >\ny');
+    expect(escapeUnterminatedHtml('<script>\nx\n</script>\ny')).toBe('<script>\nx\n</script>\ny');
+    // The browser ends the element at the first `</script ` and reads what follows as markup, inside the Markdown block (found by fuzz).
+    expect(escapeUnterminatedHtml('<script>"</script <plaintext><style></template></script><noscript>')).toBe('<script>"</script <plaintext>&lt;style></template></script>&lt;noscript>');
+    expect(escapeUnterminatedHtml('<script></script <pre><!--</title><a</script></textarea')).toBe('<script></script <pre>&lt;!--</title>&lt;a</script>&lt;/textarea');
+  });
+  it('a tag that would swallow a fence opener is no tag: a line-head end tag or non-block tag cannot span a block boundary', () => {
+    expect(escapeUnterminatedHtml('<script>\nx\n</script\n```\n>\n```\nq <textarea>z')).toBe('&lt;script>\nx\n&lt;/script\n```\n>\n```\nq &lt;textarea>z');
+    expect(escapeUnterminatedHtml('<b\n```\n>\n```\nq <textarea>z')).toBe('&lt;b\n```\n>\n```\nq &lt;textarea>z');
+    expect(escapeUnterminatedHtml('x\n</b\n```\n>\n```\nq <textarea>z')).toBe('x\n&lt;/b\n```\n>\n```\nq &lt;textarea>z');
+  });
+  it('inside an HTML block (types 1 to 7) Markdown reads no fence, code span or indented code, so a construct there is live markup', () => {
+    // Type 6: a block-level tag at the head of a line runs to the next blank line.
+    expect(escapeUnterminatedHtml('<div>\n```\n<b x=\n```\nz')).toBe('<div>\n```\n&lt;b x=\n```\nz');
+    expect(escapeUnterminatedHtml('<div>\n    <b x=\n\nz')).toBe('<div>\n    &lt;b x=\n\nz');
+    expect(escapeUnterminatedHtml('<div>\n`a\n<b x=\nb`\n\nz')).toBe('<div>\n`a\n&lt;b x=\nb`\n\nz');
+    // Type 7: a complete tag alone on a line starts one when it does not interrupt a paragraph.
+    expect(escapeUnterminatedHtml('<b>\n```\n<i x=\n```\nz')).toBe('<b>\n```\n&lt;i x=\n```\nz');
+    expect(escapeUnterminatedHtml('a\n<b>\n```\n<i x=\n```\nz')).toBe('a\n<b>\n```\n<i x=\n```\nz');
+    // Types 1 to 5 run to their closer's line; after it Markdown is back.
+    expect(escapeUnterminatedHtml('<!-- c\n```\n<b x=\n-->\n<i x=')).toBe('<!-- c\n```\n<b x=\n-->\n&lt;i x=');
+    expect(escapeUnterminatedHtml('<!-- c -->\n```\n<b x=\n```\nz')).toBe('<!-- c -->\n```\n<b x=\n```\nz');
+    // A block-opening tag may span a fence line (the block is raw to its blank line); a backslash escapes nothing in it.
+    expect(escapeUnterminatedHtml('<div\n```\n>\n```\nq <textarea>z')).toBe('<div\n```\n>\n```\nq &lt;textarea>z');
+    expect(escapeUnterminatedHtml('<div>\n\\<b x=')).toBe('<div>\n\\&lt;b x=');
+    // The rest of the line that holds the closer is still raw HTML, so a backtick there opens no code span.
+    expect(escapeUnterminatedHtml('<!-- c --> `a <b x= b` c')).toBe('<!-- c --> `a &lt;b x= b` c');
+    expect(escapeUnterminatedHtml('<script>x</script> `a <b x= b` c')).toBe('<script>x</script> `a &lt;b x= b` c');
+    expect(escapeUnterminatedHtml('<!-- c\n```\n--> `a <b x= b` c')).toBe('<!-- c\n```\n--> `a &lt;b x= b` c');
+    // After a blank line the block is over and Markdown is back: the fence is a fence again.
+    expect(escapeUnterminatedHtml('<div>\n\n```\n<b x=\n```\nz')).toBe('<div>\n\n```\n<b x=\n```\nz');
+  });
+  it('inside an HTML block a complete multi-line tag or comment is not cut by a Markdown block start: the interior is raw to the end of the block', () => {
+    const same = [
+      '<div>\n  <a\n    href="x"\n  >link</a>\n</div>',
+      '<div>\n<img src="x"\n alt="a\n- b">\n</div>',
+      '<div>\n<span title="a\n# b">x</span>\n</div>',
+      '<div>\n  a <!--\n# x\n--> b\n</div>',
+      '<p class="a"\n>text</p>',
+    ];
+    for (const body of same) expect([body, escapeUnterminatedHtml(body)]).toEqual([body, body]);
+    // The block ends at its blank line: a tag that is still open there is unterminated.
+    expect(escapeUnterminatedHtml('<div>\n<a href="x\n\n">z')).toBe('<div>\n&lt;a href="x\n\n">z');
+    // Outside an HTML block the same tag is inline HTML and a `>` at a line start ends its paragraph.
+    expect(escapeUnterminatedHtml('x <a\n- b\n>')).toBe('x &lt;a\n- b\n>');
+  });
+  it('a type 7 block (a complete tag alone on its line) starts wherever there is no paragraph to interrupt: after a blank line, a heading, a thematic break, a fence or indented code', () => {
+    const starts: Array<[string, string]> = [
+      ['a heading', '# h\n<b>\n```\n<i x=\n```\nz'],
+      ['a thematic break', '***\n<b>\n```\n<i x=\n```\nz'],
+      ['a closed fence', '```\nc\n```\n<b>\n```\n<i x=\n```\nz'],
+      ['indented code', '    code\n<b>\n```\n<i x=\n```\nz'],
+      ['a block that has ended', '<!-- c -->\n<b>\n```\n<i x=\n```\nz'],
+      ['a setext underline (=)', 'Title\n===\n<b>\n```\n<i x=\n```\nz'],
+      ['a setext underline (-)', 'Title\n---\n<b>\n```\n<i x=\n```\nz'],
+      ['a link reference definition', '[a]: http://x\n<b>\n```\n<i x=\n```\nz'],
+    ];
+    for (const [label, body] of starts) expect([label, escapeUnterminatedHtml(body)]).toEqual([label, body.replace('<i x=', '&lt;i x=')]);
+    // A link reference definition may put its destination on the next line, and its label may hold an escaped bracket.
+    expect(escapeUnterminatedHtml('[a]:\n/u\n<b>\nuse `<pre x=` here')).toBe('[a]:\n/u\n<b>\nuse `&lt;pre x=` here');
+    expect(escapeUnterminatedHtml('[a\\]b]: /u\n<b>\nuse `<pre x=` here')).toBe('[a\\]b]: /u\n<b>\nuse `&lt;pre x=` here');
+    // A title on the line after a definition, and a definition followed by an ordinary paragraph line, are told apart.
+    expect(escapeUnterminatedHtml('[a]: /u\n"title"\n<b>\nuse `<pre x=` here')).toBe('[a]: /u\n"title"\n<b>\nuse `&lt;pre x=` here');
+    expect(escapeUnterminatedHtml('[a]:\nhttp://x\n"title"\n<span>\nuse `<pre x=` here')).toBe('[a]:\nhttp://x\n"title"\n<span>\nuse `&lt;pre x=` here');
+    // A title that closes on a later line is still part of the definition (markdown-it and commonmark.js both consume it).
+    expect(escapeUnterminatedHtml("[a]: /u 'ti\ntle'\n<span>\nuse `<pre x=` here")).toBe("[a]: /u 'ti\ntle'\n<span>\nuse `&lt;pre x=` here");
+    expect(escapeUnterminatedHtml('[a]: /u\n(ti\ntle)\n<span>\nuse `<pre x=` here')).toBe('[a]: /u\n(ti\ntle)\n<span>\nuse `&lt;pre x=` here');
+    expect(escapeUnterminatedHtml('[a]:\n/u\n"ti\nmid\ntle"\n<span>\nuse `<pre x=` here')).toBe('[a]:\n/u\n"ti\nmid\ntle"\n<span>\nuse `&lt;pre x=` here');
+    expect(escapeUnterminatedHtml('[a]:\n/u "ti\ntle"\n<span>\nuse `<pre x=` here')).toBe('[a]:\n/u "ti\ntle"\n<span>\nuse `&lt;pre x=` here');
+    // A title closes on its own opener's unescaped closer, never on another delimiter at a line end (Gravitus's BLIND delta; both parsers consume the definition).
+    for (const mid of ["y'", 'x\\"', 'x)']) {
+      expect(escapeUnterminatedHtml(`[a]: /u "ti\n${mid}\nz"\n<span>\nuse \`<pre x=\` here`)).toBe(`[a]: /u "ti\n${mid}\nz"\n<span>\nuse \`&lt;pre x=\` here`);
+    }
+    // A bare list marker leaves an empty item and no open paragraph.
+    for (const m of ['-', '*', '+', '1.', '2)']) {
+      expect(escapeUnterminatedHtml(`${m}\n<span>\nuse \`<pre x=\` here`)).toBe(`${m}\n<span>\nuse \`&lt;pre x=\` here`);
+    }
+    // After a bare list marker an indented line is the item's content, not indented code: a tag there is read (Celine's QA delta).
+    for (const m of ['-', '*', '+', '1.', '2)']) {
+      expect(escapeUnterminatedHtml(`${m}\n    <script>\nuse`)).toBe(`${m}\n    &lt;script>\nuse`);
+      expect(escapeUnterminatedHtml(`${m}\n\t<!--\nuse`)).toBe(`${m}\n\t&lt;!--\nuse`);
+      expect(escapeUnterminatedHtml(`${m}\n    <div x='\nuse`)).toBe(`${m}\n    &lt;div x='\nuse`);
+    }
+    // A blank line after a lone label ends it: the next tag line starts a block of its own.
+    expect(escapeUnterminatedHtml('[a]:\n\n<span>\nuse `<pre x=` here')).toBe('[a]:\n\n<span>\nuse `&lt;pre x=` here');
+    // A backtick fence after a lone label is a fence (it interrupts the label's paragraph), so its lines stay code.
+    expect(escapeUnterminatedHtml('[a]:\n```\n<b>\nuse `<pre x=` here\n```\nz')).toBe('[a]:\n```\n<b>\nuse `<pre x=` here\n```\nz');
+    expect(escapeUnterminatedHtml('[a]: /u\ntext\n<b>\nuse `<pre x=` here')).toBe('[a]: /u\ntext\n<b>\nuse `<pre x=` here');
+    // A quote's own heading line leaves no paragraph open either.
+    expect(escapeUnterminatedHtml('> # h\n<b>\n```\n<i x=\n```\nz')).toBe('> # h\n<b>\n```\n&lt;i x=\n```\nz');
+    // After a paragraph line (a lazy continuation of a quote or a list item included) a type 7 tag cannot interrupt: the fence is a fence.
+    for (const body of ['a\n<b>\n```\n<i x=\n```\nz', '> a\n<b>\n```\n<i x=\n```\nz', '- a\n<b>\n```\n<i x=\n```\nz']) {
+      expect([body, escapeUnterminatedHtml(body)]).toEqual([body, body]);
+    }
+    // The shapes from the review: a span in the raw interior hides nothing.
+    expect(escapeUnterminatedHtml('Title\n===\n<span>\nuse `<pre x=` here')).toBe('Title\n===\n<span>\nuse `&lt;pre x=` here');
+    expect(escapeUnterminatedHtml('[a]: http://x\n<span>\nuse `<pre x=` here')).toBe('[a]: http://x\n<span>\nuse `&lt;pre x=` here');
+    // A closed code span cannot hide the interior of such a block.
+    expect(escapeUnterminatedHtml('# h\n<b>\n`x\n<script>\ny` z')).toBe('# h\n<b>\n`x\n&lt;script>\ny` z');
+  });
+  it('only `<!` and a letter is an HTML block (type 4): the rest of its closing line is raw, and after `<! ` it is Markdown', () => {
+    expect(escapeUnterminatedHtml('<!A a > `x <b x= y` z')).toBe('<!A a > `x &lt;b x= y` z');
+    expect(escapeUnterminatedHtml('<! a > `x <b x= y` z')).toBe('<! a > `x <b x= y` z');
+  });
+  it('the restart does not lose a raw region: every pass scans the escaped text from its start', () => {
+    const body = '<div>\n<b x=\n```\n<script a';
+    const once = escapeUnterminatedHtml(body);
+    expect(escapeUnterminatedHtml(once)).toBe(once);
+    // The tag opened by `<b x=` reaches the end of the text with no `>`: both constructs are escaped, over two passes that each start from the top.
+    expect(once).toBe('<div>\n&lt;b x=\n```\n&lt;script a');
+  });
+  it('a line-head pre block runs raw to its end tag, blank lines and fences included', () => {
+    // The tag that opens in the interior ends at the `>` of the end tag: one complete tag to a browser, nothing swallowed.
+    expect(escapeUnterminatedHtml('<pre>\na\n\n```\n<b x=\n```\n</pre>')).toBe('<pre>\na\n\n```\n<b x=\n```\n</pre>');
+    // The rest of the line that holds the end tag is raw too: a backtick there opens no code span.
+    expect(escapeUnterminatedHtml('<pre>\na\n</pre> `a <b x= b` c')).toBe('<pre>\na\n</pre> `a &lt;b x= b` c');
+  });
+  it('an end tag whose first `>` sits inside a quoted value is ambiguous (a browser reads attributes on it, htmlparser2 ends at the `>`): it is escaped', () => {
+    expect(escapeUnterminatedHtml('</textarea<div class="><xmp><noscript>"<pre>')).toBe('&lt;/textarea<div class="><xmp><noscript>"<pre>');
+    expect(escapeUnterminatedHtml('</b x=">">')).toBe('&lt;/b x=">">');
+    // An ordinary end tag, and an end tag with a harmless attribute-like tail, are unchanged.
+    expect(escapeUnterminatedHtml('</b>')).toBe('</b>');
+    expect(escapeUnterminatedHtml('</b >')).toBe('</b >');
+    expect(escapeUnterminatedHtml('</b x=y>')).toBe('</b x=y>');
+  });
+  it('a tag whose name holds `=`, `<` or a quote is ambiguous (a browser reads a name, htmlparser2 fails on it): it is escaped', () => {
+    expect(escapeUnterminatedHtml("<pre=</=='<plaintext>\n")).toBe("&lt;pre=</=='<plaintext>\n");
+    expect(escapeUnterminatedHtml('x <a=b> y')).toBe('x &lt;a=b> y');
+    expect(escapeUnterminatedHtml("x <a'b> y")).toBe("x &lt;a'b> y");
+    expect(escapeUnterminatedHtml('x <a<b> y')).toBe('x &lt;a<b> y');
+    // A CommonMark autolink is not an HTML tag: `=`, `'` and the like are legal in it, and it is left alone.
+    for (const body of ['<mailto:a@b.c?subject=hi>', '<irc:chan?x=1>', '<ftp:host?a=b>', '<https://x?q=1>', '<a=b@c.de>', "<o'brien@x.com>", 'see <mailto:a@b.c?s=1> now', '<tel:+1555>', '<urn:isbn:0451450523>']) {
+      expect([body, escapeUnterminatedHtml(body)]).toEqual([body, body]);
+    }
+    // Only a complete autolink is exempt: with a blank in it it is a tag again (named `mailto:a`, complete), and with no closing `>` it is open.
+    expect(escapeUnterminatedHtml('<mailto:a b=c>')).toBe('<mailto:a b=c>');
+    expect(escapeUnterminatedHtml('<mailto:a@b.c?s=1')).toBe('&lt;mailto:a@b.c?s=1');
+    // Names that real pages use are untouched.
+    for (const body of ['x <o:p> y', 'x <svg:rect/> y', 'x <my-element a="b"> y', 'x <h1>t</h1>', 'x <a b="c">d</a>']) expect([body, escapeUnterminatedHtml(body)]).toEqual([body, body]);
+  });
+  it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag', () => {
+    expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');
+    expect(escapeUnterminatedHtml('<b y= <template>')).toBe('<b y= <template>'); // one complete tag: the value is `<template`
+  });
+  it('only a non-empty bullet or a list that starts at 1 ends a paragraph', () => {
+    // An empty bullet, and an ordered list not starting at 1, cannot interrupt a paragraph, so the span runs on and the `<` is code.
+    expect(escapeUnterminatedHtml("a `x\n-\n<b x='\ny` w")).toBe("a `x\n-\n<b x='\ny` w");
+    expect(escapeUnterminatedHtml("a `x\n2. t\n<b x='\ny` w")).toBe("a `x\n2. t\n<b x='\ny` w");
+    expect(escapeUnterminatedHtml("a `x\n1. t\n<b x='\ny` w")).toBe("a `x\n1. t\n&lt;b x='\ny` w");
+  });
+  it('stays linear on a body of thousands of stray `<a`', () => {
+    const body = '<a '.repeat(40000);
+    const t0 = Date.now();
+    const out = escapeUnterminatedHtml(body);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(out).not.toMatch(/<a /);
+    expect(out.length).toBe(body.length + 3 * 40000);
+  }, 60_000);
+  it('stays linear on one long line of many tags, end tags and comments)', () => {
+    for (const unit of ['<b>x', '</b>', '<!-- c -->', '<?p?>', '<![CDATA[c]]>']) {
+      const body = unit.repeat(120_000 / unit.length * 4);
+      const t0 = Date.now();
+      expect(escapeUnterminatedHtml(body)).toBe(body);
+      // A quadratic scan takes tens of seconds here.
+      expect({ unit: unit, fast: Date.now() - t0 < 3000 }).toEqual({ unit: unit, fast: true });
+    }
+  }, 120_000);
+  it('stays linear on thousands of unmatched backtick runs', () => {
+    const body = '` ``'.repeat(30000) + ' <pre x=';
+    const t0 = Date.now();
+    const out = escapeUnterminatedHtml(body);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(out.endsWith(' &lt;pre x=')).toBe(true);
+  }, 60_000);
+});

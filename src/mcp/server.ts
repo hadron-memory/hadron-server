@@ -429,6 +429,7 @@ import { edgeDisplayOrder, edgeRunOrder } from '../lib/edgeOrder.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
 import { memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
 import { ownerLimitCaller, requireNodeHeadroom } from '../lib/ownerLimits/nodes.js';
+import { assertNodeContentSize, resultingNodeContent } from '../lib/nodeContentLimit.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -4647,6 +4648,8 @@ export function createMcpServerInstance(
               ...upsertArgs.update, content,
             });
             if (changes.length === 0) return current.id;
+            // #5019 (cor:dmo:060:19) — the section stores its description as its body too, so both count.
+            assertNodeContentSize(resultingNodeContent({ content, description: description ?? null }, currentForDiff));
             sectionChanged = authoredContentChanged(changes);
             // #1328 — a re-save is an update whatever the tool is called
             // (`findings:parent-node-upsert-is-authoring`).
@@ -4666,6 +4669,10 @@ export function createMcpServerInstance(
           }
           if (!prior || prior.deletedAt) {
             await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted, auth);
+            const kept = prior ? await tx.node.findUnique({ where: { id: prior.id } }) : null;
+            assertNodeContentSize(resultingNodeContent(
+              { content, description: description ?? null }, kept && parentKey ? decryptNodeFieldsWithKey({ ...kept }, parentKey) : kept,
+            ));
           }
           // #5015 (cor:acl:150:04) — only a fresh insert adds a live node here: the upsert leaves a tombstone deleted and
           // a live section is an update. The memory row is held FOR SHARE just above, so the owner read is the one at
@@ -5020,7 +5027,7 @@ export function createMcpServerInstance(
         // #2772 (cor:api:090:04): the vector work budget ended the search before it found a page; never a silent empty.
         // #4779 adds two causes: an uncertified hybrid order (budget or keyword ceiling) and a page still short after one re-ranking.
         return textResult(
-          `${scopePrefix}Note: the search stopped early (the vector work budget ran out, the offset+limit window passed 20000 rows, a hybrid ranking could not be certified inside the budget or the keyword ceiling, or a page stayed short after one re-ranking, before a page was found); narrow the filters or lower the offset. [stopped_early]\n\nFound 0 node(s).`,
+          `${scopePrefix}Note: the search stopped early (the vector work budget ran out, the offset+limit window passed 20000 rows, a hybrid ranking could not be certified inside the budget, the vector rank depth or the keyword ceiling, or a page stayed short after one re-ranking, before a page was found); narrow the filters or lower the offset. [stopped_early]\n\nFound 0 node(s).`,
         );
       }
       if (result.reason === 'embedding_unavailable') {
@@ -5038,7 +5045,7 @@ export function createMcpServerInstance(
       const noteLines: string[] = [];
       if (degradedFlags.has('stopped_early')) {
         noteLines.push(
-          'Note: the search stopped early (the vector work budget ran out, the offset+limit window was cut at 20000 rows, a hybrid ranking could not be certified inside the budget or the keyword ceiling, or a page stayed short after one re-ranking), so this page may be shorter than, or ordered differently from, the true page. [degraded:stopped_early]',
+          'Note: the search stopped early (the vector work budget ran out, the offset+limit window was cut at 20000 rows, a hybrid ranking could not be certified inside the budget, the vector rank depth or the keyword ceiling, or a page stayed short after one re-ranking), so this page may be shorter than, or ordered differently from, the true page. [degraded:stopped_early]',
         );
       }
       if (degradedFlags.has('no_vector_index')) {
@@ -6921,6 +6928,13 @@ export function createMcpServerInstance(
           objectType !== undefined ? (objectType.trim() || null) : pre?.objectType,
           properties !== undefined ? properties : pre?.properties,
         );
+        // #5019 (cor:dmo:060:19) — the resulting node in plaintext, before the snapshot: this tool clears an omitted body or
+        // description, and a revived tombstone keeps its omitted data and properties.
+        const sizeKey = memEncRow?.isEncrypted ? sessionKeyCache.getByMemoryId(memoryId) : null;
+        assertNodeContentSize(resultingNodeContent(
+          { content: content ?? null, description: description ?? null, data: nodeData, properties },
+          pre && sizeKey ? decryptNodeFieldsWithKey({ ...pre }, sizeKey) : pre,
+        ));
         if (!pre) return null;
         await ensureCurrentNodeRevisionInTransaction(tx, pre.id, { expectedMemoryId: memoryId });
         pre = await tx.node.findUniqueOrThrow({ where: { id: pre.id } });
@@ -7610,6 +7624,8 @@ export function createMcpServerInstance(
               : current;
             const changedFields = diffNodeChanges(currentForDiff, plaintextUpdates);
             if (changedFields.length === 0 && !edgeWrite) return;
+            // #5019 (cor:dmo:060:19) — parity with writeNodeCore: the resulting node, before the snapshot; edges are not content.
+            if (changedFields.length > 0) assertNodeContentSize(resultingNodeContent(plaintextUpdates, currentForDiff));
             // #1328 — parity with writeNodeCore, before the snapshot.
             const authoredChange = authoredContentChanged(changedFields);
             const authoredStamp = await assertAuthoring(tx, memory.id, {

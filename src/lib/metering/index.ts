@@ -412,7 +412,10 @@ export interface GrantCreditsParams {
   organizationId: string;
   /** Positive micro-cents. */
   amountMicroCents: bigint;
-  /** Policy field only in Phase 0 (FR-005). */
+  /**
+   * When the grant expires (#5011, hrn:node:hadronmemory.com:specs:cor:dmo:170:10): enforced by
+   * ./settleExpiredGrants.ts. The mutation refuses one not later than now; the library stores what it is given.
+   */
   expiresAt?: Date | null;
   /**
    * Idempotency + provenance pair, required (#5007): e.g. ('stripe-checkout',
@@ -529,8 +532,8 @@ export async function debitCredits(db: PrismaClient, params: DebitCreditsParams)
 /** Org balance = SUM over the append-only ledger; 0n for an empty ledger. */
 export async function creditBalance(db: PrismaClient, organizationId: string): Promise<bigint> {
   const agg = await db.creditLedgerEntry.aggregate({
-    // deletedAt null: soft-delete is break-glass ops; the balance follows
-    // the codebase-wide soft-deleted-is-gone semantic. Sanctioned
+    // deletedAt null: since #5010 the database refuses a soft-deleted entry (cor:dmo:170:08), so this only keeps
+    // the balance unchanged where that migration refused (HDPRF) and the old schema is still served. Sanctioned
     // corrections are `adjustment` rows, which DO count.
     where: { organizationId, deletedAt: null },
     _sum: { amountMicroCents: true },

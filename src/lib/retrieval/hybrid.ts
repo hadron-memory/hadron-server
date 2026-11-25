@@ -64,14 +64,20 @@ export interface HybridLeg { ids: ReadonlyArray<string>; exhausted: boolean }
  *   unknown term is bounded above by `1/(k + depth + 1)`: the node is not in the leg's first `depth` ranks.
  * - Certified when each of the first `page` nodes scores above every later node's upper bound (an unseen node's included);
  *   an equal score is enough only against a later node whose score is exact, since that tie's order is the stable key.
+ * - #5162 — never certified on a lookup that contradicts the vector leg (above the #4994 bound they are separate HNSW
+ *   walks): every looked-up leg node must sit at its leg position, and every other looked-up rank must be deeper than the
+ *   leg. The caller asks the lookup about the leg's nodes too, so agreement is shown, not assumed. A contradiction only
+ *   withholds certification: the order is read and settled as before (the same rows), and the caller flags the page
+ *   `stopped_early`. `exactLookup` (the lookup ranked a scope within the bound exactly, as the leg is there) skips the
+ *   check: no second walk exists, and a difference could only be a write between the two statements.
  *
- * `vecLookup` lists the keyword hits whose vector term is still unknown (look them up, then call again); `kwUncertain` says
- * the keyword leg could still change the order (widen it).
+ * While the bounds still leave doubt about the order up to `page`, `vecLookup` lists the keyword hits whose vector term is
+ * still unknown (look them up, then call again) and `kwUncertain` says the keyword leg could still change the order (widen
+ * it). With no doubt left both are empty, even when a disagreement withholds `certified`: there is nothing more to read.
  *
  * Limits (BLIND P3-2, P3-5 on #4928):
  * - "Certified" is relative to the legs as given. A vector leg served by the approximate HNSW walk (rankUnderBudget) is the
- *   index's order, not the exact one; certification then holds for that order, the approximation ruling 0150 accepts for
- *   any ANN page.
+ *   index's order, not the exact one; certification then holds for that order (built as, not ruled: #4928).
  * - A certified page's node can still carry an unknown term (it is ordered by bounds that leave no doubt): its `score` is
  *   then the known part, and its `matchedBy` names only the legs it was seen in.
  */
@@ -81,6 +87,7 @@ export function certifiedHybridRanking(
   page: number,
   vecRanks: ReadonlyMap<string, number> = new Map(),
   vecLooked: ReadonlySet<string> = new Set(),
+  exactLookup = false,
   k: number = RRF_K,
 ): {
   ranked: Array<{ nodeId: string; score: number; matchedBy: MatchedBy }>;
@@ -121,15 +128,20 @@ export function certifiedHybridRanking(
     sufInexact[i] = Math.max(sufInexact[i + 1]!, r.exact ? -Infinity : r.ub);
     sufExact[i] = Math.max(sufExact[i + 1]!, r.exact ? r.score : -Infinity);
   }
-  let certified = n >= page || unseenUb === 0;
-  for (let i = 0; certified && i < Math.min(page, n); i++) {
+  let settled = n >= page || unseenUb === 0;
+  for (let i = 0; settled && i < Math.min(page, n); i++) {
     const s = rows[i]!.score;
-    if (!(s > sufInexact[i + 1]! && s >= sufExact[i + 1]!)) certified = false;
+    if (!(s > sufInexact[i + 1]! && s >= sufExact[i + 1]!)) settled = false;
   }
+  const walksDisagree = !exactLookup && [...vecLooked].some((id) => {
+    const inLeg = vecRank.get(id);
+    const lookedUp = vecRanks.get(id);
+    return inLeg !== undefined ? lookedUp !== inLeg : lookedUp !== undefined && lookedUp <= vec.ids.length;
+  });
   return {
     ranked: rows.map((r) => ({ nodeId: r.nodeId, score: r.score, matchedBy: r.matchedBy })),
-    certified,
-    vecLookup: certified ? [] : rows.filter((r) => r.inKw && !r.vecKnown).map((r) => r.nodeId),
-    kwUncertain: !certified && !kw.exhausted,
+    certified: settled && !walksDisagree,
+    vecLookup: settled ? [] : rows.filter((r) => r.inKw && !r.vecKnown).map((r) => r.nodeId),
+    kwUncertain: !settled && !kw.exhausted,
   };
 }

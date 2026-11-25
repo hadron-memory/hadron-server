@@ -33,6 +33,7 @@ import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetU
 import { QueryTooComplexError } from './admissionComplexity.js';
 import { TeamReadBusyError } from '../../lib/agentTasks/teamReadBudget.js';
 import { OwnerLimitReachedError } from '../../lib/ownerLimits/errors.js';
+import { NodeContentTooLargeError } from '../../lib/nodeContentLimit.js';
 import { AuthStoreBusyError } from '../../lib/authStoreBusy.js';
 import { GitCommandError } from '../../integrations/github/execGit.js';
 import { SessionExpiredError } from '../../lib/nodeCrypto.js';
@@ -67,6 +68,12 @@ function mapping<E>(
 
 const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // #5009: an owner reached a limit. The caller's to resolve (delete, or ask the owner), so silenced; the extensions are the contract.
+  // #5019: `NODE_CONTENT_TOO_LARGE` with `maxBytes` only, never the measured size. A caller's input is not a server fault.
+  mapping(
+    (err): err is NodeContentTooLargeError => err instanceof NodeContentTooLargeError,
+    (err) => ({ ...err.extensions, code: 'NODE_CONTENT_TOO_LARGE' }),
+    { silenceInSentry: true },
+  ),
   mapping(
     (err): err is OwnerLimitReachedError => err instanceof OwnerLimitReachedError,
     (err) => ({ ...err.extensions }),
