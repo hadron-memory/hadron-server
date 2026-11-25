@@ -150,6 +150,15 @@ describe('#74 a capped read and an App scope', () => {
     expect((r.data as any).nodeBatch.nodes[0].incomingEdges.map((e: any) => e.name)).toEqual(['same-in']);
   });
 
+  it('an unloaded far node that is soft-deleted is judged by its memory', async () => {
+    const mem = await memory('far-slug', { class: 'private', userId: alice, ownerUserId: alice });
+    const far = (await createDbNode(db, { loc: 'far-loc', memoryId: mem })).id;
+    await edge('far-out', shared, near, far);
+    await db.node.updateMany({ where: { id: { in: [far, sibling] } }, data: { deletedAt: new Date() } });
+    const n = await db.node.findUniqueOrThrow({ where: { id: near }, include: { outgoingEdges: true } });
+    expect(((await batchReadEdges(n as never, context(member), 'out')) as Array<{ name: string }>).map((e) => e.name)).toEqual(['same-out']);
+  });
+
   it('a memory the read admitted is listed, and no other', async () => {
     const admitted = await memory('admitted', { class: 'private', userId: alice, ownerUserId: alice });
     const other = await memory('other-far', { class: 'private', userId: alice, ownerUserId: alice });
@@ -200,5 +209,33 @@ describe('#74 a capped read and an App scope', () => {
     expect(row.outgoingEdges.map((e: any) => e.name)).toEqual(['in-scope']);
     const page = await run(`{ appNodesPage(appRef: "${app.id}", limit: 50) { items { id outgoingEdges { name } } } }`, context(member));
     expect((page.data as any).appNodesPage.items.find((n: any) => n.id === n1).outgoingEdges.map((e: any) => e.name)).toEqual(['in-scope']);
+    // The base's own row reads through its child (#1893): its edge to a node of that child is listed there.
+    for (const rows of [(r.data as any).appNodes, (page.data as any).appNodesPage.items]) expect(rows.some((n: any) => n.id === nb)).toBe(true);
+    const inherited = await run(`{ appNodes(appRef: "${app.id}", limit: 50) { id incomingEdges { name } } }`, context(member));
+    expect((inherited.data as any).appNodes.find((n: any) => n.id === nb).incomingEdges.map((e: any) => e.name)).toEqual(['to-base']);
+  });
+
+  it('an inherited node lists no edge whose memory the reader may not read, in both directions', async () => {
+    const base = await memory('base', { organizationId: orgId, class: 'system' });
+    const child = await memory('child', { organizationId: orgId, class: 'system' });
+    const baseAgent = await db.agent.create({ data: { organizationId: orgId, name: 'base', urn: 'el74:base', visibility: 'ORGANIZATION', systemMemoryId: base } as never });
+    const childAgent = await db.agent.create({ data: { organizationId: orgId, name: 'child', urn: 'el74:child', visibility: 'ORGANIZATION', systemMemoryId: child, extendsAgentId: baseAgent.id } as never });
+    const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'el74 app', urn: 'el74:el74-app' } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: childAgent.id } });
+    const nb = (await createDbNode(db, { loc: 'nb', memoryId: base })).id;
+    const mem = await memory('far-slug', { class: 'private', userId: alice, ownerUserId: alice });
+    await edge('held-out', mem, nb, near);
+    await edge('held-in', mem, near, nb);
+    await edge('base-out', base, nb, near);
+    await edge('shared-in', shared, near, nb);
+    const q = `{ appNodes(appRef: "${app.id}", limit: 50) { id outgoingEdges { name } incomingEdges { name } } }`;
+    const names = async (ctx: Context) => {
+      const r = await run(q, ctx);
+      expect(r.errors).toBeUndefined();
+      const n = (r.data as any).appNodes.find((x: any) => x.id === nb);
+      return [n.outgoingEdges.map((e: any) => e.name).sort(), n.incomingEdges.map((e: any) => e.name).sort()];
+    };
+    expect(await names(context(member))).toEqual([['base-out'], ['shared-in']]);
+    expect(await names(context(alice))).toEqual([['base-out', 'held-out'], ['held-in', 'shared-in']]);
   });
 });
