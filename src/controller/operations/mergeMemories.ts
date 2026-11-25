@@ -1,4 +1,5 @@
 import { ENGINE_KEYS } from '../../lib/chatRootEngineState.js';
+import { softDeleteMemoryAssets } from '../../lib/asset/memoryDelete.js';
 import { resetEmbeddingObligations, stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { memoryIsVectorIndexed } from '../../lib/embedding/indexing.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptMergeCollisions, assertNoBootPromptRows, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
@@ -1024,7 +1025,10 @@ async function runMerge(
       await assertNoProtectedReach(tx, sourceMemoryId, 'all', 'delete');
       // #1468 — the source memory's deletion: whatever the batches left.
       await assertNoMintedCorpusRemoval(tx, sourceMemoryId, 'merge out of its corpus', { includeTombstones: false });
-      await tx.memory.update({ where: { id: sourceMemoryId }, data: { deletedAt: new Date() } });
+      const deletedAt = new Date();
+      await tx.memory.update({ where: { id: sourceMemoryId }, data: { deletedAt } });
+      // #5124: a merge does not move files, so the source memory's files are deleted with it, at the same instant.
+      await softDeleteMemoryAssets(tx, sourceMemoryId, deletedAt);
     });
   }
 

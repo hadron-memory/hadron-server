@@ -1,4 +1,5 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { softDeleteMemoryAssets } from '../../../lib/asset/memoryDelete.js';
 import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { refuseLegacyBaseUrl, requireEndpointFor, requireKeyFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
@@ -1277,6 +1278,8 @@ export const agentMutations = {
         await endHeldGrants(tx, 'agent', id, 'AGENT_DELETED');
         if (agent.systemMemoryId) {
           await tx.memory.updateMany({ where: { id: agent.systemMemoryId }, data: { deletedAt } });
+          // #5124: the system memory's files go with it, at the same instant.
+          await softDeleteMemoryAssets(tx, agent.systemMemoryId, deletedAt);
         }
       }, {
         // An exclusive authority bracket prevents two deleters from upgrading
