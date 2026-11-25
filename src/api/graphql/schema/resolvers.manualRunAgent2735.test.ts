@@ -34,7 +34,7 @@ const ctx = (): Context => ({ db, roles: ['ADMIN'], userId: adminId, clientId: `
 const code = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; } catch (e: any) { return e?.extensions?.code ?? e?.message; } };
 const mcp = () => createTestableMcpServer({ userId: adminId, roles: ['ADMIN'], clientId: `user:${adminId}` });
 const importInput = (extra: Record<string, unknown> = {}) => ({
-  memoryId: targetMemoryId, loc: 'imports:one', content: 'hello', contentType: 'text/markdown',
+  memoryRef: targetMemoryId, loc: 'imports:one', content: 'hello', contentType: 'text/markdown',
   taskRef: taskUrn, appRef: appId, ...extra,
 });
 async function agent(name: string, org = orgId) {
