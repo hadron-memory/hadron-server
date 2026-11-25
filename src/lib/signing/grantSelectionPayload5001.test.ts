@@ -36,7 +36,7 @@ describe('P1: the fixture is the reference and the builder matches it', () => {
       'byte-order-not-locale', 'at-the-cap-25',
     ]);
     // Independent Python hashlib pin of the compact UTF-8 JSON: a regenerated fixture that moves any byte moves this hash.
-    expect(createHash('sha256').update(JSON.stringify(fixture.cases)).digest('hex')).toBe('PIN');
+    expect(createHash('sha256').update(JSON.stringify(fixture.cases)).digest('hex')).toBe('517c6d81f0bd76b07d0e526da068083b7c1be20cf6c6401d3b69f4d2b73fd840');
   });
 
   it.each([
