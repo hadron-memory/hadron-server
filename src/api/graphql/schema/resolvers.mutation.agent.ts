@@ -1,5 +1,6 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { softDeleteMemoryAssets } from '../../../lib/asset/memoryDelete.js';
+import { requireOwnerHeadroom } from '../../../lib/ownerLimits/gate.js';
 import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { refuseLegacyBaseUrl, requireEndpointFor, requireKeyFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
@@ -501,6 +502,9 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       resolvedSystemMemoryId = systemMemory.id;
     }
 
+    // #5016: one Agent more for its owner, the last lock this door takes. A refusal rolls back the system memory written above and, with it,
+    // the skeleton; promoting an existing memory (`systemMemoryRef`) takes one out of the `memories` count and is never refused on that key.
+    await requireOwnerHeadroom(tx, { owner: resolvedOrgId ? { organizationId: resolvedOrgId } : { userId: ownerUserId! }, key: 'agents', caller: ctx.userId ? { userId: ctx.userId } : null });
     const agent = await tx.agent.create({
       data: {
         // #2171 (R211): a NEW Agent offers owner and member unless told otherwise.

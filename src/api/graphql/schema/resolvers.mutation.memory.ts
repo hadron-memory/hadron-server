@@ -1,6 +1,7 @@
 import { encryptChatEngineStateWithKey, buildEngineStateIncompleteError } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { softDeleteMemoryAssets } from '../../../lib/asset/memoryDelete.js';
+import { requireOwnerHeadroom } from '../../../lib/ownerLimits/gate.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../../../integrations/github/syncNotAttempted.js';
 import { applyOrgDefaultsAtCreation } from './resolvers.memoryConfigOrgDefault.js';
@@ -746,6 +747,8 @@ export const memoryMutations = {
       // Memory is never persisted in a zero-owner state (which would
       // be effectively unreachable to anyone, including the creator).
       const memory = await withFsProjectionRollback(() => ctx.db.$transaction(async (tx) => {
+        // #5016: every class this door creates is free-standing and counts; the owner is the row's own, the caller already authorized.
+        await requireOwnerHeadroom(tx, { owner: userOwned ? { userId: ctx.userId! } : { organizationId: resolvedOrgId! }, key: 'memories', caller: ctx.userId ? { userId: ctx.userId } : null });
         const created = await tx.memory.create({
           data: {
             id: generateId(),
