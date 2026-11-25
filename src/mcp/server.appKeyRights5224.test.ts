@@ -111,13 +111,13 @@ async function makeWorld(kind: 'organization' | 'user'): Promise<World> {
   return { appId, agentId, mia, leo, root, tenant, key: { bearer }, miaKey: await userKey(mia), space: { id: space.id, urn: space.urn, nodeId: node.id, mark } };
 }
 
-const SHAPES = ['in the App, the App owner\'s tenancy', 'in the App, the person\'s own tenancy', 'free-standing', 'free-standing, named by an agent memory item', 'in the App, named by an agent memory item'] as const;
+const SHAPES = ['in the App, the App owner\'s tenancy', 'in the App, the person\'s own tenancy', 'free-standing', 'free-standing, named by an agent memory item', 'in the App, named by an agent memory item', 'the App owner\'s tenancy, no Agent, named by an agent memory item'] as const;
 
 /** One of Mia's memories, with a distinguishable value in every field a read surface can return. */
 async function seed(w: World, cls: 'personal' | 'private', shape: (typeof SHAPES)[number]): Promise<Target> {
   const mark = `mia${generateId().toLowerCase().slice(-10)}`;
   const inApp = shape.startsWith('in the App');
-  const ownTenancy = shape !== SHAPES[0] && shape !== SHAPES[4];
+  const ownTenancy = shape !== SHAPES[0] && shape !== SHAPES[4] && shape !== SHAPES[5];
   const memory = await db.memory.create({
     data: {
       id: generateId(), class: cls, visibility: null, userId: w.mia, createdBy: w.mia, name: `${mark}M`,
