@@ -177,6 +177,24 @@ import { forbiddenError } from '../../../lib/refusals.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 
 /**
+ * #5184 — a personal or private memory with an App keeps its slug
+ * (`hrn:node:hadronmemory.com:specs:cor:dmo:060:20`, "The slug never changes",
+ * S10). `updateMemory` calls this only for a `urn` argument, after the manage
+ * gate and again on the locked row.
+ *
+ * One test on the row, so it covers memories made before the rule. The row does
+ * not record how it came by its App, so an attached memory, and a session's
+ * memory that kept its `appId`, are covered too. The display name stays free.
+ */
+function assertMemorySlugMayChange(memory: { class: string; appId: string | null }): void {
+  if (memory.appId !== null && (memory.class === 'personal' || memory.class === 'private')) {
+    throw new GraphQLError('A personal or private memory in an App keeps its slug. Its display name can be changed.', {
+      extensions: { code: 'APP_MEMORY_SLUG_FIXED', memoryClass: memory.class },
+    });
+  }
+}
+
+/**
  * #561 — refuse a `Memory.source` that is not a GitHub repository URL.
  *
  * The ONE gate both write paths call, rather than a check per mutation: the
@@ -904,6 +922,8 @@ export const memoryMutations = {
       ({ id } = await resolveMemoryRef(ctx.db, ref));
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory));
+      // #5184: before any other argument is judged or any ref resolved.
+      if (urn !== undefined) assertMemorySlugMayChange(memory);
       // #4140 (cor:api:140:01): `orgRef` resolves only AFTER the memory's own gate (resource before
       // counterparty), and the resolved id is what is compared (here and under the row lock below), so a
       // URN of the memory's OWN org is a no-op. An unknown org is the resolver's typed
@@ -1116,6 +1136,10 @@ export const memoryMutations = {
             extensions: { code: 'CONFLICT' },
           });
         }
+        // #5184: judged again on the locked row. The staleness check above does
+        // not compare `appId`, so an attach that committed since the first read
+        // is caught only here.
+        if (urn !== undefined) assertMemorySlugMayChange(lockedMemory);
         if (newOrgId != null && newOrgId !== lockedRow?.organizationId) {
           throw new GraphQLError('Use transferMemoryOwnership to change a memory owner.', {
             extensions: { code: 'USE_TRANSFER_MEMORY_OWNERSHIP' },
