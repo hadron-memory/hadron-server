@@ -978,7 +978,7 @@ async function writeNodeCoreRaw(
 
       // #5019 — judged on the locked, decrypted row, before the revision snapshot and the write. `input` is the caller's plaintext.
       const assertSizeCeiling = (stored: NodeContentFields | null): void => {
-        if (opts.sizeCeiling === 'check') assertNodeContentSize(resultingNodeContent(input as NodeContentFields, stored));
+        if (opts.sizeCeiling === 'check') assertNodeContentSize(() => resultingNodeContent(input as NodeContentFields, stored));
       };
 
       /** Recompute against the locked row when an abstract-only write follows a concurrent body edit. */
@@ -1749,7 +1749,7 @@ async function writeNodeCoreRaw(
             let authoritativeChanges: string[] = [];
             let storedForIncludes: string | null = null;
             let authoritativeAbstractHash = nextAbstractOriginHash;
-            if (!authoritative) assertSizeCeiling(null);
+            let sizedAgainst: NodeContentFields | null = null;
             if (authoritative) {
               // Row lock + drift reconciled as its own revision BEFORE this
               // snapshot (@copilot, PR #1339): the address lock binds only
@@ -1771,7 +1771,7 @@ async function writeNodeCoreRaw(
               const authoritativeForDiff = memEncInfo.isEncrypted
                 ? decryptNodeFields({ ...authoritative }, memEncInfo)
                 : authoritative;
-              assertSizeCeiling(authoritativeForDiff); // #5019 — a revive keeps the fields it omits
+              sizedAgainst = authoritativeForDiff; // #5019 — a revive keeps the fields it omits
               // A tombstone's text is not the includer's stored text (#2041 S2b).
               if (!authoritative.deletedAt) storedForIncludes = authoritativeForDiff.content ?? null;
               authoritativeAbstractHash = hashAgainstLockedContent(authoritative.content);
@@ -1820,6 +1820,9 @@ async function writeNodeCoreRaw(
               runnable: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
               mintHuman: true, authoredChange: authoredByWrite,
             }, opts.authoring);
+            // #5019, #5160 — after the role and authoring gates: a size refusal counts stored fields, so a writer those gates
+            // refuse must not learn it. The revision above rolls back with it.
+            assertSizeCeiling(sizedAgainst);
 
             // #1460 — a tombstone still owns its old abstract and chunk
             // vectors. Remove them in this transaction before making the row
@@ -4727,7 +4730,7 @@ export const nodeMutations = {
       // #5019 — the merged target, before any write. A merge that touches no encrypted field holds no key, so the stored
       // body is then measured from its envelope.
       if (Object.keys(changed).length > 0) {
-        assertNodeContentSize(resultingNodeContent(changed, tgtEnc.isEncrypted && !touchesEncrypted ? withEncryptedSizes(target) : tgtPt));
+        assertNodeContentSize(() => resultingNodeContent(changed, tgtEnc.isEncrypted && !touchesEncrypted ? withEncryptedSizes(target) : tgtPt));
       }
 
       // Post-merge plaintext content drives the spec-032 abstract hash.

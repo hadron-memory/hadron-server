@@ -18,7 +18,7 @@ import { runAuthoring, runReadsNode } from '../runAuthoring.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 import { splitNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../../urn.js';
 import { resolveFlowMemory, loadFlowNode } from '../loadFlowNode.js';
-import { ownerLimitToolError } from '../../ownerLimits/errors.js';
+import { createRefusalToolError } from '../../ownerLimits/errors.js';
 import type { RunToolDef, RunToolContext } from './types.js';
 
 /** Shared arg schema for the write tools (full NodeInput parity, minus edges — v1). */
@@ -166,7 +166,7 @@ export const hadronCreateNode: RunToolDef = {
       return { created: true, urn, id: written.id };
     } catch (err) {
       // #5015: the owner's `nodes` limit is the model's to react to, not the end of the run.
-      const refused = ownerLimitToolError(err);
+      const refused = createRefusalToolError(err);
       if (refused) return { created: false, urn, ...refused };
       const code = (err as { extensions?: { code?: string } }).extensions?.code;
       if (code === 'NodeLocConflictError') {
@@ -221,7 +221,7 @@ export const hadronUpdateNode: RunToolDef = {
       return { updated: true, urn, id: written.id };
     } catch (err) {
       // #5019: a node over the deployment's size ceiling is the model's to shorten, not the end of the run.
-      const refused = ownerLimitToolError(err);
+      const refused = createRefusalToolError(err);
       if (refused) return { updated: false, urn, ...refused };
       throw err;
     }
