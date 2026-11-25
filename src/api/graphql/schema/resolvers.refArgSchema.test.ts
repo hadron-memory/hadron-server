@@ -356,3 +356,18 @@ describe('#4357 P3-8 — the legacy-Id allowance is per field', () => {
   });
 });
 
+
+describe('#5081 (gap 3) — the 21 organization-scope arguments stay named in the guard tables', () => {
+  const QUERY = ['findNodes', 'globalSearch', 'edges', 'impersonationSessions', 'memories', 'exchangeConnections', 'exchangeConnectionsPage', 'slackConnections', 'telegramConnections', 'mcpServers', 'homeAssistantInstances', 'resendSenders', 'apps', 'agents', 'scopes', 'channels', 'registerEntries', 'assets', 'orgBootPromptSigning', 'orgBootPromptSigningPreview'];
+  it.each(QUERY)('Query.%s is in EXPECTED_QUERY_REF_ARGS with orgRef', (name) => {
+    expect(EXPECTED_QUERY_REF_ARGS[name]).toContain('orgRef');
+  });
+  it('Mutation.setOrgBootPromptSigning is in EXPECTED_REF_ARGS with orgRef', () => {
+    expect(EXPECTED_REF_ARGS.setOrgBootPromptSigning).toContain('orgRef');
+  });
+  it('a bare `org` argument is a stray legacy arg, as is orgId', () => {
+    expect(isStrayLegacyIdArg('Query.orgBootPromptSigning', 'org')).toBe(true);
+    expect(isStrayLegacyIdArg('Query.apps', 'orgId')).toBe(true);
+    expect(isStrayLegacyIdArg('Query.apps', 'orgRef')).toBe(false);
+  });
+});
