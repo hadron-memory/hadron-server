@@ -120,7 +120,7 @@ import { GraphQLError } from 'graphql';
 import { withAuthorizedMemoryTx } from './authorizedTx.js';
 // Spec 049 §8.5 — the memory-level lock Channel creation shares with deleteMemory.
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
-import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
+import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory, tombstoneReclaimableBy } from '../../../lib/mintedSpecPermanence.js';
 import { questionError, memoryHoldsQuestionLog } from '../../../lib/questions/index.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { validateMemorySchema, MemorySchemaError } from '../../../lib/memorySchema.js';
@@ -749,10 +749,11 @@ export const memoryMutations = {
       // Check for existing memory with the same URN
       const existing = await ctx.db.memory.findUnique({ where: { urn: memoryUrn } });
       if (existing) {
-        if (existing.deletedAt) {
+        if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
+          // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${memoryUrn}" already exists`, {
             extensions: { code: 'CONFLICT' },
           });
@@ -1578,10 +1579,11 @@ export const memoryMutations = {
       // is hard-deleted, a live one is an error.
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
       if (existing) {
-        if (existing.deletedAt) {
+        if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
+          // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
             extensions: { code: 'CONFLICT' },
           });
@@ -1804,10 +1806,11 @@ export const memoryMutations = {
       const newUrn = `${targetOrg.urn}:${targetSlug}`;
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
       if (existing) {
-        if (existing.deletedAt) {
+        if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
+          // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
             extensions: { code: 'CONFLICT' },
           });
