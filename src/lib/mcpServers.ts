@@ -73,7 +73,7 @@ export function encryptMcpHeaders(input: unknown): string {
       extensions: { code: 'BAD_USER_INPUT' },
     });
   }
-  for (const [name, value] of entries) {
+  for (const [index, [name, value]] of entries.entries()) {
     if (
       typeof value !== 'string' ||
       name.length === 0 ||
@@ -84,7 +84,12 @@ export function encryptMcpHeaders(input: unknown): string {
       !/^[!#$%&'*+\-.^_`|~A-Za-z0-9]+$/.test(name) ||
       /[\r\n]/.test(value)
     ) {
-      throw new GraphQLError(`Invalid header "${name}".`, { extensions: { code: 'BAD_USER_INPUT' } });
+      // #5158: name the rule and the entry's position, never the typed text. A credential typed without its `Name: ` part reaches
+      // here as the header NAME (the CLI cuts at the first colon), so the name is input too; the value never was echoed.
+      throw new GraphQLError(
+        `Invalid header (entry ${index + 1}): the name must be an HTTP token of 1-${MAX_HEADER_NAME} characters, and the value a string of at most ${MAX_HEADER_VALUE} characters with no line breaks.`,
+        { extensions: { code: 'BAD_USER_INPUT' } },
+      );
     }
   }
   return encryptToken(JSON.stringify(Object.fromEntries(entries)));
