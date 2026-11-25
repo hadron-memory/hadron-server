@@ -6,6 +6,8 @@
  */
 import { ApolloServer } from '@apollo/server';
 import { randomBytes } from 'node:crypto';
+import { Client } from 'pg';
+import { waitForLockWaitersBlockedBy } from '../../../test/lockWait.js';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -165,6 +167,29 @@ describe('P15: every ref is judged by the one-grant read gate', () => {
       }
     } finally { await direct.stop(); }
     expect(await selections()).toBe(0);
+  });
+});
+
+describe('P15 (race): the reach is judged again under the transaction\'s anchors', () => {
+  it('a worker retired while the request waits on the App anchor is GRANT_NOT_FOUND, writing nothing', async () => {
+    const a = await held();
+    const b = await held();
+    const blocker = new Client({ connectionString: process.env.DATABASE_URL });
+    await blocker.connect();
+    try {
+      await blocker.query('BEGIN');
+      const pid = (await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+      await blocker.query('SELECT id FROM apps WHERE id = $1 FOR UPDATE', [w.appId]);
+      const call = asWorker(REQUEST, { g: [a, b] });
+      await waitForLockWaitersBlockedBy(db, pid, 1);
+      // The first read already passed (it took no lock); the worker retires before the anchor is granted.
+      await blocker.query(`UPDATE workers SET retired_at = (clock_timestamp() AT TIME ZONE 'UTC') WHERE id = $1`, [w.workerId]);
+      await blocker.query('COMMIT');
+      const r = await call;
+      expect(code(r)).toBe('GRANT_NOT_FOUND');
+    } finally { await blocker.query('ROLLBACK').catch(() => undefined); await blocker.end(); }
+    expect(await selections()).toBe(0);
+    expect(await items()).toBe(0);
   });
 });
 

@@ -342,6 +342,43 @@ describe('P7 + P8 + R9: items fail alone; all failing is a whole-call refusal', 
     expect(await selState(sel.id)).toBe('completed');
   });
 
+  it('P8 (departure): a holder that departs between proof and completion reads STALE for that grant alone, judged on the locked row', async () => {
+    const w2 = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId, name: 'sel-worker2', slug: 'sel-worker2' } });
+    const departing = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, created_at, updated_at)
+      VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, ${now}, ${now})`, departing, appId, w2.id, JSON.stringify({ entryNode: entryNodeId }), REASON);
+    const staying = await scheduleGrant();
+    const sel = await openSelection([departing, staying]);
+    const p = await prove(sel.id, admin);
+    await db.$executeRawUnsafe(`UPDATE workers SET retired_at = ${now} WHERE id = $1`, w2.id);
+    await db.$executeRawUnsafe(`UPDATE grants SET holder_departed_at = ${now} WHERE worker_id = $1`, w2.id);
+    const r = await post(sel.id, 'complete', signingBody(p, admin), p.cookie);
+    expect(r.status).toBe(200);
+    expect(await outcomesOf(r)).toEqual({ [departing]: 'STALE', [staying]: 'ACTIVATED' });
+    expect((await grantRow(departing)).activated_at).toBeNull();
+    expect(await activateEvents(departing)).toBe(0);
+  });
+
+  it('P8 (expiry): a grant that expires between proof and completion reads EXPIRED for it alone (no trigger ends an item for the passing of time)', async () => {
+    const expiring = generateId();
+    await db.$executeRawUnsafe(`INSERT INTO grants (id, app_id, worker_id, action, action_values, reason, max_uses, expires_at, created_at, updated_at)
+      VALUES ($1, $2, $3, 'schedule.create', $4::jsonb, $5, 3, ${now} + interval '4 seconds', ${now}, ${now})`, expiring, appId, workerId, JSON.stringify({ entryNode: entryNodeId }), REASON);
+    const staying = await scheduleGrant();
+    const sel = await openSelection([expiring, staying]);
+    const p = await prove(sel.id, admin);
+    expect(p.json.offered).toEqual([expiring, staying].sort());
+    for (let i = 0; i < 100; i++) {
+      const [{ over }] = await db.$queryRawUnsafe<Array<{ over: boolean }>>(`SELECT clock_timestamp() AT TIME ZONE 'UTC' > expires_at AS over FROM grants WHERE id = $1`, expiring);
+      if (over) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const r = await post(sel.id, 'complete', signingBody(p, admin), p.cookie);
+    expect(r.status).toBe(200);
+    expect(await outcomesOf(r)).toEqual({ [expiring]: 'EXPIRED', [staying]: 'ACTIVATED' });
+    expect((await grantRow(expiring)).activated_at).toBeNull();
+    expect(await activateEvents(expiring)).toBe(0);
+  }, 30_000);
+
   it('R9: every offered grant failing refuses the whole call: nothing recorded, the ceremony unspent', async () => {
     const gs = [await scheduleGrant(), await scheduleGrant()];
     const sel = await openSelection(gs);
