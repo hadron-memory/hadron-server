@@ -164,7 +164,8 @@ describe('#4512 review probes: no live assigned id', () => {
     const feature = part('fx:110', 'Head.\n\n---\n\n="fx-110-a">tail</pre>', 'Feature: F');
     const out = renderSpecDocument(doc([part('fx:110:a', 'text <pre id')], feature));
     expect(count(out, ' id="fx-110-a"')).toBe(1);
-    expect(out).toContain('<pre data-id\n\n="fx-110-a">tail</pre>');
+    // #5033: the body's open `<pre id` is written `&lt;pre id` (it never opens), and the neutralising pass still renames the attribute.
+    expect(out).toContain('&lt;pre data-id\n\n="fx-110-a">tail</pre>');
   });
   it('an authored NUL cannot forge the server anchor mark', () => {
     const out = renderSpecDocument(doc([part('fx:110:a', 'x \u0000forged\u0000 y')]));

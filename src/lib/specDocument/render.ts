@@ -6,6 +6,8 @@
  * (the read gate, includes, link readability, the portal origin, the render time) is decided by the caller
  * and handed in as data; see `resolvers.specDocument.ts`.
  */
+import { stepFence, type OpenFence } from './fences.js';
+import { escapeUnterminatedHtml } from './unterminatedHtml.js';
 
 /** The ten spec type words (cor:spc:030:02). A name starts with one of them followed by `:`. */
 export const SPEC_TYPE_WORDS = [
@@ -110,25 +112,6 @@ export function wikilinkTargets(text: string): string[] {
   const out = new Set<string>();
   eachOutsideFence(text, (line) => { for (const m of line.matchAll(WIKILINK)) out.add(m[1].trim()); return line; });
   return [...out];
-}
-
-/** An open fenced code block: the delimiter character and the length it opened with (CommonMark 4.5). */
-interface OpenFence { ch: string; len: number }
-
-/**
- * One line against the fence state. A fence opens with 3+ backticks or tildes (up to 3 spaces of indent; a
- * backtick fence's info string holds no backtick) and closes only on the same character, at least as long,
- * with nothing after it but whitespace. A shorter or different delimiter inside is body text.
- */
-function stepFence(line: string, open: OpenFence | null): { open: OpenFence | null; fenceLine: boolean } {
-  if (open === null) {
-    const f = /^ {0,3}(?=(`{3,}|~{3,}))\1(.*)$/.exec(line);
-    if (f && !(f[1][0] === '`' && f[2].includes('`'))) return { open: { ch: f[1][0], len: f[1].length }, fenceLine: true };
-    return { open: null, fenceLine: false };
-  }
-  const c = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
-  if (c && c[1][0] === open.ch && c[1].length >= open.len) return { open: null, fenceLine: true };
-  return { open, fenceLine: false };
 }
 
 function eachOutsideFence(text: string, fn: (line: string) => string | null): string {
@@ -294,13 +277,13 @@ const approvalText = (a: ApprovalLine): string => {
 const stateLine = (p: DocPart): string => `Approval: ${approvalText(p.approval)} · Mint: ${p.minted ? 'minted' : 'unminted'}`;
 
 /** A name that already leads with its citation as a whole word (not a longer loc like `fx:110:06x`) is not suffixed. */
-const heading = (p: DocPart): string => (p.name === p.loc || p.name.startsWith(`${p.loc} `) ? p.name : `${p.name} [${p.loc}]`);
+const heading = (p: DocPart): string => escapeUnterminatedHtml(p.name === p.loc || p.name.startsWith(`${p.loc} `) ? p.name : `${p.name} [${p.loc}]`);
 
 /** The part's body as shown, or null when it shows none (placeholder, superseded, empty). */
 function shownBody(p: DocPart, shift: boolean, links: ReadonlyMap<string, LinkResolution>, anchors: ReadonlyMap<string, string>, assigned: ReadonlySet<string>): string | null {
   if (p.isPlaceholder || p.superseded || p.body == null) return null;
   const { body } = splitAtClosingRule(p.body);
-  const cleaned = renderLinks(cleanBody(body, shift), links, anchors);
+  const cleaned = escapeUnterminatedHtml(renderLinks(cleanBody(body, shift), links, anchors));
   return cleaned === '' ? null : cleaned;
 }
 
