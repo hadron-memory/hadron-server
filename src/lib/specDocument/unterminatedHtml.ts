@@ -289,6 +289,9 @@ function firstUnterminated(text: string, from: number): number {
     const opensBlock = BLOCK6_NAMES.has(name) || (!isEnd && TYPE1_NAMES.has(name));
     const tagEnd = tagEndOf(text, i, nameStart);
     if (tagEnd === -1 || tagEnd > tagLimit(i, opensBlock)) return i;
+    // An end tag takes attributes in a browser (a quote hides a `>`) but htmlparser2 ends it at the first `>`; where the two ends differ the
+    // readers resume in different places, so the tag is left unterminated rather than guessed.
+    if (isEnd && tagEnd !== text.indexOf('>', i) + 1) return i;
     // A block-level tag at the head of a line (type 6), or a complete tag alone on its line that does not interrupt a paragraph (type 7),
     // starts an HTML block that runs to the next blank line.
     if (startsLine(i)) {
