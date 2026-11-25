@@ -46,6 +46,8 @@ const a = (n: number) => 'a'.repeat(n);
 const json = (n: number) => ({ k: a(n - 8) });
 const refusedAt = (r: Result, maxBytes = 1000) => {
   expect(r.errors?.[0]?.extensions).toMatchObject({ code: 'NODE_CONTENT_TOO_LARGE', maxBytes });
+  // Never the measured size: on an update it includes stored fields, and a writer may not be able to read them.
+  expect(r.errors![0].extensions).not.toHaveProperty('bytes');
   expect(r.errors![0].message).toBe(`A node can hold at most ${maxBytes} bytes.`);
 };
 const ok = (r: Result) => expect(r.errors).toBeUndefined();

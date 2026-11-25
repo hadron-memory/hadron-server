@@ -22,7 +22,7 @@ describe('#5019 NODE_CONTENT_MAX_BYTES', () => {
 describe('#5019 the measure', () => {
   it('counts UTF-8 bytes, not characters, and refuses only above the ceiling', () => {
     vi.stubEnv('NODE_CONTENT_MAX_BYTES', '1000');
-    expect(refused({ content: '€'.repeat(334) })!.extensions).toEqual({ code: 'NODE_CONTENT_TOO_LARGE', maxBytes: 1000, bytes: 1002 });
+    expect(refused({ content: '€'.repeat(334) })!.extensions).toEqual({ code: 'NODE_CONTENT_TOO_LARGE', maxBytes: 1000 });
     expect(refused({ content: 'a'.repeat(1000) })).toBeNull();
     expect(refused({ content: 'a'.repeat(1001) })!.message).toBe('A node can hold at most 1000 bytes.');
   });

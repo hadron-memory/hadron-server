@@ -127,11 +127,13 @@ describe('#5015 run tools at the owner\'s nodes limit', () => {
     vi.stubEnv('NODE_CONTENT_MAX_BYTES', '10');
     try {
       const run = await mintRun(writerId);
-      const error = { code: 'NODE_CONTENT_TOO_LARGE', maxBytes: 10, bytes: 11, message: 'A node can hold at most 10 bytes.' };
+      const error = { code: 'NODE_CONTENT_TOO_LARGE', maxBytes: 10, message: 'A node can hold at most 10 bytes.' };
       const created = await call(hadronCreateNode, run, { urn: `hrn:node:${ORG_URN}:runmem:fresh`, name: 'fresh', content: 'x'.repeat(11) });
       expect(created).toMatchObject({ created: false, error });
+      expect((created as { error: object }).error).toEqual(error);
       const updated = await call(hadronUpdateNode, run, { urn: `hrn:node:${ORG_URN}:runmem:existing`, content: 'x'.repeat(11) });
       expect(updated).toMatchObject({ updated: false, error });
+      expect((updated as { error: object }).error).toEqual(error);
       expect(await db.node.count({ where: { memoryId, loc: 'fresh' } })).toBe(0);
       expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'existing' } })).content).toBeNull();
     } finally { vi.unstubAllEnvs(); }
