@@ -9947,7 +9947,7 @@ export const typeDefs = `#graphql
     teamStopSignals(appRef: String!, worker: String, includeEnded: Boolean, first: Int, after: String): StopSignalPage!
     """
     #2017 (S1) — the ready-to-deliver batches of the workers registered on the calling host (hrn:node:hadronmemory.com:specs:cor:agt:080:22, :26).
-    An own live session reads only its bound worker. #5000: a session past its idle window but inside its App's dormancy period is LAPSED, not ended, and its holder's own read resumes it (same session id); a refusal is SESSION_NOT_LIVE with extensions.reason OTHER_SESSION_LIVE or NOT_OWNER (not the caller's own session to resume, or the caller can no longer drive the App); an ended or dormant session is refused earlier, at the session binding, with the generic message. A host App key needs attention:deliver AND host:operate;
+    An own live session reads only its bound worker. #5000: a session past its idle window but inside its App's dormancy period is LAPSED, not ended, and its holder's own read resumes it (same session id); a refusal is SESSION_NOT_LIVE with extensions.reason OTHER_SESSION_LIVE, LIVENESS_UNKNOWN (too many open sessions on the worker to check them all, and none of those checked is live) or NOT_OWNER (not the caller's own session to resume, or the caller can no longer drive the App); an ended or dormant session is refused earlier, at the session binding, with the generic message. A host App key needs attention:deliver AND host:operate;
     the host is the key's, the request names none, and a worker not on that host is absent. The text is written by the server and typed unchanged. Reading moves nothing; acknowledge the batch ids.
     """
     deliveryBatches(appRef: String!, workerRefs: [String!], first: Int, after: String): DeliveryBatchPage!
@@ -16360,7 +16360,9 @@ export const typeDefs = `#graphql
     Error codes (extensions.code): TEAM_CHAT_BODY_TOO_LARGE, TEAM_CHAT_DUPLICATE,
     TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_ENDED,
     SESSION_NOT_LIVE (dormant or ineligible for lapsed-session resume; extensions.reason
-    names the failed condition: DORMANT, ENDED, OTHER_SESSION_LIVE or NOT_OWNER),
+    names the failed condition: DORMANT, ENDED, OTHER_SESSION_LIVE, LIVENESS_UNKNOWN
+    (too many open sessions on the worker to check them all, and none of those checked
+    is live) or NOT_OWNER),
     SESSION_NOT_WORKER_BOUND, CHANNEL_HOST_NOT_WRITABLE, WORKER_RETIRED,
     SESSION_EXPIRED (encrypted team memory without an active session key),
     TEAM_AGENT_NOT_FOUND / TEAM_AGENT_AMBIGUOUS (first-post bootstrap could
