@@ -9,7 +9,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { waitForLockWaiters } from '../../test/lockWait.js';
 import { expectNodeTotalsExact } from '../../test/nodeTotals.js';
 import { generateId } from '../id.js';
-import { retryOnSerializationFailure } from '../serializableRetry.js';
+import { isSerializationFailure, retryOnSerializationFailure } from '../serializableRetry.js';
 import { countOwnerNodesOnDemand, OWNER_LIMIT_KEYS } from './keys.js';
 import { repairMemoryNodeTotal } from './nodeTotals.js';
 
@@ -124,19 +124,27 @@ describe('#5078 the fold at commit', () => {
     await expectExact(2n);
   });
 
-  it('a fold takes the total rows in memory order', async () => {
-    const ids = [m1, m2, m3].sort();
-    for (const id of ids) await mk(db, id, 'n');
-    let writer!: Promise<unknown>;
-    await db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT 1 FROM memory_node_totals WHERE memory_id = ${ids[0]} FOR UPDATE`;
-      writer = db.$transaction(async (w) => { for (const id of [...ids].reverse()) await mk(w, id, 'x'); }, { timeout: 30_000 });
-      await waitForLockWaiters(db, 1);
-      // It waits at the first row and has taken none of the later ones.
-      for (const id of ids.slice(1)) await tx.$queryRaw`SELECT 1 FROM memory_node_totals WHERE memory_id = ${id} FOR UPDATE NOWAIT`;
-    }, { timeout: 30_000 });
-    await writer;
-    await expectExact(6n);
+  /** #5126 item 1: the order of a fold's `GROUP BY` is a HashAggregate over random ids, so one set of ids kills a removed `ORDER BY` only
+   *  about half of the time. Each round makes fresh memories (fresh random ids) and the loop makes a miss in every round vanishingly rare. */
+  it('a fold takes the total rows in memory order, over several fresh sets of memories', async () => {
+    let expected = 0n;
+    for (let round = 0; round < 12; round++) {
+      const ids = (await Promise.all(['p', 'q', 'r'].map(async (s) => (await db.memory.create({ data: {
+        id: generateId(), name: `${s}${round}`, urn: `nf:${s}${round}`, class: 'knowledge', organizationId: orgId } })).id))).sort();
+      for (const id of ids) await mk(db, id, 'n');
+      let writer!: Promise<unknown>;
+      await db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT 1 FROM memory_node_totals WHERE memory_id = ${ids[0]} FOR UPDATE`;
+        writer = db.$transaction(async (w) => { for (const id of [...ids].reverse()) await mk(w, id, 'x'); }, { timeout: 30_000 });
+        await waitForLockWaiters(db, 1);
+        // It waits at the first row and has taken none of the later ones.
+        for (const id of ids.slice(1)) await tx.$queryRaw`SELECT 1 FROM memory_node_totals WHERE memory_id = ${id} FOR UPDATE NOWAIT`;
+      }, { timeout: 30_000 });
+      await writer;
+      expected += 6n;
+      expect(await used()).toBe(expected);
+    }
+    await expectNodeTotalsExact(db);
   });
 
   it('a transaction whose changes cancel out takes no total row', async () => {
@@ -177,6 +185,27 @@ describe('#5078 the fold at commit', () => {
     await Promise.all([write('s1'), write('s2')]);
     expect(attempts).toBeGreaterThan(2);
     await expectExact(3n);
+  });
+
+  /** #5126 item 3. Not the limit refusal (cor:acl:150:03 S2): the doors that gate a write run READ COMMITTED. This pins what two SERIALIZABLE
+   *  writers that each read their owner's figure and then write a node in their own memory do today: exactly one commits, the other is aborted.
+   *  (A probe with the owner read removed aborts one as well, so the read is not what conflicts: the pin names the observed outcome, not a cause.) */
+  it('two SERIALIZABLE writers in two memories of one owner, each reading the owner figure first: exactly one commits, the other is aborted', async () => {
+    let ready = 0;
+    let go!: () => void;
+    const both = new Promise<void>((r) => { go = r; });
+    const gatedWrite = (memoryId: string, loc: string) => db.$transaction(async (tx) => {
+      await OWNER_LIMIT_KEYS.nodes.count(tx as typeof db, { organizationId: orgId });
+      await mk(tx, memoryId, loc);
+      if (++ready === 2) go();
+      await both;
+    }, { isolationLevel: 'Serializable', timeout: 30_000 });
+    const settled = await Promise.allSettled([gatedWrite(m1, 'g1'), gatedWrite(m2, 'g2')]);
+    expect(settled.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const lost = settled.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    // As observed (not S2's OWNER_LIMIT_REACHED): Postgres's serialization failure, in the form the shared retry recognizes.
+    expect(isSerializationFailure(lost?.reason)).toBe(true);
+    await expectExact(1n);
   });
 
   it('a node delete in flight and its memory\'s hard delete both finish; a memory deleted with its first node leaves no figure', async () => {
@@ -242,5 +271,30 @@ describe('#5078 the migration and post-push', () => {
       await db.$transaction(async (tx) => { for (const s of [lock, ...statements]) await tx.$executeRawUnsafe(s); });
       await expectExact(1n);
     }
+  });
+});
+
+/** #5126 item 2: `TRUNCATE nodes CASCADE` is refused by the append-only tables, so the trigger function is exercised through a scratch table that carries the
+ *  same trigger; a do-nothing function leaves the figures behind. */
+describe('#5078 the TRUNCATE trigger', () => {
+  it('a truncate empties the pending rows and zeroes every total', async () => {
+    await mk(db, m1, 'a');
+    await mk(db, m2, 'b');
+    await db.$executeRaw`ALTER TABLE memory_node_pending DISABLE TRIGGER memory_node_pending_fold`;
+    try { await mk(db, m1, 'unfolded'); } finally {
+      await db.$executeRaw`ALTER TABLE memory_node_pending ENABLE TRIGGER memory_node_pending_fold`;
+    }
+    expect(await db.memoryNodePending.count()).toBe(1);
+    expect(await db.memoryNodeTotal.count({ where: { liveNodes: { gt: 0 } } })).toBeGreaterThan(0);
+    await db.$executeRawUnsafe('CREATE TABLE scratch_truncate_5126 (id int)');
+    try {
+      await db.$executeRawUnsafe(`CREATE TRIGGER scratch_truncate_5126_trg AFTER TRUNCATE ON scratch_truncate_5126
+        FOR EACH STATEMENT EXECUTE FUNCTION hadron_memory_node_total_after_truncate()`);
+      await db.$executeRawUnsafe('TRUNCATE scratch_truncate_5126');
+    } finally {
+      await db.$executeRawUnsafe('DROP TABLE scratch_truncate_5126');
+    }
+    expect(await db.memoryNodePending.count()).toBe(0);
+    expect(await db.memoryNodeTotal.count({ where: { liveNodes: { not: 0 } } })).toBe(0);
   });
 });
