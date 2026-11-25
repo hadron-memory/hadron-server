@@ -53,6 +53,11 @@ export function mcpTaskListArgs<T extends Record<string, unknown> & { parentTask
   const { parentTaskId, ...rest } = args;
   return parentTaskId === undefined ? rest : { ...rest, parentTaskRef: parentTaskId };
 }
+/** #5080: `hadron_task_create` keeps `parentTaskId`; the GraphQL input names it `parentTaskRef`. */
+export function mcpTaskCreateInput<T extends Record<string, unknown> & { parentTaskId?: unknown }>(args: T): Omit<T, 'parentTaskId'> & { parentTaskRef?: unknown } {
+  const { parentTaskId, ...rest } = args;
+  return parentTaskId === undefined ? rest : { ...rest, parentTaskRef: parentTaskId };
+}
 export function mcpTaskRefArgs<T extends Record<string, unknown> & { taskId?: unknown }>(args: T): Omit<T, 'taskId'> & { taskRef?: unknown } {
   const { taskId, ...rest } = args;
   return taskId === undefined ? rest : { ...rest, taskRef: taskId };
@@ -447,9 +452,8 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       'it queued; pass status BACKLOG to park it instead.',
     SHAPE_HADRON_TASK_CREATE,
     async ({ session, parentTaskId, ...rest }) =>
-      // #5080: the tool keeps `parentTaskId`; the GraphQL input names it `parentTaskRef`.
       write('hadron_task_create', session, 'Created', (ctx) =>
-        M.createAgentTask({}, { input: { ...rest, ...(parentTaskId !== undefined ? { parentTaskRef: parentTaskId } : {}) } }, ctx)),
+        M.createAgentTask({}, { input: mcpTaskCreateInput({ ...rest, parentTaskId }) }, ctx)),
   );
 
   off('hadron_task_blocker_add',

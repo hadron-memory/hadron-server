@@ -88,9 +88,14 @@ export const TICKER_WRITE_TOOLS = [
 export const TICKER_READ_TOOLS = ['hadron_ticker_list', 'hadron_agent_ticker_template_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get', 'hadron_team_chat_inbox'] as const;
 
 /** #5080: the tools keep their `channelIds` input; the GraphQL input names the same list `channelRefs`. */
-function mcpTickerInput<T extends { channelIds?: unknown }>(input: T): Omit<T, 'channelIds'> & { channelRefs?: unknown } {
+export function mcpTickerInput<T extends Record<string, unknown> & { channelIds?: unknown }>(input: T): Omit<T, 'channelIds'> & { channelRefs?: unknown } {
   const { channelIds, ...rest } = input;
   return channelIds === undefined ? rest : { ...rest, channelRefs: channelIds };
+}
+
+/** #5080: `hadron_team_chat_inbox_ack` keeps `through[].channelId`; the GraphQL input names it `channelRef`. */
+export function mcpAckThrough(through: Array<{ channelId: string; seq: number }>) {
+  return through.map(({ channelId, seq }) => ({ channelRef: channelId, seq }));
 }
 
 function textResult(text: string, isError = false) {
@@ -438,7 +443,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     SHAPE_HADRON_TEAM_CHAT_INBOX_ACK,
     async ({ session, batchIds, through }) => {
       const ack = async (ctx: Context) => {
-        const r = await M.acknowledgeDeliveryBatches({}, { batchIds, ...(through ? { through: through.map(({ channelId, seq }) => ({ channelRef: channelId, seq })) } : {}) }, session ? { ...ctx, sessionId: session, sessionBindingRefused: false } : ctx);
+        const r = await M.acknowledgeDeliveryBatches({}, { batchIds, ...(through ? { through: mcpAckThrough(through) } : {}) }, session ? { ...ctx, sessionId: session, sessionBindingRefused: false } : ctx);
         return `Acknowledged ${r.acknowledged}${r.unchanged ? ` (${r.unchanged} already delivered)` : ''}.`;
       };
       // A host key acts as itself and names no session; anyone else is a write and needs a session, like hadron_ack_wakes.

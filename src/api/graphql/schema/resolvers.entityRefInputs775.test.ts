@@ -139,6 +139,19 @@ describe('3. channelRefs refusals do not tell an unreadable channel from a missi
   });
 });
 
+describe('5. the refusals an MCP caller now sees name the GraphQL field (one per tool family)', () => {
+  it('ticker tools: channelRefs', async () => {
+    const a = await ask(ctxOf(member.id), CREATE_TICKER, { a: appId, i: { name: 'x', cadenceSeconds: 600, channelRefs: [hidden.id] } });
+    expect(a.error?.message).toMatch(/channelRefs/);
+    expect(a.error?.message).not.toMatch(/channelIds/);
+  });
+  it('hadron_task_create: parentTaskRef', async () => {
+    const a = await ask(ctxOf(member.id), 'mutation($i:CreateAgentTaskInput!){createAgentTask(input:$i){id}}', { i: { title: 't' } });
+    expect(a.error?.message).toMatch(/parentTaskRef/);
+    expect(a.error?.message).not.toMatch(/parentTaskId/);
+  });
+});
+
 describe('4. the old names of the other renamed input fields are unknown input fields', () => {
   it.each([
     ['createNode memoryId', CREATE_NODE, { i: { memoryId: 'x', loc: 'x', name: 'x' } }],

@@ -310,6 +310,25 @@ describe('R57 own-live-session batches', () => {
     } finally { await server.stop(); }
   });
 
+  it('BatchThrough.channelRef: the channel id and its chat-root URN move the same prefix through GraphQL (#5080)', async () => {
+    const s = await ownSession(); await postForBoth(); await postForBoth();
+    const [b] = (await selfRead(s)).batches; const seq = b.ranges[0].seqs[0];
+    const { ApolloServer } = await import('@apollo/server');
+    const { typeDefs } = await import('./typeDefs.js');
+    const server = new ApolloServer<Context>({ typeDefs, resolvers: resolvers as any });
+    const ack = async (channelRef: string) => {
+      const a = await server.executeOperation({ query: 'mutation($ids: [String!]!, $t: [BatchThrough!]) { acknowledgeDeliveryBatches(batchIds: $ids, through: $t) { acknowledged unchanged } }', variables: { ids: [b.id], t: [{ channelRef, seq }] } }, { contextValue: selfCtx(s) });
+      if (a.body.kind !== 'single') throw new Error('expected single response');
+      return { errors: a.body.singleResult.errors, data: (a.body.singleResult.data as any)?.acknowledgeDeliveryBatches };
+    };
+    try {
+      expect(await ack(`hrn:node:${org.urn}:team-shared:${channel.loc}`)).toEqual({ errors: undefined, data: { acknowledged: 1, unchanged: 0 } });
+      expect((await selfRead(s)).batches[0].ranges[0].seqs).toEqual([b.ranges[0].seqs[1]]);
+      // The same mark again, by the primary key: already delivered, so both spellings named one channel.
+      expect(await ack(channel.id)).toEqual({ errors: undefined, data: { acknowledged: 0, unchanged: 1 } });
+    } finally { await server.stop(); }
+  });
+
   it('a userless own-session key can read but cannot borrow a human session or survive key revocation', async () => {
     const s = await ownSession({ userId: null });
     const context = keyCtx(bareKey, app.id, { sessionId: s.id });
