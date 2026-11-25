@@ -219,16 +219,19 @@ function firstUnterminated(text: string, from: number): number {
       if (step.fenceLine || wasOpen) { prev = 'nonpara'; lrd = 0; i = end + 1; continue; }
       // An indented code block: a line of four spaces or a tab, after a blank line, the start of the text or another such line.
       if (/^(?: {4}|\t)/.test(inner) && inner.trim() !== '' && prev !== 'other') { prev = 'code'; lrd = 0; i = end + 1; continue; }
-      if (lrd === 1) {
+      if (lrd === 3) {
+        // Inside a title that opened on an earlier line: still the definition, until the line that closes it (or a blank line, which ends the attempt).
+        if (inner.trim() === '') { prev = 'blank'; lrd = 0; } else { prev = 'nonpara'; lrd = /["')][ \t]*$/.test(inner) ? 0 : 3; }
+      } else if (lrd === 1 && inner.trim() !== '') {
         prev = 'nonpara';
-        lrd = 2;
+        lrd = titleOpens(inner) ? 3 : 2;
       } else if (lrd === 2 && /^ {0,3}["'(]/.test(inner)) {
         prev = 'nonpara';
-        lrd = 0;
+        lrd = titleOpens(inner) ? 3 : 0;
       } else {
         const label = /^ {0,3}\[(?:[^\]\\]|\\.)+\]:([ \t]*)/.exec(inner);
-        lrd = label ? (label[0].length === inner.length ? 1 : 2) : 0;
-        prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|=+[ \t]*$)/.test(inner) ? 'nonpara' : 'other';
+        lrd = label ? (label[0].length === inner.length ? 1 : titleOpens(inner.slice(label[0].length)) ? 3 : 2) : 0;
+        prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|=+[ \t]*$|(?:[-+*]|\d{1,9}[.)])[ \t]*$)/.test(inner) ? 'nonpara' : 'other';
       }
     }
     const c = text[i];
@@ -384,6 +387,19 @@ function firstUnterminated(text: string, from: number): number {
   }
   const open = [rawStart, ...templates.slice(0, 1)].filter((x) => x !== -1);
   return open.length === 0 ? -1 : Math.min(...open);
+}
+
+/** Whether a line leaves a link reference definition's title open: a quote or parenthesis that starts a title (at the start or after a blank) with no closing delimiter after it on the line. A false answer only widens the definition, which escapes more. */
+function titleOpens(rest: string): boolean {
+  const m = /(?:^|[ \t])(["'(])/.exec(rest);
+  if (!m) return false;
+  const close = m[1] === '(' ? ')' : m[1];
+  const after = rest.slice(m.index + m[0].length);
+  for (let k = 0; k < after.length; k += 1) {
+    if (after[k] === '\\') k += 1;
+    else if (after[k] === close) return false;
+  }
+  return true;
 }
 
 /**
