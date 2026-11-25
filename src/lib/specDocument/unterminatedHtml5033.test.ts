@@ -388,7 +388,10 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('x <a\n- b\n>')).toBe('x &lt;a\n- b\n>');
   });
   it('a line-head pre block runs raw to its end tag, blank lines and fences included', () => {
-    expect(escapeUnterminatedHtml('<pre>\na\n\n```\n<b x=\n```\n</pre>')).toBe('<pre>\na\n\n```\n&lt;b x=\n```\n</pre>');
+    // The tag that opens in the interior ends at the `>` of the end tag: one complete tag to a browser, nothing swallowed.
+    expect(escapeUnterminatedHtml('<pre>\na\n\n```\n<b x=\n```\n</pre>')).toBe('<pre>\na\n\n```\n<b x=\n```\n</pre>');
+    // The rest of the line that holds the end tag is raw too: a backtick there opens no code span.
+    expect(escapeUnterminatedHtml('<pre>\na\n</pre> `a <b x= b` c')).toBe('<pre>\na\n</pre> `a &lt;b x= b` c');
   });
   it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag', () => {
     expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');

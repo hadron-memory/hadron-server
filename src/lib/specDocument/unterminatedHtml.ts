@@ -166,11 +166,13 @@ function firstUnterminated(text: string, from: number): number {
   };
   // A tag runs to the next blank line only where it opens an HTML block (a type 6 name, or a type 1 start tag); anywhere else it is inline
   // HTML, which no block boundary lets through, even at the head of a line.
-  const tagLimit = (j: number, opensBlock: boolean): number => (opensBlock && startsLine(j) ? blankBound(j) : inlineBound(j));
-  const blockLimit = (j: number): number => (startsLine(j) ? n : inlineBound(j));
   // Inside an HTML block (types 1 to 7) Markdown reads no fence, code span, backslash escape or indented code: the lines are raw HTML, and
   // a browser reads them as markup. `rawUntil` is the end of the last such line; the scan skips the Markdown rules below it.
   let rawUntil = -1;
+  // Inside an HTML block's raw region no Markdown block start applies: a construct there runs to the end of the region.
+  const tagLimit = (j: number, opensBlock: boolean): number =>
+    (j < rawUntil ? rawUntil : opensBlock && startsLine(j) ? blankBound(j) : inlineBound(j));
+  const blockLimit = (j: number): number => (j < rawUntil ? rawUntil : startsLine(j) ? n : inlineBound(j));
   const lineEndAt = (j: number): number => {
     const nl = text.indexOf('\n', j);
     return nl === -1 ? n : nl;
