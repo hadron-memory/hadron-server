@@ -110,10 +110,11 @@ describe('createMcpServer', () => {
    *  `Name: ` part reaches the server as the header NAME, so the name is input too. */
   describe('#5158 the malformed-header refusal does not echo typed input', () => {
     const SECRET_NAME = 'Basic dXNlcjpwYXNzd29yZA==';
+    let updates = 0;
     const refusal = async (headers: Record<string, string>, run: 'create' | 'update' = 'create') => {
       const err: any = await (run === 'create'
         ? createServer({ headers })
-        : createServer().then((server: any) => resolvers.Mutation.updateMcpServer({}, { ref: server.id, headers } as never, ctxFor(admin.id)))
+        : createServer({ slug: `upd-${++updates}` }).then((server: any) => resolvers.Mutation.updateMcpServer({}, { ref: server.id, headers } as never, ctxFor(admin.id)))
       ).then(() => null, (e: unknown) => e);
       expect(err?.extensions?.code).toBe('BAD_USER_INPUT');
       return String(err.message);
@@ -134,6 +135,21 @@ describe('createMcpServer', () => {
       const message = await refusal({ 'X-Ok-Name': 'line one\nline two' });
       expect(message).not.toContain('X-Ok-Name');
       expect(message).not.toContain('line one');
+    });
+
+    it('every other malformed shape is refused the same way, on create and on update, without repeating its text', async () => {
+      const cases: Array<[string, Record<string, unknown>, string[]]> = [
+        ['a value over the maximum length', { 'X-Long-Value': 'v'.repeat(4097) }, ['X-Long-Value', 'vvvvvvvv']],
+        ['a non-string value', { 'X-Num': 5 as unknown as string }, ['X-Num']],
+        ['an empty name', { '': 'secret-value-123' }, ['secret-value-123']],
+      ];
+      for (const [label, headers, typed] of cases) {
+        for (const run of ['create', 'update'] as const) {
+          const message = await refusal(headers as Record<string, string>, run);
+          expect(message, `${label} (${run})`).toMatch(/^Invalid header \(entry 1\)/);
+          for (const text of typed) expect(message, `${label} (${run})`).not.toContain(text);
+        }
+      }
     });
 
     it('names the rule and the entry position, and a later bad entry is told apart from an earlier good one', async () => {
