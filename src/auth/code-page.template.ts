@@ -1,8 +1,8 @@
 /**
  * #5125 — the page that shows the authorization code after consent, for a login finished on another device
  * (hrn:node:hadronmemory.com:specs:cor:aut:030:01). Rendered only by the consent POST, and only when the authorize
- * request asked for it. Same card and header as the consent page. The one script copies the field; without it the
- * code stays selectable by hand.
+ * request asked for it. Same card and header as the consent page. The one script shows the copy button and
+ * copies the field; without it there is no button and the code stays selectable by hand.
  */
 import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js';
 
@@ -43,14 +43,17 @@ export const CODE_PAGE_TEMPLATE = `<!doctype html>
     h1 { font-size: 1.25rem; margin: 0 0 1rem; }
     h1, p { overflow-wrap: anywhere; }
     label { display: block; font-weight: 500; margin: 1rem 0 0.35rem; }
+    /* The whole code stays visible at phone widths: it wraps anywhere and is never clipped. */
     #code {
+      display: block; resize: none; overflow-wrap: anywhere; word-break: break-all;
       box-sizing: border-box; width: 100%; min-height: 2.75rem; padding: 0.5rem 0.75rem;
       font: 0.9rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       background: var(--field-bg); color: var(--text);
       border: 1px solid var(--field-border); border-radius: 6px;
     }
+    #copy:not([hidden]) { display: block; }
     #copy {
-      display: block; width: 100%; min-height: 2.75rem; margin: 0.75rem 0 0; padding: 0.6rem 1rem;
+      width: 100%; min-height: 2.75rem; margin: 0.75rem 0 0; padding: 0.6rem 1rem;
       font: inherit; font-weight: 500; border: 0; border-radius: 6px;
       background: #0a66ff; color: #fff; cursor: pointer;
     }
@@ -71,8 +74,8 @@ ${HADRON_HEADER_STYLE}
     <h1>Copy your sign-in code</h1>
     <p>Paste this code where <strong>{{clientName}}</strong> is waiting for it. It works once and expires in 10 minutes.</p>
     <label for="code">Sign-in code</label>
-    <input id="code" type="text" readonly autocomplete="off" spellcheck="false" value="{{code}}">
-    <button id="copy" type="button">Copy code</button>
+    <textarea id="code" rows="5" readonly autocomplete="off" spellcheck="false">{{code}}</textarea>
+    <button id="copy" type="button" hidden>Copy code</button>
     <p id="status" role="status" aria-live="polite"></p>
     <p class="warn"><strong>Do not share this code.</strong> Use it only if you started this sign-in yourself. No one from Hadron will ask you for it.</p>
   </main>
@@ -80,8 +83,10 @@ ${HADRON_HEADER_STYLE}
     (function () {
       var field = document.getElementById('code');
       var status = document.getElementById('status');
+      var copy = document.getElementById('copy');
+      copy.hidden = false;
       field.addEventListener('focus', function () { field.select(); });
-      document.getElementById('copy').addEventListener('click', function () {
+      copy.addEventListener('click', function () {
         function byHand() { field.focus(); field.select(); status.textContent = 'Press Ctrl+C or Cmd+C to copy the code.'; }
         if (!navigator.clipboard) { byHand(); return; }
         navigator.clipboard.writeText(field.value).then(function () { status.textContent = 'Code copied.'; }, byHand);

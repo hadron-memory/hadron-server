@@ -79,7 +79,7 @@ async function consent(extra: Params, challenge: string, over: Params = {}, as =
   });
   return { html, post };
 }
-const shownCode = (html: string) => parseHTML(html).document.querySelector('#code')?.getAttribute('value') ?? '';
+const shownCode = (html: string) => parseHTML(html).document.querySelector('#code')?.textContent ?? '';
 /** A pending authorization finished through the code page. */
 async function pending(as = cookie) {
   const { verifier, challenge } = pkce();
@@ -133,7 +133,11 @@ describe('#5125 authorize', () => {
     const { document } = parseHTML(page);
     const code = shownCode(page);
     expect(code).toMatch(/^[0-9a-f]{16}\.[0-9a-f]{64}$/);
-    expect(document.querySelector('button#copy')).not.toBeNull();
+    // A wrapping field shows the whole 81-character code on a phone; the button exists only for a reader with script.
+    expect(document.querySelector('#code')!.tagName).toBe('TEXTAREA');
+    expect(document.querySelector('#code')!.hasAttribute('readonly')).toBe(true);
+    expect(document.querySelector('button#copy')!.hasAttribute('hidden')).toBe(true);
+    expect(document.querySelector('script')!.textContent).toContain('copy.hidden = false');
     expect(page).toContain('Code &lt;Entry&gt; CLI');
     const nonce = document.querySelector('script')!.getAttribute('nonce')!;
     const csp = post.headers.get('content-security-policy')!;
