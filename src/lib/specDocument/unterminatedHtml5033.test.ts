@@ -434,6 +434,14 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('</b >')).toBe('</b >');
     expect(escapeUnterminatedHtml('</b x=y>')).toBe('</b x=y>');
   });
+  it('a tag whose name holds `=`, `<` or a quote is ambiguous (a browser reads a name, htmlparser2 fails on it): it is escaped', () => {
+    expect(escapeUnterminatedHtml("<pre=</=='<plaintext>\n")).toBe("&lt;pre=</=='<plaintext>\n");
+    expect(escapeUnterminatedHtml('x <a=b> y')).toBe('x &lt;a=b> y');
+    expect(escapeUnterminatedHtml("x <a'b> y")).toBe("x &lt;a'b> y");
+    expect(escapeUnterminatedHtml('x <a<b> y')).toBe('x &lt;a<b> y');
+    // Names that real pages use are untouched.
+    for (const body of ['x <o:p> y', 'x <svg:rect/> y', 'x <my-element a="b"> y', 'x <h1>t</h1>', 'x <a b="c">d</a>']) expect(escapeUnterminatedHtml(body), body).toBe(body);
+  });
   it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag', () => {
     expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');
     expect(escapeUnterminatedHtml('<b y= <template>')).toBe('<b y= <template>'); // one complete tag: the value is `<template`
