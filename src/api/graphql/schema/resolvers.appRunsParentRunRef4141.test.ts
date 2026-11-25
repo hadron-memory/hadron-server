@@ -34,8 +34,8 @@ async function exec(query: string, variables: Record<string, unknown>, ctx: Part
   if (out.body.kind !== 'single') throw new Error('incremental response');
   return out.body.singleResult;
 }
-const LIST = 'query($app: String, $org: String, $p: ID) { appRuns(appRef: $app, orgRef: $org, parentRunRef: $p) { total items { id } } }';
-const LIST_ALL = 'query($app: String) { appRuns(appRef: $app) { total items { id } } }';
+const LIST = 'query($app: ID, $org: ID, $p: ID) { appRuns(appRef: $app, orgRef: $org, parentRunRef: $p) { total items { id } } }';
+const LIST_ALL = 'query($app: ID) { appRuns(appRef: $app) { total items { id } } }';
 const list = (vars: Record<string, unknown>, ctx: Partial<Context> = { roles: ['ADMIN'] }) => exec(LIST, { app: appUrn, ...vars }, ctx);
 const ids = (r: { data?: unknown }) => ((r.data as any).appRuns.items as { id: string }[]).map((i) => i.id).sort();
 const code = (r: { errors?: readonly { extensions?: Record<string, unknown> }[] }) => r.errors?.[0]?.extensions?.code;
@@ -164,7 +164,7 @@ describe('#4141 appRuns(parentRunRef:)', () => {
   it('composes AND with statuses', async () => {
     const done = await newRun(appId, parentId);
     await db.appRun.update({ where: { id: done }, data: { status: 'COMPLETED' } });
-    const q = 'query($app: String, $p: ID, $s: [AppRunStatus!]) { appRuns(appRef: $app, parentRunRef: $p, statuses: $s) { total items { id } } }';
+    const q = 'query($app: ID, $p: ID, $s: [AppRunStatus!]) { appRuns(appRef: $app, parentRunRef: $p, statuses: $s) { total items { id } } }';
     const run = async (s: string[]) => ids(await exec(q, { app: appUrn, p: parentId, s }, { roles: ['ADMIN'] }));
     expect(await run(['COMPLETED'])).toEqual([done]);
     expect(await run(['RUNNING'])).toEqual([childId]);
@@ -220,7 +220,7 @@ describe('#4141 appRuns(parentRunRef:)', () => {
   });
 
   it('the old `parentRunId` argument no longer validates', async () => {
-    const out = await exec('query($a: String, $p: ID) { appRuns(appRef: $a, parentRunId: $p) { total } }', { a: appUrn, p: parentId }, { roles: ['ADMIN'] });
+    const out = await exec('query($a: ID, $p: ID) { appRuns(appRef: $a, parentRunId: $p) { total } }', { a: appUrn, p: parentId }, { roles: ['ADMIN'] });
     expect(code(out)).toBe('GRAPHQL_VALIDATION_FAILED');
     expect(out.errors?.[0]?.message).toContain('Unknown argument "parentRunId"');
     expect(await exec(LIST_ALL, { app: appUrn }, { roles: ['ADMIN'] })).toMatchObject({ data: { appRuns: { total: 4 } } });

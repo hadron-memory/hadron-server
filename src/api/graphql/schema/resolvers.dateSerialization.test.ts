@@ -257,7 +257,7 @@ describe('#205 e2e — spec-040 headless types return ISO dates', () => {
       },
     });
     const r = await run(
-      `query ($a: String) { appRuns(appRef: $a) { items { startedAt finishedAt createdAt } } }`,
+      `query ($a: ID) { appRuns(appRef: $a) { items { startedAt finishedAt createdAt } } }`,
       ctx(),
       { a: app.id },
     );
