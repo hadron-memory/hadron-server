@@ -351,7 +351,9 @@ export const typeDefs = `#graphql
     and \`scope.droppedCount\` says how many), stopped_early (#2772: a vector
     or hybrid search ran out of its work budget before the page was complete;
     #4779: also when a hybrid page's fused order could not be certified inside
-    the work budget or the keyword leg's 2000-row ceiling, or when a page that
+    the work budget or the keyword leg's 2000-row ceiling (#4994: including
+    when, among more than 20000 eligible vectors, a hit whose vector rank was
+    needed lies past the first 1000 nodes of the vector ranking), or when a page that
     hydration left short (or filled past the depth its ranking was certified
     to) was still incomplete after its one deeper re-ranking (chunk
     granularity flags a short page without re-ranking);
