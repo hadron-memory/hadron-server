@@ -7,6 +7,7 @@ import { faultRequestId, internalFaultEnvelope, internalFaultText, logInternalFa
 import { textResult } from './textResult.js';
 import { attestationRefusalResult } from '../lib/authoringAttestation.js';
 import { isContentResolutionLimitError, type ContentResolutionLimitError } from '../lib/includes/resolutionBudget.js';
+import { OwnerLimitReachedError } from '../lib/ownerLimits/errors.js';
 
 // Backstop for wrappers that copied the diagnostic and discarded its class.
 // Use distinctive ORM signatures, not broad words like "query" or "database",
@@ -83,6 +84,15 @@ export function resolutionLimitResult(error: ContentResolutionLimitError) {
   } } };
 }
 
+/**
+ * #5015 (cor:acl:150:04): an owner-limit refusal reaches every MCP client as `[owner_limit_reached] <message>`, whichever
+ * tool's door raised it. The message is already in the form for this caller (#5009: no number for a writer who may not
+ * manage the owner), so nothing here adds or removes detail.
+ */
+export function ownerLimitResult(error: OwnerLimitReachedError) {
+  return refusalResult(`[owner_limit_reached] ${error.message}`);
+}
+
 function supersededResult(error: import('graphql').GraphQLError) {
   return { ...refusalResult('Session superseded.'), structuredContent: { error: sessionSupersededEnvelope(error) } };
 }
@@ -101,6 +111,7 @@ export function toolErrorResult(
   if (isSessionSupersededError(error)) return supersededResult(error);
   if (error instanceof RateLimited) return rateLimitedResult(error);
   if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
+  if (error instanceof OwnerLimitReachedError) return ownerLimitResult(error);
   const attestation = attestationRefusalResult(error);
   if (attestation) return attestation;
   if (containsDatabaseDiagnostic(error) || !isTrustedRefusal(error)) return toolFaultResult(error, site);
@@ -119,6 +130,7 @@ export function withToolErrorBoundary(
       if (isSessionSupersededError(error)) return supersededResult(error);
       if (error instanceof RateLimited) return rateLimitedResult(error);
       if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
+      if (error instanceof OwnerLimitReachedError) return ownerLimitResult(error);
       const attestation = attestationRefusalResult(error);
       if (attestation) return attestation;
       // A typed refusal retains the SDK's existing error handling; any other throw is a fault.

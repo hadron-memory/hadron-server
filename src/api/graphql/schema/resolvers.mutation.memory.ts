@@ -1,5 +1,8 @@
 import { encryptChatEngineStateWithKey, buildEngineStateIncompleteError } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { softDeleteMemoryAssets } from '../../../lib/asset/memoryDelete.js';
+import { requireOwnerHeadroom } from '../../../lib/ownerLimits/gate.js';
+import { ownerLimitCaller } from '../../../lib/ownerLimits/nodes.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../../../integrations/github/syncNotAttempted.js';
 import { applyOrgDefaultsAtCreation } from './resolvers.memoryConfigOrgDefault.js';
@@ -125,7 +128,6 @@ import { validateMemorySource, GitSourceError } from '../../../lib/gitSource.js'
 import { validateGitBranch, GitRefError } from '../../../lib/gitRef.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 import { recordNodeUsage } from '../../../lib/usageRecorder.js';
-import { createNode } from '../../../controller/operations/createNode.js';
 import {
   ALL_NODE_MERGE_FIELDS,
   type NodeMergeField,
@@ -491,6 +493,7 @@ export const memoryMutations = {
           deleteSourceMem,
           editor,
           principal: ctx,
+          ownerLimitCaller: ownerLimitCaller(ctx),
         });
       } catch (e) {
         // Surface the same typed error mergeNodes does, with the offending loc.
@@ -708,9 +711,10 @@ export const memoryMutations = {
         );
       }
 
-      // #2730: the root node's loc is `name`; refuse an unprojectable one here,
-      // after the gates and before ensureUserHandle, the tombstone reclaim or
-      // any create.
+      // #2730: refuse an unprojectable name here, after the gates and before ensureUserHandle,
+      // the tombstone reclaim or any create. Kept unchanged by #3952 ("touch nothing else"): no root node
+      // is made from the name any more, so this is now stricter than creation needs; relaxing it and
+      // renaming assertMemoryRootLoc is a follow-up (#5149).
       assertMemoryRootLoc(name);
       assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
 
@@ -745,6 +749,8 @@ export const memoryMutations = {
       // Memory is never persisted in a zero-owner state (which would
       // be effectively unreachable to anyone, including the creator).
       const memory = await withFsProjectionRollback(() => ctx.db.$transaction(async (tx) => {
+        // #5016: every class this door creates is free-standing and counts; the owner is the row's own, the caller already authorized.
+        await requireOwnerHeadroom(tx, { owner: userOwned ? { userId: ctx.userId! } : { organizationId: resolvedOrgId! }, key: 'memories', caller: ctx.userId ? { userId: ctx.userId } : null });
         const created = await tx.memory.create({
           data: {
             id: generateId(),
@@ -828,19 +834,13 @@ export const memoryMutations = {
             },
           });
         }
-        // #2728: the root node is created in the Memory's own transaction, so a root failure rolls the Memory
-        // (and a group's owner row) back instead of leaving a rootless row a retry would duplicate.
-        const rootName = name.split(':').pop() ?? name;
-        await createNode({
-          memoryId: created.id,
-          loc: name,
-          name: rootName,
-          description: 'Root node for this memory.',
-        }, tx);
+        // #3952 (R11): a new memory has no root node. It was built from the display name, so a name with a space
+        // gave a loc no client can address (D-2026-05-11-013) and an unapproved node that blocked the first mint
+        // (cor:dmo:120:06/:07). Existing roots are left alone (R12).
         // #3426 (C3): the ONE site where the org's default templates are applied — an org-owned knowledge or group memory
         // created here. Not personal/private (the owner alone manages those), not user-owned, and no other creation path
         // (App, install, agent, chat, worker, clone, extract). No flag opts a caller out, so `source` changes nothing.
-        // Inside this transaction: a failure rolls the memory, its root node and its rules back together.
+        // Inside this transaction: a failure rolls the memory and its rules back together.
         if (resolvedOrgId && (requestedClass === 'knowledge' || requestedClass === 'group')) {
           await applyOrgDefaultsAtCreation(tx, { memoryId: created.id, orgId: resolvedOrgId, actor: ctx.userId ?? ctx.clientId ?? 'system' });
         }
@@ -1417,10 +1417,13 @@ export const memoryMutations = {
         if (row && row.deleted_at === null) {
           await assertNoMintedCorpusRemoval(tx, resolvedId, 'delete the corpus', { includeTombstones: false });
         }
-        await tx.memory.updateMany({
+        const deletedAt = new Date();
+        const { count } = await tx.memory.updateMany({
           where: { id: resolvedId, deletedAt: null },
-          data: { deletedAt: new Date() },
+          data: { deletedAt },
         });
+        // #5124: the memory's files go with it, at the same instant, so the janitor reclaims them. A re-delete touches nothing.
+        if (count === 1) await softDeleteMemoryAssets(tx, resolvedId, deletedAt);
       });
       return true;
     },
@@ -1566,6 +1569,7 @@ export const memoryMutations = {
 
       const isUserOwned = source.class === 'personal' || source.class === 'private';
       const { memoryId } = await cloneMemoryGraph(ctx.db, {
+        ownerLimitCaller: ownerLimitCaller(ctx),
         sourceMemoryId: source.id,
         name,
         newUrn,
@@ -1652,7 +1656,9 @@ export const memoryMutations = {
       }
 
       // A move must leave at least one live node OUTSIDE the subtree, else it
-      // empties the source (and orphans its root). Checked by node set, NOT by
+      // empties the source (and orphans its root, where it has one). Since #3952 a
+      // new memory has no root, so its only subtree can no longer be moved out whole;
+      // that refusal is kept on purpose (#5148 asks whether to allow it). Checked by node set, NOT by
       // `parent.loc === source.name`: Memory.name is mutable (updateMemory) and
       // a rename does not rename the root node loc, so a name-based guard is
       // wrong both ways (misses a renamed root, false-flags a node at the new
@@ -1791,6 +1797,7 @@ export const memoryMutations = {
       // slug (a valid loc), and the display name is the slug the caller chose.
       const vectorIndexEnabled = newClass === 'knowledge';
       const { memoryId } = await extractParentNodeGraph(ctx.db, {
+        ownerLimitCaller: ownerLimitCaller(ctx),
         sourceMemoryId: source.id,
         parentLoc: parent.loc,
         newUrn,
@@ -2223,7 +2230,7 @@ export const memoryMutations = {
       });
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory, 'CONTRIBUTOR'));
 
-      const result = await syncGraphFromGithub(memory);
+      const result = await syncGraphFromGithub(memory, { ownerLimitCaller: ownerLimitCaller(ctx) });
       if (result.notAttemptedReason) {
         throw new GraphQLError(syncNotAttemptedMessage(result.notAttemptedReason), {
           extensions: { code: SYNC_NOT_ATTEMPTED, reason: result.notAttemptedReason },
@@ -2232,6 +2239,8 @@ export const memoryMutations = {
       // `fault` is judged on its own: an exception with an empty message must not read as success.
       if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) {
+        // #5015 — the owner-limit refusal in this caller's own form, extensions included (the stored record keeps the no-number form).
+        if (result.ownerLimitError) throw result.ownerLimitError;
         if (result.errorCode) throw new GraphQLError(result.error, { extensions: { code: result.errorCode } });
         // #1789: the text is the stored `Memory.syncError` the caller can already read, so it keeps its text; it needs a code
         // of its own to be a typed refusal rather than a fault.

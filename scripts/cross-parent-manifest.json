@@ -79,6 +79,7 @@
     "NodeApprovalReceipt": "envelope",
     "LintWarning": "value",
     "LintWarningPage": "envelope",
+    "SpecLintFinding": "value",
     "ApproveMemoryNodesResult": "envelope",
     "QuestionOption": "value",
     "QuestionRecommendation": "value",

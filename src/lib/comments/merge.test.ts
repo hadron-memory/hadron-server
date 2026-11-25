@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb } from '../../test/helpers.js';
+import { cleanDb, seedRootNode } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { mergeMemoryGraph } from '../../controller/operations/mergeMemories.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
@@ -28,7 +28,7 @@ const errorOf = async (p: Promise<unknown>): Promise<GraphQLError> => {
 };
 // Batch and page size 1: every relocated node commits in its own transaction,
 // so a thread that didn't travel WITH its target would break the invariants.
-const merge = (fields: string[] = []) => mergeMemoryGraph(db, {
+const merge = (fields: string[] = []) => mergeMemoryGraph(db, { ownerLimitCaller: null,
   sourceMemoryId: src.id, targetMemoryId: dst.id, fields: new Set(fields as never[]),
   deleteSourceMem: false, editor: { userId: admin.id, info: null, workerId: null, agentId: null } as never,
   batchSize: 1, classifyPageSize: 1,
@@ -42,6 +42,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   src = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'merge-src' }, as());
   dst = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'merge-dst' }, as());
+  await seedRootNode(db, src.id, 'merge-src'); await seedRootNode(db, dst.id, 'merge-dst');
 });
 
 describe('mergeMemories carries threads (cor:dmo:110:02)', () => {

@@ -1504,6 +1504,36 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_memory_node_total_after_delete",
+      "kind": "function",
+      "file": "memory-node-total-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_memory_node_total_after_insert",
+      "kind": "function",
+      "file": "memory-node-total-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_memory_node_total_after_truncate",
+      "kind": "function",
+      "file": "memory-node-total-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_memory_node_total_after_update",
+      "kind": "function",
+      "file": "memory-node-total-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_memory_node_total_fold",
+      "kind": "function",
+      "file": "memory-node-total-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_node_content_change",
       "kind": "function",
       "file": "signing-invariants.sql",
@@ -1651,6 +1681,12 @@
       "name": "hadron_task_end_releases",
       "kind": "function",
       "file": "task-blocker-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_tsv_unclosed_comment",
+      "kind": "function",
+      "file": "post-push.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
@@ -2620,6 +2656,12 @@
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
+      "name": "memory_node_pending.memory_node_pending_fold",
+      "kind": "trigger",
+      "file": "memory-node-total-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "model_family_availability.worker_reference_fence_1162",
       "kind": "trigger",
       "file": "worker-reference-invariants.sql",
@@ -2677,6 +2719,30 @@
       "name": "nodes.git_mirror_node_remove_soft_delete",
       "kind": "trigger",
       "file": "git-mirror-obligation-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.memory_node_total_delete",
+      "kind": "trigger",
+      "file": "memory-node-total-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.memory_node_total_insert",
+      "kind": "trigger",
+      "file": "memory-node-total-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.memory_node_total_truncate",
+      "kind": "trigger",
+      "file": "memory-node-total-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.memory_node_total_update",
+      "kind": "trigger",
+      "file": "memory-node-total-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {

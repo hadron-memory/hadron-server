@@ -351,7 +351,9 @@ export const typeDefs = `#graphql
     and \`scope.droppedCount\` says how many), stopped_early (#2772: a vector
     or hybrid search ran out of its work budget before the page was complete;
     #4779: also when a hybrid page's fused order could not be certified inside
-    the work budget or the keyword leg's 2000-row ceiling, or when a page that
+    the work budget or the keyword leg's 2000-row ceiling (#4994: including
+    when, among more than 20000 eligible vectors, a hit whose vector rank was
+    needed lies past the first 1000 nodes of the vector ranking), or when a page that
     hydration left short (or filled past the depth its ranking was certified
     to) was still incomplete after its one deeper re-ranking (chunk
     granularity flags a short page without re-ranking);
@@ -1547,6 +1549,8 @@ export const typeDefs = `#graphql
     mintStatus: NodeMintStatus!
     "#2048 (hrn:node:hadronmemory.com:specs:cor:agt:040:13) — link lint for a boot-prompt source: the warnings that hold for this node as it is now, read as the caller (a target the caller cannot read is a position-only BROKEN_INCLUDE). An empty page is a real answer; null means the warnings are unavailable (a fault, or a compiled boot prompt, whose warnings read its recorded provenance). Lint never blocks a write, and nothing is stored or pushed. Pages default to 50 and clamp at 100."
     lintWarnings(first: Int = 50, after: String): LintWarningPage
+    "#5109 (server half of hadron-cli#3127) — spec content lint, computed on read from this node's stored text and never stored: a Rule spec with no Why We Need This Rule section, or an empty one, is an ERROR; a sentence above the divider line that restricts something and gives no reason (no because, so that, since or why in its paragraph, and no link to a ruling or a Why section) is a WARNING that names the sentence. A node that is not a spec, and a retired one, have no findings; an empty list is a real answer. Null means the node's text was not loaded for this read. Read under the node's own read gate; at most 200 findings."
+    specLint: [SpecLintFinding!]
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:06) — the node's signatures and their derived states, current signers first. Batch-loaded on list and search reads. An encrypted node reads NOT_APPLICABLE and lists none."
     signatureStatus: NodeSignatureStatus!
     "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — the node's signing requests, newest first, including ended ones (#10019). state filters on the effective state (an open request past its deadline is EXPIRED). first: 1–100, default 20."
@@ -2651,6 +2655,35 @@ export const typeDefs = `#graphql
     approval: NodeApproval!
     "#2048 — the link-lint warnings for this node as they hold now; the same data as Node.lintWarnings. Approving never blocks on a warning."
     lintWarnings(first: Int = 50, after: String): LintWarningPage
+  }
+
+  "#5109 — which spec lint check a finding comes from."
+  enum SpecLintRule {
+    "A Rule spec has no Why We Need This Rule section."
+    RULE_WHY_MISSING
+    "A Rule spec has the section, but it is empty or only whitespace."
+    RULE_WHY_EMPTY
+    "A sentence restricts something and gives no reason in its paragraph or through a link to a ruling or a Why section."
+    LIMIT_WITHOUT_REASON
+  }
+
+  "#5109 — how serious a spec lint finding is. The sentence check is a WARNING for now (it has false positives)."
+  enum SpecLintSeverity {
+    ERROR
+    WARNING
+  }
+
+  "#5109 — one spec lint finding."
+  type SpecLintFinding {
+    "The spec's citation (its loc)."
+    citation: String!
+    rule: SpecLintRule!
+    severity: SpecLintSeverity!
+    message: String!
+    "The offending sentence, for LIMIT_WITHOUT_REASON; null for a structural finding."
+    sentence: String
+    "1-based line of the sentence's paragraph or of the Why heading; null when there is none."
+    line: Int
   }
 
   "#2048 (hrn:node:hadronmemory.com:specs:cor:agt:040:13) — what link lint warns about."
@@ -9940,7 +9973,7 @@ export const typeDefs = `#graphql
     teamStopSignals(appRef: String!, worker: String, includeEnded: Boolean, first: Int, after: String): StopSignalPage!
     """
     #2017 (S1) — the ready-to-deliver batches of the workers registered on the calling host (hrn:node:hadronmemory.com:specs:cor:agt:080:22, :26).
-    An own live session reads only its bound worker. #5000: a session past its idle window but inside its App's dormancy period is LAPSED, not ended, and its holder's own read resumes it (same session id); a refusal is SESSION_NOT_LIVE with extensions.reason OTHER_SESSION_LIVE or NOT_OWNER (not the caller's own session to resume, or the caller can no longer drive the App); an ended or dormant session is refused earlier, at the session binding, with the generic message. A host App key needs attention:deliver AND host:operate;
+    An own live session reads only its bound worker. #5000: a session past its idle window but inside its App's dormancy period is LAPSED, not ended, and its holder's own read resumes it (same session id); a refusal is SESSION_NOT_LIVE with extensions.reason OTHER_SESSION_LIVE, LIVENESS_UNKNOWN (too many open sessions on the worker to check them all, and none of those checked is live) or NOT_OWNER (not the caller's own session to resume, or the caller can no longer drive the App); an ended or dormant session is refused earlier, at the session binding, with the generic message. A host App key needs attention:deliver AND host:operate;
     the host is the key's, the request names none, and a worker not on that host is absent. The text is written by the server and typed unchanged. Reading moves nothing; acknowledge the batch ids.
     """
     deliveryBatches(appRef: String!, workerRefs: [String!], first: Int, after: String): DeliveryBatchPage!
@@ -11358,6 +11391,11 @@ export const typeDefs = `#graphql
     An Agent's revisions, newest first, with the slot limit, the highest slot used and the saves left (#4488).
     Read by whoever may restore a revision: the Agent's manager.
 
+    Error codes (extensions.code): AGENT_NOT_FOUND (no such Agent, or one the
+    caller cannot read), FORBIDDEN (a reader who does not manage the Agent),
+    AGENT_HAS_NO_SYSTEM_MEMORY (the Agent has no system memory, so it has no
+    revisions to list).
+
     Accepts the entity's ID or URN.
     """
     agentRevisions(agentRef: ID!): AgentRevisionList!
@@ -12478,10 +12516,14 @@ export const typeDefs = `#graphql
 
     sortBy / sortDir (#833) order the whole result set server-side, so a client
     table is no longer limited to sorting the page it happens to hold.
+
+    appRef, orgRef and parentRunRef share one scalar, ID (#5050,
+    hrn:node:hadronmemory.com:specs:cor:api:140:01). appRef and orgRef were String until #5050, so a
+    document that declares either variable as String no longer validates; declare it ID.
     """
     appRuns(
-      appRef: String
-      orgRef: String
+      appRef: ID
+      orgRef: ID
       status: AppRunStatus @deprecated(reason: "Use statuses (#836) - a single value cannot express PENDING-or-RUNNING.")
       statuses: [AppRunStatus!]
       parentRunRef: ID
@@ -14540,7 +14582,7 @@ export const typeDefs = `#graphql
       is per node, and every new node starts unminted, with draft rights, in
       any memory.
       """
-      draftCorpus: Boolean
+      draftCorpus: Boolean @deprecated(reason: "Accepted and ignored since #1591: a memory's draft or minted state is derived from its nodes.")
     ): Memory!
 
     """
@@ -16354,7 +16396,9 @@ export const typeDefs = `#graphql
     Error codes (extensions.code): TEAM_CHAT_BODY_TOO_LARGE, TEAM_CHAT_DUPLICATE,
     TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_ENDED,
     SESSION_NOT_LIVE (dormant or ineligible for lapsed-session resume; extensions.reason
-    names the failed condition: DORMANT, ENDED, OTHER_SESSION_LIVE or NOT_OWNER),
+    names the failed condition: DORMANT, ENDED, OTHER_SESSION_LIVE, LIVENESS_UNKNOWN
+    (too many open sessions on the worker to check them all, and none of those checked
+    is live) or NOT_OWNER),
     SESSION_NOT_WORKER_BOUND, CHANNEL_HOST_NOT_WRITABLE, WORKER_RETIRED,
     SESSION_EXPIRED (encrypted team memory without an active session key),
     TEAM_AGENT_NOT_FOUND / TEAM_AGENT_AMBIGUOUS (first-post bootstrap could

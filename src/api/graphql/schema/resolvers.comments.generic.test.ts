@@ -2,6 +2,7 @@
  * #1606 — generic paths never create, convert, edit, move or remove a comment
  * (cor:dmo:110:04), and a target's lifecycle carries its threads (110:02/05).
  */
+import { restoreGuardSearchPath } from '../../../test/restoreGuardSearchPath5096.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError, buildSchema, graphql } from 'graphql';
 import { typeDefs } from './typeDefs.js';
@@ -344,6 +345,7 @@ describe('#1663 review — encrypted memories (local P2-2)', () => {
       // ones, as the later migrations do in prod, so no later test file on
       // this worker's database runs against a stale check (#1935).
       await client.query(readFileSync(new URL('../../../../prisma/comment-invariants.sql', import.meta.url), 'utf8'));
+      await restoreGuardSearchPath(client); // #5096: and the pinned search_path the replay reset
     } finally { await client.end(); }
     expect((await db.edge.findUniqueOrThrow({ where: { id: edge.id } })).anchorApprovalHash).toBe(edge.anchorApprovalHash);
     await expect(db.$executeRaw`UPDATE edges SET anchor_approval_hash = NULL WHERE id = ${edge.id}`)

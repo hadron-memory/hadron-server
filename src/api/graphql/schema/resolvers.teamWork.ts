@@ -806,18 +806,11 @@ export const teamWorkMutations = {
       // #664/#752: append under the ancestor-path lock so a concurrent
       // non-recursive delete of the root can't orphan the record.
       await lockAncestorsForCreateMany(tx, root.memoryId, [loc]);
-      await tx.node.create({
-        data: {
-          id: recordId,
-          memoryId: root.memoryId,
-          loc,
-          name: `${workKind} ${actionToken} ${canonicalRef}`,
-          nodeType: 'record',
-          objectType: WORKLOG_OBJECT_TYPE,
-          properties: properties as InputJsonValue,
-          createdBy: ctx.userId ?? null,
-        },
-      });
+      // #5119: the Session row is taken BEFORE the node insert, the order the team-chat post's resume takes them in. Both writes name one
+      // worker, and the #1162 worker fence (taken by the Session update's trigger and by the node insert's) is held to commit, so the
+      // opposite order (fence by the node, then the Session row) deadlocked with a post that resumes this session (40P01). Still ONE
+      // transaction (cor:agt:020:05): only the order changed. The late-record rule below (a lapsed session is not revived) is a code
+      // invariant of this door (#1543), not spec text, and is unchanged.
       // kind:pr convenience (#947, decided lean): denormalize the latest-wins
       // Session.prNumber so `team session log --pr` stays one server call.
       // Display-only (cor:agt:020:03) — the worklog row above is the record.
@@ -841,6 +834,18 @@ export const teamWorkMutations = {
           });
         }
       }
+      await tx.node.create({
+        data: {
+          id: recordId,
+          memoryId: root.memoryId,
+          loc,
+          name: `${workKind} ${actionToken} ${canonicalRef}`,
+          nodeType: 'record',
+          objectType: WORKLOG_OBJECT_TYPE,
+          properties: properties as InputJsonValue,
+          createdBy: ctx.userId ?? null,
+        },
+      });
     });
 
     // #1061 — a worklog record IS a node, so appending one is a write. Like

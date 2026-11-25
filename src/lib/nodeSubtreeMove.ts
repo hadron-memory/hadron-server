@@ -84,6 +84,7 @@ import {
   type SnapshotSourceNode,
   type SnapshotEditor,
 } from './nodeRevisionSnapshot.js';
+import { requireNodeHeadroom, sameMemoryOwner } from './ownerLimits/nodes.js';
 
 /** A node OUTSIDE the moving set already occupies a destination slot. */
 export class SubtreeMoveCollisionError extends Error {
@@ -322,6 +323,13 @@ export async function moveNodeSubtree(
      * server-authored callers.
      */
     principal?: RoleWriterPrincipal;
+    /**
+     * #5015 (cor:acl:150:04) — the person whose act this move is, for the owner-limit refusal's form (null for an
+     * unattended or impersonated caller). REQUIRED so a new caller states it. A move into a memory of ANOTHER owner adds
+     * the subtree's nodes and its carried live comments to that owner and is refused at its `nodes` limit; a move inside
+     * one owner adds nothing and is never judged.
+     */
+    ownerLimitCaller: { userId: string } | null;
   },
 ): Promise<MoveNodeSubtreeResult> {
   const { source, destLoc, editor, renameSourceLeaf, renameAuthoring } = opts;
@@ -733,6 +741,13 @@ export async function moveNodeSubtree(
         role: renamed.role, runnable: renamed.isRunnable, mintHuman: true, authoredChange: true,
       }, renameAuthoring ?? attestedAuthoring(null))
     : null;
+  // #5015 — a move across owners adds the subtree and its carried live comments to the destination's owner. Every row
+  // and both memory rows are locked by now (the memories FOR NO KEY UPDATE, so neither owner can change), and the
+  // owner-limit key is the move's last lock (gate ruling 5); a refusal rolls back the history written above.
+  if (crossMemory && !opts.planOnly && !(await sameMemoryOwner(tx, srcMemoryId, destMemoryId))) {
+    const amount = BigInt(subtree.length + carriedComments.filter((c) => c.node.deletedAt == null).length);
+    await requireNodeHeadroom(tx, { memoryId: destMemoryId, amount, caller: opts.ownerLimitCaller });
+  }
   for (const n of subtree) {
     await tx.node.update({ where: { id: n.id }, data: { loc: `__moving-${n.id}` } });
   }

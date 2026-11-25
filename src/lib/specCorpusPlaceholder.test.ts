@@ -182,7 +182,7 @@ describe('copies and merges keep a placeholder a placeholder (#1591; was refused
 
   it('merges a placeholder into another memory; it relocates, still a placeholder', async () => {
     await db.node.create({ data: { id: generateId(), memoryId: draft.id, loc: 'pas:095:01', name: 'x', isPlaceholder: true } });
-    await mergeMemoryGraph(db, {
+    await mergeMemoryGraph(db, { ownerLimitCaller: null,
       sourceMemoryId: draft.id, targetMemoryId: minted.id, fields: new Set(['CONTENT', 'EDGES']),
       deleteSourceMem: false, editor: { userId: admin.id }, batchSize: 1, classifyPageSize: 1,
     });
@@ -254,7 +254,7 @@ describe('every content write fills a placeholder (@codex P2 on #1452)', () => {
       id: generateId(), memoryId: source.id, loc: 'pas:121:01', name: 'Written spec',
       nodeType: 'info', content: 'The real rule.',
     } });
-    await mergeMemoryGraph(db, {
+    await mergeMemoryGraph(db, { ownerLimitCaller: null,
       sourceMemoryId: source.id, targetMemoryId: draft.id,
       fields: new Set(['CONTENT']), deleteSourceMem: false, editor: { userId: admin.id },
     });

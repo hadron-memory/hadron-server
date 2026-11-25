@@ -4,7 +4,7 @@ import { GraphQLError } from 'graphql';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, seedRootNode } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../mcp/server.js';
@@ -52,6 +52,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
   memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs' }, as());
+  await seedRootNode(db, memory.id, 'specs');
 });
 
 describe('mintMemoryNodes (#1591)', () => {

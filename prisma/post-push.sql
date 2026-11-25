@@ -472,15 +472,32 @@ ALTER TABLE principals
 -- which a generated column rejects; the wrapper is the standard workaround.
 -- IF NOT EXISTS (structural, like the HNSW index); changing the expression or
 -- weights needs a dedicated DROP+ADD migration — this won't update it in place.
+-- #5137: an unclosed `<!--` makes the default parser quadratic (every opener rescans to the end of the text for a `-->`
+-- that is not there: 16 KB of `<!--` is about 200 ms, 49 KB over a second, and it keeps burning after the client gives up).
+-- An opener with no `-->` after it is not a comment to the parser: it indexes exactly like `<! -` (verified over 400000
+-- random strings drawn from `<!--`, `-->`, `<!-`, `<!---`, `-5`, `<a `, `&amp;` and words: identical tsvectors). The
+-- replacement keeps the length and cannot re-form an opener with a following `-` (`<!-` would: `<!---` -> `<!--`, still quadratic, #5140
+-- local P1). So every `<!--` after the LAST `-->` is rewritten to `<! -` before parsing; a `<!--` before the last `-->` finds its closer at once and stays.
+-- Same tokens, weights and positions, so the search signal does not change; no refusal; no row is rewritten.
+CREATE OR REPLACE FUNCTION hadron_tsv_unclosed_comment(t text)
+RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path = public, pg_temp AS $$
+  SELECT CASE
+    WHEN position('<!--' in t) = 0 THEN t
+    WHEN position('-->' in t) = 0 THEN replace(t, '<!--', '<! -')
+    ELSE left(t, length(t) - position('>--' in reverse(t)) - 1)
+      || replace(right(t, position('>--' in reverse(t)) + 1), '<!--', '<! -')
+  END
+$$;
+
 CREATE OR REPLACE FUNCTION hadron_nodes_tsv(
   p_name text, p_alias text, p_loc text, p_tags text[],
   p_description text, p_abstract text, p_content text, p_properties text, p_data text
-) RETURNS tsvector LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+) RETURNS tsvector LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path = public, pg_temp AS $$
   SELECT
-    setweight(to_tsvector('english', coalesce(p_name, '') || ' ' || coalesce(p_alias, '')), 'A') ||
-    setweight(to_tsvector('english', coalesce(p_loc, '') || ' ' || array_to_string(coalesce(p_tags, ARRAY[]::text[]), ' ')), 'B') ||
-    setweight(to_tsvector('english', coalesce(p_description, '') || ' ' || coalesce(p_abstract, '')), 'C') ||
-    setweight(to_tsvector('english', left(coalesce(p_content, '') || ' ' || coalesce(p_properties, '') || ' ' || coalesce(p_data, ''), 1000000)), 'D')
+    setweight(to_tsvector('english', hadron_tsv_unclosed_comment(coalesce(p_name, '') || ' ' || coalesce(p_alias, ''))), 'A') ||
+    setweight(to_tsvector('english', hadron_tsv_unclosed_comment(coalesce(p_loc, '') || ' ' || array_to_string(coalesce(p_tags, ARRAY[]::text[]), ' '))), 'B') ||
+    setweight(to_tsvector('english', hadron_tsv_unclosed_comment(coalesce(p_description, '') || ' ' || coalesce(p_abstract, ''))), 'C') ||
+    setweight(to_tsvector('english', hadron_tsv_unclosed_comment(left(coalesce(p_content, '') || ' ' || coalesce(p_properties, '') || ' ' || coalesce(p_data, ''), 1000000))), 'D')
 $$;
 
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (
@@ -1110,3 +1127,18 @@ ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_sta
 
 -- #5009 (Billing A7a): the owner-limit rows.
 \ir owner-limit-invariants.sql
+
+-- #5078 (Billing A7d): per-memory live node totals: the triggers, then a refill no node write can fall into.
+\ir memory-node-total-invariants.sql
+BEGIN;
+LOCK TABLE nodes IN SHARE ROW EXCLUSIVE MODE;
+DELETE FROM memory_node_pending;
+INSERT INTO memory_node_totals (memory_id, live_nodes)
+  SELECT memory_id, count(*) FILTER (WHERE deleted_at IS NULL) FROM nodes GROUP BY memory_id
+  ON CONFLICT (memory_id) DO UPDATE SET live_nodes = EXCLUDED.live_nodes;
+UPDATE memory_node_totals t SET live_nodes = 0
+  WHERE t.live_nodes <> 0 AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.memory_id = t.memory_id);
+COMMIT;
+
+-- #5096: pin every guard function's search path; LAST, after every file above that (re)creates a function.
+\ir guard-search-path-invariants.sql
