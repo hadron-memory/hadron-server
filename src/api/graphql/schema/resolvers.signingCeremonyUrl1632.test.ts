@@ -98,6 +98,8 @@ describe('no GraphQL or MCP call takes an assertion or a signature record (cor:d
       mutation.requestNodeSignature, mutation.withdrawSigningRequest, query.signingRequest,
       // #3649 slice B: the grant signing request calls take a grant ref or a request id, never an assertion.
       mutation.requestGrantSignature, mutation.withdrawGrantSigningRequest, query.grantSigningRequest,
+      // #5001: the selection calls take grant refs (a list) or a selection id, never an assertion.
+      mutation.requestGrantSelectionSignature, mutation.withdrawGrantSigningSelection, query.grantSigningSelection,
     ];
     for (const op of signingOps) {
       expect(op).toBeDefined();
@@ -110,7 +112,7 @@ describe('no GraphQL or MCP call takes an assertion or a signature record (cor:d
     }
     // And nothing in the whole mutation surface is named for completing or storing a signature.
     const writes = Object.keys(mutation).filter((n) => /signature|signing/i.test(n));
-    expect(writes.sort()).toEqual(['requestGrantSignature', 'requestNodeSignature', 'setOrgBootPromptSigning', 'withdrawGrantSigningRequest', 'withdrawSigningRequest']);
+    expect(writes.sort()).toEqual(['requestGrantSelectionSignature', 'requestGrantSignature', 'requestNodeSignature', 'setOrgBootPromptSigning', 'withdrawGrantSigningRequest', 'withdrawGrantSigningSelection', 'withdrawSigningRequest']);
     const objs = Object.values(schema.getTypeMap()).filter((t) => isObjectType(t) && /^Signing/.test(t.name));
     expect(objs.length).toBeGreaterThan(0);
   });
