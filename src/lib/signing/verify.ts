@@ -10,6 +10,7 @@ import { verifyAuthenticationResponse } from '@simplewebauthn/server';
 import { signatureChallenge, signaturePayloadBytes, type SignaturePayloadInput } from './payload.js';
 import { SigningNotConfiguredError } from './config.js';
 import { grantSignaturePayloadBytes, type GrantSignaturePayloadInput } from './grantPayload.js';
+import { GRANT_SELECTION_PAYLOAD_V1, grantSelectionPayloadBytes } from './grantSelectionPayload.js';
 
 export interface AssertionParts {
   authenticatorData: Buffer;
@@ -154,6 +155,27 @@ export async function signatureRecordVerifies(record: StoredSignature, credentia
 export interface StoredGrantSignature extends AssertionParts, GrantSignaturePayloadInput {
   id: string;
   payloadVersion: string;
+  /**
+   * #5001: for a record signed as part of a selection, the touch record's KEPT signed item list (grant id, version, terms hash, in
+   * signed order). The bytes are rebuilt from it and never from the grants as they are now; the record's own grant, version and
+   * terms hash must be one of those items. Absent for a one-grant record: a selection-version record without it is invalid, and a
+   * one-grant record never reaches the selection builder.
+   */
+  selection?: { selectionId: string; items: Array<{ grantId: string; version: number; termsHash: string }> };
+}
+
+/** The payload bytes a stored grant record signed, by its payload version; a throw (or null) means the record cannot verify. */
+function storedGrantPayload(record: StoredGrantSignature): Buffer | null {
+  if (record.payloadVersion === GRANT_SELECTION_PAYLOAD_V1) {
+    const sel = record.selection;
+    if (!sel || !sel.items.some((i) => i.grantId === record.grantId && i.version === record.recordVersion && i.termsHash === record.termsHash)) return null;
+    return grantSelectionPayloadBytes(record.payloadVersion, {
+      selectionId: sel.selectionId, items: sel.items.map((i) => ({ grantId: i.grantId, recordVersion: i.version, termsHash: i.termsHash })),
+    });
+  }
+  // The one-grant builder refuses every other version, so a selection record can never be judged as v1.
+  if (record.selection) return null;
+  return grantSignaturePayloadBytes(record.payloadVersion, record);
 }
 
 /**
@@ -166,7 +188,9 @@ export interface StoredGrantSignature extends AssertionParts, GrantSignaturePayl
 export async function grantSignatureRecordVerifies(record: StoredGrantSignature, credential: VerifierCredential, rpId: string): Promise<boolean> {
   let payload: Buffer;
   try {
-    payload = grantSignaturePayloadBytes(record.payloadVersion, record);
+    const built = storedGrantPayload(record);
+    if (!built) return false;
+    payload = built;
   } catch {
     return false;
   }

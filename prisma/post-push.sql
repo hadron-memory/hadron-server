@@ -1046,6 +1046,9 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
 -- verbatim with migration 20261109200000_grant_signing (after grant-invariants.sql: the tables it guards reference grants).
 \ir grant-signing-invariants.sql
 
+-- #5001: the selection tables' guards and the selection-version widening of the signing CHECKs; after grant-signing-invariants.sql.
+\ir grant-selection-signing-invariants.sql
+
 -- #3999: secret change requests. Verbatim with migration 20261120180000_secret_change_requests.
 \ir secret-change-requests-invariants.sql
 
@@ -1121,6 +1124,9 @@ ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_sta
 
 -- #5009 (Billing A7a): the owner-limit rows.
 \ir owner-limit-invariants.sql
+
+-- #5018 (Billing A14): a node's recorded size, kept by triggers on nodes and node_revisions.
+\ir node-bytes-invariants.sql
 
 -- #5078 (Billing A7d): per-memory live node totals: the triggers, then a refill no node write can fall into.
 \ir memory-node-total-invariants.sql

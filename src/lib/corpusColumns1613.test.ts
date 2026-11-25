@@ -8,6 +8,10 @@
  * remaining reader off the columns and stops every writer; the columns stay in
  * the schema (no migration) until PR 2 drops them.
  *
+ * PR 2 (#5063, migration 20261125030000_drop_memory_corpus_columns) dropped them: C1a and C1b now
+ * assert the memory row has no such field at all (src/test/migrations/corpusColumnDrop5063.test.ts
+ * pins the drop itself), and C2's "minted node, no stamp" state is the only state there is.
+ *
  * Naming and numbering (#5088 F11): the file keeps its #1613 name because it was written against the #1613 remainder
  * and is cited by that name elsewhere; its pins belong to #5063 (PR 1 of that remainder). There is no C3 pin. The
  * numbers are kept as they are, because other comments cite C2, C2b, C4, C5 and C6 by number.
@@ -94,22 +98,26 @@ beforeEach(async () => {
 });
 
 describe('#5063 C1 — nothing writes the legacy corpus columns', () => {
-  it('C1a — createMemory(draftCorpus: true) leaves corpus_draft false', async () => {
+  it('C1a — createMemory(draftCorpus: true) is accepted and writes no corpus_draft', async () => {
     const m = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'c1a', draftCorpus: true }, ctx());
-    const [row] = await db.$queryRaw<Array<{ corpus_draft: boolean }>>`
-      SELECT corpus_draft FROM memories WHERE id = ${m.id}`;
-    expect(row.corpus_draft).toBe(false);
+    // PR 2 (#5063) dropped the column: the argument is accepted and ignored, and the row has no such field.
+    const [row] = await db.$queryRaw<Array<{ r: Record<string, unknown> }>>`
+      SELECT to_jsonb(m) AS r FROM memories m WHERE id = ${m.id}`;
+    expect(row.r.id).toBe(m.id);
+    expect(row.r).not.toHaveProperty('corpus_draft');
   });
 
-  it('C1b — mintMemoryNodes leaves the stamp columns null and mints the node records', async () => {
+  it('C1b — mintMemoryNodes writes no memory stamp and mints the node records', async () => {
     const m = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'c1b' }, ctx());
     await specNode(m.id, 'c1b:010');
     await approveAll(m.id);
     await mint(m.id);
-    const [row] = await db.$queryRaw<Array<{ corpus_minted_at: Date | null; corpus_minted_by: string | null }>>`
-      SELECT corpus_minted_at, corpus_minted_by FROM memories WHERE id = ${m.id}`;
-    expect(row.corpus_minted_at).toBeNull();
-    expect(row.corpus_minted_by).toBeNull();
+    // PR 2 (#5063) dropped the stamp columns: the row has neither, and the node records hold the mint.
+    const [row] = await db.$queryRaw<Array<{ r: Record<string, unknown> }>>`
+      SELECT to_jsonb(m) AS r FROM memories m WHERE id = ${m.id}`;
+    expect(row.r.id).toBe(m.id);
+    expect(row.r).not.toHaveProperty('corpus_minted_at');
+    expect(row.r).not.toHaveProperty('corpus_minted_by');
     const n = await db.node.findFirstOrThrow({ where: { memoryId: m.id, mintedAt: { not: null } } });
     expect(n.mintedAt).toBeInstanceOf(Date);
   });
@@ -142,8 +150,7 @@ describe('#5063 C2 — the first-spec-mark conflict probe keys on the node mint,
         content: 'draft spec', role: null, nodeType: 'info', tags: [],
       },
     });
-    // The state PR 2 leaves behind: the columns exist but nothing wrote them.
-    await db.$executeRaw`UPDATE memories SET corpus_minted_at = NULL, corpus_minted_by = NULL WHERE id = ${m.id}`;
+    // The state PR 2 (#5063) leaves behind: the node is minted and the memory has no stamp column at all.
 
     // Stand-in for deleteMemory: the row FOR UPDATE and the tombstone, held open.
     const { release, done, pid: holderPid } = await holdOpen(async (tx) => {

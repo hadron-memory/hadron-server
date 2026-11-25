@@ -432,6 +432,9 @@ const CONCEALED_FIELDS: Record<string, (args?: any) => unknown> = {
   signatureStatus: () => ({ state: null, signatures: [], integrityProblems: 0 }),
   contentValidation: () => ({ state: 'UNVALIDATED', latestReport: null }),
   validationTasks: () => null,
+  // #5018 (§10, Rodolfo P2-1): the stored size of content the reader cannot read is content-derived; the resolver would re-read the live row by id.
+  storedBytes: () => null,
+  revisionBytes: () => null,
 };
 
 /** Fields in {@link CONCEALED_FIELDS}, for the drift pin. */

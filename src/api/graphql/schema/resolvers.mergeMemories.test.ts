@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, seedRootNode } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { mergeMemoryGraph } from '../../../controller/operations/mergeMemories.js';
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
@@ -56,6 +56,7 @@ beforeEach(async () => {
   });
   srcMem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'mm-src' }, ctx());
   tgtMem = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'mm-tgt' }, ctx());
+  await seedRootNode(db, srcMem.id, 'mm-src'); await seedRootNode(db, tgtMem.id, 'mm-tgt');
 });
 
 describe('mergeMemories — partition (collide vs relocate)', () => {

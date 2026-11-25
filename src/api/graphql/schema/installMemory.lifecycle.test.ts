@@ -277,7 +277,7 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     try {
       const result = await server.executeOperation(
         { query: `mutation($i:UpdateNodeInput!){updateNode(input:$i){id memoryId loc name revision description abstract tags content data
-          memory{id} outgoingEdges{id} incomingEdges{id} asset{id} signingRequests{id} signingRequestsPage{items{id} total hasMore nextCursor} commentSummary{comments openThreads oldestOpenThreadAt}
+          storedBytes revisionBytes memory{id} outgoingEdges{id} incomingEdges{id} asset{id} signingRequests{id} signingRequestsPage{items{id} total hasMore nextCursor} commentSummary{comments openThreads oldestOpenThreadAt}
           approvalStatus{state approval{revision}} mintStatus{minted mintedByInfo} authorship{__typename} createdByWorker{id} updatedByAgent{id} updatedByUser{handle}
           contentValidation{state} signatureStatus{state signatures{id}}}}`, variables: { i: { install: f.install, loc: 'prompts:lane', description: 'only-this' } } },
         { contextValue: ctx },
@@ -291,6 +291,8 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
       expect(out.name).toBe('prompts:lane');
       // Selecting `revision` on a concealed write must not error (Node.revision reads revSeq): Andi, Charles, Bindi.
       expect(out.revision).toBe((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq);
+      expect(out.storedBytes).toBeNull(); // #5018 §10: the size of content the reader cannot read
+      expect(out.revisionBytes).toBeNull();
       expect(out).toMatchObject({ description: null, abstract: null, tags: [], content: null, data: null, memory: null,
         outgoingEdges: [], incomingEdges: [], asset: null, signingRequests: [], signingRequestsPage: { items: [], total: 0, hasMore: false, nextCursor: null }, authorship: null, createdByWorker: null, updatedByAgent: null,
         // Ruth's #2064 merge condition: #2189's updatedByUser re-reads the last editor by node id, so it is concealed too.
@@ -313,6 +315,17 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     expect(await N.updatedByUser({ id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toMatchObject({ handle: 'concealed-editor' });
     // A concealed parent carries id and memoryId but must not let the resolver re-read the live row.
     expect(await N.updatedByUser({ [INSTALL_CONCEALED]: true, id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toBeNull();
+  });
+
+  it('#5018 (§10): Node.storedBytes and Node.revisionBytes read nothing on a concealed install-write parent (they would re-read the live row by node id)', async () => {
+    const f = await fixture();
+    const node = await f.create(f.admin);
+    const { INSTALL_CONCEALED } = await import('./installMemory.js');
+    const N = resolvers.Node as any;
+    // Control: an ordinary parent of the same node reports its size.
+    expect(typeof (await N.storedBytes({ id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id)))).toBe('number');
+    expect(await N.storedBytes({ [INSTALL_CONCEALED]: true, id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toBeNull();
+    expect(await N.revisionBytes({ [INSTALL_CONCEALED]: true, id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toBeNull();
   });
 
   it('#1151 (Rico §10): Node.createdByUser reads nothing on a concealed install-write parent (it would re-read createdBy by node id)', async () => {

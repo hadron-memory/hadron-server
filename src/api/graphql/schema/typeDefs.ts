@@ -351,7 +351,11 @@ export const typeDefs = `#graphql
     and \`scope.droppedCount\` says how many), stopped_early (#2772: a vector
     or hybrid search ran out of its work budget before the page was complete;
     #4779: also when a hybrid page's fused order could not be certified inside
-    the work budget or the keyword leg's 2000-row ceiling, or when a page that
+    the work budget or the keyword leg's 2000-row ceiling (#4994: including
+    when, among more than 20000 eligible vectors, a hit whose vector rank was
+    needed lies past the first 1000 nodes of the vector ranking; #5162: or when, among
+    that many, the vector ranking read to certify the page disagrees with the vector
+    results the page was built from), or when a page that
     hydration left short (or filled past the depth its ranking was certified
     to) was still incomplete after its one deeper re-ranking (chunk
     granularity flags a short page without re-ranking);
@@ -1535,6 +1539,10 @@ export const typeDefs = `#graphql
     moveEdgeUrnChanges: [NodeMoveEdgeUrnChange!]
     "#1323 — current live revision. Creation is revision 1; each committed authoring change advances it. NodeRevision.revNo N is the retained snapshot of this node when revision N was current, before the edit that advanced it."
     revision: Int!
+    "#5018 (hrn:node:hadronmemory.com:specs:cor:dmo:060:18) — the bytes this node's content, description, data and properties take as stored: the stored (encrypted) form in an encrypted memory, and data and properties as their jsonb text. Name, alias, abstract and tags are not counted. Null means not measured yet."
+    storedBytes: Int
+    "#5018 (hrn:node:hadronmemory.com:specs:cor:dmo:060:18) — the same figure over this node's earlier revisions as they are stored now, a base-10 string (pruning may run after the write that exceeds the memory's maxRevCount, so it can briefly be higher). A revision taken in another memory the node once lived in still counts. Null means not measured yet, and also for a reader who cannot read every memory a counted revision was taken in, or whose node history is concealed."
+    revisionBytes: String
     "#1326 — attribution of this content state. Null means legacy or unknown. Task identity is redacted unless its memory is independently readable."
     authorship: NodeAuthorship
     "#1326 — advisory validation for this exact revision. A report for an older revision is STALE."
@@ -2520,7 +2528,45 @@ export const typeDefs = `#graphql
     endedAt: DateTime
     "Latest verified ineligible signing-proof attempt while OPEN, if any. Visible only through the existing request read gate; contains no signer identity and does not end the request (#4546; hrn:node:hadronmemory.com:specs:cor:acl:140:07)."
     lastRefusedAt: DateTime
+    "#5001: the selection this request is an item of (hrn:node:hadronmemory.com:specs:cor:acl:140:07), or null for a one-grant request. An item is signed only through its selection's page, never on a one-grant page; the one-grant read, withdraw and ceremony answer for an item as for an unknown id."
+    selectionId: ID
     "The server-hosted ceremony page where someone who may issue the grant signs it (hrn:node:hadronmemory.com:specs:cor:acl:140:07): the server origin plus /grant-signing/<id>, with no token. Copy it verbatim; never compose it. Signing there with a passkey activates the grant; no GraphQL or MCP call takes an assertion. An ended request's link only explains that it ended."
+    ceremonyUrl: String!
+  }
+
+  "#5001 (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — a grant signing selection: open, then ends exactly once. There is no STALE state: a grant that changes ends only its own item."
+  enum GrantSigningSelectionState {
+    OPEN
+    "One touch was verified; each item it activated has its own record, and the items it did not activate ended with it."
+    COMPLETED
+    "The signer turned the whole selection down."
+    DECLINED
+    "Its lifetime passed (SIGNING_REQUEST_TTL_SECONDS, default 24h); endedAt is the deadline."
+    EXPIRED
+    "The requester account withdrew it."
+    WITHDRAWN
+  }
+
+  """
+  #5001 (hrn:node:hadronmemory.com:specs:cor:acl:140:07, hrn:node:hadronmemory.com:specs:cor:acl:140:09) — one request for a person to sign a SELECTION of one App's pending grants with ONE passkey touch. Each grant is an item, pinned at creation (its version and terms hash); a grant that changes ends only its own item, and each item activates or fails on its own. The payload version is hadron-grant-selection-signature-v1.
+  """
+  type GrantSigningSelection {
+    "128 bits of randomness."
+    id: ID!
+    "The items in ascending grant id order (the order the signed bytes list them)."
+    items: [GrantSigningRequest!]!
+    "The payload version the signer signs: hadron-grant-selection-signature-v1."
+    payloadVersion: String!
+    "The effective state."
+    state: GrantSigningSelectionState!
+    requestedBy: SigningRequester!
+    createdAt: DateTime!
+    expiresAt: DateTime!
+    "Null while OPEN. EXPIRED ends at expiresAt; every other end at the moment it happened (DB clock)."
+    endedAt: DateTime
+    "Latest verified signing-proof attempt by someone who may issue none of the grants, while OPEN, if any. Visible only through the selection's read gate; contains no signer identity and does not end the selection (#4546, #5001; hrn:node:hadronmemory.com:specs:cor:acl:140:07)."
+    lastRefusedAt: DateTime
+    "The server-hosted ceremony page: the server origin plus /grant-selection-signing/<id>, with no token. Copy it verbatim; never compose it. One passkey touch there signs every grant the signer may issue; no GraphQL or MCP call takes an assertion."
     ceremonyUrl: String!
   }
 
@@ -10793,6 +10839,8 @@ export const typeDefs = `#graphql
     signingRequest(id: ID!): SigningRequest
     "#3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — one grant signing request; null when unknown or when its grant is not readable to the caller: a bound worker session in its own App, a person acting as themselves who manages the grant's live, installed App (as appGrants reads it), or (#4544, hrn:node:hadronmemory.com:specs:cor:sec:060:01) the person who issued the secret read client the grant backs, while an App participant."
     grantSigningRequest(id: ID!): GrantSigningRequest
+    "#5001 (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — one grant signing selection by id. Null when unknown, or when any grant in it is not readable by the caller (one shape for both)."
+    grantSigningSelection(id: ID!): GrantSigningSelection
     "#1591 — the tamper check over every live node of a memory (ID or fully-qualified URN)."
     verifyMemoryNodes(memoryRef: String!): MemoryIntegrityReport!
 
@@ -13153,6 +13201,12 @@ export const typeDefs = `#graphql
     malformed, or two installed Team Agents when either carries the node, is TASK_OUTCOME_SET_UNUSABLE, refusing
     every finish. Both are judged after the assignee and status checks and before any write or event: the task
     stays started. With no set, any one word is accepted. The set is read only at finish.
+    #5036: a task bound as a PR review seat (pr seat) with no verdict recorded at its assigned head is refused with
+    SEAT_VERDICT_REQUIRED, whose message names hadron team pr verdict; record the verdict, then finish. Exempt: a
+    seat never bound, a seat superseded by a later seat, and a task finished with outcome failed or cancelled (any
+    case). Judged at the assigned head of the seat, not the current frozen head of the build task, after the assignee and status
+    checks and before any write or event: the task stays started. Rule: the team memory
+    coordination:pr-finishing (Finishing a review seat).
     """
     finishAgentTask(taskRef: ID!, result: AgentTaskResultInput!): AgentTask!
 
@@ -13839,6 +13893,12 @@ export const typeDefs = `#graphql
     #3649 slice B (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — ask for one pending grant to be signed. Three callers may ask: a bound worker session in its own App, a person acting as themselves who manages the grant's live, installed App (as appGrants reads it), or (#4544, hrn:node:hadronmemory.com:specs:cor:sec:060:01) the person who issued the secret read client the grant backs, while an App participant, so a writer who does not manage the App can finish the hand-off; workers never sign. No signer is named: whoever signs must be able to issue it. The request pins the grant's version and terms hash. Refusals: FORBIDDEN while impersonating; GRANT_NOT_FOUND (unknown and unreadable alike); GRANT_NOT_PENDING (activated, revoked, or its holder gone; no state is named); GRANT_EXPIRED (past its expiry, so it can never be signed); GRANT_TERMS_UNREPRESENTABLE (extensions.reason). No call takes an assertion: the signer signs on the server-hosted ceremony page.
     """
     requestGrantSignature(grantRef: ID!): GrantSigningRequest!
+    """
+    #5001 (hrn:node:hadronmemory.com:specs:cor:acl:140:07, hrn:node:hadronmemory.com:specs:cor:acl:140:09) — ask for a SELECTION of pending grants of one App to be signed with ONE passkey touch, at most 25. The same callers as requestGrantSignature, and every ref must be readable by the caller through the same gate. The request pins each grant's version and terms hash; the signer signs only the grants they may issue and read (and is shown only those), and each activates or fails on its own. Refused whole, before any write, naming the first bad ref in ascending id order: FORBIDDEN while impersonating; SELECTION_EMPTY; SELECTION_TOO_LARGE (extensions.cap); SELECTION_DUPLICATE_GRANT (extensions.grantRef); GRANT_NOT_FOUND (unknown and unreadable alike); SELECTION_MIXED_APPS (grants of more than one App; no App is named); GRANT_NOT_PENDING; GRANT_EXPIRED; GRANT_TERMS_UNREPRESENTABLE (extensions.reason). GraphQL only: the one-grant request has no MCP tool either. No call takes an assertion: the signer signs on the server-hosted ceremony page.
+    """
+    requestGrantSelectionSignature(grantRefs: [ID!]!): GrantSigningSelection!
+    "#5001 (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — withdraw an open grant signing selection; its open items end with it. Only the requester account, among those who may read every grant in it. Refusals: FORBIDDEN while impersonating, SIGNING_REQUEST_NOT_FOUND (unknown and unreadable alike), SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
+    withdrawGrantSigningSelection(id: ID!): GrantSigningSelection!
     """
     #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05) — ask for a grant. A bound worker session may call it, in its own App, for itself or its role agent (installed in the App). #3711: a PERSON who manages the App may call it too, naming the App in input.appRef, for a worker of the App or an agent installed in it; the row records that person, never a worker. Either way the row is born pending and allows nothing until it is signed (#3649). Returns the grant as grant(ref:) reads it (a manager reads it as appGrants does). Refusals, each before any write and none naming a submitted value: GRANT_REQUESTER_NOT_WORKER, GRANT_NOT_MANAGER (a person arm caller who does not manage the App, and an unknown App: the same answer), GRANT_HOLDER_NOT_ALLOWED (any other holder, or an agent not installed here), GRANT_ACTION_UNKNOWN, GRANT_VALUES_INVALID (a value that does not match the action's declared parameters, or an undeclared key, or a list above 100 entries per parameter, or a node-typed value that does not name a node the requester can read: a missing, deleted, unreadable and malformed id are the same answer, hrn:node:hadronmemory.com:specs:cor:acl:140:07), GRANT_TERMS_INVALID (including a reason above 2,000 Unicode code points; hrn:node:hadronmemory.com:specs:cor:acl:140:01). These write-path limits never prevent rebuilding an existing grant's signature terms. Over MCP only the person arm exists (hadron_create_grant, ruling 0255 item 21). Present only where signing is switched on (PASSKEY_SIGNING_ENABLED).
     """
@@ -19867,9 +19927,10 @@ export const typeDefs = `#graphql
     """
     #3125 S2 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the outside item this task claims, for example an issue's
     canonical URL. Stored and compared exactly as written; 1 to 512 characters with no whitespace, control or invisible
-    format character and no user name or password (else BAD_USER_INPUT). Set only here: no edit takes it. A second
-    task with the same value in this App, whatever the first task's state, is refused TASK_EXTERNAL_ID_TAKEN, which
-    names no task (find it with agentTasks(externalId:)). Another App's tasks never conflict.
+    format character and no user name or password (else BAD_USER_INPUT). Set only here: no edit takes it. At most one
+    ACTIVE task (backlog, pending or started) per App holds a given value; a finished or cancelled task keeps its value
+    but no longer blocks a new claim. A create while an active task holds the value is refused TASK_EXTERNAL_ID_TAKEN,
+    which names no task (find it with agentTasks(externalId:)). Another App's tasks never conflict.
     #4113 (hrn:node:hadronmemory.com:specs:cor:agt:050:02): naming it with YOURSELF as the assignee is the claim, and a
     claim is created STARTED in this one call (startedAt set; task.created, task.assigned, task.started; never queued,
     matched or alarmed as not started). A claim naming another assignee, no assignee, or an open blocker stays PENDING

@@ -68,7 +68,7 @@ async function review(r: Review = {}) {
   for (const v of r.verdicts ?? [r]) await verdictEvent((r.inApp ?? app).id, t.id, slot, v);
   if ((r.end ?? 'finish') === 'finish') {
     const findings = Array.from({ length: r.findings ?? 0 }, (_, i) => ({ severity: 'P2', text: `finding ${i + 1}` }));
-    await M.finishAgentTask!({}, { taskRef: t.id, result: { outcome: 'approved', ...(r.findings == null ? {} : { findings }) } }, ctx(holder.id));
+    await M.finishAgentTask!({}, { taskRef: t.id, result: { outcome: r.verdicts?.length === 0 ? 'failed' : 'approved', ...(r.findings == null ? {} : { findings }) } }, ctx(holder.id));
     for (const [i, disposition] of (r.dispositions ?? []).entries()) {
       await M.disposeAgentTaskFinding!({}, { taskRef: t.id, findingId: `F${i + 1}`, disposition }, ctx(author.id));
     }

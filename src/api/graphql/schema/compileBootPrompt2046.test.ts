@@ -80,6 +80,15 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     expect(await db.edge.count({ where: { sourceId: one.nodeId, name: 'compiled-from' } })).toBe(1);
   });
 
+  it('#5019: a compile is not judged by NODE_CONTENT_MAX_BYTES', async () => {
+    const f = await fixture();
+    await f.source(f.agentMem.id, 'boot:source', 'x'.repeat(2000));
+    vi.stubEnv('NODE_CONTENT_MAX_BYTES', '1000');
+    try {
+      expect((await compileBootPrompt(ctxOf(f.admin.id), agentTarget(f))).revNo).toBe(1);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it('setPointer:false leaves the Agent pointer alone', async () => {
     const f = await fixture();
     await f.source(f.agentMem.id, 'boot:source', 'x');

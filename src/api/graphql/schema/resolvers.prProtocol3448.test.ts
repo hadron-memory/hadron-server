@@ -499,7 +499,7 @@ describe('SECURITY delta: negative history survives bounce and reassignment', ()
 describe('SECURITY delta: ended rows and mirrored property history', () => {
   async function end(id:string, who:string, ownerId:string, status:string) {
     if (status === 'cancelled') await M.cancelAgentTask!({}, { taskRef:id }, ctx(ownerId));
-    else { await M.startAgentTask!({}, { taskRef:id }, ctx(who)); await M.finishAgentTask!({}, { taskRef:id, result:{outcome:'done'} }, ctx(who)); }
+    else { await M.startAgentTask!({}, { taskRef:id }, ctx(who)); await M.finishAgentTask!({}, { taskRef:id, result:{outcome:'failed'} }, ctx(who)); } // #5036: a seat with no verdict finishes only as failed or cancelled
   }
   it.each(['cancelled','finished'])('schedule and freeze refuse a %s build without an event or property change', async status => {
     await end(build.id, author.id, owner.id, status);

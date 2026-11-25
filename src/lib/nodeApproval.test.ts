@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, seedRootNode } from '../test/helpers.js';
 import { waitForLockWaitersOfType } from '../test/lockWait.js';
 import { generateId } from './id.js';
 import { computeApprovalHash } from './approvalHash.js';
@@ -64,6 +64,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
   memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'approvals' }, as());
+  await seedRootNode(db, memory.id, 'approvals');
 });
 
 describe('approveNode (#1591)', () => {

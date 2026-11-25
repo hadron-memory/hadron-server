@@ -60,6 +60,7 @@ import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
 import { mountSigningCeremonyRoutes } from './api/signingCeremonyRoutes.js';
 import { mountSecretChangeCeremonyRoutes } from './api/secretChangeCeremonyRoutes.js';
 import { mountGrantSigningCeremonyRoutes } from './api/grantSigningCeremonyRoutes.js';
+import { mountGrantSelectionSigningCeremonyRoutes } from './api/grantSelectionSigningCeremonyRoutes.js';
 import { mountSecretRevealRoutes } from './api/secretRevealRoutes.js';
 import { mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
 import { signingSurfacePolicy } from './lib/signing/surface.js';
@@ -84,6 +85,7 @@ import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
 import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
 import { loadOwnerDefaultLimits } from './lib/ownerLimits/defaults.js';
+import { nodeContentMaxBytes } from './lib/nodeContentLimit.js';
 import { complexityAdmissionPlugin } from './api/graphql/admissionComplexity.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
@@ -1127,6 +1129,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   mountSigningCeremonyRoutes(app);
   // #3649 slice C: the grant signing ceremony, on the same switch.
   mountGrantSigningCeremonyRoutes(app);
+  mountGrantSelectionSigningCeremonyRoutes(app);
   mountSecretChangeCeremonyRoutes(app);
   mountSecretRevealRoutes(app);
   mountPasskeySignInRoutes(app);
@@ -1226,6 +1229,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   const admission = readGraphqlAdmissionConfig();
   // #5009: the deployment's default owner limits; a malformed value refuses boot.
   loadOwnerDefaultLimits();
+  nodeContentMaxBytes(); // #5019: a malformed ceiling refuses boot
   // The effective L4 configuration, on one line, so ops can confirm the mode a deploy actually booted with.
   console.log(JSON.stringify({
     event: 'graphql.admission.config', mode: admission.complexityMode, maxDepth: admission.maxDepth,

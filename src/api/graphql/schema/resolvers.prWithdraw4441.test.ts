@@ -159,7 +159,9 @@ describe('#4441 the withdraw verb: who, on what, and the record', () => {
 
   it('a seat with no verdict, and a task that is not a bound seat, are refused', async () => {
     await schedule(); await freeze();
-    const blind = await seat('blind', H, other.id); await M.startAgentTask!({}, { taskRef: blind.id }, ctx(other.id)); await finish(blind, other.id);
+    const blind = await seat('blind', H, other.id); await M.startAgentTask!({}, { taskRef: blind.id }, ctx(other.id));
+    // #5036: a seat with no verdict finishes only as failed or cancelled.
+    await M.finishAgentTask!({}, { taskRef: blind.id, result: { outcome: 'failed' } }, ctx(other.id));
     expect(await code(withdraw(blind, ctx(other.id)))).toBe('REVIEW_VERDICT_NOT_NEGATIVE');
     expect(await code(withdraw(build, ctx(manager.id)))).toBe('REVIEW_SEAT_UNASSIGNED');
   });

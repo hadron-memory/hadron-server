@@ -1,3 +1,4 @@
+import { refuseSeatFinishWithoutVerdict } from '../../../lib/agentTasks/seatVerdictGate.js';
 import { hasUnstorableJsonText } from '../../../lib/agentTasks/references.js';
 import { appendAppActionEvent } from '../../../lib/agentTasks/events.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
@@ -2686,6 +2687,8 @@ export const agentTaskMutations = {
       if (task.status !== 'started') {
         throw taskError('TASK_INVALID_TRANSITION', 'Start the task before finishing it.', { taskId, status: task.status });
       }
+      // #5036: a PR review seat with no verdict at its assigned head is not finished; judged before any write.
+      await refuseSeatFinishWithoutVerdict(tx, task, outcome);
       // #2652 (cor:agt:050:30): the team's closed outcome set, read now, before any write; no set keeps any one word.
       await checkOutcomeInTeamSet(tx, txCtx, app.id, outcome, (w) => TASK_OUTCOME_PATTERN.test(w));
       // #4414 (cor:agt:050:30): the role tasks followed, judged here, before any write, through the node read gate.

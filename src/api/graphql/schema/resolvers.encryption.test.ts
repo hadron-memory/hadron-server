@@ -372,7 +372,7 @@ describe('createNode with encryption', () => {
     }) as never);
     try {
       await writeNodeCore({ memoryId: session.memoryId!, loc: 'locked-reaffirm',
-        abstract: 'Summary' }, sessionCtx, 'update', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) });
+        abstract: 'Summary' }, sessionCtx, 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null) });
     } finally {
       probe.mockRestore();
     }

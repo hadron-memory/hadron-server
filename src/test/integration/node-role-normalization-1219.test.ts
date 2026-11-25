@@ -130,7 +130,7 @@ describe('#1219 Node.role empty normalization (cor:dmo:060:02, ruling A)', () =>
     await writeNodeCore(
       { memoryId: fx.memory.id, loc: 'r-core', name: 'Core path', role: '  ' } as never,
       fx.ctx,
-      'upsert', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) },
+      'upsert', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null) },
     );
     expect((await persisted('r-core')).role).toBeNull();
   });

@@ -24,7 +24,7 @@ import { reloadOwnerDefaultLimitsForTests } from '../../ownerLimits/defaults.js'
 import { OWNER_LIMIT_NO_NUMBER_MESSAGE } from '../../ownerLimits/errors.js';
 import { admitAndExecuteTool } from '../toolAdmission.js';
 import { hadronStoreFile } from './index.js';
-import { hadronCreateNode } from './nodeTools.js';
+import { hadronCreateNode, hadronUpdateNode } from './nodeTools.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from './types.js';
 import { testRunAgentId } from '../../../test/runAgent.js';
@@ -121,6 +121,22 @@ describe('#5015 run tools at the owner\'s nodes limit', () => {
     expect(deleteObject).toHaveBeenCalledWith(key);
     expect(await db.asset.count({ where: { memoryId } })).toBe(0);
     expect(await db.node.count({ where: { memoryId, loc: 'files:report' } })).toBe(0);
+  });
+
+  it('#5019: hadron_create_node and hadron_update_node return the node-size refusal and write nothing', async () => {
+    vi.stubEnv('NODE_CONTENT_MAX_BYTES', '10');
+    try {
+      const run = await mintRun(writerId);
+      const error = { code: 'NODE_CONTENT_TOO_LARGE', maxBytes: 10, message: 'A node can hold at most 10 bytes.' };
+      const created = await call(hadronCreateNode, run, { urn: `hrn:node:${ORG_URN}:runmem:fresh`, name: 'fresh', content: 'x'.repeat(11) });
+      expect(created).toMatchObject({ created: false, error });
+      expect((created as { error: object }).error).toEqual(error);
+      const updated = await call(hadronUpdateNode, run, { urn: `hrn:node:${ORG_URN}:runmem:existing`, content: 'x'.repeat(11) });
+      expect(updated).toMatchObject({ updated: false, error });
+      expect((updated as { error: object }).error).toEqual(error);
+      expect(await db.node.count({ where: { memoryId, loc: 'fresh' } })).toBe(0);
+      expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'existing' } })).content).toBeNull();
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it('any other handler failure still ends the run (TOOL_FAILED): only the owner-limit refusal is returned', async () => {

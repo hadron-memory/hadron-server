@@ -174,7 +174,8 @@ describe('R3p: a worker may ask, never sign; an App key reads no grant and canno
   it('no GraphQL field takes an assertion or completes a grant signing request', async () => {
     const { typeDefs } = deploymentSchema();
     const fields = [...typeDefs.matchAll(/^\s+(\w*[Gg]rant\w*Sign\w*|\w*[Ss]ign\w*Grant\w*)\s*\(/gm)].map((m) => m[1]).sort();
-    expect(fields).toEqual(['grantSigningRequest', 'requestGrantSignature', 'withdrawGrantSigningRequest']);
+    // #5001 added the selection's own request, read and withdraw; none takes an assertion either.
+    expect(fields).toEqual(['grantSigningRequest', 'grantSigningSelection', 'requestGrantSelectionSignature', 'requestGrantSignature', 'withdrawGrantSigningRequest', 'withdrawGrantSigningSelection']);
     expect(typeDefs).not.toMatch(/complete\w*GrantSign|GrantSign\w*complete|declineGrant|activateGrant/i);
   });
 

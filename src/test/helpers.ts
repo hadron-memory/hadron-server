@@ -215,7 +215,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // fires no row triggers. #1706: agent_team_alarm_schedule references the events, so it is
   // truncated with them. #1708: so is worker_delivery_task_events, for the same reason.
   // #2022: a task's stop holds go with it.
-  await db.$executeRawUnsafe('TRUNCATE alarm_escalation_ends, dark_worker_episodes, lead_cadence_episodes, lead_cadence_clocks, post_limit_episodes, host_sweep_episodes, saturation_episodes, team_dark_episodes, host_sweep_runs, start_failing_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, secret_read_clients, grant_events, grant_signatures, grant_signing_requests, grants, agent_task_stop_holds, agent_match_outcomes, agent_task_counters, agent_task_blockers, agent_tasks');
+  await db.$executeRawUnsafe('TRUNCATE alarm_escalation_ends, dark_worker_episodes, lead_cadence_episodes, lead_cadence_clocks, post_limit_episodes, host_sweep_episodes, saturation_episodes, team_dark_episodes, host_sweep_runs, start_failing_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, secret_read_clients, grant_events, grant_signatures, grant_selection_signatures, grant_signing_selections, grant_signing_requests, grants, agent_task_stop_holds, agent_match_outcomes, agent_task_counters, agent_task_blockers, agent_tasks');
   // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
   await db.worker.deleteMany();
   await db.node.deleteMany();
@@ -750,6 +750,14 @@ export async function createDbRunConsentPrincipal(db: PrismaClient, organization
   const user = await db.user.create({ data: { id, handle: `consent-${id}`, githubUsername: `consent-${id}` } });
   await db.orgMember.create({ data: { organizationId, userId: user.id, role: 'READER' } });
   return { userId: user.id, appId, organizationId, roles: [] as Role[] };
+}
+
+/**
+ * #3952: a new memory no longer gets a root node. Tests whose fixture relied on that auto root (a node at
+ * the memory's own name, "Root node for this memory.") seed one explicitly with this helper.
+ */
+export async function seedRootNode(db: PrismaClient, memoryId: string, loc: string) {
+  return db.node.create({ data: { memoryId, loc, name: loc.split(':').pop() ?? loc, description: 'Root node for this memory.' } });
 }
 
 /**

@@ -89,3 +89,19 @@ describe('#3612 reviewed report versions', () => {
   });
  });
 });
+
+describe('#5019 report version 3', () => {
+  const now = new Date('2026-11-25T00:00:00Z');
+  it('a committed report is version 3 only when an oversize entry exists, whatever else it lists', () => {
+    const oversize = { kind: 'oversize' as const, loc: 'big', code: 'NODE_CONTENT_TOO_LARGE' as const };
+    const refused = { kind: 'attestation_refused' as const, loc: 'a', code: 'AUTHOR_TASK_BROKEN' as const };
+    const plain = { kind: 'deferred' as const, loc: 'b', code: 'ROW_CHANGED' as const };
+    expect(JSON.parse(committedSyncReport([oversize, refused, plain], now)!).version).toBe(3);
+    expect(JSON.parse(committedSyncReport([refused, plain], now)!).version).toBe(2);
+    expect(JSON.parse(committedSyncReport([plain], now)!).version).toBe(1);
+  });
+  it('a failed report is version 3 for OWNER_LIMIT_REACHED and version 1 for the two older codes', () => {
+    expect(JSON.parse(failedSyncReport('OWNER_LIMIT_REACHED', now))).toEqual({ version: 3, outcome: 'failed', recordedAt: now.toISOString(), entries: [], code: 'OWNER_LIMIT_REACHED' });
+    for (const code of ['SYNC_FAILED', 'BAD_USER_INPUT'] as const) expect(JSON.parse(failedSyncReport(code, now)).version).toBe(1);
+  });
+});
