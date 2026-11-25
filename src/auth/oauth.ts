@@ -45,6 +45,7 @@ import { signJwt } from './jwt.js';
 import { verifyAuthenticatedJwt, SignInNotLive, lockLiveSignInRoot } from './signIn.js';
 import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
 import { CONSENT_TEMPLATE } from './consent.template.js';
+import { CODE_PAGE_TEMPLATE } from './code-page.template.js';
 import {
   EMAIL_ENTRY_TEMPLATE,
   EMAIL_SENT_TEMPLATE,
@@ -550,7 +551,28 @@ interface ConsentParams {
   state: string;
   csrfToken: string;
   grantProof: string;
+  codeDelivery?: CodeDelivery;
 }
+
+/**
+ * #5125 — how an approved code reaches the client: the redirect (the default), or a page that shows it for the user to
+ * carry to a client on another device. Chosen only by the authorize request's `code_delivery` parameter, never inferred
+ * (hrn:node:hadronmemory.com:specs:cor:aut:030:01).
+ */
+type CodeDelivery = 'redirect' | 'page';
+
+/** `page` asks for the code page; absent or empty is the redirect; anything else (a repeat included) is null: refuse. */
+function parseCodeDelivery(value: unknown): CodeDelivery | null {
+  if (value === undefined || value === '') return 'redirect';
+  return value === 'page' ? 'page' : null;
+}
+
+const CONSENT_STATE_FIELD = '<input type="hidden" name="state"                 value="{{state}}">';
+if (!CONSENT_TEMPLATE.includes(CONSENT_STATE_FIELD)) throw new Error('consent template: the state field moved; code_delivery has no place in the form');
+const CODE_PAGE_CONSENT_TEMPLATE = CONSENT_TEMPLATE.replace(
+  CONSENT_STATE_FIELD,
+  `${CONSENT_STATE_FIELD}\n      <input type="hidden" name="code_delivery"         value="page">`,
+);
 
 /**
  * Substitute `{{placeholder}}` values into a server-hosted HTML
@@ -574,7 +596,7 @@ function renderTemplate(template: string, params: Record<string, string>): strin
 export function renderConsent(params: ConsentParams): string {
   const scope = params.oauthScopes.join(' ');
   const accountGrant = params.oauthScopes.includes('account');
-  return renderTemplate(CONSENT_TEMPLATE, {
+  return renderTemplate(params.codeDelivery === 'page' ? CODE_PAGE_CONSENT_TEMPLATE : CONSENT_TEMPLATE, {
     clientName: params.clientName,
     scope,
     resource: params.resource,
@@ -629,6 +651,7 @@ interface ConsentGrant {
   codeChallengeMethod: string;
   oauthScopes: readonly OAuthScope[];
   state: string;
+  codeDelivery: CodeDelivery;
 }
 
 /**
@@ -647,6 +670,8 @@ function createConsentGrantProof(grant: ConsentGrant): string {
     grant.codeChallengeMethod,
     grant.oauthScopes,
     grant.state,
+    // Only when asked for, so a form rendered by the previous image still verifies during a deploy.
+    ...(grant.codeDelivery === 'page' ? ['page'] : []),
   ]);
   return createHmac('sha256', resolveCsrfSecret()).update(payload).digest('base64url');
 }
@@ -1079,6 +1104,11 @@ function buildHandleAuthorizeGet(
       redirectWithOAuthError(res, redirectUri, parsedScopes.error, state);
       return;
     }
+    const codeDelivery = parseCodeDelivery(q.code_delivery);
+    if (codeDelivery === null) {
+      redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+      return;
+    }
 
     // 4. Happy path — issue CSRF token and render consent HTML.
     const csrfToken = csrf.generateCsrfToken(req, res);
@@ -1091,6 +1121,7 @@ function buildHandleAuthorizeGet(
       codeChallengeMethod,
       oauthScopes: parsedScopes.scopes,
       state,
+      codeDelivery,
     });
     const html = renderConsent({
       clientName,
@@ -1103,6 +1134,7 @@ function buildHandleAuthorizeGet(
       state,
       csrfToken,
       grantProof,
+      codeDelivery,
     });
     res.type('html').send(html);
   };
@@ -1134,7 +1166,7 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
   // 2. Re-validate client_id + redirect_uri (open-redirect mitigation).
   const validated = await validateClientAndRedirectUri(res, body.client_id, body.redirect_uri);
   if (!validated) return;
-  const { redirectUri } = validated;
+  const { clientName, redirectUri } = validated;
 
   // 3. RFC 8707 single-resource enforcement (v1).
   if (Array.isArray(body.resource)) {
@@ -1183,6 +1215,11 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
     redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
     return;
   }
+  const codeDelivery = parseCodeDelivery(body.code_delivery);
+  if (codeDelivery === null) {
+    redirectWithOAuthError(res, redirectUri, 'invalid_request', state);
+    return;
+  }
   const csrfToken = typeof body._csrf === 'string' ? body._csrf : '';
   if (
     !hasValidConsentGrantProof(
@@ -1195,6 +1232,7 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
         codeChallengeMethod,
         oauthScopes: parsedScopes.scopes,
         state,
+        codeDelivery,
       },
       body.grant_proof,
     )
@@ -1209,7 +1247,11 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
   // once; we only ever look it up by hash at /token.
   // Per REV-3: resource is `String[]` — the v1 contract limits to
   // one element but the storage shape is future-proof.
-  const rawCode = randomBytes(32).toString('hex'); // 64 hex / 256 bits entropy
+  // #5125: a code for the page carries its pending-authorization handle in front, so a wrong entry has a row to count
+  // against. The hash covers the whole displayed string.
+  const entryHandle = codeDelivery === 'page' ? randomBytes(ENTRY_HANDLE_BYTES).toString('hex') : null;
+  const secret = randomBytes(32).toString('hex'); // 64 hex / 256 bits entropy
+  const rawCode = entryHandle === null ? secret : `${entryHandle}.${secret}`;
   const codeHash = createHash('sha256').update(rawCode).digest('hex');
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10-minute expiry
 
@@ -1231,6 +1273,7 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
           expiresAt,
           createdBy: userId,
           signInId: session?.signInId ?? null,
+          entryHandle,
         },
       });
     });
@@ -1251,10 +1294,30 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
   // a millisecond timestamp shared by every user created in the same minute.
   logOAuthEvent('authcode_minted', { client_id: validated.clientId, user: userId.slice(-8), ip: req.ip ?? '' });
 
-  // 7. Redirect with the RAW code (not the hash). Single-use; the
+  // 7. #5125: the request asked for the code page. Nothing is sent to the redirect URI.
+  if (codeDelivery === 'page') {
+    sendCodePage(res, rawCode, clientName);
+    return;
+  }
+
+  // Otherwise redirect with the RAW code (not the hash). Single-use; the
   // /token handler atomically claims it via updateMany-with-conditional.
   const url = buildRedirectWithParams(redirectUri, { code: rawCode, state });
   res.redirect(302, url);
+}
+
+/** The code page (#5125). Its policy admits only the one copy script; the code is never stored, framed or referred. */
+function sendCodePage(res: Response, code: string, clientName: string): void {
+  const nonce = randomBytes(16).toString('base64');
+  res.status(200).set({
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+  });
+  // clientName goes last: it is client-controlled, so a `{{code}}` inside it is never substituted.
+  res.type('html').send(renderTemplate(CODE_PAGE_TEMPLATE, { code, nonce, clientName }));
 }
 
 // ── /oauth/authorize/email (#804 — magic-link sign-in leg) ───────────
@@ -1552,6 +1615,28 @@ async function revokeAuthCodeByHash(codeHash: string): Promise<void> {
   }
 }
 
+/** #5125: a pending authorization dies at this many wrong entries (hrn:node:hadronmemory.com:specs:cor:aut:030:01). */
+const ENTRY_FAILURE_LIMIT = 5;
+const ENTRY_HANDLE_BYTES = 8;
+const ENTRY_HANDLE_PREFIX = new RegExp(`^([0-9a-f]{${ENTRY_HANDLE_BYTES * 2}})\\.`);
+
+/**
+ * Count a code that matched no row against the pending authorization its handle names, if it names a live one. One
+ * statement, so concurrent wrong entries each count once under the row lock; the fifth sets `redeemed_at`, which the
+ * claim below re-reads under the same lock. A failure to count is the caller's error, never an uncounted refusal.
+ */
+async function countWrongEntry(rawCode: string): Promise<void> {
+  const handle = ENTRY_HANDLE_PREFIX.exec(rawCode)?.[1];
+  if (!handle) return;
+  await db.$executeRaw`
+    UPDATE auth_codes SET
+      entry_failures = entry_failures + 1,
+      redeemed_at = CASE WHEN entry_failures + 1 >= ${ENTRY_FAILURE_LIMIT}
+        THEN (clock_timestamp() AT TIME ZONE 'UTC') ELSE redeemed_at END
+    WHERE entry_handle = ${handle} AND redeemed_at IS NULL
+      AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')`;
+}
+
 /**
  * PKCE-only verifier range per RFC 7636 §4.1: 43-128 chars, same
  * unreserved-URI charset as the challenge. Without these caps a
@@ -1639,6 +1724,12 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
   const codeHash = createHash('sha256').update(rawCode).digest('hex');
   const authCode = await db.authCode.findUnique({ where: { codeHash } });
   if (!authCode) {
+    try {
+      await countWrongEntry(rawCode);
+    } catch (error) {
+      respondOAuthServerError(res, 'failed to check authorization code', error);
+      return;
+    }
     res.status(400).json({
       error: 'invalid_grant',
       error_description: 'code is unknown',
@@ -1656,16 +1747,23 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
     return;
   }
 
+  // #5125: a code entered by hand gets the unknown-code answer for every refusal, so none says which check failed. A
+  // redirect-delivered code keeps its own descriptions.
+  const refuse = (description: string, error = 'invalid_grant') => {
+    const entered = authCode.entryHandle !== null;
+    res.status(400).json({
+      error: entered ? 'invalid_grant' : error,
+      error_description: entered ? 'code is unknown' : description,
+    });
+  };
+
   // AuthCode scopes are server-authored and immutable. Refuse a corrupt or
   // legacy-empty row rather than accidentally minting an unrestricted key.
   // The rollout migration backfills every pre-enforcement code to `account`.
   const oauthScopes = validatedStoredOAuthScopes(authCode.oauthScopes);
   if (!oauthScopes) {
     await revokeAuthCodeByHash(codeHash);
-    res.status(400).json({
-      error: 'invalid_grant',
-      error_description: 'authorization code has an invalid OAuth grant',
-    });
+    refuse('authorization code has an invalid OAuth grant');
     return;
   }
 
@@ -1673,20 +1771,14 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
   const submittedClientId = typeof body.client_id === 'string' ? body.client_id : '';
   if (submittedClientId !== authCode.clientId) {
     await revokeAuthCodeByHash(codeHash);
-    res.status(400).json({
-      error: 'invalid_grant',
-      error_description: 'client_id does not match the authorization code',
-    });
+    refuse('client_id does not match the authorization code');
     return;
   }
   const submittedRedirectUri =
     typeof body.redirect_uri === 'string' ? body.redirect_uri : '';
   if (submittedRedirectUri !== authCode.redirectUri) {
     await revokeAuthCodeByHash(codeHash);
-    res.status(400).json({
-      error: 'invalid_grant',
-      error_description: 'redirect_uri does not match the authorization code',
-    });
+    refuse('redirect_uri does not match the authorization code');
     return;
   }
   // resource: REV-3 stored as String[]; v1 contract is exactly 1
@@ -1694,10 +1786,7 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
   // in the request → reject.
   if (Array.isArray(body.resource)) {
     await revokeAuthCodeByHash(codeHash);
-    res.status(400).json({
-      error: 'invalid_request',
-      error_description: 'multiple resource values are not supported in v1',
-    });
+    refuse('multiple resource values are not supported in v1', 'invalid_request');
     return;
   }
   const submittedResource = typeof body.resource === 'string' ? body.resource : '';
@@ -1706,10 +1795,7 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
     authCode.resource[0] !== submittedResource
   ) {
     await revokeAuthCodeByHash(codeHash);
-    res.status(400).json({
-      error: 'invalid_grant',
-      error_description: 'resource does not match the authorization code',
-    });
+    refuse('resource does not match the authorization code');
     return;
   }
 
@@ -1717,28 +1803,19 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
   const codeVerifier = typeof body.code_verifier === 'string' ? body.code_verifier : '';
   if (codeVerifier.length === 0 || !isValidCodeVerifier(codeVerifier)) {
     await revokeAuthCodeByHash(codeHash);
-    res.status(400).json({
-      error: 'invalid_grant',
-      error_description: 'PKCE code_verifier is malformed',
-    });
+    refuse('PKCE code_verifier is malformed');
     return;
   }
   if (!verifyPkceS256(codeVerifier, authCode.codeChallenge)) {
     await revokeAuthCodeByHash(codeHash);
-    res.status(400).json({
-      error: 'invalid_grant',
-      error_description: 'PKCE verification failed',
-    });
+    refuse('PKCE verification failed');
     return;
   }
 
   // 4. Expiry. No revoke needed — the row is already unreachable
   // by anyone via this code.
   if (authCode.expiresAt.getTime() <= Date.now()) {
-    res.status(400).json({
-      error: 'invalid_grant',
-      error_description: 'code has expired',
-    });
+    refuse('code has expired');
     return;
   }
 
