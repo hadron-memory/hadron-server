@@ -14,11 +14,26 @@
  *
  * Design decision + rationale: `hadron-server::design:object-store-api`.
  */
-import type { NodeWhere, NodePropertySort, PredicateCast, SortDirection } from './retrieval/nodeWhere.js';
+import { GraphQLError } from 'graphql';
+import { compileNodeWhere, type NodeWhere, type NodePropertySort, type PredicateCast, type SortDirection } from './retrieval/nodeWhere.js';
 import type { MemorySchema } from './memorySchema.js';
 
 /** Reserved envelope keys — an object field can't be named these (they'd collide with the projection). */
 export const RESERVED_OBJECT_KEYS = ['id', 'type'] as const;
+
+/**
+ * #725 (hrn:node:hadronmemory.com:specs:cor:api:170:03): a query named a field a STRICT collection does not declare. A typed refusal of
+ * its own, never BAD_USER_INPUT (which stays for malformed input), following ROLE_NOT_DECLARED. The message names only the caller's own
+ * field and the collection the caller named: it never lists the declared fields and never names a remedy.
+ */
+export class FieldNotDeclaredError extends GraphQLError {
+  constructor(readonly field: string, readonly objectType: string) {
+    super(`Field "${field}" is not declared in strict collection "${objectType}".`, {
+      extensions: { code: 'FIELD_NOT_DECLARED', field, objectType },
+    });
+    this.name = 'FieldNotDeclaredError';
+  }
+}
 
 /** Thrown on malformed object input; the resolver maps it to BAD_USER_INPUT. */
 export class ObjectStoreError extends Error {
@@ -176,4 +191,52 @@ export function sortToPropertySort(
     throw new ObjectStoreError(`sort direction must be "asc" or "desc" (got ${JSON.stringify(dir)})`);
   }
   return { path: [field], as: castForField(schema, type, field), direction: dir as SortDirection };
+}
+
+/** The `where` leaves that read `properties` (the default column), in the order the predicate compiler walks them: depth-first. */
+function propertyLeafFields(where: NodeWhere | null | undefined): string[] {
+  const out: string[] = [];
+  const walk = (node: NodeWhere | null | undefined): void => {
+    if (node == null || typeof node !== 'object') return;
+    if (node.and !== undefined || node.or !== undefined || node.not !== undefined) {
+      for (const child of node.and ?? node.or ?? []) walk(child);
+      if (node.not !== undefined) walk(node.not);
+      return;
+    }
+    if ((node.field ?? 'properties') === 'properties' && Array.isArray(node.path) && typeof node.path[0] === 'string') out.push(node.path[0]);
+  };
+  walk(where);
+  return out;
+}
+
+/**
+ * #725 (cor:api:170:03): the first field a query names that a STRICT collection does not declare, or null. It applies only when the memory
+ * has a schema, `type` is a declared collection and that collection has `strict: true` (a non-strict collection, no schema and an
+ * undeclared type are unchanged). It checks the first segment of each `properties` path: every `match` key, every `where` leaf on
+ * `properties` (a leaf on `data` is never checked) and the `sort` key; `exports` is never refused, because strict writes allow it. With
+ * several, the first in this order: `match` keys, then `where` leaves depth-first, then `sort`. A malformed `where` returns null here so
+ * the query's own BAD_USER_INPUT wins; the caller has already run `matchToWhere` and `sortToPropertySort`, which refuse malformed
+ * `match` and `sort` first. Pure and database-free, so it runs before any row is read.
+ */
+export function firstUndeclaredField(
+  schema: MemorySchema | null | undefined,
+  type: string,
+  query: { match?: Record<string, unknown> | null; where?: NodeWhere | null; sort?: Record<string, unknown> | null },
+): string | null {
+  const collection = schema?.objectTypes?.[type];
+  if (!collection || collection.strict !== true) return null;
+  const declared = (field: string) => field === 'exports' || Object.hasOwn(collection.fields ?? {}, field);
+  if (query.where != null) {
+    try {
+      compileNodeWhere(query.where, () => '$1');
+    } catch {
+      return null; // malformed: the query's own refusal comes first
+    }
+  }
+  const named = [
+    ...(query.match != null && isPlainObject(query.match) ? Object.keys(query.match) : []),
+    ...propertyLeafFields(query.where),
+    ...(query.sort != null && isPlainObject(query.sort) ? Object.keys(query.sort) : []),
+  ];
+  return named.find((field) => !declared(field)) ?? null;
 }

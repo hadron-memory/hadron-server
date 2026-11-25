@@ -10602,6 +10602,15 @@ export const typeDefs = `#graphql
     cast inferred from the memory schema; 'where' is the full #719 predicate
     (ANDed with match); 'sort' is a single-field shorthand desugared to a
     property-path sort.
+    In a STRICT collection (the memory's schema declares the type with strict:
+    true) a field the query names that the collection does not declare is refused
+    with FIELD_NOT_DECLARED (extensions: field, objectType), before any row is read
+    (hrn:node:hadronmemory.com:specs:cor:api:170:03): the first segment of each
+    properties path in match, where and sort; where on data, and exports, are never
+    refused. A non-strict collection, a memory with no schema and a type the schema
+    does not declare are unchanged, and a caller who cannot read the memory gets the
+    answer it always got. Malformed input is still BAD_USER_INPUT. The declared
+    fields are discovered through Memory.schema.
     """
     findObjects(
       "Memory ID or fully-qualified URN (hrn:memory:...) — relative refs are rejected (spec 022)."
