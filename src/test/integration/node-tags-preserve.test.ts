@@ -82,7 +82,7 @@ async function upsertNode(input: Record<string, unknown>) {
   return writeNodeCore(
     { memoryId: fx.memory.id, ...input } as never,
     fx.ctx,
-    'upsert', { authoring: attestedAuthoring(null) },
+    'upsert', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) },
   );
 }
 

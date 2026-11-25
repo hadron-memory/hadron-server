@@ -23,6 +23,7 @@ import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { liveTxContext } from './authorizedTx.js';
 import { lockInstallAuthorityFirst } from './installMemory.js';
 import { type Context, getAccessibleMemoryIds, isAuthorizationDenial, isMemoryReadableCached, nodeNotFoundError, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
+import { ownerLimitCaller, requireNodeHeadroom } from '../../../lib/ownerLimits/nodes.js';
 
 /** Expected authorization failures alone collapse to a concealed recovery miss. */
 /** R131: no recovery capability is inferred from a credential holder or run's on-behalf-of user. */
@@ -364,6 +365,9 @@ export const recoveryMutations = {
       // The final rulebook fence must follow every row and address lock.
       await assertRoleWritersForNodes(tx, txCtx, [current], { from: memory.id });
       if (!current.deletedAt) return { node: current, changed: false };
+      // #5015 (cor:acl:150:04): bringing a deleted node back adds a live node to the owner, judged after every lock above
+      // (the owner-limit key is the last lock). The TARGET threads restored with it are counted, never refused.
+      await requireNodeHeadroom(tx, { memoryId: memory.id, caller: ownerLimitCaller(ctx) });
       const count = await tx.node.updateMany({ where: { id: current.id, memoryId: memory.id, loc: current.loc, deletedAt: current.deletedAt },
         data: { deletedAt: null, deletedBy: null } });
       if (count.count !== 1) throw changed();

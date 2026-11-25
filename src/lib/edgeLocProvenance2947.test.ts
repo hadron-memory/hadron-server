@@ -70,7 +70,7 @@ describe('#2947 provenance is recorded by every writer', () => {
     const authored = await resolvers.Mutation.createEdge(null, { sourceRef: a.id, targetRef: z.id, name: 'own', loc: 'authored-1' } as never, ctx()) as { id: string };
     expect(await flag(derived.id)).toBe(false);
     expect(await flag(authored.id)).toBe(true);
-    const clone = await cloneMemoryGraph(db, { sourceMemoryId: mem.id, name: 'clone', newUrn: `${mem.urn}-clone`, targetOrganizationId: (await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).organizationId!, ownerUserId: null, groupOwnerUserId: null, actorId: mover.id, copierReadableMemoryIds: null });
+    const clone = await cloneMemoryGraph(db, { ownerLimitCaller: null, sourceMemoryId: mem.id, name: 'clone', newUrn: `${mem.urn}-clone`, targetOrganizationId: (await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).organizationId!, ownerUserId: null, groupOwnerUserId: null, actorId: mover.id, copierReadableMemoryIds: null });
     const cloned = await db.edge.findMany({ where: { memoryId: clone.memoryId }, select: { name: true, locAuthored: true } });
     expect(cloned.sort((x, y) => (x.name ?? '').localeCompare(y.name ?? ''))).toEqual([{ name: 'own', locAuthored: true }, { name: 'uses', locAuthored: false }]);
     const raw = await db.edge.create({ data: { id: generateId(), memoryId: mem.id, sourceId: c.id, targetId: z.id, loc: 'unsaid', name: 'x' } });

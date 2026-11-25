@@ -1780,7 +1780,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
           // Skip if the memory tracks a specific branch that doesn't match
           if (memory.readBranch && ref !== `refs/heads/${memory.readBranch}`) continue;
           console.log(`[webhook] Push to ${fullName}/${defaultBranch} → syncing memory "${memory.name}"`);
-          syncGraphFromGithub(memory).catch((err) => {
+          // #5015 — an unattended sync: nobody to tell, so the owner-limit refusal takes the no-number form.
+          syncGraphFromGithub(memory, { ownerLimitCaller: null }).catch((err) => {
             console.error(`[webhook] Sync failed for memory "${memory.name}":`, err);
           });
         }

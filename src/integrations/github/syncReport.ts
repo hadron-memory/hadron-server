@@ -49,7 +49,7 @@ export interface SyncReport {
   outcome: 'partial' | 'failed' | 'unknown';
   recordedAt: string;
   entries: SyncReportEntry[];
-  code?: 'SYNC_FAILED' | 'BAD_USER_INPUT';
+  code?: 'SYNC_FAILED' | 'BAD_USER_INPUT' | 'OWNER_LIMIT_REACHED';
   invalidSources?: { count: number; items: Array<{ ordinal: number; code: 'INVALID_LOC' }>; omitted: number };
 }
 
@@ -74,6 +74,6 @@ export function committedSyncReport(entries: readonly SyncReportEntry[], now = n
   return JSON.stringify({ version, outcome: invalidSourceCount > 0 ? 'unknown' : 'partial', recordedAt: now.toISOString(), entries: publicEntries, ...invalidSources } satisfies SyncReport);
 }
 
-export function failedSyncReport(code: 'SYNC_FAILED' | 'BAD_USER_INPUT', now = new Date()): string {
+export function failedSyncReport(code: 'SYNC_FAILED' | 'BAD_USER_INPUT' | 'OWNER_LIMIT_REACHED', now = new Date()): string {
   return JSON.stringify({ version: 1, outcome: 'failed', recordedAt: now.toISOString(), entries: [], code } satisfies SyncReport);
 }

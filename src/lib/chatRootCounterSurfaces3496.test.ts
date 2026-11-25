@@ -81,7 +81,7 @@ it('cloneMemory copies counter rows through the new root ids', async () => {
     const r = await root('chats:a', 42);
     await post(r);
     await db.$executeRaw`UPDATE chat_root_counters SET last_message_at='280000-01-01'::timestamp WHERE chat_root_node_id=${r.id}`;
-    const copy = await db.$transaction(tx => cloneMemoryGraphInTx(tx, { sourceMemoryId: memoryId, name: 'copy', newUrn: `surface:copy-${generateId()}`, targetOrganizationId: orgId, ownerUserId: userId, groupOwnerUserId: null, actorId: userId, copierReadableMemoryIds: null }));
+    const copy = await db.$transaction(tx => cloneMemoryGraphInTx(tx, { ownerLimitCaller: null, sourceMemoryId: memoryId, name: 'copy', newUrn: `surface:copy-${generateId()}`, targetOrganizationId: orgId, ownerUserId: userId, groupOwnerUserId: null, actorId: userId, copierReadableMemoryIds: null }));
     expect(await db.chatRootCounter.findUnique({ where: { chatRootNodeId: copy.nodeIdMap.get(r.id)! }, select:{messageCount:true} })).toMatchObject({ messageCount: 43 });
     const [time]=await db.$queryRaw<Array<{value:string}>>`SELECT last_message_at::text AS value FROM chat_root_counters WHERE chat_root_node_id=${copy.nodeIdMap.get(r.id)!}`;
     expect(time.value).toContain('280000-01-01');

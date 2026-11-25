@@ -161,6 +161,10 @@ describe('#5016 cloneMemory and cloneAgent', () => {
     const before = { agents: await db.agent.count(), memories: await db.memory.count() };
     await expect(call('cloneAgent', { source: src.urn, target: org2.urn })).rejects.toMatchObject(REACHED);
     expect({ agents: await db.agent.count(), memories: await db.memory.count() }).toEqual(before);
+    // #5015: the system memory copy's nodes are asked in the same call, so a clone with room for the Agent alone is refused too.
+    defaults({ organization: { agents: 5, memories: 0, nodes: 0 } });
+    await expect(call('cloneAgent', { source: src.urn, target: org2.urn })).rejects.toMatchObject({ extensions: { code: 'OWNER_LIMIT_REACHED', limitKey: 'nodes' } });
+    expect({ agents: await db.agent.count(), memories: await db.memory.count() }).toEqual(before);
     defaults({ organization: { agents: 5, memories: 0 } });
     await expect(call('cloneAgent', { source: src.urn, target: org2.urn })).resolves.toBeTruthy();
   });

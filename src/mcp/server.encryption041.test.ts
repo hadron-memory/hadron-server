@@ -353,7 +353,7 @@ describe('locked vs unlocked writes', () => {
     const context = { db, roles: ['ADMIN'], userId: owner.id } as Context;
     await writeNodeCore(
       { memoryId, loc: 'secret-note', data: { evidence: 'same' } },
-      context, 'update', { authoring: attestedAuthoring(null) },
+      context, 'update', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) },
     );
     const initial = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
     await db.node.update({
@@ -370,7 +370,7 @@ describe('locked vs unlocked writes', () => {
 
     await writeNodeCore(
       { memoryId, loc: 'secret-note', content: 'the plaintext secret', abstract: 'A secret summary.', data: { evidence: 'same' } },
-      context, 'update', { authoring: attestedAuthoring(null) },
+      context, 'update', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) },
     );
     expect(await db.node.findUniqueOrThrow({ where: { id: initial.id } })).toMatchObject(stamped);
     expect(await db.nodeRevision.count({ where: { nodeId: initial.id } })).toBe(revisions);
@@ -404,7 +404,7 @@ describe('locked vs unlocked writes', () => {
 
     await writeNodeCore(
       { memoryId, loc: 'secret-note', name: initial.name, content: 'the plaintext secret' },
-      context, 'upsert', { authoring: attestedAuthoring(null) },
+      context, 'upsert', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) },
     );
     expect(await db.node.findUniqueOrThrow({ where: { id: initial.id } })).toMatchObject({
       authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 1,
@@ -413,7 +413,7 @@ describe('locked vs unlocked writes', () => {
     // Control: a real plaintext change through the same branch still clears.
     await writeNodeCore(
       { memoryId, loc: 'secret-note', name: initial.name, content: 'a different plaintext secret' },
-      context, 'upsert', { authoring: attestedAuthoring(null) },
+      context, 'upsert', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) },
     );
     expect(await db.node.findUniqueOrThrow({ where: { id: initial.id } })).toMatchObject({
       authorshipKind: null, authoredByTask: null, authoredByRevision: null,
@@ -429,7 +429,7 @@ describe('locked vs unlocked writes', () => {
     const context = { db, roles: ['ADMIN'], userId: owner.id } as Context;
     await writeNodeCore(
       { memoryId, loc: 'secret-note', content: 'the plaintext secret', abstract: 'A secret summary.' },
-      context, 'update', { authoring: attestedAuthoring(null) },
+      context, 'update', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) },
     );
     const initial = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'secret-note' } });
     const taskId = generateId();
@@ -443,7 +443,7 @@ describe('locked vs unlocked writes', () => {
       },
     });
     const revisions = await db.nodeRevision.count({ where: { nodeId: initial.id } });
-    await writeNodeCore({ memoryId, loc: 'secret-note', abstract: 'A secret summary.' }, context, 'update', { authoring: attestedAuthoring(null) });
+    await writeNodeCore({ memoryId, loc: 'secret-note', abstract: 'A secret summary.' }, context, 'update', { ownerLimit: 'refuse', authoring: attestedAuthoring(null) });
     expect(await db.node.findUniqueOrThrow({ where: { id: initial.id } })).toMatchObject({
       abstractOriginHash: computeContentHash('the plaintext secret'),
       authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 1,
