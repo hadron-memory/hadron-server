@@ -114,7 +114,7 @@ it('bulk results carry per-item warnings only after committed content replacemen
   const source = await db.node.create({ data: { id: generateId(), memoryId, loc: 'bulk', name: 'Bulk', content: 'old' } });
   const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
   const query = `mutation($i:SearchReplaceInNodesInput!){searchReplaceInNodes(input:$i){nodesChanged results{nodeId}}}`;
-  const input = { nodeIds: [source.id], oldText: 'old', newText: '{{> target rev=1}}', fields: ['content'] };
+  const input = { nodeRefs: [source.id], oldText: 'old', newText: '{{> target rev=1}}', fields: ['content'] };
   const run = async (dryRun: boolean) => {
     const r = await server.executeOperation({ query, variables: { i: { ...input, dryRun } } }, { contextValue: ctx() });
     if (r.body.kind !== 'single') throw new Error('unexpected response');
