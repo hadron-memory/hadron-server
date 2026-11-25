@@ -20,6 +20,7 @@ import { Prisma } from '../../generated/prisma/index.js';
 import type { AiModelPrice, PrismaClient, UsageEvent } from '../../generated/prisma/index.js';
 import type { AiConfigOwnerType } from '../aiConfig.js';
 import { generateId } from '../id.js';
+import { PRICE_CACHE_TTL_MS, priceCache } from './priceCache.js';
 
 /** Ledger entry kinds (string column, validated here — no enum by design). */
 export const LEDGER_KINDS = ['grant', 'debit', 'adjustment'] as const;
@@ -53,27 +54,7 @@ function markupPercent(): number {
 
 // ── Price lookup (FR-002) ────────────────────────────────────────────────
 
-interface CachedPrice {
-  row: AiModelPrice | null;
-  fetchedAt: number;
-  /** #5021: when the next row for this key takes effect (ms), or null when none is known. The entry is not served
-   * from that instant on, so a process that cached the old row switches at the new row's effective instant. */
-  nextEffectiveAt: number | null;
-}
-
-/**
- * How long a process may serve a cached price lookup, in milliseconds. It is also the minimum lead of a new price row
- * (#5021, hrn:node:hadronmemory.com:specs:cor:dmo:170:06): `setAiModelPrice` refuses an `effectiveAt` earlier than now
- * plus this lifetime and defaults an omitted one to it, so every process's cache has expired, or knows the new row's
- * effective instant, before the row takes effect. One number for both, on purpose.
- */
-export const PRICE_CACHE_TTL_MS = 60_000;
-const priceCache = new Map<string, CachedPrice>();
-
-/** Test hook: drop the price cache (e.g. after seeding AiModelPrice rows). */
-export function clearPriceCache(): void {
-  priceCache.clear();
-}
+export { clearPriceCache, PRICE_CACHE_TTL_MS } from './priceCache.js';
 
 /**
  * Pricing tiers are 1-3 (Holger, 2026-07-11) — schema headroom for future

@@ -11,7 +11,7 @@ import { createHash, randomBytes } from 'crypto';
 import { APP_KEY_PREFIX } from '../middleware/auth.js';
 import type { PrismaClient, Role } from '../generated/prisma/index.js';
 import { drainNodeUsage } from '../lib/usageRecorder.js';
-import { clearPriceCache } from '../lib/metering/index.js';
+import { clearPriceCache } from '../lib/metering/priceCache.js';
 
 /** Build a deterministic test App key with the canonical `hdr_app_` prefix. */
 export function buildAppKey(suffix?: string): string {
