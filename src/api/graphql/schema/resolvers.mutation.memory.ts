@@ -120,7 +120,7 @@ import { GraphQLError } from 'graphql';
 import { withAuthorizedMemoryTx } from './authorizedTx.js';
 // Spec 049 §8.5 — the memory-level lock Channel creation shares with deleteMemory.
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
-import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
+import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory, tombstoneReclaimableBy } from '../../../lib/mintedSpecPermanence.js';
 import { questionError, memoryHoldsQuestionLog } from '../../../lib/questions/index.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { validateMemorySchema, MemorySchemaError } from '../../../lib/memorySchema.js';
@@ -166,7 +166,7 @@ import {
   resolveRequiredMemoryRef,
   getAccessibleMemoryIds,
   type MergeMemoriesInput,
-  assertMemoryRootLoc,
+  deriveMemorySlug,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
@@ -711,11 +711,8 @@ export const memoryMutations = {
         );
       }
 
-      // #2730: refuse an unprojectable name here, after the gates and before ensureUserHandle,
-      // the tombstone reclaim or any create. Kept unchanged by #3952 ("touch nothing else"): no root node
-      // is made from the name any more, so this is now stricter than creation needs; relaxing it and
-      // renaming assertMemoryRootLoc is a follow-up (#5149).
-      assertMemoryRootLoc(name);
+      // #5149: the name's only refusals, after the gates and before ensureUserHandle, the tombstone reclaim or any create.
+      const memorySlug = deriveMemorySlug(name);
       assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
 
       // The URN root is the owner principal's bare namespace atom — an org
@@ -730,14 +727,15 @@ export const memoryMutations = {
         : (await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId! }, select: { urn: true } })).urn;
       // #574: slugify the display name — a raw name would persist a
       // case-sensitive / space-bearing URN that can't round-trip through parseUrn.
-      const memoryUrn = `${memRoot}:${deriveSlugFromName(name)}`;
+      const memoryUrn = `${memRoot}:${memorySlug}`;
       // Check for existing memory with the same URN
       const existing = await ctx.db.memory.findUnique({ where: { urn: memoryUrn } });
       if (existing) {
-        if (existing.deletedAt) {
+        if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
+          // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${memoryUrn}" already exists`, {
             extensions: { code: 'CONFLICT' },
           });
@@ -1557,10 +1555,11 @@ export const memoryMutations = {
       // is hard-deleted, a live one is an error.
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
       if (existing) {
-        if (existing.deletedAt) {
+        if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
+          // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
             extensions: { code: 'CONFLICT' },
           });
@@ -1609,8 +1608,8 @@ export const memoryMutations = {
         ({ id: parentId } = await resolveNodeRefForCaller(ctx, parentRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError(`Node not found: "${parentRef}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: parentRef },
+          throw new GraphQLError('Node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         throw e;
@@ -1623,8 +1622,8 @@ export const memoryMutations = {
       // its memory. Treat an extract from a tombstoned source as not-found so a
       // stale node id can't resurrect deleted content into a new live memory.
       if (source.deletedAt) {
-        throw new GraphQLError(`Node not found: "${parentRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: parentRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
 
@@ -1632,8 +1631,8 @@ export const memoryMutations = {
       // URN-widened parentRef must not become a cross-tenant exfiltration path
       // (review:entity-ref-args #3). Denial reads as not-found (no oracle).
       if (!(await canReadMemory(ctx.db, ctx, source.id))) {
-        throw new GraphQLError(`Node not found: "${parentRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: parentRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
 
@@ -1783,10 +1782,11 @@ export const memoryMutations = {
       const newUrn = `${targetOrg.urn}:${targetSlug}`;
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
       if (existing) {
-        if (existing.deletedAt) {
+        if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
+          // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
             extensions: { code: 'CONFLICT' },
           });

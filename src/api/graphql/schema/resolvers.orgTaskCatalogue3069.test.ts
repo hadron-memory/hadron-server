@@ -37,7 +37,7 @@ async function portalHalves(who: 'owner' | 'admin') {
   const ctx = context(who);
   const org = await Q.organization({}, { ref: orgId }, ctx);
   const own = ((await ORG.memories(org, {}, ctx)) as { id: string }[]).map(m => m.id);
-  const system = (await Q.memories({}, { orgId, filter: { memoryClasses: ['system'] }, limit: 50 }, ctx)).items as { id: string; appId: string | null }[];
+  const system = (await Q.memories({}, { orgRef: orgId, filter: { memoryClasses: ['system'] }, limit: 50 }, ctx)).items as { id: string; appId: string | null }[];
   return { own, system };
 }
 
@@ -91,7 +91,7 @@ beforeEach(async () => {
 
 describe('#3069 what the portal filter relies on', () => {
   it('the portal can select appId on that list: the document it needs validates against the schema', () => {
-    const document = parse('query($orgId: ID!) { memories(orgId: $orgId, filter: { memoryClasses: [system] }) { items { id appId } total } }');
+    const document = parse('query($orgRef: ID!) { memories(orgRef: $orgRef, filter: { memoryClasses: [system] }) { items { id appId } total } }');
     expect(validate(buildSchema(typeDefs), document)).toEqual([]);
   });
 
@@ -124,11 +124,11 @@ describe('#3069 a named set is taken as named, for a caller who may reference it
   it('a platform-ADMIN org member: createScope refuses the unfiltered set on the install memory', async () => {
     const set = await unfilteredSet('admin');
     expect(set).toContain(installMemoryId);
-    await expect(exported('admin', set)).rejects.toThrow(`No match for memoryRef "${installMemoryId}"`);
+    await expect(exported('admin', set)).rejects.toThrow('No match for memoryRef.');
   });
 
   it('control: passing orgId narrows the unfiltered set on the list path alone', async () => {
-    const result = await Q.findNodes({}, { orgId, filter: { memoryIds: await unfilteredSet('owner'), isRunnable: true } }, context('owner'));
+    const result = await Q.findNodes({}, { orgRef: orgId, filter: { memoryIds: await unfilteredSet('owner'), isRunnable: true } }, context('owner'));
     expect((result.hits as { node: { loc: string } }[]).map(h => h.node.loc).sort()).toEqual(['tasks:agent-task', 'tasks:org-task']);
   });
 });

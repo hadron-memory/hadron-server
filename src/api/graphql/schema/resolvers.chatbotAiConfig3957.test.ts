@@ -224,10 +224,12 @@ describe('chatAiConfigChoices', () => {
   it('a non-member gets exactly the answer a missing App gets', async () => {
     const a = await Q.chatAiConfigChoices(null, { appRef: app.id }, ctx(outsider)).catch((e: any) => e);
     const b = await Q.chatAiConfigChoices(null, { appRef: generateId() }, ctx(outsider)).catch((e: any) => e);
-    const strip = (e: Error, id: string) => `${e.name}|${e.message.split(id).join('<ref>')}`;
+    // #5168: the refusal no longer quotes the ref, so the two compare whole, with nothing to strip.
+    const whole = (e: Error) => `${e.name}|${e.message}`;
     expect(a).toBeInstanceOf(Error);
     expect(a.name).toBe('AppNotFoundError');
-    expect(strip(a, app.id)).toBe(strip(b, (b.message.match(/[A-Za-z0-9]{20,}/) ?? [''])[0]));
+    expect(whole(a)).toBe(whole(b));
+    expect(a.message).not.toContain(app.id);
   });
 });
 
@@ -360,12 +362,12 @@ describe('the chat path', () => {
     // serialized error is compared; and the echo is the verbatim input, never anything config-derived.
     const refusal = (id: string, run: () => Promise<unknown>) => run().then(() => null, (e: any) => {
       const whole = JSON.stringify({ name: e.name, ...(typeof e.toJSON === 'function' ? e.toJSON() : { message: e.message }) });
-      expect(whole).toContain(id); // the caller's own input comes back verbatim
+      expect(whole).not.toContain(id); // #5168: the caller's input is no longer echoed back
       for (const derived of [orgConfig.name, orgConfig.model, orgConfig.provider, orgConfig.apiKeyPreview!, KEY]) expect(whole).not.toContain(derived);
       return whole.split(id).join('<id>');
     });
     const absent = generateId();
-    const spellings = [orgConfig.id, orgConfig.id.toUpperCase(), orgConfig.id.toLowerCase(), absent]; // a spelling only the caller supplied is echoed as sent
+    const spellings = [orgConfig.id, orgConfig.id.toUpperCase(), orgConfig.id.toLowerCase(), absent]; // no spelling is echoed (#5168)
     const starts = await Promise.all(spellings.map(id => refusal(id, () => start({ scope: 'private', aiConfigChoice: id }))));
     expect(new Set(starts).size).toBe(1);
     expect(starts[0]).toContain('AiServiceConfigNotFoundError');

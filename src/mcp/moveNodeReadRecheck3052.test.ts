@@ -68,7 +68,7 @@ async function populate(f: Awaited<ReturnType<typeof fixture>>) {
 
 /** The full refusal envelope: one text block, flagged, naming the memory and nothing else. */
 const expectRefusal = (result: unknown, memoryUrn: string) =>
-  expect(result).toEqual({ content: [{ type: 'text', text: `Source memory not found: "${memoryUrn}".` }], isError: true });
+  expect(result).toEqual({ content: [{ type: 'text', text: 'Source memory not found.' }], isError: true });
 
 describe('#3052 hadron_move_node source read recheck', () => {
   it('allows the reader and moves the node', async () => {

@@ -176,7 +176,7 @@ describe('homeAssistantInstance / homeAssistantInstances reads', () => {
 
     const outsiderPage = await resolvers.Query.homeAssistantInstances(
       {},
-      { orgId: org.id },
+      { orgRef: org.id },
       ctxFor(outsider.id),
     );
     expect(outsiderPage).toEqual({ items: [], total: 0 });

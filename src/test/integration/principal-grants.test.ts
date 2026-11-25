@@ -187,7 +187,7 @@ describe('requireOrgAction — no grant rows (transcription check)', () => {
     // is the missing-memory answer rather than a Forbidden confirming it.
     await expect(
       resolvers.Mutation.cloneMemory({}, { ref: mem.id, targetUrn: 'org-a::km-3' }, contributorCtx()),
-    ).rejects.toThrow(`MEMORY_NOT_FOUND: ${mem.id}`);
+    ).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
     expect(await db.memory.findFirst({ where: { urn: 'org-a:km-3' } })).toBeNull();
   });
 });

@@ -1,4 +1,4 @@
-/** #5019 (Billing A11): a malformed NODE_CONTENT_MAX_BYTES refuses boot without echoing the value. Imports none of the new modules, so it is red on main because main boots. */
+/** #5019 (Billing A11): a malformed NODE_CONTENT_MAX_BYTES refuses boot without echoing the value. Imports none of the new modules, so it is red on main because main boots. One real boot: what a valid value parses to is pinned in nodeContentLimit5019.test.ts (#5160). */
 import { describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -31,11 +31,5 @@ describe('#5019 boot', () => {
     expect(code).not.toBe(0);
     expect(out).toContain('NODE_CONTENT_MAX_BYTES must be');
     expect(out).not.toContain(MARKER);
-  }, 70_000);
-
-  it('a valid value boots', async () => {
-    const { code, out } = await boot('1000');
-    expect(out).toContain('BOOTED');
-    expect(code).toBe(0);
   }, 70_000);
 });

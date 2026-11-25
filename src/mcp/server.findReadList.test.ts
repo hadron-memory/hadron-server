@@ -306,7 +306,7 @@ describe('#188 BOLA — hadron_list_nodes scope override is gated by canReadMemo
       parentRel: `urn:node:${fx.memory.urn}:archive`,
       depth: 1,
     });
-    expect(text).toMatch(/Node .* not found/i);
+    expect(text).toMatch(/Node not found/i); // #5168: the ref is not quoted back
     // No actual data from the inaccessible memory leaks into the response.
     expect(text).not.toContain('Old item');
   });

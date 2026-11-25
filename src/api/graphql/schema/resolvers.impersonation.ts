@@ -271,18 +271,18 @@ export const impersonationQueries = {
 
   /**
    * Uniform audit list (cor:api:120): `{ items, total }`, createdAt-desc.
-   * Platform admins may omit `orgId` (unscoped); everyone else must name an
+   * Platform admins may omit `orgRef` (unscoped); everyone else must name an
    * org they are a live ADMIN/OWNER of.
    */
   impersonationSessions: async (
     _: unknown,
     {
-      orgId,
+      orgRef,
       filter,
       limit,
       offset,
     }: {
-      orgId?: string | null;
+      orgRef?: string | null;
       filter?: { activeOnly?: boolean | null } | null;
       limit?: number | null;
       offset?: number | null;
@@ -294,10 +294,10 @@ export const impersonationQueries = {
     if (ctx.impersonation) throw forbidden();
     const platformAdmin = isPlatformAdmin(ctx);
     let scopedOrgId: string | null = null;
-    if (orgId != null) {
-      scopedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgId });
+    if (orgRef != null) {
+      scopedOrgId = await resolveOrgRefArg(ctx.db, { ref: orgRef });
     } else if (!platformAdmin) {
-      throw badInput('orgId is required (platform admins may omit it).');
+      throw badInput('orgRef is required (platform admins may omit it).');
     }
     if (!platformAdmin) {
       if (!ctx.userId) throw forbidden();

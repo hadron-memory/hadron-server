@@ -88,7 +88,8 @@ export class AmbiguousUserRefError extends Error {
  */
 export class AmbiguousLegacyUrnError extends Error {
   constructor(public ref: string, public candidateNodeIds?: readonly string[]) {
-    super(`AMBIGUOUS_LEGACY_URN: ${ref}`);
+    // #5168: the ref is the caller's own text and is not quoted back; `ref` stays on the instance.
+    super('AMBIGUOUS_LEGACY_URN: the legacy URN matches more than one entity; use its id or current URN.');
     this.name = 'AmbiguousLegacyUrnError';
   }
 }
@@ -163,8 +164,9 @@ export class NodeRevisionNotFoundError extends EntityNotFoundError {
  * of silently writing to `pending_edges` (issue #105).
  */
 export class NodeNotFoundError extends EntityNotFoundError {
-  constructor(ref: string) {
-    super('NODE_NOT_FOUND', ref);
+  /** `detail`: server-authored context for the message (#5168), never the caller's ref. */
+  constructor(ref: string, detail?: string) {
+    super('NODE_NOT_FOUND', ref, detail);
     this.name = 'NodeNotFoundError';
   }
 }

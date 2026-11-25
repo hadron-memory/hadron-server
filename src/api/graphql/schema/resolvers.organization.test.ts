@@ -82,12 +82,12 @@ describe('memories(orgId, memoryClasses: [system]) — the former orgSystemMemor
   });
 
   it('accepts an ID', async () => {
-    const mems = (await resolvers.Query.memories({}, { orgId: org.id, filter: { memoryClasses: ['system'] } }, adminCtx())).items;
+    const mems = (await resolvers.Query.memories({}, { orgRef: org.id, filter: { memoryClasses: ['system'] } }, adminCtx())).items;
     expect(mems).toHaveLength(1);
   });
 
   it('accepts a URN', async () => {
-    const mems = (await resolvers.Query.memories({}, { orgId: org.urn, filter: { memoryClasses: ['system'] } }, adminCtx())).items;
+    const mems = (await resolvers.Query.memories({}, { orgRef: org.urn, filter: { memoryClasses: ['system'] } }, adminCtx())).items;
     expect(mems).toHaveLength(1);
   });
 });
@@ -105,24 +105,24 @@ describe('Query.apps (007-entity-id-or-urn)', () => {
   });
 
   it('accepts an ID', async () => {
-    const apps = (await resolvers.Query.apps({}, { orgId: org.id }, adminCtx())).items;
+    const apps = (await resolvers.Query.apps({}, { orgRef: org.id }, adminCtx())).items;
     expect(apps).toHaveLength(1);
   });
 
   it('accepts a URN', async () => {
-    const apps = (await resolvers.Query.apps({}, { orgId: org.urn }, adminCtx())).items;
+    const apps = (await resolvers.Query.apps({}, { orgRef: org.urn }, adminCtx())).items;
     expect(apps).toHaveLength(1);
   });
 });
 
 describe('Query.exchangeConnections (007-entity-id-or-urn)', () => {
   it('accepts an ID', async () => {
-    const conns = await resolvers.Query.exchangeConnections({}, { orgId: org.id }, adminCtx());
+    const conns = await resolvers.Query.exchangeConnections({}, { orgRef: org.id }, adminCtx());
     expect(Array.isArray(conns)).toBe(true);
   });
 
   it('accepts a URN', async () => {
-    const conns = await resolvers.Query.exchangeConnections({}, { orgId: org.urn }, adminCtx());
+    const conns = await resolvers.Query.exchangeConnections({}, { orgRef: org.urn }, adminCtx());
     expect(Array.isArray(conns)).toBe(true);
   });
 });

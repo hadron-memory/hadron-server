@@ -71,8 +71,8 @@ describe('#1561 — hadron_get_run', () => {
     const r = await run();
     const denied = await getRun(outsider.id, r.id);
     const missing = await getRun(outsider.id, generateId());
-    expect(denied).toBe(`Run "${r.id}" not found.`);
-    expect(missing).toMatch(/^Run ".+" not found\.$/);
+    expect(denied).toBe('Run not found.');
+    expect(missing).toBe('Run not found.'); // #5168: the ref is not quoted back
   });
 
   it('caps a huge envelope with an honest truncation note instead of blowing the result ceiling', async () => {
@@ -106,13 +106,13 @@ describe('#1565 review — run starters read their own run; foreign runs stay ma
 
   it("another member's run reads as not found", async () => {
     const r = await run({ createdBy: otherMember.id });
-    expect(await getRun(member.id, r.id)).toBe(`Run "${r.id}" not found.`);
+    expect(await getRun(member.id, r.id)).toBe('Run not found.');
   });
 
   it('a starter whose App membership was revoked can no longer read it', async () => {
     const r = await run({ createdBy: member.id });
     await db.appMember.deleteMany({ where: { appId: app.id, userId: member.id } });
-    expect(await getRun(member.id, r.id)).toBe(`Run "${r.id}" not found.`);
+    expect(await getRun(member.id, r.id)).toBe('Run not found.');
   });
 
   it("another App's key cannot read this App's run (Cody's cross-App-key control)", async () => {
@@ -121,7 +121,7 @@ describe('#1565 review — run starters read their own run; foreign runs stay ma
     const otherApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
     const r = await run({ createdBy: null });
     const foreignKey = createTestableMcpServer({ appId: otherApp.id, roles: [], clientId: `app:${otherApp.id}` } as AuthContext);
-    expect(await foreignKey.callToolText('hadron_get_run', { ref: r.id })).toBe(`Run "${r.id}" not found.`);
+    expect(await foreignKey.callToolText('hadron_get_run', { ref: r.id })).toBe('Run not found.');
   });
 
   it("a pure App key reads its own App's run; a user's App SELECTION is not that credential", async () => {
@@ -129,7 +129,7 @@ describe('#1565 review — run starters read their own run; foreign runs stay ma
     const appKey = createTestableMcpServer({ appId: app.id, roles: [], clientId: `app:${app.id}` } as AuthContext);
     expect(await appKey.callToolText('hadron_get_run', { ref: r.id })).toContain(`Run ${r.id}`);
     const selecting = createTestableMcpServer({ userId: outsider.id, appId: app.id, roles: ['READER'], clientId: `user:${outsider.id}` } as AuthContext);
-    expect(await selecting.callToolText('hadron_get_run', { ref: r.id })).toBe(`Run "${r.id}" not found.`);
+    expect(await selecting.callToolText('hadron_get_run', { ref: r.id })).toBe('Run not found.');
   });
 });
 
@@ -159,7 +159,7 @@ describe('#1565 review — Liam P3, Copilot and Jane P2 cases', () => {
   it('createdBy on a scheduled or webhook run is the trigger config\'s creator, not a starter: not readable (Copilot)', async () => {
     for (const triggerKind of ['SCHEDULE', 'WEBHOOK'] as const) {
       const r = await run({ triggerKind, createdBy: member.id });
-      expect(await getRun(member.id, r.id), triggerKind).toBe(`Run "${r.id}" not found.`);
+      expect(await getRun(member.id, r.id), triggerKind).toBe('Run not found.');
     }
   });
 

@@ -956,7 +956,7 @@ describe('#1030 — the team chat is not an agent chat', () => {
     await post(ctx(appMember.id), { body: 'first!' });
     await expect(
       M.sendChatMessage({}, { chatId: TEAM_CHAT_LOC, userMessage: 'hi' }, ctx(appMember.id)),
-    ).rejects.toThrow(`Chat "${TEAM_CHAT_LOC}" not found`);
+    ).rejects.toThrow('Chat not found');
 
     // The record is untouched: still one message, still allocated by this
     // file's allocator rather than the agent-chat path.
@@ -981,10 +981,10 @@ describe('#1030 — the team chat is not an agent chat', () => {
 
     await expect(
       M.deleteChat({}, { chatId: TEAM_CHAT_LOC }, ctx(appMember.id)),
-    ).rejects.toThrow(`Chat "${TEAM_CHAT_LOC}" not found`);
+    ).rejects.toThrow('Chat not found');
     await expect(
       M.deleteChat({}, { chatId: TEAM_CHAT_LOC }, { db, userId: admin.id, roles: ['ADMIN'] } as Context),
-    ).rejects.toThrow(`Chat "${TEAM_CHAT_LOC}" not found`);
+    ).rejects.toThrow('Chat not found');
 
     // Root and messages both survive, and the surface that owns them still
     // reads them.
@@ -1002,7 +1002,7 @@ describe('#1030 — the team chat is not an agent chat', () => {
     await post(ctx(appMember.id), { body: 'first!' });
     await expect(
       M.updateChatTitle({}, { chatId: TEAM_CHAT_LOC, title: 'renamed' }, ctx(appMember.id)),
-    ).rejects.toThrow(`Chat "${TEAM_CHAT_LOC}" not found`);
+    ).rejects.toThrow('Chat not found');
   });
 
   it("an ordinary agent chat in the same memory still lists — the exclusion is the team chat, not the App", async () => {

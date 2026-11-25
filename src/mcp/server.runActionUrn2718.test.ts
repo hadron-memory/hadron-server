@@ -55,7 +55,7 @@ const actionUrn = (agentUrn: string, code: string) => `hrn:action:${agentUrn}:${
 const nodeUrn = (code = CODE) => emitNodeUrnV2(memoryUrn, `register:${code}`);
 const run = (as: string, urn: string, args?: Record<string, string>) =>
   createTestableMcpServer(auth(as)).callToolText('hadron_run_action', { urn, ...(args ? { args } : {}) });
-const notFound = (urn: string) => `Node "${urn}" not found.`;
+const notFound = (urn: string) => 'Node not found.';
 
 async function registerEntry(mem: string, code: string) {
   return db.node.create({

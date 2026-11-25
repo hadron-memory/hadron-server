@@ -80,11 +80,10 @@ describe('#1174 — the not-found is in the code, not only in the message', () =
     expect(err, 'expected the operation to fail').toBeDefined();
     expect(err!.extensions?.code).toBe('ORGANIZATION_NOT_FOUND');
     expect(err!.extensions?.code).not.toBe('INTERNAL_SERVER_ERROR');
-    // The ref, structured — a client never has to split the message for it.
-    expect(err!.extensions?.ref).toBe('nosuch.example');
-    // The message is UNCHANGED. The code is additive: this fix must not break
-    // a reader who is (wrongly) matching prose today.
-    expect(err!.message).toBe('ORGANIZATION_NOT_FOUND: nosuch.example');
+    // #5168: the ref is not relayed (it was, as `extensions.ref`): the caller's own text, possibly a pasted secret.
+    expect(err!.extensions?.ref).toBeUndefined();
+    // #5168: the message keeps its code prefix and no longer quotes the ref.
+    expect(err!.message).toBe('ORGANIZATION_NOT_FOUND: nothing found for the given ref.');
   });
 
   it('the siblings still answer a bare null, because THAT is their contract', async () => {

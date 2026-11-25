@@ -17,7 +17,7 @@ afterAll(() => api.stop());
 const Q = resolvers.Query!;
 let orgId: string, authorRoot: string, servingRoot: string, appId: string, agentId: string, workerId: string, adminId: string, memberId: string;
 const context = (userId = adminId): Context => ({ db, userId, roles: [] });
-const preview = (ctx = context()) => Q.orgBootPromptSigningPreview!({}, { org: orgId }, ctx) as Promise<any>;
+const preview = (ctx = context()) => Q.orgBootPromptSigningPreview!({}, { orgRef: orgId }, ctx) as Promise<any>;
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -53,7 +53,7 @@ describe('#4017 signing preview URNs', () => {
     expect(fields.workerUrn?.description).toMatch(/worker/i);
   });
   it('exposes nullable, documented agent/worker URNs through the actual GraphQL surface on both row kinds', async () => {
-    const result = await api.executeOperation({ query: `query($org:ID!){orgBootPromptSigningPreview(org:$org){rows{agentId agentUrn workerId workerUrn}}}`, variables: { org: orgId } }, { contextValue: context() });
+    const result = await api.executeOperation({ query: `query($orgRef:ID!){orgBootPromptSigningPreview(orgRef:$orgRef){rows{agentId agentUrn workerId workerUrn}}}`, variables: { orgRef: orgId } }, { contextValue: context() });
     expect(result.body.kind).toBe('single');
     if (result.body.kind !== 'single') throw new Error('Unexpected incremental result');
     expect(result.body.singleResult.errors).toBeUndefined();

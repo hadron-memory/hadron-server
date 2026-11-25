@@ -525,8 +525,8 @@ describe('resolution (item 3, 4, 5)', () => {
         const e = await refusal(M.cancelAgentTask({}, { taskRef: p.input }, as(who)));
         expect(e.extensions?.code).toBe('TASK_NOT_FOUND');
         expect(e.message).toBe('Task not found.');
-        expect(e.extensions?.taskId).toBe(p.input);
-        expect(Object.keys(e.extensions ?? {}).sort()).toEqual(['code', 'taskId']);
+        expect(e.extensions?.taskId).toBeUndefined(); // #5168: the caller's ref is not relayed
+        expect(Object.keys(e.extensions ?? {}).sort()).toEqual(['code']);
         expect(await Q.agentTask({}, { ref: p.input }, as(who))).toBeNull();
       }
     }
@@ -543,8 +543,8 @@ describe('resolution (item 3, 4, 5)', () => {
     await mk(appX, 'x1');
     const e = await refusal(M.cancelAgentTask({}, { taskRef: 'AT0.1' }, as(eve)));
     const f = await refusal(M.cancelAgentTask({}, { taskRef: 'AT0.777' }, as(eve)));
-    expect(e.extensions).toEqual({ code: 'TASK_NOT_FOUND', taskId: 'AT0.1' });
-    expect(f.extensions).toEqual({ code: 'TASK_NOT_FOUND', taskId: 'AT0.777' });
+    expect(e.extensions).toEqual({ code: 'TASK_NOT_FOUND' });
+    expect(f.extensions).toEqual({ code: 'TASK_NOT_FOUND' });
   });
 
   it.each(['AT', 'AT-1', 'AT0312', 'AT03', 'AT3.0', 'AT3.05', 'AT3.', 'AT3..4', 'AT.3', 'AT312 ', ' AT312', 'AT99999999999999999999', 'AT1.9223372036854775808', 'XAT1', 'AT1x', `AT1${'.1'.repeat(16)}`])(
@@ -552,7 +552,7 @@ describe('resolution (item 3, 4, 5)', () => {
     async (bad) => {
       await mk(appX, 'x1', bob);
       expect(await Q.agentTask({}, { ref: bad }, as(bob))).toBeNull();
-      expect((await refusal(M.cancelAgentTask({}, { taskRef: bad }, as(bob)))).extensions).toEqual({ code: 'TASK_NOT_FOUND', taskId: bad });
+      expect((await refusal(M.cancelAgentTask({}, { taskRef: bad }, as(bob)))).extensions).toEqual({ code: 'TASK_NOT_FOUND' });
     },
   );
 
