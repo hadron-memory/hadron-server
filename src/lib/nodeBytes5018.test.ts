@@ -197,8 +197,8 @@ describe('#5018 the trigger bodies are schema-qualified (#5089)', () => {
 });
 
 describe('#5018 the migration carries the shared SQL verbatim', () => {
-  it('prisma/node-bytes-invariants.sql is the tail of migration 20261124213000_node_bytes, after its ALTER TABLE', () => {
-    const migration = readFileSync('prisma/migrations/20261124213000_node_bytes/migration.sql', 'utf8');
+  it('prisma/node-bytes-invariants.sql is the tail of migration 20261125010000_node_bytes, after its ALTER TABLE', () => {
+    const migration = readFileSync('prisma/migrations/20261125010000_node_bytes/migration.sql', 'utf8');
     const shared = readFileSync('prisma/node-bytes-invariants.sql', 'utf8');
     expect(migration.endsWith(shared)).toBe(true);
     expect(migration.slice(0, migration.length - shared.length)).toMatch(/^-- AlterTable\nALTER TABLE "nodes" ADD COLUMN "stored_bytes" INTEGER,\nADD COLUMN "revision_bytes" BIGINT;\n\n$/);

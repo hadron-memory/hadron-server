@@ -3,7 +3,7 @@ ALTER TABLE "nodes" ADD COLUMN "stored_bytes" INTEGER,
 ADD COLUMN "revision_bytes" BIGINT;
 
 -- #5018 (Billing A14): a node's recorded size (hrn:node:hadronmemory.com:specs:cor:dmo:060:18). One source, shared verbatim with
--- migration 20261124213000_node_bytes. Every statement is idempotent (OR REPLACE, drop-then-add).
+-- migration 20261125010000_node_bytes. Every statement is idempotent (OR REPLACE, drop-then-add).
 --
 -- nodes.stored_bytes   the bytes of content, description, data and properties as stored (data and properties as their jsonb text),
 --                      capped at the Int range so a write is never refused for its size.
