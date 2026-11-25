@@ -58,7 +58,19 @@ const isAsciiPunct = (c: string | undefined): boolean => c !== undefined && /[!-
  * a quote, a list item, a thematic break or an HTML block of CommonMark's types 1 to 6 (type 7 cannot interrupt a paragraph). A heading is one line, so a span that opens in one ends with it. Where a line only
  * looks like a block start the run is cut short, which means fewer code spans are skipped and more `<` are judged: the safe side.
  */
-const BLOCK_START = /\n(?: {0,3}(?:#{1,6}(?:[ \t\r]|$)|`{3,}|~{3,}|>|[-+*][ \t]+\S|1[.)][ \t]+\S|(?:[-*_][ \t]*){3,}\r?(?:\n|$)|<(?:script|pre|style|textarea)(?:[ \t>\r]|$)|<!--|<\?|<![A-Za-z]|<!\[CDATA\[|<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t>\r]|\/>|$))|[ \t\r]*\n)/gim;
+/** CommonMark HTML block type 6: the tag names that start a block (the name may be an opening or a closing tag). */
+const BLOCK6 = 'address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul';
+const BLOCK6_NAMES: ReadonlySet<string> = new Set(BLOCK6.split('|'));
+/** HTML block type 1: the elements whose block runs to a literal end tag. */
+const TYPE1_NAMES: ReadonlySet<string> = new Set(['script', 'style', 'textarea', 'pre']);
+const BLOCK_START = new RegExp(
+  `\\n(?: {0,3}(?:${[
+    '#{1,6}(?:[ \\t\\r]|$)', '`{3,}', '~{3,}', '>', '[-+*][ \\t]+\\S', '1[.)][ \\t]+\\S', '(?:[-*_][ \\t]*){3,}\\r?(?:\\n|$)',
+    '<(?:script|pre|style|textarea)(?:[ \\t>\\r]|$)', '<!--', '<\\?', '<![A-Za-z]', '<!\\[CDATA\\[',
+    `<\\/?(?:${BLOCK6})(?:[ \\t>\\r]|\\/>|$)`,
+  ].join('|')})|[ \\t\\r]*\\n)`,
+  'gim',
+);
 function paragraphEnd(text: string, i: number): number {
   const lineStart = text.lastIndexOf('\n', i - 1) + 1;
   const eol = text.indexOf('\n', i);
@@ -152,13 +164,28 @@ function firstUnterminated(text: string, from: number): number {
     }
     return j - lineFrom <= 3 && lineFirst === j;
   };
-  const tagLimit = (j: number): number => (startsLine(j) ? blankBound(j) : inlineBound(j));
+  // A tag runs to the next blank line only where it opens an HTML block (a type 6 name, or a type 1 start tag); anywhere else it is inline
+  // HTML, which no block boundary lets through, even at the head of a line.
+  const tagLimit = (j: number, opensBlock: boolean): number => (opensBlock && startsLine(j) ? blankBound(j) : inlineBound(j));
   const blockLimit = (j: number): number => (startsLine(j) ? n : inlineBound(j));
+  // Inside an HTML block (types 1 to 7) Markdown reads no fence, code span, backslash escape or indented code: the lines are raw HTML, and
+  // a browser reads them as markup. `rawUntil` is the end of the last such line; the scan skips the Markdown rules below it.
+  let rawUntil = -1;
+  const lineEndAt = (j: number): number => {
+    const nl = text.indexOf('\n', j);
+    return nl === -1 ? n : nl;
+  };
+  const prevLineBlank = (): boolean => {
+    if (lineFrom === 0) return true;
+    return text.slice(text.lastIndexOf('\n', lineFrom - 2) + 1, lineFrom - 1).trim() === '';
+  };
   // A backtick run of length N that found no closer in its paragraph: no later run of N in the same paragraph has one either.
   const noCloser = new Map<number, number>();
   let i = from;
   while (i < n) {
-    if (i === 0 || text[i - 1] === '\n') {
+    if ((i === 0 || text[i - 1] === '\n') && i < rawUntil) {
+      prev = 'other';
+    } else if (i === 0 || text[i - 1] === '\n') {
       const nl = text.indexOf('\n', i);
       const end = nl === -1 ? n : nl;
       const line = text.slice(i, end);
@@ -173,8 +200,8 @@ function firstUnterminated(text: string, from: number): number {
       prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : 'other';
     }
     const c = text[i];
-    if (c === '\\') { i += isAsciiPunct(text[i + 1]) ? 2 : 1; continue; }
-    if (c === '`') {
+    if (c === '\\' && i >= rawUntil) { i += isAsciiPunct(text[i + 1]) ? 2 : 1; continue; }
+    if (c === '`' && i >= rawUntil) {
       let len = 1;
       while (text[i + len] === '`') len += 1;
       paraEnd = inlineBound(i);
@@ -197,7 +224,7 @@ function firstUnterminated(text: string, from: number): number {
       // Inside an inline raw-text element: the only markup is its own end tag.
       if (text[i + 1] === '/' && text.slice(i + 2, i + 2 + rawName.length).toLowerCase() === rawName && /[\s>]/.test(text[i + 2 + rawName.length] ?? 'x')) {
         const end = tagEndOf(text, i, i + 2);
-        if (end === -1 || end > inlineBound(i)) return rawStart;
+        if (end === -1 || end > tagLimit(i, false)) return rawStart;
         rawStart = -1;
         i = end;
       } else i += 1;
@@ -208,6 +235,7 @@ function firstUnterminated(text: string, from: number): number {
       if (text.startsWith('<!--->', i)) { i += 6; continue; }
       const close = text.indexOf('-->', i + 4);
       if (close === -1 || close + 3 > blockLimit(i)) return i;
+      if (startsLine(i)) rawUntil = Math.max(rawUntil, lineEndAt(close));
       i = close + 3;
       continue;
     }
@@ -220,6 +248,7 @@ function firstUnterminated(text: string, from: number): number {
       const first = text.indexOf('>', i + 2);
       const closer = text.indexOf(']]>', i + 9);
       if (first === -1 || closer === -1 || first !== closer + 2 || closer + 3 > blockLimit(i)) return i;
+      if (startsLine(i)) rawUntil = Math.max(rawUntil, lineEndAt(closer));
       i = first + 1;
       continue;
     }
@@ -227,12 +256,14 @@ function firstUnterminated(text: string, from: number): number {
       const first = text.indexOf('>', i + 2);
       const closer = text.indexOf('?>', i + 1);
       if (first === -1 || closer === -1 || first !== closer + 1 || closer + 2 > blockLimit(i)) return i;
+      if (startsLine(i)) rawUntil = Math.max(rawUntil, lineEndAt(closer));
       i = first + 1;
       continue;
     }
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
+      if (startsLine(i)) rawUntil = Math.max(rawUntil, lineEndAt(close));
       i = close + 1;
       continue;
     }
@@ -240,7 +271,7 @@ function firstUnterminated(text: string, from: number): number {
     if (isEnd && !isLetter(text[i + 2]) && text[i + 2] !== '>') {
       // `</` and anything but a letter or `>` is a bogus comment, which runs to the next `>`.
       const close = text.indexOf('>', i + 2);
-      if (close === -1 || close + 1 > tagLimit(i)) return i;
+      if (close === -1 || close + 1 > tagLimit(i, false)) return i;
       i = close + 1;
       continue;
     }
@@ -248,11 +279,20 @@ function firstUnterminated(text: string, from: number): number {
 
     // A start or end tag: the name, then attributes up to the `>` outside a quoted value.
     const nameStart = i + (isEnd ? 2 : 1);
-    const tagEnd = tagEndOf(text, i, nameStart);
-    if (tagEnd === -1 || tagEnd > tagLimit(i)) return i;
     let nameEnd = nameStart;
     while (nameEnd < n && !isBlank(text[nameEnd]) && text[nameEnd] !== '/' && text[nameEnd] !== '>') nameEnd += 1;
     const name = text.slice(nameStart, nameEnd).toLowerCase();
+    const opensBlock = BLOCK6_NAMES.has(name) || (!isEnd && TYPE1_NAMES.has(name));
+    const tagEnd = tagEndOf(text, i, nameStart);
+    if (tagEnd === -1 || tagEnd > tagLimit(i, opensBlock)) return i;
+    // A block-level tag at the head of a line (type 6), or a complete tag alone on its line that does not interrupt a paragraph (type 7),
+    // starts an HTML block that runs to the next blank line.
+    if (startsLine(i)) {
+      if (BLOCK6_NAMES.has(name)) rawUntil = Math.max(rawUntil, blankBound(i));
+      else if (!TYPE1_NAMES.has(name) && !text.slice(i, tagEnd).includes('\n') && text.slice(tagEnd, lineEndAt(tagEnd)).trim() === '' && prevLineBlank()) {
+        rawUntil = Math.max(rawUntil, blankBound(i));
+      }
+    }
     if (isEnd) {
       if (name === 'template') templates.pop();
       i = tagEnd;
@@ -270,6 +310,7 @@ function firstUnterminated(text: string, from: number): number {
         const literal = new RegExp(`</${name}>`, 'gi');
         literal.lastIndex = tagEnd;
         if (!literal.test(text)) return i;
+        rawUntil = Math.max(rawUntil, lineEndAt(literal.lastIndex));
         const closer = new RegExp(`</${name}(?=[\\s>])`, 'gi');
         closer.lastIndex = tagEnd;
         const m = closer.exec(text);
@@ -289,6 +330,7 @@ function firstUnterminated(text: string, from: number): number {
       const closer = /<\/(?:pre|script|style|textarea)>/gi;
       closer.lastIndex = i;
       if (!closer.test(text)) return i;
+      rawUntil = Math.max(rawUntil, lineEndAt(closer.lastIndex));
     }
     i = tagEnd;
   }
