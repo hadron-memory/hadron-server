@@ -403,6 +403,10 @@ describe('escapeUnterminatedHtml', () => {
     // A closed code span cannot hide the interior of such a block.
     expect(escapeUnterminatedHtml('# h\n<b>\n`x\n<script>\ny` z')).toBe('# h\n<b>\n`x\n&lt;script>\ny` z');
   });
+  it('only `<!` and a letter is an HTML block (type 4): the rest of its closing line is raw, and after `<! ` it is Markdown', () => {
+    expect(escapeUnterminatedHtml('<!A a > `x <b x= y` z')).toBe('<!A a > `x &lt;b x= y` z');
+    expect(escapeUnterminatedHtml('<! a > `x <b x= y` z')).toBe('<! a > `x <b x= y` z');
+  });
   it('the restart does not lose a raw region: every pass scans the escaped text from its start', () => {
     const body = '<div>\n<b x=\n```\n<script> a';
     const once = escapeUnterminatedHtml(body);
