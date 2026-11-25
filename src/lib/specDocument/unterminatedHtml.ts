@@ -264,13 +264,19 @@ function firstUnterminated(text: string, from: number): number {
     if (RAW_TEXT.has(name)) {
       if (startsLine(i) && (name === 'script' || name === 'style' || name === 'textarea')) {
         // CommonMark type 1: the block runs raw to the first line that holds an end tag, code or not.
-        // The block ends at the line that holds `</name>` itself: a partial end tag (`</name ` or `</name` and a newline) ends nothing in
-        // Markdown, and a browser would read one of those as swallowing what follows up to the next `>`, so both readers need the full tag.
-        const closer = new RegExp(`</${name}>`, 'gi');
+        // Markdown ends the block only at a line that holds `</name>` itself, so that literal end tag must exist. A browser ends the element
+        // at the first `</name` followed by a blank, `/` or `>` (and that tag's own `>`), and reads as markup what comes after it, inside the
+        // block: the scan resumes there.
+        const literal = new RegExp(`</${name}>`, 'gi');
+        literal.lastIndex = tagEnd;
+        if (!literal.test(text)) return i;
+        const closer = new RegExp(`</${name}(?=[\\s>])`, 'gi');
         closer.lastIndex = tagEnd;
         const m = closer.exec(text);
         if (!m) return i;
-        i = m.index + name.length + 3;
+        const end = tagEndOf(text, m.index, m.index + 2);
+        if (end === -1) return i;
+        i = end;
       } else {
         rawStart = i;
         rawName = name;

@@ -311,7 +311,10 @@ describe('escapeUnterminatedHtml', () => {
       ['a declaration', "a `x\n<!DOCTYPE x\nz` q", "a `x\n&lt;!DOCTYPE x\nz` q"],
       ['CDATA', "a `x\n<![CDATA[x\nz` q", "a `x\n&lt;![CDATA[x\nz` q"],
       ['a block tag (type 6)', "a `x\n<div>\n<b x='\ny` w", "a `x\n<div>\n&lt;b x='\ny` w"],
-      ['a block end tag (type 6)', "a `x\n</div>\n<b x='\ny` w", "a `x\n</div>\n&lt;b x='\ny` w"],
+      ['an uppercase block opener', "a `x\n<TEXTAREA> y\nz` q", "a `x\n&lt;TEXTAREA> y\nz` q"],
+    ['an uppercase block tag (type 6)', "a `x\n<DIV>\n<b x='\ny` w", "a `x\n<DIV>\n&lt;b x='\ny` w"],
+    ['a block tag that is not the first of the list (table)', "a `x\n<table>\n<b x='\ny` w", "a `x\n<table>\n&lt;b x='\ny` w"],
+    ['a block end tag (type 6)', "a `x\n</div>\n<b x='\ny` w", "a `x\n</div>\n&lt;b x='\ny` w"],
     ];
     for (const [label, body, want] of cases) expect(escapeUnterminatedHtml(body), label).toBe(want);
     // An inline tag that is not a block-level name does not end the paragraph (type 7 cannot interrupt one): the span runs on.
@@ -321,6 +324,9 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('<script>\nx\n</script\n```\n>\n```\nq <textarea>z')).toContain('&lt;script>');
     expect(escapeUnterminatedHtml('<script>\nx\n</script >\ny')).toBe('&lt;script>\nx\n</script >\ny');
     expect(escapeUnterminatedHtml('<script>\nx\n</script>\ny')).toBe('<script>\nx\n</script>\ny');
+    // The browser ends the element at the first `</script ` and reads what follows as markup, inside the Markdown block (found by fuzz).
+    expect(escapeUnterminatedHtml('<script>"</script <plaintext><style></template></script><noscript>')).toBe('<script>"</script <plaintext>&lt;style></template></script>&lt;noscript>');
+    expect(escapeUnterminatedHtml('<script></script <pre><!--</title><a</script></textarea')).toBe('<script></script <pre>&lt;!--</title><a</script></textarea');
   });
   it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag (BLIND delta pin)', () => {
     expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');
