@@ -34,7 +34,7 @@ export interface BackfillIo {
   log: (line: string) => void;
   /** The run instant. Injected by tests; defaults to the process clock. */
   now?: () => Date;
-  /** Test seam: runs between a batch's read and its write, to let a test change the data in that gap. */
+  /** @internal Test seam: runs between a batch's read and its write, to let a test change the data in that gap. */
   afterRead?: () => Promise<void>;
 }
 
