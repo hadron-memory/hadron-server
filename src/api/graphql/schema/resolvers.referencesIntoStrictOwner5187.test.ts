@@ -16,9 +16,8 @@
  * org-owned (`organizationId` set, `userId` the owner). Only the second gives an organization OWNER or admin a
  * relation to the target, so only it can catch an arm that admits by organization role (Rodolfo, SEC10).
  *
- * No behaviour changes in this slice. A surface that answers differently is REPORTED, not fixed or pinned as correct here:
- * GraphQL and MCP differ on an edge row whose holder or far end the reader cannot read, left as an `it.todo` below
- * (tracked privately; the number goes on the PR).
+ * No behaviour changes in this slice. One difference between the GraphQL and MCP edge listings is tracked privately as
+ * hadron-internal#74; nothing here asserts it as correct (see the `it.todo`).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
@@ -103,7 +102,7 @@ async function seed(): Promise<void> {
 }
 
 const leaks = (text: string, t: Target) =>
-  [t.nodeId, t.name, `ALICE_SECRET_${t.cls}`, t.urn].filter((s) => text.includes(s));
+  [t.nodeId, t.name, t.memoryId, `ALICE_SECRET_${t.cls}`, `DEP_SECRET_${t.cls}`, t.urn].filter((s) => text.includes(s));
 /** The data of a GraphQL result, asserting it carried no errors, so a failure names the reader. */
 const dataOf = (r: { errors?: unknown; data?: unknown }, label: string): any => {
   expect(r.errors, label).toBeUndefined();
@@ -124,16 +123,24 @@ for (const shapeName of SHAPES) {
           const kid = `hrn:node:${holderUrn}:src:kid`;
           // Owner control: the owner of the target sees the edge's far end, so a surface that stopped listing edges
           // cannot pass the readers' absence checks below.
-          const own = await mcp(alice).callToolText('hadron_get_node', { urn: kid });
+          const ownSrv = mcp(alice);
+          const own = await ownSrv.callToolText('hadron_get_node', { urn: kid });
           expect(own, 'owner').toContain(t.name);
           expect(own, 'owner sees the edge').toContain(`into-${cls}`);
+          for (const [form, text] of [
+            ['get_nodes refs', await ownSrv.callToolText('hadron_get_nodes', { refs: [kid] })],
+            ['get_nodes prefix', await ownSrv.callToolText('hadron_get_nodes', { memoryUrn: holderUrn, locPrefix: 'src' })],
+            ['get_next_node', await ownSrv.callToolText('hadron_get_next_node', { parent: `hrn:node:${holderUrn}:src` })],
+          ] as const) {
+            expect(text, `owner ${form}`).toContain(t.name);
+          }
           for (const { label, user } of readers) {
             const s = mcp(user);
             const one = await s.callToolText('hadron_get_node', { urn: kid });
             expect(one, label).toContain('Holder Kid');
             expect(leaks(one, t), `${label} get_node`).toEqual([]);
-            // MCP drops the whole edge (a documented difference from GraphQL, reported on #5187).
-            expect(one, `${label} edge dropped`).not.toContain(`into-${cls}`);
+            expect(one, `${label} edge not listed`).not.toContain(`into-${cls}`);
+            expect(one, `${label} incoming edge not listed`).not.toContain(`back-${cls}`);
             const batch = await s.callToolText('hadron_get_nodes', { refs: [kid] });
             expect(batch, label).toContain('Holder Kid');
             expect(leaks(batch, t), `${label} get_nodes refs`).toEqual([]);
@@ -159,8 +166,7 @@ for (const shapeName of SHAPES) {
             const node = dataOf(await run(Q, gctx(user), { ref: holderNodeIds.kid }), label).node;
             expect(node.name, label).toBe('Holder Kid');
             expect(leaks(JSON.stringify(node), t), `${label} node edges`).toEqual([]);
-            // GraphQL keeps the edge row with a null far end (the other half of the reported difference).
-            expect(node.outgoingEdges.find((e: any) => e.name === `into-${cls}`), `${label} outgoing row`).toMatchObject({ target: null });
+            for (const e of node.outgoingEdges) expect(e.target?.id ?? null, `${label} outgoing far end`).not.toBe(t.nodeId);
           }
         });
 
@@ -175,19 +181,17 @@ for (const shapeName of SHAPES) {
           expect(dataOf(await run(One, gctx(alice), { r: edgeRow.id }), 'owner').edge.target?.name, 'owner edge(ref)').toBe(t.name);
           for (const { label, user } of readers) {
             const items = dataOf(await run(Q, gctx(user), { f: { memoryId: holderMemoryId } }), label).edges.items as Array<{ id: string; target: unknown }>;
-            const row = items.find((i) => i.id === edgeRow.id)!;
-            expect(row, label).toBeTruthy();
-            expect(row.target, `${label} list target`).toBeNull();
+            const row = items.find((i) => i.id === edgeRow.id);
+            expect(row?.target ?? null, `${label} list target`).toBeNull();
             expect(leaks(JSON.stringify(items), t), `${label} list`).toEqual([]);
             const one = dataOf(await run(One, gctx(user), { r: edgeRow.id }), label);
-            expect(one.edge.target, `${label} edge(ref)`).toBeNull();
+            expect(one.edge?.target ?? null, `${label} edge(ref)`).toBeNull();
           }
         });
       }
 
-      // Reported privately, never asserted as correct: GraphQL and MCP answer differently for an edge row whose holder or
-      // far end the reader cannot read. Wired when the fix lands.
-      it.todo('GraphQL edge rows whose holder or far end the reader cannot read are absent, as on MCP (reported on #5187)');
+      // Tracked privately as hadron-internal#74; wired when the fix lands.
+      it.todo('GraphQL and MCP agree on the edge rows a reader who cannot read their holder or far end is shown (hadron-internal#74)');
     });
 
     describe('following a node reference into the memory answers as a missing node would (cor:api:140:03)', () => {
@@ -266,9 +270,13 @@ for (const shapeName of SHAPES) {
       });
 
       it('a hard delete cascade is refused without naming a memory the caller cannot read, and alters nothing', async () => {
-        const rows = () => db.edge.count({ where: { OR: [{ name: { startsWith: 'into-' } }, { name: { startsWith: 'back-' } }] } });
+        const rows = () => db.edge.findMany({
+          where: { OR: [{ name: { startsWith: 'into-' } }, { name: { startsWith: 'back-' } }] },
+          orderBy: { id: 'asc' },
+          select: { id: true, memoryId: true, sourceId: true, targetId: true, name: true, loc: true, deletedAt: true },
+        });
         const before = await rows();
-        expect(before).toBe(4);
+        expect(before).toHaveLength(4);
         for (const { label, user } of readers) {
           const out = await mcp(user).callToolText('hadron_delete_node', {
             urn: `hrn:node:${holderUrn}:src:kid`, hard: true, cascadeCrossMemoryEdges: true,
@@ -277,7 +285,7 @@ for (const shapeName of SHAPES) {
           for (const t of targets) expect(leaks(out, t), `${label} names ${t.cls}`).toEqual([]);
           // Per reader, so an early success cannot hide behind a later iteration: the node and every reference stay.
           expect(await db.node.findUnique({ where: { id: holderNodeIds.kid } }), `${label} node kept`).not.toBeNull();
-          expect(await rows(), `${label} references kept`).toBe(before);
+          expect(await rows(), `${label} references kept`).toEqual(before);
         }
       });
     });
@@ -289,7 +297,7 @@ for (const shapeName of SHAPES) {
           // The dependency edge points at its OWN node with its own marker, so the owner control shows each path
           // renders (an ignored `dep-*` edge would not be hidden by the include's marker).
           const dep = await db.node.create({
-            data: { id: generateId(), memoryId: t.memoryId, loc: 'hidden-dep', name: `${SECRET_NAME} dep ${cls}`, content: `ALICE_SECRET_${cls}_DEP` },
+            data: { id: generateId(), memoryId: t.memoryId, loc: 'hidden-dep', name: `${SECRET_NAME} dep ${cls}`, content: `DEP_SECRET_${cls}` },
           });
           const runNode = await db.node.create({
             data: {
@@ -303,11 +311,12 @@ for (const shapeName of SHAPES) {
           const RENDER = `query($r: String!) { renderRunNode(nodeRef: $r) }`;
           const own = JSON.stringify(dataOf(await run(RENDER, gctx(alice), { r: runNode.id }), 'owner'));
           expect(own, 'owner include').toContain(`ALICE_SECRET_${cls}`);
-          expect(own, 'owner dependency').toContain(`ALICE_SECRET_${cls}_DEP`);
+          expect(own, 'owner dependency').toContain(`DEP_SECRET_${cls}`);
           for (const { label, user } of readers) {
             const text = JSON.stringify(dataOf(await run(RENDER, gctx(user), { r: runNode.id }), label));
             expect(leaks(text, t), `${label} render`).toEqual([]);
             expect(text, `${label} dependency`).not.toContain(`${SECRET_NAME} dep`);
+            expect(text, `${label} dependency id`).not.toContain(dep.id);
             expect(text, label).toContain(BROKEN_INCLUDE_NOTICE);
           }
         });
