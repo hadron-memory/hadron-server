@@ -32,6 +32,8 @@ import {
   matchToWhere,
   combineWhere,
   sortToPropertySort,
+  firstUndeclaredField,
+  FieldNotDeclaredError,
   type StoredObject,
 } from '../../../lib/objectStore.js';
 
@@ -162,6 +164,10 @@ export const objectQueries = {
     } catch (e) {
       mapObjectError(e);
     }
+    // #725 (cor:api:170:03): after the schema read, which is null for a memory the caller cannot read (so such a caller gets today's
+    // answer, never this refusal) and after malformed input has been refused; before any row is read.
+    const undeclared = firstUndeclaredField(schema, t, { match, where, sort });
+    if (undeclared !== null) throw new FieldNotDeclaredError(undeclared, t);
     const result = await nodeQueries.findNodes(
       _,
       {
