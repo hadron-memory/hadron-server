@@ -55,7 +55,7 @@ it.each(['qualified', 'scoped'] as const)('rechecks revoked participation on the
   expect(await srv.callToolText('hadron_find_nodes', args)).toContain('alpha-note');
   await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: user.id } } });
   const denied = await srv.callToolText('hadron_find_nodes', args);
-  expect(denied).toBe(mode === 'qualified' ? 'No nodes found matching "*".' : `Memory not found or invalid: 'hrn:mem:${memory.urn}'. Use hadron_list_memories to see what is available.`);
+  expect(denied).toBe(mode === 'qualified' ? 'No nodes found matching "*".' : 'Memory not found or invalid. Use hadron_list_memories to see what is available.');
   for (const name of children) expect(denied).not.toContain(name);
 });
 
@@ -80,5 +80,5 @@ it('authorizes dual references before diagnosing a mismatch', async () => {
  const foreign=await db.user.create({data:{handle:'foreign-scope'}});
  await db.memory.update({where:{id:other.id},data:{userId:foreign.id}});
  const denied=await srv.callToolText('hadron_find_nodes',{query:'*',parentRel,memoryUrn:`hrn:mem:${other.urn}`});
- expect(denied).toBe(`Memory not found or invalid: 'hrn:mem:${other.urn}'. Use hadron_list_memories to see what is available.`);
+ expect(denied).toBe('Memory not found or invalid. Use hadron_list_memories to see what is available.');
 });

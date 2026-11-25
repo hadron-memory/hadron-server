@@ -37,12 +37,13 @@ type SigningRequestRow = {
   createdAt: Date; expiresAt: Date; endedAt: Date | null;
 };
 
-function nodeNotFound(nodeRef: string): GraphQLError {
-  return new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+function nodeNotFound(_nodeRef: string): GraphQLError {
+  return new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
 }
 
-function requestNotFound(id: string): GraphQLError {
-  return new GraphQLError('Signing request not found', { extensions: { code: 'SIGNING_REQUEST_NOT_FOUND', id } });
+function requestNotFound(_id: string): GraphQLError {
+  // #5168: the miss does not relay the caller's id.
+  return new GraphQLError('Signing request not found', { extensions: { code: 'SIGNING_REQUEST_NOT_FOUND' } });
 }
 
 function refusalToGraphQL(error: SigningRefusal, ref: Record<string, string>): GraphQLError {

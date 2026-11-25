@@ -35,6 +35,7 @@ import { AmbiguousLegacyUrnError } from '../lib/entityRef/errors.js';
 import type { AuthContext } from '../middleware/auth.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
+import { refusalText } from '../lib/refEcho.js';
 
 type ActorRef = { id: string; name: string | null; handle: string | null; urn: string | null };
 type Author = { kind: 'WORKER' | 'USER' | 'USER_AGENT' | 'APP'; worker: ActorRef | null; user: ActorRef | null; agent: ActorRef | null; app: ActorRef | null };
@@ -85,7 +86,7 @@ export function commentErrorText(e: unknown) {
   // A ref that can't be resolved as written is the caller's input, not a
   // server fault (the scope tools' convention).
   if (e instanceof UrnNotQualifiedError || e instanceof AmbiguousLegacyUrnError) {
-    return refused(`[bad_user_input] ${e.message}`);
+    return refused(`[bad_user_input] ${refusalText(e)}`);
   }
   throw e;
 }
@@ -227,7 +228,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
       const ctx = ctxOf();
       try {
         const c = await Q.comment({}, { ref }, ctx);
-        if (!c) return textResult(`[comment_not_found] No readable comment "${ref}".`);
+        if (!c) return textResult('[comment_not_found] No readable comment.');
         const target = await (C.target(c, {}, ctx) as Promise<{ urn: string; name: string }>);
         return textResult(`Comment on ${target.urn} (${target.name}).\n${COMMENT_FRAMING}\n\n${await renderComment(c, ctx)}`);
       } catch (e) {

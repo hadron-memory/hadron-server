@@ -58,6 +58,7 @@ import {
   MemoryConfigTemplateNotFoundError,
   reassertManageOwner,
 } from './resolvers.memoryConfigTemplate.js';
+import { refusalText } from '../../../lib/refEcho.js';
 
 export type ApplyOutcome = 'APPLIED' | 'SKIPPED_CONFLICT' | 'REPLACED' | 'SKIPPED_LOCKED';
 
@@ -345,10 +346,10 @@ function toEntryError(e: unknown): BulkApplyError {
   }
   // A malformed ref is a fact about the caller's own string, never about a stored row.
   if (e instanceof UrnNotQualifiedError) {
-    return { code: 'URN_NOT_QUALIFIED', message: e.message, currentRevision: null, requestId: null };
+    return { code: 'URN_NOT_QUALIFIED', message: refusalText(e), currentRevision: null, requestId: null };
   }
   if (e instanceof UrnParseError) {
-    return { code: 'BAD_USER_INPUT', message: e.message, currentRevision: null, requestId: null };
+    return { code: 'BAD_USER_INPUT', message: refusalText(e), currentRevision: null, requestId: null };
   }
   if (e instanceof GraphQLError) {
     const code = e.extensions?.code;

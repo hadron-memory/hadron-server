@@ -1606,8 +1606,8 @@ export const memoryMutations = {
         ({ id: parentId } = await resolveNodeRefForCaller(ctx, parentRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError(`Node not found: "${parentRef}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: parentRef },
+          throw new GraphQLError('Node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         throw e;
@@ -1620,8 +1620,8 @@ export const memoryMutations = {
       // its memory. Treat an extract from a tombstoned source as not-found so a
       // stale node id can't resurrect deleted content into a new live memory.
       if (source.deletedAt) {
-        throw new GraphQLError(`Node not found: "${parentRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: parentRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
 
@@ -1629,8 +1629,8 @@ export const memoryMutations = {
       // URN-widened parentRef must not become a cross-tenant exfiltration path
       // (review:entity-ref-args #3). Denial reads as not-found (no oracle).
       if (!(await canReadMemory(ctx.db, ctx, source.id))) {
-        throw new GraphQLError(`Node not found: "${parentRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: parentRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
 

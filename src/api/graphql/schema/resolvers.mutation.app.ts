@@ -1705,7 +1705,7 @@ export const appMutations = {
       // user — collapse both to NOT_FOUND. If present, return it
       // unchanged when already revoked; descendants are still traversed.
       if (!row) {
-        throw new GraphQLError(`UserApiKey ${id} not found.`, {
+        throw new GraphQLError('UserApiKey not found.', {
           extensions: { code: 'NOT_FOUND' },
         });
       }
@@ -1754,7 +1754,7 @@ export const appMutations = {
         { lockMode: 'exclusive' },
       );
       if (!row) {
-        throw new GraphQLError(`UserApiKey ${id} not found.`, { extensions: { code: 'NOT_FOUND' } });
+        throw new GraphQLError('UserApiKey not found.', { extensions: { code: 'NOT_FOUND' } });
       }
       if (hidden && !row.revokedAt) {
         throw new GraphQLError('Only a revoked API key can be hidden; revoke it first.', {
@@ -1820,7 +1820,7 @@ export const appMutations = {
         { lockMode: 'exclusive' },
       );
       if (!record) {
-        throw new GraphQLError(`UserApiKey ${id} not found.`, { extensions: { code: 'NOT_FOUND' } });
+        throw new GraphQLError('UserApiKey not found.', { extensions: { code: 'NOT_FOUND' } });
       }
       return record;
     },

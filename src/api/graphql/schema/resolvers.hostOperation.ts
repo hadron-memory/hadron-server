@@ -101,8 +101,10 @@ import {
   type ResetHost,
 } from '../../../lib/contextReset/contextReset.js';
 
-const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
-const opNotFound = (id: string): GraphQLError => taskError('HOST_OPERATION_NOT_FOUND', 'Host operation not found.', { id });
+// #5168: the refusal never relays the caller's ref (it is their own text, possibly a pasted secret).
+const appNotFound = (_appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.');
+// #5168: the miss does not relay the caller's id.
+const opNotFound = (_id: string): GraphQLError => taskError('HOST_OPERATION_NOT_FOUND', 'Host operation not found.');
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
 
 /** At most this many operations per collection or page. */

@@ -58,7 +58,7 @@ async function readableChannel(ctx: Context, ref: string): Promise<Channel | nul
 
 async function writableChannel(ctx: Context, ref: string): Promise<Channel> {
   const row = await readableChannel(ctx, ref);
-  if (!row) throw new GraphQLError(`No match for channelRef "${ref}".`, { extensions: { code: 'NOT_FOUND' } });
+  if (!row) throw new GraphQLError('No match for channelRef.', { extensions: { code: 'NOT_FOUND' } });
   await requireMemoryWriteAccess(ctx, row.memoryId);
   return row;
 }
@@ -193,7 +193,7 @@ export const channelMutations = {
         current.deletedAt ||
         current.incarnation !== row.incarnation
       ) {
-        throw new GraphQLError(`No match for channelRef "${ref}".`, { extensions: { code: 'NOT_FOUND' } });
+        throw new GraphQLError('No match for channelRef.', { extensions: { code: 'NOT_FOUND' } });
       }
       // Row and root together; the address stays protected while either
       // exists (a tombstoned Channel still guards — protectedLoc.ts).

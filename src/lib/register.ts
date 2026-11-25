@@ -89,7 +89,7 @@ export async function resolveRegisterOwnerForWrite(ctx: Context, ownerRef: strin
   try {
     organizationId = (await resolveOrgRef(ctx.db, ref)).id;
   } catch {
-    throw badInput(`No match for ownerRef "${ref}".`);
+    throw badInput('No match for ownerRef.');
   }
   const owner = { organizationId, appId: null };
   await requireRegisterOwnerWrite(ctx, owner);
@@ -145,7 +145,7 @@ export async function resolveChannelForOwner(
   owner: RegisterOwnerColumns,
 ): Promise<{ id: string; memoryId: string }> {
   const ref = channelRef.trim();
-  const refuse = () => badInput(`No match for channelRef "${ref}".`);
+  const refuse = () => badInput('No match for channelRef.');
   // #1171: id OR the chat root's node URN; an unresolvable ref is the same
   // refusal a foreign one gets — the register never discloses a Channel.
   const id = await resolveChannelRefId(ctx.db, ref);
@@ -189,7 +189,7 @@ export async function resolveRegisterAttendee(
   owner: RegisterOwnerColumns,
 ): Promise<RegisterAttendeeColumns> {
   const ref = attendeeRef.trim();
-  const refuse = () => badInput(`No match for attendeeRef "${ref}" in this owner's context.`);
+  const refuse = () => badInput("No match for attendeeRef in this owner's context.");
   // A Worker first; anything the Worker resolver refuses (not found, or an
   // Agent-shaped URN) falls through to the Agent resolver.
   let workerId: string | null = null;

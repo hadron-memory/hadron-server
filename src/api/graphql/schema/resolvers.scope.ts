@@ -96,7 +96,7 @@ function requireWriter(ctx: Context): string {
 async function writableScope(ctx: Context, ref: string): Promise<Scope> {
   const scope = await readableScope(ctx, ref);
   if (!scope) {
-    throw new GraphQLError(`No match for scopeRef "${ref}".`, { extensions: { code: 'NOT_FOUND' } });
+    throw new GraphQLError('No match for scopeRef.', { extensions: { code: 'NOT_FOUND' } });
   }
   await requireScopeWrite(ctx, scope);
   return scope;

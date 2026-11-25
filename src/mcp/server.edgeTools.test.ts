@@ -187,7 +187,7 @@ describe('the hazard #835 exists to remove', () => {
       await reusing;
 
       const out = await updating;
-      expect(out).toContain(`Edge target not found: "${oldMessage.id}"`);
+      expect(out).toContain('Edge target not found');
       expect((await db.node.findUniqueOrThrow({ where: { id: source.id } })).content).toBeNull();
       expect(await db.edge.count({ where: { sourceId: source.id } })).toBe(3);
       expect(await db.edge.count({ where: { targetId: oldMessage.id, deletedAt: null } })).toBe(0);

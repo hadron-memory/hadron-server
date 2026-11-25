@@ -259,7 +259,16 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // field `CreditBalance.expiring: [ExpiringCredit!]!` (what is left of each unexpired grant, soonest first) and type
 // `ExpiringCredit`. `grantCredits` refuses an `expiresAt` not later than now with BAD_USER_INPUT (it was accepted).
 // Additive SDL; a lagging client still validates. (0.39.0 is #4763, #4139 S3, merged first.)
-export const HADRON_SERVER_VERSION = '0.40.0';
+//
+// 0.41.0 — REFUSAL WIRE CHANGE, #5168: no refusal quotes or relays the ref the caller typed. Every code is unchanged.
+// Messages lose the value (`<CODE>: <ref>` is now `<CODE>: nothing found for the given ref.`; `URN "<v>" is not fully
+// qualified. …` is now `The ref is not a fully qualified <type> URN. …`; `No match for <x>Ref "<v>".` and
+// `<X> "<v>" not found.` lose the quoted value). Extensions drop the relayed caller value: `offendingValue` (on
+// URN_NOT_QUALIFIED, the URN parse BAD_USER_INPUT and AmbiguousLegacyUrnError), `ref` (every entity not-found), and the
+// per-door `appRef`, `taskId`, `workerRef`, `nodeRef`, `nodeRevRef`, `channelRef`, `grantRef`, `id` on their not-found
+// refusals. `expectedType` and `reason` stay. A client branches on the code, as it should; no first-party client reads a
+// dropped key (re-grep on the PR). No SDL change.
+export const HADRON_SERVER_VERSION = '0.41.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

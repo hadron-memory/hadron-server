@@ -26,6 +26,7 @@ import { GraphQLError as GraphQLErrorClass, Kind, type GraphQLError, type GraphQ
 import { publicErrorExtensions } from '../../lib/errorDiagnostics.js';
 import { faultRequestId, INTERNAL_ERROR_CODE, INTERNAL_ERROR_MESSAGE, logInternalFault } from '../../lib/internalFault.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
+import { concealRefEcho } from '../../lib/refEcho.js';
 import { AmbiguousLegacyUrnError, EncryptedVectorIndexNotAcknowledgedError, InvalidChunkConfigError } from '../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
@@ -112,12 +113,12 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
     { silenceInSentry: true },
   ),
   // Spec 022: surface UrnNotQualifiedError with a stable error code so external
-  // callers can branch on it programmatically.
+  // callers can branch on it programmatically. #5168: never the value the caller typed (no `offendingValue`, and the
+  // message is concealed by `concealRefEcho` in `formatGraphQLError`): a token pasted into a ref came back verbatim.
   mapping(
     (err): err is UrnNotQualifiedError => err instanceof UrnNotQualifiedError,
     (err) => ({
       code: 'URN_NOT_QUALIFIED',
-      offendingValue: err.offendingValue,
       expectedType: err.expectedType,
     }),
     { silenceInSentry: true },
@@ -125,13 +126,13 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // A malformed-grammar / bad-slug URN is caller error, not a server fault.
   // parseUrn / validateUserSlug (create boundaries, e.g. cloneMemory's
   // targetUrn) throw UrnParseError; without this it would surface as
-  // INTERNAL_SERVER_ERROR.
+  // INTERNAL_SERVER_ERROR. #5168: the `reason` is the contract; the offending segment is the caller's own text and is
+  // not relayed.
   mapping(
     (err): err is UrnParseError => err instanceof UrnParseError,
     (err) => ({
       code: 'BAD_USER_INPUT',
       reason: err.reason,
-      offendingValue: err.offendingSegment,
     }),
     { silenceInSentry: true },
   ),
@@ -139,7 +140,8 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // LOUDLY with this typed code (never a silent wrong resolve).
   mapping(
     (err): err is AmbiguousLegacyUrnError => err instanceof AmbiguousLegacyUrnError,
-    (err) => ({ code: 'AmbiguousLegacyUrnError', offendingValue: err.ref }),
+    // #5168: the code only; the ref is the caller's own text.
+    (err) => ({ code: 'AmbiguousLegacyUrnError' }),
     { silenceInSentry: true },
   ),
   // #3136 review (local seat F1): AmbiguousUserRefError is deliberately NOT
@@ -235,7 +237,8 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // taken for URN_NOT_QUALIFIED above.
   mapping(
     (err): err is EntityNotFoundError => err instanceof EntityNotFoundError,
-    (err) => ({ code: err.code, ref: err.ref }),
+    // #5168: the code only. The `ref` extension relayed the caller's value verbatim; the instance keeps it for logs.
+    (err) => ({ code: err.code }),
     { silenceInSentry: true },
   ),
 ];
@@ -308,6 +311,8 @@ export function formatGraphQLError(
   if (formattedError.extensions && ('stacktrace' in formattedError.extensions || 'exception' in formattedError.extensions)) {
     formattedError = { ...formattedError, extensions: publicErrorExtensions(formattedError.extensions) };
   }
+  // #5168: a URN library refusal quotes the caller's value; conceal it before any message is read below.
+  concealRefEcho(error);
   const original = unwrap(error);
   for (const m of CLIENT_ERROR_MAPPINGS) {
     if (!m.matches(original)) continue;

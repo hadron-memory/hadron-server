@@ -134,13 +134,13 @@ describe('AuthStoreBusyError → AUTH_STORE_BUSY (#4471)', () => {
 });
 
 describe('the pre-existing URN mappings still hold (extraction regression)', () => {
-  it('UrnNotQualifiedError → URN_NOT_QUALIFIED with its detail fields', () => {
+  it('UrnNotQualifiedError → URN_NOT_QUALIFIED with its detail fields (#5168: never the offending value)', () => {
     const out = format(new UrnNotQualifiedError('bad', undefined, 'node'));
     expect(out.extensions).toMatchObject({
       code: 'URN_NOT_QUALIFIED',
-      offendingValue: 'bad',
       expectedType: 'node',
     });
+    expect(out.extensions).not.toHaveProperty('offendingValue');
   });
 
   it('UrnParseError → BAD_USER_INPUT', () => {
@@ -150,12 +150,11 @@ describe('the pre-existing URN mappings still hold (extraction regression)', () 
     expect(out.extensions?.reason).toBe(err.reason);
   });
 
-  it('AmbiguousLegacyUrnError → AmbiguousLegacyUrnError with the ref', () => {
+  it('AmbiguousLegacyUrnError → AmbiguousLegacyUrnError (#5168: without the ref)', () => {
     const out = format(new AmbiguousLegacyUrnError('org::mem'));
-    expect(out.extensions).toMatchObject({
-      code: 'AmbiguousLegacyUrnError',
-      offendingValue: 'org::mem',
-    });
+    expect(out.extensions).toMatchObject({ code: 'AmbiguousLegacyUrnError' });
+    expect(out.extensions).not.toHaveProperty('offendingValue');
+    expect(JSON.stringify(out)).not.toContain('org::mem');
   });
 });
 
@@ -247,16 +246,15 @@ describe('EntityNotFoundError → its own code on the wire (#1174)', () => {
     const out = format(err);
     expect(out.extensions?.code).toBe(code);
     expect(out.extensions?.code).not.toBe('INTERNAL_SERVER_ERROR');
-    // The ref the caller passed, structured — so a client never has to split
-    // the message to recover it.
-    expect(out.extensions?.ref).toBe('nosuch');
+    // #5168: the ref the caller passed is NOT relayed (it was, as `extensions.ref`): it is the caller's own text,
+    // and a token pasted into a ref came back verbatim. The code is the contract.
+    expect(out.extensions).not.toHaveProperty('ref');
+    expect(JSON.stringify(out)).not.toContain('nosuch');
   });
 
-  it('the MESSAGE is unchanged — the code is additive, not a rewording', () => {
-    // Resolver-level tests across the suite match on this text, and the whole
-    // point of #1174 is that nobody should NEED to.
+  it('the MESSAGE keeps the code as its prefix and no longer quotes the ref (#5168)', () => {
     expect(format(new OrganizationNotFoundError('nosuch.example')).message).toBe(
-      'ORGANIZATION_NOT_FOUND: nosuch.example',
+      'ORGANIZATION_NOT_FOUND: nothing found for the given ref.',
     );
   });
 

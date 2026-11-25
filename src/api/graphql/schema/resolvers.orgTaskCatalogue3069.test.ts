@@ -124,7 +124,7 @@ describe('#3069 a named set is taken as named, for a caller who may reference it
   it('a platform-ADMIN org member: createScope refuses the unfiltered set on the install memory', async () => {
     const set = await unfilteredSet('admin');
     expect(set).toContain(installMemoryId);
-    await expect(exported('admin', set)).rejects.toThrow(`No match for memoryRef "${installMemoryId}"`);
+    await expect(exported('admin', set)).rejects.toThrow('No match for memoryRef.');
   });
 
   it('control: passing orgId narrows the unfiltered set on the list path alone', async () => {
