@@ -782,6 +782,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #2659: the append-only record of a deleted user API key.
 \ir user-api-key-deletion-invariants.sql
 
+-- #5010: the credit ledger is append-only. One source, shared verbatim with migration
+-- 20261125130000_credit_ledger_append_only (pinned by src/test/migrations/creditLedgerAppendOnly5010.test.ts).
+\ir credit-ledger-invariants.sql
+
 -- #430: the Git-mirror obligation's shape (closed error classes) and its attempt sequence.
 \ir git-mirror-obligation-invariants.sql
 
@@ -930,6 +934,12 @@ CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx
 -- 20261115280000_agent_team_events_person_activity_idx, which builds it CONCURRENTLY for production.
 CREATE INDEX IF NOT EXISTS agent_team_events_person_activity_idx
   ON agent_team_events (actor_user_id, app_id, created_at) WHERE actor_worker_id IS NULL AND task_id IS NOT NULL;
+
+-- #5011 (Billing A4): expiring grants by organization, for the settlement probe and the hourly expiry job. Partial, so
+-- Prisma's schema language can't model it. Same definition as migration
+-- 20261125140000_credit_ledger_expiring_grants_idx, which builds it CONCURRENTLY for production.
+CREATE INDEX IF NOT EXISTS credit_ledger_entries_expiring_grants_idx
+  ON credit_ledger_entries (organization_id, expires_at) WHERE expires_at IS NOT NULL;
 
 -- #4273: the worker-liveness read (workerActivitySql) keeps a worker's open sessions and the ended ones that end at or after
 -- its latest start; these two partial indexes serve those ranges. Same definitions as migrations

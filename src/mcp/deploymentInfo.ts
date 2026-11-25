@@ -253,7 +253,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // 0274: notices, server, companions). The export's contents, gating and refusals are unchanged; only the argument that
 // names the node changed. (0.38.0 is #4782, entity refs S7, merged first.)
 //
-// 0.40.0 — BREAKING, entity refs gap 2 (#5080): 21 input-type fields on 17 input types, plus `createAiServiceConfig(ownerId:)`,
+// 0.41.0 — BREAKING, entity refs gap 2 (#5080): 21 input-type fields on 17 input types, plus `createAiServiceConfig(ownerId:)`,
 // take refs, no alias (`*Id` -> `*Ref`): `NodeFilter.memoryRefs`, `EdgeFilter.memoryRef` / `sourceRef` / `targetRef`,
 // `AppFilter.agentRef`, `AiServiceConfigFilter.ownerRef`, `CreateNodeInput` / `UpdateNodeInput` / `ImportNodeInput` /
 // `NodeAuthoringCheckInput` / `BeginAssetUploadV2Input` `.memoryRef`, `UpdateNodeInput.ref`, `NodeEdgeInput.targetRef`,
@@ -262,9 +262,15 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `createAiServiceConfig(ownerRef:)`. A lagging client's old name is an UNKNOWN field or argument and GraphQL refuses the whole
 // operation (ship order per precedent 0274: notices, server, companions). Three of them close a gap: ticker channels and
 // `BatchThrough` now resolve a URN as well as an id. `NodeInput` (the retired `replaceSubtree` shape) keeps `memoryId` and
-// its edges keep `targetId`; `ResumeSessionInput.expectedWorkerId` stays (#5163). MCP tool inputs are unchanged. (0.39.0 is
-// #4139, entity refs S3, merged first.)
-export const HADRON_SERVER_VERSION = '0.40.0';
+// its edges keep `targetId`; `ResumeSessionInput.expectedWorkerId` stays (#5163). MCP tool inputs are unchanged. (0.40.0 is
+// #5011, Billing A4, merged first.)
+// 0.40.0 — SEMANTICS BREAK, Billing A4 (#5011): free credit now expires. `creditBalance` settles the owner's expired
+// grants (one `adjustment` entry each, source pair ('grant-expiry', <grant id>)) before it sums, and never answers a
+// balance holding credit whose expiry has passed, so a balance drops at an expiry with no write by the client. New
+// field `CreditBalance.expiring: [ExpiringCredit!]!` (what is left of each unexpired grant, soonest first) and type
+// `ExpiringCredit`. `grantCredits` refuses an `expiresAt` not later than now with BAD_USER_INPUT (it was accepted).
+// Additive SDL; a lagging client still validates. (0.39.0 is #4763, #4139 S3, merged first.)
+export const HADRON_SERVER_VERSION = '0.41.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

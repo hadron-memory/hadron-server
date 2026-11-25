@@ -29,3 +29,19 @@ export function ownerRefOf(row: OwnedRow | null | undefined): OwnerRef | null {
 export function ownerOfWork(app: OwnedRow | null | undefined, agent: OwnedRow | null | undefined): OwnerRef | null {
   return app ? ownerRefOf(app) : ownerRefOf(agent);
 }
+
+/** A person owner reached a ledger function that only knows organizations: a programming error, never a refusal. */
+export class PersonLedgerNotSupportedError extends Error {
+  constructor() {
+    super('A person ledger is not supported yet (Billing A6, #5014).');
+    this.name = 'PersonLedgerNotSupportedError';
+  }
+}
+
+/** The organization id of an organization owner; throws for a person owner until A6. */
+export function ownerOrganizationId(owner: OwnerRef): string {
+  if ('organizationId' in owner && typeof owner.organizationId === 'string' && owner.organizationId !== '') {
+    return owner.organizationId;
+  }
+  throw new PersonLedgerNotSupportedError();
+}

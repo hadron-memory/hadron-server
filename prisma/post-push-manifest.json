@@ -370,6 +370,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_credit_ledger_not_soft_deleted",
+      "kind": "check-constraint",
+      "file": "credit-ledger-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_dark_worker_episodes_shape",
       "kind": "check-constraint",
       "file": "dark-alarm-invariants.sql",
@@ -1276,6 +1282,18 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_credit_ledger_entries_append_only",
+      "kind": "function",
+      "file": "credit-ledger-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_credit_ledger_user_merged",
+      "kind": "function",
+      "file": "credit-ledger-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_departure_cause_fits",
       "kind": "function",
       "file": "grant-invariants.sql",
@@ -1954,6 +1972,12 @@
       "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
+      "name": "credit_ledger_entries_expiring_grants_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
       "name": "dark_worker_episodes_app_id_ended_at_idx",
       "kind": "index",
       "file": "dark-alarm-invariants.sql",
@@ -2521,6 +2545,12 @@
       "name": "context_resets.worker_reference_fence_1162",
       "kind": "trigger",
       "file": "worker-reference-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "credit_ledger_entries.credit_ledger_entries_append_only",
+      "kind": "trigger",
+      "file": "credit-ledger-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {

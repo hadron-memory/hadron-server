@@ -170,7 +170,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.hadronServer.deleteMany();
   // Spec 046 — usage metering (prices are FK-free; ledger FKs org only).
   await db.aiModelPrice.deleteMany();
-  await db.creditLedgerEntry.deleteMany();
+  // #5010: the ledger is append-only by trigger (a row DELETE is refused); TRUNCATE fires no row trigger.
+  await db.$executeRawUnsafe('TRUNCATE credit_ledger_entries');
   // Spec 043 — Slack integration (receipts have no FK; connections FK org + app).
   await db.slackEventReceipt.deleteMany();
   await db.slackConnection.deleteMany();
