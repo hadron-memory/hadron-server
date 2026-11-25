@@ -117,8 +117,12 @@ function firstUnterminated(text: string, from: number): number {
   const n = text.length;
   let fence: OpenFence | null = null;
   let paraEnd = -1;
-  // What the previous line was, for indented code: after a blank line (or at the start) a four-space line is code, after text it continues the paragraph.
-  let prev: 'blank' | 'code' | 'other' = 'blank';
+  // What the previous line was. 'other' is a line of a paragraph (or anything that a following line can continue); every other kind leaves
+  // no paragraph open: after it a four-space line is indented code and a type 7 tag may start an HTML block. 'nonpara' is a heading, a
+  // thematic break, a fence line or the last line of an HTML block.
+  let prev: 'blank' | 'code' | 'nonpara' | 'other' = 'blank';
+  // The kind of the line before the one being read (`prev` is already the current line's kind once its head is handled).
+  let prevBefore: typeof prev = 'blank';
   // A raw-text element opened in the middle of a line is inline HTML: Markdown goes on parsing after it, so only an end tag
   // that Markdown also reads as HTML (outside code, a fence and a backslash escape) closes it. -1 when none is open.
   let rawStart = -1;
@@ -177,17 +181,17 @@ function firstUnterminated(text: string, from: number): number {
     const nl = text.indexOf('\n', j);
     return nl === -1 ? n : nl;
   };
-  const prevLineBlank = (): boolean => {
-    if (lineFrom === 0) return true;
-    return text.slice(text.lastIndexOf('\n', lineFrom - 2) + 1, lineFrom - 1).trim() === '';
-  };
   // A backtick run of length N that found no closer in its paragraph: no later run of N in the same paragraph has one either.
   const noCloser = new Map<number, number>();
   let i = from;
   while (i < n) {
     if ((i === 0 || text[i - 1] === '\n') && i < rawUntil) {
-      prev = 'other';
+      prevBefore = prev;
+      prev = 'nonpara';
     } else if (i === 0 || text[i - 1] === '\n') {
+      // The line before was the last raw line of an HTML block: nothing is open after it.
+      if (i - 1 === rawUntil) prev = 'nonpara';
+      prevBefore = prev;
       const nl = text.indexOf('\n', i);
       const end = nl === -1 ? n : nl;
       const line = text.slice(i, end);
@@ -196,10 +200,10 @@ function firstUnterminated(text: string, from: number): number {
       const wasOpen = fence !== null;
       const step = stepFence(inner, fence);
       fence = step.open;
-      if (step.fenceLine || wasOpen) { prev = 'other'; i = end + 1; continue; }
+      if (step.fenceLine || wasOpen) { prev = 'nonpara'; i = end + 1; continue; }
       // An indented code block: a line of four spaces or a tab, after a blank line, the start of the text or another such line.
       if (/^(?: {4}|\t)/.test(inner) && inner.trim() !== '' && prev !== 'other') { prev = 'code'; i = end + 1; continue; }
-      prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : 'other';
+      prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$)/.test(inner) ? 'nonpara' : 'other';
     }
     const c = text[i];
     if (c === '\\' && i >= rawUntil) { i += isAsciiPunct(text[i + 1]) ? 2 : 1; continue; }
@@ -267,7 +271,7 @@ function firstUnterminated(text: string, from: number): number {
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
-      if (startsLine(i)) rawUntil = Math.max(rawUntil, lineEndAt(close));
+      if (startsLine(i) && isLetter(text[i + 2])) rawUntil = Math.max(rawUntil, lineEndAt(close));
       i = close + 1;
       continue;
     }
@@ -296,7 +300,7 @@ function firstUnterminated(text: string, from: number): number {
     // starts an HTML block that runs to the next blank line.
     if (startsLine(i)) {
       if (BLOCK6_NAMES.has(name)) rawUntil = Math.max(rawUntil, blankBound(i));
-      else if (!TYPE1_NAMES.has(name) && !text.slice(i, tagEnd).includes('\n') && text.slice(tagEnd, lineEndAt(tagEnd)).trim() === '' && prevLineBlank()) {
+      else if (!TYPE1_NAMES.has(name) && !text.slice(i, tagEnd).includes('\n') && text.slice(tagEnd, lineEndAt(tagEnd)).trim() === '' && prevBefore !== 'other') {
         rawUntil = Math.max(rawUntil, blankBound(i));
       }
     }
