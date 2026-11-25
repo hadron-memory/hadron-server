@@ -351,6 +351,13 @@ describe('escapeUnterminatedHtml', () => {
     // Types 1 to 5 run to their closer's line; after it Markdown is back.
     expect(escapeUnterminatedHtml('<!-- c\n```\n<b x=\n-->\n<i x=')).toBe('<!-- c\n```\n<b x=\n-->\n&lt;i x=');
     expect(escapeUnterminatedHtml('<!-- c -->\n```\n<b x=\n```\nz')).toBe('<!-- c -->\n```\n<b x=\n```\nz');
+    // A block-opening tag may span a fence line (the block is raw to its blank line); a backslash escapes nothing in it.
+    expect(escapeUnterminatedHtml('<div\n```\n>\n```\nq <textarea>z')).toBe('<div\n```\n>\n```\nq &lt;textarea>z');
+    expect(escapeUnterminatedHtml('<div>\n\\<b x=')).toBe('<div>\n\\&lt;b x=');
+    // The rest of the line that holds the closer is still raw HTML, so a backtick there opens no code span.
+    expect(escapeUnterminatedHtml('<!-- c --> `a <b x= b` c')).toBe('<!-- c --> `a &lt;b x= b` c');
+    expect(escapeUnterminatedHtml('<script>x</script> `a <b x= b` c')).toBe('<script>x</script> `a &lt;b x= b` c');
+    expect(escapeUnterminatedHtml('<!-- c\n```\n--> `a <b x= b` c')).toBe('<!-- c\n```\n--> `a &lt;b x= b` c');
     // After a blank line the block is over and Markdown is back: the fence is a fence again.
     expect(escapeUnterminatedHtml('<div>\n\n```\n<b x=\n```\nz')).toBe('<div>\n\n```\n<b x=\n```\nz');
   });
