@@ -873,6 +873,25 @@ export interface EdgeUrnChange {
 }
 
 /**
+ * #5128: the live, ungoverned edges with an endpoint among `ids`. The ids bind twice (source side and target side), and
+ * Postgres allows 32,767 bind variables in one statement, so a subtree of more than about 16,383 nodes failed here, after
+ * the move had spent its time. The ids go in chunks of 10,000 (20,000 binds) and the rows are merged by id, so the result
+ * is the same set at any size.
+ */
+export const EDGE_LOOKUP_CHUNK = 10_000;
+export async function findLiveEdgesTouching(tx: Prisma.TransactionClient, ids: string[]) {
+  const byId = new Map<string, Awaited<ReturnType<typeof tx.edge.findMany>>[number]>();
+  for (let i = 0; i < ids.length; i += EDGE_LOOKUP_CHUNK) {
+    const chunk = ids.slice(i, i + EDGE_LOOKUP_CHUNK);
+    const rows = await tx.edge.findMany({
+      where: { deletedAt: null, governedKind: null, OR: [{ sourceId: { in: chunk } }, { targetId: { in: chunk } }] },
+    });
+    for (const row of rows) byId.set(row.id, row);
+  }
+  return [...byId.values()];
+}
+
+/**
  * #2947 (rulings 0153, 0154, 0161, 0162; cor:api:190:01, :02) — what a move does to the EDGES that touch the moved subtree,
  * for a same-memory AND a cross-memory move.
  *
@@ -903,10 +922,7 @@ async function rebaseMovedEdges(
     createdBy: string | null;
   },
 ): Promise<EdgeUrnChange[]> {
-  const moved = [...a.movedIds];
-  const edges = await tx.edge.findMany({
-    where: { deletedAt: null, governedKind: null, OR: [{ sourceId: { in: moved } }, { targetId: { in: moved } }] },
-  });
+  const edges = await findLiveEdgesTouching(tx, [...a.movedIds]);
   if (edges.length === 0) return [];
 
   // Current locs of the endpoints that did NOT move (the moved ones are in newLocById).
