@@ -5,7 +5,11 @@
 -- from the nodes and stays.
 --
 -- contract: depends on PR 1 having shipped (deploy-verified on alpha in merge 8e01d932, team chat
--- #146998); previous image 8e01d932 (server-info 0.39.0) no longer reads or writes these three columns.
+-- #146998). The previous image 8e01d932 (server-info 0.39.0) no longer uses these columns in code, but
+-- its Prisma client still SELECTs them (schema.prisma kept them), so every Memory read on that image
+-- FAILS with P2022 from the moment this drop applies until the new image serves. Safe only because the
+-- alpha deploy stops the old container before the new image migrates (coordinator ruling, team chat
+-- #147185, confirmed #147191). A rollback to any pre-drop image needs the reverse DDL below FIRST.
 --
 -- Plain DROP COLUMN, no HDPRF refusal (gate ruling R5 (a)): the spec promises no memory-level mint
 -- record, so the columns hold nothing the corpus guarantees.
