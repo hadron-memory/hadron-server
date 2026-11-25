@@ -1,0 +1,79 @@
+/**
+ * #5016 (Billing A7c): every creation site of a memory, Agent or App under `src` is classified, so a new one cannot land silently:
+ * "refuses" (it asks `requireOwnerHeadroom`), "free, because ..." or "counts, not refused, because ...". The check is by file and
+ * count, not by line, so an unrelated edit does not move it. Fixtures are excluded by PLACE (`src/test/`, a `*Fixtures*` file). Slice A7b
+ * (#5015) adds the node columns to this table.
+ */
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+type Verdict = { n: number; kind: 'refuses' | 'free' | 'counts-not-refused'; because: string; asks?: string };
+const SITES: Record<string, Verdict> = {
+  'src/api/graphql/schema/resolvers.mutation.memory.ts': { n: 1, kind: 'refuses', because: 'createMemory: every class it accepts is free-standing and counts', asks: 'memories' },
+  'src/controller/operations/cloneMemory.ts': { n: 1, kind: 'refuses', because: 'cloneMemory: counts when the copy\'s class does; a cloneAgent system memory is free', asks: 'memories' },
+  'src/controller/operations/extractParentNode.ts': { n: 1, kind: 'refuses', because: 'extractParentNodeToMemory: the new memory counts for the target organization', asks: 'memories' },
+  'src/api/graphql/schema/resolvers.mutation.agent.ts': { n: 2, kind: 'refuses', because: 'createAgent: the Agent asks `agents`; its system memory (class system) is free', asks: 'agents' },
+  'src/lib/agentClone/cloneAgent.ts': { n: 1, kind: 'refuses', because: 'cloneAgent: the Agent asks `agents` (A7b adds `nodes` to the same call)', asks: 'agents' },
+  'src/api/graphql/schema/resolvers.mutation.app.ts': { n: 2, kind: 'refuses', because: 'createApp: the App and each dependency App ask `apps`', asks: 'apps' },
+  'src/api/graphql/schema/resolvers.mutation.appMemory.ts': { n: 2, kind: 'free', because: 'a memory inside an App (app_id set) is not in the `memories` count' },
+  'src/api/graphql/schema/installMemory.ts': { n: 1, kind: 'free', because: 'an install memory is not in the `memories` count' },
+  'src/api/graphql/schema/chat-scope.ts': { n: 1, kind: 'free', because: 'the shared App-class memory (class app) is not in the `memories` count' },
+  'src/api/graphql/schema/resolvers.worker.ts': { n: 1, kind: 'free', because: 'a worker memory is App-class and not in the `memories` count' },
+  'src/api/graphql/schema/resolvers.mutation.session.ts': { n: 2, kind: 'free', because: 'startAgentSession memories carry app_id (class app/personal inside an App) and are never refused' },
+  'src/api/graphql/schema/resolvers.mutation.chat.ts': { n: 1, kind: 'counts-not-refused', because: 'startChat with no matching App creates a counted knowledge memory for the Agent\'s organization; chat is never refused (gate ruling 2)' },
+};
+/**
+ * Writes that change what an owner holds WITHOUT an insert (a restore, a class change, an owner move, a re-parent). Each names the file
+ * and a marker, and says whether it asks. No restore of a deleted memory, Agent or App exists (cor:dmo:050:21: no undelete).
+ */
+const MOVES: Array<{ file: string; marker: string; kind: 'refuses' | 'free' | 'counts-not-refused'; because: string }> = [
+  { file: 'src/api/graphql/schema/resolvers.mutation.memoryTransfer.ts', marker: 'requireOwnerHeadroomMany', kind: 'refuses', because: 'transferMemoryOwnership: the receiving owner takes the memory and its live nodes' },
+  { file: 'src/api/graphql/schema/resolvers.mutation.agent.ts', marker: "class: 'system'", kind: 'free', because: 'promoting a memory to an Agent\'s system memory takes it out of the counted set' },
+  { file: 'src/lib/mergeOwnerNamespacedUrns.ts', marker: 'ownerUserId: targetUserId', kind: 'counts-not-refused', because: 'an account merge re-owns everything; the survivor may end over a cap (decision r)' },
+  { file: 'src/controller/operations/detachAppOwnerMemories.ts', marker: 'appId', kind: 'counts-not-refused', because: 'hard-deleting an App detaches its personal/private memories (app_id to null), which then count as free-standing; a deletion side effect, never refused' },
+  { file: 'src/api/graphql/schema/appInstallState.ts', marker: 'uninstalledAt', kind: 'free', because: 'an uninstalled App keeps counting and reinstalling it adds nothing' },
+];
+const WRITE = /\.(memory|agent|app)\.(create|createMany|createManyAndReturn|upsert)\(/g;
+const walk = (dir: string): string[] => readdirSync(dir).flatMap((f) => {
+  const p = join(dir, f);
+  return statSync(p).isDirectory() ? (f === 'generated' ? [] : walk(p)) : [p];
+});
+const isFixture = (p: string) => p.startsWith('src/test/') || /Fixtures/.test(p);
+const found = () => {
+  const out: Record<string, number> = {};
+  for (const p of walk('src')) {
+    if (!p.endsWith('.ts') || p.endsWith('.test.ts') || isFixture(p)) continue;
+    const n = (readFileSync(p, 'utf8').match(WRITE) ?? []).length;
+    if (n) out[p] = n;
+  }
+  return out;
+};
+
+describe('#5016 every memory, Agent and App creation site under src is classified', () => {
+  it('the table and the source agree, by file and count', () => {
+    expect(found()).toEqual(Object.fromEntries(Object.entries(SITES).map(([p, v]) => [p, v.n])));
+  });
+
+  it('a refusing site names the key it asks and really calls the helper', () => {
+    for (const [p, v] of Object.entries(SITES)) {
+      if (v.kind !== 'refuses') continue;
+      const src = readFileSync(p, 'utf8');
+      expect(src, p).toMatch(/requireOwnerHeadroom/);
+      expect(src, p).toContain(`'${v.asks}'`);
+    }
+  });
+
+  it('every non-insert move is classified, exists in its file, and a refusing one asks', () => {
+    for (const m of MOVES) {
+      const src = readFileSync(m.file, 'utf8');
+      expect(src, m.file).toContain(m.marker);
+      if (m.kind === 'refuses') expect(src, m.file).toMatch(/requireOwnerHeadroom/);
+      expect(m.because.length, m.file).toBeGreaterThan(15);
+    }
+  });
+
+  it('every entry says why', () => {
+    for (const [p, v] of Object.entries(SITES)) expect(v.because.length, p).toBeGreaterThan(15);
+  });
+});
