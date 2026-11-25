@@ -215,7 +215,7 @@ describe('#3437 item 4: the seams a `carry` context would silently open', () => 
     let specId: string;
     let specTask: string;
     const request = (rest: Record<string, unknown> = {}) => ({
-      memoryRef: draftId, nodeIds: [specId], oldText: 'cat', newText: 'dog', fields: ['content'], dryRun: true, ...rest,
+      memoryRef: draftId, nodeRefs: [specId], oldText: 'cat', newText: 'dog', fields: ['content'], dryRun: true, ...rest,
     });
     const replace = (input: Record<string, unknown>) => resolvers.Mutation.searchReplaceInSpecNodes(null, { input } as never, ctx());
 
@@ -348,7 +348,7 @@ describe('#3437 item 7: an encrypted no-op, on real ciphertext', () => {
 
   it('node replace: the same text needs no claim and keeps the stamp; a real change refuses', async () => {
     const node = await row('guide-page');
-    const input = { nodeIds: [node.id], fields: ['content'], oldText: 'cat' };
+    const input = { nodeRefs: [node.id], fields: ['content'], oldText: 'cat' };
     await M.searchReplaceInNodes({}, { input: { ...input, newText: 'cat' } }, ctx());
     await expectStampedAndCurrent('guide-page');
     const before = await row('guide-page');
@@ -358,7 +358,7 @@ describe('#3437 item 7: an encrypted no-op, on real ciphertext', () => {
 
   it('spec replace: the same text needs no claim and keeps the stamp; a real change refuses', async () => {
     const node = await row('pas:010:01');
-    const input = { memoryRef: privateId, nodeIds: [node.id], fields: ['content'], oldText: 'cat', dryRun: true };
+    const input = { memoryRef: privateId, nodeRefs: [node.id], fields: ['content'], oldText: 'cat', dryRun: true };
     const replace = (rest: Record<string, unknown>) => resolvers.Mutation.searchReplaceInSpecNodes(null, { input: { ...input, ...rest } } as never, ctx());
     const same = await replace({ newText: 'cat' }) as { plan: string };
     await replace({ newText: 'cat', dryRun: false, expectedPlan: same.plan });

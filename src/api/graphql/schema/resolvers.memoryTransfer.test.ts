@@ -99,11 +99,11 @@ describe('transferMemoryOwnership', () => {
     const input = { memoryRef: memory.id, orgRef: 'nonexistent-org', targetClass: 'knowledge', dryRun: true };
     await expect(transfer(input, outsider.id)).rejects.toMatchObject({ name: 'MemoryNotFoundError' });
     const oldUrn = memory.urn;
-    await expect(transfer({ ...input, memoryId: `hrn:mem:${oldUrn}` }, outsider.id)).rejects.toMatchObject({ name: 'MemoryNotFoundError' });
+    await expect(transfer({ ...input, memoryRef: `hrn:mem:${oldUrn}` }, outsider.id)).rejects.toMatchObject({ name: 'MemoryNotFoundError' });
   });
 
   it('requires administration of the destination and a class conversion', async () => {
-    await expect(transfer({ memoryId: memory.id, orgRef: org.id, dryRun: true })).resolves.toMatchObject({
+    await expect(transfer({ memoryRef: memory.id, orgRef: org.id, dryRun: true })).resolves.toMatchObject({
       canApply: false, blockers: expect.arrayContaining([expect.objectContaining({ code: 'MEMORY_TRANSFER_CLASS_REQUIRED' })]),
     });
     await db.orgMember.deleteMany({ where: { organizationId: org.id, userId: owner.id } });
@@ -114,12 +114,12 @@ describe('transferMemoryOwnership', () => {
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
     const preview = await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge', dryRun: true });
     expect(preview.blockers).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'ENCRYPTED_MEMORY_TRANSFER_UNSUPPORTED' })]));
-    await expect(transfer({ memoryId: memory.id, orgRef: org.id, targetClass: 'knowledge' })).rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_MEMORY_TRANSFER_UNSUPPORTED' } });
+    await expect(transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' })).rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_MEMORY_TRANSFER_UNSUPPORTED' } });
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: false } });
     await db.memoryShare.create({ data: { memoryId: memory.id, granteeId: receiver.id, grantorId: owner.id, role: 'reader' } });
     const attached = await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge', dryRun: true });
     expect(attached.dependents).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'Memory shares', count: 1, handling: 'REFUSE' })]));
-    await expect(transfer({ memoryId: memory.id, orgRef: org.id, targetClass: 'knowledge' })).rejects.toMatchObject({ extensions: { code: 'MEMORY_TRANSFER_DEPENDENTS' } });
+    await expect(transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' })).rejects.toMatchObject({ extensions: { code: 'MEMORY_TRANSFER_DEPENDENTS' } });
   });
 
   it('refuses an Agent memory grant before a transfer can change its tenant', async () => {
@@ -144,7 +144,7 @@ describe('transferMemoryOwnership', () => {
     await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:specs`, name: 'Existing', class: 'knowledge', visibility: 'ORGANIZATION' } });
     const preview = await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge', dryRun: true });
     expect(preview.newUrn).not.toBe(`${org.urn}:specs`);
-    await expect(transfer({ memoryId: memory.id, orgRef: org.id, targetClass: 'knowledge', expectedNewUrn: `${org.urn}:specs` })).rejects.toMatchObject({ extensions: { code: 'STALE_TRANSFER_PREVIEW' } });
+    await expect(transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge', expectedNewUrn: `${org.urn}:specs` })).rejects.toMatchObject({ extensions: { code: 'STALE_TRANSFER_PREVIEW' } });
     const result = await transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge', expectedNewUrn: preview.newUrn });
     expect(result.newUrn).toBe(preview.newUrn);
     expect((await resolveNodeRef(db, `hrn:node:${memory.urn}:${node.loc}`)).id).toBe(node.id);
@@ -596,7 +596,7 @@ describe('transferMemoryOwnership', () => {
     expect(preview.dependents).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'Node mirror provenance', count: 1, handling: 'REFUSE' }),
     ]));
-    await expect(transfer({ memoryId: memory.id, orgRef: org.id, targetClass: 'knowledge' })).rejects.toMatchObject({ extensions: { code: 'MEMORY_TRANSFER_DEPENDENTS' } });
+    await expect(transfer({ memoryRef: memory.id, orgRef: org.id, targetClass: 'knowledge' })).rejects.toMatchObject({ extensions: { code: 'MEMORY_TRANSFER_DEPENDENTS' } });
   });
 
   it('reports durable trigger URNs as dependents before changing their owner scope', async () => {

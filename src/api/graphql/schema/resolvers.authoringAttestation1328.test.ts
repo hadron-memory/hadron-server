@@ -245,7 +245,7 @@ describe('#1328 merges and bulk edits', () => {
   it('searchReplaceInNodes refuses the whole batch on one governed node, and one claim stamps the changed nodes', async () => {
     await create('a', { content: 'alpha', authoredWith: claim() });
     await db.node.create({ data: { id: generateId(), memoryId, loc: 'plain', name: 'plain', content: 'alpha' } });
-    const input = { oldText: 'alpha', newText: 'beta', memoryIds: [memoryId], fields: ['content'] };
+    const input = { oldText: 'alpha', newText: 'beta', memoryRefs: [memoryId], fields: ['content'] };
     await expectRefused(M.searchReplaceInNodes({}, { input }, ctx()), 'AUTHORING_ATTESTATION_MISSING');
     expect((await stored('plain')).content).toBe('alpha');
     expect((await stored('a')).content).toBe('alpha');
@@ -258,7 +258,7 @@ describe('#1328 merges and bulk edits', () => {
     await create('a', { content: 'alpha', authoredWith: claim() });
     await db.node.create({ data: { id: generateId(), memoryId, loc: 'plain', name: 'plain', content: 'ALPHA' } });
     await db.node.update({ where: { id: taskId }, data: { revSeq: 5 } });
-    const input = { oldText: 'alpha', newText: 'alpha', caseInsensitive: true, memoryIds: [memoryId], fields: ['content'] };
+    const input = { oldText: 'alpha', newText: 'alpha', caseInsensitive: true, memoryRefs: [memoryId], fields: ['content'] };
     await M.searchReplaceInNodes({}, { input }, ctx());
     expect(await stored('a')).toMatchObject({ content: 'alpha', authoredByTask: taskId, authoredByRevision: 1 });
     expect((await stored('plain')).content).toBe('alpha');
@@ -267,14 +267,14 @@ describe('#1328 merges and bulk edits', () => {
   it('searchReplaceInNodes still demands a claim for a row that changes beside a no-op row', async () => {
     await create('a', { content: 'alpha', authoredWith: claim() });
     await create('b', { content: 'ALPHA', authoredWith: claim() });
-    const input = { oldText: 'alpha', newText: 'alpha', caseInsensitive: true, memoryIds: [memoryId], fields: ['content'] };
+    const input = { oldText: 'alpha', newText: 'alpha', caseInsensitive: true, memoryRefs: [memoryId], fields: ['content'] };
     await expectRefused(M.searchReplaceInNodes({}, { input }, ctx()), 'AUTHORING_ATTESTATION_MISSING');
     expect((await stored('b')).content).toBe('ALPHA');
   });
 
   it('a dry run needs no claim', async () => {
     await create('a', { content: 'alpha', authoredWith: claim() });
-    const input = { oldText: 'alpha', newText: 'beta', memoryIds: [memoryId], fields: ['content'], dryRun: true };
+    const input = { oldText: 'alpha', newText: 'beta', memoryRefs: [memoryId], fields: ['content'], dryRun: true };
     await expect(M.searchReplaceInNodes({}, { input }, ctx())).resolves.toBeTruthy();
   });
 

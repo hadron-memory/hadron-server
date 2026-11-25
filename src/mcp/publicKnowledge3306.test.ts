@@ -381,7 +381,7 @@ describe('#3306 the shared predicate itself', () => {
       expect(unscoped.hits.map((h: { node: { memoryId: string } }) => h.node.memoryId)).not.toContain(extra[0]);
       expect(seen).toHaveLength(0);
       // Named: exactly the named ids are looked up (cap and cap+1 on the node page still hold).
-      const named = { memoryIds: extra };
+      const named = { memoryRefs: extra };
       const atCap = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 3, filter: named }, { ...principal });
       expect(atCap.hits).toHaveLength(3);
       const over = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 4, filter: named }, { ...principal });
