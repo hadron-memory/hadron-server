@@ -542,11 +542,13 @@ function pauseEachAfterFirstGrantLock(only?: string) {
   let release!: () => void;
   const gate = new Promise<void>((r) => { release = r; });
   const seen = new Set<number>();
+  const order: Array<{ pid: number; id: string }> = [];
   const waiters: Array<(pid: number) => void> = [];
   const real = grantLocks.lockGrantForSigning;
   vi.spyOn(grantLocks, 'lockGrantForSigning').mockImplementation(async (tx, id, appIdArg) => {
     const out = await real(tx, id, appIdArg);
     const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    order.push({ pid, id });
     if (!seen.has(pid) && (only === undefined || id === only)) {
       seen.add(pid);
       waiters.shift()?.(pid);
@@ -554,7 +556,7 @@ function pauseEachAfterFirstGrantLock(only?: string) {
     }
     return out;
   });
-  return { nextHeld: () => new Promise<number>((r) => waiters.push(r)), release: () => release() };
+  return { nextHeld: () => new Promise<number>((r) => waiters.push(r)), release: () => release(), order };
 }
 async function blockerConn(): Promise<{ c: Client; pid: number }> {
   const c = new Client({ connectionString: process.env.DATABASE_URL });
@@ -593,6 +595,13 @@ describe('P13: completions lock their grants in ascending id, so overlapping one
     for (const g of [g1, g2, g3]) { expect((await grantRow(g)).activated_at).not.toBeNull(); expect(await activateEvents(g)).toBe(1); }
     expect(await selState(selA.id)).toBe('completed');
     expect(await selState(selB.id)).toBe('completed');
+    // The order itself: each completion took its grant locks in ascending id (a consistent descending or random order would
+    // deadlock two selections that share two grants, and a count of outcomes cannot tell).
+    for (const pid of [pidA, pidB]) {
+      const ids = pause.order.filter((o) => o.pid === pid).map((o) => o.id);
+      expect(ids.length).toBeGreaterThanOrEqual(2);
+      expect(ids).toEqual([...ids].sort());
+    }
   });
 
   it('the same two grants in two selections: the second completion waits on the first; one activation and one record each', async () => {
