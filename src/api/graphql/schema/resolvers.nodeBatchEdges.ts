@@ -1,7 +1,7 @@
 import { GraphQLError } from 'graphql';
 import { BATCH_READ_MAX_EDGES } from '../../../lib/batchRead.js';
 import { edgeDisplayOrder } from '../../../lib/edgeOrder.js';
-import type { Context } from './resolvers.helpers.js';
+import { isMemoryReadableCached, loadEdgeEndpointNode, type Context } from './resolvers.helpers.js';
 import type { Edge } from '../../../generated/prisma/index.js';
 import type { InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 
@@ -69,15 +69,56 @@ export function markBatchReadNodes(nodes: object[]): void {
   for (const node of nodes) budgets.set(node, budget);
 }
 
-export function batchReadEdges(parent: Parent, ctx: Context, direction: 'out' | 'in'): unknown {
+/**
+ * Memories the read that returned a node admitted beyond the node-content gate (`appNodes`, whose App scope is its own gate).
+ * Only an explicit mark widens the list of a node's edges.
+ */
+const admittedMemories = new WeakMap<object, ReadonlySet<string>>();
+export function markAdmittedMemories(nodes: object[], memoryIds: ReadonlySet<string>): void {
+  for (const node of nodes) admittedMemories.set(node, memoryIds);
+}
+
+/** Of `memoryIds`, those whose edges and nodes may be listed on `parent`: its own (the read that returned it was gated), an admitted one, or one the reader may read. */
+async function listableMemories(parent: Parent, ctx: Context, memoryIds: Iterable<string>): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const id of new Set(memoryIds)) {
+    if (id === parent.memoryId || admittedMemories.get(parent)?.has(id) || await isMemoryReadableCached(ctx, id)) out.add(id);
+  }
+  return out;
+}
+
+/**
+ * hadron-internal#74 (cor:api:140:03, cor:acl:010:02) — a node lists an edge when the reader may list both the memory that HOLDS the
+ * edge and the memory of its far node; any other edge is absent, as in MCP. Both are asked: a stored `Edge.memoryId` is the source side,
+ * and may differ from either end after a move.
+ */
+export async function batchReadEdges(parent: Parent, ctx: Context, direction: 'out' | 'in'): Promise<unknown> {
   const field = direction === 'out' ? 'outgoingEdges' : 'incomingEdges';
-  return loadBatchReadEdges(parent, direction, (remaining) => ctx.db.edge.findMany({
-    where: direction === 'out'
-      ? { sourceId: parent.id, source: { memoryId: parent.memoryId, deletedAt: null } }
-      : { targetId: parent.id, target: { memoryId: parent.memoryId, deletedAt: null } },
-    // #2967 — order before the take, so the overflow probe sees the same edges in the same order
-    // as the single `node` read (cor:api:040:01 parity).
-    orderBy: edgeDisplayOrder(),
-    take: remaining + 1,
-  })) ?? parent[field];
+  const far = direction === 'out' ? 'target' : 'source';
+  const where = direction === 'out'
+    ? { sourceId: parent.id, source: { memoryId: parent.memoryId, deletedAt: null } }
+    : { targetId: parent.id, target: { memoryId: parent.memoryId, deletedAt: null } };
+  const pending = loadBatchReadEdges(parent, direction, async (remaining) => {
+    // The filter is in the query, so a capped read counts and returns listed edges only. The grouping runs in the database.
+    const held = await ctx.db.edge.groupBy({ by: ['memoryId'], where });
+    const ends = await ctx.db.node.groupBy({
+      by: ['memoryId'],
+      where: direction === 'out' ? { incomingEdges: { some: where } } : { outgoingEdges: { some: where } },
+    });
+    const ids = [...await listableMemories(parent, ctx, [...held, ...ends].map((r) => r.memoryId))];
+    return ctx.db.edge.findMany({
+      where: { AND: [where, { memoryId: { in: ids } }, { [far]: { memoryId: { in: ids } } }] },
+      // #2967 — order before the take, so the overflow probe sees the same edges in the same order
+      // as the single `node` read (cor:api:040:01 parity).
+      orderBy: edgeDisplayOrder(),
+      take: remaining + 1,
+    });
+  });
+  if (pending) return pending;
+  const rows = parent[field] as Array<Edge & Partial<Record<'source' | 'target', { memoryId?: string } | null>>> | undefined;
+  if (!rows?.length) return rows;
+  const farIds = await Promise.all(rows.map(async (e) =>
+    e[far]?.memoryId ?? (await loadEdgeEndpointNode(ctx, direction === 'out' ? e.targetId : e.sourceId, true) as { memoryId: string } | null)?.memoryId ?? null));
+  const ids = await listableMemories(parent, ctx, [...rows.map((e) => e.memoryId), ...farIds.filter((id) => id !== null)]);
+  return rows.filter((e, i) => ids.has(e.memoryId) && farIds[i] !== null && ids.has(farIds[i]));
 }

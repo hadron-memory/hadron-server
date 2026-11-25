@@ -7,7 +7,7 @@ import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { projectUsageRowsFor } from './resolvers.usageProjection.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
-import { markBatchReadNodes } from './resolvers.nodeBatchEdges.js';
+import { markAdmittedMemories, markBatchReadNodes } from './resolvers.nodeBatchEdges.js';
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
 import { isConcealedCommentHistory } from './resolvers.comments.js';
@@ -372,7 +372,9 @@ async function appNodesRead(ctx: Context, appRef: string, filter: AppNodesFilter
       ...(inheritance.excludeNodeIds.length > 0 ? [{ id: { notIn: inheritance.excludeNodeIds } }] : []),
     ],
   };
-  return { where, inheritance };
+  // An inherited base is in scope through its child only; it admits no edge of its own.
+  const admitted = new Set([...scope.sources].filter(([, s]) => s.some((x) => x.kind !== 'INHERITED_BASE')).map(([id]) => id));
+  return { where, inheritance, admitted };
 }
 
 /** Everything a returned `appNodes` / `appNodesPage` row carries. */
@@ -390,13 +392,14 @@ type AppNodeRow = Prisma.NodeGetPayload<{ include: typeof APP_NODES_INCLUDE }>;
  * the reads, for the rows RETURNED only. Splices the dropped rows out of `rows`.
  */
 async function finishAppNodes(
-  ctx: Context, rows: AppNodeRow[], inheritance: Parameters<typeof retainEffective>[2],
+  ctx: Context, rows: AppNodeRow[], inheritance: Parameters<typeof retainEffective>[2], admitted: ReadonlySet<string>,
 ): Promise<AppNodeRow[]> {
   // The exclusion list was a snapshot: re-check what was read (P2-1).
   const kept = new Set((await retainEffective(ctx.db, rows, inheritance)).map((r) => r.id));
   for (let i = rows.length - 1; i >= 0; i--) if (!kept.has(rows[i]!.id)) rows.splice(i, 1);
   await decryptNodesBatch(ctx.db, rows);
   markInherited(rows, inheritance.inheritedFrom);
+  markAdmittedMemories(rows, admitted);
   // #1061 — the App-scoped node list returns full node projections, so each one is a read. Scope is the
   // App's installed-agent memories, established by `appNodesRead`.
   recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(rows), ctx);
@@ -2956,7 +2959,7 @@ export const nodeQueries = {
         take: limit ?? 20,
         include: APP_NODES_INCLUDE,
       });
-      return finishAppNodes(ctx, results, read.inheritance);
+      return finishAppNodes(ctx, results, read.inheritance, read.admitted);
     },
 
     /**
@@ -3030,7 +3033,7 @@ export const nodeQueries = {
         }),
       ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
       const rawRows = rows.length;
-      const items = await finishAppNodes(ctx, rows, read.inheritance);
+      const items = await finishAppNodes(ctx, rows, read.inheritance, read.admitted);
       return { items, total, hasMore: skip + rawRows < total };
     },
 

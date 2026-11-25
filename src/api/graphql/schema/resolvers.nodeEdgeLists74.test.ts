@@ -8,6 +8,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbNode } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { batchReadEdges, markAdmittedMemories } from './resolvers.nodeBatchEdges.js';
+import { BATCH_READ_MAX_EDGES } from '../../../lib/batchRead.js';
 import { typeDefs } from './typeDefs.js';
 
 const schema = buildSchema(typeDefs);
@@ -24,7 +26,7 @@ async function run(source: string, ctx: Context) {
 
 const FIELDS = 'id urn loc name description data createdAt createdByUser { handle }';
 const single = (id: string) => `{ node(ref: "${id}") { id incomingEdges { ${FIELDS} source { id } } outgoingEdges { ${FIELDS} target { id } } } }`;
-const batch = (id: string) => `{ nodeBatch(refs: ["${id}"]) { items { node { id incomingEdges { ${FIELDS} source { id } } outgoingEdges { ${FIELDS} target { id } } } } } }`;
+const batch = (id: string) => `{ nodeBatch(refs: ["${id}"]) { nodes { id incomingEdges { ${FIELDS} source { id } } outgoingEdges { ${FIELDS} target { id } } } } }`;
 const context = (userId?: string, roles: Context['roles'] = []): Context => ({ db, userId, roles }) as Context;
 
 type Listed = { incoming: string[]; outgoing: string[]; text: string };
@@ -92,7 +94,7 @@ describe.each(SHAPES)('#74 a far node in a %s memory', (_shape, shape) => {
   it('a nodeBatch answers the same', async () => {
     const r = await run(batch(near), context(member));
     expect(r.errors).toBeUndefined();
-    const n = (r.data as any).nodeBatch.items[0].node;
+    const n = (r.data as any).nodeBatch.nodes[0];
     expect([n.incomingEdges.map((e: any) => e.name), n.outgoingEdges.map((e: any) => e.name)]).toEqual([['same-in'], ['same-out']]);
   });
 
@@ -119,6 +121,8 @@ describe.each(SHAPES)('#74 a far node in a %s memory', (_shape, shape) => {
     await edge('third', mem, sibling, near);
     expect((await list(near, context(member))).incoming).toEqual(['same-in']);
     expect((await list(sibling, context(member))).outgoing).toEqual(['same-in']);
+    const r = await run(batch(near), context(member));
+    expect((r.data as any).nodeBatch.nodes[0].incomingEdges.map((e: any) => e.name)).toEqual(['same-in']);
   });
 });
 
@@ -132,5 +136,69 @@ describe('#74 readable memories', () => {
       const got = await list(near, ctx());
       expect([got.incoming, got.outgoing]).toEqual([['other-in', 'same-in'], ['other-out', 'same-out']]);
     }
+  });
+});
+
+describe('#74 a capped read and an App scope', () => {
+  it('a nodeBatch counts listed edges only', async () => {
+    const mem = await memory('far-slug', { class: 'private', userId: alice, ownerUserId: alice });
+    const far = (await createDbNode(db, { loc: 'far-loc', memoryId: mem })).id;
+    await db.edge.createMany({ data: Array.from({ length: BATCH_READ_MAX_EDGES + 1 }, (_, i) =>
+      ({ id: generateId(), loc: `far-loc:cap-${i}`, name: `cap-${i}`, memoryId: mem, sourceId: far, targetId: near })) as never });
+    const r = await run(batch(near), context(member));
+    expect(r.errors).toBeUndefined();
+    expect((r.data as any).nodeBatch.nodes[0].incomingEdges.map((e: any) => e.name)).toEqual(['same-in']);
+  });
+
+  it('a memory the read admitted is listed, and no other', async () => {
+    const admitted = await memory('admitted', { class: 'private', userId: alice, ownerUserId: alice });
+    const other = await memory('other-far', { class: 'private', userId: alice, ownerUserId: alice });
+    const a = (await createDbNode(db, { loc: 'a', memoryId: admitted })).id;
+    const o = (await createDbNode(db, { loc: 'o', memoryId: other })).id;
+    await edge('admitted-out', shared, near, a);
+    await edge('other-out', shared, near, o);
+    const load = () => db.node.findUniqueOrThrow({ where: { id: near }, include: { outgoingEdges: { include: { target: true } } } });
+    const names = async (n: object) => ((await batchReadEdges(n as never, context(member), 'out')) as Array<{ name: string }>).map((e) => e.name).sort();
+    expect(await names(await load())).toEqual(['same-out']);
+    const marked = await load();
+    markAdmittedMemories([marked], new Set([admitted]));
+    expect(await names(marked)).toEqual(['admitted-out', 'same-out']);
+  });
+
+  it('a far node that was not loaded with the edge is judged too', async () => {
+    const mem = await memory('far-slug', { class: 'private', userId: alice, ownerUserId: alice });
+    const far = (await createDbNode(db, { loc: 'far-loc', memoryId: mem })).id;
+    await edge('far-out', shared, near, far);
+    const n = await db.node.findUniqueOrThrow({ where: { id: near }, include: { outgoingEdges: true } });
+    expect(((await batchReadEdges(n as never, context(member), 'out')) as Array<{ name: string }>).map((e) => e.name)).toEqual(['same-out']);
+  });
+
+  it('a node another gate returned keeps its same-memory edges', async () => {
+    const n = await db.node.findUniqueOrThrow({ where: { id: near }, include: { outgoingEdges: { include: { target: true } } } });
+    expect(((await batchReadEdges(n as never, context(outsider), 'out')) as Array<{ name: string }>).map((e) => e.name)).toEqual(['same-out']);
+  });
+
+  it('appNodes lists an edge between two memories of its App scope, and none to a base in scope through a child only', async () => {
+    const agent = async (name: string, extendsAgentId?: string) => {
+      const mem = await memory(name, { organizationId: orgId, class: 'system' });
+      const row = await db.agent.create({ data: { organizationId: orgId, name, urn: `el74:${name}`, visibility: 'ORGANIZATION', systemMemoryId: mem, extendsAgentId } as never });
+      return { id: row.id, mem };
+    };
+    const base = await agent('base');
+    const one = await agent('one', base.id);
+    const two = await agent('two');
+    const app = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'el74 app', urn: 'el74:el74-app' } });
+    for (const x of [one, two]) await db.appAgent.create({ data: { appId: app.id, agentId: x.id } });
+    const n1 = (await createDbNode(db, { loc: 'n1', memoryId: one.mem })).id;
+    const n2 = (await createDbNode(db, { loc: 'n2', memoryId: two.mem })).id;
+    const nb = (await createDbNode(db, { loc: 'nb', memoryId: base.mem })).id;
+    await edge('in-scope', one.mem, n1, n2);
+    await edge('to-base', one.mem, n1, nb);
+    const r = await run(`{ appNodes(appRef: "${app.id}", limit: 50) { id outgoingEdges { name } } }`, context(member));
+    expect(r.errors).toBeUndefined();
+    const row = (r.data as any).appNodes.find((n: any) => n.id === n1);
+    expect(row.outgoingEdges.map((e: any) => e.name)).toEqual(['in-scope']);
+    const page = await run(`{ appNodesPage(appRef: "${app.id}", limit: 50) { items { id outgoingEdges { name } } } }`, context(member));
+    expect((page.data as any).appNodesPage.items.find((n: any) => n.id === n1).outgoingEdges.map((e: any) => e.name)).toEqual(['in-scope']);
   });
 });
