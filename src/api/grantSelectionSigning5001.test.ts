@@ -6,6 +6,7 @@
  * offered item failing is a whole-call refusal with the ceremony unspent; P10 replay is refused each way; P11 cooling-off; P18 the
  * one-grant routes refuse a selection item; R8 an item with an unreadable node is shown without a sentence and not signed; R10 decline.
  */
+import { createHash } from 'node:crypto';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Client } from 'pg';
@@ -19,6 +20,8 @@ import { upsertPlatformActions } from '../lib/grants/actions.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { createGrantSelectionInTransaction } from '../lib/signing/grantSelectionRequests.js';
 import { createGrantSigningRequestInTransaction } from '../lib/signing/grantRequests.js';
+import { grantSelectionPayloadBytes, sortedSelectionItems } from '../lib/signing/grantSelectionPayload.js';
+import { signatureChallenge } from '../lib/signing/payload.js';
 import { loadGrantSignatureStatuses } from '../lib/signing/grantStatus.js';
 import * as grantLocks from '../lib/signing/grantActivationLocks.js';
 import { waitForLockWaitersBlockedBy } from '../test/lockWait.js';
@@ -142,6 +145,24 @@ function signingBody(p: Proved, who: { key: SoftPasskey }, counter = 2) {
   const s = p.json.signing as { ceremonyId: string; challenge: string };
   const a = who.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(s.challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter });
   return assertionBody(s.ceremonyId, who.key, a, { grantIds: p.json.offered });
+}
+
+/** #5192: the request rows' pins, ascending by grant id (the order every payload builder uses). */
+const pinsOf = (selectionId: string) => db.grantSigningRequest.findMany({
+  where: { selectionId }, orderBy: { grantId: 'asc' }, select: { grantId: true, version: true, termsHash: true },
+});
+
+/**
+ * #5192: an assertion that VERIFIES over an arbitrary named set — the exact bytes completion rebuilds for `named` (the payload
+ * builders are the production ones, so the signature is honest for that set). Only the ceremony's minted challenge hash can refuse it.
+ */
+async function namedSetAssertion(selectionId: string, who: { key: SoftPasskey }, named: Array<{ grantId: string; version: number; termsHash: string }>, counter: number) {
+  const [sel] = await db.$queryRawUnsafe<Array<{ payload_version: string }>>('SELECT payload_version FROM grant_signing_selections WHERE id = $1', selectionId);
+  const challenge = signatureChallenge(grantSelectionPayloadBytes(sel!.payload_version, {
+    selectionId,
+    items: sortedSelectionItems(named.map((r) => ({ grantId: r.grantId, recordVersion: r.version, termsHash: r.termsHash }))),
+  }));
+  return who.key.assert({ payload: Buffer.alloc(0), rawChallenge: challenge, origin: ORIGIN, rpId: RP, counter });
 }
 
 const FORBIDDEN = '{"error":"forbidden"}';
@@ -442,6 +463,107 @@ describe('P10: a signature made for one ceremony never completes another', () =>
     expect((await post(sel.id, 'complete', forged, p.cookie)).status).toBe(403);
     expect((await post(sel.id, 'challenge', { grantIds: [...p.json.offered, 'zzzz'] }, p.cookie)).status).toBe(403);
     expect(await db.grantSelectionSignature.count()).toBe(0);
+  });
+});
+
+// #5192 item 1 (Riana's SECURITY P3-1): the completion-time `cer.challenge_hash !== sha256Hex(challenge)` leg. The existing P10 pins
+// above are satisfied by signature verification alone (their assertion was signed over the MINTED set), so dropping the hash check
+// survived. Each pin below completes with a set whose challenge was never minted while the assertion HONESTLY verifies over that
+// named set's own bytes — only the ceremony's bound hash can refuse it.
+describe('#5192 item 1: the completion-time offered-set challenge hash', () => {
+  it('a SUBSET named at completion, signed over that subset\'s own bytes, is the uniform refusal: nothing written, the ceremony unspent', async () => {
+    const gs = [await scheduleGrant(), await scheduleGrant()];
+    const sel = await openSelection(gs);
+    const p = await prove(sel.id, admin);
+    const rows = await pinsOf(sel.id);
+    const counter = await counterOf(admin.id);
+    const sub = rows.slice(0, 1); // a set whose challenge was never minted
+    const a = await namedSetAssertion(sel.id, admin, sub, counter + 2);
+    const r = await post(sel.id, 'complete', assertionBody(p.json.signing.ceremonyId, admin.key, a, { grantIds: sub.map((x) => x.grantId) }), p.cookie);
+    expect(r.status).toBe(403);
+    expect(await r.text()).toBe(FORBIDDEN);
+    await nothingWritten(sel.id, gs, admin.id, counter);
+    expect(await unconsumed(admin.id)).toBe(1); // the minted ceremony is still live: the refusal came before consumeCeremony
+  });
+
+  it('a SUPERSET naming an item the proof never offered (revoked before the proof) is refused the same way', async () => {
+    const gs = [await scheduleGrant(), await scheduleGrant(), await scheduleGrant()];
+    const sel = await openSelection(gs);
+    const sorted = [...gs].sort();
+    await revoke(sorted[2]!); // ENDED at the proof: never offered, never in the minted challenge
+    const p = await prove(sel.id, admin);
+    expect(p.json.offered).toEqual(sorted.slice(0, 2));
+    const rows = await pinsOf(sel.id);
+    expect(rows.map((x) => x.grantId)).toEqual(sorted);
+    const counter = await counterOf(admin.id);
+    const a = await namedSetAssertion(sel.id, admin, rows, counter + 2);
+    const r = await post(sel.id, 'complete', assertionBody(p.json.signing.ceremonyId, admin.key, a, { grantIds: rows.map((x) => x.grantId) }), p.cookie);
+    expect(r.status).toBe(403);
+    expect(await r.text()).toBe(FORBIDDEN);
+    await nothingWritten(sel.id, gs, admin.id, counter);
+    expect(await unconsumed(admin.id)).toBe(1);
+  });
+
+  it('a REORDER of the same set completes: the offered set is canonical (ascending), so the guard is set equality, not list equality', async () => {
+    const gs = [await scheduleGrant(), await scheduleGrant(), await scheduleGrant()];
+    const sel = await openSelection(gs);
+    const p = await prove(sel.id, admin);
+    expect(p.json.offered).toEqual([...gs].sort());
+    const r = await post(sel.id, 'complete', { ...signingBody(p, admin), grantIds: [...p.json.offered].reverse() }, p.cookie);
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ outcomes: [...gs].sort().map((grantId) => ({ grantId, outcome: 'ACTIVATED' })) });
+    expect(await selState(sel.id)).toBe('completed');
+  });
+});
+
+// #5192 item 3 (Antonio's LOCAL F1): the in-lock `cer.consumed_at || cer.expires_at <= now` pre-check. consumeCeremony raises the
+// same refusal later, so the pins below compose a ceremony problem with a request-state problem: the pre-check fires FIRST, so the
+// guard answers the uniform ceremony refusal (403) where the mutant without it answers the request-state one (409).
+describe('#5192 item 3: the in-lock ceremony consumed/expired pre-check fires before the request-state refusals', () => {
+  it('CONSUMED: a replay after a successful completion is the uniform ceremony refusal (403), not SIGNING_REQUEST_ENDED (409)', async () => {
+    const gs = [await scheduleGrant(), await scheduleGrant()];
+    const sel = await openSelection(gs);
+    const p = await prove(sel.id, admin);
+    expect((await post(sel.id, 'complete', signingBody(p, admin), p.cookie)).status).toBe(200);
+    const r = await post(sel.id, 'complete', signingBody(p, admin, 3), p.cookie);
+    expect(r.status).toBe(403);
+    expect(await r.text()).toBe(FORBIDDEN);
+    expect(await db.grantSelectionSignature.count()).toBe(1);
+    expect(await activateEvents(gs[0]!)).toBe(1);
+  });
+
+  it('EXPIRED: a ceremony expired between proof and completion, with the selection ended, is the ceremony refusal — not the selection-state one', async () => {
+    const gs = [await scheduleGrant(), await scheduleGrant()];
+    const sel = await openSelection(gs);
+    const p = await prove(sel.id, admin);
+    await db.$executeRawUnsafe(`UPDATE passkey_ceremonies SET expires_at = ${now} - interval '1 second' WHERE id = $1`, p.json.signing.ceremonyId);
+    await db.$executeRawUnsafe(`UPDATE grant_signing_selections SET state = 'declined' WHERE id = $1`, sel.id);
+    const r = await post(sel.id, 'complete', signingBody(p, admin), p.cookie);
+    expect(r.status).toBe(403);
+    expect(await r.text()).toBe(FORBIDDEN);
+    expect(await db.grantSelectionSignature.count()).toBe(0);
+  });
+});
+
+// #5192 (Brooks, deferred from the stale SECURITY seat): the proof challenge's ceremony-id binding. An assertion over the
+// challenge a ceremony-id-less `selectionProofChallenge` would build (the selection line only) must be refused; the same
+// ceremony still proves with the honest challenge, so the refusal is the binding, not the fixture.
+describe('#5192: the proof challenge binds the ceremony id', () => {
+  it('an assertion over the selection-only challenge (the ceremony line dropped) is the uniform refusal, and the same ceremony still proves afterwards', async () => {
+    const gs = [await scheduleGrant(), await scheduleGrant()];
+    const sel = await openSelection(gs);
+    const c = await post(sel.id, 'proof/challenge', {});
+    expect(c.status).toBe(200);
+    const cookie = (c.headers.get('set-cookie') ?? '').split(';')[0]!;
+    const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
+    const forged = createHash('sha256').update(`hadron-grant-selection-signing-proof\nselection ${sel.id}\n`).digest();
+    const bad = admin.key.assert({ payload: Buffer.alloc(0), rawChallenge: forged, origin: ORIGIN, rpId: RP, counter: 1 });
+    const r = await post(sel.id, 'proof', assertionBody(ceremonyId, admin.key, bad), cookie);
+    expect(r.status).toBe(403);
+    expect(await r.text()).toBe(FORBIDDEN);
+    const honest = admin.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: 2 });
+    const ok = await post(sel.id, 'proof', assertionBody(ceremonyId, admin.key, honest), cookie);
+    expect(ok.status).toBe(200);
   });
 });
 

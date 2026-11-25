@@ -222,6 +222,23 @@ describe('R4p: withdraw is the requester account\'s alone, once', () => {
       .toBe(JSON.stringify(await post(personKey, null, WITHDRAW, { id: 'AAAAAAAAAAAAAAAAAAAAAA' })).replaceAll('AAAAAAAAAAAAAAAAAAAAAA', 'X'));
     expect((await asWorker(READ, { id })).data.grantSigningRequest.state).toBe('OPEN');
   });
+
+  // #5192 item 2, resolver site (Riana's SECURITY P3-2): the one-grant withdraw resolver's own selection link. The caller IS the
+  // requester over a grant it can read, so without the link the call would walk into the withdraw; the pin answers exactly like
+  // an unknown id and ends nothing. (The lib site has its own pin in grantSelection5001.test.ts; each kills its guard alone.)
+  it('withdrawing a selection ITEM by id answers exactly like an unknown id, and nothing ends', async () => {
+    const g = await held({ action_values: { entryNode: 'n1' } });
+    const opened = await asWorker('mutation($g:[ID!]!){requestGrantSelectionSignature(grantRefs:$g){id items{id}}}', { g: [g] });
+    expect(opened.errors).toBeUndefined();
+    const selId = opened.data.requestGrantSelectionSignature.id as string;
+    const itemId = opened.data.requestGrantSelectionSignature.items[0].id as string;
+    const r = await asWorker(WITHDRAW, { id: itemId });
+    expect(code(r)).toBe('SIGNING_REQUEST_NOT_FOUND');
+    expect(JSON.stringify(r).replaceAll(itemId, 'X'))
+      .toBe(JSON.stringify(await asWorker(WITHDRAW, { id: 'AAAAAAAAAAAAAAAAAAAAAA' })).replaceAll('AAAAAAAAAAAAAAAAAAAAAA', 'X'));
+    expect((await db.grantSigningRequest.findUniqueOrThrow({ where: { id: itemId } })).state).toBe('open');
+    expect((await db.grantSigningSelection.findUniqueOrThrow({ where: { id: selId } })).state).toBe('open');
+  });
 });
 
 describe('R5p: a request past its deadline reads EXPIRED, at its deadline, judged at one instant per row (#3802 BLIND P3)', () => {
