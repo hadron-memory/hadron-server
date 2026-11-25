@@ -474,17 +474,18 @@ ALTER TABLE principals
 -- weights needs a dedicated DROP+ADD migration — this won't update it in place.
 -- #5137: an unclosed `<!--` makes the default parser quadratic (every opener rescans to the end of the text for a `-->`
 -- that is not there: 16 KB of `<!--` is about 200 ms, 49 KB over a second, and it keeps burning after the client gives up).
--- An opener with no `-->` after it is not a comment to the parser: it indexes exactly like `<!-` (verified over 200000
--- random strings drawn from `<!--`, `-->`, `<!-`, `<a `, `&amp;` and words: identical tsvectors). So every `<!--` after the
--- LAST `-->` is rewritten to `<!-` before parsing; a `<!--` before the last `-->` finds its closer at once and stays.
+-- An opener with no `-->` after it is not a comment to the parser: it indexes exactly like `<! -` (verified over 400000
+-- random strings drawn from `<!--`, `-->`, `<!-`, `<!---`, `-5`, `<a `, `&amp;` and words: identical tsvectors). The
+-- replacement keeps the length and cannot re-form an opener with a following `-` (`<!-` would: `<!---` -> `<!--`, still quadratic, #5140
+-- local P1). So every `<!--` after the LAST `-->` is rewritten to `<! -` before parsing; a `<!--` before the last `-->` finds its closer at once and stays.
 -- Same tokens, weights and positions, so the search signal does not change; no refusal; no row is rewritten.
 CREATE OR REPLACE FUNCTION hadron_tsv_unclosed_comment(t text)
 RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path = public, pg_temp AS $$
   SELECT CASE
     WHEN position('<!--' in t) = 0 THEN t
-    WHEN position('-->' in t) = 0 THEN replace(t, '<!--', '<!-')
+    WHEN position('-->' in t) = 0 THEN replace(t, '<!--', '<! -')
     ELSE left(t, length(t) - position('>--' in reverse(t)) - 1)
-      || replace(right(t, position('>--' in reverse(t)) + 1), '<!--', '<!-')
+      || replace(right(t, position('>--' in reverse(t)) + 1), '<!--', '<! -')
   END
 $$;
 

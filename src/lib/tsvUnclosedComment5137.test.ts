@@ -45,10 +45,23 @@ describe('a node write with an unclosed <!-- body', () => {
     }
   });
 
-  it(`updates inside ${BOUND_MS} ms, in the name and description legs too`, async () => {
-    const n = await db.node.create({ data: { id: generateId(), memoryId, loc: 'u', name: 'n', content: 'x' } });
-    const ms = await timed(() => db.node.update({ where: { id: n.id }, data: { content: '<!--'.repeat(OPENERS), description: '<!--'.repeat(OPENERS), name: '<!--'.repeat(OPENERS) } }));
-    expect(ms).toBeLessThan(BOUND_MS * 2);
+  // One leg at a time at the single-leg bound: leaving any one leg unwrapped is red (#5140 second-seat P3).
+  it.each(['name', 'alias', 'description', 'abstract', 'content'])(`an unclosed opener in %s alone updates inside ${BOUND_MS} ms`, async (field) => {
+    const n = await db.node.create({ data: { id: generateId(), memoryId, loc: `u-${field}`, name: 'n', content: 'x' } });
+    const ms = await timed(() => db.node.update({ where: { id: n.id }, data: { [field]: '<!--'.repeat(OPENERS) } }));
+    expect(ms).toBeLessThan(BOUND_MS);
+  });
+
+  it(`tags (loc/tags leg) with an unclosed opener create inside ${BOUND_MS} ms`, async () => {
+    const ms = await timed(() => db.node.create({ data: { id: generateId(), memoryId, loc: 'tg', name: 'n', tags: ['<!--'.repeat(OPENERS)] } }));
+    expect(ms).toBeLessThan(BOUND_MS);
+  });
+
+  // #5140 local P1: a plain `<!-` replacement re-forms `<!--` when a `-` follows (`<!---` -> `<!--`), still quadratic.
+  it.each(['<!---', '<!----', '<!--5 '])(`the %s shape creates inside ${BOUND_MS} ms at ${SIZE} bytes`, async (unit) => {
+    const content = unit.repeat(Math.ceil(SIZE / unit.length));
+    const ms = await timed(() => db.node.create({ data: { id: generateId(), memoryId, loc: 'sh', name: 'n', content } }));
+    expect(ms).toBeLessThan(BOUND_MS);
   });
 
   it('indexes as nothing, as before', async () => {
@@ -67,6 +80,8 @@ describe('the search signal does not change', () => {
     '<!-- x --> y <!-- z',
     '<!---->hello<!-- world',
     '<!--> tricky <!-- open',
+    '<!--- dash <!---- two <!--5 num <!--x',
+    '-5 <!--5 and <!--- end',
     'plain words with <a href="x">link</a> and &amp; entity',
     '<!-- one --> <!-- two --> three <!-- four <!-- five',
     '--> stray closer <!-- opener',
@@ -90,6 +105,6 @@ describe('the helper', () => {
       SELECT hadron_tsv_unclosed_comment('no markup') AS a,
              hadron_tsv_unclosed_comment('x <!-- y --> z') AS b,
              hadron_tsv_unclosed_comment('x <!-- y --> z <!-- w') AS c`;
-    expect(rows[0]).toEqual({ a: 'no markup', b: 'x <!-- y --> z', c: 'x <!-- y --> z <!- w' });
+    expect(rows[0]).toEqual({ a: 'no markup', b: 'x <!-- y --> z', c: 'x <!-- y --> z <! - w' });
   });
 });
