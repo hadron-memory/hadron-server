@@ -46,8 +46,7 @@ const doors: [string, Create][] = [
   ['createAppMemory', (name, who = admin.id) => M.createAppMemory({}, { appRef: app.id, name }, ctx(who))],
   ['createMemoryInApp app', (name, who = admin.id) => M.createMemoryInApp(
     {}, { appRef: app.id, agentRef: agent.id, memoryClass: 'app', name }, ctx(who))],
-  ['createMemoryInApp personal', (name, who = admin.id) => M.createMemoryInApp(
-    {}, { appRef: app.id, agentRef: agent.id, memoryClass: 'personal', name }, ctx(who))],
+  // #5183: createMemoryInApp personal/private no longer judge `name` (the server derives both slug and name).
 ];
 
 /** Every name #2730 refused that can be stored and yields a slug, with the slug it yields. */
@@ -84,11 +83,8 @@ for (const [door, create] of doors) {
         expect(row.name).toBe(name);
         const [root, stored, ...rest] = row.urn.split(':');
         expect([root, rest]).toEqual([org.urn, []]);
-        // A personal memory's slug is an opaque id; every other door's is the one derived from the name.
-        if (door !== 'createMemoryInApp personal') {
-          expect(stored).toBe(slug);
-          expect(isValidSlug(stored!)).toBe(true);
-        }
+        expect(stored).toBe(slug);
+        expect(isValidSlug(stored!)).toBe(true);
         expect(await db.node.count({ where: { memoryId: id } })).toBe(0);
         expect(readdirSync(graphsPath, { recursive: true })).toEqual([]);
       });
@@ -106,6 +102,18 @@ for (const [door, create] of doors) {
     }
   });
 }
+
+describe('#5183 createMemoryInApp personal/private ignore the name argument, refused names included', () => {
+  afterEach(async () => { await db.memory.deleteMany({ where: { appUserMemory: true } }); });
+  for (const [label, name] of [...admitted.map(([l, n]) => [l, n]), ...refused]) {
+    it(`a personal memory named with ${label} is created under the derived name`, async () => {
+      const mem = await M.createMemoryInApp(
+        {}, { appRef: app.id, agentRef: agent.id, memoryClass: 'personal', name }, ctx(admin.id));
+      expect(mem.name).toBe(mem.urn.split(':')[1]);
+      expect(mem.name).toMatch(/-personal$/);
+    });
+  }
+});
 
 describe('#5149 createMemory in the caller\'s own namespace', () => {
   for (const [label, name] of refused) {
