@@ -562,9 +562,16 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
         const eol = text.indexOf('\n', close + 1);
         const oneLine = text.lastIndexOf('\n', close) < i;
         const opensBlock = prevBefore !== 'other' && prevBefore !== 'marker' && !prevDefinition;
-        // Escaped, the line is paragraph text, and an underline after it would make it a heading and change how the lines after it read.
-        const nextLine = eol === -1 ? '' : text.slice(eol + 1, text.indexOf('\n', eol + 1) === -1 ? n : text.indexOf('\n', eol + 1));
-        const underlined = /^ {0,3}(?:=+|-+)[ \t]*\r?$/.test(nextLine);
+        // Escaped, the line is paragraph text. A lone `-` under it is then an underline, not the empty bullet it is as written, and a line
+        // indented under that bullet leaves the item it belonged to (a fence there, for one, would lose its container). Any other underline
+        // (`===`, `---`) opens no item either way, so it changes nothing after it.
+        const lineAt = (from: number): string => {
+          const to = text.indexOf('\n', from);
+          return text.slice(from, to === -1 ? n : to);
+        };
+        const nextLine = eol === -1 ? '' : lineAt(eol + 1);
+        const afterNext = eol === -1 || text.indexOf('\n', eol + 1) === -1 ? '' : lineAt(text.indexOf('\n', eol + 1) + 1);
+        const underlined = /^ {0,3}-[ \t]*\r?$/.test(nextLine) && /^(?: {2,}|\t)\S/.test(afterNext);
         const opened = oneLine && opensBlock && !underlined && /^ {0,3}$/.test(text.slice(lineHead, i)) && /^(?:`{3,}|~{3,})/.test(text.slice(close + 1, close + 4))
           ? stepFence(text.slice(close + 1, eol === -1 ? n : eol), null).open
           : null;

@@ -243,6 +243,15 @@ describe('#5265 QA F1 and F2 (Charles, 5d444777): bodies that main keeps stay as
   });
 });
 
+describe('#5265 Riana P2 (3fa46eef): an underline under the declaration escapes it, unless a lone `-` holds an indented line', () => {
+  cases([
+    ['`===`', '§!DOCTYPE html>```\n===', ['marked']],
+    ['`---`', '§!DOCTYPE html>```\n---', ['marked']],
+    ['a lone `-` with nothing indented under it', '§!DOCTYPE html>```\n-', ['marked']],
+    ['`===` over an indented line (no bullet to leave)', '§!DOCTYPE html>```\n===\n  x', ['marked']],
+  ]);
+});
+
 describe('#5265: a setext underline ends the run a code span may close in', () => {
   cases([
     ['`=` under the line', '&lt;!DOCTYPE html>```§script>\n=\nx<!-- c -->```', ALL],
