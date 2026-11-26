@@ -278,7 +278,9 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 //
 // 0.43.0 — #5183 (A1 of #5182): createMemoryInApp's `name` is optional. For a personal or private memory the server derives
 // slug and display name (<app>-<handle>-<class>), the memory is the user's own, one per class per App
-// (APP_USER_MEMORY_ALREADY_EXISTS). A client that still sends `name` has it ignored for those classes.
+// (APP_USER_MEMORY_ALREADY_EXISTS). A client that still sends `name` has it ignored for those classes. Also changed for those
+// classes: the memory's tenant moves from the App's organization to the user (organizationId null, URN rooted on their handle),
+// and an App key, worker session, run principal or impersonation is refused (authorization denied), before any read of the App.
 //
 // 0.44.0 — ADDITIVE, #5218: `App.viewerAppUserMemoryClasses: [MemoryClass!]!`, the personal/private classes the
 // signed-in viewer may still create in the App through `createMemoryInApp`. A lagging client still validates.

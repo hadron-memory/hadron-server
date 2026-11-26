@@ -8,7 +8,7 @@ import { listAppInstallations } from '../../../lib/appInstallations.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import type { Context } from './resolvers.helpers.js';
 
-/** S12 "Person only": true when the caller is NOT the signed-in member acting as themselves. Needs a user id too. */
+/** S12 "Person only": true when the caller is NOT the signed-in member acting as themselves (no user id counts as not). */
 export function refusedAppUserMemoryPrincipal(ctx: Context): boolean {
   return !ctx.userId || !!(ctx.appKeyId || ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx));
 }
