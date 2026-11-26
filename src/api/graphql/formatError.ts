@@ -113,11 +113,11 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
     (err) => ({
       code: 'AUTH_STORE_BUSY',
       retryable: true,
-      reason: normalizeAuthStoreBusyReason(err.extensions.reason),
+      reason: normalizeAuthStoreBusyReason(err.extensions?.reason),
     }),
     {
       silenceInSentry: false,
-      fixedMessageFor: (err) => authStoreBusyMessage(err.extensions.reason),
+      fixedMessageFor: (err) => authStoreBusyMessage(err.extensions?.reason),
     },
   ),
   // #3009: declining the encrypted-vector disclosure is a caller refusal on both consumers of this list.

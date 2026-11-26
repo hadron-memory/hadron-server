@@ -84,6 +84,28 @@ describe('the rendered error is exactly the fixed fields (#4591)', () => {
     expectFixed(out, 'POOL_WAIT');
   });
 
+  // #5253: `instanceof` proves the class, not that `extensions` survived. The renderers read the reason through `?.`, so an error
+  // whose extensions were nulled or removed after construction still normalizes to POOL_WAIT. The GraphQL 503 is not asserted: Apollo
+  // reads the status from the thrown `extensions.http` before `formatError` runs, so no renderer can supply it.
+  it.each([
+    ['null', (e: AuthStoreBusyError) => { (e as unknown as { extensions: unknown }).extensions = null; }],
+    ['removed', (e: AuthStoreBusyError) => { delete (e as unknown as { extensions?: unknown }).extensions; }],
+  ])('answers POOL_WAIT, its prose and the three fixed fields when the error\'s extensions are %s (#5253)', (_label, gone) => {
+    const error = new AuthStoreBusyError(new Error(DRIVER), 'STORE_UNREACHABLE');
+    gone(error);
+    const out = formatGraphQLError({ message: error.message, path: ['hello'], extensions: {} }, error);
+    expectFixed(out, 'POOL_WAIT');
+    expect(out.path).toEqual(['hello']);
+  });
+
+  it('answers POOL_WAIT when the extensions are gone on an error wrapped as a resolver throw is (#5253)', () => {
+    const original = new AuthStoreBusyError(new Error(DRIVER), 'STORE_UNREACHABLE');
+    (original as unknown as { extensions: unknown }).extensions = null;
+    const wrapper = new GraphQLError(original.message, { originalError: original });
+    const out = formatGraphQLError({ message: wrapper.message, extensions: { code: 'INTERNAL_SERVER_ERROR' } }, wrapper);
+    expectFixed(out, 'POOL_WAIT');
+  });
+
   it('answers the fixed code and retryable when both were changed', () => {
     const out = format(tampered((e) => { e.code = DRIVER; e.retryable = DRIVER; }));
     expectFixed(out, 'POOL_WAIT');
