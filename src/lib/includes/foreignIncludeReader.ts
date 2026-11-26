@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '../../generated/prisma/index.js';
 import type { AuthContext } from '../../middleware/auth.js';
 import { canReadMemory } from '../../mcp/access-control.js';
 import { isRunPrincipal } from '../auth/runPrincipal.js';
