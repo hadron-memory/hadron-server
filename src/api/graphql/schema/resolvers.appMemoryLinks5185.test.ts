@@ -482,14 +482,21 @@ describe('detach is no App-existence oracle for a caller who cannot read the mem
 });
 
 describe('detach for a caller who CAN read the memory, with a missing App', () => {
-  it('an unknown and a deleted App answer FORBIDDEN, the same as an App the caller has no say over', async () => {
+  it('an unknown App, a deleted App and an existing App with no say over the link all answer the same FORBIDDEN', async () => {
     const m = await memory({}); // alice reads it (org reader)
-    const deleted = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Gone', urn: `${org.urn}:gone4`, deletedAt: new Date() } as never });
+    const deleted = await db.app.create({
+      data: { id: generateId(), organizationId: org.id, name: 'Gone', urn: `${org.urn}:gone4`, deletedAt: new Date() } as never,
+    });
     const norm = (r: { code: string; message: string } | null) => r && { code: r.code, message: r.message.split(m.id).join('<ref>') };
     const unknown = norm(await refusal(detach(asUser(alice), m.id, generateId())));
     const gone = norm(await refusal(detach(asUser(alice), m.id, deleted.id)));
+    // The third cell: an EXISTING App, with a link made by someone else; bob reads the memory and has no say over that link.
+    await attach(asUser(alice), m.id, orgApp.id);
+    const noSay = norm(await refusal(detach(asUser(bob), m.id, orgApp.id)));
     expect(unknown).toMatchObject({ code: 'FORBIDDEN' });
     expect(gone).toEqual(unknown);
+    expect(noSay).toEqual(unknown);
+    expect(await links(m.id)).toHaveLength(1); // the refused detach removed nothing
   });
 });
 

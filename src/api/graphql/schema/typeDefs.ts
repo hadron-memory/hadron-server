@@ -14772,8 +14772,7 @@ export const typeDefs = `#graphql
     #5185 — remove the link of a memory to an App; the memory is never changed. The person who attached it removes their own
     link (even after losing read); the memory's owner and the person who manages the App remove every link of that memory in
     that App. No link to remove is success. The memory is judged first. A caller who cannot read it gets MEMORY_NOT_FOUND
-    (the same answer as an unknown memory) whatever the App, so an existing, an unknown and a deleted App are
-    indistinguishable to them. A caller who can read it gets FORBIDDEN when they have no authority over the link, and the
+    (the same answer as an unknown memory) whatever the App, so the App side tells them nothing. A caller who can read it gets FORBIDDEN when they have no authority over the link, and the
     same FORBIDDEN for an unknown or deleted App. The links of a soft-deleted memory cannot be detached; they sit inert
     until it is restored. Person only, as 'attachMemoryToApp'.
     """
