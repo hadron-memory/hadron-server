@@ -1917,7 +1917,7 @@ export const agentMutations = {
       _: unknown,
       args: {
         ownerType: AiConfigOwnerType;
-        ownerId: string;
+        ownerRef: string;
         name: string;
         provider: string;
         model: string;
@@ -1930,7 +1930,7 @@ export const agentMutations = {
       ctx: Context,
     ) => {
       try {
-        const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, args.ownerType, args.ownerId);
+        const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, args.ownerType, args.ownerRef);
         await assertAiConfigAppOwnerInstalled(ctx.db, ownerWhere.appId);
         const name = validateAiConfigName(args.name);
         validateProviderAndParams(args.provider, args.params ?? null);

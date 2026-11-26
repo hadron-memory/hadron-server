@@ -97,7 +97,7 @@ describe('GraphQL expectedRevision (#937)', () => {
             updateNode(input: $input) { id revision content }
           }
         `,
-        variables: { input: { id: node.id, expectedRevision: 1, content: 'wire edit' } },
+        variables: { input: { ref: node.id, expectedRevision: 1, content: 'wire edit' } },
       },
       { contextValue: ctx() },
     );
@@ -242,7 +242,7 @@ describe('GraphQL expectedRevision (#937)', () => {
             updateNode(input: $input) { id revision content }
           }
         `,
-        variables: { input: { id: node.id, expectedRevision: null, content: 'unguarded null edit' } },
+        variables: { input: { ref: node.id, expectedRevision: null, content: 'unguarded null edit' } },
       },
       { contextValue: ctx() },
     );

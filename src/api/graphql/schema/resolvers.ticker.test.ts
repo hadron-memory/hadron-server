@@ -235,7 +235,7 @@ describe('tickers — create, read, URN, slug', () => {
   });
 
   it('refuses a channel the caller cannot read', async () => {
-    await expectCode(createTicker(ctx(member.id), { channelIds: [generateId()] }), 'BAD_USER_INPUT');
+    await expectCode(createTicker(ctx(member.id), { channelRefs: [generateId()] }), 'BAD_USER_INPUT');
   });
 
   it('refuses impersonation (read-only)', async () => {

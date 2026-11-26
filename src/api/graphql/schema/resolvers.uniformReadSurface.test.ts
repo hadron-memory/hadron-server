@@ -110,12 +110,12 @@ describe('Query.edges — the uniform paginated edge list', () => {
   });
 
   it('filters by memoryId (ID or URN), sourceNodeId, targetNodeId', async () => {
-    expect((await Q.edges(null, { filter: { memoryId: memA.urn } }, ctx(member.id))).total).toBe(1);
+    expect((await Q.edges(null, { filter: { memoryRef: memA.urn } }, ctx(member.id))).total).toBe(1);
     expect(
-      (await Q.edges(null, { filter: { sourceNodeId: nodeA1.id } }, ctx(member.id))).total,
+      (await Q.edges(null, { filter: { sourceRef: nodeA1.id } }, ctx(member.id))).total,
     ).toBe(1);
     expect(
-      (await Q.edges(null, { filter: { targetNodeId: nodeA1.id } }, ctx(member.id))).total,
+      (await Q.edges(null, { filter: { targetRef: nodeA1.id } }, ctx(member.id))).total,
     ).toBe(0);
   });
 
@@ -179,7 +179,7 @@ describe('Query.agent(ref) — the uniform single-agent read', () => {
     const M = resolvers.Mutation as any;
     const written = await M.createNode(
       null,
-      { input: { memoryId: memA.id, loc: 'uni:write-check', name: 'w' } },
+      { input: { memoryRef: memA.id, loc: 'uni:write-check', name: 'w' } },
       ctx(member.id),
     );
     expect(written?.loc).toBe('uni:write-check');
@@ -190,7 +190,7 @@ describe('Query.agent(ref) — the uniform single-agent read', () => {
     await expect(
       M.createNode(
         null,
-        { input: { memoryId: memA.id, loc: 'uni:write-check-2', name: 'w2' } },
+        { input: { memoryRef: memA.id, loc: 'uni:write-check-2', name: 'w2' } },
         ctx(member.id),
       ),
     ).rejects.toThrow(/MEMORY_NOT_FOUND/);
@@ -489,7 +489,7 @@ describe('Node.urn / Edge.urn (#481)', () => {
   it('flows through the query surfaces: node(ref) and findNodes hits carry urn', async () => {
     const node = await Q.node(null, { ref: nodeA1.id }, ctx(member.id));
     expect(await T.Node.urn(node, {}, ctx(member.id))).toContain(`:${nodeA1.loc}`);
-    const found = await Q.findNodes(null, { filter: { memoryIds: [memA.id] } }, ctx(member.id));
+    const found = await Q.findNodes(null, { filter: { memoryRefs: [memA.id] } }, ctx(member.id));
     expect(found.hits.length).toBeGreaterThan(0);
     const viaList = await T.Node.urn(found.hits[0].node, {}, ctx(member.id));
     expect(viaList.startsWith('hrn:node:')).toBe(true);

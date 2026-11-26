@@ -4782,13 +4782,13 @@ export function createMcpServerInstance(
       // Resolved scope handed to findNodes. When neither memoryUrn nor a
       // memory-resolvable parentRel is supplied, both stay undefined and
       // findNodes falls back to its own accessible-set scoping.
-      let filterMemoryIds: string[] | undefined;
+      let filterMemoryRefs: string[] | undefined;
       let filterLocPrefix: string | undefined;
 
       // #498 — at most one memory selector. memoryUrn (single), memoryUrns (a
       // set), and allMemories (everything accessible) are three ways to say
       // "where"; combining them is ambiguous. allMemories needs no scope work —
-      // leaving filterMemoryIds undefined makes findNodes use the accessible set
+      // leaving filterMemoryRefs undefined makes findNodes use the accessible set
       // (session-scoped downstream); it exists as the explicit, discoverable
       // form of "omit the scope" so agents reach for the org-wide probe.
       const memSelectors = [
@@ -4824,7 +4824,7 @@ export function createMcpServerInstance(
             `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
           );
         }
-        filterMemoryIds = [mem.id];
+        filterMemoryRefs = [mem.id];
       }
 
       // Scope to a SET of memories (#498). Each URN gets the SAME gates as the
@@ -4855,7 +4855,7 @@ export function createMcpServerInstance(
         );
         const bad = resolved.find((r): r is { error: string } => 'error' in r);
         if (bad) return refusalResult(bad.error);
-        filterMemoryIds = resolved.map((r) => (r as { id: string }).id);
+        filterMemoryRefs = resolved.map((r) => (r as { id: string }).id);
       }
 
       // Explicit org-wide scope (#498). Materialize the readable set so
@@ -4867,7 +4867,7 @@ export function createMcpServerInstance(
       // really means all. The resolver re-gates whatever ids we pass, so this
       // cannot broaden beyond the caller's actual reach.
       if (allMemories) {
-        filterMemoryIds =
+        filterMemoryRefs =
           accessibleMemoryIds ??
           (
             await db.memory.findMany({ where: { deletedAt: null }, select: { id: true } })
@@ -4884,7 +4884,7 @@ export function createMcpServerInstance(
             : refusalResult(parent.message);
         }
         filterLocPrefix = parent.loc;
-        if (parent.memoryId) filterMemoryIds = [parent.memoryId];
+        if (parent.memoryId) filterMemoryRefs = [parent.memoryId];
       }
 
       // Build a GraphQL Context from the MCP auth, including appId + sessionId so
@@ -4916,8 +4916,8 @@ export function createMcpServerInstance(
       }
       if (scopeRes?.memoryIds) {
         const inScope = new Set(scopeRes.memoryIds);
-        filterMemoryIds = filterMemoryIds ? filterMemoryIds.filter((id) => inScope.has(id)) : scopeRes.memoryIds;
-        if (filterMemoryIds.length === 0) {
+        filterMemoryRefs = filterMemoryRefs ? filterMemoryRefs.filter((id) => inScope.has(id)) : scopeRes.memoryIds;
+        if (filterMemoryRefs.length === 0) {
           // This valid empty result returns before the resolver. Charge it
           // here once through the same admission engine, without turning an
           // empty filter into an unscoped core retrieval.
@@ -4947,7 +4947,7 @@ export function createMcpServerInstance(
             mode: effectiveMode,
             orgRef: scopeOrgId,
             filter: {
-              memoryIds: filterMemoryIds,
+              memoryRefs: filterMemoryRefs,
               isRunnable: isRunnable ?? undefined,
               hasOpenThreads: hasOpenThreads ?? undefined,
               role: role ?? undefined,
@@ -5682,7 +5682,7 @@ export function createMcpServerInstance(
           // miss — the same screen hadron_get_node and nodeBatch(refs:) apply.
           const typeErr = validateUrnType(parseUrnInput(raw), 'node');
           if (typeErr) {
-            return textResult(`hadron_get_nodes: ${typeErr} (ref "${raw}")`);
+            return textResult(`hadron_get_nodes: ${typeErr} (one of the refs)`);
           }
           try {
             assertFullyQualifiedUrn(raw, 'node');
@@ -6120,14 +6120,14 @@ export function createMcpServerInstance(
       } else {
         const { memoryUrn: currentMemoryUrn, loc: currentLoc } = splitNodeUrn(rawCurrent);
         if (currentMemoryUrn !== memoryUrn) {
-          return textResult(`Current URN's memory (${currentMemoryUrn}) doesn't match parent's memory (${memoryUrn}).`);
+          return textResult('The current node is not in the parent\'s memory.');
         }
         const idx = children.findIndex((n) => n.loc === currentLoc);
         if (idx === -1) {
           return refusalResult('Current node not found among the parent\'s children.');
         }
         if (idx + 1 >= children.length) {
-          return textResult(`No more nodes after "${currentLoc}".`);
+          return textResult('No more nodes after the current node.');
         }
         next = children[idx + 1];
       }
@@ -7937,7 +7937,7 @@ export function createMcpServerInstance(
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
       )[doorName](
         {},
-        { input: { memoryId: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}), ...(taskIndex ? { index: taskIndex } : {}), ...(taskSkill ? { skill: taskSkill } : {}) },
+        { input: { memoryRef: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}), ...(taskIndex ? { index: taskIndex } : {}), ...(taskSkill ? { skill: taskSkill } : {}) },
         ctx,
       );
       return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${taskIndex ? ` · listed in the tasks index of ${taskIndex.agent} (trigger: ${taskIndex.trigger.trim()})` : ''}${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
@@ -8206,8 +8206,8 @@ export function createMcpServerInstance(
               authoredWith,
               oldText,
               newText,
-              nodeIds: nodeUrns,
-              memoryIds: memoryUrns,
+              nodeRefs: nodeUrns,
+              memoryRefs: memoryUrns,
               prefix,
               fields,
               caseInsensitive: caseInsensitive ?? false,
@@ -8426,7 +8426,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       if (!existing) return refusalResult('Node not found.');
       if (existing.deletedAt && !hard) {
         return textResult(
-          `Node "${rawUrn}" is already soft-deleted. Pass hard: true to remove the row entirely.`,
+          'The node is already soft-deleted. Pass hard: true to remove the row entirely.',
         );
       }
 
@@ -8607,7 +8607,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
           );
         }
         if (result.refused === 'changed') {
-          return textResult(`Node "${rawUrn}" moved while this delete waited; re-read it and retry.`);
+          return textResult('The node moved while this delete waited; re-read it and retry.');
         }
         if (result.refused === 'mintedSpec') {
           return refusalResult(`[spec_minted_permanent] ${result.message}`);
@@ -8627,7 +8627,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
           return textResult(
-            `Node "${rawUrn}" has ${result.count} descendant(s). ` +
+            `The node has ${result.count} descendant(s). ` +
               `${mode} refuses without recursive: true. ` +
               `Pass recursive: true to apply the same ${hard ? 'hard' : 'soft'} delete to every descendant.`,
           );

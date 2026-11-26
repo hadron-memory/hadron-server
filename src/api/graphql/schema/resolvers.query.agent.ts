@@ -394,7 +394,7 @@ export const agentQueries = {
         limit,
         offset,
       }: {
-        filter?: { ownerType: AiConfigOwnerType; ownerId: string } | null;
+        filter?: { ownerType: AiConfigOwnerType; ownerRef: string } | null;
         limit?: number | null;
         offset?: number | null;
       },
@@ -404,7 +404,7 @@ export const agentQueries = {
       try {
         let ownerWhere: Record<string, string> = {};
         if (filter) {
-          ({ ownerWhere } = await requireAiConfigOwnerAdmin(ctx, filter.ownerType, filter.ownerId));
+          ({ ownerWhere } = await requireAiConfigOwnerAdmin(ctx, filter.ownerType, filter.ownerRef));
         } else if (!isPlatformAdmin(ctx)) {
           // No owner filter = the cross-owner ops view — platform staff only.
           throw forbiddenError();

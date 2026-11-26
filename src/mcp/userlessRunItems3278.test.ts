@@ -77,7 +77,7 @@ describe('#3278 userless run item admission', () => {
     if (door === 'mcp-list') expect((await getMemoryAccess(db, f.principal)).has(id)).toBe(false);
     else if (door === 'graphql-ids') expect(await getAccessibleMemoryIds({ ...f.principal })).not.toContain(id);
     else {
-      const args = { filter: { memoryIds: [id] }, limit: 10, ...(door === 'keyword' ? { query: 'needle3278', mode: 'keyword' } : {}) };
+      const args = { filter: { memoryRefs: [id] }, limit: 10, ...(door === 'keyword' ? { query: 'needle3278', mode: 'keyword' } : {}) };
       const withItem = await Q.findNodes({}, args, { ...f.principal });
       await db.agentMemoryItem.delete({ where: { agentId_memoryId: { agentId: f.agent.id, memoryId: id } } });
       const without = await Q.findNodes({}, args, { ...f.principal });

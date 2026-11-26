@@ -38,7 +38,7 @@ describe('#2587 NUL row in the shared body-framing fixture', () => {
 
     it.each(refused.map((c) => [c.name, c] as const))('%s: createNode rejects and leaves no node', async (_name, c) => {
       await expect(
-        (resolvers.Mutation as any).createNode({}, { input: { memoryId, loc: 'nul', name: 'nul', content: c.stored } }, ctx),
+        (resolvers.Mutation as any).createNode({}, { input: { memoryRef: memoryId, loc: 'nul', name: 'nul', content: c.stored } }, ctx),
       ).rejects.toThrow();
       expect(await db.node.count({ where: { memoryId, loc: 'nul' } })).toBe(0);
     });
@@ -46,7 +46,7 @@ describe('#2587 NUL row in the shared body-framing fixture', () => {
     it('an ordinary row from the same fixture is accepted (negative control)', async () => {
       const ok = cases.find((c) => c.kind === 'roundtrip' && c.store === undefined && typeof c.stored === 'string')!;
       const node = await (resolvers.Mutation as any).createNode(
-        {}, { input: { memoryId, loc: 'ok', name: 'ok', content: ok.stored } }, ctx);
+        {}, { input: { memoryRef: memoryId, loc: 'ok', name: 'ok', content: ok.stored } }, ctx);
       expect(node.content).toBe(ok.stored);
     });
   });

@@ -580,7 +580,7 @@ describe('#3699 signing page slice 2: summary first, sticky bar, status in the b
     const first = await openRequest();
     const p1 = await prove(first.id, signer);
     expect((await post(first.id, 'complete', signingBody(p1, signer.key), p1.cookie)).status).toBe(200);
-    await resolvers.Mutation.updateNode(null, { input: { id: nodeId, content: 'Records are kept 90 days.\n' } }, { db, userId: requester.id, roles: [] } as never);
+    await resolvers.Mutation.updateNode(null, { input: { ref: nodeId, content: 'Records are kept 90 days.\n' } }, { db, userId: requester.id, roles: [] } as never);
     const second = await openRequest();
     const p2 = await prove(second.id, signer, { counter: 3 });
     const changed = await renderedProof(second.id, p2.json);
@@ -958,7 +958,7 @@ describe('passkey-proven read access and the named-signer match come BEFORE any 
     const p1 = await prove(first.id, signer);
     expect((await post(first.id, 'complete', signingBody(p1, signer.key), p1.cookie)).status).toBe(200);
     // A real edit (it snapshots the signed text and bumps the revision), not a raw column write.
-    await resolvers.Mutation.updateNode(null, { input: { id: nodeId, content: 'Records are kept 90 days.\n' } }, { db, userId: requester.id, roles: [] } as never);
+    await resolvers.Mutation.updateNode(null, { input: { ref: nodeId, content: 'Records are kept 90 days.\n' } }, { db, userId: requester.id, roles: [] } as never);
     const second = await openRequest();
     const p2 = await prove(second.id, signer, { counter: 3 });
     const prev = p2.json.view.previous;
@@ -1040,7 +1040,7 @@ describe('#3120 fix head: fixation, concurrent proofs, the verified baseline, a 
     const p1 = await prove(first.id, signer);
     expect((await post(first.id, 'complete', signingBody(p1, signer.key), p1.cookie)).status).toBe(200);
     const real = await db.nodeSignature.findFirstOrThrow({ where: { nodeId } });
-    await resolvers.Mutation.updateNode(null, { input: { id: nodeId, content: 'Records are kept 90 days.\n' } }, { db, userId: requester.id, roles: [] } as never);
+    await resolvers.Mutation.updateNode(null, { input: { ref: nodeId, content: 'Records are kept 90 days.\n' } }, { db, userId: requester.id, roles: [] } as never);
     // A NEWER record beneath the API that fails verification, for another request.
     const other = await openRequest();
     await forge(other.id, other.revision, real);

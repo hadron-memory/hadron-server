@@ -158,7 +158,7 @@ describe('createNode/updateNode inline edge targets — cross-memory gate (#755)
     await expect(
       resolvers.Mutation.createNode(
         {},
-        { input: { memoryId: memA.id, loc: 'exfil', name: 'exfil', edges: [{ targetId: nodeB.id, name: 'rel' }] } as never },
+        { input: { memoryRef: memA.id, loc: 'exfil', name: 'exfil', edges: [{ targetRef: nodeB.id, name: 'rel' }] } as never },
         asContributor(),
       ),
     ).rejects.toThrow(/Edge target not found/);
@@ -172,7 +172,7 @@ describe('createNode/updateNode inline edge targets — cross-memory gate (#755)
     await expect(
       resolvers.Mutation.updateNode(
         {},
-        { input: { id: own.id, edges: [{ targetId: nodeB.id, name: 'rel' }] } as never },
+        { input: { ref: own.id, edges: [{ targetRef: nodeB.id, name: 'rel' }] } as never },
         asContributor(),
       ),
     ).rejects.toThrow(/Edge target not found/);
@@ -183,7 +183,7 @@ describe('createNode/updateNode inline edge targets — cross-memory gate (#755)
     const attempt = (targetId: string) =>
       resolvers.Mutation.createNode(
         {},
-        { input: { memoryId: memA.id, loc: `probe-${targetId.slice(0, 6)}`, name: 'p', edges: [{ targetId, name: 'rel' }] } as never },
+        { input: { memoryRef: memA.id, loc: `probe-${targetId.slice(0, 6)}`, name: 'p', edges: [{ targetRef: targetId, name: 'rel' }] } as never },
         asContributor(),
       ).then(() => null, (e: Error) => e.message.replace(targetId, '<REF>'));
 
@@ -195,7 +195,7 @@ describe('createNode/updateNode inline edge targets — cross-memory gate (#755)
   it('a same-memory inline edge still works (the common case is unaffected)', async () => {
     const created = await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: memA.id, loc: 'ok', name: 'ok', edges: [{ targetId: nodeA.id, name: 'rel' }] } as never },
+      { input: { memoryRef: memA.id, loc: 'ok', name: 'ok', edges: [{ targetRef: nodeA.id, name: 'rel' }] } as never },
       asContributor(),
     );
     expect(await db.edge.count({ where: { sourceId: created.id, targetId: nodeA.id } })).toBe(1);
@@ -205,7 +205,7 @@ describe('createNode/updateNode inline edge targets — cross-memory gate (#755)
     // Platform admin reads memB, so the cross-memory edge is legitimate.
     const created = await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: memA.id, loc: 'cross-ok', name: 'cross', edges: [{ targetId: nodeB.id, name: 'rel' }] } as never },
+      { input: { memoryRef: memA.id, loc: 'cross-ok', name: 'cross', edges: [{ targetRef: nodeB.id, name: 'rel' }] } as never },
       ctx(admin.id, ['ADMIN']),
     );
     expect(await db.edge.count({ where: { sourceId: created.id, targetId: nodeB.id } })).toBe(1);
@@ -261,7 +261,7 @@ describe('inline edge targets honor a MemoryShare grantee (#844 review)', () => 
     const { target } = await seedSharedPersonal(grantee.id);
     const created = await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: memA.id, loc: 'grantee-node', name: 'g', edges: [{ targetId: target.id, name: 'rel' }] } as never },
+      { input: { memoryRef: memA.id, loc: 'grantee-node', name: 'g', edges: [{ targetRef: target.id, name: 'rel' }] } as never },
       ctx(grantee.id, ['CONTRIBUTOR']),
     );
     expect(await db.edge.count({ where: { sourceId: created.id, targetId: target.id } })).toBe(1);
@@ -297,7 +297,7 @@ describe('inline edge targets honor a MemoryShare grantee (#844 review)', () => 
     await expect(
       resolvers.Mutation.createNode(
         {},
-        { input: { memoryId: memA.id, loc: 'probe2', name: 'p', edges: [{ targetId: target.id, name: 'rel' }] } as never },
+        { input: { memoryRef: memA.id, loc: 'probe2', name: 'p', edges: [{ targetRef: target.id, name: 'rel' }] } as never },
         ctx(stranger.id, ['CONTRIBUTOR']),
       ),
     ).rejects.toThrow(/Edge target not found/);

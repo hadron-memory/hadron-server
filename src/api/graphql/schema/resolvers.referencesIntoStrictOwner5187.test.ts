@@ -181,11 +181,11 @@ for (const shapeName of SHAPES) {
           const Q = `query($f: EdgeFilter) { edges(filter: $f) { items { id name target { id name } source { id name } } } }`;
           const One = `query($r: ID!) { edge(ref: $r) { id target { id name } } }`;
           // Owner control.
-          const ownList = dataOf(await run(Q, gctx(alice), { f: { memoryId: holderMemoryId } }), 'owner').edges.items as Array<{ id: string; target: { name: string } | null }>;
+          const ownList = dataOf(await run(Q, gctx(alice), { f: { memoryRef: holderMemoryId } }), 'owner').edges.items as Array<{ id: string; target: { name: string } | null }>;
           expect(ownList.find((i) => i.id === edgeRow.id)?.target?.name, 'owner list').toBe(t.name);
           expect(dataOf(await run(One, gctx(alice), { r: edgeRow.id }), 'owner').edge.target?.name, 'owner edge(ref)').toBe(t.name);
           for (const { label, user } of readers) {
-            const items = dataOf(await run(Q, gctx(user), { f: { memoryId: holderMemoryId } }), label).edges.items as Array<{ id: string; target: unknown }>;
+            const items = dataOf(await run(Q, gctx(user), { f: { memoryRef: holderMemoryId } }), label).edges.items as Array<{ id: string; target: unknown }>;
             expect((items as any[]).find((i) => i.name === 'ordinary-link')?.target?.name, `${label} ordinary edge`).toBe('Holder Source');
             const row = items.find((i) => i.id === edgeRow.id);
             expect(row?.target ?? null, `${label} list target`).toBeNull();

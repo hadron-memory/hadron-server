@@ -281,15 +281,15 @@ describe('the reach of a link, on both surfaces', () => {
     await attach(asUser(alice), m.id, orgApp.id);
     const keyCtx = { db, appId: orgApp.id, appKeyId: 'k1', roles: [], clientId: `app:${orgApp.id}` } as unknown as Context;
     const denied = { code: 'FORBIDDEN', message: 'Forbidden: no write access to this memory' };
-    expect(await refusal(M.createNode(null, { input: { memoryId: m.id, loc: 'new', name: 'N', content: 'x' } }, keyCtx))).toEqual(denied);
-    expect(await refusal(M.updateNode(null, { input: { memoryId: m.id, loc: 'wnote', content: 'changed' } }, keyCtx))).toEqual(denied);
+    expect(await refusal(M.createNode(null, { input: { memoryRef: m.id, loc: 'new', name: 'N', content: 'x' } }, keyCtx))).toEqual(denied);
+    expect(await refusal(M.updateNode(null, { input: { memoryRef: m.id, loc: 'wnote', content: 'changed' } }, keyCtx))).toEqual(denied);
     expect(await refusal(M.deleteNode(null, { nodeRef: node.id }, keyCtx))).toEqual(denied);
     // The control: the same calls reach the write gate and pass it for someone who may write the memory, so the refusals
     // above are the gate's, not argument validation or a missing App key shape.
     const admin = await db.user.create({ data: { id: generateId(), githubId: 5_185_600, githubUsername: 'adm4', roles: ['ADMIN'] } });
     await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
     const adminCtx = { db, userId: admin.id, roles: ['ADMIN'] } as unknown as Context;
-    expect(await refusal(M.createNode(null, { input: { memoryId: m.id, loc: 'new', name: 'N', content: 'x' } }, adminCtx))).toBeNull();
+    expect(await refusal(M.createNode(null, { input: { memoryRef: m.id, loc: 'new', name: 'N', content: 'x' } }, adminCtx))).toBeNull();
     await db.node.deleteMany({ where: { memoryId: m.id, loc: 'new' } });
     expect(await db.node.count({ where: { memoryId: m.id } })).toBe(1);
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content).toBe('body');

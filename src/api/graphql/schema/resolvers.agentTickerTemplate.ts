@@ -27,7 +27,8 @@ import {
 export const TICKER_TEMPLATES_MAX = 20;
 
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
-const notFound = (id: string): GraphQLError => taskError('TICKER_TEMPLATE_NOT_FOUND', 'Ticker template not found.', { id });
+/** #5225: the code only; the caller's id is not relayed (cor:api:140:01). */
+const notFound = (_id: string): GraphQLError => taskError('TICKER_TEMPLATE_NOT_FOUND', 'Ticker template not found.');
 const isTemplateAbsent = (e: unknown): boolean => e instanceof GraphQLError && e.extensions?.code === 'TICKER_TEMPLATE_NOT_FOUND';
 const isAgentAbsent = (e: unknown): boolean => e instanceof AgentNotFoundError;
 

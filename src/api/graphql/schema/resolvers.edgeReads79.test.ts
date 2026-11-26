@@ -88,7 +88,7 @@ describe.each(SHAPES)('#79 a far node in a %s memory', (_shape, shape) => {
   const nothingFar = (text: string) => { for (const s of ['far-slug', 'far-loc', 'FAR_', 'far-in', 'far-out']) expect(text).not.toContain(s); };
 
   it.each(READERS)('%s: edges by source, by target and by memory, and edge by id', async (_reader, ctx) => {
-    for (const [filter, names] of [[`sourceNodeId: "${near}"`, ['same-out']], [`targetNodeId: "${near}"`, ['same-in']], [`memoryId: "${shared}"`, ['same-in', 'same-out']]] as const) {
+    for (const [filter, names] of [[`sourceRef: "${near}"`, ['same-out']], [`targetRef: "${near}"`, ['same-in']], [`memoryRef: "${shared}"`, ['same-in', 'same-out']]] as const) {
       const got = await page(filter, ctx());
       expect([filter, got.names, got.total]).toEqual([filter, names, names.length]);
       nothingFar(got.text);
@@ -100,14 +100,14 @@ describe.each(SHAPES)('#79 a far node in a %s memory', (_shape, shape) => {
   it.each(READERS)('%s: a far node as the filter answers as a missing one, by id and by URN', async (_reader, ctx) => {
     const urn = (await run(`{ node(ref: "${far}") { urn } }`, context(alice))).data as any;
     for (const ref of [far, urn.node.urn]) {
-      for (const key of ['sourceNodeId', 'targetNodeId']) expect(await page(`${key}: "${ref}"`, ctx())).toMatchObject({ names: [], total: 0 });
+      for (const key of ['sourceRef', 'targetRef']) expect(await page(`${key}: "${ref}"`, ctx())).toMatchObject({ names: [], total: 0 });
     }
   });
 
   it('a PUBLIC near node: an outsider and an anonymous reader get no far edge', async () => {
     await db.memory.update({ where: { id: shared }, data: { visibility: 'PUBLIC' } });
     for (const ctx of [context(outsider), context()]) {
-      const r = await run(`{ edges(filter: { sourceNodeId: "${near}" }) { total items { ${FIELDS} } } edge(ref: "${farOut}") { id } }`, ctx);
+      const r = await run(`{ edges(filter: { sourceRef: "${near}" }) { total items { ${FIELDS} } } edge(ref: "${farOut}") { id } }`, ctx);
       nothingFar(JSON.stringify(r.data ?? {}));
       expect(r.errors).toBeUndefined();
       expect([(r.data as any).edges.items.map((e: any) => e.name), (r.data as any).edges.total, (r.data as any).edge]).toEqual([['same-out'], 1, null]);
@@ -115,23 +115,23 @@ describe.each(SHAPES)('#79 a far node in a %s memory', (_shape, shape) => {
   });
 
   it('the memory\'s owner gets them all', async () => {
-    expect((await page(`sourceNodeId: "${near}"`, context(alice))).names).toEqual(['far-out', 'same-out']);
-    expect((await page(`targetNodeId: "${near}"`, context(alice))).names).toEqual(['far-in', 'same-in']);
-    expect((await page(`targetNodeId: "${far}"`, context(alice))).names).toEqual(['far-out']);
+    expect((await page(`sourceRef: "${near}"`, context(alice))).names).toEqual(['far-out', 'same-out']);
+    expect((await page(`targetRef: "${near}"`, context(alice))).names).toEqual(['far-in', 'same-in']);
+    expect((await page(`targetRef: "${far}"`, context(alice))).names).toEqual(['far-out']);
     expect((await one(farOut, context(alice))).id).toBe(farOut);
     expect((await one(farIn, context(alice))).id).toBe(farIn);
   });
 
   it('an edge it holds between two readable nodes, and a soft-deleted far node', async () => {
     const third = (await edge('third', mem, sibling, near)).id;
-    expect((await page(`targetNodeId: "${near}"`, context(member))).names).toEqual(['same-in']);
+    expect((await page(`targetRef: "${near}"`, context(member))).names).toEqual(['same-in']);
     expect(await one(third, context(member))).toBeNull();
     // Held in the readable memory although its source is not there (a stored memoryId can differ from its ends).
     const stale = (await edge('stale', shared, far, near)).id;
-    expect((await page(`targetNodeId: "${near}"`, context(member))).names).toEqual(['same-in']);
+    expect((await page(`targetRef: "${near}"`, context(member))).names).toEqual(['same-in']);
     expect(await one(stale, context(member))).toBeNull();
     await db.node.update({ where: { id: far }, data: { deletedAt: new Date() } });
-    expect((await page(`sourceNodeId: "${near}"`, context(member))).names).toEqual(['same-out']);
+    expect((await page(`sourceRef: "${near}"`, context(member))).names).toEqual(['same-out']);
     expect(await one(farOut, context(member))).toBeNull();
   });
 });
@@ -143,13 +143,13 @@ describe('#79 readable memories', () => {
     const out = (await edge('other-out', shared, near, n)).id;
     await edge('other-in', other, n, near);
     for (const [, ctx] of READERS) {
-      expect((await page(`sourceNodeId: "${near}"`, ctx())).names).toEqual(['other-out', 'same-out']);
-      expect((await page(`targetNodeId: "${n}"`, ctx())).names).toEqual(['other-out']);
-      expect((await page(`sourceNodeId: "${n}"`, ctx())).names).toEqual(['other-in']);
+      expect((await page(`sourceRef: "${near}"`, ctx())).names).toEqual(['other-out', 'same-out']);
+      expect((await page(`targetRef: "${n}"`, ctx())).names).toEqual(['other-out']);
+      expect((await page(`sourceRef: "${n}"`, ctx())).names).toEqual(['other-in']);
       expect((await one(out, ctx())).target.id).toBe(n);
     }
     // A memory or organization filter narrows the holder, never the ends.
-    expect((await page(`memoryId: "${shared}"`, context(member))).names).toEqual(['other-out', 'same-in', 'same-out']);
+    expect((await page(`memoryRef: "${shared}"`, context(member))).names).toEqual(['other-out', 'same-in', 'same-out']);
     const own = await memory('own', { class: 'private', userId: member, ownerUserId: member });
     await edge('own-out', shared, near, (await createDbNode(db, { loc: 'o', memoryId: own })).id);
     const inOrg = await run(`{ edges(orgRef: "${orgId}") { items { name } } }`, context(member));
@@ -158,7 +158,7 @@ describe('#79 readable memories', () => {
     await db.node.update({ where: { id: n }, data: { deletedAt: new Date() } });
     const got = await one(out, context(member));
     expect([got.id, got.target]).toEqual([out, null]);
-    expect((await page(`sourceNodeId: "${near}"`, context(member))).names).toEqual(['other-out', 'same-out']);
+    expect((await page(`sourceRef: "${near}"`, context(member))).names).toEqual(['other-out', 'same-out']);
   });
 
   it('a page counts and pages returned edges only', async () => {
@@ -166,8 +166,8 @@ describe('#79 readable memories', () => {
     for (let i = 0; i < 3; i += 1) await edge(`a-far-${i}`, shared, near, (await createDbNode(db, { loc: `far-loc-${i}`, memoryId: mem })).id);
     // They sort first, so a page cut before the rule would be short.
     await db.$executeRaw`UPDATE edges SET loc = 'a:' || name WHERE name LIKE 'a-far-%'`;
-    expect(await page(`memoryId: "${shared}"`, context(member), ', limit: 1')).toMatchObject({ names: ['same-in'], total: 2 });
-    expect(await page(`memoryId: "${shared}"`, context(member), ', limit: 1, offset: 1')).toMatchObject({ names: ['same-out'], total: 2 });
-    expect(await page(`memoryId: "${shared}"`, context(member), ', limit: 0')).toMatchObject({ names: [], total: 2 });
+    expect(await page(`memoryRef: "${shared}"`, context(member), ', limit: 1')).toMatchObject({ names: ['same-in'], total: 2 });
+    expect(await page(`memoryRef: "${shared}"`, context(member), ', limit: 1, offset: 1')).toMatchObject({ names: ['same-out'], total: 2 });
+    expect(await page(`memoryRef: "${shared}"`, context(member), ', limit: 0')).toMatchObject({ names: [], total: 2 });
   });
 });

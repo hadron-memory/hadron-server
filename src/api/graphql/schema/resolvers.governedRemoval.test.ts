@@ -197,16 +197,16 @@ describe('GraphQL deleteNode: ordinary subtrees are unaffected', () => {
 
 describe('clear-first: the kind update door, then an ordinary delete', () => {
   it('retires a task through its door, then deletes it', async () => {
-    expect(await code(M.createTaskNode({}, { input: { memoryId, loc: 'c:task', name: 't', isRunnable: true } }, ctx()))).toBe('OK');
+    expect(await code(M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'c:task', name: 't', isRunnable: true } }, ctx()))).toBe('OK');
     expect(await delById('c:task')).toBe('ROLE_GOVERNED');
-    expect(await code(M.updateTaskNode({}, { input: { memoryId, loc: 'c:task', isRunnable: false } }, ctx()))).toBe('OK');
+    expect(await code(M.updateTaskNode({}, { input: { memoryRef: memoryId, loc: 'c:task', isRunnable: false } }, ctx()))).toBe('OK');
     expect(await delById('c:task')).toBe('OK');
   });
 
   it('clears a review through its door, then deletes it', async () => {
-    expect(await code(M.createReviewNode({}, { input: { memoryId, loc: 'c:rev', name: 'r', role: 'review' } }, ctx()))).toBe('OK');
+    expect(await code(M.createReviewNode({}, { input: { memoryRef: memoryId, loc: 'c:rev', name: 'r', role: 'review' } }, ctx()))).toBe('OK');
     expect(await delById('c:rev', { hard: true })).toBe('ROLE_GOVERNED');
-    expect(await code(M.updateReviewNode({}, { input: { memoryId, loc: 'c:rev', role: null } }, ctx()))).toBe('OK');
+    expect(await code(M.updateReviewNode({}, { input: { memoryRef: memoryId, loc: 'c:rev', role: null } }, ctx()))).toBe('OK');
     expect(await delById('c:rev', { hard: true })).toBe('OK');
   });
 
@@ -216,11 +216,11 @@ describe('clear-first: the kind update door, then an ordinary delete', () => {
     await node('w:rev', { role: 'review' });
     // The contributor can neither delete it nor clear it...
     expect(await delById('w:rev', {}, asUser(contribId))).toBe('ROLE_GOVERNED');
-    expect(await code(M.updateReviewNode({}, { input: { memoryId, loc: 'w:rev', role: null } }, asUser(contribId)))).toBe('ROLE_WRITER_LEVEL_REQUIRED');
+    expect(await code(M.updateReviewNode({}, { input: { memoryRef: memoryId, loc: 'w:rev', role: null } }, asUser(contribId)))).toBe('ROLE_WRITER_LEVEL_REQUIRED');
     expect((await at('w:rev')).role).toBe('review');
     expect(await delById('w:rev', {}, asUser(contribId))).toBe('ROLE_GOVERNED');
     // ...while the ADMIN can do both, in order.
-    expect(await code(M.updateReviewNode({}, { input: { memoryId, loc: 'w:rev', role: null } }, asUser(adminId, ['ADMIN'])))).toBe('OK');
+    expect(await code(M.updateReviewNode({}, { input: { memoryRef: memoryId, loc: 'w:rev', role: null } }, asUser(adminId, ['ADMIN'])))).toBe('OK');
     expect(await delById('w:rev', {}, asUser(contribId))).toBe('OK');
   });
 });
@@ -422,7 +422,7 @@ describe('races: a marker edit against the removal, in both orders', () => {
     const del = captured(resolvers.Mutation.deleteNode({}, { nodeRef: parent.id, recursive: true } as never, { ...ctx(), db: paused }));
     await locked.promise;
     let doorDone = false;
-    const door = code(M.updateReviewNode({}, { input: { memoryId, loc: 'q:d', role: 'review' } }, ctx())).then((c) => { doorDone = true; return c; });
+    const door = code(M.updateReviewNode({}, { input: { memoryRef: memoryId, loc: 'q:d', role: 'review' } }, ctx())).then((c) => { doorDone = true; return c; });
     await waitForLockWaiters(db, 1);
     // The edit is held behind the delete's rows: it has not completed.
     expect(doorDone).toBe(false);

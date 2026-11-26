@@ -1,4 +1,4 @@
-# Frozen portal NodeFind and NodeFields, a8874b86; #2372 compatibility fixture.
+# Frozen portal NodeFind and NodeFields, a8874b86; #2372 compatibility fixture. #5080: the one input-field name that moved (NodeFilter.memoryIds -> memoryRefs) follows the schema.
 
   
   fragment NodeFields on Node {
@@ -44,7 +44,7 @@
     $sort: NodeSort
     $granularity: SearchGranularity
     $fields: [NodeField!]
-    $memoryIds: [ID!]
+    $memoryRefs: [ID!]
     $createdBy: String
     $updatedAfter: String
     $updatedBefore: String
@@ -66,7 +66,7 @@
       fields: $fields
       limit: $limit
       filter: {
-        memoryIds: $memoryIds
+        memoryRefs: $memoryRefs
         createdBy: $createdBy
         updatedAfter: $updatedAfter
         updatedBefore: $updatedBefore

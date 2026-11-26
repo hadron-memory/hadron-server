@@ -368,7 +368,7 @@ describe('recordTeamWork — storage, governance, and races', () => {
         {},
         {
           input: {
-            memoryId: root!.memoryId,
+            memoryRef: root!.memoryId,
             loc: 'worklog:offroad',
             name: 'off-road',
             objectType: WORKLOG_OBJECT_TYPE,

@@ -131,11 +131,11 @@ describe('#2653 createAgentTasks (cor:agt:050:06 creating several at once)', () 
 
   it('creates child tasks of an existing parent the caller is assigned; another App\'s parent reads as not found', async () => {
     const parent = await single({ assignee: { user: ownerId } });
-    const made = await batch([item({ parentTaskId: parent.id }), item({ parentTaskId: parent.id })]);
+    const made = await batch([item({ parentTaskRef: parent.id }), item({ parentTaskRef: parent.id })]);
     expect(made.map((t: any) => t.handle)).toEqual([`${parent.handle}.1`, `${parent.handle}.2`]);
     const foreignApp = await db.app.create({ data: { ownerUserId: ownerId, name: 'Other', urn: 'syntheticowner:other' } });
     const foreignParent = await M.createAgentTask(null, { input: { appRef: foreignApp.id, title: 'Foreign', assignee: { user: ownerId } } }, ctx());
-    expect(await refusal(() => batch([item(), item({ parentTaskId: foreignParent.id })]))).toEqual({ code: 'TASK_NOT_FOUND', position: 2 });
+    expect(await refusal(() => batch([item(), item({ parentTaskRef: foreignParent.id })]))).toEqual({ code: 'TASK_NOT_FOUND', position: 2 });
     // A root task naming another App is refused as that App is, never created in the call's App.
     expect(await refusal(() => batch([item({ appRef: foreignApp.id })]))).toEqual({ code: 'APP_NOT_FOUND', position: 1 });
     expect(await db.agentTask.count({ where: { parentTaskId: parent.id } })).toBe(2);
@@ -143,7 +143,7 @@ describe('#2653 createAgentTasks (cor:agt:050:06 creating several at once)', () 
 
   it('a child under a parent the caller is not assigned is refused like a single create', async () => {
     const parent = await single({ assignee: { user: memberId } });
-    expect(await refusal(() => batch([item({ parentTaskId: parent.id })]))).toEqual({ code: 'TASK_NOT_ASSIGNEE', position: 1 });
+    expect(await refusal(() => batch([item({ parentTaskRef: parent.id })]))).toEqual({ code: 'TASK_NOT_ASSIGNEE', position: 1 });
   });
 
   it('cross-tenant: an outsider is refused as for a single create, and a foreign owner is TASK_OWNER_INVALID at its position', async () => {
@@ -170,9 +170,9 @@ describe('#2653 createAgentTasks (cor:agt:050:06 creating several at once)', () 
     const q = await single({ assignee: { user: ownerId } });
     for (let round = 0; round < 3; round++) {
       const results = await Promise.allSettled([
-        batch([item({ parentTaskId: p.id }), item({ parentTaskId: q.id })]),
-        batch([item({ parentTaskId: q.id }), item({ parentTaskId: p.id })]),
-        single({ parentTaskId: p.id, appRef: undefined }),
+        batch([item({ parentTaskRef: p.id }), item({ parentTaskRef: q.id })]),
+        batch([item({ parentTaskRef: q.id }), item({ parentTaskRef: p.id })]),
+        single({ parentTaskRef: p.id, appRef: undefined }),
       ]);
       expect(results.map(r => r.status)).toEqual(['fulfilled', 'fulfilled', 'fulfilled']);
     }

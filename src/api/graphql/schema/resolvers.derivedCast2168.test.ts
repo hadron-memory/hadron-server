@@ -667,7 +667,7 @@ it.each(['org-member', 'platform-admin'] as const)(
       kind === 'platform-admin' ? { ...ctx(), roles: ['ADMIN'] } : ctx();
     const result = await (resolvers.Query as any).apps(
       {},
-      { filter: { agentId: role.id } },
+      { filter: { agentRef: role.id } },
       context,
     );
     expect(result.items.map((row: { id: string }) => row.id)).not.toContain(

@@ -276,11 +276,23 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // orgBootPromptSigningPreview, setOrgBootPromptSigning) are renamed. Scalars and gates are unchanged (impersonationSessions
 // keeps `String`); a lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation. (0.41.0 is #5168, merged first.)
 //
-// 0.43.0 (#5185, A3 of #5182): attachMemoryToApp LINKS a readable memory (any class but system) to an App and no longer binds
+// 0.43.0 — BREAKING, entity refs gap 2 (#5080): 21 input-type fields on 17 input types, plus `createAiServiceConfig(ownerId:)`,
+// take refs, no alias (`*Id` -> `*Ref`): `NodeFilter.memoryRefs`, `EdgeFilter.memoryRef` / `sourceRef` / `targetRef`,
+// `AppFilter.agentRef`, `AiServiceConfigFilter.ownerRef`, `CreateNodeInput` / `UpdateNodeInput` / `ImportNodeInput` /
+// `NodeAuthoringCheckInput` / `BeginAssetUploadV2Input` `.memoryRef`, `UpdateNodeInput.ref`, `NodeEdgeInput.targetRef`,
+// `SearchReplaceInNodesInput` `.nodeRefs` / `.memoryRefs`, `SpecSearchReplaceInput.nodeRefs`, `CreateAgentTaskInput` /
+// `CloneAgentTaskInput` `.parentTaskRef`, `TickerInput` / `TickerPatch` `.channelRefs`, `BatchThrough.channelRef`, and
+// `createAiServiceConfig(ownerRef:)`. A lagging client's old name is an UNKNOWN field or argument and GraphQL refuses the whole
+// operation (ship order per precedent 0274: notices, server, companions). Three of them close a gap: ticker channels and
+// `BatchThrough` now resolve a URN as well as an id. `NodeInput` (the retired `replaceSubtree` shape) keeps `memoryId` and
+// its edges keep `targetId`; `ResumeSessionInput.expectedWorkerId` stays (#5163). MCP tool inputs are unchanged. (0.42.0 is
+// #5081, entity refs gap 3, merged first.)
+//
+// 0.44.0 (#5185, A3 of #5182): attachMemoryToApp LINKS a readable memory (any class but system) to an App and no longer binds
 // or renames it; `agentRef` is optional and ignored; MEMORY_ALREADY_APP_SCOPED, ORGANIZATION_MISMATCH and AGENT_NOT_INSTALLED
 // are no longer answered by it. New: detachMemoryFromApp(memoryRef, appRef): Boolean! and App.attachedMemories. A pure App key and
 // a userless run read a linked memory (never write it) while its attacher can read it in their own right.
-export const HADRON_SERVER_VERSION = '0.43.0';
+export const HADRON_SERVER_VERSION = '0.44.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

@@ -93,7 +93,7 @@ describe('request reset', () => {
       if (name === 'createNode') stale = captureIncludePinWarningLifetime(cc);
       return result;
     };
-    const first = await run(CREATE, { i: { memoryId, loc: 'plain', name: 'Plain', content: 'no pins here' } }, c);
+    const first = await run(CREATE, { i: { memoryRef: memoryId, loc: 'plain', name: 'Plain', content: 'no pins here' } }, c);
     expect(first.errors).toBeUndefined();
     expect(first.extensions?.warnings).toBeUndefined();
     expect(stale).toBeDefined();
@@ -104,7 +104,7 @@ describe('request reset', () => {
       return result;
     };
     const id = (first.data as any).createNode.id;
-    const second = await run(UPDATE, { i: { id, description: 'metadata only' } }, c);
+    const second = await run(UPDATE, { i: { ref: id, description: 'metadata only' } }, c);
     expect(second.errors).toBeUndefined();
     expect(second.extensions?.warnings).toBeUndefined();
 
@@ -113,7 +113,7 @@ describe('request reset', () => {
       if (name === 'updateNode') attachIncludePinWarnings(cc, { memoryId }, pin(), undefined, cc, captureIncludePinWarningLifetime(cc));
       return result;
     };
-    const third = await run(UPDATE, { i: { id, description: 'metadata again' } }, c);
+    const third = await run(UPDATE, { i: { ref: id, description: 'metadata again' } }, c);
     expect(third.extensions?.warnings).toEqual([{ path: 'updateNode', ...WARNING }]);
   });
 });
@@ -126,7 +126,7 @@ describe('a field that errors after its write committed, and a rolled-back write
     };
     const r = await run(
       'mutation($a:CreateNodeInput!,$b:CreateNodeInput!){b:createNode(input:$b){id} a:createNode(input:$a){id}}',
-      { a: { memoryId, loc: 'a', name: 'boom', content: pin() }, b: { memoryId, loc: 'b', name: 'fine', content: pin() } },
+      { a: { memoryRef: memoryId, loc: 'a', name: 'boom', content: pin() }, b: { memoryRef: memoryId, loc: 'b', name: 'fine', content: pin() } },
     );
     expect(r.errors).toHaveLength(1);
     expect(r.errors![0]).toMatchObject({ message: 'late failure after commit', path: ['a'], extensions: { code: 'LATE_FAILURE' } });
@@ -153,14 +153,14 @@ describe('a field that errors after its write committed, and a rolled-back write
   };
 
   it('a nested write rolled back by an outer transaction persists nothing and advises nothing; the committed twin advises', async () => {
-    const control = await M.createNode(null, { input: { memoryId, loc: 'control', name: 'Control', content: 'plain' } }, ctx());
+    const control = await M.createNode(null, { input: { memoryRef: memoryId, loc: 'control', name: 'Control', content: 'plain' } }, ctx());
     for (const commit of [false, true]) {
       await db.node.deleteMany({ where: { memoryId, loc: 'nested' } });
       hooks.after = async (name, _args, c) => {
         if (name === 'updateNode') await outerWrite(commit, c);
         return control;
       };
-      const r = await run(UPDATE, { i: { id: control.id, description: `round ${commit}` } });
+      const r = await run(UPDATE, { i: { ref: control.id, description: `round ${commit}` } });
       expect(r.errors).toBeUndefined();
       expect(await db.node.count({ where: { memoryId, loc: 'nested', deletedAt: null } })).toBe(commit ? 1 : 0);
       expect(r.extensions?.warnings).toEqual(commit ? [{ path: 'updateNode', ...WARNING }] : undefined);
@@ -202,7 +202,7 @@ describe('encrypted merge and restore, and a section save', () => {
   it('restoreNodeRevision of an encrypted pinned revision advises; restoring an unpinned revision does not', async () => {
     sessionKeyCache.set('s2749', encryptedId, generateDataKey());
     const node = await sealedNode('doc', 'v1 plain');
-    const update = (content: string) => M.updateNode(null, { input: { id: node.id, content } }, ctx());
+    const update = (content: string) => M.updateNode(null, { input: { ref: node.id, content } }, ctx());
     await update(urnPin()); // revision 2 carries the pin once the next write snapshots it
     await update('v3 plain');
     const revision = (revNo: number) => db.nodeRevision.findFirstOrThrow({ where: { nodeId: node.id, revNo } });
@@ -245,7 +245,7 @@ describe('the final response cap', () => {
     // #4793: a source-less create no longer warns; a finish with an open child is the task-side carrier.
     const parents = await finishableParents(M, ctx(), appId, TASKS, { user: userId });
     const finish = (i: number) => finishField(`t${i}`, parents[i]);
-    const node = (i: number) => `n${i}: createNode(input: { memoryId: "${memoryId}", loc: "pinned-${i}", name: "pinned ${i}", content: "${pin()}" }) { id }`;
+    const node = (i: number) => `n${i}: createNode(input: { memoryRef: "${memoryId}", loc: "pinned-${i}", name: "pinned ${i}", content: "${pin()}" }) { id }`;
     const aliases = [
       ...Array.from({ length: TASKS }, (_, i) => finish(i)),
       ...Array.from({ length: NODES }, (_, i) => node(i)),

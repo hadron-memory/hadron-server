@@ -72,7 +72,7 @@ describe('create and read #2420', () => {
 
   it('every task returns its own value: a child and a grandchild never read their root', async () => {
     await M.updateAgentTask({}, { taskRef: task.id, input: { properties: { root: true } } }, ctx());
-    const child = await M.createAgentTask({}, { input: { parentTaskId: task.id, title: 'Child' } }, ctx(assignee.id));
+    const child = await M.createAgentTask({}, { input: { parentTaskRef: task.id, title: 'Child' } }, ctx(assignee.id));
     expect((await stored(child.id)).properties).toBeNull();
     await M.updateAgentTask({}, { taskRef: child.id, input: { properties: { child: true } } }, ctx(assignee.id));
     await M.updateAgentTask({}, { taskRef: task.id, input: { properties: { root: 2 } } }, ctx());
@@ -80,7 +80,7 @@ describe('create and read #2420', () => {
     expect((await stored()).properties).toEqual({ root: 2 });
     // A grandchild: made by the child's assignee under the child, it holds only its own value too.
     await M.assignAgentTask({}, { taskRef: child.id, assignee: { user: sibling.id } }, ctx(assignee.id));
-    const grand = await M.createAgentTask({}, { input: { parentTaskId: child.id, title: 'Grandchild' } }, ctx(sibling.id));
+    const grand = await M.createAgentTask({}, { input: { parentTaskRef: child.id, title: 'Grandchild' } }, ctx(sibling.id));
     expect((await stored(grand.id)).properties).toBeNull();
     await M.updateAgentTask({}, { taskRef: grand.id, input: { properties: { grand: true } } }, ctx(sibling.id));
     await M.updateAgentTask({}, { taskRef: child.id, input: { properties: { child: 2 } } }, ctx(assignee.id));
@@ -197,7 +197,7 @@ describe('who may write #2420', () => {
   });
 
   it('refuses a non-owner non-assignee, including the assignee of a sibling or of the root, and a revoked manager', async () => {
-    const child = await M.createAgentTask({}, { input: { parentTaskId: task.id, title: 'Child', assignee: { user: sibling.id } } }, ctx(assignee.id));
+    const child = await M.createAgentTask({}, { input: { parentTaskRef: task.id, title: 'Child', assignee: { user: sibling.id } } }, ctx(assignee.id));
     await expect(setProps({ a: 1 }, sibling.id, task.id)).rejects.toMatchObject(code('TASK_NOT_OWNER'));
     await expect(setProps({ a: 1 }, assignee.id, child.id)).resolves.toBeDefined(); // the parent's assignee owns its child
     await expect(setProps({ a: 1 }, outsider.id)).rejects.toBeDefined();

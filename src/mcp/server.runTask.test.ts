@@ -481,7 +481,7 @@ describe('isRunnable write path (hadron_create_node / hadron_update_node / Graph
       resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>
     ).createTaskNode(
       {},
-      { input: { memoryId: fx.alpha.id, loc: 'tasks:via-gql', name: 'Via GQL', isRunnable: true } },
+      { input: { memoryRef: fx.alpha.id, loc: 'tasks:via-gql', name: 'Via GQL', isRunnable: true } },
       ctx,
     );
     const row = await db.node.findFirst({
