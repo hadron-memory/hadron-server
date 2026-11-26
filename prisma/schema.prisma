@@ -476,6 +476,7 @@ model User {
   // 023-app-shape: per-Memory authorization back-relations.
   memorySharesGranted           MemoryShare[]               @relation("MemorySharesGranted")
   memorySharesByGrantor         MemoryShare[]               @relation("MemorySharesByGrantor")
+  appMemoryLinks                AppMemoryLink[]             @relation("AppMemoryLinksByAttacher")
   memoryMemberships             MemoryMember[]              @relation("MemoryMemberships")
   // 025-oauth-for-mcp: user-level credential + OAuth back-relations.
   userApiKeys                   UserApiKey[]
@@ -1160,6 +1161,7 @@ model Memory {
   //                 symmetric team membership.
   shares              MemoryShare[]
   memberships         MemoryMember[]
+  appLinks            AppMemoryLink[]
   /// #1325 — this memory's rulebook, at most one row. ABSENT reads as the
   /// empty config: it is materialized on the first rule write, never at memory
   /// creation (there is no shared creation helper to hang that on —
@@ -3877,8 +3879,12 @@ model Secret {
   /// Plain ids, so an agent's write is attributable to a worker as the grant tables do.
   createdByWorkerId  String? @map("created_by_worker_id")
   createdBySessionId String? @map("created_by_session_id")
-  /// Only meaningful for App rows (`chk_secret_protected_app_only`); the protection ceremony is S4.
+  /// #3999: bumped by trigger `secret_change_revision` (function `hadron_secret_change_revision`) on every UPDATE of
+  /// the row, whatever column changed, so any committed secret touch invalidates earlier staged change requests,
+  /// same-millisecond ones included — deliberately broad; a stale request must never complete.
   changeRevision Int @default(0) @map("change_revision")
+  /// Only meaningful for App rows (`chk_secret_protected_app_only`). A protected App secret changes only through the
+  /// requester's passkey ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02).
   protected      Boolean  @default(false)
   versions       SecretVersion[]
 
@@ -4250,6 +4256,7 @@ model App {
   defaultChannel          Channel?                  @relation("AppDefaultChannel", fields: [defaultChannelId], references: [id], onDelete: SetNull)
   keys                    AppKey[]
   members                 AppMember[]
+  memoryLinks             AppMemoryLink[]
   memories                Memory[]                  @relation("AppMemories")
   users                   User[]
   sessions                Session[]
@@ -4853,6 +4860,30 @@ model Worker {
   @@index([reportsToWorkerId])
   @@index([bootPromptNodeId])
   @@map("workers")
+}
+
+/// A link from an App to a memory it may read, made with `attachMemoryToApp` (hrn:node:hadronmemory.com:specs:cor:dmo:060:20, "An attached memory").
+///
+/// The memory is unchanged: no column of `memories` records a link. A link reaches the App's key and userless runs for
+/// READ only, and only while the attacher can read the memory in their own right, judged at use (`src/lib/appMemoryLinks.ts`);
+/// a row whose attacher lost read stays here, inert, until detached. One row per (App, memory, attacher).
+///
+/// Relationships: joins App, Memory and the attacher (User); a row goes with a hard-deleted App, memory or attacher, and
+/// `mergeUsers` moves the attacher.
+model AppMemoryLink {
+  appId      String   @map("app_id")
+  memoryId   String   @map("memory_id")
+  attachedBy String   @map("attached_by")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  app      App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  memory   Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  attacher User   @relation("AppMemoryLinksByAttacher", fields: [attachedBy], references: [id], onDelete: Cascade)
+
+  @@id([appId, memoryId, attachedBy])
+  @@index([memoryId])
+  @@index([attachedBy])
+  @@map("app_memory_links")
 }
 
 /// A grant by the owner of a personal memory that lets one other user into it, as a reader or as a writer. It is the
@@ -10638,7 +10669,9 @@ model SecretReadClient {
   issuerUserId String?   @map("issuer_user_id")
   /// The grant's issuer is its person holder. Stored once so S4's protection change and read check can query it.
   selfIssued   Boolean   @map("self_issued")
-  /// R22: worker held by the actual signer at issuance; sealed then. Null for pending and legacy clients.
+  /// #3999 R22: whether the holder is the actual signer's own worker. The marker is written at read-client activation
+  /// (the passkey issuance flow) and judged against the worker's hold at that moment. False — a person-held client, a
+  /// worker another person held, or a worker with no live hold then. Null — pending or legacy, not captured. Sealed then.
   issuedToOwnWorker Boolean? @map("issued_to_own_worker")
   /// SECRET_DELETED | PROTECTED, set together with `endedAt`, once.
   endReason    String?   @map("end_reason")

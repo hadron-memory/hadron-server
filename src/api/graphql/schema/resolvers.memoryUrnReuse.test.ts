@@ -53,6 +53,15 @@ const survives = async (id: string) => ({
 
 // #5203 S3 (cor:urn:010:01): createMemory's tombstone answers below are the answers to a SUPPLIED slug, so its doors
 // pass `slug: 'diary'`. A DERIVED slug never reclaims a deleted holder; it iterates past it (pinned at the end).
+/** The owner's own personal source in the org: readable and copyable by them without any org grant, so the target-side gates alone decide. */
+async function ownSource(userId: string) {
+  const mem = generateId();
+  await db.memory.create({ data: { id: mem, name: 'own', urn: `${orgUrn}:own`, organizationId: orgId, class: 'personal', userId } });
+  const parent = generateId();
+  await db.node.create({ data: { id: parent, memoryId: mem, loc: 'sec', name: 'Sec', content: 'x' } });
+  return { mem, parent };
+}
+
 const doors: Array<[string, (c: Context) => Promise<unknown>]> = [
   ['createMemory (personal)', (c) => M.createMemory({}, { orgRef: orgId, name: 'Diary', slug: 'diary', memoryClass: 'personal', vectorIndexEnabled: false }, c)],
   ['createMemory (private)', (c) => M.createMemory({}, { orgRef: orgId, name: 'Diary', slug: 'diary', memoryClass: 'private', vectorIndexEnabled: false }, c)],
@@ -101,11 +110,11 @@ describe('URN reuse after a soft delete: personal/private memories (hadron-inter
     expect(foreign).toEqual(live);
   });
 
-  it('a caller with no user (not the owner) cannot reclaim through clone either', async () => {
+  it('a caller with no user cannot reuse through clone either', async () => {
     const id = await tombstone('private', aliceId);
-    // An App principal passes the door's identity check, so this still reaches the reclaim rule.
+    // An App principal passes the door's identity check (hadron-internal#77); the target-org gate (#78) then refuses it.
     const r = await refusal(doors[2]![1]({ db, userId: undefined, appId: generateId(), roles: ['ADMIN'] } as unknown as Context));
-    expect(r.extensions?.code).toBe('CONFLICT');
+    expect(r.extensions?.code).toBe('UNAUTHENTICATED');
     expect(await survives(id)).toEqual({ memory: 1, nodes: 1 });
   });
 
@@ -119,13 +128,15 @@ describe('URN reuse after a soft delete: personal/private memories (hadron-inter
 
     it('the owner reclaims their own private tombstone through cloneMemory', async () => {
       const id = await tombstone('private', aliceId);
-      await doors[2]![1](as(aliceId, ['ADMIN']));
+      const o = await ownSource(aliceId);
+      await M.cloneMemory({}, { ref: o.mem, targetUrn: `hrn:mem:${orgUrn}:diary` }, as(aliceId));
       expect(await db.memory.count({ where: { id } })).toBe(0);
     });
 
     it('the owner reclaims their own tombstone through extractParentNodeToMemory', async () => {
       const id = await tombstone('personal', aliceId);
-      await doors[3]![1](as(aliceId, ['ADMIN']));
+      const o = await ownSource(aliceId);
+      await M.extractParentNodeToMemory({}, { parentRef: o.parent, targetUrn: `hrn:mem:${orgUrn}:diary` }, as(aliceId));
       expect(await db.memory.count({ where: { id } })).toBe(0);
     });
 

@@ -61,6 +61,7 @@ const PINNED_DOORS = [
   'deleteMemorySubscription',
   'deleteOrganization',
   'deleteTeamRole',
+  'detachMemoryFromApp',
   'endAgentlessSession',
   'ensureAppMember',
   'extractParentNodeToMemory',
@@ -230,6 +231,27 @@ describe('#85 signed-out ref doors', () => {
       expect(JSON.parse(first.text).errors[0].extensions.code, `door ${i}`).toBe('UNAUTHENTICATED');
       for (const a of answers) expect(a, `door ${i}`).toEqual(first);
     }
+  });
+
+  it('85: detachMemoryFromApp signed out answers one raw-identical UNAUTHENTICATED whether the App and memory are real, missing or malformed, and writes nothing (#5185)', async () => {
+    // A real memory linked into the real App, so a refusal that leaked "found" vs "missing" would show, and a detach that ran would be visible.
+    const memory = await db.memory.create({ data: { id: generateId(), name: 'so85mem', urn: `${orgUrn}:m-${generateId().slice(-8)}`, class: 'knowledge', visibility: 'ORGANIZATION', organizationId: orgId } as never });
+    const attacher = await db.user.create({ data: { handle: `so85-attacher-${generateId().slice(0, 6)}`, roles: ['READER'] } });
+    await db.appMemoryLink.create({ data: { appId, memoryId: memory.id, attachedBy: attacher.id } });
+    const linksBefore = await db.appMemoryLink.count();
+    const query = (memoryRef: string, appRef: string) => `mutation { detachMemoryFromApp(memoryRef: "${memoryRef}", appRef: "${appRef}") }`;
+    const apps = [appId, orgId, orgUrn, deletedAppId, generateId(), 'hrn:app:no-such', '@@ not a ref @@'];
+    const memories = [memory.id, memory.urn, generateId(), 'hrn:mem:no-such:memory', '@@ not a ref @@'];
+    // ask() returns the raw HTTP status and body text, so toEqual below is byte identity of both.
+    const answers = await Promise.all(apps.flatMap((appRef) => memories.map((memoryRef) => ask(query(memoryRef, appRef)))));
+    const first = answers[0]!;
+    expect(first.status).toBe(200);
+    const body = JSON.parse(first.text) as { data?: unknown; errors?: Array<{ extensions?: { code?: string } }> };
+    expect(body.errors).toHaveLength(1);
+    expect(body.errors![0]!.extensions?.code).toBe('UNAUTHENTICATED');
+    expect(body.data == null).toBe(true);
+    for (const answer of answers) expect(answer).toEqual(first);
+    expect(await db.appMemoryLink.count()).toBe(linksBefore);
   });
 
   it('writes nothing for a signed-out caller', async () => {

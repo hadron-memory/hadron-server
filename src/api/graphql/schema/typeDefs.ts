@@ -3623,6 +3623,12 @@ export const typeDefs = `#graphql
     installedAgentUrn: String
     trainingMode: Boolean!
     surfaces: [String!]!
+    """
+    #5185 — the memories linked to this App with 'attachMemoryToApp'. You see only entries whose memory you can read in your
+    own right; others are absent and not counted. 'active' is whether the link counts right now (its attacher still reads the
+    memory in their own right, the App is installed, and a personal or private memory is the App owner's and was linked by the owner).
+    """
+    attachedMemories: [AppAttachedMemory!]!
     "The App's members. null means WITHHELD from this caller (#2089): an impersonated caller, or one who reaches a user-owned App only by an outer-object route. Never read null as an empty roster. The App's owning user, a current owner-role member of a user-owned App (ruling 0260, #3765), and callers of an org-owned App get the real list (a real empty list included)."
     members: [AppMember!]
     "Member count. null means WITHHELD from this caller (#2089), never zero; the real count (a real 0 included) for callers who may see the roster, a current owner-role member of a user-owned App among them (ruling 0260, #3765)."
@@ -4033,6 +4039,17 @@ export const typeDefs = `#graphql
     has left the org sees null here, and still gets id/handle/urn.
     """
     name: String
+  }
+
+  "#5185 — one link of a memory to an App."
+  type AppAttachedMemory {
+    memory: Memory!
+    "The user who attached it. null means WITHHELD from this caller, as the App's member list is (#2089)."
+    attachedById: ID
+    attachedByHandle: String
+    createdAt: DateTime!
+    "Whether the link counts right now."
+    active: Boolean!
   }
 
   type AppMember {
@@ -6859,7 +6876,7 @@ export const typeDefs = `#graphql
     id: ID!
     """The effective state, with expiry judged on the server clock: open, completed, declined (the requester declined on the ceremony page), expired, withdrawn (the requester withdrew it) or stale (the secret changed first)."""
     state: String!
-    """The requested operation."""
+    """The requested operation: STORE, DELETE, SET_PROTECTED or CLEAR_PROTECTED. STORE is staged by createSecret and updateSecret (a create, a new value version, a metadata edit or a protection change); DELETE by deleteSecret; the protection pair by setSecretProtected."""
     operation: String!
     """Creation time."""
     createdAt: DateTime!
@@ -6908,7 +6925,7 @@ export const typeDefs = `#graphql
     grantId: ID!
     secretName: String!
     selfIssued: Boolean!
-    "The worker holder was held by the actual signer at issuance (R22); null for a pending or legacy client, sealed once captured."
+    "Whether the holder is the actual signer's own worker (#3999 R22): the marker is written when the read client is activated in the passkey issuance flow and judged against the worker's hold at that moment (not the hold at any earlier time). true — a worker the signer held then; false — a person-held client, a worker another person held, or a worker with no live hold then; null — not captured (pending) or a legacy row. Sealed once captured."
     issuedToOwnWorker: Boolean
   }
 
@@ -6931,7 +6948,7 @@ export const typeDefs = `#graphql
     secretId: ID!
     secretName: String!
     selfIssued: Boolean!
-    "The worker holder was held by the actual signer at issuance (R22); null for a pending or legacy client, sealed once captured."
+    "Whether the holder is the actual signer's own worker (#3999 R22): the marker is written when the read client is activated in the passkey issuance flow and judged against the worker's hold at that moment (not the hold at any earlier time). true — a worker the signer held then; false — a person-held client, a worker another person held, or a worker with no live hold then; null — not captured (pending) or a legacy row. Sealed once captured."
     issuedToOwnWorker: Boolean
     "Null while live, else one of SECRET_DELETED, PROTECTED, REVOKED, PENDING, SPENT, EXPIRED, NOT_STARTED, ISSUER_GONE (nothing else ended it) or ENDED. A stored end wins; otherwise the grant's own state, in the order the reveal door answers."
     endReason: String
@@ -9303,6 +9320,8 @@ export const typeDefs = `#graphql
     MEMORY_MEMBER
     "personal-class cross-user grant (MemoryShare)."
     MEMORY_SHARE
+    "cross-org MemorySubscription (#329): the subscribing org's live subscription — read at any membership role, write only for knowledge at CONTRIBUTOR+ membership AND subscription. role is the EFFECTIVE level conferred (READER, or CONTRIBUTOR where write holds), never the subscription row's own role. via is the subscribing org's URN."
+    MEMORY_SUBSCRIPTION
     "individual action grant (PrincipalGrant, cor:acl:040:06) - clone/delete capabilities on top of the role bundle."
     PRINCIPAL_GRANT
     "node inherits its memory's access."
@@ -14826,18 +14845,31 @@ export const typeDefs = `#graphql
     ): Memory!
 
     """
-    Attach an EXISTING free-standing memory to an App.
+    #5185 — LINK a memory you can read to an App. The memory is not changed: same owner, class, App, Agent, URN and name. The
+    App's key and its userless runs may then READ it (never write it) for as long as you can read it in your own right (not
+    through any App); when you lose read the link goes inert, and it works again if you regain it. A user, with or without the
+    App selected, gains nothing from a link. For a 'personal' or 'private' memory the key reads it only when the memory's owner
+    is the App's owner (a user-owned App whose owner linked their own memory); in an organization's App the link is inert for
+    the key. Any class except 'system', in any tenant. One memory may be linked into several Apps. A link you already hold is
+    success and writes nothing. 'agentRef' is accepted and ignored (deployed clients keep working).
 
-    Applies only to 'personal'/'private' memories owned by the caller (an
-    'app'-class memory can't be free-standing, so there is nothing to attach).
-    Sets the App and Agent scope; the memory's URN, class, and owner are
-    unchanged. memoryRef/appRef/agentRef accept an ID, bare URN, or prefixed
-    URN; the Agent must be installed in the App. Requires App membership.
-
-    Typed errors: UNSUPPORTED_MEMORY_CLASS, MEMORY_ALREADY_APP_SCOPED,
-    APP_UNINSTALLED, AGENT_NOT_INSTALLED, FORBIDDEN, ORGANIZATION_MISMATCH.
+    Person only: a signed-in user acting as themselves, and a member of the App. Typed errors, judged in this order before any
+    write: UNAUTHENTICATED (no signed-in user); FORBIDDEN (an App key, run, worker session or impersonation; also an unknown or
+    deleted App, or a caller who is not a member, one identical answer); MEMORY_NOT_FOUND (unknown, deleted or not readable by
+    you in your own right, one identical answer); UNSUPPORTED_MEMORY_CLASS ('memoryClass: system'); APP_UNINSTALLED.
+    No longer answered: MEMORY_ALREADY_APP_SCOPED, ORGANIZATION_MISMATCH, AGENT_NOT_INSTALLED.
     """
-    attachMemoryToApp(memoryRef: ID!, appRef: ID!, agentRef: ID!): Memory!
+    attachMemoryToApp(memoryRef: ID!, appRef: ID!, agentRef: ID): Memory!
+
+    """
+    #5185 — remove the link of a memory to an App; the memory is never changed. The person who attached it removes their own
+    link (even after losing read); the memory's owner and the person who manages the App remove every link of that memory in
+    that App. No link to remove is success. The memory is judged first. A caller who cannot read it gets MEMORY_NOT_FOUND
+    (the same answer as an unknown memory) whatever the App, so the App side tells them nothing. A caller who can read it gets FORBIDDEN when they have no authority over the link, and the
+    same FORBIDDEN for an unknown or deleted App. The links of a soft-deleted memory cannot be detached; they sit inert
+    until it is restored. Person only, as 'attachMemoryToApp'.
+    """
+    detachMemoryFromApp(memoryRef: ID!, appRef: ID!): Boolean!
 
     """
     Update a Memory.
@@ -14936,9 +14968,9 @@ export const typeDefs = `#graphql
     only the authored tag and nothing is created.
 
     Authorization: the SOURCE side requires (personal/private →
-    owner only; knowledge/group → source-org memory.clone grant). When \`targetUrn\` names a
-    DIFFERENT org, the caller must additionally be a non-reader member of that
-    target org. system/app-class sources and encrypted memories are rejected.
+    owner only; knowledge/group → source-org memory.clone grant). The caller must also be a
+    non-reader member of the target org (any target, the source's own org included);
+    reusing the URN of a soft-deleted org-owned memory additionally requires memory.create there. system/app-class sources and encrypted memories are rejected.
     """
     cloneMemory(ref: ID!, targetUrn: String!): Memory!
 
@@ -14970,7 +15002,7 @@ export const typeDefs = `#graphql
     NODE_NOT_FOUND). For knowledge/group sources the caller needs the SOURCE
     org's memory.clone grant (an export) AND the destination org's memory.create
     (plus a non-reader membership for a cross-org drop); a personal/private
-    extract instead requires the owner to be a member of the destination org.
+    extract instead requires the owner to be a non-reader member of the destination org; reusing the URN of a soft-deleted org-owned memory additionally requires memory.create there.
     'move' additionally requires source write access and must leave a live
     node outside the extracted subtree; otherwise it would empty the source
     (clone + deleteMemory instead). The guard uses node membership, not the
@@ -15350,6 +15382,15 @@ export const typeDefs = `#graphql
     of a Secret, and nothing changes until the requester completes the passkey
     ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The expiry and the two
     caps are as for createSecret.
+    Legacy webfetch-auth rows (written before metadata.type was derived from
+    the value) recover differently per owner kind, because only org and user
+    rows are re-validated against their own decrypted stored value. There, any
+    edit — metadata-only included — re-derives the type. An App row keeps its
+    value in versions, which a metadata-only edit does not decrypt: rewriting
+    the VALUE re-validates the (metadata, value) pair and re-derives the type,
+    while a metadata-only edit of such a row is refused (the stored type is
+    unavailable) until a value rewrite restores it. This holds for protected
+    and unprotected App rows alike; it is not part of the passkey rules above.
     """
     updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean): Secret!
     """
