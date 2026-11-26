@@ -20,6 +20,7 @@ import { upsertPlatformActions } from '../lib/grants/actions.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { createGrantSelectionInTransaction } from '../lib/signing/grantSelectionRequests.js';
 import { createGrantSigningRequestInTransaction } from '../lib/signing/grantRequests.js';
+import { selectionProofChallenge } from '../lib/signing/grantSelectionCeremony.js';
 import { grantSelectionPayloadBytes, sortedSelectionItems } from '../lib/signing/grantSelectionPayload.js';
 import { signatureChallenge } from '../lib/signing/payload.js';
 import { loadGrantSignatureStatuses } from '../lib/signing/grantStatus.js';
@@ -147,7 +148,12 @@ function signingBody(p: Proved, who: { key: SoftPasskey }, counter = 2) {
   return assertionBody(s.ceremonyId, who.key, a, { grantIds: p.json.offered });
 }
 
-/** #5192: the request rows' pins, ascending by grant id (the order every payload builder uses). */
+/**
+ * #5192: the request rows' pins, ascending by grant id. Postgres orders by its collation while the payload builders sort by
+ * code unit (`sortedSelectionItems`); for the schema's 32-lowercase-hex ids the two agree on every collation the test databases
+ * run (#3872: en_US.UTF-8 keeps digits and a–f in code-point order — verified against the shared cluster), and the superset pin
+ * below asserts that equality itself, so a divergence is a red there, never a silent pass.
+ */
 const pinsOf = (selectionId: string) => db.grantSigningRequest.findMany({
   where: { selectionId }, orderBy: { grantId: 'asc' }, select: { grantId: true, version: true, termsHash: true },
 });
@@ -556,12 +562,19 @@ describe('#5192: the proof challenge binds the ceremony id', () => {
     expect(c.status).toBe(200);
     const cookie = (c.headers.get('set-cookie') ?? '').split(';')[0]!;
     const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
-    const forged = createHash('sha256').update(`hadron-grant-selection-signing-proof\nselection ${sel.id}\n`).digest();
+    const selectionOnly = `hadron-grant-selection-signing-proof\nselection ${sel.id}\n`;
+    const served = Buffer.from(challenge, 'base64url');
+    // The selection-only template is byte-accurate: the production builder reproduces the served challenge, and the template
+    // plus the ceremony line does too. Either pin red ⇒ the template has drifted, so the 403 below can only be the missing
+    // ceremony line, never "wrong bytes".
+    expect(served).toEqual(selectionProofChallenge(sel.id, ceremonyId));
+    expect(served).toEqual(createHash('sha256').update(`${selectionOnly}ceremony ${ceremonyId}\n`).digest());
+    const forged = createHash('sha256').update(selectionOnly).digest();
     const bad = admin.key.assert({ payload: Buffer.alloc(0), rawChallenge: forged, origin: ORIGIN, rpId: RP, counter: 1 });
     const r = await post(sel.id, 'proof', assertionBody(ceremonyId, admin.key, bad), cookie);
     expect(r.status).toBe(403);
     expect(await r.text()).toBe(FORBIDDEN);
-    const honest = admin.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: 2 });
+    const honest = admin.key.assert({ payload: Buffer.alloc(0), rawChallenge: served, origin: ORIGIN, rpId: RP, counter: 2 });
     const ok = await post(sel.id, 'proof', assertionBody(ceremonyId, admin.key, honest), cookie);
     expect(ok.status).toBe(200);
   });
