@@ -172,3 +172,29 @@ describe('#5203 S3 a SUPPLIED slug keeps today\'s answers on a deleted holder', 
       .rejects.toMatchObject({ extensions: { code: 'CONFLICT' } });
   });
 });
+
+// An Agent's address is held by its Agent row AND by its system memory at `<urn>-system`. Each holder alone must be
+// skipped: an Agent row with no system memory at that address, and a memory at `<urn>-system` with no Agent.
+describe('#5203 S3 createAgent and cloneAgent skip each holder of an Agent address on its own', () => {
+  const agentDoors: [string, (name: string) => Promise<{ id: string }>][] = [
+    ['createAgent', (name) => M.createAgent({}, { orgRef: org.id, name }, ctx(admin.id))],
+    ['cloneAgent', (name) => M.cloneAgent({}, { source: source.id, target: org.id, name }, ctx(admin.id))],
+  ];
+  for (const [door, create] of agentDoors) {
+    it(`${door}: an Agent row alone (no system memory at <urn>-system) is skipped`, async () => {
+      await db.agent.create({ data: { id: generateId(), name: 'Lone', urn: `${org.urn}:lone`, organizationId: org.id } });
+      expect(await db.memory.count({ where: { urn: `${org.urn}:lone-system` } })).toBe(0);
+      const made = await create('Lone');
+      expect((await rowOf('agent', made.id)).urn).toBe(`${org.urn}:lone-2`);
+    });
+    it(`${door}: a memory alone at <urn>-system (no Agent row) is skipped, and stays`, async () => {
+      const held = await db.memory.create({
+        data: { id: generateId(), name: 'Solo System', urn: `${org.urn}:solo-system`, organizationId: org.id, class: 'system' },
+      });
+      expect(await db.agent.count({ where: { urn: `${org.urn}:solo` } })).toBe(0);
+      const made = await create('Solo');
+      expect((await rowOf('agent', made.id)).urn).toBe(`${org.urn}:solo-2`);
+      expect(await db.memory.findUnique({ where: { id: held.id } })).not.toBeNull();
+    });
+  }
+});
