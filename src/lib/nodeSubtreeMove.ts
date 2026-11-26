@@ -199,6 +199,23 @@ function relativeContentLinks(content: string): Array<{ raw: string; target: str
   return links;
 }
 
+/** The live nodes of a memory at any of `locs`. */
+export async function findLiveNodesByLoc(tx: Prisma.TransactionClient, memoryId: string, locs: string[]) {
+  return tx.node.findMany({
+    where: { memoryId, loc: { in: locs }, deletedAt: null },
+    select: { id: true, loc: true },
+  });
+}
+
+/** The edge locs a memory already holds (live OR soft-deleted) at any of `bases`, or under one as `<base>:…`. */
+export async function findHeldEdgeLocs(tx: Prisma.TransactionClient, memoryId: string, bases: string[]): Promise<Set<string>> {
+  const rows = await tx.edge.findMany({
+    where: { memoryId, OR: [{ loc: { in: bases } }, ...bases.map((b) => ({ loc: { startsWith: `${b}:` } }))] },
+    select: { loc: true },
+  });
+  return new Set(rows.map((r) => r.loc));
+}
+
 /** A miss at a live loc may still resolve through a historical NODE alias. */
 async function aliasTargetId(
   tx: Prisma.TransactionClient,
@@ -439,10 +456,7 @@ export async function moveNodeSubtree(
     : [];
   const targets = [...new Set(contentLinks.map((link) => link.target))];
   const sourceTargets = targets.length
-    ? await tx.node.findMany({
-        where: { memoryId: srcMemoryId, loc: { in: targets }, deletedAt: null },
-        select: { id: true, loc: true },
-      })
+    ? await findLiveNodesByLoc(tx, srcMemoryId, targets)
     : [];
   const sourceIdByLoc = new Map(sourceTargets.map((n) => [n.loc, n.id]));
   for (const target of targets) {
@@ -646,10 +660,7 @@ export async function moveNodeSubtree(
   /** Compare content links against either the committed or virtual destination. */
   async function linkWarningsAfterMove(virtual: boolean): Promise<MoveLinkWarning[]> {
     const destinationTargets = targets.length
-      ? await tx.node.findMany({
-          where: { memoryId: destMemoryId, loc: { in: targets }, deletedAt: null },
-          select: { id: true, loc: true },
-        })
+      ? await findLiveNodesByLoc(tx, destMemoryId, targets)
       : [];
     const destinationIdByLoc = new Map<string, string>(destinationTargets.map((n) => [n.loc, n.id]));
     if (virtual) {
@@ -969,11 +980,7 @@ async function rebaseMovedEdges(
   const taken = new Map<string, Set<string>>();
   for (const memoryId of new Set(plans.map((p) => p.memoryId))) {
     const bases = [...new Set(plans.filter((p) => p.memoryId === memoryId).map((p) => p.base))];
-    const rows = await tx.edge.findMany({
-      where: { memoryId, OR: [{ loc: { in: bases } }, ...bases.map((b) => ({ loc: { startsWith: `${b}:` } }))] },
-      select: { loc: true },
-    });
-    taken.set(memoryId, new Set(rows.map((r) => r.loc)));
+    taken.set(memoryId, await findHeldEdgeLocs(tx, memoryId, bases));
   }
 
   const changes: EdgeUrnChange[] = [];
