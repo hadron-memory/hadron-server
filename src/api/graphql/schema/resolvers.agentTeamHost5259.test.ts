@@ -349,6 +349,20 @@ describe('removeAgentTeamHost: person-only (A6), and what it ends (A7, A8)', () 
     expect((await loadLaunchableFamilies(db, { appId: app.id }, new Date())).get(kit.id)).toEqual(['claude']);
   });
 
+  it('a removed host that joins again and registers with its new key is live and launchable again (registerHost clears lost_at)', async () => {
+    const first = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
+    await register(first, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
+    await remove({ hostId: 'mac1' });
+    const again = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
+    // The removal revoked the old key and removed the assignment, so the rejoined host is assigned and registers afresh.
+    await M.assignHostWorker({}, { input: { appRef: app.id, hostId: 'mac1', worker: 'Kit', workdir: 'hadron-server/kit', family: 'claude' } }, ctx(manager.id));
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, new Date())).size).toBe(0);
+    await register(again, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
+    expect((await db.hostRegistration.findFirstOrThrow({ where: { hostId: 'mac1' } })).lostAt).toBeNull();
+    expect(await db.hostRegistration.count({ where: { hostId: 'mac1' } })).toBe(1);
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, new Date())).get(kit.id)).toEqual(['claude']);
+  });
+
   it('A8 (N1): the host\'s issued and collected operations fail in the removal with a reason naming it; a start whose session bound reads succeeded', async () => {
     const keyId = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
     await register(keyId, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
