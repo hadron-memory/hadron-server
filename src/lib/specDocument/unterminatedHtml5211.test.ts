@@ -484,3 +484,141 @@ it('#5265 the exemptions and restarts after 597e24ba stay fast on thousands of l
     expect({ unit, fast: performance.now() - t < 2000 }).toEqual({ unit, fast: true });
   }
 }, 60_000);
+
+describe('#5265 fix head after 02250085: a long nested-marker line, and a bare item that a block line ends', () => {
+  // P2-1: a line of nested markers was walked once per marker (02250085: 52 s at 200,000 levels), and its item columns were spread into Math.max.
+  it('a line of many nested list markers before a fence is read in linear time', () => {
+    const body = `${'- '.repeat(100_000)}x\n\`\`\`\n<xmp>`;
+    const t = performance.now();
+    escapeUnterminatedHtml(body);
+    expect({ fast: performance.now() - t < 2000 }).toEqual({ fast: true });
+  }, 60_000);
+
+  // P2-2: a bare marker's item ends at a line that starts another block, even right after its paragraph: the fence below is top-level and
+  // never closes, so what follows is code to every reader and nothing in it is rewritten.
+  it.each(['-\n  x\n# h\n  ~~~\n<xmp>', '-\n  x\n> q\n  ~~~\n<xmp>', '-\n  x\n---\n  ~~~\n<xmp>'])('%j is kept as written', (body) => {
+    expect(escapeUnterminatedHtml(body)).toBe(body);
+  });
+
+  it('a paragraph line still continues the item lazily, so the fence under it is the item\'s', () => {
+    const body = '-\n  x\n  ~~~\n<xmp>';
+    expect(losers(body)).toEqual(['commonmark.js', 'markdown-it', 'marked']);
+    expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+  });
+});
+
+describe('#5265 fix head after 02250085: bodies main kept that 02250085 lost', () => {
+  // [body, escaped, readers that still lose the anchor]: each loses no reader main keeps, and the escape is a fixed point. The readers
+  // left are those an unclosed fence takes the anchor from whether or not anything is escaped.
+  const cm = ['commonmark.js', 'markdown-it'];
+  it.each<[string, string, string[]]>([
+    // `</` right after a declaration's fence: a bogus comment to a browser, text to Markdown, so the `<script>` it holds is markup.
+    ['<!DOCTYPE html>~~~</<script>', '&lt;!DOCTYPE html>~~~&lt;/&lt;script>', []],
+    ['<!DOCTYPE html>```</<script>', '&lt;!DOCTYPE html>```&lt;/&lt;script>', []],
+    ['<!DOCTYPE html>~~~</<xmp>', '&lt;!DOCTYPE html>~~~&lt;/&lt;xmp>', []],
+    ['<![CDATA[]]>~~~</<textarea><xmp>1.', '&lt;![CDATA[]]>~~~&lt;/&lt;textarea>&lt;xmp>1.', []],
+    ['<!l>~~~</<script>', '&lt;!l>~~~&lt;/&lt;script>', []],
+    // marked: a backtick run right after a `~` opens no code span.
+    ['<div/<div/"~~~```<div/<div><script># h```', '<div/<div/"~~~```<div/<div>&lt;script># h```', []],
+    ['a~```<script>```', 'a~```&lt;script>```', []],
+    // marked: `<?>` is no processing instruction closer; its block runs to the next `?>` and the tags before it are markup to a browser.
+    ['<?>\n~~~\r\n<template>?>', '<?>\n~~~\r\n&lt;template>?>', cm],
+    ['<?>?><pre>\n```</\r', '<?>?><pre>\n```&lt;/\r', cm],
+    ['- `\n-*-\n<xmp>`', '- `\n-*-\n&lt;xmp>`', []],
+    ['+ >~~~\n  ~~~\r\n<script', '+ >~~~\n  ~~~\r\n&lt;script', []],
+    ['># ```\n<!x<textarea>```', '># ```\n&lt;!x&lt;textarea>```', []],
+    ['<!x>~~~\r\n~~~\r\n<xmp>', '<!x>~~~\r\n~~~\r\n&lt;xmp>', cm],
+    ['>x\n>-\n    ><textarea', '>x\n>-\n    >&lt;textarea', []],
+    // marked: a marker and one space is paragraph text, and a lone marker under it continues the paragraph.
+    ['1. \n-\n<!X<textarea>', '1. \n-\n<!X&lt;textarea>', []],
+    // marked: under a paragraph, an ordered marker and one space starts a new paragraph, which takes no underline.
+    ['>\t\n=\n1. \n-\n<!X<textarea>', '>\t\n=\n1. \n-\n<!X&lt;textarea>', []],
+    ['a\n1) \n-\n<!X<textarea>', 'a\n1) \n-\n<!X&lt;textarea>', []],
+    ['>=\r\n+\n<x>\n~~~\n\n~~~\n<textarea', '>=\r\n+\n<x>\n~~~\n\n~~~\n&lt;textarea', cm],
+    ['<div/\n <!---->\n\t<xmp>', '&lt;div/\n <!---->\n\t&lt;xmp>', []],
+    // CommonMark: inside a bare marker's item, a line's indent counts from the item's content column (the `>` is a quote, not code).
+    ['<div/xa\n-\n-\n  <!-- c --><!DOCTYPE html>```10. \n    >\t<xmp>[a]: /u\n<div>', '&lt;div/xa\n-\n-\n  <!-- c --><!DOCTYPE html>```10. \n    >\t&lt;xmp>[a]: /u\n<div>', []],
+    ['-\n  <!X>\n    > <xmp>', '-\n  <!X>\n    > &lt;xmp>', []],
+    // marked: under a paragraph, a line that is only a tag with a `-` line under it opens an HTML block (its setext rule stops there).
+    ['-*-\n<x>\n  - \n-*-\n~~~\n<script><span><?x?>   \n    \r\n', '-*-\n<x>\n  - \n-*-\n~~~\n&lt;script><span><?x?>   \n    \r\n', cm],
+    ['a\n<x>\n-\n~~~\n<script>', 'a\n<x>\n-\n~~~\n&lt;script>', cm],
+    ['- a\n<x>\n-\n~~~\n<script>', '- a\n<x>\n-\n~~~\n&lt;script>', cm],
+    // marked: a marker and two blanks is an empty item, so the `-` under it is an item and the declaration line opens a block.
+    ['10. \t\n-\n<!DOCTYPE html>```>\tx', '10. \t\n-\n&lt;!DOCTYPE html>```>\tx', []],
+  ])('%j', (body, escaped, lose) => {
+    const out = escapeUnterminatedHtml(body);
+    expect(out).toBe(escaped);
+    expect(escapeUnterminatedHtml(out)).toBe(out);
+    expect(losers(out)).toEqual(lose);
+  });
+});
+
+describe('#5265 fix head after 02250085: guards the mutants left alive at 02250085', () => {
+  // marked reads the rest of a line after a CDATA or processing instruction it closed as new blocks (markedRawTo).
+  it.each([
+    ['<?x?>a\n=\n  <!DOCTYPE html>```', '<?x?>a\n=\n  &lt;!DOCTYPE html>```'],
+    ['<![CDATA[x]]>- <b y= <script>', '<![CDATA[x]]>- <b y= &lt;script>'],
+    // A line that closes a nested item leaves only that item: the fence under it is still the outer item's (leaveItems).
+    ['- a\n  - b\n  # h\n  ~~~\n<xmp>', '- a\n  - b\n  # h\n  ~~~\n&lt;xmp>'],
+    ['1. a\n   - b\n   # h\n   ~~~\n<xmp>', '1. a\n   - b\n   # h\n   ~~~\n&lt;xmp>'],
+  ])('%j', (body, escaped) => {
+    expect(losers(body)).not.toEqual([]);
+    expect(escapeUnterminatedHtml(body)).toBe(escaped);
+    expect(losers(escaped)).toEqual([]);
+  });
+
+  it('more exempt declarations than the scan budget covers: every `<` is escaped', () => {
+    const body = Array(40).fill('<!T>```\n-\n  ~~~').join('\n');
+    expect(escapeUnterminatedHtml(body)).toBe(body.replace(/</g, '&lt;'));
+  });
+});
+
+describe('#5265 fix head after 02250085: one call is linear in the text', () => {
+  // A top-level declaration whose fence never closes, exempt in marked, repeated, with open tags after it: the exemptions, the
+  // fence reads and the escapes nested (36 s at 160 KB). Past its budget of scans the call escapes every `<`.
+  it('160 KB of exempt declarations with 30 open tags after them', () => {
+    const unit = '<!T>```\n-\n  ~~~';
+    const body = `${Array(Math.ceil((160 * 1024) / (unit.length + 1))).fill(unit).join('\n')}${"\n<b x='".repeat(30)}`;
+    const t = performance.now();
+    const out = escapeUnterminatedHtml(body);
+    expect({ fast: performance.now() - t < 8000 }).toEqual({ fast: true });
+    expect(out).toBe(body.replace(/</g, '&lt;'));
+  }, 60_000);
+});
+
+describe('#5265 fix head after 02250085: the residuals vs main of fuzz seeds 13-16', () => {
+  // [body, escaped]: each loses no reader, and the escape is a fixed point. 02250085 lost a reader main keeps on the first of each pair.
+  it.each<[string, string]>([
+    // marked: a marker with one blank after it (`+ `) is paragraph text, so the tag line under it continues that paragraph and opens no
+    // HTML block; the declaration further down ends its own block, and the fence after it closes.
+    ['+ \n<x>\n<b y= + <!x>~~~\r\n<!DOCTYPE html>```\n-\n```\n</b>', '+ \n<x>\n<b y= + <!x>~~~\r\n<!DOCTYPE html>```\n-\n```\n</b>'],
+    ['+ \n<x>\nb\n<!D x>```\n-\n```\n', '+ \n<x>\nb\n<!D x>```\n-\n```\n'],
+    // marked: a list item inside a quote ends at a lazy line that starts an HTML block to it, so a code span opened in the item ends there.
+    ['> - > a `x\n--\n<xmp>\n-*-\ny z> a `x\n>=\n\n-\n---<span>', '> - > a `x\n--\n&lt;xmp>\n-*-\ny z> a `x\n>=\n\n-\n---<span>'],
+    ['> - a `x\n<xmp>\nb`', '> - a `x\n&lt;xmp>\nb`'],
+    // A quote indented into a bare marker's item holds its list inside that item: a fence under it is the item's, and ends with it.
+    ['*-*  ~~~\n\n-\n  > - <pre x=\t-*-`\n\n  ~~~\r\n<xmp>', '*-*  ~~~\n\n-\n  > - &lt;pre x=\t-*-`\n\n  ~~~\r\n&lt;xmp>'],
+    ['-\n  > - a\n  ~~~\n<xmp>', '-\n  > - a\n  ~~~\n&lt;xmp>'],
+  ])('%j', (body, escaped) => {
+    const out = escapeUnterminatedHtml(body);
+    expect(out).toBe(escaped);
+    expect(escapeUnterminatedHtml(out)).toBe(out);
+    expect(losers(out)).toEqual([]);
+  });
+});
+
+describe('#5265 fix head after 02250085: guards left unpinned at 02250085', () => {
+  // A `<pre>` with no fence line after it is never exempt: escaping it cannot open a fence that takes the anchor, so it is escaped (the
+  // fence that is open above it is the item's, and ends with it).
+  it.each<[string, string]>([
+    ['-\n<pre>\n  ~~~\n<pre>', '-\n<pre>\n  ~~~\n&lt;pre>'],
+    ['\n-\n<pre x=<!-->\n  ~~~\r\n<pre x=<span>\n', '\n-\n<pre x=<!-->\n  ~~~\r\n&lt;pre x=<span>\n'],
+    // marked starts no CDATA block right after a line its paragraph took raw, so the `<xmp>` after that CDATA is markup and is escaped.
+    ['\r\n>=\r\n\n\n-*-\n<?x?>\n<![CDATA[x]]><!X<xmp>*-*   # h', '\r\n>=\r\n\n\n-*-\n<?x?>\n<![CDATA[x]]><!X&lt;xmp>*-*   # h'],
+  ])('%j', (body, escaped) => {
+    const out = escapeUnterminatedHtml(body);
+    expect(out).toBe(escaped);
+    expect(escapeUnterminatedHtml(out)).toBe(out);
+    expect(losers(out)).toEqual([]);
+  });
+});

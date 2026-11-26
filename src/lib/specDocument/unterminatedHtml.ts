@@ -46,12 +46,18 @@
  * Cost: one linear scan per escape, each from the start of the escaped text (an open construct may hide another, and an open
  * `<template>` stays open after a later construct is escaped), at most {@link MAX_RESTARTS} times; a text that needs more has
  * every `<` in it escaped (a body that hides more than that many constructs behind one another is not an authoring case).
+ * #5265 — the escapes, the exemptions of firstUnterminated and the reads of endsInOpenFence nest, so the scans of one call are also
+ * counted: past {@link MAX_SCANS} every `<` is escaped the same way, which keeps a call linear in the text.
  */
 import { stepFence, type OpenFence } from './fences.js';
 
 /** Elements whose content is text up to their own end tag. */
 const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript']);
 const MAX_RESTARTS = 32;
+/** The scans one call of escapeUnterminatedHtml may run (a body of the fuzz alphabet needs at most 26). */
+const MAX_SCANS = 64;
+let scansLeft = 0;
+const SCANS_SPENT = Symbol('scans spent');
 
 const isLetter = (c: string | undefined): boolean => c !== undefined && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
 const isBlank = (c: string): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
@@ -95,6 +101,10 @@ const LIST_CLOSING_LINE = new RegExp(
  * #5265 — marked 17 closes an open list item at fewer HTML lines than CommonMark: its `htmlBeginRegex` takes a start tag (`<` and a
  * letter, then a `>` on the line) or a comment, and no declaration, processing instruction, CDATA or end tag.
  */
+/** #5265 — marked takes no setext underline under a paragraph whose first line starts with a bullet and a space (`1. `, `- `, read as text). */
+const MARKED_BULLET_HEAD = /^(?:[*+-]|\d{1,9}[.)]) /;
+/** #5265 — under a paragraph, marked starts a new paragraph at an ordered marker and one space with nothing after it (`a`, then `1. `). */
+const MARKED_ORDERED_TEXT = /^ {0,3}\d{1,9}[.)] \r?$/;
 const LIST_CLOSING_LINE_MARKED = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|(?:-[ \t]*){3,}$|(?:\*[ \t]*){3,}$|(?:_[ \t]*){3,}$|<(?:[a-z].*>|!--))/i;
 /**
  * The end of the inline run that holds `i`: where a code span that opened at `i` can no longer close. A code span never crosses a
@@ -106,7 +116,21 @@ function paragraphEnd(text: string, i: number, ctx: RunContext = NO_CONTAINER): 
   const lineStart = text.lastIndexOf('\n', i - 1) + 1;
   const eol = text.indexOf('\n', i);
   const lineEnd = eol === -1 ? text.length : eol;
-  if (/^ {0,3}#{1,6}(?:[ \t\r]|$)/.test(text.slice(lineStart, lineEnd))) return lineEnd;
+  // #5265 — the heading may sit in a quote or a list item (`># a`, `- # a`): it is still one line.
+  if (/^(?: {0,3}(?:>[ \t]?|(?:[-+*]|\d{1,9}[.)])[ \t]+))* {0,3}#{1,6}(?:[ \t\r]|$)/.test(text.slice(lineStart, lineEnd))) return lineEnd;
+  const end = blockEnd(text, i, ctx);
+  // #5265 — marked ends a list item at a line indented short of its content (and three columns at most) that starts an HTML block to it
+  // (`<` and a letter with a `>` later on the line, or `<!--`), even where CommonMark reads that line as lazy paragraph text. Searched
+  // only up to the run's other end, so no run reads past its own text.
+  if (ctx.markedListCol > 0) {
+    const cut = new RegExp(`\\n {0,${Math.min(3, ctx.markedListCol - 1)}}<(?:[a-z].*>|!--)`, 'i').exec(text.slice(i, end));
+    if (cut) return i + cut.index;
+  }
+  return end;
+}
+
+/** Where the next line that starts another block (or a blank line) cuts the run at `i`, for {@link paragraphEnd}. */
+function blockEnd(text: string, i: number, ctx: RunContext): number {
   const re = new RegExp(BLOCK_START.source, BLOCK_START.flags);
   re.lastIndex = i;
   for (let m = re.exec(text); m; m = re.exec(text)) {
@@ -121,8 +145,8 @@ function paragraphEnd(text: string, i: number, ctx: RunContext = NO_CONTAINER): 
 }
 
 /** The containers of the line an inline run starts on, for the underline rule of {@link paragraphEnd}. */
-interface RunContext { quoted: boolean; listCol: number }
-const NO_CONTAINER: RunContext = { quoted: false, listCol: -1 };
+interface RunContext { quoted: boolean; listCol: number; markedListCol: number }
+const NO_CONTAINER: RunContext = { quoted: false, listCol: -1, markedListCol: -1 };
 /**
  * A setext underline that lazy text may hold: `=` or `--`. Three or more `-` are a thematic break and a lone `-` an empty list item, and
  * either ends a lazy paragraph too.
@@ -181,6 +205,8 @@ function containersOf(line: string): { list: Container[]; at: number; item: numb
   let col = 0;
   let item = -1;
   let itemQuotes = 0;
+  // The quotes opened so far, counted as they open: a line of many nested markers is walked once (#5265).
+  let quotes = 0;
   const items: number[] = [];
   for (;;) {
     let p = at;
@@ -193,6 +219,7 @@ function containersOf(line: string): { list: Container[]; at: number; item: numb
       // The one blank after the marker belongs to it (of a tab, one column does: the rest is content indent, which only `<` at a tab's far side sees).
       if (line[at] === ' ' || line[at] === '\t') { col += line[at] === '\t' ? 4 - (col % 4) : 1; at += 1; }
       list.push({ quote: true });
+      quotes += 1;
       continue;
     }
     const m = /^(?:[-+*]|\d{1,9}[.)])/.exec(line.slice(p, p + 10));
@@ -207,7 +234,7 @@ function containersOf(line: string): { list: Container[]; at: number; item: numb
     at = q;
     col = c;
     item = c;
-    itemQuotes = list.filter((x) => x.quote).length;
+    itemQuotes = quotes;
     if (itemQuotes === 0) items.push(c);
   }
   return { list, at, item, itemQuotes, items };
@@ -301,6 +328,9 @@ const FENCE_LINE = /\n[ \t]*(?:`{3,}|~{3,})/;
 
 const NO_EXEMPT: ReadonlySet<number> = new Set();
 
+/** A line that ends in exactly one space or tab after its last other character (`1. `, `-\t`). */
+const ONE_BLANK_END = /[^ \t][ \t]\r?$/;
+
 /** Whether `model` (CommonMark unless named) reads a fence outside every container that is still open at the end of `text`: it takes the anchor after it as code. */
 function endsInOpenFence(text: string, model: ReaderModel = 'commonmark'): boolean {
   // The constructs CommonMark itself leaves open are escaped first, as the pass would.
@@ -315,6 +345,8 @@ function endsInOpenFence(text: string, model: ReaderModel = 'commonmark'): boole
 
 /** {@link firstUnterminated}, and whether a fence outside every container is open at the end (read only when nothing is unterminated). */
 function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySet<number> = NO_EXEMPT): { at: number; topLevelFence: boolean; decl: number; pre?: 'line' | 'restart' } {
+  scansLeft -= 1;
+  if (scansLeft < 0) throw SCANS_SPENT;
   const n = text.length;
   let fence: OpenFence | null = null;
   let fenceContainers: Container[] = [];
@@ -367,6 +399,9 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
   // Whether the line before (and the line being read) is a quote line with content: only after one does marked carry the quote on lazily.
   let prevQuoted = false;
   let quoted = false;
+  // #5265 — whether marked still carries a quote on through the line being read (a line with no marker under a quote line, or under such a
+  // line): an HTML block it opens there is the quote's, and ends with it, at the next line that is no lazy text (a fence, for one).
+  let markedCarry = false;
   // A raw-text element opened in the middle of a line is inline HTML: Markdown goes on parsing after it, so only an end tag
   // that Markdown also reads as HTML (outside code, a fence and a backslash escape) closes it. -1 when none is open.
   let rawStart = -1;
@@ -415,6 +450,8 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
   let leftBare = false;
   // Whether the last bare marker ended at its line's end: marked takes a marker followed by spaces or tabs and nothing else for paragraph text.
   let markerTight = false;
+  // #5265 — whether that marker had exactly one space or tab after it: marked reads such a line as paragraph text (two or more: an empty item).
+  let markerText = false;
   // #5265 — the `<` of the top-level declaration whose fence (marked) is still open, or -1.
   let declFence = -1;
   // Whether the line before was taken for a link reference definition: marked's grammar for one is stricter, so it may be a paragraph there.
@@ -461,7 +498,12 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
   const inQuote = (): boolean => lineContainers.some((c) => c.quote);
   // Whether a type 7 tag at the head of the line at `j` would interrupt a paragraph. A line that opens a list item or a deeper quote starts afresh.
   const interrupts = (): boolean => {
-    if (prevBefore !== 'other') return false;
+    // #5265 — marked reads a marker with one blank after it (`+ `, ONE_BLANK_END) as paragraph text, so a tag line under it continues that paragraph.
+    if (prevBefore !== 'other' && !(model === 'marked' && prevBefore === 'marker' && markerText)) return false;
+    // #5265 — marked's setext heading stops at a line that is only a tag (` {0,3}<[^\n>]+>`), and a `-` underline under it ends the paragraph
+    // before that line: the tag opens an HTML block there (`a`, `<x>`, `-`). Not in a quote, whose paragraph takes both lines lazily.
+    if (model === 'marked' && lineContainers.every((c) => !c.quote) && !inQuote() && /^ {0,3}<[^\n>]+>\r?$/.test(text.slice(lineFrom, lineTo))
+      && /^ {0,3}-+ *\r?$/.test(text.slice(lineTo + 1, lineEndAt(Math.min(n, lineTo + 1))))) return false;
     if (lineContainers.some((c) => !c.quote)) return false;
     const before = lineFrom === 0 ? '' : text.slice(text.lastIndexOf('\n', lineFrom - 2) + 1, lineFrom - 1);
     const depth = (l: readonly Container[]): number => l.filter((c) => c.quote).length;
@@ -512,13 +554,14 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
     const bare = item[3] === undefined;
     bareCols.length = 0;
     bareCols.push(item[1].length + item[2].length + (bare || item[3].length > 4 ? 1 : item[3].length));
-    if (bare) { markerWidth = item[2].length + 1; prev = 'marker'; markerTight = !/[ \t]\r?$/.test(rest); }
+    if (bare) { markerWidth = item[2].length + 1; prev = 'marker'; markerTight = !/[ \t]\r?$/.test(rest); markerText = ONE_BLANK_END.test(rest); }
   };
   // #5265 — a fence that starts right after such a closer (`<!x>~~~`, `<??>~~~`) opens in marked, outside every container; it is the
   // construct's own (`declFence`), so a fence that never closes escapes the construct (firstUnterminated may exempt it). Whether it opened.
   const markedFenceAfter = (j: number, after: number): boolean => {
     if (exempt.has(j) || !/^ {0,3}(?:`{3,}|~{3,})/.test(text.slice(after, after + 6))) return false;
-    const opened = stepFence(text.slice(after, lineEndAt(after)), null).open;
+    // A CRLF line is read without its `\r`, as the scan reads every line (a `.` in the fence pattern does not take a `\r`).
+    const opened = stepFence(text.slice(after, lineEndAt(after)).replace(/\r$/, ''), null).open;
     if (opened === null) return false;
     fence = opened;
     fenceContainers = [];
@@ -561,6 +604,7 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
       const inner = line.replace(/^ {0,3}(?:> ?)+/, '');
       prevQuoted = quoted;
       quoted = inner.trim() !== '' && /^ {0,3}>/.test(line);
+      markedCarry = model === 'marked' && line.trim() !== '' && !/^ {0,3}(?:>|`{3,}|~{3,})/.test(line) && (prevQuoted || markedCarry);
       let here = containersOf(line);
       const listed = here.list.some((c) => !c.quote);
       // A number other than 1 starts no list in the middle of a paragraph; it is an item only where a list is open already.
@@ -572,14 +616,19 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
       // An item that starts with a blank line holds nothing; one with content ends at a line indented less (but a paragraph's lazy line).
       const bareBefore = bareCols.length;
       if (fence === null && line.trim() === '' && prev === 'marker') bareCols.pop();
-      else if (fence === null && line.trim() !== '' && prev !== 'other') while (bareCols.length > 0 && lineIndent < bareCol()) bareCols.pop();
+      // A paragraph line continues it lazily; a line that starts another block (a heading, a fence, a quote, a break) ends it as it ends any item.
+      else if (fence === null && line.trim() !== '' && (prev !== 'other' || (model === 'marked' ? LIST_CLOSING_LINE_MARKED : LIST_CLOSING_LINE).test(line))) while (bareCols.length > 0 && lineIndent < bareCol()) bareCols.pop();
       leftBare = prev === 'marker' && line.trim() !== '' && bareCols.length < bareBefore && markerTight;
       const prevWasPara: boolean = prev === 'other';
       prevParaRaw = paraRaw;
       paraRaw = false;
       // A list marker indented into an item a bare marker opened (`-`, then `  - x`) opens an item inside it: the outer one stays open.
       const bareOuter = here.list.some((c) => !c.quote) && here.list[0].quote === false ? bareCols.filter((c) => c <= lineIndent) : [];
-      if (here.list.some((c) => !c.quote)) bareCols.length = 0;
+      // #5265 — a quote indented into that item (`-`, then `  > - x`) holds its list inside the item: the item stays open around it.
+      if (here.list.some((c) => !c.quote)) {
+        if (here.list[0].quote) while (bareCols.length > 0 && bareCol() > lineIndent) bareCols.pop();
+        else bareCols.length = 0;
+      }
       // A fence lives in the containers of the line that opened it, and ends with them.
       let within = fence === null ? null : contentInside(line, fenceContainers);
       if (within !== null && fenceInItem && line.trim() !== '' && columnAfter((/^[ \t]*/.exec(line) as RegExpExecArray)[0]) < fenceItemCol) within = null;
@@ -596,12 +645,23 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
         // A fence on a line indented into the open item (or under a bare marker) is the item's: it ends with it, before the anchor.
         const cols = columnAfter((/^[ \t]*/.exec(content) as RegExpExecArray)[0], columnAfter(line.slice(0, here.at))) - columnAfter(line.slice(0, here.at));
         // In nested items it is the innermost item it is indented into (`- - x`, then a fence at column 2: the outer one's).
-        const itemCol = listCol > 0 ? Math.max(-1, ...listCols.filter((c) => c <= cols)) : -1;
+        // A loop, not a spread: a line of many nested markers leaves one column per item (#5265).
+        let itemCol = -1;
+        if (listCol > 0) for (const c of listCols) if (c <= cols && c > itemCol) itemCol = c;
         fenceInItem = here.list.length === 0 && (itemCol > 0 || (bareCol() > 0 && cols >= bareCol()));
         fenceItemCol = itemCol > 0 ? itemCol : bareCol();
       }
       fence = step.open;
       if (fence === null) { declFence = -1; markedCloser = null; }
+      // A marker indented into an open item outside every quote opens an item inside it: the outer ones stay open.
+      const enterItems = (from: number): void => {
+        const outer = here.list[0].quote === false ? [...bareOuter, ...(listCol > 0 && listDepth === 0 ? listCols.filter((c) => c <= lineIndent) : [])] : [];
+        listCols = [...outer, ...here.items];
+        listCol = here.item - from;
+        listDepth = here.itemQuotes;
+      };
+      // #5265 — a fence line that a list marker opens (`+ >~~~`) is in that item, so a line under it indented to the item stays there.
+      if (step.fenceLine && !wasOpen && here.list.some((c) => !c.quote)) enterItems(columnAfter(line.slice(0, line.length - inner.length)));
       if (step.fenceLine || wasOpen) { prev = 'nonpara'; lrd = 0; inDefinition = false; i = end + 1; continue; }
       // An indented code block: a line of four spaces or a tab, after a blank line, the start of the text or another such line.
       const quotes = line.slice(0, line.length - inner.length);
@@ -621,13 +681,7 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
       const lineCols = columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0], from) - from;
       const listedHere = here.list.some((c) => !c.quote);
       // #5265 — an item that holds a quote (`- > x`) has its content where the item's marker puts it, outside the quote it opens.
-      if (listedHere) {
-        // A marker indented into an open item outside every quote opens an item inside it: the outer ones stay open.
-        const outer = here.list[0].quote === false ? [...bareOuter, ...(listCol > 0 && listDepth === 0 ? listCols.filter((c) => c <= lineIndent) : [])] : [];
-        listCols = [...outer, ...here.items];
-        listCol = here.item - from;
-        listDepth = here.itemQuotes;
-      }
+      if (listedHere) enterItems(from);
       // A quote that opens inside the item continues it when its marker sits at the item's content; leaving the item's own quote ends it.
       else if (depth > listDepth && listCol > 0 && quoteColumns(line, listDepth + 1).marker - quoteColumns(line, listDepth).content < listCol) leaveItems(quoteColumns(line, listDepth + 1).marker - quoteColumns(line, listDepth).content);
       else if (depth < listDepth) listCol = -1;
@@ -644,9 +698,17 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
       const bareLazy: boolean = model === 'commonmark' && prevWasPara && bareCols.length > 0 && !listedHere && depth === 0 && lineIndent < bareCol();
       const depthBefore = prevDepth;
       prevDepth = depth;
-      runContext = { quoted: depth > 0, listCol: depth === listDepth && model === 'commonmark' ? listCol : -1 };
-      const codeIndent = listCol > 0 && !listedHere && depth === listDepth && lineCols >= listCol ? lineCols - listCol : indent;
-      if (codeIndent >= 4 && inner.trim() !== '' && ((prev !== 'other' && prev !== 'marker') || opensQuote) && !afterDefinition && !(fenceCut && model === 'marked')) { prev = 'code'; lrd = 0; i = end + 1; continue; }
+      runContext = {
+        quoted: depth > 0,
+        listCol: depth === listDepth && model === 'commonmark' ? listCol : -1,
+        markedListCol: depth >= listDepth && model === 'marked' ? listCol : -1,
+      };
+      // #5265 — inside the item of a bare marker (`-`, then `  <!X>`), CommonMark counts a line's indent from the item's content column.
+      const bareIn = model === 'commonmark' && listCol <= 0 && !listedHere && depth === 0 && bareCols.length > 0 && lineIndent >= bareCol();
+      const codeIndent = listCol > 0 && !listedHere && depth === listDepth && lineCols >= listCol ? lineCols - listCol : bareIn ? lineIndent - bareCol() : indent;
+      // #5265 — markdown-it takes a `>` indented four or more columns, right under a quote line, for that quote's marker: the line is no code to it.
+      const miQuote = model === 'commonmark' && depthBefore > 0 && lineIndent >= 4 && /^[ \t]*>/.test(line);
+      if (codeIndent >= 4 && inner.trim() !== '' && ((prev !== 'other' && prev !== 'marker') || opensQuote) && !afterDefinition && !(fenceCut && model === 'marked') && !miQuote) { prev = 'code'; lrd = 0; i = end + 1; continue; }
       if (lrd === 3) {
         // Inside a title that opened on an earlier line: still the definition, until the line that closes it (or a blank line, which ends the attempt).
         if (inner.trim() === '') { prev = prev === 'code' ? 'code' : 'blank'; lrd = 0; } else { prev = 'nonpara'; inDefinition = true; lrd = hasCloser(inner, titleCloser) ? 0 : 3; }
@@ -673,12 +735,18 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
           // After a paragraph line an empty item starts no list (it is text), but a lone `-` in a container the paragraph's line had is an item.
           ? (paraBefore && !(quoteLazy || listLazy || bareLazy) ? 'other' : 'marker')
           : prev === 'marker' && indent >= markerWidth + 4 ? 'marker' : 'other';
-        markedNoSetext = prev === 'other' && ((quoteLazy && prevQuoted) || (paraBefore ? markedNoSetext : /^ {0,3}<[A-Za-z][A-Za-z0-9-]*\/(?!>)[^\n>]*>$/.test(inner)));
+        markedNoSetext = prev === 'other' && ((quoteLazy && prevQuoted) || (paraBefore && !MARKED_ORDERED_TEXT.test(inner) ? markedNoSetext : /^ {0,3}<[A-Za-z][A-Za-z0-9-]*\/(?!>)[^\n>]*>$/.test(inner) || MARKED_BULLET_HEAD.test(inner)));
         // #5265 — a lazy line of a quote's paragraph is still in the quote (CommonMark): the line after it that has no marker leaves the quote,
         // so a lone `-` there opens an item rather than continuing the paragraph.
         if (model === 'commonmark' && quoteLazy && prevBefore === 'other' && prev === 'other') prevDepth = depthBefore;
         if (prev === 'marker' && indent < 4) markerWidth = inner.trim().length + 1;
-        if (prev === 'marker') markerTight = !/[ \t]\r?$/.test(inner);
+        // #5265 — under a marker marked reads as text (`1. `: one space or tab after it, ONE_BLANK_END), a lone marker continues that paragraph (marked takes no underline under a
+        // bullet head), so it is text to marked too, whatever follows it.
+        if (prev === 'marker') {
+          const asText: boolean = model === 'marked' && prevBefore === 'marker' && markerText;
+          markerTight = asText ? false : !/[ \t]\r?$/.test(inner);
+          markerText = asText || ONE_BLANK_END.test(inner);
+        }
         // marked carries a quote on through the line after a quote line, a bare marker included: that item is the quote's (#5265).
         if (prev === 'marker' && indent < 4 && here.list.length === 0 && depth === 0 && !(model === 'marked' && depthBefore > 0)) bareCols.push(indent + markerWidth);
       }
@@ -688,6 +756,8 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
     if (c === '`' && i >= rawUntil) {
       let len = 1;
       while (text[i + len] === '`') len += 1;
+      // #5265 — marked's text rule takes a run of `~` and backticks as one piece of text, so a run right after a `~` opens no code span there.
+      if (model === 'marked' && text[i - 1] === '~') { i += len; continue; }
       paraEnd = inlineBound(i);
       if ((noCloser.get(len) ?? -1) >= paraEnd) { i += len; continue; }
       let k = i + len;
@@ -719,8 +789,10 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
     if (text.startsWith('<!--', i)) {
       // #5211 — at the head of a line these are a whole type 2 block, so the rest of their line is raw.
       // marked takes such a line as a block only when a blank line or the end follows it; otherwise it is inline.
+      // #5265 — marked's paragraph is interrupted by a comment only at the line's first column: an indented one under a paragraph is inline.
+      const markedInline = model === 'marked' && prevBefore === 'other' && i > 0 && text[i - 1] !== '\n';
       const wholeBlock = (): void => {
-        if (!startsLine(i)) return;
+        if (!startsLine(i) || markedInline) return;
         const e = lineEndAt(i);
         if (model === 'commonmark' || e >= n || /^[ \t]*(?:\n|$)/.test(text.slice(e + 1))) raw(e);
       };
@@ -728,7 +800,7 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
       if (text.startsWith('<!--->', i)) { wholeBlock(); i += 6; continue; }
       const close = text.indexOf('-->', i + 4);
       if (close === -1 || close + 3 > blockLimit(i)) return { at: i, topLevelFence: false, decl: -1 };
-      if (startsLine(i)) raw(lineEndAt(close));
+      if (startsLine(i) && !markedInline) raw(lineEndAt(close));
       i = close + 3;
       continue;
     }
@@ -756,9 +828,12 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
       // #5265 — marked's block needs a `?>` after the `<?` (`<?>` is no closer to it) and runs to the end of the text without one. A browser
       // ends the instruction at its first `>`, and reads as markup what follows: all of it raw to Markdown, so a tag there is judged as markup.
       if (model === 'marked' && first !== -1 && markedRestarts(i) && text.indexOf('?>', i + 2) === -1) { raw(n); i = first + 1; continue; }
-      const closer = text.indexOf('?>', i + 1);
-      if (first === -1 || closer === -1 || first !== closer + 1 || closer + 2 > blockLimit(i)) return { at: i, topLevelFence: false, decl: -1 };
-      if (startsLine(i)) raw(markedRawTo(i, closer + 2, lineEndAt(closer)));
+      // #5265 — `<?>`: the browser's instruction ends at its own `>`, and marked's block at the next `?>`, which may sit lines further on.
+      // Between the two everything is raw to marked and markup to a browser, so the region is raw and its tags are judged as markup.
+      const markedOwn = model === 'marked' && first === i + 2 && markedRestarts(i);
+      const closer = markedOwn ? text.indexOf('?>', i + 2) : text.indexOf('?>', i + 1);
+      if (first === -1 || closer === -1 || (!markedOwn && (first !== closer + 1 || closer + 2 > blockLimit(i)))) return { at: i, topLevelFence: false, decl: -1 };
+      if (startsLine(i) || markedOwn) raw(markedRawTo(i, closer + 2, lineEndAt(closer)));
       if (model === 'marked' && startsLine(i) && !markedRestarts(i)) paraRaw = true;
       if (model === 'marked' && markedRestarts(i) && closer >= i + 2 && lineEndAt(i) === lineEndAt(closer) && markedHead(i)) {
         if (markedFenceAfter(i, closer + 2)) { i = lineEndAt(i) + 1; continue; }
@@ -804,6 +879,9 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
       // `</` and anything but a letter or `>` is a bogus comment, which runs to the next `>`.
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > tagLimit(i, false)) return { at: i, topLevelFence: false, decl: -1 };
+      // #5265 — outside an HTML block it is no tag to Markdown (an end tag needs a letter), which reads a `<` inside it as markup
+      // (`</<script>`) where a raw reader reads comment text: the two readings disagree, so the `</` is escaped, after which both read the `<`.
+      if (i >= rawUntil && text.slice(i + 2, close).includes('<')) return { at: i, topLevelFence: false, decl: -1 };
       i = close + 1;
       continue;
     }
@@ -841,9 +919,11 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
     // #5265 — marked starts these blocks right after a CDATA or processing instruction block it ended on the line, too (where marked restarts, the line interrupts no paragraph).
     const restartHead = model === 'marked' && i === markedRestartAt;
     if (startsLine(i) || restartHead) {
-      if (BLOCK6_NAMES.has(name)) raw(containerEnd(i, true));
+      // Only its own line is taken for the block on a line marked carries a quote through: what follows is judged, the safe side.
+      const blockEnd = (): number => (markedCarry && lineContainers.length === 0 ? lineEndAt(i) : containerEnd(i, true));
+      if (BLOCK6_NAMES.has(name)) raw(blockEnd());
       else if ((!TYPE1_NAMES.has(name) || (isEnd && model === 'commonmark')) && !text.slice(i, tagEnd).includes('\n') && text.slice(tagEnd, lineEndAt(tagEnd)).trim() === '' && !interrupts()) {
-        raw(containerEnd(i, true));
+        raw(blockEnd());
       }
     }
     if (isEnd) {
@@ -929,6 +1009,16 @@ function hasCloser(line: string, close: string): boolean {
  */
 export function escapeUnterminatedHtml(text: string): string {
   if (!text.includes('<')) return text;
+  scansLeft = MAX_SCANS;
+  try {
+    return escapeWithinBudget(text);
+  } catch (e) {
+    if (e === SCANS_SPENT) return text.replace(/</g, '&lt;');
+    throw e;
+  }
+}
+
+function escapeWithinBudget(text: string): string {
   let cur = text;
   for (let k = 0; ; k += 1) {
     const cm = firstUnterminated(cur, 0, 'commonmark');

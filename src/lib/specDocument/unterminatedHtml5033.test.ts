@@ -468,7 +468,9 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('</b x=y>')).toBe('</b x=y>');
   });
   it('a tag whose name holds `=`, `<` or a quote is ambiguous (a browser reads a name, htmlparser2 fails on it): it is escaped', () => {
-    expect(escapeUnterminatedHtml("<pre=</=='<plaintext>\n")).toBe("&lt;pre=</=='<plaintext>\n");
+    // #5265 — `</=='<plaintext>` is a comment to a raw reader but text to Markdown, which then emits `<plaintext>` raw (it takes the rest of
+    // the page as text in an HTML5 parser): the `</` and the tag are escaped too.
+    expect(escapeUnterminatedHtml("<pre=</=='<plaintext>\n")).toBe("&lt;pre=&lt;/=='&lt;plaintext>\n");
     expect(escapeUnterminatedHtml('x <a=b> y')).toBe('x &lt;a=b> y');
     expect(escapeUnterminatedHtml("x <a'b> y")).toBe("x &lt;a'b> y");
     expect(escapeUnterminatedHtml('x <a<b> y')).toBe('x &lt;a<b> y');
