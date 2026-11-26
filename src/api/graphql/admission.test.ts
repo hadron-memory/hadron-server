@@ -47,8 +47,8 @@ async function bootReal(env: Record<string, string> = {}): Promise<string> {
 
 type Reply = Omit<Response, 'json'> & { json(): Promise<any> }; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-const post = (base: string, body: unknown, path = '/graphql'): Promise<Reply> =>
-  fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+const post = (base: string, body: unknown, path = '/graphql', headers: Record<string, string> = {}): Promise<Reply> =>
+  fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
 
 /** `{ <marker> }` padded with a trailing comment so the source is exactly `n` UTF-8 bytes. */
 function queryOfBytes(n: number, pad = ' '): string {
@@ -134,14 +134,10 @@ describe('L1 query source bytes (POST, real stack)', () => {
     // #85: createNode takes an App ref (install target), so a signed-out caller is refused before the resolver.
     const user = await db.user.create({ data: { handle: 'admission-control', roles: ['READER'] } });
     const token = await signJwt({ sub: user.id, roles: ['READER'] });
-    const res = await fetch(base + '/graphql', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-      body: JSON.stringify({
-        query: 'mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }',
-        variables: { i: { memoryRef: 'x', loc: 'a', name: 'a', content: 'c'.repeat(5 * 1024 * 1024) } },
-      }),
-    }) as Reply;
+    const res = await post(base, {
+      query: 'mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }',
+      variables: { i: { memoryRef: 'x', loc: 'a', name: 'a', content: 'c'.repeat(5 * 1024 * 1024) } },
+    }, '/graphql', { authorization: `Bearer ${token}` });
     expect(res.status).toBe(200);
     expect((await res.json()).errors[0].message).toBe('Internal server error.'); // #1789: the spy's plain Error is a fault; reaching the resolver is asserted by the spy call below
     expect(createNodeSpy).toHaveBeenCalledTimes(1);

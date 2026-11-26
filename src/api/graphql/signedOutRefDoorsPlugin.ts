@@ -19,14 +19,22 @@ const REF_ARG_NAME = /^(app|org|organization)(Ref|Id|Urn|Slug)$/i;
 const IRREGULAR: Readonly<Record<string, readonly string[]>> = {
   updateOrganization: ['ref'],
   deleteOrganization: ['ref'],
+  updateApp: ['ref'],
+  deleteApp: ['ref'],
+  uninstallApp: ['ref'],
+  reinstallApp: ['ref'],
+  // The organization is read out of a memory URN's path (`<org>::<slug>`), then resolved.
+  cloneMemory: ['targetUrn'],
+  extractParentNodeToMemory: ['targetUrn'],
 };
 
-function inputHasRefField(type: GraphQLInputType, seen: Set<string>, depth = 0): boolean {
+function inputHasRefField(type: GraphQLInputType, seen: Set<string>): boolean {
   const named = getNamedType(type);
-  if (!isInputObjectType(named) || seen.has(named.name) || depth > 8) return false;
+  // `seen` bounds the walk against cycles; there is no depth cap, so a deeply nested ref field is never missed.
+  if (!isInputObjectType(named) || seen.has(named.name)) return false;
   seen.add(named.name);
   return Object.values(named.getFields()).some(
-    (f) => REF_ARG_NAME.test(f.name) || inputHasRefField(f.type, seen, depth + 1),
+    (f) => REF_ARG_NAME.test(f.name) || inputHasRefField(f.type, seen),
   );
 }
 
@@ -64,7 +72,7 @@ export const signedOutRefDoorsPlugin: ApolloServerPlugin<{ userId?: string; appI
         const doors = doorSet(schema);
         // null: the selection set cannot be enumerated, so it cannot be proven free of a ref door. Refuse.
         if (fields === null || fields.some((f) => doors.has(f))) {
-          throw new GraphQLError('Authenticated user required', { extensions: { code: 'UNAUTHENTICATED' } });
+          throw new GraphQLError('Authentication required', { extensions: { code: 'UNAUTHENTICATED', http: { status: 200 } } });
         }
       },
     };

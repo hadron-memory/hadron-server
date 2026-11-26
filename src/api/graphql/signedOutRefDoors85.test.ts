@@ -1,6 +1,7 @@
 /** #85 (cor:api:140:02 r7): signed-out callers get UNAUTHENTICATED before any App or organization ref resolves. */
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildASTSchema, parse } from 'graphql';
 import { db } from '../../integrations/db/client.js';
@@ -11,6 +12,135 @@ import { closeServerIfStarted, createServerOnCleanDb } from '../../test/startSer
 import { typeDefs } from './schema/typeDefs.js';
 import { signedOutRefDoors } from './signedOutRefDoorsPlugin.js';
 
+const PINNED_DOORS = [
+  'addAgentToApp',
+  'addOrgMember',
+  'adjustCredits',
+  'advanceChannelReadState',
+  'assignHostWorker',
+  'attachMemoryToApp',
+  'authorizeContextResetStop',
+  'cancelWebPoll',
+  'castWorker',
+  'claimContextReset',
+  'clearOwnerLimits',
+  'cloneMemory',
+  'collectHostOperations',
+  'compileAppAgentBootPrompt',
+  'createAgent',
+  'createAgentOrgGrant',
+  'createAgentSchedule',
+  'createAgentTask',
+  'createAgentTasks',
+  'createAgentWebhook',
+  'createApp',
+  'createAppKey',
+  'createAppMemory',
+  'createConnectionGrant',
+  'createGrant',
+  'createHomeAssistantInstance',
+  'createMcpServer',
+  'createMemory',
+  'createMemoryInApp',
+  'createMemorySubscription',
+  'createNode',
+  'createPrincipalGrant',
+  'createResendSender',
+  'createReviewNode',
+  'createScope',
+  'createSlackConnection',
+  'createSpecNode',
+  'createTaskNode',
+  'createTeamChatMessage',
+  'createTeamRole',
+  'createTelegramConnection',
+  'createTicker',
+  'createUserInvitation',
+  'deleteApp',
+  'deleteAppModelGroup',
+  'deleteMemorySubscription',
+  'deleteOrganization',
+  'deleteTeamRole',
+  'endAgentlessSession',
+  'ensureAppMember',
+  'extractParentNodeToMemory',
+  'grantApp',
+  'grantCredits',
+  'importNode',
+  'installAgentIntoApp',
+  'issueHostOperation',
+  'joinApp',
+  'leaveApp',
+  'liftTeamStopSignal',
+  'linkGithubApp',
+  'markOwnTeamChatRead',
+  'mintActionTickets',
+  'recordAppAction',
+  'recordHostSweepRun',
+  'recordTeamWork',
+  'regenerateAppKey',
+  'registerContextResetRecovery',
+  'registerHost',
+  'reinstallApp',
+  'removeAgentFromApp',
+  'removeAppMember',
+  'removeOrgMember',
+  'reportContextResetAgentStopped',
+  'reportContextResetRelaunchFailed',
+  'reportContextResetRelaunched',
+  'reportExternalTasks',
+  'reportHostOperation',
+  'restartWorkerSession',
+  'revokeAgentOrgGrant',
+  'revokeAppGrant',
+  'runTask',
+  'setAgentTaskStallSchedule',
+  'setAppAgentBootPrompt',
+  'setAppChatbotAiConfig',
+  'setAppDeliverySettings',
+  'setAppMemoryWriteGrant',
+  'setAppModelGroup',
+  'setAppProperties',
+  'setAppRoleList',
+  'setAppSweepMode',
+  'setAppTickerSettings',
+  'setAutomationReadGrant',
+  'setAutomationTeamSnapshotGrant',
+  'setHostSetupSource',
+  'setHostWorkerAvailability',
+  'setHostWorkerTerminals',
+  'setModelFamilyAvailability',
+  'setOrgBootPromptSigning',
+  'setOwnerLimits',
+  'setQuotaLimit',
+  'setSaturationAlarmWakeRoles',
+  'setTeamPause',
+  'setTeamStopSignal',
+  'setWorkerAvailability',
+  'setWorkerLeaveAlone',
+  'startConnection',
+  'startImpersonation',
+  'startSession',
+  'transferMemoryOwnership',
+  'triggerAppRun',
+  'unassignHostWorker',
+  'uninstallAgentFromApp',
+  'uninstallApp',
+  'unlinkGithubApp',
+  'updateApp',
+  'updateMemory',
+  'updateMemorySubscription',
+  'updateNode',
+  'updateOrgGithubApp',
+  'updateOrgMember',
+  'updateOrganization',
+  'updateReviewNode',
+  'updateSpecNode',
+  'updateTaskNode',
+  'updateTeamCollections',
+  'updateTeamRole',
+];
+
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 
 let server: Server;
@@ -19,6 +149,9 @@ let orgId: string;
 let orgUrn: string;
 let appId: string;
 let strangerToken: string;
+let deletedOrgId: string;
+let deletedAppId: string;
+let appKeyRaw: string;
 
 async function ask(query: string, bearer?: string) {
   const response = await fetch(`${base}/graphql`, {
@@ -50,35 +183,56 @@ beforeEach(async () => {
   orgUrn = `so85-${generateId().slice(0, 8)}`;
   const org = await db.organization.create({ data: { id: generateId(), name: 'so85', urn: orgUrn } });
   orgId = org.id;
-  const app = await db.app.create({ data: { id: generateId(), name: 'so85app', urn: `so85app-${generateId().slice(0, 8)}`, organizationId: orgId } as never });
+  const app = await db.app.create({ data: { id: generateId(), name: 'so85app', urn: `so85app-${generateId().slice(0, 8)}`, organizationId: orgId } });
   appId = app.id;
+  const gone = await db.organization.create({ data: { id: generateId(), name: 'so85gone', urn: `so85gone-${generateId().slice(0, 8)}`, deletedAt: new Date() } });
+  deletedOrgId = gone.id;
+  const goneApp = await db.app.create({ data: { id: generateId(), name: 'so85goneapp', urn: `so85goneapp-${generateId().slice(0, 8)}`, organizationId: orgId, deletedAt: new Date() } });
+  deletedAppId = goneApp.id;
+  appKeyRaw = `hdr_app_${generateId().replace(/[^0-9a-f]/g, '').padEnd(64, '0').slice(0, 64)}`;
+  await db.appKey.create({ data: { appId, keyHash: createHash('sha256').update(appKeyRaw).digest('hex'), keyPreview: appKeyRaw.slice(0, 12) } });
   const stranger = await db.user.create({ data: { handle: `so85-stranger-${generateId().slice(0, 6)}`, roles: ['READER'] } });
   strangerToken = await signJwt({ sub: stranger.id, roles: ['READER'] });
 });
 
 describe('#85 signed-out ref doors', () => {
-  it('derives the door list from the schema and covers every anchor of the issue', () => {
-    const list = signedOutRefDoors(buildASTSchema(parse(typeDefs), { assumeValidSDL: true }));
-    for (const door of ['createAppKey', 'regenerateAppKey', 'updateOrganization', 'deleteOrganization', 'linkGithubApp', 'updateOrgGithubApp', 'unlinkGithubApp', 'createUserInvitation', 'removeOrgMember']) {
-      expect(list, door).toContain(door);
-    }
-    expect(list).toEqual([...list].sort());
+  it('the derived door list is pinned exactly, so a door added or lost fails here', () => {
+    expect(signedOutRefDoors(buildASTSchema(parse(typeDefs), { assumeValidSDL: true }))).toEqual(PINNED_DOORS);
+  });
+
+  it('every mutation whose resolver resolves an App or organization reference directly is a door', async () => {
+    const { resolvers } = await import('./schema/resolvers.js');
+    const doors = new Set(PINNED_DOORS);
+    const direct = Object.entries(resolvers.Mutation as Record<string, unknown>)
+      .filter(([, fn]) => typeof fn === 'function' && /resolve(App|Org)Ref\(/.test(String(fn)))
+      .map(([name]) => name);
+    expect(direct.filter((name) => !doors.has(name))).toEqual([]);
+  });
+
+  it('every mutation taking an argument named exactly `ref` whose name mentions an App or an organization is a door', () => {
+    const schema = buildASTSchema(parse(typeDefs), { assumeValidSDL: true });
+    const doors = new Set(PINNED_DOORS);
+    const strays = Object.values(schema.getMutationType()!.getFields())
+      .filter((f) => /app(?![a-z])|App(?![a-z])|org/i.test(f.name) && f.args.some((a) => a.name === 'ref' || a.name === 'id') && !doors.has(f.name))
+      .map((f) => f.name);
+    expect(strays).toEqual([]);
   });
 
   it('a signed-out caller gets one byte-identical UNAUTHENTICATED for a real, a missing and a malformed ref', async () => {
     for (let i = 0; i < doors('x').length; i += 1) {
-      const answers = await Promise.all([appId, orgId, orgUrn, generateId(), 'hrn:org:no-such', '@@ not a ref @@']
+      const answers = await Promise.all([appId, orgId, orgUrn, deletedOrgId, deletedAppId, generateId(), 'hrn:org:no-such', '@@ not a ref @@']
         .map(async (ref) => ask(doors(ref)[i]!)));
       const first = answers[0]!;
-      expect(first.text, `door ${i}`).toContain('UNAUTHENTICATED');
+      expect(first.status, `door ${i}`).toBe(200);
+      expect(JSON.parse(first.text).errors[0].extensions.code, `door ${i}`).toBe('UNAUTHENTICATED');
       for (const a of answers) expect(a, `door ${i}`).toEqual(first);
     }
   });
 
   it('writes nothing for a signed-out caller', async () => {
     const before = await db.appKey.count();
-    await ask(doors(appId)[0]!);
-    await ask(doors(orgId)[2]!);
+    for (const q of doors(appId)) await ask(q);
+    for (const q of doors(orgId)) await ask(q);
     expect(await db.appKey.count()).toBe(before);
     expect((await db.organization.findUniqueOrThrow({ where: { id: orgId } })).name).toBe('so85');
   });
@@ -87,8 +241,22 @@ describe('#85 signed-out ref doors', () => {
     for (const ref of [orgId, generateId()]) {
       for (const q of doors(ref)) {
         const a = await ask(q, strangerToken);
-        expect(a.text).not.toContain('UNAUTHENTICATED');
+        expect(['FORBIDDEN', 'NOT_FOUND', 'ORGANIZATION_NOT_FOUND', 'APP_NOT_FOUND']).toContain(JSON.parse(a.text).errors[0].extensions.code);
       }
+    }
+  });
+
+  it('an aliased door and a fragment-wrapped door are refused the same way signed out', async () => {
+    const aliased = await ask(`mutation { x: createAppKey(appRef: "${appId}") { rawKey } }`);
+    const fragmented = await ask(`mutation { ...F } fragment F on Mutation { ... on Mutation { createAppKey(appRef: "${appId}") { rawKey } } }`);
+    for (const a of [aliased, fragmented]) expect(JSON.parse(a.text).errors[0].extensions.code).toBe('UNAUTHENTICATED');
+  });
+
+  it('an App-key caller is not refused by the gate (its answer is the door\'s own)', async () => {
+    for (const q of doors(appId)) {
+      const a = await ask(q, appKeyRaw);
+      const code = JSON.parse(a.text).errors?.[0]?.extensions?.code;
+      expect(code).not.toBe('UNAUTHENTICATED');
     }
   });
 
