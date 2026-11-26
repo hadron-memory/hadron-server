@@ -60,10 +60,17 @@ describe('#3999 readable approval model (Node VM; no browser)',()=>{
   expect(values[3]).toBe(new Intl.NumberFormat().format(1024)+' bytes');expect(values[4]).not.toBe(summary.expiresAt);expect(values[4]).toContain(Intl.DateTimeFormat().resolvedOptions().timeZone);
   const text=JSON.stringify(dl);expect(text).not.toContain('opaque-user-id');expect(text).not.toContain('SET_PROTECTED');expect(text).not.toContain('never-render-canary');
  });
- it('renders the proposed inspectable metadata as plain text for a store',async()=>{
+ it('renders the proposed inspectable metadata as readable text for a store (#4626 item 17)',async()=>{
   const metadata={type:'bearer',urlPrefix:'https://example.test/<script>unsafe</script>'};
   const {elements}=await pageModel({operation:'STORE',change:'Update secret metadata',sizeBytes:null,metadata});await elements.start.onclick!();
-  const rows=elements.review.children[0].children;const i=rows.findIndex(n=>n.textContent==='New metadata');expect(i).toBeGreaterThan(-1);expect(rows[i+1].textContent).toBe(JSON.stringify(metadata));
+  const rows=elements.review.children[0].children;const i=rows.findIndex(n=>n.textContent==='New metadata');expect(i).toBeGreaterThan(-1);
+  expect(rows[i+1].textContent).toBe('type: bearer; urlPrefix: https://example.test/<script>unsafe</script>');
+  expect(rows[i+1].textContent).not.toContain('{');
+ });
+ it('shows no metadata row at all for a protection-flag-only change (#4626 item 17)',async()=>{
+  const {elements}=await pageModel({operation:'STORE',change:'Turn protection off',sizeBytes:null});await elements.start.onclick!();
+  const rows=elements.review.children[0].children;
+  expect(rows.some(n=>n.textContent==='New metadata')).toBe(false);
  });
  it('a dismissed proof prompt is a retryable cancellation, not an unavailable request',async()=>{
   const {elements}=await pageModel({}, {cancelled:true});await elements.start.onclick!();
