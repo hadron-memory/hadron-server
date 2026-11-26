@@ -1,7 +1,7 @@
 /**
  * #473 — the uniform base read surface: per entity, a find-one taking
  * `ref` (PK or fully-qualified URN), a paginated find-many returning the
- * { items, total } envelope, and the cor:api:100:01 orgRef scope (member →
+ * { items, total } envelope, and the cor:api:100:01 orgId scope (member →
  * scope, non-member → empty page, no disclosure, no admin bypass).
  *
  * Migrated legacy suites cover the semantics the new queries inherited
@@ -119,7 +119,7 @@ describe('Query.edges — the uniform paginated edge list', () => {
     ).toBe(0);
   });
 
-  it('orgRef: member → scoped, non-member → empty page (no disclosure)', async () => {
+  it('orgId: member → scoped, non-member → empty page (no disclosure)', async () => {
     expect((await Q.edges(null, { orgRef: orgA.id }, ctx(member.id))).total).toBe(1);
     expect(await Q.edges(null, { orgRef: orgB.id }, ctx(member.id))).toEqual({ items: [], total: 0 });
     expect(await Q.edges(null, { orgRef: 'no-such-org' }, ctx(member.id))).toEqual({ items: [], total: 0 });
@@ -207,7 +207,7 @@ describe('Query.agents — the uniform paginated agent list', () => {
     expect((await Q.agents(null, {}, ctx(admin.id, ['ADMIN']))).total).toBe(2);
   });
 
-  it('orgRef: member → scoped; non-member → empty; NO admin bypass', async () => {
+  it('orgId: member → scoped; non-member → empty; NO admin bypass', async () => {
     expect((await Q.agents(null, { orgRef: orgA.urn }, ctx(member.id))).total).toBe(1);
     expect(await Q.agents(null, { orgRef: orgB.id }, ctx(member.id))).toEqual({ items: [], total: 0 });
     // The admin is not a member of orgA — scoping is a membership concept.

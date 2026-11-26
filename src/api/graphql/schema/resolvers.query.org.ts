@@ -378,7 +378,7 @@ export const orgQueries = {
         query,
         entityTypes,
         fields,
-        orgRef: orgRefArg,
+        orgRef: orgIdArg,
         limit,
         offset,
         scope,
@@ -399,7 +399,7 @@ export const orgQueries = {
       // Spec 049 Phase 3 — a named scope narrows the Memory + Node slices to
       // the scope's memories (already ∩ access, S2); `global` becomes the
       // organization narrowing below. Nothing else changes; omitted ⇒ pre-049.
-      let orgId = orgRefArg;
+      let orgId = orgIdArg;
       let scopeRes: SearchScopeResolution | null = null;
       if (scope != null && scope.trim() !== '') {
         scopeRes = await resolveNamedScopeForQuery(ctx, scope, appRef ?? null, orgId ?? null);

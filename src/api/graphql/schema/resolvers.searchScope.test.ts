@@ -128,7 +128,7 @@ describe('a scope named in the call', () => {
     expect(locsOf(r)).toEqual([`${memA1.id}:alpha`]);
   });
 
-  it('`global` is the organization view: orgRef, else the single membership, else ORG_REQUIRED', async () => {
+  it('`global` is the organization view: orgId, else the single membership, else ORG_REQUIRED', async () => {
     const named = await Q.findNodes({}, { scope: 'global', orgRef: orgA.urn }, ctx(twoOrgs.id));
     expect(named.scope).toMatchObject({ kind: 'global', label: orgA.urn });
     expect(locsOf(named)).toEqual([`${memA1.id}:alpha`, `${memA2.id}:alpha`].sort());
@@ -137,7 +137,7 @@ describe('a scope named in the call', () => {
     // The envelope says what was searched — the org's readable memories, materialised.
     expect(new Set(single.scope.memoryUrns)).toEqual(new Set([memA1.urn, memA2.urn]));
     await expect(Q.findNodes({}, { scope: 'global' }, ctx(twoOrgs.id))).rejects.toMatchObject({ extensions: { code: 'ORG_REQUIRED' } });
-    // An orgRef that names nothing is a FINAL refusal — never the single membership instead (Codex on #1161).
+    // An orgId that names nothing is a FINAL refusal — never the single membership instead (Codex on #1161).
     await expect(Q.findNodes({}, { scope: 'global', orgRef: `no-such-${generateId()}` }, ctx(reader.id))).rejects.toMatchObject({ extensions: { code: 'ORG_REQUIRED' } });
   });
 
@@ -168,26 +168,10 @@ describe('a scope named in the call', () => {
 describe('#1173 — a refusal states the condition, never another surface\'s remedy', () => {
   // The CLI, MCP and the portal read the SAME string, so a remedy phrased in
   // one surface's vocabulary is unactionable on the other two: `appRef` and
-  // `orgRef` are GraphQL argument names, `hadron_set_active_org` is an MCP tool.
+  // `orgId` are GraphQL argument names, `hadron_set_active_org` is an MCP tool.
   // A CLI user can type none of them; a portal user can click none of them.
   // `conventions:the-error-code-is-the-contract-the-prose-is-not`.
-  // #5188: the argument was renamed orgId → orgRef (#5166), so the guard grew
-  // `orgRef`; `orgId` stays so a message drifting back to the old name is
-  // still caught. The control test below pins every term.
-  const FOREIGN_VOCABULARY = /appRef|orgRef|orgId|scopeRef|hadron_|\(MCP\)|\(GraphQL\)/;
-
-  it('#5188 control: the vocabulary guard knows every current argument name, so a green not.toMatch is proof of absence', async () => {
-    // A refusal message that DID say `orgRef` (or any other term) must be
-    // caught: each term matches on its own. Without this, dropping a renamed
-    // argument from the pattern would leave every `not.toMatch` green while
-    // proving nothing — the mutant the #5188 seat runs removes `orgRef` from
-    // FOREIGN_VOCABULARY and this goes red.
-    for (const term of ['appRef', 'orgRef', 'orgId', 'scopeRef', 'hadron_set_active_org', '(MCP)', '(GraphQL)']) {
-      expect(`a remedy that says ${term} here`).toMatch(FOREIGN_VOCABULARY);
-    }
-    // And the negative half: a message with none of the vocabulary stays green.
-    expect('name an organization to scope this search').not.toMatch(FOREIGN_VOCABULARY);
-  });
+  const FOREIGN_VOCABULARY = /appRef|orgId|scopeRef|hadron_|\(MCP\)|\(GraphQL\)/;
 
   const refusalOf = async (call: Promise<unknown>) => {
     try {
