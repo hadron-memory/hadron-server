@@ -162,7 +162,11 @@
   ],
   [
    "hadron_agent_tasks",
-   "ff505d4c18614f0f4ab4671b3e88a523a2d61b4c346974edf16c82c91db4254b"
+   "24cea80e8bfbfb3be914d917eda80d1acaaa790899a16a38e8301852e556cb18"
+  ],
+  [
+   "hadron_get_instructions",
+   "62b5b613863a3cd45d53c891bd755feb6da23abe1ea9673b8552d492ef993104"
   ],
   [
    "hadron_agent_processes",
@@ -524,7 +528,11 @@
   ],
   [
    "hadron_agent_tasks",
-   "ff505d4c18614f0f4ab4671b3e88a523a2d61b4c346974edf16c82c91db4254b"
+   "24cea80e8bfbfb3be914d917eda80d1acaaa790899a16a38e8301852e556cb18"
+  ],
+  [
+   "hadron_get_instructions",
+   "62b5b613863a3cd45d53c891bd755feb6da23abe1ea9673b8552d492ef993104"
   ],
   [
    "hadron_agent_processes",
@@ -886,7 +894,11 @@
   ],
   [
    "hadron_agent_tasks",
-   "ff505d4c18614f0f4ab4671b3e88a523a2d61b4c346974edf16c82c91db4254b"
+   "24cea80e8bfbfb3be914d917eda80d1acaaa790899a16a38e8301852e556cb18"
+  ],
+  [
+   "hadron_get_instructions",
+   "62b5b613863a3cd45d53c891bd755feb6da23abe1ea9673b8552d492ef993104"
   ],
   [
    "hadron_agent_processes",
@@ -1248,7 +1260,11 @@
   ],
   [
    "hadron_agent_tasks",
-   "ff505d4c18614f0f4ab4671b3e88a523a2d61b4c346974edf16c82c91db4254b"
+   "24cea80e8bfbfb3be914d917eda80d1acaaa790899a16a38e8301852e556cb18"
+  ],
+  [
+   "hadron_get_instructions",
+   "62b5b613863a3cd45d53c891bd755feb6da23abe1ea9673b8552d492ef993104"
   ],
   [
    "hadron_agent_processes",

@@ -28,6 +28,7 @@ import { canReadMemory, EXPLICIT_REF } from './access-control.js';
 import { resolveAgentRef } from '../lib/entityRef/agentRef.js';
 import { listAgentProcesses, listAgentTasks, type ListedNode } from '../lib/agentDefinitionLists.js';
 import { emitEntityUrnV2, safeNodeUrnV2 } from '../lib/urnEmit.js';
+import { currentActor } from '../lib/requestActor.js';
 
 function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
@@ -56,10 +57,23 @@ function refusalResult(e: unknown) {
   return { isError: true as const, content: [{ type: 'text' as const, text: `[${code}] ${wire.message}` }] };
 }
 
+/** #5284: one served task of an agentInstructions answer, as the resolver returns it. */
+type InstructionsEntry = { node: ListedNode; score?: number | null };
+type InstructionsAnswer = {
+  state: 'MATCHED' | 'NO_MATCH';
+  route: 'REGISTER' | 'SEARCH' | null;
+  register: { code: string; state: string } | null;
+  candidates: InstructionsEntry[];
+  instructions: string | null;
+  nearest: InstructionsEntry[];
+  fallback: InstructionsEntry | null;
+};
+
 type AgentRow = { id: string; urn: string; extendsAgentId: string | null; tasksIndexRef: string | null; processesIndexRef: string | null };
 type Resolver<A> = (parent: unknown, args: A, ctx: Context) => Promise<AgentRow>;
 type ServedRead = { decision: { pointerLevel: string; compiledNodeId: string; servedRevSeq: number }; text: string };
 const Q = resolvers.Query as unknown as {
+  agentInstructions: (parent: unknown, args: { agentRef: string | null; appRef: string | null; phrase: string | null; eventCode: string | null }, ctx: Context) => Promise<InstructionsAnswer>;
   agentServedBootPrompt: (parent: unknown, args: { agentRef: string; appRef?: string | null; llmModel?: string | null }, ctx: Context) => Promise<ServedRead>;
 };
 const M = resolvers.Mutation as unknown as {
@@ -124,20 +138,57 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
     'hadron_agent_tasks',
     "List an Agent's tasks (cor:dmo:050:15): every runnable node in its effective system memory, across its base chain, and every task the tasks index (Agent.tasksIndexRef) of an Agent in the chain lists, each once. A task an index lists carries that edge's name as its Trigger; a task no index lists has none. A base's task keeps its own URN and says which Agent it is inherited from. Readable by whoever may read the Agent's system memory. Returns the same list as GraphQL agentTaskList. To act on a task, follow the Trigger that matches your situation and read the task by its URN; for an inherited one, read it at its 'Read through' address (the same loc in this Agent's own system memory), since you may be able to read the Agent and not its base.",
     SHAPE_HADRON_AGENT_TASKS,
-    async ({ agentRef: ref, symptom, limit }) => {
+    async ({ agentRef: ref, phrase, limit }) => {
       try {
         const { id } = await resolveAgentRef(db, ref);
-        const entries = await listAgentTasks(db, auth, id, ref, { symptom, limit });
+        const entries = await listAgentTasks(db, auth, id, ref, { phrase, limit });
         if (entries.length === 0) return textResult(`No tasks for Agent ${ref}.`);
         const urns = await nodeUrns(db, entries.map((e) => e.node));
         const child = await systemMemoryUrn(db, id);
         const lines = [`${entries.length} task(s) for Agent ${ref}:`];
         for (const e of entries) {
-          lines.push(...entryLines(e.node, urns.get(e.node.id)!, [...(e.trigger ? [`Trigger: ${e.trigger}`] : []), ...(e.matchedBy ? [`Abstract: ${e.node.abstract}`, `Matched by: ${e.matchedBy}`] : [])], child));
+          lines.push(...entryLines(e.node, urns.get(e.node.id)!, [...(e.trigger ? [`Trigger: ${e.trigger}`] : []), ...(e.matchedBy ? [`Abstract: ${e.node.abstract}`, `Matched by: ${e.matchedBy}`, ...(e.score != null ? [`Score: ${e.score.toFixed(2)}`] : [])] : [])], child));
         }
         return textResult(lines.join('\n'));
       } catch (e) {
         return errorResult(e);
+      }
+    },
+  );
+
+  server.tool(
+    'hadron_get_instructions',
+    "Get the role task to follow (Proposed cor:dmo:050:24): give a phrase describing your situation, an eventCode, or both, and get the best-fit task with its full body, or a clear 'No task matches this phrase.'. With an eventCode (it needs appRef), the App's action register answers first. Otherwise the phrase is matched against the abstracts of the Agent's tasks (hadron_agent_tasks), and only tasks scoring at or above the no-match floor (0.45 by default) count: the best is returned with its body, runners-up by name only. With no match you get no body; the nearest tasks are named for diagnosis only, and in an App the task the register maps instructions.no-match to is named as the fallback. agentRef may be omitted to use your own Agent (a bound worker's); a caller with no Agent of its own must name one. Without appRef the Agent is read as hadron_agent_tasks reads it; with appRef you must take part in the App and the Agent must be installed or cast there. Refusals: BAD_USER_INPUT, APP_NOT_FOUND, AGENT_NOT_FOUND (alike for unknown and unreadable). Nothing is recorded. The same answer as GraphQL agentInstructions.",
+    SHAPE_HADRON_GET_INSTRUCTIONS,
+    async ({ agentRef: ref, appRef, phrase, eventCode }) => {
+      try {
+        const answer = await Q.agentInstructions({}, { agentRef: ref ?? null, appRef: appRef ?? null, phrase: phrase ?? null, eventCode: eventCode ?? null }, contextOf(db, auth));
+        const all = [...answer.candidates, ...answer.nearest, ...(answer.fallback ? [answer.fallback] : [])];
+        const urns = await nodeUrns(db, all.map((e) => e.node));
+        // The asking Agent, for the Read through line: resolved after the resolver answered, so its refusals keep their order.
+        const agentId = !all.length ? null : ref ? (await resolveAgentRef(db, ref)).id : currentActor().agentId;
+        const child = agentId ? await systemMemoryUrn(db, agentId) : null;
+        const render = (e: InstructionsEntry, extra: string[]) => entryLines(e.node, urns.get(e.node.id)!, extra, child);
+        const lines: string[] = [];
+        if (answer.state === 'MATCHED') {
+          const [best, ...rest] = answer.candidates;
+          lines.push('Follow this task:', ...render(best, answer.route === 'REGISTER' ? [`Event code: ${answer.register?.code ?? ''}`] : [`Score: ${best.score?.toFixed(2) ?? 'none'}`]), '', answer.instructions ?? '');
+          if (rest.length) {
+            lines.push('', 'Other candidates:');
+            for (const e of rest) lines.push(...render(e, e.score != null ? [`Score: ${e.score.toFixed(2)}`] : []));
+          }
+        } else {
+          lines.push('No task matches this phrase.');
+          if (answer.register) lines.push(`Register: ${answer.register.code} is ${answer.register.state}`);
+          if (answer.fallback) lines.push('', 'Fallback (the register maps instructions.no-match to it):', ...render(answer.fallback, []));
+          if (answer.nearest.length) {
+            lines.push('', 'Nearest, under the match floor (not instructions):');
+            for (const e of answer.nearest) lines.push(...render(e, [`Score: ${e.score != null ? e.score.toFixed(2) : 'none (keyword only)'}`]));
+          }
+        }
+        return textResult(lines.join('\n'));
+      } catch (e) {
+        return refusalResult(e);
       }
     },
   );
@@ -251,7 +302,14 @@ const indexRef = (which: 'tasks' | 'processes', spec: string) => z.string().min(
 // function- or block-scoped binding, so `tsc` rejects one that captures `auth` or any other
 // per-session value). Every MCP session registers these same objects instead of rebuilding ~15 MB.
 
-const SHAPE_HADRON_AGENT_TASKS = { agentRef, symptom: z.string().optional().describe('Situation to match against runnable effective-chain task abstracts; omit for the unchanged full list.'), limit: z.number().int().positive().optional().describe('Symptom candidates to return (default 3, values above 3 clamp to 3); ignored without symptom.') };
+const SHAPE_HADRON_AGENT_TASKS = { agentRef, phrase: z.string().optional().describe('A phrase describing your situation, matched against the abstracts of the runnable effective-chain tasks; each result carries its Score. Omit it for the unchanged full list.'), limit: z.number().int().positive().optional().describe('How many ranked tasks to return: default 3, at most 10 (11 or more is refused). Ignored without a phrase.') };
+
+const SHAPE_HADRON_GET_INSTRUCTIONS = {
+  agentRef: z.string().min(1).optional().describe('The Agent: its ID or fully-qualified URN (hrn:agent:<root>:<slug>). Omit it to use your own Agent (a bound worker\'s).'),
+  appRef: z.string().min(1).optional().describe('The App to ask in: its ID or fully-qualified URN (hrn:app:<root>:<slug>). Needed for an eventCode and for the instructions.no-match fallback; omit it if your Agent is in no team App.'),
+  phrase: z.string().optional().describe('Your situation in a few words, 1 to 500 characters; matched against task abstracts.'),
+  eventCode: z.string().optional().describe('An event code (cor:agt:110:01) for the App\'s action register to answer first; needs appRef.'),
+};
 
 const SHAPE_HADRON_AGENT_PROCESSES = { agentRef };
 

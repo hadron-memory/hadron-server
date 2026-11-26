@@ -18,6 +18,7 @@ import { upsertAbstractVector } from '../../../services/embedding/vectors.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
 import { typeDefs } from './typeDefs.js';
+import { formatGraphQLError } from '../formatError.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -81,7 +82,7 @@ const QUERY_DOC = `query($a: ID, $p: ID, $ph: String, $c: String) {
     fallback { node { id loc } }
   }
 }`;
-const apollo = new ApolloServer<Context>({ typeDefs, resolvers });
+const apollo = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
 async function run(query: string, variables: Record<string, unknown>, c: Context) {
   const res = await apollo.executeOperation({ query, variables }, { contextValue: c });
   if (res.body.kind !== 'single') throw new Error('expected a single result');
@@ -252,7 +253,7 @@ describe('#5284 agentInstructions: the search arm and the floor', () => {
     const r = await ask({ a: coder.id, ph: 'deploy' });
     expect([r.state, r.instructions, locs(r.nearest)]).toEqual(['NO_MATCH', null, ['tasks:deploy']]);
   });
-  it.each(['0', '1', 'abc', '', '-0.2', '1.5'])('TASK_MATCH_MIN_SCORE=%j uses the default 0.45', async (v) => {
+  it.each(['0', '1', 'abc', '', '-0.2', '1.5', '3e-1', '0x0'])('TASK_MATCH_MIN_SCORE=%j uses the default 0.45', async (v) => {
     vi.stubEnv('TASK_MATCH_MIN_SCORE', v);
     expect((await ask({ a: coder.id, ph: 'something weak' })).state).toBe('NO_MATCH');
     expect((await ask({ a: coder.id, ph: 'deploy failed' })).state).toBe('MATCHED');

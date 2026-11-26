@@ -16,6 +16,8 @@ import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { listAgentProcesses, listAgentTasks, reverifyServed, type ListedNode } from '../../../lib/agentDefinitionLists.js';
 import { readAgentRevisionList } from '../../../lib/agentRevisionSnapshot.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
+import { loadAgentInstructions } from '../../../lib/taskMatch/instructions.js';
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import {
   type Context,
@@ -148,10 +150,26 @@ export const agentQueries = {
      * index lists, each once, with the listing edge's trigger where one exists.
      * hadron_agent_tasks returns the same list (src/lib/agentDefinitionLists.ts).
      */
-    agentTaskList: async (_: unknown, { ref, symptom, limit }: { ref: string; symptom?: string | null; limit?: number | null }, ctx: Context) => {
+    agentTaskList: async (_: unknown, { ref, phrase, limit }: { ref: string; phrase?: string | null; limit?: number | null }, ctx: Context) => {
       const { id } = await resolveAgentRef(ctx.db, ref);
-      return listedEntries(ctx, id, await listAgentTasks(ctx.db, ctx, id, ref, { symptom, limit }));
+      return listedEntries(ctx, id, await listAgentTasks(ctx.db, ctx, id, ref, { phrase, limit }));
     },
+
+    /**
+     * #5284 (S4 of #4360; Proposed cor:dmo:050:24) — the role task to follow, with its body, or that no task fits.
+     * The logic is src/lib/taskMatch/instructions.ts; this binds it to the list's own serving path: candidates are
+     * hydrated and re-verified exactly as agentTaskList serves them, and the body is `Node.content`'s own resolution
+     * (resolveNodeContent, includes resolved with the caller's access) of the row served as candidates[0].
+     * hadron_get_instructions calls this resolver.
+     */
+    agentInstructions: async (
+      _: unknown,
+      args: { agentRef?: string | null; appRef?: string | null; phrase?: string | null; eventCode?: string | null },
+      ctx: Context,
+    ) => loadAgentInstructions(ctx, args, {
+      serve: (agentId, entries) => listedEntries(ctx, agentId, entries),
+      body: (served) => resolveNodeContent(ctx, served.node as Parameters<typeof resolveNodeContent>[1]),
+    }),
 
     /**
      * #1892 (cor:dmo:050:16) — an Agent's processes: those it starts or owns
