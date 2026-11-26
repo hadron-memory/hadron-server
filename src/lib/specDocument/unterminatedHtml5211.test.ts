@@ -395,3 +395,92 @@ describe('#5265 fix head after 8652e68e: guards the fuzz and the mutants found',
     expect(losers(escapeUnterminatedHtml(body))).toEqual(['commonmark.js', 'markdown-it']);
   });
 });
+
+describe('#5265 fix head after 597e24ba: the residuals main kept and 597e24ba lost (Xan #151509)', () => {
+  const CM = ['commonmark.js', 'markdown-it'];
+  // Each body loses the anchor at 597e24ba in every reader; escaped as now, it loses it in no reader main keeps it in (a reader that main
+  // loses too is listed: the construct there is code to it, or a fence that opens to the end takes the anchor whatever is escaped).
+  it.each<[string, string[]]>([
+    ['- >\n  ~~~\r\n<script', []],
+    ['- >\n  ~~~\r\n<textarea', []],
+    ['<!T>-\n  ~~~\r\n<xmp>', CM],
+    ['<!T>+\n  ~~~\r\n<xmp>', CM],
+    ['>=\na\n-\n  ~~~\r\n<script', ['marked']],
+    ['>x\na\n-\n  ~~~\r\n<script', ['marked']],
+    ['<?>\n~~~\r\n<p', CM],
+    ['<div/\n<pre>\n~~~', []],
+  ])('%j: the losers once escaped are %j', (body, after) => {
+    expect(losers(escapeUnterminatedHtml(body))).toEqual(after);
+  });
+});
+
+describe('#5265 fix head after 597e24ba: the readers\' rules the residuals needed', () => {
+  const CM = ['commonmark.js', 'markdown-it'];
+  it.each<[string, string[], string]>([
+    // A fence in an item that opens with a quote, in a nested item, or in the item a marker opens right after a closer ends with the item.
+    ['- >\n  ~~~\n<script', [], 'item that opens with a quote'],
+    ['- - x\n  ~~~\n<xmp>', [], 'nested item'],
+    ['<!T>-\n  ~~~\n<xmp>', CM, 'item after a declaration'],
+    ['<![CDATA[]]>- a\n  ~~~\n<xmp>', CM, 'item after CDATA'],
+    ['<!x><!l>+\n  ~~~\n<!--', CM, 'item after a second declaration on the line'],
+    // CommonMark keeps a lazy quote line in the quote: the lone `-` after it opens an item.
+    ['>x\na\n-\n  ~~~\n<script', ['marked'], 'lazy quote line'],
+    // A lone marker short of a bare item's content after its paragraph is the next item, not an underline; `=` there is lazy text.
+    ['-\n  u\n-\n\t<script', [], 'next bare item'],
+    ['-\n  u\n=\n\t<script', [], 'lazy `=`'],
+    // marked's processing instruction needs a `?>` after `<?`; a CDATA or PI closer restarts marked, so a fence, an HTML block there opens.
+    ['<?>\n~~~\n<p', CM, '`<?>` has no closer'],
+    ['<??>~~~', [], 'fence after a PI'],
+    ['<![CDATA[]]>~~~', [], 'fence after CDATA'],
+    ['<![CDATA[]]><n>\n~~~\n<textarea', CM, 'type 7 block after CDATA'],
+    ['<??><div>\n~~~\n<textarea', CM, 'type 6 block after a PI'],
+  ])('%j: the losers once escaped are %j (%s)', (body, after) => {
+    expect(losers(escapeUnterminatedHtml(body))).toEqual(after);
+  });
+
+  // Left as written: escaping would hand a reader the loss it does not have.
+  it.each<[string, string[], string]>([
+    // A top-level `<pre>` with no closer runs raw to the end; escaped, the `~~~` under it would open a fence that never closes.
+    ['<pre>\n~~~', [], 'line-head pre'],
+    ['<!y><pre>\n~~~', CM, 'pre at marked\'s restart'],
+    // That one is judged by marked's reading (CommonMark reads that `<pre>` as inline): escaped, it would hand marked the fence.
+    ['<!y><pre>\n<x>\n~~~', [], 'pre at marked\'s restart, judged by marked'],
+    // marked reads a textarea right after a CDATA closer as a type 1 block that its end tag closes; CommonMark's fence takes the anchor anyway.
+    ['<![CDATA[]]><textarea>\n~~~\n</textarea>', CM, 'textarea after CDATA'],
+    ['<![CDATA[]]><textarea>\n~~~\r\n</textarea>', CM, 'textarea after CDATA, CRLF'],
+    // A declaration that follows another inside a quote opens its fence in the quote, which ends with it.
+    ['><!y><!x>~~~\n-\n  ```', [], 'declarations in a quote'],
+  ])('%j: kept as written, losers %j (%s)', (body, after) => {
+    expect(escapeUnterminatedHtml(body)).toBe(body);
+    expect(losers(body)).toEqual(after);
+  });
+
+  // After a closer, what the rest of the line is decides whether the next line continues a paragraph. Each one here leaves none open, so the
+  // declaration on the next line starts a block whose fence never closes in marked, and is escaped; plain text there is continued.
+  it.each([
+    '><![CDATA[]]>```\n<!x>~~~',
+    '<??>>\n<!l>```',
+    '<??>>     z\n<!l>```',
+    '<![CDATA[]]><!-->-\n<!l>```',
+    '<??>    x\n<!l>```',
+    '<!T>#\n<!l>```',
+  ])('%j: the declaration on the next line is escaped', (body) => {
+    expect(losers(body)).toEqual(['marked']);
+    expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+  });
+
+  it('plain text after a declaration is a paragraph: an indented raw-text tag under it is inline, and escaped', () => {
+    const body = '<!h>`\n    <textarea>';
+    expect(losers(body)).toEqual(['marked']);
+    expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+  });
+});
+
+it('#5265 the exemptions and restarts after 597e24ba stay fast on thousands of lines', () => {
+  for (const unit of ['<pre>\n~~~\n', '<div/\n<pre>\n~~~\n', '<!y><pre>\n~~~\n', '<![CDATA[]]><textarea>\n~~~\n</textarea>\n', '<??><n>\n~~~\n', '<!x><!l>+\n  ~~~\n', '-\n  u\n-\n\t<script\n']) {
+    const body = unit.repeat(3000);
+    const t = performance.now();
+    escapeUnterminatedHtml(body);
+    expect({ unit, fast: performance.now() - t < 2000 }).toEqual({ unit, fast: true });
+  }
+}, 60_000);
