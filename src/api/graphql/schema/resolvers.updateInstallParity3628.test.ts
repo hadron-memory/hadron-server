@@ -166,7 +166,7 @@ for (const kind of ['ROW', 'DERIVED'] as const) {
         return result.body.singleResult.extensions?.warnings;
       };
       const text = '{{> target rev=1}}';
-      expect(await execute({ memoryId: f.memoryId, loc: 'control', content: text })).toEqual([expect.objectContaining({ path: 'updateNode', code: 'include.pin.unkept' })]);
+      expect(await execute({ memoryRef: f.memoryId, loc: 'control', content: text })).toEqual([expect.objectContaining({ path: 'updateNode', code: 'include.pin.unkept' })]);
       // The control writes another node so it cannot pre-acknowledge this pin.
       expect(await execute({ ...f.input, content: 'install ' + text })).toEqual([expect.objectContaining({ path: 'updateNode', code: 'include.pin.unkept' })]);
     } finally { await server.stop(); }

@@ -207,7 +207,7 @@ export const scopeQueries = {
       const r = await resolveScopeByNameInApp(ctx, name, appId);
       if (r.ambiguousAmong.length) {
         throw new GraphQLError(
-          `"${name}" is owned by ${r.ambiguousAmong.length} Agents installed in this App; address one by id: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`,
+          `That scope name is owned by ${r.ambiguousAmong.length} Agents installed in this App; address one by id: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`,
           { extensions: { code: 'SCOPE_NAME_AMBIGUOUS', candidates: r.ambiguousAmong.map((s) => s.id) } },
         );
       }

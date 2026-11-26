@@ -142,7 +142,7 @@ describe('#2805 question doors vs a root create through the root-seq key', () =>
     const tWaitsOnChannel = await advisoryWaiterOn(await channelKey(memory.id));
 
     // A: a real root create that takes K and then waits on F(W) if T holds it.
-    const A = outcome(resolvers.Mutation.createNode(null, { input: { memoryId: memory.id, loc: 'rootA', name: 'rootA' } }, as()));
+    const A = outcome(resolvers.Mutation.createNode(null, { input: { memoryRef: memory.id, loc: 'rootA', name: 'rootA' } }, as()));
     const settle = async (ms: number) => { const t = Date.now(); while (Date.now() - t < ms) await setImmediate(); };
     await settle(600);
     goK();

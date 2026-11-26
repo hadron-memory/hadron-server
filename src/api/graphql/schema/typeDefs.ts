@@ -243,8 +243,8 @@ export const typeDefs = `#graphql
   """
   input NodeFilter {
     "Memory scope — a mix of memory IDs and fully-qualified URNs; intersected with the caller's access."
-    memoryIds: [ID!]
-    "Restrict by memory class. SYSTEM is excluded by default; passing this (or naming a system memory in memoryIds) overrides that."
+    memoryRefs: [ID!]
+    "Restrict by memory class. SYSTEM is excluded by default; passing this (or naming a system memory in memoryRefs) overrides that."
     memoryClasses: [MemoryClass!]
     "Without it, system and chat-message nodes are left out (hrn:node:hadronmemory.com:specs:cor:api:090:02); naming one of them returns it. record nodes are never left out. An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
     nodeType: String
@@ -1040,22 +1040,22 @@ export const typeDefs = `#graphql
     unreadable, deleted, unresolvable or nonexistent Agent yields an empty page,
     never a not-found or forbidden error. Combines with ownedByMe and orgRef.
     """
-    agentId: ID
+    agentRef: ID
   }
 
   """
   Filter for the uniform edges() list (#473). Clauses AND-combine and are
-  intersected with the caller's readable memories. memoryId / sourceNodeId /
-  targetNodeId each accept an ID or a fully-qualified URN; an unresolvable
+  intersected with the caller's readable memories. memoryRef / sourceRef /
+  targetRef each accept an ID or a fully-qualified URN; an unresolvable
   ref yields an empty page (consistent with the no-disclosure posture).
   """
   input EdgeFilter {
     "Confine to edges whose (denormalized, source-side) memory is this one."
-    memoryId: ID
+    memoryRef: ID
     "Edges leaving this node."
-    sourceNodeId: ID
+    sourceRef: ID
     "Edges arriving at this node."
-    targetNodeId: ID
+    targetRef: ID
     """
     #2999 — runnability is tri-state, with parity to the node filter. true returns only runnable edges; false returns only edges explicitly marked not runnable. An edge never marked (NULL) matches neither, and only an omitted filter returns it. (hrn:node:hadronmemory.com:specs:cor:dmo:060:03)
     """
@@ -1085,7 +1085,7 @@ export const typeDefs = `#graphql
   input AiServiceConfigFilter {
     ownerType: AiConfigOwnerType!
     "The owning entity — accepts ID or URN (HADRON_SERVER: ID only)."
-    ownerId: ID!
+    ownerRef: ID!
   }
 
   """
@@ -2070,7 +2070,7 @@ export const typeDefs = `#graphql
     expectedWorkerId, expectedWorkerName (null unless the caller may read that worker), foundWorkerId,
     foundWorkerName and foundSource (CLAIM or LIVE_SESSION), before any write: no claim is consumed and no
     session is started, ended or touched. With nothing of the caller's waiting the answer stays
-    NOTHING_TO_RESUME. Omitted or null: unchanged. Blank or not an id (a URN or a name): BAD_USER_INPUT, before any read.
+    NOTHING_TO_RESUME. Omitted or null: unchanged. Blank or not an id (a URN or a name): BAD_USER_INPUT, before any read. That id-only refusal is built behaviour (#3822), not a rule of hrn:node:hadronmemory.com:specs:cor:agt:020:03, which says only that the caller may name the worker it expects and that a blank one is refused; the field is a known gap against hrn:node:hadronmemory.com:specs:cor:api:140:01, deferred to hadron-server#5163.
     """
     expectedWorkerId: ID
   }
@@ -6263,9 +6263,10 @@ export const typeDefs = `#graphql
     modelGroups: [String!]
 
     """
-    #2252 (R189) — the coarse tier of model from the platform's one model-to-tier mapping: high (opus-class),
-    mid (sonnet-class), low (haiku-class); null when the model is unmapped (no guessed equivalence for another
-    family). Advisory: a coordinator's reading aid, never an authorization or routing input in this slice.
+    #2252 (R189) — the coarse tier of model from the platform's one model-to-tier mapping: high (opus- or
+    fable-class), mid (sonnet-class), low (haiku-class), with the glm, gpt and deepseek lines placed by their vendor's
+    positioning; null when the model is unmapped (no guessed tier for a model nobody has
+    placed). Advisory: a coordinator's reading aid, never an authorization or routing input in this slice.
     """
     tier: String
     """
@@ -7435,14 +7436,14 @@ export const typeDefs = `#graphql
     recovery: AuthoringCheckRecovery
   }
   """
-  A proposed write to check. Name the node by ref (PK or URN of an existing node), or by memoryId and
+  A proposed write to check. Name the node by ref (PK or URN of an existing node), or by memoryRef and
   loc together (an existing node at that loc is judged as itself; otherwise a new node).
   """
   input NodeAuthoringCheckInput {
-    "An existing node: PK or fully-qualified node URN. XOR with memoryId+loc."
+    "An existing node: PK or fully-qualified node URN. XOR with memoryRef+loc."
     ref: String
     "With loc: the memory (ID or fully-qualified URN). XOR with ref."
-    memoryId: String
+    memoryRef: String
     loc: String
     "The role the write would leave the node with. Omit to keep the node's own; null to clear. A new node starts with none."
     role: String
@@ -7482,6 +7483,25 @@ export const typeDefs = `#graphql
   Outgoing edge on a node, used in NodeInput.edges
   """
   input NodeEdgeInput {
+    """
+    Reference to the target node. Accepts a node ID, a full URN
+    (hrn:node:<memory-urn>:<loc>), a memory-prefixed loc
+    (<memory-urn>:<loc>), or a short loc resolved within the source
+    node's memory.
+    """
+    targetRef: String!
+    "Relationship name (was 'label'). Optional — loc is the identity."
+    name: String
+    "Explicit edge loc. Omit to derive <sourceLoc>:<name>:<targetLoc>."
+    loc: String
+    description: String
+    isRunnable: Boolean
+  }
+
+  """
+  The legacy shape of NodeInput.edges (the retired replaceSubtree, which refuses without writing). A frozen copy of NodeEdgeInput from before #5080 renamed its targetId to targetRef, so legacy callers still validate and reach REPLACE_SUBTREE_RETIRED.
+  """
+  input LegacyNodeEdgeInput {
     """
     Reference to the target node. Accepts a node ID, a full URN
     (hrn:node:<memory-urn>:<loc>), a memory-prefixed loc
@@ -7534,7 +7554,7 @@ export const typeDefs = `#graphql
     """
     Replace all outgoing edges when provided (omit to leave edges unchanged)
     """
-    edges: [NodeEdgeInput!]
+    edges: [LegacyNodeEdgeInput!]
     """
     Why this change was made — recorded on the revision-history snapshot
     (NodeRevision.revLabel, #620; historically it squatted in editedBy),
@@ -7590,9 +7610,9 @@ export const typeDefs = `#graphql
   }
 
   """
-  Input for createNode. 'loc' and 'name' are required, plus EITHER 'memoryId'
+  Input for createNode. 'loc' and 'name' are required, plus EITHER 'memoryRef'
   or 'install' (an App's install memory, #2044) — both or neither is an
-  error (BAD_USER_INPUT). Creating is create-only — a live node at (memoryId,
+  error (BAD_USER_INPUT). Creating is create-only — a live node at (memoryRef,
   loc) rejects with NodeLocConflictError (spec 039 Phase 0 D1/D4).
   """
   input CreateNodeInput {
@@ -7609,8 +7629,8 @@ export const typeDefs = `#graphql
     qualified (hrn:mem:<root>:<memory>) per spec 022 — relative-form URNs are
     rejected as GraphQL errors with extensions.code "URN_NOT_QUALIFIED".
     """
-    memoryId: String
-    "#2044 — an App's install memory as the target, instead of 'memoryId'. See InstallTargetInput."
+    memoryRef: String
+    "#2044 — an App's install memory as the target, instead of 'memoryRef'. See InstallTargetInput."
     install: InstallTargetInput
     loc: String!
     name: String!
@@ -7647,8 +7667,8 @@ export const typeDefs = `#graphql
   }
 
   """
-  Input for updateNode. Identify the target by 'id' (PK or fully-qualified
-  node URN) XOR ('memoryId' + 'loc') — both selectors, or neither, is an
+  Input for updateNode. Identify the target by 'ref' (PK or fully-qualified
+  node URN) XOR ('memoryRef' + 'loc') — both selectors, or neither, is an
   error (spec 039 Phase 0 D2). updateNode never creates and never moves (D3).
   Every content field is optional: omitted = preserved (D4).
   """
@@ -7658,13 +7678,13 @@ export const typeDefs = `#graphql
     role rule names one (before and after the write). See AuthoredWithInput.
     """
     authoredWith: AuthoredWithInput
-    "The node to change: PK (CUID / 32-char hex) or fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). XOR with memoryId+loc."
-    id: String
-    "Selector, with 'loc': the target's memory (ID or fully-qualified URN). XOR with 'id'."
-    memoryId: String
-    "#2044 — selector, with 'loc', in place of 'memoryId': the App's install memory. Creates nothing (the first createNode does). XOR with 'id'."
+    "The node to change: PK (CUID / 32-char hex) or fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). XOR with memoryRef+loc."
+    ref: String
+    "Selector, with 'loc': the target's memory (ID or fully-qualified URN). XOR with 'ref'."
+    memoryRef: String
+    "#2044 — selector, with 'loc', in place of 'memoryRef': the App's install memory. Creates nothing (the first createNode does). XOR with 'ref'."
     install: InstallTargetInput
-    "Selector, with 'memoryId': the target's current loc. Not writable here — moveNode relocates."
+    "Selector, with 'memoryRef': the target's current loc. Not writable here — moveNode relocates."
     loc: String
     """
     Optional optimistic-concurrency precondition (#937). When supplied, the
@@ -7721,7 +7741,7 @@ export const typeDefs = `#graphql
   }
 
   """
-  Input for importNode (#457). Target: 'nodeUrn' XOR ('memoryId' + 'loc') —
+  Input for importNode (#457). Target: 'nodeUrn' XOR ('memoryRef' + 'loc') —
   the URN may name a not-yet-existing node (import creates it). Source:
   exactly one of 'url' | 'content'.
   """
@@ -7732,10 +7752,10 @@ export const typeDefs = `#graphql
     """
     authoredWith: AuthoredWithInput
     "Target memory (ID or fully-qualified URN), with 'loc'. XOR with 'nodeUrn'."
-    memoryId: String
-    "Target loc within 'memoryId'. XOR with 'nodeUrn'."
+    memoryRef: String
+    "Target loc within 'memoryRef'. XOR with 'nodeUrn'."
     loc: String
-    "Fully-qualified node URN naming the target (existing or new). XOR with memoryId+loc."
+    "Fully-qualified node URN naming the target (existing or new). XOR with memoryRef+loc."
     nodeUrn: String
     "Source URL (http/https) — fetched server-side, SSRF-guarded, WITHOUT user credentials."
     url: String
@@ -8587,13 +8607,13 @@ export const typeDefs = `#graphql
   """
   Bulk literal/regex search-and-replace across selected nodes.
 
-  Selection is a union — at least one of 'nodeIds' or 'memoryIds' is required:
-    - nodeIds:   explicit nodes (IDs or fully-qualified URNs).
-    - memoryIds: every live node in those memories (IDs or URNs).
-    - prefix:    further restrict the memoryIds set to the node at 'prefix'
+  Selection is a union — at least one of 'nodeRefs' or 'memoryRefs' is required:
+    - nodeRefs:  explicit nodes (IDs or fully-qualified URNs).
+    - memoryRefs: every live node in those memories (IDs or URNs).
+    - prefix:    further restrict the memoryRefs set to the node at 'prefix'
                  plus its descendants, matched on colon loc-path boundaries
                  (so 'auth' matches 'auth' and 'auth:tokens' but not
-                 'authoring'). Requires 'memoryIds' — loc is only unique
+                 'authoring'). Requires 'memoryRefs' — loc is only unique
                  within a memory.
 
   Matching is literal substring by default; set 'regex: true' to treat
@@ -8614,10 +8634,10 @@ export const typeDefs = `#graphql
     "Replacement. May be empty (deletes the matched text). Regex mode honors dollar-sign backrefs."
     newText: String!
     "Explicit node IDs or fully-qualified URNs."
-    nodeIds: [ID!]
+    nodeRefs: [ID!]
     "Memory IDs or URNs — selects every live node in each."
-    memoryIds: [ID!]
-    "Loc-prefix filter applied within 'memoryIds' (parent loc + descendants)."
+    memoryRefs: [ID!]
+    "Loc-prefix filter applied within 'memoryRefs' (parent loc + descendants)."
     prefix: String
     "Which text fields to search. At least one required."
     fields: [NodeTextField!]!
@@ -8649,7 +8669,7 @@ export const typeDefs = `#graphql
     "#1328 — one claim for every changed spec. See AuthoredWithInput."
     authoredWith: AuthoredWithInput
     memoryRef: ID!
-    nodeIds: [ID!]!
+    nodeRefs: [ID!]!
     oldText: String!
     newText: String!
     fields: [SpecTextField!]!
@@ -9118,8 +9138,8 @@ export const typeDefs = `#graphql
 
   """
   v2 (spec 006-asset-upload-redesign): memory-addressed input.
-  memoryId is required for the attached upload path. The staging
-  path (memoryId omitted) is added in US4.
+  memoryRef is required for the attached upload path. The staging
+  path (memoryRef omitted) is added in US4.
   """
   input BeginAssetUploadV2Input {
     """
@@ -9128,7 +9148,7 @@ export const typeDefs = `#graphql
     qualified (org:memory) per spec 022 — relative-form URNs are
     rejected as GraphQL errors with extensions.code "URN_NOT_QUALIFIED".
     """
-    memoryId:        ID!
+    memoryRef:        ID!
     filename:        String!
     mimeType:        String!
     sizeBytes:       Int!
@@ -10124,7 +10144,7 @@ export const typeDefs = `#graphql
     nothing; a retired worker is no party to name, so it matches nothing). creator is
     the task's creator as createdBy projects it: a worker, or a person for a task they created
     themselves (not one their worker created, #2370). queued selects pending tasks with no assignee; rootsOnly selects roots. These
-    take precedence over status and parentTaskId respectively. limit defaults to 20 (cap 200).
+    take precedence over status and parentTaskRef respectively. limit defaults to 20 (cap 200).
     Readers: the App's participants (hrn:node:hadronmemory.com:specs:cor:agt:050:21), or the App's own live key
     without a session binding (#1755).
     An App you do not participate in answers APP_NOT_FOUND, exactly like an
@@ -10608,7 +10628,7 @@ export const typeDefs = `#graphql
       offset: Int
       "Optional absolute relevance floor (cor:api:090 / #497): drop ranked hits whose score is below this value. Scores are NOT comparable across modes, so the meaningful scale differs per mode (keyword ts_rank is roughly 0..a-few; vector cosine similarity is 0..1; hybrid is a small RRF fraction) — pick a floor for the mode in use. Ignored on the no-query browse list (unscored) and never trims expand-neighbours. A floor returns fewer hits, never weaker ones."
       minScore: Float
-      "Spec 049 (D-2026-09-13-002): search under a named scope — a scope id, a bare scope name (needs appRef), 'app' (the App's attached memories; needs appRef), or 'global' (the active organization's view — orgRef, or your single membership). The scope's memories are intersected with your access (a lens never grants; the rest is disclosed as scope.droppedCount) and filter.memoryIds narrows WITHIN it. Omitted: the pre-049 behaviour — your accessible set, optionally narrowed by orgRef."
+      "Spec 049 (D-2026-09-13-002): search under a named scope — a scope id, a bare scope name (needs appRef), 'app' (the App's attached memories; needs appRef), or 'global' (the active organization's view — orgRef, or your single membership). The scope's memories are intersected with your access (a lens never grants; the rest is disclosed as scope.droppedCount) and filter.memoryRefs narrows WITHIN it. Omitted: the pre-049 behaviour — your accessible set, optionally narrowed by orgRef."
       scope: String
       "Spec 049: the App context for a bare scope name or for scope: 'app' (ID or URN)."
       appRef: ID
@@ -10695,14 +10715,16 @@ export const typeDefs = `#graphql
     The uniform single-edge read (#473) — edges are first-class, loc-addressed
     peers of nodes (spec 037). 'ref' accepts a primary key or a
     fully-qualified edge URN (\`hrn:edge:<root>:<memory>:<loc>\`; the edge's
-    memory is its SOURCE node's memory). Access: the edge's memory must be in
-    the caller's readable set; denied and missing are both null.
+    memory is its SOURCE node's memory). Access: the edge's memory and the memory
+    of each of its nodes must be in the caller's readable set; denied and missing
+    are both null.
     """
     edge(ref: ID!): Edge
 
     """
     Uniform paginated edge list (#473). Scope: edges whose (denormalized,
-    source-side) memory the caller can read, AND-narrowed by the filter.
+    source-side) memory, and the memory of each of whose nodes, the caller can
+    read, AND-narrowed by the filter.
     orgRef follows hrn:node:hadronmemory.com:specs:cor:api:100:01 (member -> scope, non-member -> empty page,
     no disclosure, no admin bypass). Deterministic loc-ascending order
     (id tiebreak); limit default 20 / cap 200; limit: 0 -> count only.
@@ -11613,7 +11635,7 @@ export const typeDefs = `#graphql
     result; this is not every memory linked to any installed Agent.
 
     Accepts the App's ID or fully qualified URN. NodeFilter narrows node fields,
-    including objectType, approvalState and minted. Nonempty memoryIds or
+    including objectType, approvalState and minted. Nonempty memoryRefs or
     memoryClasses are rejected with BAD_USER_INPUT: the App scope is authoritative.
     where and childrenOf are rejected with BAD_USER_INPUT too (#3427, #2832); use findNodes.
     Unlike findNodes, system-node types are not excluded by default. Deleted
@@ -11631,7 +11653,7 @@ export const typeDefs = `#graphql
     but total counts every node appNodes would return for the filter and hasMore says whether rows
     remain past this page. Ordered by loc, then id, so the order is stable across the App's memories.
     Default page 20, limit: 0 is count-only, a negative limit is 0, a limit over 200 is served as 200,
-    a negative offset is 0. The filter's memoryIds, memoryClasses, where and childrenOf are refused, as on appNodes.
+    a negative offset is 0. The filter's memoryRefs, memoryClasses, where and childrenOf are refused, as on appNodes.
 
     Accepts the App's ID or URN.
     """
@@ -13313,7 +13335,7 @@ export const typeDefs = `#graphql
     description, source, tags, requirements, references, closeSessionWhenDone, priority, properties and the parent. Not
     copied: assignee, status, result, handle, blockers, startBy, finishBy, externalId. The clone is PENDING (or BACKLOG, as
     input.status asks). The parent is kept only for someone who may create a child of it (else TASK_NOT_ASSIGNEE, nothing
-    created, unless input.parentTaskId names another parent or null for none); a root is cloned as a root of the same
+    created, unless input.parentTaskRef names another parent or null for none); a root is cloned as a root of the same
     kind, through the root create gate; under an ended parent it goes under the project AT0. The properties and priority
     are copied only for a caller who may set them and are otherwise left out, with no refusal. Refusals: TASK_NOT_FOUND
     (an unknown, unreadable or cross-App source or parent), BAD_USER_INPUT (AT0 cannot be cloned), TASK_NOT_ASSIGNEE,
@@ -14638,6 +14660,10 @@ export const typeDefs = `#graphql
       """
       orgRef: ID
       name: String!
+      """
+      #5203: the slug to store, when the caller chose one. It is validated, not derived: a reserved word or a malformed slug is BAD_USER_INPUT and a taken one is refused as before. Omitted or null: the slug is derived from name.
+      """
+      slug: String
       shortDescription: String
       description: String
       """Free-form structured metadata bag (client-defined JSON). Null = unset."""
@@ -14924,7 +14950,7 @@ export const typeDefs = `#graphql
     orgRef accepts the org's ID or URN; an empty orgRef is BAD_USER_INPUT. An empty
     systemMemoryRef means none (a system memory is provisioned).
     """
-    createAgent(orgRef: ID, name: String!, description: String, systemMemoryRef: ID, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null is LONG_LIVED." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted or null is no cap." contextCap: Int, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
+    createAgent(orgRef: ID, name: String!, "#5203: the slug to store, when the caller chose one. It is validated, not derived: a reserved word or a malformed slug is BAD_USER_INPUT and a taken one is refused as before. Omitted or null: the slug is derived from name." slug: String, description: String, systemMemoryRef: ID, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null is LONG_LIVED." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted or null is no cap." contextCap: Int, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
     """
     Clone an Agent into an organization you administer: a new PERSONAL-draft Agent
     with its own copy of the source's system memory, its links and imports, and a recorded origin. Needs a
@@ -15583,11 +15609,11 @@ export const typeDefs = `#graphql
     Auth: platform ADMIN/OWNER for HADRON_SERVER; org ADMIN for ORGANIZATION;
     the App/Agent's strict owner or owning-org ADMIN for APP/AGENT. A platform
     role does not bypass a user-owned App/Agent's credential gate.
-    ownerId accepts ID or URN (HADRON_SERVER: ID only).
+    ownerRef accepts ID or URN (HADRON_SERVER: ID only).
     """
     createAiServiceConfig(
       ownerType: AiConfigOwnerType!
-      ownerId: ID!
+      ownerRef: ID!
       name: String!
       provider: String!
       model: String!
@@ -17533,7 +17559,7 @@ export const typeDefs = `#graphql
   }
 
   input BatchThrough {
-    channelId: ID!
+    channelRef: ID!
     "A seq this batch rendered in that channel."
     seq: Int!
   }
@@ -18222,7 +18248,7 @@ export const typeDefs = `#graphql
     "Tick counting starts here. Defaults to now."
     anchorAt: DateTime
     quietHours: JSON
-    channelIds: [ID!]
+    channelRefs: [ID!]
     relevance: TickerRelevance
     "Absent on create = [READ_TEAM_CHANNEL]; an empty list is refused. On update, absent = unchanged."
     reasons: [TickerReason!]
@@ -18236,7 +18262,7 @@ export const typeDefs = `#graphql
     anchorAt: DateTime
     quietHours: JSON
     clearQuietHours: Boolean
-    channelIds: [ID!]
+    channelRefs: [ID!]
     clearChannels: Boolean
     relevance: TickerRelevance
     "Absent on create = [READ_TEAM_CHANNEL]; an empty list is refused. On update, absent = unchanged."
@@ -19934,7 +19960,7 @@ export const typeDefs = `#graphql
     properties: JSON
     requirements: AgentTaskRequirementsInput
     "Another parent in the same App, or null for none (a root under AT0, or a project with project: true)."
-    parentTaskId: ID
+    parentTaskRef: ID
     "#4997: true makes the clone a top-level task and a project; false places it under AT0 and unmarked unless isProject says otherwise."
     project: Boolean
     "#4997 (hrn:node:hadronmemory.com:specs:cor:agt:050:02): the clone's project marker; left out, the clone keeps the source's. false with project: true is refused."
@@ -19948,7 +19974,7 @@ export const typeDefs = `#graphql
 
   """
   createAgentTask input. A ROOT task names appRef; any App participant may
-  create one (hrn:node:hadronmemory.com:specs:cor:agt:050:06). A CHILD task names parentTaskId; only the
+  create one (hrn:node:hadronmemory.com:specs:cor:agt:050:06). A CHILD task names parentTaskRef; only the
   parent's assignee may create one, and it owns it (hrn:node:hadronmemory.com:specs:cor:agt:050:07).
   """
   input CreateAgentTaskInput {
@@ -19959,8 +19985,8 @@ export const typeDefs = `#graphql
     blockedBy: [ID!]
     "The team App (id or URN). Required for a root task; for a child task it is taken from the parent and, if given, must match."
     appRef: ID
-    parentTaskId: ID
-    "Make a top-level PROJECT (AT1, AT2, ...) instead of a task under the reserved project AT0, carrying the project marker (#4997). Not with parentTaskId."
+    parentTaskRef: ID
+    "Make a top-level PROJECT (AT1, AT2, ...) instead of a task under the reserved project AT0, carrying the project marker (#4997). Not with parentTaskRef."
     project: Boolean
     """
     #4997 (hrn:node:hadronmemory.com:specs:cor:agt:050:01 Project marker): mark this task as a project for the team metrics, wherever it sits

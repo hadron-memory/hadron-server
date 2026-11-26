@@ -32,8 +32,8 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   memoryUrn = `nul4106.test:mem-${generateId().slice(0, 8).toLowerCase()}`;
   memory = await db.memory.create({ data: { name: 'mem4106', urn: memoryUrn, class: 'knowledge', organizationId: org.id } });
-  n1 = await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N1', content: 'one' } }, ctx(admin.id));
-  n2 = await M.createNode({}, { input: { memoryId: memory.id, loc: 'n2', name: 'N2', content: 'two' } }, ctx(admin.id));
+  n1 = await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N1', content: 'one' } }, ctx(admin.id));
+  n2 = await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n2', name: 'N2', content: 'two' } }, ctx(admin.id));
 });
 
 const refused = (p: Promise<unknown>, field: string) =>
@@ -78,14 +78,14 @@ describe('#4106 createEdge / updateEdge', () => {
     shape(text, 'condition');
   });
   it('searchReplaceInNodes refuses a lone-surrogate oldText typed and leaves the node untouched', async () => {
-    await M.updateNode({}, { input: { id: n1.id, content: 'a😀b', expectedRevision: undefined } }, ctx(admin.id)).catch(() => undefined);
+    await M.updateNode({}, { input: { ref: n1.id, content: 'a😀b', expectedRevision: undefined } }, ctx(admin.id)).catch(() => undefined);
     const before = await db.node.findUniqueOrThrow({ where: { id: n1.id } });
-    await refused(M.searchReplaceInNodes({}, { input: { oldText: '\ud83d', newText: 'X', memoryIds: [memory.id], fields: ['content'], dryRun: false } }, ctx(admin.id)), 'oldText');
+    await refused(M.searchReplaceInNodes({}, { input: { oldText: '\ud83d', newText: 'X', memoryRefs: [memory.id], fields: ['content'], dryRun: false } }, ctx(admin.id)), 'oldText');
     expect((await db.node.findUniqueOrThrow({ where: { id: n1.id } })).content).toBe(before.content);
   });
   it('searchReplaceInNodes refuses a regex oldText that splits a stored surrogate pair, writing nothing', async () => {
-    const n = await M.createNode({}, { input: { memoryId: memory.id, loc: 'emoji', name: 'E', content: 'a😀b' } }, ctx(admin.id));
-    await refused(M.searchReplaceInNodes({}, { input: { oldText: '\\ud83d', regex: true, newText: 'X', memoryIds: [memory.id], fields: ['content'], dryRun: false } }, ctx(admin.id)), 'oldText');
+    const n = await M.createNode({}, { input: { memoryRef: memory.id, loc: 'emoji', name: 'E', content: 'a😀b' } }, ctx(admin.id));
+    await refused(M.searchReplaceInNodes({}, { input: { oldText: '\\ud83d', regex: true, newText: 'X', memoryRefs: [memory.id], fields: ['content'], dryRun: false } }, ctx(admin.id)), 'oldText');
     expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).content).toBe('a😀b');
     const text = await mcp().callToolText('hadron_replace_text', { oldText: '\\ud83d', regex: true, newText: 'X', memoryUrns: [`hrn:mem:${memoryUrn}`], fields: ['content'] });
     shape(text, 'oldText');

@@ -267,7 +267,7 @@ describe('appNodesPage — recovery (pin 5)', () => {
 });
 
 describe('appNodesPage — unsupported filter fields (pin 6)', () => {
-  it.each([{ memoryIds: ['x'] }, { memoryClasses: ['knowledge'] }])('%j is BAD_USER_INPUT', async (filter) => {
+  it.each([{ memoryRefs: ['x'] }, { memoryClasses: ['knowledge'] }])('%j is BAD_USER_INPUT', async (filter) => {
     await expect(Q.appNodesPage({}, { appRef: appId, filter }, asUser(member))).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     await expect(Q.appNodes({}, { appRef: appId, filter }, asUser(member))).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });

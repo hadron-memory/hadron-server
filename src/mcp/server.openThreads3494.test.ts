@@ -26,7 +26,7 @@ it('registered boolean, forwarding, same GraphQL sets and unchanged hit text (no
  const shape=mcp.toolParamSchema('hadron_find_nodes','hasOpenThreads');
  expect(()=>shape.parse(true)).not.toThrow();expect(()=>shape.parse(false)).not.toThrow();expect(()=>shape.parse(undefined)).not.toThrow();expect(()=>shape.parse('true')).toThrow();
  for(const value of [true,false,undefined]){
-  const gql=await resolvers.Query.findNodes(null,{query:'mcpgroom',mode:'keyword',filter:{memoryIds:[memoryId],hasOpenThreads:value}},{db,userId,roles:[]});
+  const gql=await resolvers.Query.findNodes(null,{query:'mcpgroom',mode:'keyword',filter:{memoryRefs:[memoryId],hasOpenThreads:value}},{db,userId,roles:[]});
   const text=await mcp.callToolText('hadron_find_nodes',{memoryUrn,query:'mcpgroom',hasOpenThreads:value});
   for(const loc of ['open','closed','none']){
    const label=`:${loc}`;if(gql.hits.some(h=>(h.node as {loc:string}).loc===loc))expect(text).toContain(label);else expect(text).not.toContain(label);

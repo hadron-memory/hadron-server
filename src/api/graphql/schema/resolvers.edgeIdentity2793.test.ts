@@ -89,7 +89,7 @@ it('handles aliases/named/inline fragments and merged endpoint selections withou
   expect(rows.filter((r: any) => r?.id === b.id).every((r: any) => !Object.hasOwn(r, 'content'))).toBe(true);
 });
 
-it.each(['id loc name', 'id content'])('keeps unreadable/deleted endpoints null: %s', async selection => {
+it.each(['id loc name', 'id content'])('does not list an unreadable endpoint (hadron-internal#74), keeps a deleted one null: %s', async selection => {
   const { a, b } = await pair();
   const outsider = await db.user.create({ data: { handle: 'other2793' } });
   const home = await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { organizationId: true } });
@@ -98,8 +98,7 @@ it.each(['id loc name', 'id content'])('keeps unreadable/deleted endpoints null:
   await db.edge.create({ data: { memoryId, loc: 'cross', sourceId: a.id, targetId: secret.id } });
   await db.node.update({ where: { id: b.id }, data: { deletedAt: new Date() } });
   const nodes = await run(selection, [a.id]);
-  expect(nodes[0].outgoingEdges).toHaveLength(2);
-  expect(nodes[0].outgoingEdges.map((e: any) => e.target)).toEqual([null, null]);
+  expect(nodes[0].outgoingEdges.map((e: any) => e.target)).toEqual([null]);
   expect(JSON.stringify(nodes)).not.toContain('NEVER_DISCLOSE');
 });
 

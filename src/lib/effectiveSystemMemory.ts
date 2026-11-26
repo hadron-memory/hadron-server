@@ -425,6 +425,7 @@ type InheritedEdgeArgs = {
  *   in effect there (overridden away to nothing, a base boot prompt) drops
  *   the edge. A resolved endpoint that is inherited is stamped, `via` the
  *   same child, so its own fields are the sanitized projection too;
+ * - an edge held outside the chain shows only when `canReadMemory` admits its memory;
  * - an endpoint outside the chain shows only when `canReadMemory` admits its
  *   own memory: never widened.
  *
@@ -471,6 +472,8 @@ export async function resolveInheritedEdges(db: InheritedEdgeDb, args: Inherited
   };
   do {
     for (const edge of edges) {
+      // hadron-internal#74 — the memory that holds the edge is asked too: one of the chain's, or one the reader may read.
+      if (!inChain.has(edge.memoryId) && !(await args.canReadMemory(edge.memoryId))) continue;
       const endpoint = bounded
         ? await db.node.findUnique({ where: { id: args.direction === 'out' ? edge.targetId : edge.sourceId }, select: endpointIdentity })
         : args.direction === 'out' ? edge.target : edge.source;

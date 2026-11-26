@@ -138,7 +138,7 @@ describe('#234 — GraphQL findNodes degrades when embed() throws', () => {
 
     const result = await resolvers.Query.findNodes(
       {},
-      { query: 'alpha', filter: { memoryIds: [memUrn] }, mode: 'hybrid' },
+      { query: 'alpha', filter: { memoryRefs: [memUrn] }, mode: 'hybrid' },
       adminCtx(),
     );
 
@@ -157,7 +157,7 @@ describe('#234 — GraphQL findNodes degrades when embed() throws', () => {
 
     const result = await resolvers.Query.findNodes(
       {},
-      { query: 'beta', filter: { memoryIds: [memUrn] }, mode: 'vector' },
+      { query: 'beta', filter: { memoryRefs: [memUrn] }, mode: 'vector' },
       adminCtx(),
     );
 
@@ -174,7 +174,7 @@ describe('#234 — GraphQL findNodes degrades when embed() throws', () => {
 
     const result = await resolvers.Query.findNodes(
       {},
-      { query: 'gamma', filter: { memoryIds: [memUrn] }, mode: 'keyword' },
+      { query: 'gamma', filter: { memoryRefs: [memUrn] }, mode: 'keyword' },
       adminCtx(),
     );
 

@@ -76,7 +76,7 @@ afterEach(() => { vi.unstubAllEnvs(); reloadOwnerDefaultLimitsForTests({ OWNER_D
 
 describe('#5078 every kind of write keeps the figure equal to a recount', () => {
   it('a node created through GraphQL and through MCP', async () => {
-    await moves(A(), 1n, () => M.createNode({}, { input: { memoryId: a1.id, loc: 'g', name: 'g', content: 'x' } }, ctx()));
+    await moves(A(), 1n, () => M.createNode({}, { input: { memoryRef: a1.id, loc: 'g', name: 'g', content: 'x' } }, ctx()));
     const mcp = createTestableMcpServer({ userId: admin, roles: [], clientId: `user:${admin}` });
     await moves(A(), 1n, () => mcp.callToolText('hadron_create_node', { urn: `hrn:node:${a1.urn}:m`, name: 'm', content: 'x' }));
   });
@@ -86,7 +86,7 @@ describe('#5078 every kind of write keeps the figure equal to a recount', () => 
     await moves(A(), -1n, () => M.deleteNode({}, { nodeRef: n.id }, ctx()));
     await moves(A(), 1n, () => M.restoreNode({}, { nodeRef: n.id }, ctx()));
     await moves(A(), -1n, () => M.deleteNode({}, { nodeRef: n.id }, ctx()));
-    await moves(A(), 1n, () => M.createNode({}, { input: { memoryId: a1.id, loc: 'n', name: 'again', content: 'x' } }, ctx()));
+    await moves(A(), 1n, () => M.createNode({}, { input: { memoryRef: a1.id, loc: 'n', name: 'again', content: 'x' } }, ctx()));
   });
 
   it('a recursive soft delete and a hard delete, of live rows and of tombstones', async () => {

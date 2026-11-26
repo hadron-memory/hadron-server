@@ -80,7 +80,7 @@ describe('#3651 createNode(install:) delivers include.pin.unkept on the outer re
     expect(created.errors).toBeUndefined();
     expect(created.extensions?.warnings).toEqual(unkept('createNode'));
     // Controls keep working: ordinary memoryId create, and install update.
-    const control = await gql(f.context(), CREATE, { i: { memoryId: f.memoryId, loc: 'control', name: 'C', content: '{{> control-target rev=1}}' } });
+    const control = await gql(f.context(), CREATE, { i: { memoryRef: f.memoryId, loc: 'control', name: 'C', content: '{{> control-target rev=1}}' } });
     expect(control.errors).toBeUndefined();
     expect(control.extensions?.warnings).toEqual(unkept('createNode'));
     const updated = await gql(f.context(), UPDATE, { i: { install: f.install, loc: 'source', content: 'again ' + PIN } });

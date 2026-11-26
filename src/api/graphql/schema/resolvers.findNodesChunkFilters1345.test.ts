@@ -40,7 +40,7 @@ const stub: EmbeddingClient = {
 const admin = (): Context => ({ db, roles: ['ADMIN'], userId: 'admin-cf' } as Context);
 const findNodes = (args: Record<string, unknown>) => (resolvers.Query as any).findNodes(null, args, admin());
 const chunks = (filter: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
-  findNodes({ query: 'q', mode: 'vector', granularity: 'chunk', filter: { memoryIds: [memId], ...filter }, ...extra });
+  findNodes({ query: 'q', mode: 'vector', granularity: 'chunk', filter: { memoryRefs: [memId], ...filter }, ...extra });
 const parentsOf = (res: { passages: { parentNodeId: string }[] }) => new Set(res.passages.map((p) => p.parentNodeId));
 
 let memId: string;

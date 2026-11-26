@@ -26,7 +26,8 @@ import { type ActAdmission, type ActInstruction } from '../../../lib/auth/instru
 import { admitAppManagement, requireInstructedActKeepingRuns, readActInstruction, callerIsWorkerSession, lockCallerSession } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 
-const keyNotFound = (id: string) => taskError('APP_KEY_NOT_FOUND', 'App key not found.', { id });
+/** #5225: the code only; the caller's id is not relayed (cor:api:140:01). */
+const keyNotFound = (_id: string) => taskError('APP_KEY_NOT_FOUND', 'App key not found.');
 const scopeForbidden = () => taskError('FORBIDDEN', 'Only whoever manages this App can change what its keys may do.');
 
 /** The key and its App as the caller may see them: a key of an App they do not participate in does not exist. */
@@ -65,7 +66,7 @@ async function changeScope(
   if (revoke && await callerIsWorkerSession(ctx)) await admitAppManagement(ctx, app, scopeForbidden, revoke.instruction);
   requireWritable(ctx, app);
   if (!isAppKeyScope(scope)) {
-    throw new GraphQLError(`Unknown scope "${scope}". The scopes are: ${APP_KEY_SCOPES.join(', ')}.`, { extensions: { code: 'BAD_USER_INPUT' } });
+    throw new GraphQLError(`Unknown scope. The scopes are: ${APP_KEY_SCOPES.join(', ')}.`, { extensions: { code: 'BAD_USER_INPUT' } });
   }
   if (hostId !== undefined) checkHostArg(scope, hostId);
   await inTaskWriteTx(ctx, app, actor, () => keyNotFound(id), async (tx, txCtx, fresh) => {

@@ -19,7 +19,7 @@ export async function finishableParents(
   return Promise.all(Array.from({ length: n }, async (_, i) => {
     const parent = await M.createAgentTask({}, { input: { appRef, title: `parent ${i}`, assignee } }, ctx);
     await as(() => M.startAgentTask({}, { taskRef: parent.id }, ctx));
-    await as(() => M.createAgentTask({}, { input: { parentTaskId: parent.id, title: `child ${i}` } }, ctx));
+    await as(() => M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: `child ${i}` } }, ctx));
     return parent.id as string;
   }));
 }

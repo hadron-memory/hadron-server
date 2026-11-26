@@ -137,7 +137,7 @@ describe('#1061 — reads are recorded on every surface that returns node conten
   it('records one read PER HIT for a search — the defect that made the chart 10x low', async () => {
     await seedNodes(5, 'searchable');
 
-    const r = await Q.findNodes(null, { filter: { memoryIds: [mem.id] } }, asUser());
+    const r = await Q.findNodes(null, { filter: { memoryRefs: [mem.id] } }, asUser());
     expect(r.hits).toHaveLength(5);
 
     const events = await eventsOfType('read', { minCount: 5 });
@@ -172,7 +172,7 @@ describe('#1061 — writes are recorded on every node-write surface', () => {
   it('records a write for createNode and again for updateNode', async () => {
     const created = await M.createNode(
       null,
-      { input: { memoryId: mem.id, loc: 'w-1', name: 'w', nodeType: 'info' } },
+      { input: { memoryRef: mem.id, loc: 'w-1', name: 'w', nodeType: 'info' } },
       asUser(),
     );
     expect(created.loc).toBe('w-1');
@@ -183,7 +183,7 @@ describe('#1061 — writes are recorded on every node-write surface', () => {
     expect(events[0].memoryId).toBe(mem.id);
     expect(events[0].userId).toBe(user.id);
 
-    await M.updateNode(null, { input: { memoryId: mem.id, loc: 'w-1', name: 'w2' } }, asUser());
+    await M.updateNode(null, { input: { memoryRef: mem.id, loc: 'w-1', name: 'w2' } }, asUser());
     events = await eventsOfType('write', { minCount: 2 });
     expect(events).toHaveLength(2);
   });
@@ -219,7 +219,7 @@ describe('#1061 — writes are recorded on every node-write surface', () => {
         input: {
           oldText: 'body',
           newText: 'BODY',
-          memoryIds: [mem.id],
+          memoryRefs: [mem.id],
           fields: ['content'],
           dryRun: true,
         },
@@ -231,7 +231,7 @@ describe('#1061 — writes are recorded on every node-write surface', () => {
     await M.searchReplaceInNodes(
       null,
       {
-        input: { oldText: 'body', newText: 'BODY', memoryIds: [mem.id], fields: ['content'] },
+        input: { oldText: 'body', newText: 'BODY', memoryRefs: [mem.id], fields: ['content'] },
       },
       asUser(),
     );

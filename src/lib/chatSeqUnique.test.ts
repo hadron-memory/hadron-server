@@ -355,7 +355,7 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
     await expectCode(
       M.createNode({}, {
         input: {
-          memoryId: legacyMem.id,
+          memoryRef: legacyMem.id,
           loc: `${TEAM_CHAT_LOC}:messages:003-dupe`,
           name: '003-dupe', nodeType: 'chat-message', seq: 3, content: 'dupe',
         },
@@ -373,7 +373,7 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
     await expectCode(
       M.createNode({}, {
         input: {
-          memoryId: legacyMem.id,
+          memoryRef: legacyMem.id,
           loc: `${TEAM_CHAT_LOC}:messages:005-next`,
           name: '005-next', nodeType: 'chat-message', content: 'next',
         },
@@ -399,7 +399,7 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
     const b = await seedMessage(legacyMem.id, 7);
 
     await expectCode(
-      M.updateNode({}, { input: { id: b, seq: 3 } }, ctx(admin.id)),
+      M.updateNode({}, { input: { ref: b, seq: 3 } }, ctx(admin.id)),
       'SEQ_PROTECTED',
     );
   });

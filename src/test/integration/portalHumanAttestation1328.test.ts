@@ -31,7 +31,7 @@ const send = async (token: string, input: Record<string, unknown>, headers: Reco
   });
   return await res.json() as { data?: unknown; errors?: Array<{ message: string; extensions?: { code?: string } }> };
 };
-const input = (loc: string, extra: Record<string, unknown> = {}) => ({ memoryId, loc, name: loc, content: 'x', role: 'guide', ...extra });
+const input = (loc: string, extra: Record<string, unknown> = {}) => ({ memoryRef: memoryId, loc, name: loc, content: 'x', role: 'guide', ...extra });
 
 beforeAll(async () => {
   server = createHttpServer(await createServerOnCleanDb());

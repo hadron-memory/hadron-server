@@ -25,7 +25,7 @@ let chatIds: string[] = [];
 let savedUrl: string | undefined;
 
 const findNodes = (args: Record<string, unknown>) =>
-  (resolvers.Query as any).findNodes(null, { ...args, filter: { ...((args.filter as object) ?? {}), memoryIds: [mem] } }, { db, roles: ['ADMIN'], userId: 'admin-2772b' } as Context);
+  (resolvers.Query as any).findNodes(null, { ...args, filter: { ...((args.filter as object) ?? {}), memoryRefs: [mem] } }, { db, roles: ['ADMIN'], userId: 'admin-2772b' } as Context);
 
 beforeAll(async () => {
   await cleanDb(db);

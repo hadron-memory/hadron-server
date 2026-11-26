@@ -15,6 +15,7 @@ import { toolErrorResult, withToolErrorBoundary } from '../mcp/toolError.js';
 import { assertFullyQualifiedUrn, parseUrn, UrnNotQualifiedError, UrnParseError } from './urn.js';
 import { AmbiguousLegacyUrnError, OrganizationNotFoundError } from './entityRef/errors.js';
 import { concealRefEcho, refusalText } from './refEcho.js';
+import { echoesOnLine } from '../test/refEchoGuard.js';
 
 const SECRET = 'hdr_user_SECRET_5168_abcdef';
 
@@ -119,9 +120,9 @@ describe('#5168 fix head: the wrapper edge and the source-wide class (BLIND P2-1
   });
 
   /**
-   * The door probe reaches GraphQL fields with a top-level ref; MCP handlers and refs inside input objects it does not.
-   * This guard reads the source instead: no refusal text in the server quotes an interpolated value as the thing that
-   * was not found. `src/lib/runner` is excluded (its errors go to the run's model, not a caller's terminal).
+   * A line-regex tripwire over the source, not a proof (#5225 item 7): the patterns and the named exceptions live in
+   * `src/test/refEchoGuard.ts`, which says what it can and cannot catch. The door probe stays the proof for GraphQL.
+   * `src/lib/runner` is excluded (its errors go to the run's model, not a caller's terminal).
    */
   it('no not-found or no-match refusal in src quotes an interpolated value', async () => {
     const { readdirSync, readFileSync, statSync } = await import('node:fs');
@@ -136,30 +137,9 @@ describe('#5168 fix head: the wrapper edge and the source-wide class (BLIND P2-1
       }
     };
     walk(root);
-    const CLASS = [
-      /`[A-Z][\w ]* "\$\{[^}`]+\}" not found/,
-      /`[A-Z][\w ]* not found: \$\{[^}`]+\}`/,
-      /`[A-Z][\w ]* \$\{[^}`]+\} not found\.?`/,
-      /No match for [\w ]*"\$\{/,
-      /No readable [\w ]*"\$\{/,
-      // QA carry P2 (272a77fd): the single-quoted and "not found or invalid" shapes, and "No <noun> matching".
-      /not found[^`]*['"]\$\{[^}`]+\}['"]/,
-      /not found[^`]*: \$\{[^}`]+\}/,
-      /No \w+ matching ['"]\$\{/,
-    ];
-    /**
-     * Named exceptions, each with its reason. A log line is not a refusal. The loc and memoryId of a node addressed by
-     * (memory, loc) are the PR's declared exception (the NODE_NOT_FOUND `loc`/`memoryId` relay, QA F1). The approval
-     * summary names a partial by its stored URN, server data rather than caller input.
-     */
-    const EXEMPT = [
-      /console\.(warn|log|error)\(/,
-      /Node not found at loc "\$\{input\.loc\}" in memory "\$\{input\.memoryId\}"/,
-      /Instruction partial not found at approval: \$\{p\.urn\}/,
-    ];
     const hits = files.flatMap((f) => readFileSync(f, 'utf8').split('\n')
       .map((line, i) => ({ line, at: `${f.slice(root.length)}:${i + 1}` }))
-      .filter(({ line }) => CLASS.some((re) => re.test(line)) && !EXEMPT.some((re) => re.test(line)))
+      .filter(({ line }) => echoesOnLine(line))
       .map(({ at, line }) => `${at} ${line.trim().slice(0, 120)}`));
     expect(hits).toEqual([]);
   });

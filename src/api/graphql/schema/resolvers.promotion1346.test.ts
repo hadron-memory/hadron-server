@@ -195,7 +195,7 @@ describe('#1346 anonymous encrypted promotion', () => {
             // An inverse-order bulk writer would now take nodes and wait on
             // Memory, forming a cycle when this callback returns.
             writerResult = withTestOperationKey(dataKey, appId, () => resolvers.Mutation.searchReplaceInNodes({}, {
-              input: { oldText: 'original', newText: 'bulk edit', nodeIds: [nodeId, second.id], fields: ['content'] },
+              input: { oldText: 'original', newText: 'bulk edit', nodeRefs: [nodeId, second.id], fields: ['content'] },
             } as never, { db, userId: admin.id, roles: ['ADMIN'] })).then(() => null, (error: unknown) => error);
             await vi.waitFor(async () => {
               const blocked = await db.$queryRaw<Array<{ pid: number }>>`

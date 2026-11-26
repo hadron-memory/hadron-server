@@ -26,8 +26,8 @@ const mk = (loc: string) => db.node.create({
   data: { id: generateId(), memoryId: memory.id, loc, name: `Title ${loc}`, abstract: `Abstract ${loc}`, content: 'v1' },
 });
 const approve = (nodeRef: string) => resolvers.Mutation.approveNode(null, { nodeRef }, as());
-const edit = (id: string, content: string) => resolvers.Mutation.updateNode(null, { input: { id, content } }, as());
-const touchMeta = (id: string, tags: string[]) => resolvers.Mutation.updateNode(null, { input: { id, tags } }, as());
+const edit = (id: string, content: string) => resolvers.Mutation.updateNode(null, { input: { ref: id, content } }, as());
+const touchMeta = (id: string, tags: string[]) => resolvers.Mutation.updateNode(null, { input: { ref: id, tags } }, as());
 const stateOf = async (nodeId: string, revNo: number) => (await revisionApprovalOf(db, nodeId, revNo)).state;
 
 beforeEach(async () => {
@@ -242,7 +242,7 @@ describe('a hashless record authorizes nothing, on any surface (#1838)', () => {
     for (const viaSql of [false, true]) {
       for (const state of ['APPROVED', 'NOT_APPROVED', 'SUPERSEDED'] as const) {
         const res = await resolvers.Query.findNodes(null, {
-          filter: { memoryIds: [memory.id], approvalState: state, ...(viaSql ? { where: { path: ['marker'], eq: 'yes' } } : {}) },
+          filter: { memoryRefs: [memory.id], approvalState: state, ...(viaSql ? { where: { path: ['marker'], eq: 'yes' } } : {}) },
         }, as());
         const ids = res.hits.map((h: { node: { id: string } }) => h.node.id);
         expect(ids.includes(ended.id)).toBe(state === 'NOT_APPROVED');

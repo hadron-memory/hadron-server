@@ -60,7 +60,7 @@ afterEach(() => {
 describe('SQL browse (no query, with where) re-applies scope and filters at hydration', () => {
   it('a filtered id that no longer matches the role, or left scope, is not returned', async () => {
     vi.spyOn(getRetrievalProvider(), 'filterSearch').mockResolvedValue([review, outside, spec]);
-    const res = await findNodes({ filter: { memoryIds: [memId], role: 'spec', where: { path: ['k'], eq: 'v' } } });
+    const res = await findNodes({ filter: { memoryRefs: [memId], role: 'spec', where: { path: ['k'], eq: 'v' } } });
     expect(res.hits.map((h: any) => h.node.id)).toEqual([spec]);
   });
 });
@@ -69,7 +69,7 @@ describe('expand neighbours stay in scope', () => {
   it('a neighbour id outside the caller\'s scope is never hydrated; in-scope neighbours still are', async () => {
     neighbours.extra = [outside];
     // expand runs on the RANKED paths (buildResult / hydrateInOrder), so query.
-    const res = await findNodes({ query: 'zebracontent', mode: 'keyword', filter: { memoryIds: [memId], role: 'spec' }, expand: 1 });
+    const res = await findNodes({ query: 'zebracontent', mode: 'keyword', filter: { memoryRefs: [memId], role: 'spec' }, expand: 1 });
     const ids = res.hits.map((h: any) => h.node.id);
     expect(ids).toContain(spec);
     expect(ids).toContain(review); // unfiltered by role, by design
@@ -78,7 +78,7 @@ describe('expand neighbours stay in scope', () => {
 
   it('the same through buildResult (hybrid on an unindexed memory degrades to keyword there)', async () => {
     neighbours.extra = [outside];
-    const res = await findNodes({ query: 'zebracontent', mode: 'hybrid', filter: { memoryIds: [memId], role: 'spec' }, expand: 1 });
+    const res = await findNodes({ query: 'zebracontent', mode: 'hybrid', filter: { memoryRefs: [memId], role: 'spec' }, expand: 1 });
     expect(res.degraded ?? res.reason ?? '').toMatch(/no_vector_index/); // proves the buildResult path ran
     const ids = res.hits.map((h: any) => h.node.id);
     expect(ids).toContain(spec);

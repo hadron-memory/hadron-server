@@ -594,7 +594,9 @@ describe('#3323 refusal before oracle (acceptance 8)', () => {
   it('an alarm in another App and a missing alarm answer alike', async () => {
     const foreign = await refusedWorker(() => M.acknowledgeAlarm({}, { eventId: f.foreignAlarm.id, instruction: live }, bound()));
     const missing = await refusedWorker(() => M.acknowledgeAlarm({}, { eventId: generateId(), instruction: live }, bound()));
-    expect(foreign).toEqual({ ...missing, ext: { ...missing.ext as object, eventId: f.foreignAlarm.id } });
+    // #5225: neither relays the caller's eventId any more, so the two answers are identical.
+    expect(foreign).toEqual(missing);
+    expect(missing.ext).not.toHaveProperty('eventId');
   });
 });
 

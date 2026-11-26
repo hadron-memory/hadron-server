@@ -193,7 +193,7 @@ describe('#2193 — controls that keep their memory', () => {
   it('createNode returns its memory to the writer', async () => {
     const r = await post(await keyFor('admin'),
       'mutation($i: CreateNodeInput!) { createNode(input: $i) { id memory { id name } } }',
-      { i: { memoryId: mem.know, loc: `notes:new-${n}`, name: 'new' } });
+      { i: { memoryRef: mem.know, loc: `notes:new-${n}`, name: 'new' } });
     expect(r.errors).toBeUndefined();
     expect(r.data.createNode.memory).toEqual({ id: mem.know, name: 'Know' });
   });
@@ -248,12 +248,8 @@ describe('#2193 — other Node parents: Node.memory still answers as Query.memor
         expect(e!.target, `${who}: target`).toMatchObject({ id: node.handoff, memory: { id: mem.work } });
       }
       if (who === 'reader') {
-        // Stated up front: the org reader sees the edge and its knowledge-node
-        // source with that memory's record; the target sits in the working
-        // memory the reader may not read (nodeBatch pins the same denial).
-        expect(e, 'reader: the edge').toBeDefined();
-        expect(e!.source, 'reader: source').toMatchObject({ id: node.know, memory: { id: mem.know } });
-        expect(e!.target, 'reader: target').toBeNull();
+        // The target sits in the working memory the reader may not read (nodeBatch pins the same denial), so the edge is absent (hadron-internal#79).
+        expect(e, 'reader: the edge').toBeUndefined();
       }
       if (e) await memoryMatchesOracle(who, bearer, [e.source, e.target].filter(Boolean));
     }

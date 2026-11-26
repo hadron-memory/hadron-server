@@ -28,7 +28,7 @@ it('a real query-client cancellation preserves hybrid keyword hits and degradati
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   try {
     const result = await Promise.race([
-      (resolvers.Query as any).findNodes(null, { query: 'retention', mode: 'hybrid', filter: { memoryIds: [graph.id] } }, { db, roles: ['ADMIN'], userId: 'deadline-admin' } as Context),
+      (resolvers.Query as any).findNodes(null, { query: 'retention', mode: 'hybrid', filter: { memoryRefs: [graph.id] } }, { db, roles: ['ADMIN'], userId: 'deadline-admin' } as Context),
       new Promise(r => { watchdog = setTimeout(() => r('UNSETTLED'), 800); }),
     ]);
     expect(result).not.toBe('UNSETTLED');

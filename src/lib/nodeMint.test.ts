@@ -97,7 +97,7 @@ describe('mintMemoryNodes (#1591)', () => {
   it('refuses an approval that an edit superseded before the mint', async () => {
     const n = await spec('pas:010');
     await approveAll();
-    await resolvers.Mutation.updateSpecNode(null, { input: { memoryId: memory.id, loc: 'pas:010', content: 'Changed.' } } as never, as());
+    await resolvers.Mutation.updateSpecNode(null, { input: { memoryRef: memory.id, loc: 'pas:010', content: 'Changed.' } } as never, as());
     const dry = await mint(true);
     expect(dry.blockers).toEqual([expect.objectContaining({ kind: 'NOT_APPROVED', loc: 'pas:010' })]);
     expect((await rowOf(n.id)).mintedAt).toBeNull();
@@ -155,7 +155,7 @@ describe('approveMemoryNodes skips unchanged minted nodes (#1591, #1612)', () =>
 
 describe('re-mint scope (#1612, cor:dmo:120:06)', () => {
   const edit = (loc: string, content: string) =>
-    resolvers.Mutation.updateSpecNode(null, { input: { memoryId: memory.id, loc, content } } as never, as());
+    resolvers.Mutation.updateSpecNode(null, { input: { memoryRef: memory.id, loc, content } } as never, as());
 
   it('puts a minted node edited since into scope: approve, then re-mint keeps the first mint and advances revision and hash', async () => {
     const n = await spec('pas:010');
@@ -236,7 +236,7 @@ describe('mint status reads (#1591)', () => {
     await spec('pas:020', { properties: { k: 'v' } });
     const locs = async (minted: boolean, viaSql: boolean) => {
       const res = await resolvers.Query.findNodes(null, {
-        filter: { memoryIds: [memory.id], minted, ...(viaSql ? { where: { path: ['k'], eq: 'v' } } : {}) },
+        filter: { memoryRefs: [memory.id], minted, ...(viaSql ? { where: { path: ['k'], eq: 'v' } } : {}) },
         ...(viaSql ? { limit: 1 } : {}),
       }, as());
       return res.hits.map((h: { node: { loc: string } }) => h.node.loc).filter((l: string) => l !== 'specs').sort();

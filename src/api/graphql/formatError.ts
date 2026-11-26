@@ -35,7 +35,7 @@ import { QueryTooComplexError } from './admissionComplexity.js';
 import { TeamReadBusyError } from '../../lib/agentTasks/teamReadBudget.js';
 import { OwnerLimitReachedError } from '../../lib/ownerLimits/errors.js';
 import { NodeContentTooLargeError } from '../../lib/nodeContentLimit.js';
-import { AuthStoreBusyError } from '../../lib/authStoreBusy.js';
+import { AuthStoreBusyError, authStoreBusyMessage, normalizeAuthStoreBusyReason } from '../../lib/authStoreBusy.js';
 import { GitCommandError } from '../../integrations/github/execGit.js';
 import { SessionExpiredError } from '../../lib/nodeCrypto.js';
 
@@ -56,15 +56,26 @@ interface ClientErrorMapping {
    * `instanceof` chain in the plugin.
    */
   silenceInSentry: boolean;
+  /**
+   * #4591: when set, the mapping renders the WHOLE public error. The message is this value (never
+   * the thrown one) and the extensions are exactly `extensionsFor`'s: nothing Apollo copied off
+   * the thrown error is merged under them.
+   */
+  fixedMessageFor?: (err: unknown) => string;
 }
 
 /** Type-safe definition site; the cast is contained here. */
 function mapping<E>(
   matches: (err: unknown) => err is E,
   extensionsFor: (err: E) => Record<string, unknown>,
-  { silenceInSentry }: { silenceInSentry: boolean },
+  { silenceInSentry, fixedMessageFor }: { silenceInSentry: boolean; fixedMessageFor?: (err: E) => string },
 ): ClientErrorMapping {
-  return { matches, extensionsFor: (err) => extensionsFor(err as E), silenceInSentry };
+  return {
+    matches,
+    extensionsFor: (err) => extensionsFor(err as E),
+    silenceInSentry,
+    fixedMessageFor: fixedMessageFor && ((err) => fixedMessageFor(err as E)),
+  };
 }
 
 const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
@@ -94,10 +105,20 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // it as an untyped INTERNAL_SERVER_ERROR. Availability signal like TEAM_READ_BUSY — NOT silenced:
   // pool exhaustion during auth is countable evidence, the shape the P2028 incident (#4380) was
   // found by counting.
+  // #4591 (cor:aut:010:05, cor:api:260:01): the public error is fixed values only. `instanceof` proves the class, not
+  // that a subclass or a late mutation kept the message and extensions intact. The 503 does not depend on this render:
+  // Apollo consumes the thrown `extensions.http` before `formatError` runs.
   mapping(
     (err): err is AuthStoreBusyError => err instanceof AuthStoreBusyError,
-    (err) => ({ ...err.extensions }),
-    { silenceInSentry: false },
+    (err) => ({
+      code: 'AUTH_STORE_BUSY',
+      retryable: true,
+      reason: normalizeAuthStoreBusyReason(err.extensions?.reason),
+    }),
+    {
+      silenceInSentry: false,
+      fixedMessageFor: (err) => authStoreBusyMessage(err.extensions?.reason),
+    },
   ),
   // #3009: declining the encrypted-vector disclosure is a caller refusal on both consumers of this list.
   mapping(
@@ -316,6 +337,14 @@ export function formatGraphQLError(
   const original = unwrap(error);
   for (const m of CLIENT_ERROR_MAPPINGS) {
     if (!m.matches(original)) continue;
+    if (m.fixedMessageFor) {
+      return {
+        message: m.fixedMessageFor(original),
+        locations: formattedError.locations,
+        path: formattedError.path,
+        extensions: m.extensionsFor(original),
+      };
+    }
     return {
       ...formattedError,
       // The domain message, not Apollo's decoration of it.

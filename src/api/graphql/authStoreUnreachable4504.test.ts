@@ -113,11 +113,11 @@ describe('an unreachable store during request auth (#4504, decided: typed retrya
     expect(res.status).toBe(503);
     expect(body.errors).toHaveLength(1);
     expect(body.errors[0].message).toBe(AUTH_STORE_UNREACHABLE_MESSAGE);
-    expect(body.errors[0].extensions).toEqual({
+    // #4591: the three fixed fields. Apollo consumes `extensions.http` for the 503 asserted above.
+    expect(body.errors[0].extensions).toStrictEqual({
       code: 'AUTH_STORE_BUSY',
       retryable: true,
       reason: 'STORE_UNREACHABLE',
-      http: { status: 503 },
     });
     // The engine's message names the host:port; none of it may reach the caller.
     expect(text).not.toMatch(/P1001|Can't reach|127\.0\.0\.1|ECONNREFUSED|INTERNAL_SERVER_ERROR/i);

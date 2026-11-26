@@ -17,12 +17,15 @@ let server: Server;
 let base = '';
 
 /** #4592 F3: the tampered-reason fixtures, ONE named table shared by the route that plants each reason and the assertions on the wire. */
-const TAMPERED_CASES: Array<{ name: string; planted: unknown; expectedWireReason: 'STORE_UNREACHABLE' | 'POOL_WAIT'; message: string }> = [
+const TAMPERED_CASES: Array<{ name: string; planted: unknown; expectedWireReason: 'STORE_UNREACHABLE' | 'POOL_WAIT'; message: string; extensionsGone?: 'null' | 'removed' }> = [
   { name: 'unreachable', planted: 'STORE_UNREACHABLE', expectedWireReason: 'STORE_UNREACHABLE', message: AUTH_STORE_UNREACHABLE_MESSAGE },
   { name: 'pool-wait', planted: 'POOL_WAIT', expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
   { name: 'absent', planted: undefined, expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
   { name: 'driver-text', planted: 'driver-secret', expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
   { name: 'object', planted: { detail: 'driver-secret' }, expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
+  // #5253: the extensions object itself gone, not just its reason: the boundary still answers the fixed 503 with POOL_WAIT.
+  { name: 'extensions-null', planted: undefined, expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE, extensionsGone: 'null' },
+  { name: 'extensions-removed', planted: undefined, expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE, extensionsGone: 'removed' },
 ];
 
 beforeAll(async () => {
@@ -70,7 +73,9 @@ beforeAll(async () => {
       'STORE_UNREACHABLE',
     );
     tampered.message = "Can't reach database server at `10.9.8.7:5432`";
-    tampered.extensions.reason = fixture.planted;
+    if (fixture.extensionsGone === 'null') (tampered as unknown as { extensions: unknown }).extensions = null;
+    else if (fixture.extensionsGone === 'removed') delete (tampered as unknown as { extensions?: unknown }).extensions;
+    else tampered.extensions.reason = fixture.planted;
     next(tampered);
   });
   // #4504 (Bradley P3, the double-log check): headers already gone out when the fault
