@@ -76,6 +76,52 @@ describe('#3999 own passkey ceremony',()=>{
   const id=await stage();await resolvers.Mutation.withdrawSecretChangeRequest({}, {id},ctx());
   expect((await row(id)).state).toBe('withdrawn');expect((await row(id)).staged_value_encrypted).toBeNull();
  });
+ // #5334 / cor:sec:070:02 (Decided, Holger 2026-11-26): withdrawing a request that expired while open answers false.
+ async function stageExpiredOpen(){
+  const id=await stage();const r=await row(id);const expiredId=generateId();
+  await db.secretChangeRequest.create({data:{id:expiredId,appId,secretId,secretName:r.secret_name,secretKind:r.secret_kind,metadata:r.metadata as never,
+   operation:r.operation,requesterId:userId,state:'open',snapshot:r.snapshot,stagedValueEncrypted:r.staged_value_encrypted,keyVersion:r.key_version,
+   sizeBytes:r.size_bytes,expiresAt:new Date(Date.now()-10000)}});
+  return expiredId;
+ }
+ it('answers false for a request that expired while open, and records it as expired with its ciphertext cleared',async()=>{
+  const id=await stageExpiredOpen();expect((await row(id)).state).toBe('open');
+  expect(await resolvers.Mutation.withdrawSecretChangeRequest({}, {id},ctx())).toBe(false);
+  const after=await row(id);expect(after.state).toBe('expired');expect(after.ended_at).not.toBeNull();expect(after.staged_value_encrypted).toBeNull();
+ });
+ it('answers true and ends as withdrawn for a live open request',async()=>{
+  const id=await stage();
+  expect(await resolvers.Mutation.withdrawSecretChangeRequest({}, {id},ctx())).toBe(true);
+  expect((await row(id)).state).toBe('withdrawn');
+ });
+ it('judges the request after the row lock wait: a withdraw queued behind another ending answers false',async()=>{
+  const id=await stage();let queued:Promise<unknown>|undefined,settled=false;
+  await db.$transaction(async(tx)=>{
+   await tx.$queryRaw`SELECT id FROM secret_change_requests WHERE id=${id} FOR UPDATE`;
+   queued=resolvers.Mutation.withdrawSecretChangeRequest({}, {id},ctx()).finally(()=>{settled=true;});
+   await new Promise(r=>setTimeout(r,500));
+   expect(settled).toBe(false);// it waits on the row lock, so it has not answered yet
+   await tx.$executeRaw`UPDATE secret_change_requests SET state='withdrawn',ended_at=(clock_timestamp() AT TIME ZONE 'UTC') WHERE id=${id}`;
+  });
+  expect(await queued).toBe(false);expect((await row(id)).state).toBe('withdrawn');
+ });
+ it('answers false, unchanged, for a request already ended in any state',async()=>{
+  const live=await stage();await resolvers.Mutation.withdrawSecretChangeRequest({}, {id:live},ctx());
+  const ended=await row(live);
+  expect(await resolvers.Mutation.withdrawSecretChangeRequest({}, {id:live},ctx())).toBe(false);
+  expect((await row(live)).ended_at).toEqual(ended.ended_at);expect((await row(live)).state).toBe('withdrawn');
+  const exp=await stageExpiredOpen();await resolvers.Mutation.withdrawSecretChangeRequest({}, {id:exp},ctx());
+  const expEnded=await row(exp);
+  expect(await resolvers.Mutation.withdrawSecretChangeRequest({}, {id:exp},ctx())).toBe(false);
+  expect((await row(exp)).state).toBe('expired');expect((await row(exp)).ended_at).toEqual(expEnded.ended_at);
+ });
+ it('answers another person and an unknown id with the same refusal, and leaves an expired-open request untouched',async()=>{
+  const id=await stageExpiredOpen();const other=(await db.user.create({data:{email:`${generateId()}@s4.test`}})).id;
+  const a=await error(resolvers.Mutation.withdrawSecretChangeRequest({}, {id},{...ctx(),userId:other}));
+  const b=await error(resolvers.Mutation.withdrawSecretChangeRequest({}, {id:generateId()},{...ctx(),userId:other}));
+  expect(a.message).toBe(b.message);expect(a.extensions).toEqual(b.extensions);expect(a.extensions.code).toBe('NOT_FOUND');
+  expect((await row(id)).state).toBe('open');
+ });
  it('bounds open requests per secret',async()=>{
   const users=await Promise.all([0,1].map(()=>db.user.create({data:{email:`${generateId()}@s4.test`}})));
   await db.appMember.createMany({data:users.map(user=>({appId,userId:user.id,role:'reader'}))});

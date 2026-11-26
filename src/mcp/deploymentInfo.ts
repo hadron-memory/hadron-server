@@ -304,7 +304,11 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // relied on the old bind and rename still parses the call but silently gets a link only. (0.45.0 is #5239, merged first.)
 // 0.47.0 — ADDITIVE, #5218: `App.viewerAppUserMemoryClasses: [MemoryClass!]!`, the personal/private classes the
 // signed-in viewer may still create in the App through `createMemoryInApp`. A lagging client still validates. (0.46.0 is #5258, merged first.)
-export const HADRON_SERVER_VERSION = '0.47.0';
+// 0.49.0 — ANSWER CHANGE, #5334 (cor:sec:070:02, Decided, Holger 2026-11-26): `withdrawSecretChangeRequest` on a request that expired while
+// open now answers false (nothing was withdrawn); it still ends as expired with its staged value cleared, as before. It answered true.
+// A live request still answers true and ends withdrawn; an ended one, and another person's or unknown id, are unchanged. No SDL shape change.
+// (0.48.0 is #5314, expected first; the number is taken by whichever PR is READY first.)
+export const HADRON_SERVER_VERSION = '0.49.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
