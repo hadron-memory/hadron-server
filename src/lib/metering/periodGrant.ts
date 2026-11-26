@@ -174,6 +174,8 @@ export async function ensurePeriodGrant(db: PrismaClient, owner: OwnerRef, now: 
       sourceId: periodGrantSourceId(owner, now),
       note: null,
       createdBy: PERIOD_GRANT_ACTOR,
+      // Dated at the read's instant, so that read's replay (createdAt <= now) lists it under `expiring` (QA P3 on #5317).
+      createdAt: now,
     });
     done.add(key);
   } catch (err) {

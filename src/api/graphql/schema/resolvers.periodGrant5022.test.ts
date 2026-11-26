@@ -71,6 +71,19 @@ describe('G1: a person\'s first read of the month', () => {
     expect(await grants()).toHaveLength(1);
   });
 
+  it('the read that writes the grant lists it under expiring (QA P3, #5317): the grant is dated at the read\'s instant', async () => {
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"1234"}' });
+    const q = `query($userRef: ID) { creditBalance(userRef: $userRef) { balanceMicroCents expiring { amountMicroCents expiresAt } } }`;
+    const res = await gql(q, ctxOf(p), { userRef: p });
+    expect(res.errors).toBeUndefined();
+    const cb = (res.data as { creditBalance: { balanceMicroCents: string; expiring: { amountMicroCents: string; expiresAt: string }[] } })
+      .creditBalance;
+    expect(cb.balanceMicroCents).toBe('1234');
+    const rows = await grants();
+    expect(rows).toHaveLength(1);
+    expect(cb.expiring).toEqual([{ amountMicroCents: '1234', expiresAt: rows[0]!.expiresAt!.toISOString() }]);
+  });
+
   it('a platform admin\'s read writes the person\'s grant, recorded as system:period-grant, not as the admin', async () => {
     reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"1234"}' });
     expect(balanceOf(await gql(BALANCE, ctxOf(admin, ['ADMIN']), { userRef: p }))).toBe('1234');
