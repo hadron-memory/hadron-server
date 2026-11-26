@@ -188,6 +188,12 @@ describe('resolveRegister', () => {
     expect(block.split(/\r\n|[\n\r]/).filter((l) => l.startsWith('app: FORGED'))).toEqual([]);
   });
 
+  it('#5236 a plain row is byte-for-byte what it was: the exact block', async () => {
+    await db.registerEntry.updateMany({ where: { appId: app.id }, data: { description: 'watch the team channel' } });
+    const block = renderDerivedBlocks(await resolveRegister(db, { attendee: { workerId: worker.id }, actor: ctx(admin.id) }));
+    expect(block).toBe(`## Channels (register)\n- team \u2014 hrn:mem:${appMem.urn}:chats:team: both, install default; read + post; no messages yet\n  watch the team channel`);
+  });
+
   it('#5236 collapsing adds no cut: a long name and description render whole, and a plain row is unchanged', async () => {
     const longName = 'n'.repeat(250);
     const longDesc = 'd'.repeat(400);
