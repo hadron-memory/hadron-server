@@ -304,7 +304,11 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // relied on the old bind and rename still parses the call but silently gets a link only. (0.45.0 is #5239, merged first.)
 // 0.47.0 — ADDITIVE, #5218: `App.viewerAppUserMemoryClasses: [MemoryClass!]!`, the personal/private classes the
 // signed-in viewer may still create in the App through `createMemoryInApp`. A lagging client still validates. (0.46.0 is #5258, merged first.)
-export const HADRON_SERVER_VERSION = '0.47.0';
+// 0.50.0 — ADMISSION COST, #5267: `App.viewerAppUserMemoryClasses` (#5218) is priced at 24 per App by GraphQL admission (it was a leaf, 1),
+// the statements it issues for a member App with three unlicensed installed Agents. A list that selects it for many Apps costs more and can
+// now be refused QUERY_TOO_COMPLEX where it was admitted; a single-App selection is unaffected in practice. Answers and the SDL are unchanged.
+// (0.48.0 is #5314 and 0.49.0 is #5334, expected first; the number is taken by whichever PR is READY first.)
+export const HADRON_SERVER_VERSION = '0.50.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

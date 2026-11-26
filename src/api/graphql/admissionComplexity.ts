@@ -157,11 +157,22 @@ export const FIXED_LIST_SIZE: Readonly<Record<string, number>> = {
  */
 export const APP_SELF_JOIN_COST = 8;
 
+/**
+ * #5267: `App.viewerAppUserMemoryClasses` (#5218) is priced here, not batched, because the licence step is the door's own
+ * judgement (`cor:dmo:060:20`) and is not copied. The weight is the statements the field adds for one member App in the worst
+ * shape the test fixture prices: three installed Agents, none licensed, so the licence loop runs to its end (the membership
+ * read, the install listing, a licence check per Agent, the held-class read). An App with more unlicensed installed Agents
+ * costs more than this; the tail is named in the issue. Measured per member App: 7 with no Agent, 14 with one licensed Agent,
+ * 24 with three unlicensed ones (the Prisma query-event count of the field alone, `resolvers.appUserMemoryClassesCost5267.test.ts`).
+ */
+export const APP_VIEWER_USER_MEMORY_CLASSES_COST = 24;
+
 export const FIXED_FIELD_COST: Readonly<Record<string, number>> = {
   'Query.specDocument': SPEC_DOCUMENT_CALL_COST,
   // #4758: `App.selfJoin` pays the shared read gate and joinApp's own decision (two reads) for each App it reaches, on top of the
   // batched App and membership reads; selected per row on a list, the parent's list factor multiplies this.
   'App.selfJoin': APP_SELF_JOIN_COST,
+  'App.viewerAppUserMemoryClasses': APP_VIEWER_USER_MEMORY_CLASSES_COST,
 };
 
 export const DEFAULT_OMITTED_PAGE_SIZE = 100;
