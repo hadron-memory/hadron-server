@@ -102,6 +102,7 @@ import {
 } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { SUBSCRIPTION_WRITE_CLASSES } from '../../../lib/auth/memorySubscriptionAccess.js';
 import { isUserOwnedAgentDefinition } from '../../../lib/auth/userOwnedAgentDefinition.js';
 import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemory.js';
 import { isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
@@ -3135,9 +3136,11 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
   // live org CONTRIBUTOR+, group via its MemoryMember writer/owner grant.
   if ((await getOrgWritableMemoryIds(ctx.db, ctx.userId, memoryId)).includes(memoryId)) return;
 
-  // A subscription grants writes only to ordinary shared knowledge. Group
-  // membership stays the exclusive group-write arm (cor:acl:010:01).
-  if (memory.class === 'knowledge' && memory.userMemoryOfAgentId === null) {
+  // A subscription grants writes only to ordinary shared knowledge — the SAME
+  // exported list the audit and getSubscribedWritableMemoryIds use, so the
+  // writable class cannot drift between the copies. Group membership stays the
+  // exclusive group-write arm (cor:acl:010:01).
+  if ((SUBSCRIPTION_WRITE_CLASSES as readonly string[]).includes(memory.class) && memory.userMemoryOfAgentId === null) {
     const userOrgs = await ctx.db.orgMember.findMany({
       where: {
         userId: ctx.userId,
