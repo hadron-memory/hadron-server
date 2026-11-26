@@ -68,6 +68,17 @@ const hosts = (c: Context) => Q.agentTeamHosts({}, { appRef: app.id }, c);
 const host = (hostId: string, c: Context) => Q.agentTeamHost({}, { appRef: app.id, hostId }, c);
 /** The key id a raw key maps to (the join's response carries the raw key and the host, never the key row). */
 const keyIdOf = async (rawKey: string) => (await db.appKey.findUniqueOrThrow({ where: { keyHash: hashAppKey(rawKey) }, select: { id: true } })).id;
+/** A worker.start of Kit on `hostId`, with the hold that authorized it (chk_host_operations_hold). */
+const startOp = (hostId: string, over: Record<string, unknown> = {}) => db.hostOperation.create({ data: {
+  id: generateId(), appId: app.id, hostId, type: 'worker.start', args: { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude' },
+  workerId: kit.id, issuedBy: 'platform', holdUserId: holder.id, holdAt: new Date(), ...over,
+} });
+/** A session of Kit launched on `hostId` by a start that succeeded (chk_sessions_launch names all three launch columns). */
+async function launchedSession(hostId: string, over: Record<string, unknown> = {}) {
+  const op = await startOp(hostId, { status: 'succeeded', finishedAt: new Date() });
+  return db.session.create({ data: { id: generateId(), appId: app.id, agentId, workerId: kit.id, userId: holder.id, tool: 'vitest',
+    launchHostId: hostId, launchOperationId: op.id, launchIssuedBy: 'platform', ...over } });
+}
 const register = (keyId: string, workers: unknown[] = []) =>
   M.registerHost({}, { input: { appRef: app.id, label: 'Mac', pollIntervalSeconds: 600, workers } }, keyCtx(keyId));
 
@@ -331,9 +342,9 @@ describe('removeAgentTeamHost: person-only (A6), and what it ends (A7, A8)', () 
     const issued = await op({});
     const collected = await op({ status: 'collected', collectedAt: new Date() });
     const done = await op({ status: 'succeeded', finishedAt: new Date() });
-    const started = await op({ type: 'worker.start', status: 'collected', collectedAt: new Date(),
-      args: { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude' } });
-    await db.session.create({ data: { id: generateId(), appId: app.id, agentId, workerId: kit.id, userId: holder.id, tool: 'vitest', launchOperationId: started.id } });
+    const started = await startOp('mac1', { status: 'collected', collectedAt: new Date() });
+    await db.session.create({ data: { id: generateId(), appId: app.id, agentId, workerId: kit.id, userId: holder.id, tool: 'vitest',
+      launchHostId: 'mac1', launchOperationId: started.id, launchIssuedBy: 'platform' } });
     await remove({ hostId: 'mac1', force: true });
     const after = Object.fromEntries((await db.hostOperation.findMany()).map((o) => [o.id, o]));
     expect(after[issued.id]).toMatchObject({ status: 'failed' });
@@ -347,7 +358,7 @@ describe('removeAgentTeamHost: person-only (A6), and what it ends (A7, A8)', () 
   it('refused while a worker of that host has an open session, unless forced (Q4: sessionRunsOn\'s rule)', async () => {
     const keyId = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
     await register(keyId, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
-    await db.session.create({ data: { id: generateId(), appId: app.id, agentId, workerId: kit.id, userId: holder.id, tool: 'vitest', launchHostId: 'mac1' } });
+    await launchedSession('mac1');
     const r = await refusal(remove({ hostId: 'mac1' }));
     expect(r.code).toBe('AGENT_TEAM_HOST_HAS_OPEN_SESSIONS');
     expect(r.message).not.toContain('mac1');
@@ -359,8 +370,8 @@ describe('removeAgentTeamHost: person-only (A6), and what it ends (A7, A8)', () 
   it('a session launched on another host, or ended, does not hold the removal', async () => {
     const keyId = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
     await register(keyId, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
-    await db.session.create({ data: { id: generateId(), appId: app.id, agentId, workerId: kit.id, userId: holder.id, tool: 'vitest', launchHostId: 'mac2' } });
-    await db.session.create({ data: { id: generateId(), appId: app.id, agentId, workerId: kit.id, userId: holder.id, tool: 'vitest', launchHostId: 'mac1', endedAt: new Date() } });
+    await launchedSession('mac2');
+    await launchedSession('mac1', { endedAt: new Date() });
     expect(await remove({ hostId: 'mac1' })).toBe(true);
   });
 });
@@ -406,5 +417,78 @@ describe('the raw key (A10)', () => {
     expect(JSON.stringify(events)).not.toContain('hdr_app_');
     expect(JSON.stringify(await db.agentTeamHost.findMany())).not.toContain(raw.slice(8));
     expect(JSON.stringify(await hosts(ctx(member.id)))).not.toContain('hdr_app_');
+  });
+});
+
+describe('removal ends the registration for every reader of liveness', () => {
+  it('the registration listing reads the removed host as not live, inside its refresh window', async () => {
+    const keyId = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
+    await register(keyId);
+    expect((await Q.hostRegistrations({}, { appRef: app.id }, ctx(manager.id))).map((r: any) => [r.hostId, r.live])).toEqual([['mac1', true]]);
+    await remove({ hostId: 'mac1' });
+    expect((await Q.hostRegistrations({}, { appRef: app.id }, ctx(manager.id))).map((r: any) => [r.hostId, r.live])).toEqual([['mac1', false]]);
+  });
+});
+
+describe('the guarded insert, without the doors\' locks (findings: resolver-race-pin-can-miss-the-consume-guard)', () => {
+  it('two transactions racing to insert one host id: one row, exactly one of them created it', async () => {
+    const { insertOrLockTeamHost } = await import('../../../lib/hostOperations/teamHosts.js');
+    const one = () => db.$transaction((tx) => insertOrLockTeamHost(tx, { appId: app.id, hostId: 'mac1', label: 'Mac', createdByUserId: manager.id, now: new Date() }));
+    const results = await Promise.all([one(), one()]);
+    expect(results.map((r) => r.created).sort()).toEqual([false, true]);
+    expect(results[0]!.row.id).toBe(results[1]!.row.id);
+    expect(await db.agentTeamHost.count()).toBe(1);
+  });
+});
+
+describe('the backfill (A9; gate decisions Q2 and Q6)', () => {
+  const migration = () => readFileSync(new URL('../../../../prisma/migrations/20261126160000_agent_team_hosts/migration.sql', import.meta.url), 'utf8');
+  const backfill = () => {
+    const sql = migration();
+    const start = sql.indexOf('WITH sources AS');
+    const end = sql.indexOf('ON CONFLICT (app_id, host_id) DO NOTHING;', start) + 'ON CONFLICT (app_id, host_id) DO NOTHING'.length;
+    expect(start).toBeGreaterThan(0);
+    return db.$executeRawUnsafe(sql.slice(start, end));
+  };
+  const scope = (keyId: string, hostId: string, over: Record<string, unknown> = {}) =>
+    db.appKeyScope.create({ data: { id: generateId(), appKeyId: keyId, scope: 'host:operate', hostId, grantedByUserId: manager.id, ...over } });
+
+  it('one row per (App, host) from live scopes on live keys, registrations and assignments; revoked-only pairs get none', async () => {
+    const live = await mkKey(app.id, 'live');
+    await scope(live.id, 'h-scope');
+    const both = await mkKey(app.id, 'both');
+    await scope(both.id, 'h-both', { grantedAt: new Date(Date.now() - 60_000) });
+    const revokedScope = await mkKey(app.id, 'rs');
+    await scope(revokedScope.id, 'h-revoked', { revokedAt: new Date(), revokedByUserId: manager.id });
+    const revokedKey = await db.appKey.update({ where: { id: (await mkKey(app.id, 'rk')).id }, data: { revokedAt: new Date() } });
+    await scope(revokedKey.id, 'h-revkey');
+    const reg = (hostId: string, label: string, poll: number) => db.hostRegistration.create({ data: { appId: app.id, hostId, label, pollIntervalSeconds: poll, refreshedAt: new Date() } });
+    await reg('h-reg', 'Reg Label', 300);
+    await reg('h-both', 'Both Label', 120);
+    await db.hostWorkerAssignment.create({ data: { id: generateId(), appId: app.id, hostId: 'h-assign', workerId: kit.id, workdir: 'hadron-server/kit', family: 'claude', createdByUserId: holder.id } });
+    expect(await backfill()).toBe(4);
+    const rows = await db.agentTeamHost.findMany({ orderBy: { hostId: 'asc' } });
+    expect(rows.map((r) => [r.hostId, r.label, r.pollIntervalSeconds, r.createdByUserId, r.removedAt])).toEqual([
+      ['h-assign', 'h-assign', null, holder.id, null],
+      ['h-both', 'Both Label', 120, manager.id, null],
+      ['h-reg', 'Reg Label', 300, null, null],
+      ['h-scope', 'h-scope', null, manager.id, null],
+    ]);
+    // Re-runnable: a pair that has a row is left alone.
+    expect(await backfill()).toBe(0);
+  });
+
+  it('after the backfill a host that registered before keeps working: its key registers, and it can be granted and assigned', async () => {
+    const k = await mkKey(app.id, 'old');
+    await scope(k.id, 'orca1');
+    await register(k.id, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
+    await backfill();
+    await register(k.id, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
+    await M.assignHostWorker({}, { input: { appRef: app.id, hostId: 'orca1', worker: 'Kit', workdir: 'hadron-server/kit', family: 'claude' } }, ctx(manager.id));
+    expect((await hosts(keyCtx(k.id))).map((h: any) => [h.hostId, h.label])).toEqual([['orca1', 'Mac']]);
+  });
+
+  it('the migration carries no box-drawing characters (a pasted Prisma banner breaks migrate deploy)', () => {
+    expect(/[─-╿]/.test(migration())).toBe(false);
   });
 });

@@ -10127,6 +10127,21 @@ export const typeDefs = `#graphql
     """
     hostSetup(appRef: String!, hostId: String): HostSetup!
     """
+    #5259 — the App's live hosts and their settings, by host id (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the host
+    and its settings, Proposed). A removed host is left out. Whoever reads the App's tasks and events, the App's own key
+    included. A host key reads only its own host's record (hrn:node:hadronmemory.com:specs:cor:agt:070:04); a key whose
+    host:operate was revoked is refused FORBIDDEN. Each host-key read is recorded
+    (hrn:node:hadronmemory.com:specs:cor:agt:070:07).
+    """
+    agentTeamHosts(appRef: String!): [AgentTeamHost!]!
+    """
+    #5259 — one live host of the App and its settings. HOST_NOT_FOUND for a host the App does not have or has removed. A
+    host key reads only its own host: another host's id answers exactly as an unknown one, decided before any lookup
+    (hrn:node:hadronmemory.com:specs:cor:agt:070:04). Each host-key read is recorded, a refused one too
+    (hrn:node:hadronmemory.com:specs:cor:agt:070:07).
+    """
+    agentTeamHost(appRef: String!, hostId: String!): AgentTeamHost!
+    """
     #3273 (hrn:node:hadronmemory.com:specs:cor:agt:050:27, hrn:node:hadronmemory.com:specs:cor:agt:070:04):
     the current state of one context reset whose operation this App key's host collected, ended resets included.
     The host-key gate runs first, as for the protocol steps: HOST_KEY_REQUIRED (not an App key), APP_NOT_FOUND
@@ -13077,12 +13092,42 @@ export const typeDefs = `#graphql
     A worker may be assigned to several hosts. The assignment is a record until the App's hostSetupSource is SERVER.
     Refused BAD_HOST_ASSIGNMENT_ARGS (a workdir or host id that is not its token shape: a path, an option, a command),
     BAD_LAUNCHER_PROFILE (a family that is not a model-family token, or a model, effort or accountProfile that is not a
-    profile token), HOST_ASSIGNMENT_NOT_PERMITTED, WORKER_NOT_FOUND, WORKER_RETIRED, and HOST_ASSIGNMENT_EXISTS when this worker is
-    already assigned to that host and replace is not set. A refusal writes nothing.
+    profile token), HOST_ASSIGNMENT_NOT_PERMITTED, WORKER_NOT_FOUND, WORKER_RETIRED, HOST_NOT_FOUND (#5259: the host is not
+    joined to the App, or was removed), and HOST_ASSIGNMENT_EXISTS when this worker is already assigned to that host and
+    replace is not set. A refusal writes nothing.
     """
     assignHostWorker(input: AssignHostWorkerInput!, instruction: ActInstructionInput): HostWorkerAssignment!
     "#4222 — remove a worker's assignment to a host. Whoever manages the App, as for assignHostWorker (HOST_ASSIGNMENT_NOT_PERMITTED otherwise). True when one was removed, false when there was none; a retired worker's assignment is removable."
     unassignHostWorker(input: UnassignHostWorkerInput!, instruction: ActInstructionInput): Boolean!
+    """
+    #5259 — make a machine a host of the App (hrn:node:hadronmemory.com:specs:cor:agt:070:07, Proposed): in one
+    transaction, the host's record (hrn:node:hadronmemory.com:specs:cor:agt:070:01), a new App key, and that key's
+    host:operate for this host and attention:deliver. The raw key is in this answer once and nowhere else; only its
+    hash is stored. hostId defaults to a slug of label, label to hostId. Joining a removed host revives its record with
+    its settings reset. Whoever manages the App, as a person acting as themselves, exactly as for createAppKey: anyone
+    else, a worker session, a run, an impersonation and an App key are refused as createAppKey refuses them
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). Refused BAD_AGENT_TEAM_HOST_ARGS, APP_NOT_FOUND, and
+    AGENT_TEAM_HOST_EXISTS when the host is joined, or a live key operates as it, and replace is not set; replace
+    revokes every live key of this host and issues one new key. A refusal writes nothing.
+    """
+    joinAgentTeamHost(input: JoinAgentTeamHostInput!): JoinAgentTeamHostPayload!
+    """
+    #5259 — change a host's settings (hrn:node:hadronmemory.com:specs:cor:agt:070:01, Proposed): an omitted field is
+    kept, null clears it to the product default; the label is never cleared. Applied at the host's next check-in.
+    Whoever manages the App, as a person or through their held worker on an instruction; never an App key. Refused
+    AGENT_TEAM_HOST_NOT_PERMITTED, BAD_AGENT_TEAM_HOST_ARGS, APP_NOT_FOUND and HOST_NOT_FOUND (not joined, or removed).
+    """
+    updateAgentTeamHost(input: UpdateAgentTeamHostInput!, instruction: ActInstructionInput): AgentTeamHost!
+    """
+    #5259 — remove a host from the App (hrn:node:hadronmemory.com:specs:cor:agt:070:07, Proposed), in one transaction:
+    its keys are revoked, its registration ends (so its workers stop counting as launchable at once), its assignments
+    are removed and its issued and collected operations are settled as failed with a reason starting HOST_REMOVED
+    (hrn:node:hadronmemory.com:specs:cor:agt:070:02; one whose effect already happened reads succeeded). The gate is
+    joinAgentTeamHost's: a person who manages the App, acting as themselves, never a held worker or an App key.
+    Refused AGENT_TEAM_HOST_HAS_OPEN_SESSIONS while a worker of the host has an open session, unless force; and
+    BAD_AGENT_TEAM_HOST_ARGS, APP_NOT_FOUND, HOST_NOT_FOUND (not joined, or already removed). True when removed.
+    """
+    removeAgentTeamHost(input: RemoveAgentTeamHostInput!): Boolean!
     """
     #4222 — set who states which workers the App's hosts run: HOST (the default) or SERVER. Whoever manages the App
     (HOST_ASSIGNMENT_NOT_PERMITTED otherwise). Under SERVER, registerHost accepts only the workers assigned to that
@@ -17023,7 +17068,9 @@ export const typeDefs = `#graphql
     A new key, and a rotated one, holds none. Unknown scope: BAD_USER_INPUT.
     #1709: host:operate is granted for ONE host, named by hostId (hrn:node:hadronmemory.com:specs:cor:agt:070:04), and
     hostId is refused for any other scope. A key already operating as another host is refused
-    APP_KEY_SCOPE_HOST_CONFLICT: revoke host:operate first.
+    APP_KEY_SCOPE_HOST_CONFLICT: revoke host:operate first. #5259: the host must be joined to the App
+    (joinAgentTeamHost, hrn:node:hadronmemory.com:specs:cor:agt:070:01, Proposed): a host the App does not have, or has
+    removed, is refused HOST_NOT_FOUND.
     """
     grantAppKeyScope(id: ID!, scope: String!, hostId: String): AppKey!
     "#1749 — take a scope back. The key's next call is refused. Revoking a scope it does not hold changes nothing. Whoever manages the App, as themselves, or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A); an admitted instructed revoke that ended a scope records one team event (never the key or scope id). ${RUN_REFUSAL_3340}"
@@ -18576,7 +18623,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.lead-cadence (#2763, #4375: task-less, subjectWorker is the lead that stopped assigning: a worker that at least one worker reports to; events raised before #4375 carry the type alarm.coordinator-cadence, the same alarm under its old name); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); alarm.saturation (#3819: task-less and workerless: a family/tier/role combination the platform could not give work to, hrn:node:hadronmemory.com:specs:cor:agt:060:14; #4777: its chain names the App's workers whose roles its saturation-alarm list named when it was raised, each offered one wake while its episode is open, and is empty (waking nobody) when the list was, hrn:node:hadronmemory.com:specs:cor:agt:060:16; payload is reason (no-worker or none-eligible), family, tier and role, null for a dimension the task left open; only whoever manages the App acknowledges it, and acknowledging does not end its episode); team.dark (#4531: App-owned, task-less and workerless, with an empty chain, hrn:node:hadronmemory.com:specs:cor:agt:050:34: the team as a whole went silent past the dark window, one per episode; payload is reason (wake-unacked, no-turn or work-waiting), windowMinutes, workerCount, darkWorkerCount, oldestWakeAgeSeconds and waitingSeconds, counts and ages only; it wakes nobody and is not acknowledgeable) and team.recovered (an ordinary event, one per episode, when the condition clears); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02); question.answered, question.answer-retracted (#4431: a question that blocks the task was answered, or its answer taken back; payload is questionId, code, revision and state only, never the answer; only question.answered wakes the task\'s assignee)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.lead-cadence (#2763, #4375: task-less, subjectWorker is the lead that stopped assigning: a worker that at least one worker reports to; events raised before #4375 carry the type alarm.coordinator-cadence, the same alarm under its old name); alarm.stale-sweep (#4233: task-less and workerless: a host of an App in sweep mode OBSERVE or APPLY whose last run the server recorded more than five minutes ago (the server's clock, not the host's; a switch-on of the mode restarts the clock); payload.hostId names the host, the alarm goes to the App's managers and ends when the host records its next run); alarm.saturation (#3819: task-less and workerless: a family/tier/role combination the platform could not give work to, hrn:node:hadronmemory.com:specs:cor:agt:060:14; #4777: its chain names the App's workers whose roles its saturation-alarm list named when it was raised, each offered one wake while its episode is open, and is empty (waking nobody) when the list was, hrn:node:hadronmemory.com:specs:cor:agt:060:16; payload is reason (no-worker or none-eligible), family, tier and role, null for a dimension the task left open; only whoever manages the App acknowledges it, and acknowledging does not end its episode); team.dark (#4531: App-owned, task-less and workerless, with an empty chain, hrn:node:hadronmemory.com:specs:cor:agt:050:34: the team as a whole went silent past the dark window, one per episode; payload is reason (wake-unacked, no-turn or work-waiting), windowMinutes, workerCount, darkWorkerCount, oldestWakeAgeSeconds and waitingSeconds, counts and ages only; it wakes nobody and is not acknowledgeable) and team.recovered (an ordinary event, one per episode, when the condition clears); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.joined, host.updated, host.removed (#5259: payload is hostId, and for host.joined whether it replaced a live key; never the label or a key); host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02); question.answered, question.answer-retracted (#4431: a question that blocks the task was answered, or its answer taken back; payload is questionId, code, revision and state only, never the answer; only question.answered wakes the task\'s assignee)."
     type: String!
     taskId: ID
     "The task's stored handle (hrn:node:hadronmemory.com:specs:cor:agt:050:01, Proposed). Null when taskId is null or the task no longer exists; never invented."
@@ -18804,7 +18851,7 @@ export const typeDefs = `#graphql
 
   input AssignHostWorkerInput {
     appRef: String!
-    "The host's id within the App: the one its key's host:operate scope names. It need not have registered yet."
+    "The host's id within the App: the one its key's host:operate scope names. It need not have registered yet, but it must be joined (#5259: joinAgentTeamHost)."
     hostId: String!
     "The worker: its id, URN or name within the App."
     worker: String!
@@ -18826,6 +18873,54 @@ export const typeDefs = `#graphql
     appRef: String!
     hostId: String!
     worker: String!
+  }
+
+  "#5259 — a host of a team App and its settings (hrn:node:hadronmemory.com:specs:cor:agt:070:01, Proposed). A null setting is the product default. It holds no path, program, credential or account detail, and never a key."
+  type AgentTeamHost {
+    id: ID!
+    "The host's id within the App: the one its key's host:operate scope, its registration and its assignments name."
+    hostId: String!
+    label: String!
+    "Seconds between the host's check-ins, 1 to 86400. Null: the host's own default."
+    pollIntervalSeconds: Int
+    "Whether the host delivers wakes to its workers. Null: the default, on."
+    deliveryEnabled: Boolean
+    createdAt: DateTime!
+    updatedAt: DateTime!
+  }
+
+  "#5259 — a host joined to its App, and the raw key it operates with: shown here once and never again."
+  type JoinAgentTeamHostPayload {
+    host: AgentTeamHost!
+    rawKey: String!
+  }
+
+  input JoinAgentTeamHostInput {
+    appRef: String!
+    "The host's id within the App, a host token: letters, digits, . _ : or -, starting with a letter or digit, at most 128 characters. Defaults to a slug of label."
+    hostId: String
+    "1 to 128 characters. Defaults to hostId; on a live host, given, it replaces the label."
+    label: String
+    "Issue a new key for a host that is already joined, or that a live key already operates as: every live key of the host is revoked."
+    replace: Boolean
+  }
+
+  input UpdateAgentTeamHostInput {
+    appRef: String!
+    hostId: String!
+    "1 to 128 characters; cannot be cleared."
+    label: String
+    "1 to 86400, or null for the default."
+    pollIntervalSeconds: Int
+    "Null for the default."
+    deliveryEnabled: Boolean
+  }
+
+  input RemoveAgentTeamHostInput {
+    appRef: String!
+    hostId: String!
+    "Remove the host even while a worker of it has an open session."
+    force: Boolean
   }
 
   "#1709 — a worker a host can launch: the family it would run as, and its existing worktrees there."
