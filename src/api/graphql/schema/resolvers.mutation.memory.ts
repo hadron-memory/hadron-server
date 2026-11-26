@@ -765,6 +765,8 @@ export const memoryMutations = {
       const existing = slug != null ? await ctx.db.memory.findUnique({ where: { urn: memoryUrn } }) : null;
       if (existing) {
         if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
+          // Reusing an org-owned memory's URN takes memory.create on every arm, the personal one included (private#47).
+          if (existing.userId === null && !userOwned) await requireOrgAction(ctx, resolvedOrgId!, 'memory.create');
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id, [ctx.userId]));
         } else {

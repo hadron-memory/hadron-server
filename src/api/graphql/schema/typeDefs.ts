@@ -9320,6 +9320,8 @@ export const typeDefs = `#graphql
     MEMORY_MEMBER
     "personal-class cross-user grant (MemoryShare)."
     MEMORY_SHARE
+    "cross-org MemorySubscription (#329): the subscribing org's live subscription — read at any membership role, write only for knowledge at CONTRIBUTOR+ membership AND subscription. role is the EFFECTIVE level conferred (READER, or CONTRIBUTOR where write holds), never the subscription row's own role. via is the subscribing org's URN."
+    MEMORY_SUBSCRIPTION
     "individual action grant (PrincipalGrant, cor:acl:040:06) - clone/delete capabilities on top of the role bundle."
     PRINCIPAL_GRANT
     "node inherits its memory's access."
@@ -14664,8 +14666,10 @@ export const typeDefs = `#graphql
     (023-app-shape US4; the caller is auto-added as the first owner),
     or memoryClass: personal | private for an owner-only memory the
     caller owns (free-standing, no app/agent). An org-anchored personal/private
-    memory requires actual membership of that org container; the org-less
-    owner-only path requires no org membership. system- and app-class
+    memory requires actual membership of that org container, and reusing the
+    name of a deleted organization-owned memory there also requires the org's
+    memory.create grant; the org-less owner-only path requires no org
+    membership. system- and app-class
     memories are NOT created here — they auto-provision via
     Agent.systemMemoryId / the App install path.
     """

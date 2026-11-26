@@ -14,9 +14,8 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, makeMcpReq, makeMcpRes } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { handleMcpRequest } from './server.js';
 import {
@@ -71,84 +70,6 @@ async function mintUserApiKey(userId: string): Promise<string> {
   return rawKey;
 }
 
-function makeReq(opts: { authorization?: string }): Request {
-  return {
-    method: 'POST',
-    headers: opts.authorization ? { authorization: opts.authorization } : {},
-    protocol: 'http',
-    body: { jsonrpc: '2.0', method: 'initialize', id: 1 },
-    get: (name: string) => {
-      if (name.toLowerCase() === 'host') return 'localhost:4000';
-      return undefined;
-    },
-    // Express's `connect`-like adapter expects req.on / req.pipe for
-    // body streaming; our handler doesn't need them for the
-    // FR-020 code paths (which all return before transport setup
-    // when they want to short-circuit, and the transport gracefully
-    // handles a synthetic body for non-short-circuit cases).
-    on: vi.fn(),
-    pipe: vi.fn(),
-  } as unknown as Request;
-}
-
-function makeRes(): Response & {
-  _status: number;
-  _headers: Record<string, string>;
-  _body: unknown;
-} {
-  const headers: Record<string, string> = {};
-  let status = 200;
-  let body: unknown;
-  const res = {
-    setHeader: vi.fn((name: string, value: string) => {
-      headers[name] = value;
-      return res;
-    }),
-    getHeader: vi.fn((name: string) => headers[name]),
-    status: vi.fn((code: number) => {
-      status = code;
-      return res;
-    }),
-    json: vi.fn((payload: unknown) => {
-      body = payload;
-      return res;
-    }),
-    // The MCP StreamableHTTPServerTransport (via @hono/node-server's
-    // shim) calls writeHead/write/end directly on the response after
-    // our FR-020 block returns. We stub them as no-ops so the
-    // transport doesn't crash; the App-resolution assertions all
-    // care about state set BEFORE the transport runs.
-    writeHead: vi.fn((code: number, h?: Record<string, string>) => {
-      status = code;
-      if (h) Object.assign(headers, h);
-      return res;
-    }),
-    write: vi.fn(() => true),
-    end: vi.fn(),
-    on: vi.fn(),
-    once: vi.fn(),
-    off: vi.fn(),
-    removeListener: vi.fn(),
-    addListener: vi.fn(),
-    emit: vi.fn(),
-    headersSent: false,
-    get _status() {
-      return status;
-    },
-    get _headers() {
-      return headers;
-    },
-    get _body() {
-      return body;
-    },
-  };
-  return res as unknown as Response & {
-    _status: number;
-    _headers: Record<string, string>;
-    _body: unknown;
-  };
-}
-
 describe('handleMcpRequest App-identification regime (FR-020 / R-6)', () => {
   it('allows a multi-App user-credential session to OPEN (spec 026 refinement of spec 025\'s 409)', async () => {
     // Spec 025 originally returned HTTP 409 `multiple_apps_resolved` here.
@@ -163,8 +84,8 @@ describe('handleMcpRequest App-identification regime (FR-020 / R-6)', () => {
 
     const spy = vi.spyOn(userAppResolution, 'resolveAppForRequest');
 
-    const req = makeReq({ authorization: `Bearer ${rawKey}` });
-    const res = makeRes();
+    const req = makeMcpReq({ authorization: `Bearer ${rawKey}` });
+    const res = makeMcpRes();
 
     await handleMcpRequest(req, res);
 
@@ -186,8 +107,8 @@ describe('handleMcpRequest App-identification regime (FR-020 / R-6)', () => {
     await createAppForUser('alpha', user.id);
     const rawKey = await mintUserApiKey(user.id);
 
-    const req = makeReq({ authorization: `Bearer ${rawKey}` });
-    const res = makeRes();
+    const req = makeMcpReq({ authorization: `Bearer ${rawKey}` });
+    const res = makeMcpRes();
 
     await handleMcpRequest(req, res);
 
@@ -204,8 +125,8 @@ describe('handleMcpRequest App-identification regime (FR-020 / R-6)', () => {
     // Zero-App: no AppMember rows for this user.
     const rawKey = await mintUserApiKey(user.id);
 
-    const req = makeReq({ authorization: `Bearer ${rawKey}` });
-    const res = makeRes();
+    const req = makeMcpReq({ authorization: `Bearer ${rawKey}` });
+    const res = makeMcpRes();
 
     await handleMcpRequest(req, res);
 
@@ -229,8 +150,8 @@ describe('handleMcpRequest App-identification regime (FR-020 / R-6)', () => {
 
     const spy = vi.spyOn(userAppResolution, 'resolveAppForRequest');
 
-    const req = makeReq({ authorization: `Bearer ${rawKey}` });
-    const res = makeRes();
+    const req = makeMcpReq({ authorization: `Bearer ${rawKey}` });
+    const res = makeMcpRes();
 
     await handleMcpRequest(req, res);
 
@@ -280,8 +201,8 @@ describe('handleMcpRequest App-identification regime (FR-020 / R-6)', () => {
     // (the gate `auth.userId && !auth.appId` is false for AppKey).
     const spy = vi.spyOn(userAppResolution, 'resolveAppForRequest');
 
-    const req = makeReq({ authorization: `Bearer ${rawKey}` });
-    const res = makeRes();
+    const req = makeMcpReq({ authorization: `Bearer ${rawKey}` });
+    const res = makeMcpRes();
 
     await handleMcpRequest(req, res);
 
@@ -295,8 +216,8 @@ describe('handleMcpRequest App-identification regime (FR-020 / R-6)', () => {
   it('returns 401 + WWW-Authenticate for unauthenticated requests (App resolution does not interfere with the auth check)', async () => {
     // Sanity check: the FR-020 block is downstream of the auth gate.
     // No auth → 401, never reaches App resolution.
-    const req = makeReq({}); // no authorization
-    const res = makeRes();
+    const req = makeMcpReq({}); // no authorization
+    const res = makeMcpRes();
 
     await handleMcpRequest(req, res);
 
