@@ -57,6 +57,7 @@ for (const k of ['mem', 'memId'] as const) {
   door('updateNode(memoryRef+loc)', k, t => ({ input: { memoryRef: t[k], loc: 'a', content: 'd' } }));
   door('searchReplaceInNodes(memoryRefs)', k, t => ({ input: { memoryRefs: [t[k]], oldText: 'c', newText: 'd', fields: ['CONTENT'] } }));
   door('createObject', k, t => ({ memoryRef: t[k], type: 'x', fields: {} }));
+  for (const n of ['createSpecNode', 'createReviewNode', 'createTaskNode']) door(n, k, t => ({ input: { memoryRef: t[k], loc: 'n', name: 'n', content: 'c' } }));
   door('createQuestionLog', k, t => ({ memoryRef: t[k], loc: 'l2', name: 'L', defaultDeciders: [ownerId] }));
   door('replaceSubtree', k, t => ({ ownerRepo: 'a/b', memoryId: t[k], nodes: [], edges: [] }));
   door('mergeMemories', k, t => ({ input: { source: t[k], target: real.memId } }));
@@ -67,6 +68,11 @@ for (const k of ['a', 'aId'] as const) {
   door('updateNodeProperties', k, t => ({ nodeRef: t[k], properties: { x: 1 } }));
   door('searchReplaceInNodes(nodeRefs)', k, t => ({ input: { nodeRefs: [t[k]], oldText: 'c', newText: 'd', fields: ['CONTENT'] } }));
   door('deleteNode', k, t => ({ nodeRef: t[k] }));
+  for (const n of ['updateSpecNode', 'updateReviewNode', 'updateTaskNode']) door(n, k, t => ({ input: { ref: t[k], content: 'd' } }));
+  door('approveNode', k, t => ({ nodeRef: t[k] }));
+  door('recordNodeContentValidationReport', k, t => ({ nodeRef: t[k], nodeRevision: 1, validationTaskRef: t.b, validationTaskRevision: 1, outcome: 'PASS' }));
+  door('runTask', k, t => ({ nodeRef: t[k] }));
+  door('runTask(appRef)', k, t => ({ nodeRef: t[k], appRef: t.app }));
   door('createEdge(source)', k, t => ({ sourceRef: t[k], targetRef: t.b, name: 'r2' }));
   door('planNodeMove', k, t => ({ sourceRef: t[k], targetUrn: t.newUrn }));
   door('moveNode', k, t => ({ sourceRef: t[k], targetUrn: t.newUrn }));
@@ -151,6 +157,8 @@ const refusedFirst = new Set([
   'createNode', 'updateNode', 'updateNode(memoryRef+loc)', 'updateNodeData', 'updateNodeProperties',
   'searchReplaceInNodes(memoryRefs)', 'searchReplaceInNodes(nodeRefs)', 'deleteNode', 'planNodeMove', 'moveNode',
   'mergeNodes', 'clearNodeHistory', 'createObject', 'updateObject', 'deleteObject',
+  'createSpecNode', 'createReviewNode', 'createTaskNode', 'updateSpecNode', 'updateReviewNode', 'updateTaskNode',
+  'approveNode', 'recordNodeContentValidationReport', 'runTask', 'runTask(appRef)',
 ]);
 
 const resolverName = (label: string) => label.replace(/\(.*/, '');
