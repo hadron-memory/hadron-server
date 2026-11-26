@@ -85,7 +85,10 @@ describe('#5211 item 4: a type 1 end tag alone on a line starts a type 7 block',
 });
 
 describe('#5211 item 5: `<!-->` at the head of a line makes the rest of it raw', () => {
-  cases([['a backslash hides nothing there', '<!--> \\§textarea>', ALL]]);
+  cases([
+    ['a backslash hides nothing there', '<!--> \\§textarea>', ALL],
+    ['the same for `<!--->`', '<!---> \\§textarea>', ALL],
+  ]);
 });
 
 describe('#5211 item 6: a declaration whose name is followed by `<` is text to marked', () => {
