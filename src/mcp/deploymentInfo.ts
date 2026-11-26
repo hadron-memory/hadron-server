@@ -302,7 +302,9 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // are no longer answered by it. New: detachMemoryFromApp(memoryRef, appRef): Boolean! and App.attachedMemories. A pure App key and
 // a userless run read a linked memory (never write it) while its attacher can read it in their own right. A lagging client that
 // relied on the old bind and rename still parses the call but silently gets a link only. (0.45.0 is #5239, merged first.)
-export const HADRON_SERVER_VERSION = '0.46.0';
+// 0.47.0 — ADDITIVE, #5218: `App.viewerAppUserMemoryClasses: [MemoryClass!]!`, the personal/private classes the
+// signed-in viewer may still create in the App through `createMemoryInApp`. A lagging client still validates. (0.46.0 is #5258, merged first.)
+export const HADRON_SERVER_VERSION = '0.47.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
