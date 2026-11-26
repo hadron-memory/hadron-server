@@ -48,6 +48,9 @@ const VARIANTS = [
   ['padded', `  ${CANARY}  `],
   ['well-formed', `hrn:mem:acme.test:${CANARY_CORE.toLowerCase().replace(/_/g, '-')}`],
 ] as const;
+// The golden records what each door answers today, not what it should: #5266 tracks the rows that are not typed
+// refusals (INTERNAL_SERVER_ERROR on revokeAppKey, startSession's session/customer ids, node/object(ref); the
+// AiServiceConfigNotFoundError class name; recordHostSweepRun's GRAPHQL_VALIDATION_FAILED). None of them echoes.
 const GOLDEN = fileURLToPath(new URL('./__fixtures__/refEcho5168.codes.json', import.meta.url));
 
 const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
@@ -155,7 +158,7 @@ function targetsOf(f: GraphQLField<unknown, unknown>): Target[] {
       if (obj === null) continue;
       out.push({
         label: `${arg.name}.${field.name}`,
-        build: (v) => [...fill, `${arg.name}: ${obj.replace('__VALUE__', JSON.stringify(v))}`].join(', '),
+        build: (v) => [...fill, `${arg.name}: ${obj.replace('__VALUE__', () => JSON.stringify(v))}`].join(', '),
       });
     }
   }
@@ -167,8 +170,10 @@ async function probeAll(): Promise<Probe[]> {
   for (const [kind, root] of [['query', schema.getQueryType()!], ['mutation', schema.getMutationType()!]] as const) {
     for (const f of Object.values(root.getFields()) as GraphQLField<unknown, unknown>[]) {
       const targets = targetsOf(f);
-      if (targets.length) await freshDb();
       for (const t of targets) {
+        // One database per target (blind seat F2 on #5255): a NO_ERROR on one target must not leave rows a later target's
+        // probe collides with, so no code depends on the schema's field or argument order.
+        await freshDb();
         for (const [variant, value] of VARIANTS) {
           const res = await server.executeOperation(
             { query: `${kind} { ${f.name}(${t.build(value)}) ${selection(f.type)} }` },

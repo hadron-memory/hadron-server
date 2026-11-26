@@ -3841,7 +3841,7 @@ export const nodeMutations = {
             if (descendantCount > 0) {
               throw new GraphQLError(
                 `The node has ${descendantCount} descendant(s). Pass recursive: true to delete the whole subtree.`,
-                { extensions: { code: 'NODE_HAS_DESCENDANTS', count: descendantCount, ref: nodeRef } },
+                { extensions: { code: 'NODE_HAS_DESCENDANTS', count: descendantCount } },
               );
             }
           }
