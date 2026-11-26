@@ -1,9 +1,12 @@
 /** #5244; cor:sec:070:02 (Proposed sweep-backlog line): the expiry sweep drains in bounded batches, each its own transaction. Real database. */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { drainExpiredSecretChanges, SECRET_CHANGE_SWEEP_BATCH, SECRET_CHANGE_SWEEP_MAX_BATCHES } from '../lib/secrets/changeRequests.js';
+
+// 10,050 rows seeded and drained in 500-row transactions: well past the 5 s default on a shared CI runner (it timed out there).
+vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 });
 
 let appId: string, userId: string;
 
