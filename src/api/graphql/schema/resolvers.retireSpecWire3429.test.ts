@@ -44,7 +44,7 @@ beforeEach(async () => {
 });
 
 const spec = async (loc: string) => (await resolvers.Mutation.createSpecNode(null, { input: {
-  memoryId, loc, name: `Spec ${loc}`, role: 'spec', content: `# T ${loc}\n\nBody.`, abstract: `About ${loc}.`, tags: ['spec'],
+  memoryRef: memoryId, loc, name: `Spec ${loc}`, role: 'spec', content: `# T ${loc}\n\nBody.`, abstract: `About ${loc}.`, tags: ['spec'],
 } } as never, ctx())) as { id: string };
 const revision = async (id: string) => (await db.node.findUniqueOrThrow({ where: { id } })).revSeq;
 const gql = async (query: string, variables: unknown) => (await fetch(`${base}/graphql`, {

@@ -307,7 +307,7 @@ describe('children are untouched (cor:agt:050:29 details)', () => {
   it('a task with an open child may be handed back; the child keeps its status and its owner', async () => {
     const t = await anneTask();
     const child: { id: string } = await asWorker(anne, () =>
-      M.createAgentTask({}, { input: { appRef: app.id, parentTaskId: t.id, title: 'Sub-step', assignee: { worker: rook.id } } }, ctx(mia.id)));
+      M.createAgentTask({}, { input: { appRef: app.id, parentTaskRef: t.id, title: 'Sub-step', assignee: { worker: rook.id } } }, ctx(mia.id)));
     const before = await row(child.id);
     await asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO' }));
     const after = await row(child.id);

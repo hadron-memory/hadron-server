@@ -61,7 +61,7 @@ describe('findNodes where — no-query browse', () => {
     await db.node.create({
       data: { id: generateId(), memoryId: other.graph.id, loc: 'x', name: 'x', properties: { sourceKind: 'substack' } } as any,
     });
-    const res = await findNodes({ filter: { memoryIds: [graph.id], where: { path: ['sourceKind'], eq: 'substack' } } });
+    const res = await findNodes({ filter: { memoryRefs: [graph.id], where: { path: ['sourceKind'], eq: 'substack' } } });
     expect(locs(res)).toEqual(['insight.a', 'insight.c', 'insight.d']); // the other memory's substack node is out of scope
   });
 });

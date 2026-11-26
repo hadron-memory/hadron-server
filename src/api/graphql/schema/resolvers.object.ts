@@ -93,7 +93,7 @@ export const objectMutations = {
     const nodeName = deriveObjectName(t, f, name ?? undefined);
     const node = await nodeMutations.createNode(
       _,
-      { input: { memoryId: memoryRef, loc, name: nodeName, objectType: t, properties: f } },
+      { input: { memoryRef: memoryRef, loc, name: nodeName, objectType: t, properties: f } },
       ctx,
     );
     return projectNodeToObject(node);
@@ -171,7 +171,7 @@ export const objectQueries = {
     const result = await nodeQueries.findNodes(
       _,
       {
-        filter: { memoryIds: [memoryRef], objectType: t, ...(combinedWhere ? { where: combinedWhere } : {}) },
+        filter: { memoryRefs: [memoryRef], objectType: t, ...(combinedWhere ? { where: combinedWhere } : {}) },
         includeTotal: true,
         ...(sortProperty ? { sortProperty } : {}),
         limit: limit ?? undefined,

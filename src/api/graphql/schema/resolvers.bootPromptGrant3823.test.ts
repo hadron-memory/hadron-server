@@ -49,7 +49,7 @@ const grant = (nodeId: string, over: Record<string, unknown> = {}) => insertGran
   expires_at: raw(`${DB_NOW} + interval '1 hour'`), ...over,
 } as never);
 const uses = (grantId: string) => db.grantEvent.count({ where: { grantId, action: 'USE' } });
-const edit = (id: string, content = 'edited') => asWorker(() => resolvers.Mutation.updateNode(null, { input: { id, content } }, ctx()));
+const edit = (id: string, content = 'edited') => asWorker(() => resolvers.Mutation.updateNode(null, { input: { ref: id, content } }, ctx()));
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -195,7 +195,7 @@ describe('the grant is the boundary (#3823 refusals that must hold)', () => {
       { content: 'new', name: 'renamed' }, { content: 'new', tags: ['x'] }, { content: 'new', description: 'd' },
     ];
     for (const [i, extra] of inputs.entries()) {
-      expect([i, await codeOf(asWorker(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, ...extra } }, ctx())))]).toEqual([i, 'BOOT_PROMPT_WORKER_SESSION_REFUSED']);
+      expect([i, await codeOf(asWorker(() => resolvers.Mutation.updateNode(null, { input: { ref: s.id, ...extra } }, ctx())))]).toEqual([i, 'BOOT_PROMPT_WORKER_SESSION_REFUSED']);
     }
     expect(await uses(g)).toBe(0);
     const row = await db.node.findUniqueOrThrow({ where: { id: s.id } });
@@ -209,7 +209,7 @@ describe('the grant is the boundary (#3823 refusals that must hold)', () => {
   it('text in place only (F1): resending the same role and node type with the text is still a text edit', async () => {
     const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
     await grant(s.id);
-    expect(await codeOf(asWorker(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, content: 'same role', role: 'boot-prompt' } }, ctx())))).toBe('NO_ERROR');
+    expect(await codeOf(asWorker(() => resolvers.Mutation.updateNode(null, { input: { ref: s.id, content: 'same role', role: 'boot-prompt' } }, ctx())))).toBe('NO_ERROR');
   });
 
   it('text in place only: delete, role strip, node-type change, move and merge stay refused, and spend nothing', async () => {
@@ -218,8 +218,8 @@ describe('the grant is the boundary (#3823 refusals that must hold)', () => {
     const g = await grant(s.id);
     const ops = [
       () => asWorker(() => resolvers.Mutation.deleteNode(null, { nodeRef: s.id }, ctx())),
-      () => asWorker(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, role: 'notes' } }, ctx())),
-      () => asWorker(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, nodeType: 'report' } }, ctx())),
+      () => asWorker(() => resolvers.Mutation.updateNode(null, { input: { ref: s.id, role: 'notes' } }, ctx())),
+      () => asWorker(() => resolvers.Mutation.updateNode(null, { input: { ref: s.id, nodeType: 'report' } }, ctx())),
       () => asWorker(() => resolvers.Mutation.moveNode(null, { sourceRef: s.id, targetUrn: 'hrn:node:g3823.example:install:elsewhere' }, ctx())),
       () => asWorker(() => resolvers.Mutation.mergeNodes(null, { input: { source: s.id, target: t.id } }, ctx())),
     ];
@@ -231,7 +231,7 @@ describe('the grant is the boundary (#3823 refusals that must hold)', () => {
   it('a create of a boot-prompt source stays refused (a grant names an existing node)', async () => {
     const g = await grant(generateId());
     expect(await codeOf(asWorker(() => resolvers.Mutation.createNode(null, {
-      input: { memoryId: installMemoryId, loc: `boot:workers:${workerId}:source`, name: 'S', role: 'boot-prompt', content: 'x' },
+      input: { memoryRef: installMemoryId, loc: `boot:workers:${workerId}:source`, name: 'S', role: 'boot-prompt', content: 'x' },
     }, ctx())))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
     expect(await uses(g)).toBe(0);
   });
@@ -245,14 +245,14 @@ describe('the grant is the boundary (#3823 refusals that must hold)', () => {
   it('a person editing as themselves (no worker session) is unaffected, and spends no grant', async () => {
     const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
     const g = await grant(s.id);
-    await resolvers.Mutation.updateNode(null, { input: { id: s.id, content: 'by the manager' } }, ctx());
+    await resolvers.Mutation.updateNode(null, { input: { ref: s.id, content: 'by the manager' } }, ctx());
     expect(await uses(g)).toBe(0);
   });
 
   it('a refused write leaves the grant unspent (the spend rides the write\'s transaction)', async () => {
     const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
     const g = await grant(s.id);
-    const stale = await codeOf(asWorker(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, content: 'x', expectedRevSeq: 999 } as never }, ctx())));
+    const stale = await codeOf(asWorker(() => resolvers.Mutation.updateNode(null, { input: { ref: s.id, content: 'x', expectedRevSeq: 999 } as never }, ctx())));
     expect(stale).not.toBe('NO_ERROR');
     expect(await uses(g)).toBe(0);
     expect(await codeOf(edit(s.id))).toBe('NO_ERROR');
@@ -337,7 +337,7 @@ describe('the lift is the update door only, in place, signer re-judged (#3823 Ri
     const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
     const g = await grant(s.id);
     const out = await codeOf(asWorker(() => (resolvers.Mutation as any).importNode(null, {
-      input: { memoryId: installMemoryId, loc: s.loc, content: 'imported text', contentType: 'text/markdown' },
+      input: { memoryRef: installMemoryId, loc: s.loc, content: 'imported text', contentType: 'text/markdown' },
     }, ctx())));
     expect(out).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
     expect(await uses(g)).toBe(0);
@@ -354,8 +354,8 @@ describe('the lift is the update door only, in place, signer re-judged (#3823 Ri
   it('Andi P2-1: a text edit that names another loc or memory is not in place: refused, unspent', async () => {
     const s = await src(installMemoryId, `boot:workers:${workerId}:source`);
     const g = await grant(s.id);
-    for (const extra of [{ loc: `boot:workers:${workerId}:moved` }, { memoryId: agentMemoryId }]) {
-      const out = await codeOf(asWorker(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, content: 'x', ...extra } as never }, ctx())));
+    for (const extra of [{ loc: `boot:workers:${workerId}:moved` }, { memoryRef: agentMemoryId }]) {
+      const out = await codeOf(asWorker(() => resolvers.Mutation.updateNode(null, { input: { ref: s.id, content: 'x', ...extra } as never }, ctx())));
       expect(out).not.toBe('NO_ERROR');
     }
     expect(await uses(g)).toBe(0);

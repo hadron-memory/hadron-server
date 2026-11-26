@@ -93,7 +93,7 @@ let adminId: string;
 const ctx = (): Context => ({ db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` });
 
 async function seed(loc: string, name = 'before') {
-  return resolvers.Mutation.createNode({}, { input: { memoryId, loc, name } as never }, ctx());
+  return resolvers.Mutation.createNode({}, { input: { memoryRef: memoryId, loc, name } as never }, ctx());
 }
 
 async function expectCode(p: Promise<unknown>, code: string): Promise<GraphQLError> {
@@ -223,7 +223,7 @@ describe('update TOCTOU 2: the target was soft-deleted mid-write (@copilot)', ()
     // lock"). Measured, the loc path wrote through the tombstone identically:
     // `tx.node.update` keys on (loc, memoryId) with no deletedAt clause either.
     // Fixing only the reported half would have left the generic surface —
-    // `updateNode(memoryId:, loc:)`, which is what most callers use — exposed.
+    // `updateNode(memoryRef:, loc:)`, which is what most callers use — exposed.
     const node = await seed('doc:loc');
     deleteAtLock(node.id);
 

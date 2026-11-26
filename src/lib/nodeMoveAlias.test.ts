@@ -96,7 +96,7 @@ describe('node move URN aliases', () => {
       sourceRef: node.id, targetUrn: nodeUrn(source, 'new'),
     }, graphCtx());
     await resolvers.Mutation.updateNode(null, {
-      input: { id: old, content: 'updated through old address' },
+      input: { ref: old, content: 'updated through old address' },
     }, graphCtx());
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content)
       .toBe('updated through old address');
@@ -319,7 +319,7 @@ describe('node move URN aliases', () => {
     expect(await resolvers.Query.channel(null, { ref: old }, outsider)).toBeNull();
     for (const ref of [old, absent]) {
       await expect(resolvers.Mutation.updateNode(null, {
-        input: { id: ref, content: 'probe' },
+        input: { ref: ref, content: 'probe' },
       }, outsider)).rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
       await expect(resolvers.Mutation.deleteNode(null, { nodeRef: ref }, outsider))
         .rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });

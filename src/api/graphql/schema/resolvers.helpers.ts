@@ -4302,6 +4302,52 @@ export interface UpdateNodeInput
   name?: string;
 }
 
+/**
+ * #5080: the GraphQL (wire) shape of a node write names its refs `memoryRef`, `ref` and `targetRef`. The write core keeps
+ * `memoryId`, `id` and `targetId` (internal names, and every Prisma key), so each door maps at the edge and nothing below it moves.
+ */
+export interface NodeEdgeDoorInput extends Omit<NodeEdgeInput, 'targetId'> {
+  targetRef: string;
+}
+export type CreateNodeDoorInput = Omit<CreateNodeInput, 'memoryId' | 'edges'> & {
+  memoryRef?: string | null;
+  edges?: NodeEdgeDoorInput[] | null;
+};
+export type UpdateNodeDoorInput = Omit<UpdateNodeInput, 'id' | 'memoryId' | 'edges'> & {
+  ref?: string | null;
+  memoryRef?: string | null;
+  edges?: NodeEdgeDoorInput[] | null;
+};
+
+function edgesFromDoor(edges: NodeEdgeDoorInput[] | null | undefined): NodeEdgeInput[] | undefined {
+  return Array.isArray(edges) ? edges.map(({ targetRef, ...e }) => ({ ...e, targetId: targetRef })) : (edges as undefined);
+}
+
+/** A wire create input to the core's shape: `memoryRef` -> `memoryId`, `edges[].targetRef` -> `targetId`. Absent stays absent. */
+export function toCreateNodeInput<R extends { memoryRef?: string | null; edges?: NodeEdgeDoorInput[] | null }>(
+  input: R,
+): Omit<R, 'memoryRef' | 'edges'> & { memoryId?: string; edges?: NodeEdgeInput[] } {
+  const { memoryRef, edges, ...rest } = input;
+  return {
+    ...rest,
+    ...(memoryRef !== undefined ? { memoryId: memoryRef as string } : {}),
+    ...(edges !== undefined ? { edges: edgesFromDoor(edges) } : {}),
+  };
+}
+
+/** A wire update input to the core's shape: `ref` -> `id`, `memoryRef` -> `memoryId`, `edges[].targetRef` -> `targetId`. */
+export function toUpdateNodeInput<R extends { ref?: string | null; memoryRef?: string | null; edges?: NodeEdgeDoorInput[] | null }>(
+  input: R,
+): Omit<R, 'ref' | 'memoryRef' | 'edges'> & { id?: string; memoryId?: string; edges?: NodeEdgeInput[] } {
+  const { ref, memoryRef, edges, ...rest } = input;
+  return {
+    ...rest,
+    ...(ref !== undefined ? { id: ref as string } : {}),
+    ...(memoryRef !== undefined ? { memoryId: memoryRef as string } : {}),
+    ...(edges !== undefined ? { edges: edgesFromDoor(edges) } : {}),
+  };
+}
+
 export type NodeTextField = 'content' | 'name' | 'alias' | 'description' | 'abstract' | 'tags';
 
 export interface SearchReplaceInNodesInput {
@@ -4309,8 +4355,8 @@ export interface SearchReplaceInNodesInput {
   authoredWith?: AuthoredWith | null;
   oldText: string;
   newText: string;
-  nodeIds?: string[];
-  memoryIds?: string[];
+  nodeRefs?: string[];
+  memoryRefs?: string[];
   prefix?: string;
   fields: NodeTextField[];
   caseInsensitive?: boolean;

@@ -328,10 +328,10 @@ describe('mergeNodes — encryption', () => {
     const sCtx: Context = { ...appCtx, userId: driver.userId!, sessionId: session.id };
 
     const src = await resolvers.Mutation.createNode(
-      {}, { input: { memoryId: memId, loc: 'src', name: 'src', content: 'secret source' } }, sCtx,
+      {}, { input: { memoryRef: memId, loc: 'src', name: 'src', content: 'secret source' } }, sCtx,
     );
     const tgt = await resolvers.Mutation.createNode(
-      {}, { input: { memoryId: memId, loc: 'tgt', name: 'tgt', content: 'secret target' } }, sCtx,
+      {}, { input: { memoryRef: memId, loc: 'tgt', name: 'tgt', content: 'secret target' } }, sCtx,
     );
 
     const out = await resolvers.Mutation.mergeNodes(
@@ -365,9 +365,9 @@ describe('mergeNodes — encryption', () => {
     const driver = await db.session.findUniqueOrThrow({ where: { id: session.id }, select: { userId: true } });
     const sCtx: Context = { ...appCtx, userId: driver.userId!, sessionId: session.id };
 
-    const src = await resolvers.Mutation.createNode({}, { input: { memoryId: memId, loc: 'src', name: 'src', content: 'secret s' } }, sCtx);
-    const tgt = await resolvers.Mutation.createNode({}, { input: { memoryId: memId, loc: 'tgt', name: 'tgt', content: 'secret t' } }, sCtx);
-    const other = await resolvers.Mutation.createNode({}, { input: { memoryId: memId, loc: 'other', name: 'other' } }, sCtx);
+    const src = await resolvers.Mutation.createNode({}, { input: { memoryRef: memId, loc: 'src', name: 'src', content: 'secret s' } }, sCtx);
+    const tgt = await resolvers.Mutation.createNode({}, { input: { memoryRef: memId, loc: 'tgt', name: 'tgt', content: 'secret t' } }, sCtx);
+    const other = await resolvers.Mutation.createNode({}, { input: { memoryRef: memId, loc: 'other', name: 'other' } }, sCtx);
     await db.edge.create({ data: { id: generateId(), memoryId: memId, sourceId: src.id, targetId: other.id, loc: 'src:rel:other' } });
 
     // End the session → no live key for this memory.

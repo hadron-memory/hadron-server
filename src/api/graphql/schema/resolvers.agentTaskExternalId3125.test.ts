@@ -99,7 +99,7 @@ describe('externalId round-trip (#3125 S2)', () => {
 
   it('a child task may carry an externalId, under the same per-App rule', async () => {
     const parent = await create({ assignee: { user: owner.id } });
-    const child = await M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'child', externalId: X } }, ctx());
+    const child = await M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'child', externalId: X } }, ctx());
     expect(await externalIdOf(child.id)).toBe(X);
     await expect(create({ externalId: X })).rejects.toMatchObject({ extensions: { code: 'TASK_EXTERNAL_ID_TAKEN' } });
   });

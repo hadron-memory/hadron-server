@@ -56,7 +56,7 @@ function gqlCtx(): Context {
 async function createNode(input: Record<string, unknown>) {
   return resolvers.Mutation.createNode(
     {},
-    { input: { memoryId, ...input } as never },
+    { input: { memoryRef: memoryId, ...input } as never },
     gqlCtx(),
   );
 }
@@ -140,14 +140,14 @@ describe('updateNode — selector contract', () => {
 
   it('updates by (memoryId, loc)', async () => {
     await createNode({ loc: 'u3', name: 'U3', content: 'v1' });
-    const updated = await updateNode({ memoryId, loc: 'u3', content: 'v2' });
+    const updated = await updateNode({ memoryRef: memoryId, loc: 'u3', content: 'v2' });
     expect(updated.content).toBe('v2');
   });
 
   it('rejects id + (memoryId, loc) together with BAD_USER_INPUT', async () => {
     const created = await createNode({ loc: 'u4', name: 'U4' });
     await expectCode(
-      updateNode({ id: created.id, memoryId, loc: 'u4', content: 'x' }),
+      updateNode({ id: created.id, memoryRef: memoryId, loc: 'u4', content: 'x' }),
       'BAD_USER_INPUT',
     );
   });
@@ -180,7 +180,7 @@ describe('updateNode — never creates', () => {
 
   it('missing (memoryId, loc) target → NODE_NOT_FOUND, and no row appears', async () => {
     await expectCode(
-      updateNode({ memoryId, loc: 'ghost', content: 'x' }),
+      updateNode({ memoryRef: memoryId, loc: 'ghost', content: 'x' }),
       'NODE_NOT_FOUND',
     );
     const row = await db.node.findFirst({ where: { memoryId, loc: 'ghost' } });
@@ -223,7 +223,7 @@ describe('#476 — contentType HTML→Markdown conversion', () => {
 
   it('text/html content is converted and the extracted title fills properties.title', async () => {
     const node = await createNode({
-      memoryId, loc: 'cun:html-1', name: 'Import',
+      memoryRef: memoryId, loc: 'cun:html-1', name: 'Import',
       content: '<h1>Hi</h1>', contentType: 'text/html',
     });
     expect(node.content).toBe('converted:11'); // '<h1>Hi</h1>'.length
@@ -236,7 +236,7 @@ describe('#476 — contentType HTML→Markdown conversion', () => {
 
   it('a caller-supplied properties.title wins over the extracted one', async () => {
     const node = await createNode({
-      memoryId, loc: 'cun:html-2', name: 'Import',
+      memoryRef: memoryId, loc: 'cun:html-2', name: 'Import',
       content: '<p>x</p>', contentType: 'text/html',
       properties: { title: 'Mine' },
     });
@@ -245,7 +245,7 @@ describe('#476 — contentType HTML→Markdown conversion', () => {
 
   it('text/markdown (and case-variants) is a stored-as-is no-op', async () => {
     const node = await createNode({
-      memoryId, loc: 'cun:md-1', name: 'MD',
+      memoryRef: memoryId, loc: 'cun:md-1', name: 'MD',
       content: '# raw', contentType: 'Text/Markdown',
     });
     expect(node.content).toBe('# raw');
@@ -253,14 +253,14 @@ describe('#476 — contentType HTML→Markdown conversion', () => {
 
   it('an unsupported contentType rejects with BAD_USER_INPUT', async () => {
     await expect(
-      createNode({ memoryId, loc: 'cun:bad-ct', name: 'x', content: 'x', contentType: 'application/json' }),
+      createNode({ memoryRef: memoryId, loc: 'cun:bad-ct', name: 'x', content: 'x', contentType: 'application/json' }),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 
   it('application/pdf content is extracted and the PDF title fills properties.title (#488)', async () => {
     vi.mocked(convertHtmlToMarkdown).mockClear();
     const node = await createNode({
-      memoryId, loc: 'cun:pdf-1', name: 'Paper',
+      memoryRef: memoryId, loc: 'cun:pdf-1', name: 'Paper',
       content: 'JVBERi0=', contentType: 'application/pdf',
     });
     expect(node.content).toBe('pdf:8'); // 'JVBERi0='.length
@@ -273,10 +273,10 @@ describe('#476 — contentType HTML→Markdown conversion', () => {
   });
 
   it('updateNode converts too (same seam)', async () => {
-    await createNode({ memoryId, loc: 'cun:html-3', name: 'U', content: 'plain' });
+    await createNode({ memoryRef: memoryId, loc: 'cun:html-3', name: 'U', content: 'plain' });
     const updated = await (resolvers.Mutation as any).updateNode(
       {},
-      { input: { memoryId, loc: 'cun:html-3', content: '<b>new</b>', contentType: 'text/html' } },
+      { input: { memoryRef: memoryId, loc: 'cun:html-3', content: '<b>new</b>', contentType: 'text/html' } },
       gqlCtx(),
     );
     expect(updated.content).toBe('converted:10'); // '<b>new</b>'.length
@@ -284,7 +284,7 @@ describe('#476 — contentType HTML→Markdown conversion', () => {
 
   it('empty/omitted content with text/html is a no-op (no service call)', async () => {
     vi.mocked(convertHtmlToMarkdown).mockClear();
-    await createNode({ memoryId, loc: 'cun:html-4', name: 'E', contentType: 'text/html' });
+    await createNode({ memoryRef: memoryId, loc: 'cun:html-4', name: 'E', contentType: 'text/html' });
     expect(convertHtmlToMarkdown).not.toHaveBeenCalled();
   });
 });

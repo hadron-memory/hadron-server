@@ -299,7 +299,7 @@ describe('US2 — granularity:chunk rejection (PR-225 review)', () => {
         {},
         {
           query: 'anything',
-          filter: { memoryIds: [memUrn] },
+          filter: { memoryRefs: [memUrn] },
           mode: 'hybrid',
           granularity: 'chunk',
         },
@@ -319,7 +319,7 @@ describe('US2 — granularity:chunk rejection (PR-225 review)', () => {
       {},
       {
         query: 'anything',
-        filter: { memoryIds: [memUrn] },
+        filter: { memoryRefs: [memUrn] },
         mode: 'vector',
         granularity: 'chunk',
       },
@@ -336,7 +336,7 @@ describe('US2 — granularity:chunk rejection (PR-225 review)', () => {
     const call = (minScore?: number) =>
       resolvers.Query.findNodes(
         {},
-        { query: 'anything', filter: { memoryIds: [memUrn] }, mode: 'vector', granularity: 'chunk', minScore },
+        { query: 'anything', filter: { memoryRefs: [memUrn] }, mode: 'vector', granularity: 'chunk', minScore },
         adminCtx(),
       );
     // Baseline: passages present.
@@ -404,7 +404,7 @@ describe('#2201 — dead index entries from earlier files never empty the baseli
     await seedNodeWithChunks('after-dead', '# A\nbody.\n\n## B\nmore.');
     const result = await resolvers.Query.findNodes(
       {},
-      { query: 'anything', filter: { memoryIds: [memUrn] }, mode: 'vector', granularity: 'chunk' },
+      { query: 'anything', filter: { memoryRefs: [memUrn] }, mode: 'vector', granularity: 'chunk' },
       hnswCtx(),
     );
     expect((result.passages as unknown[]).length).toBeGreaterThan(0);

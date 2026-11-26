@@ -64,8 +64,8 @@ async function upsertSourceWithTarget(targetRef: string) {
       input: {
         loc: 'review:db-type-agnostic',
         name: 'db-type-agnostic',
-        memoryId: memory.id,
-        edges: [{ targetId: targetRef, name: 'use this pattern' }],
+        memoryRef: memory.id,
+        edges: [{ targetRef: targetRef, name: 'use this pattern' }],
       },
     },
     ctx(),
@@ -171,10 +171,10 @@ describe('createNode — edge target resolution (issue #105)', () => {
         input: {
           loc: 'review:db-type-agnostic',
           name: 'db-type-agnostic',
-          memoryId: memory.id,
+          memoryRef: memory.id,
           edges: [
-            { targetId: target.id, name: 'a' },
-            { targetId: second.id, name: 'b' },
+            { targetRef: target.id, name: 'a' },
+            { targetRef: second.id, name: 'b' },
           ],
         },
       },

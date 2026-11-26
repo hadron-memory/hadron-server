@@ -85,7 +85,7 @@ describe('Edge timestamps and attribution (#1151)', () => {
   });
 
   it('a clientId or null in the column gives null, never the raw value', async () => {
-    const r = await run(`{ edges(filter: { memoryId: "${memA.id}" }) { items { ${Q} } } }`, rctx(reader.id));
+    const r = await run(`{ edges(filter: { memoryRef: "${memA.id}" }) { items { ${Q} } } }`, rctx(reader.id));
     expect(r.errors).toBeUndefined();
     for (const key of ['client', 'none']) {
       const e = (r.data as any).edges.items.find((i: any) => i.loc === `e:${key}`);

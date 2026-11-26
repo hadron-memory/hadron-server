@@ -45,7 +45,7 @@ let savedTimeout: string | undefined;
 
 // The admin sees every memory (including the other org's, see the access pin), so the pins run scoped to `mem`.
 const findNodes = (args: Record<string, unknown>) =>
-  (resolvers.Query as any).findNodes(null, { ...args, filter: { ...((args.filter as object) ?? {}), memoryIds: [mem] } }, { db, roles: ['ADMIN'], userId: 'admin-2772' } as Context);
+  (resolvers.Query as any).findNodes(null, { ...args, filter: { ...((args.filter as object) ?? {}), memoryRefs: [mem] } }, { db, roles: ['ADMIN'], userId: 'admin-2772' } as Context);
 const ids = (res: any) => res.hits.map((h: any) => h.node.id);
 
 /** Brute-force reference: exact cosine order over the nodes passing `where` (SQL fragment on alias n). */
@@ -264,7 +264,7 @@ describe('#2772 an older pgvector (the exact scan) still gives the true page and
     setIterativeScanSupportForTests(false);
     try {
       const { handle, seen, sets } = spyHandle();
-      const res = await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'vector', limit: 3, offset: 3, filter: { role: 'spec', memoryIds: [mem] } }, { db: handle, roles: ['ADMIN'], userId: 'admin-2772' } as Context);
+      const res = await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'vector', limit: 3, offset: 3, filter: { role: 'spec', memoryRefs: [mem] } }, { db: handle, roles: ['ADMIN'], userId: 'admin-2772' } as Context);
       await findNodes({ query: 'q', mode: 'vector', limit: 3, offset: 0, filter: { role: 'spec' } });
       expect(ids(res)).toEqual(await reference(`n.role = 'spec'`, 3, 3));
       // The exact scan served it: no iterative-scan setting was issued, and the exact statement ran.
@@ -296,7 +296,7 @@ describe('#2772 both surfaces give the same answer', () => {
 describe('#2772 the iterative index scan, not the exact fallback, serves the deep filtered page', () => {
   it('on pgvector >= 0.8 with the HNSW plan, the deep role page takes the strict-order iterative scan and no exact statement', async () => {
     const { handle, seen, sets } = spyHandle();
-    const res = await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'vector', limit: 3, offset: 3, filter: { role: 'spec', memoryIds: [mem] } }, { db: handle, roles: ['ADMIN'], userId: 'admin-2772' } as Context);
+    const res = await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'vector', limit: 3, offset: 3, filter: { role: 'spec', memoryRefs: [mem] } }, { db: handle, roles: ['ADMIN'], userId: 'admin-2772' } as Context);
     expect(ids(res)).toEqual(await reference(`n.role = 'spec'`, 3, 3));
     expect(sets).toContain('SET LOCAL hnsw.iterative_scan = strict_order');
     expect(seen.filter((q) => q.includes('MATERIALIZED')), 'the iterative scan finished the page: no exact statement').toEqual([]);

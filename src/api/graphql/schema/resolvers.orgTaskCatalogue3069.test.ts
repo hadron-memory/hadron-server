@@ -54,7 +54,7 @@ const orgTaskSet = async (who: 'owner' | 'admin') => {
 };
 
 const listed = async (who: 'owner' | 'admin', memoryIds: string[]) => {
-  const result = await Q.findNodes({}, { filter: { memoryIds, isRunnable: true } }, context(who));
+  const result = await Q.findNodes({}, { filter: { memoryRefs: memoryIds, isRunnable: true } }, context(who));
   return (result.hits as { node: { loc: string } }[]).map(h => h.node.loc).sort();
 };
 
@@ -128,7 +128,7 @@ describe('#3069 a named set is taken as named, for a caller who may reference it
   });
 
   it('control: passing orgId narrows the unfiltered set on the list path alone', async () => {
-    const result = await Q.findNodes({}, { orgRef: orgId, filter: { memoryIds: await unfilteredSet('owner'), isRunnable: true } }, context('owner'));
+    const result = await Q.findNodes({}, { orgRef: orgId, filter: { memoryRefs: await unfilteredSet('owner'), isRunnable: true } }, context('owner'));
     expect((result.hits as { node: { loc: string } }[]).map(h => h.node.loc).sort()).toEqual(['tasks:agent-task', 'tasks:org-task']);
   });
 });

@@ -65,7 +65,7 @@ async function code(p: Promise<unknown>): Promise<string> {
 }
 
 const genericCreate = (input: Record<string, unknown>) =>
-  code(resolvers.Mutation.createNode({}, { input: { memoryId, ...input } as never }, ctx()));
+  code(resolvers.Mutation.createNode({}, { input: { memoryRef: memoryId, ...input } as never }, ctx()));
 
 const genericUpdate = (input: Record<string, unknown>) =>
   code(resolvers.Mutation.updateNode({}, { input: input as never }, ctx()));
@@ -271,7 +271,7 @@ describe('the doors', () => {
     expect(
       await code(
         (resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)
-          .updateSpecNode({}, { input: { memoryId, loc: 'h:1', name: 'edited' } }, ctx()),
+          .updateSpecNode({}, { input: { memoryRef: memoryId, loc: 'h:1', name: 'edited' } }, ctx()),
       ),
     ).toBe('OK');
 
@@ -290,7 +290,7 @@ describe('the doors', () => {
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>
       ).createSpecNode(
         {},
-        { input: { memoryId, loc: 'i:1', name: 'n', role: 'spec' } },
+        { input: { memoryRef: memoryId, loc: 'i:1', name: 'n', role: 'spec' } },
         { db, roles: [], userId: outsider.id, clientId: `user:${outsider.id}` } as Context,
       ),
     ).rejects.toThrow();
@@ -477,7 +477,7 @@ describe('the bypasses review found — each was a way in the gate did not cover
 
     await resolvers.Mutation.searchReplaceInNodes(
       {},
-      { input: { oldText: 'OLD', newText: 'NEW', memoryIds: [memoryId], fields: ['content'] } } as never,
+      { input: { oldText: 'OLD', newText: 'NEW', memoryRefs: [memoryId], fields: ['content'] } } as never,
       ctx(),
     );
 
@@ -503,7 +503,7 @@ describe('the bypasses review found — each was a way in the gate did not cover
     expect(
       await code(
         (resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)
-          .updateReviewNode({}, { input: { id, role: 'review' } }, ctx()),
+          .updateReviewNode({}, { input: { ref: id, role: 'review' } }, ctx()),
       ),
     ).toBe('OK');
     expect((await db.node.findFirstOrThrow({ where: { id } })).role).toBe('review');
@@ -549,7 +549,7 @@ describe('the bypasses review found — each was a way in the gate did not cover
     expect(
       await code(
         (resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)
-          .updateReviewNode({}, { input: { memoryId, loc: 'w:1', role: null } }, ctx()),
+          .updateReviewNode({}, { input: { memoryRef: memoryId, loc: 'w:1', role: null } }, ctx()),
       ),
     ).toBe('OK');
     expect((await db.node.findFirstOrThrow({ where: { memoryId, loc: 'w:1' } })).role).toBeNull();
@@ -731,7 +731,7 @@ describe('the refusal says WHICH way the write touched governance (@copilot)', (
     const e = await refusal(
       resolvers.Mutation.createNode(
         {},
-        { input: { memoryId, loc: 'p:1', name: 'n', role: 'review' } } as never,
+        { input: { memoryRef: memoryId, loc: 'p:1', name: 'n', role: 'review' } } as never,
         ctx(),
       ),
     );
@@ -742,7 +742,7 @@ describe('the refusal says WHICH way the write touched governance (@copilot)', (
   it('REMOVES — a generic write that would un-govern', async () => {
     expect(await door('createReviewNode', { loc: 'p:2', name: 'check', role: 'review' })).toBe('OK');
     const e = await refusal(
-      resolvers.Mutation.updateNode({}, { input: { memoryId, loc: 'p:2', role: null } } as never, ctx()),
+      resolvers.Mutation.updateNode({}, { input: { memoryRef: memoryId, loc: 'p:2', role: null } } as never, ctx()),
     );
     expect(e.extensions?.refusal).toBe('removes');
     expect(e.message).toContain('un-governing');
@@ -752,7 +752,7 @@ describe('the refusal says WHICH way the write touched governance (@copilot)', (
   it('EDITS — a generic write against a node that stays governed', async () => {
     expect(await door('createReviewNode', { loc: 'p:3', name: 'check', role: 'review' })).toBe('OK');
     const e = await refusal(
-      resolvers.Mutation.updateNode({}, { input: { memoryId, loc: 'p:3', name: 'x' } } as never, ctx()),
+      resolvers.Mutation.updateNode({}, { input: { memoryRef: memoryId, loc: 'p:3', name: 'x' } } as never, ctx()),
     );
     expect(e.extensions?.refusal).toBe('edits');
     expect(e.message).toContain('edits');

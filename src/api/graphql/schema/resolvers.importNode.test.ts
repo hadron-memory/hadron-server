@@ -108,18 +108,18 @@ beforeEach(async () => {
 describe('importNode — input contract', () => {
   it('rejects url AND content', async () => {
     await expectCode(
-      importNode({ memoryId, loc: 'x', url: 'https://a.example', content: '<p>b</p>' }),
+      importNode({ memoryRef: memoryId, loc: 'x', url: 'https://a.example', content: '<p>b</p>' }),
       'BAD_USER_INPUT',
     );
   });
 
   it('rejects neither url nor content', async () => {
-    await expectCode(importNode({ memoryId, loc: 'x' }), 'BAD_USER_INPUT');
+    await expectCode(importNode({ memoryRef: memoryId, loc: 'x' }), 'BAD_USER_INPUT');
   });
 
   it('rejects nodeUrn AND memoryId+loc', async () => {
     await expectCode(
-      importNode({ nodeUrn: `${MEMORY_URN}::x`, memoryId, loc: 'x', content: '<p>a</p>' }),
+      importNode({ nodeUrn: `${MEMORY_URN}::x`, memoryRef: memoryId, loc: 'x', content: '<p>a</p>' }),
       'BAD_USER_INPUT',
     );
   });
@@ -133,11 +133,11 @@ describe('importNode — input contract', () => {
   });
 
   it('treats empty-string selectors as absent (PR-486 review)', async () => {
-    await expectCode(importNode({ memoryId: '', loc: '', content: '<p>a</p>' }), 'BAD_USER_INPUT');
+    await expectCode(importNode({ memoryRef: '', loc: '', content: '<p>a</p>' }), 'BAD_USER_INPUT');
     // '' selectors are ABSENT, so nodeUrn alongside them stays valid.
     const res = await importNode({
       nodeUrn: `${MEMORY_URN}::clips:emptysel`,
-      memoryId: '',
+      memoryRef: '',
       loc: '',
       content: '<p>a</p>',
     });
@@ -146,7 +146,7 @@ describe('importNode — input contract', () => {
 
   it('an empty-string contentType falls back to the text/html default', async () => {
     const res = await importNode({
-      memoryId,
+      memoryRef: memoryId,
       loc: 'clips:ctdefault',
       content: '<p>c</p>',
       contentType: '',
@@ -172,7 +172,7 @@ describe('importNode — authorization precedes any fetch', () => {
     try {
       await resolvers.Mutation.importNode(
         {},
-        { input: { memoryId, loc: 'clips:denied', url: 'https://example.com/x' } as never },
+        { input: { memoryRef: memoryId, loc: 'clips:denied', url: 'https://example.com/x' } as never },
         outsiderCtx,
       );
     } catch (e) {
@@ -189,7 +189,7 @@ describe('importNode — authorization precedes any fetch', () => {
 describe('importNode — inline content path (sync)', () => {
   it('stores converted HTML with defaults and returns STORED', async () => {
     const res = await importNode({
-      memoryId,
+      memoryRef: memoryId,
       loc: 'clips:one',
       content: '<p>hello</p>',
     });
@@ -205,7 +205,7 @@ describe('importNode — inline content path (sync)', () => {
 
   it('text/markdown passes through unconverted', async () => {
     const res = await importNode({
-      memoryId,
+      memoryRef: memoryId,
       loc: 'clips:md',
       content: '# already markdown',
       contentType: 'text/markdown',
@@ -216,7 +216,7 @@ describe('importNode — inline content path (sync)', () => {
 
   it('application/pdf extracts to Markdown, defaults nodeType to info (#488)', async () => {
     const res = await importNode({
-      memoryId,
+      memoryRef: memoryId,
       loc: 'clips:paper',
       content: 'JVBERi0=', // stand-in base64 (the real decode happens in the tool)
       contentType: 'application/pdf',
@@ -233,7 +233,7 @@ describe('importNode — inline content path (sync)', () => {
 
   it('a caller-supplied nodeType overrides the application/pdf default', async () => {
     const res = await importNode({
-      memoryId,
+      memoryRef: memoryId,
       loc: 'clips:paper2',
       content: 'JVBERi0=',
       contentType: 'application/pdf',
@@ -257,7 +257,7 @@ describe('importNode — inline content path (sync)', () => {
 describe('importNode — url path (sync v1)', () => {
   it('fetches, extracts, converts, and stores with provenance', async () => {
     const res = await importNode({
-      memoryId,
+      memoryRef: memoryId,
       loc: 'clips:web',
       url: 'https://example.com/article',
     });
@@ -273,7 +273,7 @@ describe('importNode — url path (sync v1)', () => {
 
   it('falls back to the whole page when Readability finds no article', async () => {
     vi.mocked(extractArticle).mockReturnValueOnce(null);
-    const res = await importNode({ memoryId, loc: 'clips:raw', url: 'https://example.com/x' });
+    const res = await importNode({ memoryRef: memoryId, loc: 'clips:raw', url: 'https://example.com/x' });
     expect(res.node.content).toBe('md:<html><body><p>fetched from https://example.com/x</p></body></html>');
     // No article title → leaf fallback on a fresh node.
     expect(res.node.name).toBe('raw');
@@ -281,7 +281,7 @@ describe('importNode — url path (sync v1)', () => {
 
   it('does not overwrite a caller-supplied properties.url', async () => {
     const res = await importNode({
-      memoryId,
+      memoryRef: memoryId,
       loc: 'clips:prov',
       url: 'https://example.com/final',
       properties: { url: 'https://example.com/original-share-link' },
@@ -300,7 +300,7 @@ describe('importNode — update in place (handoff decision 3)', () => {
       {},
       {
         input: {
-          memoryId,
+          memoryRef: memoryId,
           loc: 'clips:existing',
           name: 'Curated Name',
           content: 'original body',
@@ -309,7 +309,7 @@ describe('importNode — update in place (handoff decision 3)', () => {
       gqlCtx(),
     );
     const res = await importNode({
-      memoryId,
+      memoryRef: memoryId,
       loc: 'clips:existing',
       content: '<p>replacement</p>',
     });
@@ -326,11 +326,11 @@ describe('importNode — update in place (handoff decision 3)', () => {
   it('a caller-supplied name DOES replace the existing one', async () => {
     await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId, loc: 'clips:rename', name: 'Old', content: 'x' } as never },
+      { input: { memoryRef: memoryId, loc: 'clips:rename', name: 'Old', content: 'x' } as never },
       gqlCtx(),
     );
     const res = await importNode({
-      memoryId,
+      memoryRef: memoryId,
       loc: 'clips:rename',
       content: '<p>y</p>',
       name: 'New Name',

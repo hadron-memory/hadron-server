@@ -356,13 +356,13 @@ const GQL_PROBES: GqlProbe[] = [
   {
     name: 'searchReplaceInNodes(nodeIds)',
     node: true,
-    query: `mutation($r: ID!) { searchReplaceInNodes(input: {oldText: "needle", newText: "pin", fields: [content], nodeIds: [$r]}) { nodesScanned } }`,
+    query: `mutation($r: ID!) { searchReplaceInNodes(input: {oldText: "needle", newText: "pin", fields: [content], nodeRefs: [$r]}) { nodesScanned } }`,
     vars: (m, l) => ({ r: nodeUrn(m, l) }),
   },
   {
     name: 'searchReplaceInNodes(memoryIds)',
     node: false,
-    query: `mutation($r: ID!) { searchReplaceInNodes(input: {oldText: "needle", newText: "pin", fields: [content], memoryIds: [$r]}) { nodesScanned } }`,
+    query: `mutation($r: ID!) { searchReplaceInNodes(input: {oldText: "needle", newText: "pin", fields: [content], memoryRefs: [$r]}) { nodesScanned } }`,
     vars: (m) => ({ r: memUrn(m) }),
   },
   {

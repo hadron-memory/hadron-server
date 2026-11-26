@@ -69,7 +69,7 @@ describe('#2249 every create path defaults the flag to false', () => {
   it('a worker creating a child task (worker caller, child of its own started task)', async () => {
     const parent = await create(ctx(member.id), { assignee: { worker: anne.id } });
     await asWorker(anne, () => M.startAgentTask({}, { taskRef: parent.id }, ctx(member.id)));
-    const child = await asWorker(anne, () => create(ctx(member.id), { parentTaskId: parent.id }));
+    const child = await asWorker(anne, () => create(ctx(member.id), { parentTaskRef: parent.id }));
     expect(child.parentTaskId).toBe(parent.id);
     expect(child.closeSessionWhenDone).toBe(false);
     expect(await stored(child.id)).toBe(false);

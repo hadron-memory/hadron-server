@@ -94,7 +94,7 @@ describe('the central node stamp (#1610)', () => {
 describe('revision snapshots (#1610)', () => {
   it('records the worker and agent behind the edit through the GraphQL write path', async () => {
     const n = await makeNode('r:1');
-    await runAsActor(W(), () => resolvers.Mutation.updateNode(null, { input: { id: n.id, content: 'changed' } }, as()));
+    await runAsActor(W(), () => resolvers.Mutation.updateNode(null, { input: { ref: n.id, content: 'changed' } }, as()));
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id }, orderBy: { revNo: 'desc' } });
     expect(rev).toMatchObject({ editedBy: user.id, editedByWorkerId: worker.id, editedByAgentId: agent.id });
     expect(await attribution(n.id)).toMatchObject({ updatedByWorkerId: worker.id, updatedByAgentId: agent.id });
@@ -190,7 +190,7 @@ describe('GraphQL reads resolve public identity only (#1610)', () => {
 describe('revision and MCP reads (#1610)', () => {
   it('NodeRevision names the worker behind the edit it records', async () => {
     const n = await makeNode('rv:1');
-    await runAsActor(W(), () => resolvers.Mutation.updateNode(null, { input: { id: n.id, content: 'changed' } }, as()));
+    await runAsActor(W(), () => resolvers.Mutation.updateNode(null, { input: { ref: n.id, content: 'changed' } }, as()));
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id }, orderBy: { revNo: 'desc' } });
     expect(await resolvers.NodeRevision.editedByWorker(rev, {}, as())).toMatchObject({ id: worker.id, name: 'Dara' });
     expect(await resolvers.NodeRevision.editedByAgent(rev, {}, as())).toMatchObject({ id: agent.id });
