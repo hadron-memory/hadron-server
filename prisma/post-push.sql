@@ -786,6 +786,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- 20261125130000_credit_ledger_append_only (pinned by src/test/migrations/creditLedgerAppendOnly5010.test.ts).
 \ir credit-ledger-invariants.sql
 
+-- #5212: the one writer of user_merges. One source, shared verbatim with migration 20261126070000_user_merge_record_function
+-- (pinned by src/test/migrations/userMergeRecord5212.test.ts). After the tables it reads: users, user_merges, user_merge_consents.
+\ir user-merge-record-invariants.sql
+
 -- #430: the Git-mirror obligation's shape (closed error classes) and its attempt sequence.
 \ir git-mirror-obligation-invariants.sql
 
