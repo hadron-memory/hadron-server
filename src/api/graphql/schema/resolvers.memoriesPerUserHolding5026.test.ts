@@ -209,6 +209,57 @@ describe('#5026 memories() lists the owner\'s per-user Agent memories', () => {
     for (const u of [owner, member]) expect(ids(await list(ctxOf(u)))).not.toContain(anon.id);
   });
 
+  it('keeps out (subscription arm): a member of an org that subscribes to the holding does not get it', async () => {
+    const m = await seedPerUser();
+    const subscriber = await user('subscriber');
+    await db.orgMember.create({ data: { organizationId: otherOrgId, userId: subscriber, role: 'ADMIN' } });
+    await db.memorySubscription.create({ data: { id: generateId(), memoryId: m.holding, organizationId: otherOrgId, role: 'READER' } });
+    expect(ids(await list(ctxOf(subscriber)))).not.toContain(m.holding);
+  });
+
+  it('keeps out (app arm): an App member does not get the App\'s anonymous session memory', async () => {
+    const anon = await db.memory.create({
+      data: {
+        id: generateId(), class: 'app', name: 'Anonymous session', urn: 'org-5026:anon-app-arm',
+        organizationId: orgId, appId, userMemoryOfAgentId: agentId, createdBy: appId,
+        anonymousExpiresAt: new Date(Date.now() + 86_400_000),
+      },
+    });
+    await db.appMember.create({ data: { appId, userId: member, role: 'owner' } });
+    await db.orgMember.updateMany({ where: { organizationId: orgId, userId: member }, data: { role: 'ADMIN' } });
+    expect(ids(await list(ctxOf(member)))).not.toContain(anon.id);
+  });
+
+  it('keeps out (install arm): an install memory that carries the per-user marker does not list to the org admin', async () => {
+    // No door writes this shape; the CHECK does not forbid it, so the arm keeps its clause.
+    const agent2 = (await db.agent.create({ data: { id: generateId(), name: 'Juno2', urn: 'org-5026:juno2', organizationId: orgId } })).id;
+    const marked = await db.memory.create({
+      data: {
+        id: generateId(), class: 'system', name: 'install-marked', urn: 'org-5026:install-marked',
+        organizationId: orgId, appId, isInstallMemory: true, installOfAgentId: agent2, userMemoryOfAgentId: agent2,
+      },
+    });
+    const plain = await db.memory.create({
+      data: {
+        id: generateId(), class: 'system', name: 'install-plain', urn: 'org-5026:install-plain',
+        organizationId: orgId, appId, isInstallMemory: true, installOfAgentId: agentId,
+      },
+    });
+    await db.orgMember.updateMany({ where: { organizationId: orgId, userId: member }, data: { role: 'ADMIN' } });
+    const listed = ids(await list(ctxOf(member), { filter: { memoryClasses: ['system'] } }));
+    expect(listed).toContain(plain.id); // positive control: the arm is live for this caller
+    expect(listed).not.toContain(marked.id);
+  });
+
+  it('keeps out (creator arm): a knowledge memory the caller created that is NOT a per-user holding', async () => {
+    // The owner created it in an org they do not belong to; only the holding
+    // marker (`userMemoryOfAgentId`) makes a creator its reader.
+    const foreign = await db.memory.create({
+      data: { id: generateId(), class: 'knowledge', name: 'left-behind', urn: 'other-5026:left', organizationId: otherOrgId, createdBy: owner },
+    });
+    expect(ids(await list(ctxOf(owner)))).not.toContain(foreign.id);
+  });
+
   it('keeps out: another user\'s holding never lists to the owner of a different one', async () => {
     const m = await seedPerUser();
     const theirs = await db.memory.create({
