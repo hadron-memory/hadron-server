@@ -44,7 +44,7 @@ start.onclick=async()=>{
   const dl=document.createElement('dl');
   const row=(label,value)=>{const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=String(value);dl.append(dt,dd);};
   row('Change',out.summary.change);row('Secret',out.summary.secret);row('App',out.summary.app);
-  if(out.summary.operation==='STORE')row('New metadata',JSON.stringify(out.summary.metadata));
+  if(out.summary.metadata!==undefined)row('New metadata',Object.entries(out.summary.metadata).map(([k,v])=>k+': '+(v!==null&&typeof v==='object'?JSON.stringify(v):String(v))).join('; ')||'(none)');
   if(out.summary.sizeBytes!==null)row('Value size',new Intl.NumberFormat().format(out.summary.sizeBytes)+' bytes');
   const expiry=new Date(out.summary.expiresAt);
   row('Request expires',new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'long'}).format(expiry)+' ('+Intl.DateTimeFormat().resolvedOptions().timeZone+')');

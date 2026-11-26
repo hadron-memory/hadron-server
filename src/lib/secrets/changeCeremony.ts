@@ -98,13 +98,22 @@ export async function proveSecretChange(db: PrismaClient, a: SecretAssertion) {
   const appUrn = emitEntityUrnV2('app', app.urn);
   // The pinned urn-lib version has only the former org/user secret arity; the App owner marker is cor:urn:010:01.
   const secretUrn = appUrn.replace(/^hrn:app:([^:]+):(.+)$/, 'hrn:secret:$1:app:$2') + ':' + current.secret_name;
+  // #4626 item 17: a STORE that stages neither a value nor a metadata change is a protection-flag-only change. Its text
+  // names the flag alone and its summary carries no metadata, so the page never claims a metadata change. The live row is
+  // read under the secret lock `authorized` already took, so the comparison cannot race a concurrent edit.
+  const live = current.secret_id ? await tx.secret.findUnique({where:{id:current.secret_id},select:{metadata:true}}) : null;
+  const flagOnly = current.secret_id!==null && !current.write_version && current.protected_result!==null && live!==null
+   && isDeepStrictEqual(current.metadata, live.metadata);
+  const protection = current.protected_result === null ? '' : current.protected_result ? ' and turn protection on' : ' and turn protection off';
   // The proof exposes metadata only; neither ciphertext nor plaintext leaves the server.
   const change = current.operation === 'STORE'
-   ? (current.secret_id ? (current.write_version ? 'Store a new version' : 'Update secret metadata') : 'Create a protected secret') +
-     (current.protected_result === null ? '' : current.protected_result ? ' and turn protection on' : ' and turn protection off')
+   ? !current.secret_id ? 'Create a protected secret' + protection
+   : current.write_version ? 'Store a new version' + protection
+   : flagOnly ? (current.protected_result ? 'Turn protection on' : 'Turn protection off')
+   : 'Update secret metadata' + protection
    : ({DELETE:'Delete this secret',SET_PROTECTED:'Turn protection on',CLEAR_PROTECTED:'Turn protection off'} as const)[current.operation];
   return { outcome:'change' as const,nonce,ceremonyId:ceremony.id,challenge:challenge.toString('base64url'),rpId:passkeyRpId(),decline:{ceremonyId:declineCeremony.id,challenge:declineChallenge.toString('base64url')},
-   summary:{app:appUrn,secret:secretUrn,operation:current.operation,change,...(current.operation==='STORE'?{metadata:current.metadata}:{}),sizeBytes:current.size_bytes,requester:current.requester_id,expiresAt:current.expires_at.toISOString()} };
+   summary:{app:appUrn,secret:secretUrn,operation:current.operation,change,...(current.operation==='STORE'&&!flagOnly?{metadata:current.metadata}:{}),sizeBytes:current.size_bytes,requester:current.requester_id,expiresAt:current.expires_at.toISOString()} };
  });
 }
 /** Completion rejudges standing, deadlines, snapshot and credential under locks. Only its committed result leaves the server. */
