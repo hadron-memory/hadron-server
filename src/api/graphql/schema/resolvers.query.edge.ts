@@ -5,6 +5,7 @@ import { resolveEdgeRef } from '../../../lib/entityRef/edgeRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { EdgeNotFoundError } from '../../../lib/entityRef/errors.js';
+import { edgeWithin, listableMemories } from './resolvers.nodeBatchEdges.js';
 import {
   type Context,
   clampListTake,
@@ -23,7 +24,7 @@ export interface EdgeFilterInput {
 
 export const edgeQueries = {
   // Uniform single-edge read: ref = PK | hrn:edge:<memory-urn>::<loc>.
-  // Access: the edge's (denormalized, source-side) memory must be readable.
+  // Access: the edge's (denormalized, source-side) memory and the memory of each end must be readable (hadron-internal#79).
   // Denied ≡ not-found (null) — same non-disclosure posture as node(ref:).
   edge: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
     let id: string;
@@ -35,12 +36,16 @@ export const edgeQueries = {
       if (e instanceof EdgeNotFoundError) return null;
       throw e;
     }
-    const edge = await ctx.db.edge.findUnique({ where: { id } });
-    if (!edge || edge.deletedAt) return null;
+    const row = await ctx.db.edge.findUnique({ where: { id }, include: { source: { select: { memoryId: true } }, target: { select: { memoryId: true } } } });
+    if (!row || row.deletedAt) return null;
+    const { source, target, ...edge } = row;
     const access = await memoryAccessFilter(ctx);
     if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
       if (!(access.memoryId.in as string[]).includes(edge.memoryId)) return null;
     }
+    const touched = [edge.memoryId, source.memoryId, target.memoryId];
+    const listable = await listableMemories(null, ctx, touched);
+    if (!touched.every((memoryId) => listable.has(memoryId))) return null;
     return edge;
   },
 
@@ -90,22 +95,20 @@ export const edgeQueries = {
     }
 
     // Endpoint clauses — node refs accept PK or fully-qualified URN.
+    // One outside the readable set is answered as one that does not resolve (hadron-internal#79).
+    const readable = new Set(accessible);
     let endpointWhere: Record<string, unknown> = {};
-    if (f.sourceNodeId != null) {
+    for (const [ref, key] of [[f.sourceNodeId, 'sourceId'], [f.targetNodeId, 'targetId']] as const) {
+      if (ref == null) continue;
+      let id: string;
       try {
-        const { id } = await resolveNodeRef(ctx.db, f.sourceNodeId);
-        endpointWhere = { ...endpointWhere, sourceId: id };
+        ({ id } = await resolveNodeRef(ctx.db, ref));
       } catch {
         return empty;
       }
-    }
-    if (f.targetNodeId != null) {
-      try {
-        const { id } = await resolveNodeRef(ctx.db, f.targetNodeId);
-        endpointWhere = { ...endpointWhere, targetId: id };
-      } catch {
-        return empty;
-      }
+      const node = await ctx.db.node.findUnique({ where: { id }, select: { memoryId: true } });
+      if (!node || !readable.has(node.memoryId)) return empty;
+      endpointWhere = { ...endpointWhere, [key]: id };
     }
 
     const where = {
@@ -113,6 +116,8 @@ export const edgeQueries = {
       ...endpointWhere,
       ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
       ...(f.includeDeleted ? {} : { deletedAt: null }),
+      // The readable set is `listableMemories`' own gate (getAccessibleMemoryIds), asked once for the whole list. It is never narrowed.
+      AND: [edgeWithin(accessible, ['source', 'target'])],
     };
 
     const take = clampListTake(limit);
