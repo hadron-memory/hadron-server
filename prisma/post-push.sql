@@ -999,6 +999,10 @@ CREATE TRIGGER agent_clone_audits_immutable
 -- worker-reference-invariants.sql, whose fence function its trigger uses.
 \ir host-assignment-invariants.sql
 
+-- #5259: the hosts of a team App and their settings. One source, shared verbatim with migration
+-- 20261126160000_agent_team_hosts (pinned by src/api/graphql/schema/resolvers.agentTeamHost5259.test.ts).
+\ir agent-team-host-invariants.sql
+
 -- S12 explicit reporting choice (legacy UNSET retained).
 \ir worker-team-choice-invariants.sql
 -- #4224: the leave-alone marker's shape (same rule as migration 20261115160000_desired_state).

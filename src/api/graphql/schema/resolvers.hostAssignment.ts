@@ -44,6 +44,8 @@ import {
   type HostSetupSource,
 } from '../../../lib/hostOperations/assignments.js';
 import { recordingRefusal } from './resolvers.hostOperation.js';
+import { hostNotFound } from './resolvers.appKeyScope.js';
+import { isLiveTeamHost } from '../../../lib/hostOperations/teamHosts.js';
 
 // #5168: the refusal never relays the caller's ref (it is their own text, possibly a pasted secret).
 const appNotFound = (_appRef: string) => taskError('APP_NOT_FOUND', 'App not found.');
@@ -61,18 +63,20 @@ type AssignInput = {
  * inside the write's transaction under the App's anchors, the caller manages the App (else
  * HOST_ASSIGNMENT_NOT_PERMITTED). `body` runs after that gate, before any write of its own.
  */
-async function asSetupManager<T>(
+export async function asSetupManager<T>(
   ctx: Context, appRef: string, instruction: ActInstruction | null | undefined,
   body: (tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor) => Promise<T>,
   /** `exclusive` for the one write that updates the anchored App row itself (a shared hold cannot be upgraded). */
   lockMode: 'shared' | 'exclusive' = 'shared',
+  /** #5259: the door's own refusal (updateAgentTeamHost answers AGENT_TEAM_HOST_NOT_PERMITTED); the gate is the same. */
+  refuse: () => Error = notPermitted,
 ): Promise<{ app: TaskApp; result: T }> {
-  if (appKeyCaller(ctx)) throw notPermitted();
+  if (appKeyCaller(ctx)) throw refuse();
   const participated = await resolveParticipatedApp(ctx, appRef);
   const actor = withInstruction(participated.actor, instruction);
   requireWritable(ctx, participated.app);
   const result = await inTaskWriteTx(ctx, participated.app, actor, () => appNotFound(appRef), async (tx, txCtx, freshApp) => {
-    if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) throw notPermitted();
+    if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) throw refuse();
     return body(tx, txCtx, freshApp, actor);
   }, { lockMode });
   return { app: participated.app, result };
@@ -116,6 +120,9 @@ export const hostAssignmentMutations = {
       if (target.retiredAt) throw taskError('WORKER_RETIRED', 'This worker is retired.', { workerId });
       // The host-setup lock, after the worker row, the last lock this write takes.
       await lockHostSetup(tx, freshApp.id, 'exclusive');
+      // #5259: only a host joined to the App is assigned a worker (hrn:node:hadronmemory.com:specs:cor:agt:070:01, Proposed).
+      // Joining and removing a host take this lock exclusive too, so the row holds still through the write.
+      if (!(await isLiveTeamHost(tx, freshApp.id, v.hostId))) throw hostNotFound();
       const key = { appId_workerId_hostId: { appId: freshApp.id, workerId, hostId: v.hostId } };
       const existing = await tx.hostWorkerAssignment.findUnique({ where: key, select: { id: true } });
       if (existing && !input.replace) {

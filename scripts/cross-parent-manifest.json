@@ -1239,6 +1239,12 @@
       "resolver": "src/api/graphql/schema/resolvers.hostAssignment.ts::withReadableApp",
       "target": "HostWorkerAssignment"
     },
+    "JoinAgentTeamHostPayload.host": {
+      "class": "parent-implies-child",
+      "audience": "joinAgentTeamHost's caller only: a person who manages the App as themselves (createAppKey's gate); the host is the record this join just wrote (#5259)",
+      "resolver": "src/api/graphql/schema/resolvers.agentTeamHost.ts::asKeyIssuer",
+      "target": "AgentTeamHost"
+    },
     "HostWorkerAssignment.worker": {
       "class": "parent-implies-child",
       "audience": "hostSetup gated by withReadableApp; assignHostWorker needs resolveParticipatedApp and actorManagesApp; rows limited to the App, a worker of the same App only (DB trigger) (#4222)",

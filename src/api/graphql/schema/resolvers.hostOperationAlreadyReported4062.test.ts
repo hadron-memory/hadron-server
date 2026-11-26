@@ -22,6 +22,7 @@ import { sweepUnreportedHostOperations } from '../../../lib/hostOperations/settl
 import { formatGraphQLError } from '../formatError.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -70,6 +71,7 @@ beforeEach(async () => {
   kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' }, select: { id: true } });
   const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   orca1 = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label: 'orca1' }, select: { id: true } });
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
   await M.registerHost({}, {
     input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 60, workers: [{ worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] }] },

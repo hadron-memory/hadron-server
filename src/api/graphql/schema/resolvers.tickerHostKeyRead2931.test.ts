@@ -20,6 +20,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { inHostKeyTickerReadTx } from './resolvers.agentTask.js';
 import { teamChatMutations } from './resolvers.teamChat.js';
 import { typeDefs } from './typeDefs.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -100,10 +101,14 @@ beforeEach(async () => {
   deliverKey = await mkKey(appX.id, 'deliver');
   revokedScopeKey = await mkKey(appX.id, 'revoked-scope');
   revokedKey = await mkKey(appX.id, 'revoked');
+  await joinHostForKey(db, hostKey.id, 'orca1');
   await M.grantAppKeyScope({}, { id: hostKey.id, scope: 'host:operate', hostId: 'orca1' }, ctx(admin.id));
+  await joinHostForKey(db, otherHostKey.id, 'orca2');
   await M.grantAppKeyScope({}, { id: otherHostKey.id, scope: 'host:operate', hostId: 'orca2' }, ctx(admin.id));
   await M.grantAppKeyScope({}, { id: deliverKey.id, scope: 'attention:deliver' }, ctx(admin.id));
+  await joinHostForKey(db, revokedScopeKey.id, 'orca1');
   await M.grantAppKeyScope({}, { id: revokedScopeKey.id, scope: 'host:operate', hostId: 'orca1' }, ctx(admin.id));
+  await joinHostForKey(db, revokedKey.id, 'orca1');
   await M.grantAppKeyScope({}, { id: revokedKey.id, scope: 'host:operate', hostId: 'orca1' }, ctx(admin.id));
   await M.registerHost({}, { input: { appRef: appX.id, label: 'Orca 1', pollIntervalSeconds: 600, workers: [{ worker: ada.id, family: 'claude' }] } }, keyCtx(hostKey));
   await M.registerHost({}, { input: { appRef: appX.id, label: 'Orca 2', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'claude' }] } }, keyCtx(otherHostKey));

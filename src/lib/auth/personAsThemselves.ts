@@ -41,10 +41,12 @@ export async function requirePersonAsThemselves(ctx: PersonGateContext, refuse: 
  *    secret's current version or a manager of the App, each as a person; a worker session and a run are refused).
  *  - `agent-webhook.rotate`: rotating a webhook's credentials returns the new secret path and a platform token, which
  *    would land in a model transcript (#3511, ruling 0177, cor:dmo:050:12 r40). Creating and deleting one are not on it.
+ *  - `agent-team-host.remove`: removing a host of a team App revokes its keys (#5259, cor:agt:070:07): whoever manages the
+ *    App, as a person; never a held worker on an instruction, never an App key. Joining one is `app-key.mint`.
  * The rule's older person-only acts (adoption, passkeys, impersonation, account merge) have their own doors on
  * {@link requirePersonAsThemselves} and are not repeated here. CLOSED: a new door joins by naming one of these acts.
  */
-export const PERSON_ONLY_ACTS = ['app-key.mint', 'app-key.rotate', 'grant.give', 'agent-webhook.rotate', 'secret.delete', 'secret.change', 'secret.issue-read-client'] as const;
+export const PERSON_ONLY_ACTS = ['app-key.mint', 'app-key.rotate', 'grant.give', 'agent-webhook.rotate', 'secret.delete', 'secret.change', 'secret.issue-read-client', 'agent-team-host.remove'] as const;
 export type PersonOnlyAct = (typeof PERSON_ONLY_ACTS)[number];
 
 /**
