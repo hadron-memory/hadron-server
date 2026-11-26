@@ -358,6 +358,8 @@ describe('the reach of a link, on both surfaces', () => {
     expect(await reachFor(key, m4.id)).toEqual({ mcp: true, graphql: true });
     await db.user.update({ where: { id: alice }, data: { deletedAt: new Date() } });
     expect(await reachFor(key, m4.id)).toEqual({ mcp: false, graphql: false });
+    expect((await judgeFor(orgApp.id, m4.id)).map((l) => l.active)).toEqual([false]); // the row is there, inert
+    expect(await links(m4.id)).toHaveLength(1);
     await db.user.update({ where: { id: alice }, data: { deletedAt: null } });
     // an App that is uninstalled grants nothing
     const m3 = await memory({});
@@ -471,6 +473,19 @@ describe('GraphQL memory(ref:) for a linked personal memory of the App owner', (
     expect(await get(keyCtx, ottos.id)).toBe(ottos.id);
     expect(await get(keyCtx, ottosPrivate.id)).toBe(ottosPrivate.id);
     expect(await get(runCtx, ottosPrivate.id)).toBeNull();
+  });
+});
+
+describe('the links of a soft-deleted memory', () => {
+  it('cannot be detached (the memory is missing to every caller) and sit inert until restore', async () => {
+    const m = await memory({});
+    await attach(asUser(alice), m.id, orgApp.id);
+    await db.memory.update({ where: { id: m.id }, data: { deletedAt: new Date() } });
+    expect(await refusal(detach(asUser(alice), m.id, orgApp.id))).toMatchObject({ code: 'MEMORY_NOT_FOUND' });
+    expect(await links(m.id)).toHaveLength(1);
+    expect(await reachFor(keyAuth(orgApp.id), m.id)).toEqual({ mcp: false, graphql: false });
+    await db.memory.update({ where: { id: m.id }, data: { deletedAt: null } });
+    expect(await reachFor(keyAuth(orgApp.id), m.id)).toEqual({ mcp: true, graphql: true });
   });
 });
 

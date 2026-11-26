@@ -521,7 +521,9 @@ export const appMemoryMutations = {
    * #5185: remove links, never the memory. The attacher removes their own link (even after losing read); the memory's strict
    * owner and the person who manages the App remove every link of that memory in that App. A caller with no authority over
    * the link gets FORBIDDEN when they can read the memory and MEMORY_NOT_FOUND when they cannot (the same answer as an
-   * unknown memory); an unknown or deleted App is FORBIDDEN. No link to remove is success.
+   * unknown memory); an unknown or deleted App answers like that too (the memory is judged first, so the App side is no existence
+   * oracle). No link to remove is success. The links of a soft-deleted memory cannot be detached (the anchor refuses it); they sit
+   * inert until the memory is restored or hard-deleted.
    */
   detachMemoryFromApp: async (
     _: unknown,
@@ -564,7 +566,8 @@ export const appMemoryMutations = {
       const currentApp = await c.db.app.findUnique({ where: { id: appId }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true } });
       if (!memory || memory.deletedAt || !currentApp || currentApp.deletedAt) return null;
       if (memory.userId === ctx.userId || memory.ownerUserId === ctx.userId) return 'owner';
-      if (await managesApp({ db: c.db, userId: ctx.userId, roles: ctx.roles }, currentApp)) return 'owner';
+      // c.roles: inside the transaction these are the transaction context's reloaded platform roles, never the request's.
+      if (await managesApp({ db: c.db, userId: ctx.userId, roles: c.roles }, currentApp)) return 'owner';
       if (memory.organizationId) {
         const admin = await c.db.orgMember.findFirst({
           where: { organizationId: memory.organizationId, userId: ctx.userId!, ...LIVE_ORG_MEMBERSHIP, role: { in: ['ADMIN', 'OWNER'] } },

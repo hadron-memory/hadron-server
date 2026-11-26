@@ -3463,7 +3463,7 @@ export function createMcpServerInstance(
         const who = app ? safeEmitEntityUrnV2('app', app.urn) : auth.appId;
         scope = auth.userId
           ? `Scope: user · active App ${who} — this App's agent memories + org-readable memories + your personal memories scoped to this App.`
-          : `Scope: App key · ${who} (App-scoped) — this App's agent memories only; personal and org-readable memories require user authentication and are not shown to an App key.`;
+          : `Scope: App key · ${who} (App-scoped) — this App's agent memories and the memories linked to it only; personal and org-readable memories require user authentication and are not shown to an App key, except a memory the App's owner linked.`;
       } else if (auth.userId) {
         scope = `Scope: user · no active App — the union across your Apps + org-readable memories + all your personal memories. Select one with hadron_set_active_app to narrow the view.`;
       } else {

@@ -2472,7 +2472,7 @@ export async function granteeShareAccess(
  *
  * The filter is also what keeps this gate's own contract: `getAccessibleMemoryIds`
  * admits personal/private ONLY through its identity-scoped clauses (owner,
- * holdings, share grantee). Nothing App-derived may add to that set.
+ * holdings, share grantee). Nothing App-derived may add to that set, EXCEPT the App's links for a pure key (#5185), which `getAccessibleMemoryIds` unions in after this filter through `src/lib/appMemoryLinks.ts`, the one judge of them.
  *
  * Both strict-owner axes live upstream as well (PR #1102 and #1260 reviews):
  * a map carrying rows the canonical point gate hard-denies is wrong for every
