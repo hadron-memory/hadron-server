@@ -276,15 +276,30 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // orgBootPromptSigningPreview, setOrgBootPromptSigning) are renamed. Scalars and gates are unchanged (impersonationSessions
 // keeps `String`); a lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation. (0.41.0 is #5168, merged first.)
 //
-// 0.43.0 — #5183 (A1 of #5182): createMemoryInApp's `name` is optional. For a personal or private memory the server derives
+// 0.43.0 — BREAKING, entity refs gap 2 (#5080): 21 input-type fields on 17 input types, plus `createAiServiceConfig(ownerId:)`,
+// take refs, no alias (`*Id` -> `*Ref`): `NodeFilter.memoryRefs`, `EdgeFilter.memoryRef` / `sourceRef` / `targetRef`,
+// `AppFilter.agentRef`, `AiServiceConfigFilter.ownerRef`, `CreateNodeInput` / `UpdateNodeInput` / `ImportNodeInput` /
+// `NodeAuthoringCheckInput` / `BeginAssetUploadV2Input` `.memoryRef`, `UpdateNodeInput.ref`, `NodeEdgeInput.targetRef`,
+// `SearchReplaceInNodesInput` `.nodeRefs` / `.memoryRefs`, `SpecSearchReplaceInput.nodeRefs`, `CreateAgentTaskInput` /
+// `CloneAgentTaskInput` `.parentTaskRef`, `TickerInput` / `TickerPatch` `.channelRefs`, `BatchThrough.channelRef`, and
+// `createAiServiceConfig(ownerRef:)`. A lagging client's old name is an UNKNOWN field or argument and GraphQL refuses the whole
+// operation (ship order per precedent 0274: notices, server, companions). Three of them close a gap: ticker channels and
+// `BatchThrough` now resolve a URN as well as an id. `NodeInput` (the retired `replaceSubtree` shape) keeps `memoryId` and
+// its edges keep `targetId`; `ResumeSessionInput.expectedWorkerId` stays (#5163). MCP tool inputs are unchanged. (0.42.0 is
+// #5081, entity refs gap 3, merged first.)
+//
+// 0.44.0 — NEW REFUSAL, #5184: `updateMemory` with a `urn` (slug) argument on a `personal` or `private` memory that
+// belongs to an App answers APP_MEMORY_SLUG_FIXED (extension `memoryClass`) and applies nothing. An organization-owned
+// one renamed before; a user-owned one answered BAD_USER_INPUT. `name` still changes. No SDL change. (0.43.0 is #5080, merged first.)
+// 0.45.0 — #5183 (A1 of #5182): createMemoryInApp's `name` is optional. For a personal or private memory the server derives
 // slug and display name (<app>-<handle>-<class>), the memory is the user's own, one per class per App
 // (APP_USER_MEMORY_ALREADY_EXISTS). A client that still sends `name` has it ignored for those classes. Also changed for those
 // classes: the memory's tenant moves from the App's organization to the user (organizationId null, URN rooted on their handle),
 // and an App key, worker session, run principal or impersonation is refused (authorization denied), before any read of the App.
 //
-// 0.44.0 — ADDITIVE, #5218: `App.viewerAppUserMemoryClasses: [MemoryClass!]!`, the personal/private classes the
+// 0.47.0 — ADDITIVE, #5218: `App.viewerAppUserMemoryClasses: [MemoryClass!]!`, the personal/private classes the
 // signed-in viewer may still create in the App through `createMemoryInApp`. A lagging client still validates.
-export const HADRON_SERVER_VERSION = '0.44.0';
+export const HADRON_SERVER_VERSION = '0.47.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

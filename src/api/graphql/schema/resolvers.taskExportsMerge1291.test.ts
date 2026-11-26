@@ -28,7 +28,7 @@ const admin = (): Context => ({ db, roles: ['ADMIN'], userId: adminId } as Conte
 const outsider = (): Context => ({ db, roles: ['READER'], userId: outsiderId } as Context);
 const props = async () => (await db.node.findUniqueOrThrow({ where: { id: taskId } })).properties as Record<string, any>;
 const merge = (properties: unknown, extra: Record<string, unknown> = {}, ctx: Context = admin()) =>
-  M.updateTaskNode({}, { input: { id: taskId, properties, ...extra }, mergeExports: true }, ctx);
+  M.updateTaskNode({}, { input: { ref: taskId, properties, ...extra }, mergeExports: true }, ctx);
 const claude = { name: 'one', description: 'Use when testing one.', enable: true };
 const codex = { name: 'two', description: 'Use when testing two.', enable: true };
 
@@ -43,7 +43,7 @@ beforeEach(async () => {
   memId = (await M.createMemory({}, { orgRef: org.id, name: 'tasks' }, admin())).id;
   taskId = (
     await M.createTaskNode({}, {
-      input: { memoryId: memId, loc: 'tasks:t1', name: 'T1', isRunnable: true, properties: { keep: 'me', exports: { claudeSkill: claude } } },
+      input: { memoryRef: memId, loc: 'tasks:t1', name: 'T1', isRunnable: true, properties: { keep: 'me', exports: { claudeSkill: claude } } },
     }, admin())
   ).id;
 });
@@ -71,9 +71,9 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
   });
 
   it('option off is today\'s whole-bag replace', async () => {
-    await M.updateTaskNode({}, { input: { id: taskId, properties: { exports: { codexSkill: codex } } } }, admin());
+    await M.updateTaskNode({}, { input: { ref: taskId, properties: { exports: { codexSkill: codex } } } }, admin());
     expect(await props()).toEqual({ exports: { codexSkill: codex } });
-    await M.updateTaskNode({}, { input: { id: taskId, properties: { x: 1 } }, mergeExports: false }, admin());
+    await M.updateTaskNode({}, { input: { ref: taskId, properties: { x: 1 } }, mergeExports: false }, admin());
     expect(await props()).toEqual({ x: 1 });
   });
 
@@ -107,7 +107,7 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
   });
 
   it('with no properties in the input, the option changes nothing', async () => {
-    await M.updateTaskNode({}, { input: { id: taskId, description: 'd' }, mergeExports: true }, admin());
+    await M.updateTaskNode({}, { input: { ref: taskId, description: 'd' }, mergeExports: true }, admin());
     expect(await props()).toEqual({ keep: 'me', exports: { claudeSkill: claude } });
   });
 
@@ -117,10 +117,10 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
       schema: { objectTypes: { task: { strict: false, fields: { title: { type: 'text', required: true } } } } },
     }, admin());
     const typed = await M.createTaskNode({}, {
-      input: { memoryId: memId, loc: 'tasks:typed', name: 'Typed', isRunnable: true, objectType: 'task', properties: { title: 'T' } },
+      input: { memoryRef: memId, loc: 'tasks:typed', name: 'Typed', isRunnable: true, objectType: 'task', properties: { title: 'T' } },
     }, admin());
     await expect(
-      M.updateTaskNode({}, { input: { id: typed.id, properties: { title: null, exports: { codexSkill: codex } } }, mergeExports: true }, admin()),
+      M.updateTaskNode({}, { input: { ref: typed.id, properties: { title: null, exports: { codexSkill: codex } } }, mergeExports: true }, admin()),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     expect((await db.node.findUniqueOrThrow({ where: { id: typed.id } })).properties).toEqual({ title: 'T' });
   });
@@ -136,7 +136,7 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
   });
 
   it('a caller without write access is refused identically with the option on or off, and nothing changes', async () => {
-    const off = await M.updateTaskNode({}, { input: { id: taskId, properties: { exports: { codexSkill: codex } } } }, outsider()).then(() => null, (e) => e);
+    const off = await M.updateTaskNode({}, { input: { ref: taskId, properties: { exports: { codexSkill: codex } } } }, outsider()).then(() => null, (e) => e);
     const on = await merge({ exports: { codexSkill: codex } }, {}, outsider()).then(() => null, (e) => e);
     expect(off).not.toBeNull();
     expect(on).not.toBeNull();
@@ -147,11 +147,11 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
   });
 
   it('a malformed patch from a caller without write access is refused as any patch is (BLIND P2), by id and by loc', async () => {
-    const plainId = await M.updateTaskNode({}, { input: { id: taskId, properties: { exports: {} } } }, outsider()).then(() => null, (e) => e);
-    const plainLoc = await M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:t1', properties: { exports: {} } } }, outsider()).then(() => null, (e) => e);
+    const plainId = await M.updateTaskNode({}, { input: { ref: taskId, properties: { exports: {} } } }, outsider()).then(() => null, (e) => e);
+    const plainLoc = await M.updateTaskNode({}, { input: { memoryRef: memId, loc: 'tasks:t1', properties: { exports: {} } } }, outsider()).then(() => null, (e) => e);
     const asId = (properties: unknown) => merge(properties, {}, outsider()).then(() => null, (e) => e);
     const asLoc = (properties: unknown) =>
-      M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:t1', properties }, mergeExports: true }, outsider()).then(() => null, (e) => e);
+      M.updateTaskNode({}, { input: { memoryRef: memId, loc: 'tasks:t1', properties }, mergeExports: true }, outsider()).then(() => null, (e) => e);
     expect(plainId?.extensions?.code).toBe('NODE_NOT_FOUND');
     expect(plainLoc?.message).toMatch(/^MEMORY_NOT_FOUND:/); // a loc selector on an unreadable memory is concealed as a missing memory
     for (const [call, plain] of [[asId, plainId], [asLoc, plainLoc]] as const) {
@@ -168,7 +168,7 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
 
   it('a loc selector naming no node is NODE_NOT_FOUND and creates nothing (BLIND P2)', async () => {
     await expect(
-      M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:nope', properties: { a: 1 } }, mergeExports: true }, admin()),
+      M.updateTaskNode({}, { input: { memoryRef: memId, loc: 'tasks:nope', properties: { a: 1 } }, mergeExports: true }, admin()),
     ).rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
     expect(await db.node.count({ where: { memoryId: memId, loc: 'tasks:nope' } })).toBe(0);
   });
@@ -181,7 +181,7 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
       if (!raced && args?.where?.loc === 'tasks:gap') {
         raced = true;
         return out.then(async (found: unknown) => {
-          await M.createTaskNode({}, { input: { memoryId: memId, loc: 'tasks:gap', name: 'Gap', isRunnable: true, properties: { x: 1 } } }, admin());
+          await M.createTaskNode({}, { input: { memoryRef: memId, loc: 'tasks:gap', name: 'Gap', isRunnable: true, properties: { x: 1 } } }, admin());
           return found;
         });
       }
@@ -189,7 +189,7 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
     }) as never);
     try {
       await expect(
-        M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:gap', properties: { a: 1 } }, mergeExports: true }, admin()),
+        M.updateTaskNode({}, { input: { memoryRef: memId, loc: 'tasks:gap', properties: { a: 1 } }, mergeExports: true }, admin()),
       ).rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
     } finally {
       spy.mockRestore();
@@ -221,7 +221,7 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
     }, { timeout: 20_000 });
     try {
       await gotLock;
-      const attempt = M.updateTaskNode({}, { input: { memoryId: memId, loc: 'tasks:t1', properties: { exports: { codexSkill: codex } } }, mergeExports: true }, admin())
+      const attempt = M.updateTaskNode({}, { input: { memoryRef: memId, loc: 'tasks:t1', properties: { exports: { codexSkill: codex } } }, mergeExports: true }, admin())
         .then(() => 'wrote', (e) => `refused:${e.extensions?.code}`);
       // The merge now holds the original id and is queued on the lock. Bounded and raced with the merge settling early,
       // so a merge that never reaches the lookup fails the test instead of hanging it with the spy installed.
@@ -251,7 +251,7 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
   });
 
   it('a loc-selected merge lands on the replacement when the original row is physically deleted (BLIND delta P2)', async () => {
-    const repl = await M.createTaskNode({}, { input: { memoryId: memId, loc: 'tasks:repl', name: 'Repl', isRunnable: true, properties: { keep: 'repl' } } }, admin());
+    const repl = await M.createTaskNode({}, { input: { memoryRef: memId, loc: 'tasks:repl', name: 'Repl', isRunnable: true, properties: { keep: 'repl' } } }, admin());
     const outcome = await mergeBehindLock(async (tx) => {
       await tx.node.delete({ where: { id: taskId } });
       await tx.node.update({ where: { id: repl.id }, data: { loc: 'tasks:t1' } });
@@ -285,7 +285,7 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
   });
 
   it('a loc-selected merge lands on the node that took the loc when the original moved away (BLIND delta P2)', async () => {
-    const repl = await M.createTaskNode({}, { input: { memoryId: memId, loc: 'tasks:repl', name: 'Repl', isRunnable: true, properties: { keep: 'repl' } } }, admin());
+    const repl = await M.createTaskNode({}, { input: { memoryRef: memId, loc: 'tasks:repl', name: 'Repl', isRunnable: true, properties: { keep: 'repl' } } }, admin());
     const outcome = await mergeBehindLock(async (tx) => {
       await tx.node.update({ where: { id: taskId }, data: { loc: 'tasks:moved' } });
       await tx.node.update({ where: { id: repl.id }, data: { loc: 'tasks:t1' } });
@@ -320,10 +320,10 @@ describe('updateTaskNode with mergeExports (#1291)', () => {
   });
 
   it('never makes a non-task node writable through the door (the kind is the door\'s, not the caller\'s)', async () => {
-    const plain = await M.createNode({}, { input: { memoryId: memId, loc: 'notes:n1', name: 'N', properties: { a: 1 } } }, admin());
+    const plain = await M.createNode({}, { input: { memoryRef: memId, loc: 'notes:n1', name: 'N', properties: { a: 1 } } }, admin());
     // The plain node is not a task: the task door still merges it as it would update it, and refuses to make it a review.
     await expect(
-      M.updateTaskNode({}, { input: { id: plain.id, properties: { exports: {} }, role: 'review' }, mergeExports: true }, admin()),
+      M.updateTaskNode({}, { input: { ref: plain.id, properties: { exports: {} }, role: 'review' }, mergeExports: true }, admin()),
     ).rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
   });
 });
@@ -335,12 +335,12 @@ describe('a userless App run under a prefix-scoped write grant (#4599 LOCAL P2)'
     const app = await db.app.create({ data: { id: generateId(), name: 'Run App', urn: 'tm-org:app', organizationId: org.id } as never });
     const mem = await db.memory.create({ data: { id: generateId(), name: 'rep', urn: 'tm-org:rep', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id } as never });
     const grant = await db.appMemoryWriteGrant.create({ data: { appId: app.id, memoryId: mem.id, prefix: PREFIX, grantedBy: adminId } });
-    const mk = (loc: string) => M.createTaskNode({}, { input: { memoryId: mem.id, loc, name: loc, isRunnable: true, properties: { keep: 1 } } }, admin());
+    const mk = (loc: string) => M.createTaskNode({}, { input: { memoryRef: mem.id, loc, name: loc, isRunnable: true, properties: { keep: 1 } } }, admin());
     const inside = await mk(`${PREFIX}:t1`);
     const outside = await mk('other:t2');
     const run = { db, clientId: 'run:r1', appId: app.id, roles: [] } as unknown as Context;
     const upd = (id: string, mergeExports: boolean) =>
-      M.updateTaskNode({}, { input: { id, properties: { exports: { codexSkill: codex } } }, mergeExports }, run).then(() => 'wrote', (e) => `refused:${e.extensions?.code}`);
+      M.updateTaskNode({}, { input: { ref: id, properties: { exports: { codexSkill: codex } } }, mergeExports }, run).then(() => 'wrote', (e) => `refused:${e.extensions?.code}`);
     return { grant, inside, outside, upd };
   }
 
@@ -385,11 +385,11 @@ describe('the option lives on updateTaskNode only (#1291)', () => {
   });
 
   it('the review and spec doors ignore a smuggled option: whole-bag replace', async () => {
-    const rev = await M.createReviewNode({}, { input: { memoryId: memId, loc: 'rev:r1', name: 'R', role: 'review', properties: { a: 1, b: 2 } } }, admin());
-    await M.updateReviewNode({}, { input: { id: rev.id, properties: { a: 9 } }, mergeExports: true }, admin());
+    const rev = await M.createReviewNode({}, { input: { memoryRef: memId, loc: 'rev:r1', name: 'R', role: 'review', properties: { a: 1, b: 2 } } }, admin());
+    await M.updateReviewNode({}, { input: { ref: rev.id, properties: { a: 9 } }, mergeExports: true }, admin());
     expect((await db.node.findUniqueOrThrow({ where: { id: rev.id } })).properties).toEqual({ a: 9 });
-    const spec = await M.createSpecNode({}, { input: { memoryId: memId, loc: 'spec:s1', name: 'S', role: 'spec', data: { version: '0.0.1' }, properties: { a: 1, b: 2 } } }, admin());
-    await M.updateSpecNode({}, { input: { id: spec.id, properties: { a: 9 } }, mergeExports: true }, admin());
+    const spec = await M.createSpecNode({}, { input: { memoryRef: memId, loc: 'spec:s1', name: 'S', role: 'spec', data: { version: '0.0.1' }, properties: { a: 1, b: 2 } } }, admin());
+    await M.updateSpecNode({}, { input: { ref: spec.id, properties: { a: 9 } }, mergeExports: true }, admin());
     expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).properties).toEqual({ a: 9 });
   });
 });

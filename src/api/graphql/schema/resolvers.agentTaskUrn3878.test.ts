@@ -83,7 +83,7 @@ async function seed() {
   const loose: any = await M.createAgentTask({}, { input: { appRef: appX.id, title: 'loose' } }, as(alice)); // AT0.1, makes AT0
   const at0 = await db.agentTask.findUniqueOrThrow({ where: { appId_handle: { appId: appX.id, handle: 'AT0' } } });
   const project: any = await M.createAgentTask({}, { input: { appRef: appX.id, title: 'project', project: true, assignee: { user: bob.id } } }, as(alice));
-  const nested: any = await M.createAgentTask({}, { input: { parentTaskId: project.id, title: 'nested' } }, as(bob));
+  const nested: any = await M.createAgentTask({}, { input: { parentTaskRef: project.id, title: 'nested' } }, as(bob));
   const onY: any = await M.createAgentTask({}, { input: { appRef: appY.id, title: 'on Y' } }, as(alice));
   expect([at0.handle, loose.handle, project.handle, nested.handle, onY.handle]).toEqual(['AT0', 'AT0.1', 'AT1', 'AT1.1', 'AT0.1']);
   return { at0, loose, project, nested, onY };

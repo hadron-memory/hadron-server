@@ -30,7 +30,7 @@ let graph: { id: string; urn: string };
 const mk = (loc: string, extra: Record<string, unknown> = {}) =>
   db.node.create({ data: { id: generateId(), memoryId: graph.id, loc, name: loc, ...extra } as any });
 const kids = (childrenOf: string, extra: Record<string, unknown> = {}) =>
-  findNodes({ filter: { memoryIds: [graph.id], childrenOf }, limit: 200, ...extra });
+  findNodes({ filter: { memoryRefs: [graph.id], childrenOf }, limit: 200, ...extra });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -74,9 +74,9 @@ describe('#2832 the direct-children rule (filter-only)', () => {
   });
 
   it('absent and null are no filter; the empty string is a value', async () => {
-    const all = await findNodes({ filter: { memoryIds: [graph.id] }, limit: 200 });
+    const all = await findNodes({ filter: { memoryRefs: [graph.id] }, limit: 200 });
     expect(all.hits.length).toBe(15);
-    expect((await findNodes({ filter: { memoryIds: [graph.id], childrenOf: null }, limit: 200 })).hits.length).toBe(15);
+    expect((await findNodes({ filter: { memoryRefs: [graph.id], childrenOf: null }, limit: 200 })).hits.length).toBe(15);
     expect((await kids('')).hits.length).toBe(2);
   });
 
@@ -90,9 +90,9 @@ describe('#2832 the direct-children rule (filter-only)', () => {
     await mk('top1:gone', { deletedAt: new Date() });
     await mk('top1:sys', { nodeType: 'system' });
     expect(sorted(await kids('top1'))).toEqual(['top1:a', 'top1:b']);
-    const withDeleted = await findNodes({ filter: { memoryIds: [graph.id], childrenOf: 'top1', includeDeleted: true }, limit: 200 });
+    const withDeleted = await findNodes({ filter: { memoryRefs: [graph.id], childrenOf: 'top1', includeDeleted: true }, limit: 200 });
     expect(sorted(withDeleted)).toEqual(['top1:a', 'top1:b', 'top1:gone']);
-    const sys = await findNodes({ filter: { memoryIds: [graph.id], childrenOf: 'top1', nodeType: 'system' }, limit: 200 });
+    const sys = await findNodes({ filter: { memoryRefs: [graph.id], childrenOf: 'top1', nodeType: 'system' }, limit: 200 });
     expect(sorted(sys)).toEqual(['top1:sys']);
   });
 });
@@ -134,7 +134,7 @@ describe('#2832 order: the sibling order of cor:dmo:020:01 unless a sort is name
   });
 
   it('no childrenOf: the plain browse is still loc order', async () => {
-    const r = await findNodes({ filter: { memoryIds: [graph.id], locPrefix: 'ord:' } });
+    const r = await findNodes({ filter: { memoryRefs: [graph.id], locPrefix: 'ord:' } });
     expect(locs(r)).toEqual(['ord:a', 'ord:b', 'ord:c', 'ord:d']);
   });
 });
@@ -146,16 +146,16 @@ describe('#2832 every search mode returns only direct children', () => {
   });
 
   it('keyword', async () => {
-    expect(sorted(await findNodes({ query: 'zebra', mode: 'keyword', filter: { memoryIds: [graph.id], childrenOf: 'q' } }))).toEqual(['q:one', 'q:two']);
-    expect(sorted(await findNodes({ query: 'zebra', mode: 'keyword', filter: { memoryIds: [graph.id], childrenOf: '' } }))).toEqual(['elsewhere']);
+    expect(sorted(await findNodes({ query: 'zebra', mode: 'keyword', filter: { memoryRefs: [graph.id], childrenOf: 'q' } }))).toEqual(['q:one', 'q:two']);
+    expect(sorted(await findNodes({ query: 'zebra', mode: 'keyword', filter: { memoryRefs: [graph.id], childrenOf: '' } }))).toEqual(['elsewhere']);
   });
 
   it('regex', async () => {
-    expect(sorted(await findNodes({ query: 'zebra', mode: 'regex', fields: ['abstract'], filter: { memoryIds: [graph.id], childrenOf: 'q' } }))).toEqual(['q:one', 'q:two']);
+    expect(sorted(await findNodes({ query: 'zebra', mode: 'regex', fields: ['abstract'], filter: { memoryRefs: [graph.id], childrenOf: 'q' } }))).toEqual(['q:one', 'q:two']);
   });
 
   it('hybrid with no vector index falls back to the keyword leg and still honors it', async () => {
-    expect(sorted(await findNodes({ query: 'zebra', mode: 'hybrid', filter: { memoryIds: [graph.id], childrenOf: 'q' } }))).toEqual(['q:one', 'q:two']);
+    expect(sorted(await findNodes({ query: 'zebra', mode: 'hybrid', filter: { memoryRefs: [graph.id], childrenOf: 'q' } }))).toEqual(['q:one', 'q:two']);
   });
 
   describe('vector and vector-backed hybrid', () => {
@@ -198,7 +198,7 @@ describe('#2832 every search mode returns only direct children', () => {
         const f = { memoryIds: [graph.id], childrenOf: 'q' };
         expect(sorted(await findNodes({ query: 'zebra', mode: 'vector', filter: f }))).toEqual(['q:one', 'q:two']);
         expect(sorted(await findNodes({ query: 'zebra', mode: 'hybrid', filter: f }))).toEqual(['q:one', 'q:two']);
-        const root = await findNodes({ query: 'zebra', mode: 'vector', filter: { memoryIds: [graph.id], childrenOf: '' } });
+        const root = await findNodes({ query: 'zebra', mode: 'vector', filter: { memoryRefs: [graph.id], childrenOf: '' } });
         expect(sorted(root)).toEqual(['elsewhere']);
         const chunks = await findNodes({ query: 'zebra', mode: 'vector', granularity: 'chunk', filter: f });
         const parentLocs = (await db.node.findMany({ where: { id: { in: chunks.passages.map((p: any) => p.parentNodeId) } }, select: { loc: true } })).map((n) => n.loc);
@@ -213,11 +213,11 @@ describe('#2832 access parity: the filter only narrows', () => {
   it('a caller who cannot read the memory gets exactly what locPrefix gives them: nothing', async () => {
     const stranger = await db.user.create({ data: { githubId: 283201, githubUsername: 'stranger-2832', roles: ['READER'] } });
     const ctx: Context = { db, userId: stranger.id, roles: ['READER'] } as Context;
-    const viaChildren = await findNodes({ filter: { memoryIds: [graph.id], childrenOf: 'top1' } }, ctx);
-    const viaPrefix = await findNodes({ filter: { memoryIds: [graph.id], locPrefix: 'top1:' } }, ctx);
+    const viaChildren = await findNodes({ filter: { memoryRefs: [graph.id], childrenOf: 'top1' } }, ctx);
+    const viaPrefix = await findNodes({ filter: { memoryRefs: [graph.id], locPrefix: 'top1:' } }, ctx);
     expect(viaChildren).toEqual(viaPrefix);
     expect(viaChildren.hits).toEqual([]);
-    const ranked = await findNodes({ query: 'top1', mode: 'keyword', filter: { memoryIds: [graph.id], childrenOf: 'top1' } }, ctx);
+    const ranked = await findNodes({ query: 'top1', mode: 'keyword', filter: { memoryRefs: [graph.id], childrenOf: 'top1' } }, ctx);
     expect(ranked.hits).toEqual([]);
   });
 });

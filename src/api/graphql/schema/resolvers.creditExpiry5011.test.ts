@@ -77,6 +77,21 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: orgId, userId: contributor, role: 'CONTRIBUTOR' } });
 });
 
+/** A client whose `creditLedgerEntry` is wrapped by `wrap`, also inside every `$transaction` it opens (the real transaction client). */
+function withLedger(base: typeof db, wrap: (ledger: typeof db.creditLedgerEntry) => typeof db.creditLedgerEntry): typeof db {
+  return new Proxy(base, {
+    get(target, key) {
+      if (key === 'creditLedgerEntry') return wrap(target.creditLedgerEntry);
+      if (key === '$transaction') {
+        return (fn: (tx: unknown) => unknown, opts: unknown) =>
+          (target.$transaction as (f: (t: unknown) => unknown, o: unknown) => unknown)((tx) => fn(withLedger(tx as typeof db, wrap)), opts);
+      }
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    },
+  }) as typeof db;
+}
+
 describe('#5011 creditBalance and grant expiry', () => {
   it('R1: one second after an expiry the balance is already lower and `expiring` leaves the grant out', async () => {
     const now = await dbNow();
@@ -153,8 +168,10 @@ describe('#5011 creditBalance and grant expiry', () => {
     expect(block).not.toMatch(/no enforcement/);
     expect(block).toMatch(/expires/i);
     const fields = [...block.matchAll(/^\s{4}(\w+): ([\w!]+)$/gm)].map((m) => `${m[1]}: ${m[2]}`);
+    // #5014 (A6): orgRef becomes optional and userRef is new (exactly one of the two is required by the resolver).
     expect(fields).toEqual([
-      'orgRef: String!',
+      'orgRef: String',
+      'userRef: ID',
       'amountMicroCents: String!',
       'expiresAt: String',
       'sourceType: String',
@@ -168,22 +185,17 @@ describe('#5011 creditBalance and grant expiry', () => {
     await entry('grant', 100, shift(now, -3_600_000), shift(now, -120_000));
     await entry('debit', 30, shift(now, -1_800_000));
     // The settlement's one write fails as a database error would; every read goes through.
-    const ledger = new Proxy(db.creditLedgerEntry, {
-      get(target, key) {
-        if (key === 'createMany') {
-          return () => Promise.reject(Object.assign(new Error('secret detail 70 grant-expiry'), { code: 'P1001' }));
-        }
-        const value = Reflect.get(target, key);
-        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
-      },
-    });
-    const failing = new Proxy(db, {
-      get(target, key) {
-        if (key === 'creditLedgerEntry') return ledger;
-        const value = Reflect.get(target, key);
-        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
-      },
-    }) as typeof db;
+    const failing = withLedger(db, (ledger) =>
+      new Proxy(ledger, {
+        get(target, key) {
+          if (key === 'createMany') {
+            return () => Promise.reject(Object.assign(new Error('secret detail 70 grant-expiry'), { code: 'P1001' }));
+          }
+          const value = Reflect.get(target, key);
+          return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+        },
+      }),
+    );
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const res = single(
@@ -327,6 +339,36 @@ describe('#5011 creditBalance and grant expiry', () => {
     expect(res.errors).toBeUndefined();
     expect(raced).toBe(true);
     // 100 granted - 30 debited, the 70 left having expired: 0. Counting the racing settlement twice would answer -70.
+    expect((res.data as { creditBalance: { balanceMicroCents: string } }).creditBalance.balanceMicroCents).toBe('0');
+  });
+  it('#5242 item 2 (Abigail on #5207): a WRITING read takes its figure from ONE snapshot too: a sweep that settles a grant just past its 60 s mark between the replay and the sum is not subtracted twice', async () => {
+    const now = await dbNow();
+    // 59.7 s past its expiry for this read (inside the 60 s: unsettled, not written here); the sweep's later clock settles it.
+    const g = await entry('grant', 100, shift(now, -3_600_000), shift(now, -59_700));
+    let raced = false;
+    const racing = withLedger(db, (ledger) =>
+      new Proxy(ledger, {
+        get(target, key) {
+          if (key === 'aggregate') {
+            return async (args: { where?: { createdAt?: unknown } }) => {
+              if (args?.where?.createdAt === undefined && !raced) {
+                raced = true;
+                await db.creditLedgerEntry.create({
+                  data: { id: generateId(), organizationId: orgId, kind: 'adjustment', amountMicroCents: -100n, sourceType: 'grant-expiry', sourceId: g.id, createdBy: 'system:credit-expiry' },
+                });
+              }
+              return (target.aggregate as (a: unknown) => Promise<unknown>)(args);
+            };
+          }
+          const value = Reflect.get(target, key);
+          return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+        },
+      }),
+    );
+    const res = await run(racing, BALANCE_ONLY, orgAdminCtx());
+    expect(res.errors).toBeUndefined();
+    expect(raced).toBe(true);
+    // 100 granted, all of it expired: 0. Counting the racing settlement in the sum AND the remainder would answer -100.
     expect((res.data as { creditBalance: { balanceMicroCents: string } }).creditBalance.balanceMicroCents).toBe('0');
   });
 });

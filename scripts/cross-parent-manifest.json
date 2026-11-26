@@ -913,7 +913,7 @@
     },
     "CreditLedgerEntryList.items": {
       "class": "parent-implies-child",
-      "audience": "org ADMIN of the named org or platform admin (requireOrgRole ADMIN); the org's own ledger; scalars only",
+      "audience": "an organization's ledger: org ADMIN of the named org or platform admin (requireOrgRole ADMIN); a person's ledger: that person or a platform admin, never an impersonated session or an App key, and one FORBIDDEN whether or not the person exists (requirePersonRecordRead); the named owner's own entries only; scalars only",
       "resolver": "src/api/graphql/schema/resolvers.metering.ts::requireOrgRole",
       "target": "CreditLedgerEntry"
     },

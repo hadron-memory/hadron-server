@@ -376,6 +376,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_credit_ledger_one_owner",
+      "kind": "check-constraint",
+      "file": "credit-ledger-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_dark_worker_episodes_shape",
       "kind": "check-constraint",
       "file": "dark-alarm-invariants.sql",
@@ -1630,6 +1636,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_record_user_merge",
+      "kind": "function",
+      "file": "user-merge-record-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_refresh_task_blocked",
       "kind": "function",
       "file": "task-blocker-invariants.sql",
@@ -1973,6 +1985,12 @@
     },
     {
       "name": "credit_ledger_entries_expiring_grants_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "credit_ledger_entries_person_expiring_grants_idx",
       "kind": "index",
       "file": "post-push.sql",
       "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."

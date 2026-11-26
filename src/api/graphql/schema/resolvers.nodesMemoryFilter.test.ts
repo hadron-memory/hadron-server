@@ -72,13 +72,13 @@ beforeEach(async () => {
 
 describe('findNodes (node list) memory filter', () => {
   it('scopes to a single memory by ID', async () => {
-    const nodes = await listNodes({ filter: { memoryIds: [memA1.id] } }, userActx());
+    const nodes = await listNodes({ filter: { memoryRefs: [memA1.id] } }, userActx());
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('one');
   });
 
   it('scopes to a single memory by URN', async () => {
-    const nodes = await listNodes({ filter: { memoryIds: [memA1.urn] } }, userActx());
+    const nodes = await listNodes({ filter: { memoryRefs: [memA1.urn] } }, userActx());
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('one');
   });
@@ -89,7 +89,7 @@ describe('findNodes (node list) memory filter', () => {
   });
 
   it('intersects with the access filter: scoping to an inaccessible memory yields []', async () => {
-    const nodes = await listNodes({ filter: { memoryIds: [memB.id] } }, userActx());
+    const nodes = await listNodes({ filter: { memoryRefs: [memB.id] } }, userActx());
     expect(nodes).toHaveLength(0);
   });
 
@@ -101,7 +101,7 @@ describe('findNodes (node list) memory filter', () => {
     await createDbNode(db, { loc: 'tagged-one', memoryId: memA1.id, tags: ['t1'] });
     await createDbNode(db, { loc: 'tagged-two', memoryId: memA2.id, tags: ['t1'] });
     const nodes = await listNodes(
-      { filter: { memoryIds: [memA1.id], tags: ['t1'] } }, userActx(),
+      { filter: { memoryRefs: [memA1.id], tags: ['t1'] } }, userActx(),
     );
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('tagged-one');
@@ -112,7 +112,7 @@ describe('findNodes (node list) memory filter', () => {
     // ref. findNodes silently drops unresolvable memoryIds; a lone bad ref
     // therefore yields an empty scope → [] with no error.
     const nodes = await listNodes(
-      { filter: { memoryIds: ['org-a:does-not-exist'] } }, userActx(),
+      { filter: { memoryRefs: ['org-a:does-not-exist'] } }, userActx(),
     );
     expect(nodes).toHaveLength(0);
   });
@@ -124,13 +124,13 @@ describe('findNodes (node list) memory filter', () => {
 describe('findNodes (node list) memoryIds filter — issue #355', () => {
   it('scopes to a SET of memories by id', async () => {
     const nodes = await listNodes(
-      { filter: { memoryIds: [memA1.id, memA2.id] } }, userActx(),
+      { filter: { memoryRefs: [memA1.id, memA2.id] } }, userActx(),
     );
     expect(nodes.map((n) => n.loc).sort()).toEqual(['one', 'two']);
   });
 
   it('scopes to a subset of the accessible memories', async () => {
-    const nodes = await listNodes({ filter: { memoryIds: [memA2.id] } }, userActx());
+    const nodes = await listNodes({ filter: { memoryRefs: [memA2.id] } }, userActx());
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('two');
   });
@@ -139,27 +139,27 @@ describe('findNodes (node list) memoryIds filter — issue #355', () => {
     // memB belongs to org-b, which userA cannot read. The whole search must
     // not fail — the inaccessible id is simply dropped from the set.
     const nodes = await listNodes(
-      { filter: { memoryIds: [memA1.id, memB.id] } }, userActx(),
+      { filter: { memoryRefs: [memA1.id, memB.id] } }, userActx(),
     );
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('one');
   });
 
   it('an empty memoryIds array falls through to all accessible memories', async () => {
-    const nodes = await listNodes({ filter: { memoryIds: [] } }, userActx());
+    const nodes = await listNodes({ filter: { memoryRefs: [] } }, userActx());
     expect(nodes).toHaveLength(2);
   });
 
   it('accepts fully-qualified URNs as well as IDs', async () => {
     const nodes = await listNodes(
-      { filter: { memoryIds: [memA1.urn, memA2.id] } }, userActx(),
+      { filter: { memoryRefs: [memA1.urn, memA2.id] } }, userActx(),
     );
     expect(nodes.map((n) => n.loc).sort()).toEqual(['one', 'two']);
   });
 
   it('silently drops unresolvable refs instead of throwing', async () => {
     const nodes = await listNodes(
-      { filter: { memoryIds: [memA1.id, 'org-a:does-not-exist'] } }, userActx(),
+      { filter: { memoryRefs: [memA1.id, 'org-a:does-not-exist'] } }, userActx(),
     );
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('one');
@@ -174,21 +174,21 @@ describe('findNodes (node list) isRunnable filter — cor:api:060', () => {
 
   it('isRunnable=true returns only runnable task nodes', async () => {
     const nodes = await listNodes(
-      { filter: { memoryIds: [memA1.id], isRunnable: true } }, userActx(),
+      { filter: { memoryRefs: [memA1.id], isRunnable: true } }, userActx(),
     );
     expect(nodes.map((n) => n.loc).sort()).toEqual(['task-one']);
   });
 
   it('isRunnable=false returns only strictly-false nodes (not the NULL majority)', async () => {
     const nodes = await listNodes(
-      { filter: { memoryIds: [memA1.id], isRunnable: false } }, userActx(),
+      { filter: { memoryRefs: [memA1.id], isRunnable: false } }, userActx(),
     );
     expect(nodes.map((n) => n.loc).sort()).toEqual(['not-runnable']);
   });
 
   it('omitting the filter returns nodes regardless of runnable status', async () => {
     const nodes = await listNodes(
-      { filter: { memoryIds: [memA1.id] } }, userActx(),
+      { filter: { memoryRefs: [memA1.id] } }, userActx(),
     );
     // 'one' (from the outer beforeEach, isRunnable NULL) + the two added here.
     expect(nodes.map((n) => n.loc).sort()).toEqual(['not-runnable', 'one', 'task-one']);
@@ -197,7 +197,7 @@ describe('findNodes (node list) isRunnable filter — cor:api:060', () => {
   it('composes with memoryIds scope', async () => {
     await createDbNode(db, { loc: 'task-two', memoryId: memA2.id, isRunnable: true });
     const nodes = await listNodes(
-      { filter: { memoryIds: [memA1.id, memA2.id], isRunnable: true } }, userActx(),
+      { filter: { memoryRefs: [memA1.id, memA2.id], isRunnable: true } }, userActx(),
     );
     expect(nodes.map((n) => n.loc).sort()).toEqual(['task-one', 'task-two']);
   });

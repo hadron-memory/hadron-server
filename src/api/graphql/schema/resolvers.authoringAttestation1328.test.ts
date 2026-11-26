@@ -32,9 +32,9 @@ const ctx = (): Context => ({ db, roles: [], userId }) as Context;
 const portal = (): Context => ({ ...ctx(), portalHumanUserId: userId }) as Context;
 const claim = (revision = 1) => ({ task: taskId, revision });
 const create = (loc: string, extra: Record<string, unknown> = {}, c: Context = ctx()) =>
-  M.createNode({}, { input: { memoryId, loc, name: loc, content: 'body', role: 'guide', ...extra } }, c);
+  M.createNode({}, { input: { memoryRef: memoryId, loc, name: loc, content: 'body', role: 'guide', ...extra } }, c);
 const update = (loc: string, extra: Record<string, unknown> = {}, c: Context = ctx()) =>
-  M.updateNode({}, { input: { memoryId, loc, ...extra } }, c);
+  M.updateNode({}, { input: { memoryRef: memoryId, loc, ...extra } }, c);
 const stored = (loc: string) => db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc, memoryId } } });
 const codeOf = async (promise: Promise<unknown>) => {
   const error = await promise.then(() => null, (e: unknown) => e);
@@ -116,8 +116,8 @@ describe('#1328 create and update', () => {
   it('a resurrected tombstone is a new authored state, with the tombstone role judged', async () => {
     const first = await create('a', { authoredWith: claim() });
     await db.node.update({ where: { id: first.id as string }, data: { deletedAt: new Date() } });
-    await expectRefused(M.createNode({}, { input: { memoryId, loc: 'a', name: 'a', content: 'back' } }, ctx()), 'AUTHORING_ATTESTATION_MISSING');
-    await M.createNode({}, { input: { memoryId, loc: 'a', name: 'a', content: 'back', authoredWith: claim() } }, ctx());
+    await expectRefused(M.createNode({}, { input: { memoryRef: memoryId, loc: 'a', name: 'a', content: 'back' } }, ctx()), 'AUTHORING_ATTESTATION_MISSING');
+    await M.createNode({}, { input: { memoryRef: memoryId, loc: 'a', name: 'a', content: 'back', authoredWith: claim() } }, ctx());
     expect(await stored('a')).toMatchObject({ deletedAt: null, authoredByTask: taskId });
   });
 
@@ -131,15 +131,15 @@ describe('#1328 create and update', () => {
   it('a rule on `task` governs a runnable node whatever its role, as the writer level does', async () => {
     await db.nodeRoleRule.create({ data: { id: generateId(), configId, role: 'task', authorTaskId: taskId, authorTaskRequired: true } });
     await expectRefused(
-      M.createTaskNode({}, { input: { memoryId, loc: 'run', name: 'run', content: 'do', isRunnable: true } }, ctx()),
+      M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'run', name: 'run', content: 'do', isRunnable: true } }, ctx()),
       'AUTHORING_ATTESTATION_MISSING', 'task',
     );
-    await M.createTaskNode({}, { input: { memoryId, loc: 'run', name: 'run', content: 'do', isRunnable: true, authoredWith: claim() } }, ctx());
+    await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'run', name: 'run', content: 'do', isRunnable: true, authoredWith: claim() } }, ctx());
     expect(await stored('run')).toMatchObject({ authoredByTask: taskId });
   });
 
   it('a claim on an ungoverned node is ignored: no rule, no stamp', async () => {
-    await M.createNode({}, { input: { memoryId, loc: 'free', name: 'free', content: 'x', authoredWith: claim(9) } }, ctx());
+    await M.createNode({}, { input: { memoryRef: memoryId, loc: 'free', name: 'free', content: 'x', authoredWith: claim(9) } }, ctx());
     expect(await stored('free')).toMatchObject({ authorshipKind: null, authoredByTask: null });
   });
 
@@ -200,7 +200,7 @@ describe('#1328 trusted portal human', () => {
   it('does not reach import, which always attests', async () => {
     await create('imp', { authoredWith: claim() });
     await expectRefused(
-      M.importNode({}, { input: { memoryId, loc: 'imp', content: 'x', contentType: 'text/markdown' } }, portal()),
+      M.importNode({}, { input: { memoryRef: memoryId, loc: 'imp', content: 'x', contentType: 'text/markdown' } }, portal()),
       'AUTHORING_ATTESTATION_MISSING',
     );
   });
@@ -245,7 +245,7 @@ describe('#1328 merges and bulk edits', () => {
   it('searchReplaceInNodes refuses the whole batch on one governed node, and one claim stamps the changed nodes', async () => {
     await create('a', { content: 'alpha', authoredWith: claim() });
     await db.node.create({ data: { id: generateId(), memoryId, loc: 'plain', name: 'plain', content: 'alpha' } });
-    const input = { oldText: 'alpha', newText: 'beta', memoryIds: [memoryId], fields: ['content'] };
+    const input = { oldText: 'alpha', newText: 'beta', memoryRefs: [memoryId], fields: ['content'] };
     await expectRefused(M.searchReplaceInNodes({}, { input }, ctx()), 'AUTHORING_ATTESTATION_MISSING');
     expect((await stored('plain')).content).toBe('alpha');
     expect((await stored('a')).content).toBe('alpha');
@@ -258,7 +258,7 @@ describe('#1328 merges and bulk edits', () => {
     await create('a', { content: 'alpha', authoredWith: claim() });
     await db.node.create({ data: { id: generateId(), memoryId, loc: 'plain', name: 'plain', content: 'ALPHA' } });
     await db.node.update({ where: { id: taskId }, data: { revSeq: 5 } });
-    const input = { oldText: 'alpha', newText: 'alpha', caseInsensitive: true, memoryIds: [memoryId], fields: ['content'] };
+    const input = { oldText: 'alpha', newText: 'alpha', caseInsensitive: true, memoryRefs: [memoryId], fields: ['content'] };
     await M.searchReplaceInNodes({}, { input }, ctx());
     expect(await stored('a')).toMatchObject({ content: 'alpha', authoredByTask: taskId, authoredByRevision: 1 });
     expect((await stored('plain')).content).toBe('alpha');
@@ -267,20 +267,20 @@ describe('#1328 merges and bulk edits', () => {
   it('searchReplaceInNodes still demands a claim for a row that changes beside a no-op row', async () => {
     await create('a', { content: 'alpha', authoredWith: claim() });
     await create('b', { content: 'ALPHA', authoredWith: claim() });
-    const input = { oldText: 'alpha', newText: 'alpha', caseInsensitive: true, memoryIds: [memoryId], fields: ['content'] };
+    const input = { oldText: 'alpha', newText: 'alpha', caseInsensitive: true, memoryRefs: [memoryId], fields: ['content'] };
     await expectRefused(M.searchReplaceInNodes({}, { input }, ctx()), 'AUTHORING_ATTESTATION_MISSING');
     expect((await stored('b')).content).toBe('ALPHA');
   });
 
   it('a dry run needs no claim', async () => {
     await create('a', { content: 'alpha', authoredWith: claim() });
-    const input = { oldText: 'alpha', newText: 'beta', memoryIds: [memoryId], fields: ['content'], dryRun: true };
+    const input = { oldText: 'alpha', newText: 'beta', memoryRefs: [memoryId], fields: ['content'], dryRun: true };
     await expect(M.searchReplaceInNodes({}, { input }, ctx())).resolves.toBeTruthy();
   });
 
   it('importNode carries its claim', async () => {
     await create('imp', { authoredWith: claim() });
-    const base = { memoryId, loc: 'imp', content: 'imported', contentType: 'text/markdown' };
+    const base = { memoryRef: memoryId, loc: 'imp', content: 'imported', contentType: 'text/markdown' };
     await expectRefused(M.importNode({}, { input: base }, ctx()), 'AUTHORING_ATTESTATION_MISSING');
     await expect(M.importNode({}, { input: base }, ctx())).rejects.toMatchObject({ extensions: { taskAccess: 'READABLE' } });
     expect((await stored('imp')).content).toBe('body');

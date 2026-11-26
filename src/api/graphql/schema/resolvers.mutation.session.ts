@@ -111,6 +111,7 @@ import {
   ConnectionNotFoundError,
   type SessionInput,
   type UsageEventInput,
+  requireCallerIdentity,
 } from './resolvers.helpers.js';
 import { assertRestoreKeepsRetirement } from '../../../lib/restoreUnretireGuard.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
@@ -702,7 +703,7 @@ async function writeRevisionRow(
 // ── #2086 / #1931 / #1948: refresh a bound session's model and family ─────────────────────────────────────────
 /** A supplied family must be a valid token; checked before any write (and, on a resume, before the claim is spent). */
 /** #4244: an Agent revision that is not there (unknown or retired loc), refused before any write. */
-function revisionNotFound(revisionLoc: string): GraphQLError {
+function revisionNotFound(): GraphQLError {
   return new GraphQLError('Revision not found', { extensions: { code: 'BAD_USER_INPUT' } });
 }
 
@@ -2571,7 +2572,7 @@ export const sessionMutations = {
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
       // Only a direct live slot is a revision: anything else (a descendant, a tombstone, another node) is not one.
-      if (!isLiveSlotLoc(revisionLoc)) throw revisionNotFound(revisionLoc);
+      if (!isLiveSlotLoc(revisionLoc)) throw revisionNotFound();
 
       return ctx.db.$transaction(async (tx) => {
         // Lock order: the revisions path (the key every save and restore takes), then this revision's loc, then the
@@ -2585,7 +2586,7 @@ export const sessionMutations = {
         const revNode = await tx.node.findFirst({
           where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
         });
-        if (!revNode) throw revisionNotFound(revisionLoc);
+        if (!revNode) throw revisionNotFound();
         if (publishedLoc === revisionLoc) {
           throw new GraphQLError('The published revision cannot be deleted. Publish another revision first.', {
             extensions: { code: 'REVISION_PUBLISHED' },
@@ -2635,7 +2636,7 @@ export const sessionMutations = {
         const revNode = await tx.node.findFirst({
           where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
         });
-        if (!revNode) throw revisionNotFound(revisionLoc);
+        if (!revNode) throw revisionNotFound();
 
         const revData = (revNode.data as Record<string, unknown>) ?? {};
         const label = versionLabel ?? (revData.label as string) ?? revisionLoc;
@@ -2673,7 +2674,7 @@ export const sessionMutations = {
       const revNode = await ctx.db.node.findFirst({
         where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
       });
-      if (!revNode) throw revisionNotFound(revisionLoc);
+      if (!revNode) throw revisionNotFound();
 
       const revData = (revNode.data as Record<string, unknown>) ?? {};
       const snapshot = revData.snapshot as { edgeFormat?: number; nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | undefined;
@@ -3437,6 +3438,7 @@ export const sessionMutations = {
       },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #542 — the task node is identified by a single `nodeRef` (ID or a
       // fully-qualified node URN), resolved by the shared `resolveNodeRef`
       // (spec 007) exactly like every other `<object>Ref` arg. The loose

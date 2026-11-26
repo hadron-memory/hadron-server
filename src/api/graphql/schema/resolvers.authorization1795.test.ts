@@ -163,7 +163,7 @@ describe('#1795 public GraphQL boundary', () => {
     const { rawKey } = await mintUserApiKey(db, { userId: users.owner, label: null, createdBy: users.owner, issuedVia: 'test' });
     const response = await fetch(`${baseUrl}/graphql`, {
       method: 'POST', headers: { authorization: `Bearer ${rawKey}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ query: 'mutation($input: CreateNodeInput!) { createNode(input: $input) { id } }', variables: { input: { memoryId: memories.holding, loc: 'owner-authored', name: 'Owner authored' } } }),
+      body: JSON.stringify({ query: 'mutation($input: CreateNodeInput!) { createNode(input: $input) { id } }', variables: { input: { memoryRef: memories.holding, loc: 'owner-authored', name: 'Owner authored' } } }),
     });
     const body = await response.json() as { errors?: unknown; data?: { createNode?: { id: string } } };
     expect(response.status).toBe(200);
@@ -180,7 +180,7 @@ describe('#1795 public GraphQL boundary', () => {
     const { rawKey } = await mintUserApiKey(db, { userId: users.contributor, label: null, createdBy: users.contributor, issuedVia: 'test' });
       const response = await fetch(`${baseUrl}/graphql`, {
         method: 'POST', headers: { authorization: `Bearer ${rawKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ query: `mutation($input: ${field === 'createNode' ? 'CreateNodeInput' : 'UpdateNodeInput'}!) { ${field}(input: $input) { id } }`, variables: { input: { memoryId, loc, name: 'Changed', content: 'Changed' } } }),
+        body: JSON.stringify({ query: `mutation($input: ${field === 'createNode' ? 'CreateNodeInput' : 'UpdateNodeInput'}!) { ${field}(input: $input) { id } }`, variables: { input: { memoryRef: memoryId, loc, name: 'Changed', content: 'Changed' } } }),
       });
       expect(response.status).toBe(200);
       const body = await response.json() as { errors?: Array<{ extensions?: { code?: string } }>; data?: Record<string, unknown> };

@@ -9,21 +9,22 @@
  * every code and takes the value out of the text and the extensions.
  *
  * The door pin is QA's probe from the issue, made an acceptance test: every Query and Mutation field with a top-level
- * ref argument (`ref`, `*Ref`, `urn`, `*Urn`) is called as a platform ADMIN with a canary shaped like a pasted token,
- * bare and padded. Two assertions per (door, argument, variant):
+ * ref argument (`ref`, `*Ref`, `urn`, `*Urn`; since #5225 item 6 also `id` and `*Id`, and the same names one level
+ * inside an input-object argument) is called as a platform ADMIN with a canary shaped like a pasted token, bare and
+ * padded, each door on a fresh database. Two assertions per (door, argument, variant):
  *   - no message and no extension value carries the canary;
  *   - the code is the one main answered before the change (gate condition (a): typed codes unchanged), read from the
  *     golden `refEcho5168.codes.json`. A door absent from the golden is a new door and must not echo either.
  * Set `REF_ECHO_5168_RECORD=<path>` to write the observed codes instead of asserting them (how the golden was made, on
- * main 446acb581).
+ * main 446acb581; the #5225 doors were added from a recording on main 6d8a0dc2c, every earlier code unchanged).
  */
 import { writeFileSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import {
-  buildASTSchema, getNamedType, isEnumType, isInterfaceType, isListType, isNonNullType, isObjectType, isScalarType,
-  isUnionType, parse, type GraphQLField, type GraphQLType,
+  buildASTSchema, getNamedType, isEnumType, isInputObjectType, isInterfaceType, isListType, isNonNullType, isObjectType,
+  isScalarType, isUnionType, parse, type GraphQLField, type GraphQLInputObjectType, type GraphQLType,
 } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -47,6 +48,9 @@ const VARIANTS = [
   ['padded', `  ${CANARY}  `],
   ['well-formed', `hrn:mem:acme.test:${CANARY_CORE.toLowerCase().replace(/_/g, '-')}`],
 ] as const;
+// The golden records what each door answers today, not what it should: #5266 tracks the rows that are not typed
+// refusals (INTERNAL_SERVER_ERROR on revokeAppKey, startSession's session/customer ids, node/object(ref); the
+// AiServiceConfigNotFoundError class name; recordHostSweepRun's GRAPHQL_VALIDATION_FAILED). None of them echoes.
 const GOLDEN = fileURLToPath(new URL('./__fixtures__/refEcho5168.codes.json', import.meta.url));
 
 const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
@@ -54,19 +58,30 @@ beforeAll(() => server.start());
 afterAll(() => server.stop());
 
 let admin: string;
-beforeEach(async () => {
+/**
+ * A clean database and the one admin, before every DOOR (#5225): a door that succeeds with a placeholder (`id: "x"`)
+ * leaves a row that would change what a later door answers, so the codes would depend on the order doors are probed.
+ */
+async function freshDb() {
   await cleanDb(db);
   admin = (await db.user.create({
     data: { id: generateId(), handle: 'ref-echo-admin', email: 'ref-echo-5168@example.test', roles: ['ADMIN'] },
   })).id;
-});
+}
+beforeEach(freshDb);
 
 const schema = buildASTSchema(typeof typeDefs === 'string' ? parse(typeDefs) : (typeDefs as never), { assumeValidSDL: true });
 const isRefArg = (n: string) => /^ref$|Ref$|^urn$|Urn$/.test(n);
+/** #5225 item 6: an id-named argument or input field (`id`, `*Id`) is a reference too. */
+const isIdArg = (n: string) => /^id$|Id$/.test(n);
+const isProbed = (n: string) => isRefArg(n) || isIdArg(n);
+/** An ID or String, or a list of them (a single value coerces to a one-item list): the shape a reference takes. */
+const isRefShaped = (t: GraphQLType) => ['ID', 'String'].includes(getNamedType(t).name);
 
-function literal(t: GraphQLType): string | null {
+/** A literal for a REQUIRED argument or input field; null when none can be made (the door is skipped). */
+function literal(t: GraphQLType, depth = 0): string | null {
   const inner = isNonNullType(t) ? t.ofType : t;
-  if (isListType(inner)) return null;
+  if (isListType(inner)) return '[]';
   const base = getNamedType(t);
   if (isEnumType(base)) return base.getValues()[0]!.name;
   if (isScalarType(base)) {
@@ -75,8 +90,24 @@ function literal(t: GraphQLType): string | null {
     if (base.name === 'JSON') return '{}';
     return '"x"';
   }
+  if (isInputObjectType(base)) return inputObject(base, depth + 1);
   return null;
 }
+
+/** An input object with every required field filled; `set` overrides named fields (their values are literals). */
+function inputObject(t: GraphQLInputObjectType, depth: number, set: Record<string, string> = {}): string | null {
+  if (depth > 3) return null;
+  const parts: string[] = [];
+  for (const field of Object.values(t.getFields())) {
+    if (field.name in set) { parts.push(`${field.name}: ${set[field.name]}`); continue; }
+    if (!isNonNullType(field.type)) continue;
+    const v = literal(field.type, depth);
+    if (v === null) return null;
+    parts.push(`${field.name}: ${v}`);
+  }
+  return `{ ${parts.join(', ')} }`;
+}
+
 const selection = (t: GraphQLType) => {
   const b = getNamedType(t);
   return isObjectType(b) || isInterfaceType(b) || isUnionType(b) ? '{ __typename }' : '';
@@ -92,26 +123,60 @@ function echoPaths(v: unknown, path: string, out: string[] = []): string[] {
   return out;
 }
 
+/**
+ * One probed position: a top-level argument (`field(arg)`) or, #5225 item 6, a reference field one level inside an
+ * input-object argument (`field(arg.field)`). `build` renders the whole argument list with the value in that position.
+ */
+interface Target { label: string; build: (value: string) => string }
+
+function targetsOf(f: GraphQLField<unknown, unknown>): Target[] {
+  const refs = f.args.filter((a) => isProbed(a.name) && isRefShaped(a.type));
+  const out: Target[] = [];
+  const fillExcept = (skip: Set<string>): string[] | null => {
+    const fill: string[] = [];
+    for (const o of f.args.filter((a) => !skip.has(a.name) && isNonNullType(a.type))) {
+      const v = refs.includes(o) ? '"x"' : literal(o.type);
+      if (v === null) return null;
+      fill.push(`${o.name}: ${v}`);
+    }
+    return fill;
+  };
+  for (const ra of refs) {
+    const fill = fillExcept(new Set([ra.name]));
+    if (fill) out.push({ label: ra.name, build: (v) => [...fill, `${ra.name}: ${JSON.stringify(v)}`].join(', ') });
+  }
+  for (const arg of f.args) {
+    const inner = isNonNullType(arg.type) ? arg.type.ofType : arg.type;
+    if (!isInputObjectType(inner)) continue;
+    const fill = fillExcept(new Set([arg.name]));
+    if (!fill) continue;
+    const fields = Object.values(inner.getFields()).filter((x) => isProbed(x.name) && isRefShaped(x.type));
+    for (const field of fields) {
+      const others = Object.fromEntries(fields.filter((x) => x !== field && isNonNullType(x.type)).map((x) => [x.name, '"x"']));
+      // Rendered with a placeholder, then the value substituted, so `inputObject` stays a pure literal builder.
+      const obj = inputObject(inner, 1, { ...others, [field.name]: '__VALUE__' });
+      if (obj === null) continue;
+      out.push({
+        label: `${arg.name}.${field.name}`,
+        build: (v) => [...fill, `${arg.name}: ${obj.replace('__VALUE__', () => JSON.stringify(v))}`].join(', '),
+      });
+    }
+  }
+  return out;
+}
+
 async function probeAll(): Promise<Probe[]> {
   const out: Probe[] = [];
   for (const [kind, root] of [['query', schema.getQueryType()!], ['mutation', schema.getMutationType()!]] as const) {
     for (const f of Object.values(root.getFields()) as GraphQLField<unknown, unknown>[]) {
-      const refs = f.args.filter((a) => isRefArg(a.name) && ['ID', 'String'].includes(getNamedType(a.type).name));
-      if (refs.length === 0) continue;
-      const fill: string[] = [];
-      let ok = true;
-      for (const o of f.args.filter((a) => !refs.includes(a) && isNonNullType(a.type))) {
-        const v = literal(o.type);
-        if (v === null) { ok = false; break; }
-        fill.push(`${o.name}: ${v}`);
-      }
-      if (!ok) continue;
-      for (const ra of refs) {
+      const targets = targetsOf(f);
+      for (const t of targets) {
+        // One database per target (blind seat F2 on #5255): a NO_ERROR on one target must not leave rows a later target's
+        // probe collides with, so no code depends on the schema's field or argument order.
+        await freshDb();
         for (const [variant, value] of VARIANTS) {
-          const others = refs.filter((r) => r !== ra && isNonNullType(r.type)).map((r) => `${r.name}: "x"`);
-          const args = [...fill, `${ra.name}: ${JSON.stringify(value)}`, ...others].join(', ');
           const res = await server.executeOperation(
-            { query: `${kind} { ${f.name}(${args}) ${selection(f.type)} }` },
+            { query: `${kind} { ${f.name}(${t.build(value)}) ${selection(f.type)} }` },
             { contextValue: { db, userId: admin, roles: ['ADMIN'] } as Context },
           );
           const body = res.body.kind === 'single' ? res.body.singleResult : null;
@@ -119,7 +184,7 @@ async function probeAll(): Promise<Probe[]> {
           const e = errors[0];
           const where = errors.flatMap((err) => echoPaths({ message: err.message, extensions: err.extensions }, 'error'));
           out.push({
-            key: `${kind}.${f.name}(${ra.name}) ${variant}`,
+            key: `${kind}.${f.name}(${t.label}) ${variant}`,
             code: e ? String(e.extensions?.code ?? 'none') : 'NO_ERROR',
             echoed: where.length > 0,
             where,

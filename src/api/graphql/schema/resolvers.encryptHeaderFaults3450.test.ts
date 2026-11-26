@@ -269,7 +269,7 @@ describe('#3450 overlap over HTTP', () => {
 describe('#3450 nothing staged outlives its request', () => {
   it('a verified key: the next request without the header is locked', async () => {
     const create = 'mutation($input: CreateNodeInput!) { createNode(input: $input) { id } }';
-    const input = { memoryId: memory.id, loc: 'entry', name: 'Entry', content: 'synthetic 3450' };
+    const input = { memoryRef: memory.id, loc: 'entry', name: 'Entry', content: 'synthetic 3450' };
     await send(ENCRYPT, { id: memory.id }, [{ memory: memory.id, dataKey }]);
     sessionKeyCache.clear();
     expect((await send(create, { input }, [{ memory: memory.id, dataKey }])).errors).toBeUndefined();

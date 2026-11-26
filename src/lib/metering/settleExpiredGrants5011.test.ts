@@ -212,8 +212,8 @@ describe('#5011 settleExpiredGrants', () => {
     const taken = { grantId: g.id, amountMicroCents: -100n };
     // A concurrent settler got there first: the same pair is written twice inside one transaction.
     const after = await db.$transaction(async (tx) => {
-      const first = await writeSettlements(tx as typeof db, orgId, [taken], d('02-02'));
-      const second = await writeSettlements(tx as typeof db, orgId, [taken], d('02-02'));
+      const first = await writeSettlements(tx as typeof db, { organizationId: orgId }, [taken], d('02-02'));
+      const second = await writeSettlements(tx as typeof db, { organizationId: orgId }, [taken], d('02-02'));
       return { first, second, count: await tx.creditLedgerEntry.count() };
     });
     expect(after).toEqual({ first: 1, second: 0, count: 2 });
@@ -286,8 +286,13 @@ describe('#5011 settleExpiredGrants', () => {
     expect((await settlements()).map((s) => [s.sourceId, s.amountMicroCents])).toEqual([[g.id, -100n]]);
   });
 
-  it('a person owner is refused until A6 (never read as an organization)', async () => {
-    await expect(settleExpiredGrants(db, { userId: generateId() }, { now: d('02-02') })).rejects.toThrow(/person/i);
+  it('a person owner is settled too, and never read as an organization (flipped by #5014: A4 refused it until A6)', async () => {
+    const user = (await db.user.create({ data: { id: generateId(), handle: `ce-${generateId().slice(0, 8)}` } })).id;
+    const g = await db.creditLedgerEntry.create({
+      data: { id: generateId(), ownerUserId: user, kind: 'grant', amountMicroCents: 100n, sourceType: 't', sourceId: generateId(), expiresAt: d('02-01'), createdAt: d('01-01') },
+    });
+    expect(await settleExpiredGrants(db, { userId: user }, { now: d('02-02') })).toEqual([{ grantId: g.id, amountMicroCents: -100n }]);
+    expect(await db.creditLedgerEntry.count({ where: { sourceType: 'grant-expiry', ownerUserId: user, organizationId: null } })).toBe(1);
   });
 
   it('with no `now`, the database clock is used', async () => {

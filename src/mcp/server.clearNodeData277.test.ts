@@ -87,7 +87,7 @@ async function update(surface: string, patch: Record<string, unknown>, userId = 
     const out = await server.executeOperation(
       {
         query: 'mutation($input:UpdateNodeInput!){updateNode(input:$input){id data content}}',
-        variables: { input: { id: node.id, ...patch } },
+        variables: { input: { ref: node.id, ...patch } },
       },
       { contextValue: { db, userId, roles: ['READER'] } },
     );

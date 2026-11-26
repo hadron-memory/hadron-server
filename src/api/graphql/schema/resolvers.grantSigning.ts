@@ -43,7 +43,7 @@ type GrantSigningRequestRow = {
   createdAt: Date; expiresAt: Date; endedAt: Date | null; selectionId?: string | null;
 };
 
-function grantNotFound(grantRef: string): GraphQLError {
+function grantNotFound(): GraphQLError {
   return new GraphQLError('Grant not found', { extensions: { code: 'GRANT_NOT_FOUND' } }); // #5168: no caller ref relayed
 }
 
@@ -170,7 +170,7 @@ export const grantSigningMutations = {
     const reaches = new Map<string, Reach>();
     for (const id of ids) {
       const reach = await readableGrantReach(ctx, id);
-      if (!reach) throw grantNotFound(id);
+      if (!reach) throw grantNotFound();
       reaches.set(id, reach);
     }
     const first = reaches.get(ids[0]!)!;
@@ -182,16 +182,16 @@ export const grantSigningMutations = {
       return await withAuthorizedTx(
         ctx, [{ kind: 'app', id: appId }],
         async (txCtx, tx) => {
-          for (const id of ids) if (!sameReach(await readableGrantReach(txCtx, id, tx), reaches.get(id)!)) throw grantNotFound(id);
+          for (const id of ids) if (!sameReach(await readableGrantReach(txCtx, id, tx), reaches.get(id)!)) throw grantNotFound();
         },
         (tx) => createGrantSelectionInTransaction(tx, ids, { appId, requester: requesterOf(ctx) }),
       );
     } catch (error) {
       if (error instanceof GrantSigningRefusal) {
         const ref = typeof error.details.grantRef === 'string' ? error.details.grantRef : null;
-        throw error.code === 'GRANT_NOT_FOUND' && ref ? grantNotFound(ref) : refusalToGraphQL(error, {});
+        throw error.code === 'GRANT_NOT_FOUND' && ref ? grantNotFound() : refusalToGraphQL(error, {});
       }
-      if (isDenial(error)) throw grantNotFound(ids[0]!);
+      if (isDenial(error)) throw grantNotFound();
       throw error;
     }
   },
@@ -224,19 +224,19 @@ export const grantSigningMutations = {
   requestGrantSignature: async (_: unknown, { grantRef }: { grantRef: string }, ctx: Context) => {
     refuseImpersonation(ctx);
     const reach = await readableGrantReach(ctx, grantRef);
-    if (!reach) throw grantNotFound(grantRef);
+    if (!reach) throw grantNotFound();
     const appId = reach.appId;
     try {
       return await withAuthorizedTx(
         ctx, [{ kind: 'app', id: appId }],
-        async (txCtx, tx) => { if (!sameReach(await readableGrantReach(txCtx, grantRef, tx), reach)) throw grantNotFound(grantRef); },
+        async (txCtx, tx) => { if (!sameReach(await readableGrantReach(txCtx, grantRef, tx), reach)) throw grantNotFound(); },
         (tx) => createGrantSigningRequestInTransaction(tx, grantRef, { appId, requester: requesterOf(ctx) }),
       );
     } catch (error) {
       if (error instanceof GrantSigningRefusal) {
-        throw error.code === 'GRANT_NOT_FOUND' ? grantNotFound(grantRef) : refusalToGraphQL(error, { grantRef });
+        throw error.code === 'GRANT_NOT_FOUND' ? grantNotFound() : refusalToGraphQL(error, { grantRef });
       }
-      if (isDenial(error)) throw grantNotFound(grantRef);
+      if (isDenial(error)) throw grantNotFound();
       throw error;
     }
   },

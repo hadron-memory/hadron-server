@@ -3,7 +3,7 @@ import type { Prisma } from '../../../generated/prisma/index.js';
 import { GraphQLError } from 'graphql';
 import type { PrismaClient } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
-import { isMemoryReadableCached, requireMemoryWriteAccess } from './resolvers.helpers.js';
+import { isMemoryReadableCached, requireMemoryWriteAccess, requireCallerIdentity } from './resolvers.helpers.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveNodeUrnField, resolveRevisionEditor } from './resolvers.types.js';
 import { withAuthorizedMemoryTx } from './authorizedTx.js';
@@ -118,6 +118,7 @@ export const signingMutations = {
     { nodeRef, expectedRevision, signerRef }: { nodeRef: string; expectedRevision?: number | null; signerRef?: string | null },
     ctx: Context,
   ) => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const { id, memoryId } = await resolveReadableNode(ctx, nodeRef);
     try {

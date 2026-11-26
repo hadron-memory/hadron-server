@@ -113,7 +113,7 @@ describe('#5018 Node.storedBytes and Node.revisionBytes', () => {
     const one = await gql(ONE, ctxOf(reader), { ref: n.id });
     expect(one.errors).toBeUndefined();
     expect(one.data!.node.storedBytes).toBe(3);
-    const list = await gql(`query($m: ID!) { findNodes(filter: { memoryIds: [$m] }) { hits { node { id storedBytes } } } }`, ctxOf(reader), { m: m.id });
+    const list = await gql(`query($m: ID!) { findNodes(filter: { memoryRefs: [$m] }) { hits { node { id storedBytes } } } }`, ctxOf(reader), { m: m.id });
     expect(list.errors).toBeUndefined();
     expect(list.data!.findNodes.hits.find((h: { node: { id: string } }) => h.node.id === n.id).node.storedBytes).toBe(3);
   });

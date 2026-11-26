@@ -287,7 +287,7 @@ describe('task.finish.open-children', () => {
   it('fires on finish with an open child, the finish still succeeds; none once the child is done', async () => {
     const parent = await create(ctx(member.id), { assignee: { worker: anne.id } });
     await asWorker(anne, teamAgentId, () => M.startAgentTask({}, { taskRef: parent.id }, ctx(member.id)));
-    const child = await asWorker(anne, teamAgentId, () => M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'child', source: 's' } }, ctx(member.id)));
+    const child = await asWorker(anne, teamAgentId, () => M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'child', source: 's' } }, ctx(member.id)));
     const c = ctx(member.id);
     const done = await asWorker(anne, teamAgentId, () => M.finishAgentTask({}, { taskRef: parent.id, result: { outcome: 'succeeded' } }, c));
     expect(done.status).toBe('finished');

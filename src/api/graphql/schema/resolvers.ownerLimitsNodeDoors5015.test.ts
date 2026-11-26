@@ -96,7 +96,7 @@ afterEach(() => { vi.restoreAllMocks(); reloadOwnerDefaultLimitsForTests({ OWNER
 describe('#5015 createNode at the owner\'s nodes limit', () => {
   it('refuses a third node for a person at a default of 2, in the limited person\'s form, and writes nothing', async () => {
     defaults({ user: { nodes: 2 } });
-    const r = await gql(CREATE, asU(), { input: { memoryId: mU1, loc: 'c', name: 'c' } });
+    const r = await gql(CREATE, asU(), { input: { memoryRef: mU1, loc: 'c', name: 'c' } });
     expect(code(r)).toBe('OWNER_LIMIT_REACHED');
     expect(err(r)!.extensions).toMatchObject({ limitKey: 'nodes', ownerType: 'user', callerCanManageOwner: true, ownerId: u, limit: '2' });
     expect(await db.node.count({ where: { memoryId: mU1, loc: 'c' } })).toBe(0);
@@ -105,7 +105,7 @@ describe('#5015 createNode at the owner\'s nodes limit', () => {
   it('refuses a create at the loc of a tombstone (the revive branch) and leaves the tombstone deleted', async () => {
     const t = await node(mU1, 't', { deletedAt: new Date() });
     defaults({ user: { nodes: 2 } });
-    const r = await gql(CREATE, asU(), { input: { memoryId: mU1, loc: 't', name: 't again' } });
+    const r = await gql(CREATE, asU(), { input: { memoryRef: mU1, loc: 't', name: 't again' } });
     expect(code(r)).toBe('OWNER_LIMIT_REACHED');
     expect((await db.node.findUniqueOrThrow({ where: { id: t.id } })).deletedAt).not.toBeNull();
   });
@@ -113,7 +113,7 @@ describe('#5015 createNode at the owner\'s nodes limit', () => {
   it('succeeds at the cap: an update of an existing node', async () => {
     defaults({ user: { nodes: 2 } });
     const a = await db.node.findFirstOrThrow({ where: { memoryId: mU1, loc: 'a' } });
-    const r = await gql(UPDATE, asU(), { input: { memoryId: mU1, loc: 'a', description: 'edited' } });
+    const r = await gql(UPDATE, asU(), { input: { memoryRef: mU1, loc: 'a', description: 'edited' } });
     expect(r.errors).toBeUndefined();
     expect((await db.node.findUniqueOrThrow({ where: { id: a.id } })).description).toBe('edited');
   });
@@ -122,22 +122,22 @@ describe('#5015 createNode at the owner\'s nodes limit', () => {
     defaults({ user: { nodes: 2 } });
     const a = await db.node.findFirstOrThrow({ where: { memoryId: mU1, loc: 'a' } });
     expect((await gql(DELETE, asU(), { ref: a.id })).errors).toBeUndefined();
-    const r = await gql(CREATE, asU(), { input: { memoryId: mU1, loc: 'c', name: 'c' } });
+    const r = await gql(CREATE, asU(), { input: { memoryRef: mU1, loc: 'c', name: 'c' } });
     expect(r.errors).toBeUndefined();
   });
 
   it('with OWNER_DEFAULT_LIMITS unset, a create is not limited', async () => {
-    const r = await gql(CREATE, asU(), { input: { memoryId: mU1, loc: 'c', name: 'c' } });
+    const r = await gql(CREATE, asU(), { input: { memoryRef: mU1, loc: 'c', name: 'c' } });
     expect(r.errors).toBeUndefined();
   });
 
   it('an organization: its ADMIN gets the managing form, a CONTRIBUTOR the form with no owner and no number', async () => {
     await node(mO, 'x');
     defaults({ organization: { nodes: 1 } });
-    const admin = await gql(CREATE, ctxOf(orgAdmin), { input: { memoryId: mO, loc: 'y', name: 'y' } });
+    const admin = await gql(CREATE, ctxOf(orgAdmin), { input: { memoryRef: mO, loc: 'y', name: 'y' } });
     expect(code(admin)).toBe('OWNER_LIMIT_REACHED');
     expect(err(admin)!.extensions).toMatchObject({ ownerType: 'organization', callerCanManageOwner: true, ownerId: orgId, limit: '1' });
-    const contrib = await gql(CREATE, ctxOf(contributor), { input: { memoryId: mO, loc: 'y', name: 'y' } });
+    const contrib = await gql(CREATE, ctxOf(contributor), { input: { memoryRef: mO, loc: 'y', name: 'y' } });
     expect(code(contrib)).toBe('OWNER_LIMIT_REACHED');
     expect(err(contrib)!.extensions).toMatchObject({ ownerType: 'organization', callerCanManageOwner: false });
     expect(err(contrib)!.extensions).not.toHaveProperty('ownerId');
@@ -153,10 +153,10 @@ describe('#5015 the refusal under impersonation', () => {
     // organization, and the acted-as person is its OWNER: without impersonation the same create gets the managing form.
     await node(mO, 'x');
     defaults({ organization: { nodes: 1 } });
-    const plain = await gql(CREATE, asU(), { input: { memoryId: mO, loc: 'y', name: 'y' } });
+    const plain = await gql(CREATE, asU(), { input: { memoryRef: mO, loc: 'y', name: 'y' } });
     expect(err(plain)?.extensions).toMatchObject({ code: 'OWNER_LIMIT_REACHED', callerCanManageOwner: true, ownerId: orgId });
     const imp = { sessionId: generateId(), actorUserId: w, orgId, expiresAt: new Date(Date.now() + 3_600_000) };
-    const r = await gql(CREATE, { ...asU(), impersonation: imp } as Partial<Context>, { input: { memoryId: mO, loc: 'y', name: 'y' } });
+    const r = await gql(CREATE, { ...asU(), impersonation: imp } as Partial<Context>, { input: { memoryRef: mO, loc: 'y', name: 'y' } });
     expect(code(r)).toBe('OWNER_LIMIT_REACHED');
     expect(err(r)?.extensions).toMatchObject({ callerCanManageOwner: false });
     expect(err(r)?.extensions).not.toHaveProperty('ownerId');

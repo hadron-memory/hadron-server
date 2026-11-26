@@ -49,9 +49,9 @@ import { agentSlugFromUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
 import { refusedAppUserMemoryPrincipal, heldAppUserMemoryClasses, appAdmitsUserMemories } from './appUserMemoryEligibility.js';
 import { appUserMemorySlug, APP_USER_MEMORY_MAX_TAIL } from '../../../lib/appUserMemoryName.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
-import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
+import { reclaimTombstonedMemory, SPEC_MINTED_PERMANENT } from '../../../lib/mintedSpecPermanence.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
-import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug } from './resolvers.helpers.js';
+import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug, requireCallerIdentity } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
 type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
@@ -203,6 +203,26 @@ async function requireAppMemoryCreator(ctx: Context, app: { organizationId: stri
 /** #5183: a collision answer for a personal/private memory carries no URN: the holder may not be the caller's. */
 function conflictWithoutUrn(): GraphQLError {
   return new GraphQLError('That memory name is taken. Try again.', { extensions: { code: 'MEMORY_URN_CONFLICT' } });
+}
+
+/**
+ * Remove every one of the caller's own tombstones in `ids`, all or none. A tombstone the reclaim refuses because it holds a
+ * question (QUESTION_CONTAINED) or a protected minted spec (SPEC_MINTED_PERMANENT) answers false with nothing removed: a
+ * savepoint undoes any tombstone already removed. Any other error undoes the savepoint too, then rethrows.
+ */
+async function reclaimAllOrKeep(tx: Prisma.TransactionClient, ids: string[]): Promise<boolean> {
+  await tx.$executeRaw`SAVEPOINT app_user_memory_reclaim`;
+  try {
+    for (const id of [...ids].sort((x, y) => x.localeCompare(y))) await reclaimTombstonedMemory(tx, id);
+  } catch (e) {
+    await tx.$executeRaw`ROLLBACK TO SAVEPOINT app_user_memory_reclaim`;
+    const held = e instanceof GraphQLError
+      && (e.extensions?.code === 'QUESTION_CONTAINED' || e.extensions?.code === SPEC_MINTED_PERMANENT);
+    if (held) return false;
+    throw e;
+  }
+  await tx.$executeRaw`RELEASE SAVEPOINT app_user_memory_reclaim`;
+  return true;
 }
 
 /** A P2002 whose violated unique is the memory URN (Prisma reports the column list, or the index name, in meta.target). */
@@ -487,9 +507,9 @@ export const appMemoryMutations = {
                 const ownTombstones = blockers.filter((b) =>
                   b.deletedAt !== null && b.userId === ctx.userId && b.appId === app.id && b.class === klass);
                 if (ownTombstones.length !== blockers.length) continue;
-                for (const b of ownTombstones.sort((x, y) => x.id.localeCompare(y.id))) {
-                  await reclaimTombstonedMemory(tx, b.id);
-                }
+                // A tombstone the reclaim refuses to remove keeps its address: that candidate is taken and the next
+                // tail is tried, so a name collision never refuses (R2).
+                if (!(await reclaimAllOrKeep(tx, ownTombstones.map((b) => b.id)))) continue;
               }
               return createRow(tx, {
                 urn, name: candidate, organizationId: null, ownerUserId: ctx.userId!, appUserMemory: true,
@@ -567,6 +587,7 @@ export const appMemoryMutations = {
     { memoryRef, appRef, agentRef }: { memoryRef: string; appRef: string; agentRef: string },
     ctx: Context,
   ) => {
+    requireCallerIdentity(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     const memory = await ctx.db.memory.findUniqueOrThrow({
       where: { id: memoryId },

@@ -39,6 +39,7 @@ import {
   isPlatformAdmin,
   requireMemoryManageAccess,
   requireMemoryWriteAccess,
+  requireCallerIdentity,
 } from './resolvers.helpers.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveNodeUrnField } from './resolvers.types.js';
@@ -705,6 +706,7 @@ export const questionMutations = {
     args: { memoryRef: string; loc: string; name?: string | null; prefix?: string | null; defaultDeciders: string[]; eligibleDeciders?: string[] | null },
     ctx: Context,
   ): Promise<QuestionLogView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, args.memoryRef);
     validateLocOrThrow(args.loc, 'loc');
@@ -787,6 +789,7 @@ export const questionMutations = {
     args: { logRef: string; defaultDeciders: string[]; eligibleDeciders?: string[] | null; expectedRevision: number; reason: string },
     ctx: Context,
   ): Promise<QuestionLogView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const reason = validateReason(args.reason);
     const defaults = uniqueIds(args.defaultDeciders, '/defaultDeciders');
@@ -830,6 +833,7 @@ export const questionMutations = {
    * included. `authorizes: true` forces the signed tier (§6.2).
    */
   askQuestion: async (_: unknown, args: AskArgs, ctx: Context): Promise<QuestionView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     // #4431: `taskRef` is an input of the door, not of the stored payload (which holds the resolved `taskId`).
     const { taskRef, ...rawInput } = (args.input ?? {}) as Record<string, unknown>;
@@ -927,6 +931,7 @@ export const questionMutations = {
     args: { ref: string; input: Record<string, unknown>; expectedRevision: number; reason: string },
     ctx: Context,
   ): Promise<QuestionView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const reason = validateReason(args.reason);
     const patch = parseOrRefuse(amendInputSchema, lowerEnums(args.input));
@@ -1019,6 +1024,7 @@ export const questionMutations = {
     args: { ref: string; reason: string; expectedRevision: number },
     ctx: Context,
   ): Promise<QuestionView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const reason = validateReason(args.reason);
     const target = await resolveGovernedNode(ctx, args.ref, QUESTION_ROLE, questionMissing);
@@ -1067,6 +1073,7 @@ export const questionMutations = {
     args: { ref: string; input: { optionKey?: string | null; text?: string | null; reason?: string | null; via?: string | null }; expectedRevision: number },
     ctx: Context,
   ): Promise<QuestionView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const given = parseAnswerInput(args.input);
     return answerAct(ctx, args.ref, args.expectedRevision, (current, by) => {
@@ -1090,6 +1097,7 @@ export const questionMutations = {
     args: { ref: string; expectedRevision: number; reason?: string | null; via?: string | null },
     ctx: Context,
   ): Promise<QuestionView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const reason = shortOrNull(args.reason, '/reason');
     const via = answerVia(args.via);
@@ -1108,6 +1116,7 @@ export const questionMutations = {
    * revision). The code stays consumed.
    */
   purgeUnansweredQuestion: async (_: unknown, args: { ref: string; reason: string }, ctx: Context): Promise<boolean> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const reason = validateReason(args.reason);
     const target = await resolveGovernedNode(ctx, args.ref, QUESTION_ROLE, questionMissing);

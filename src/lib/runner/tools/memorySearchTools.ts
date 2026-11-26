@@ -143,7 +143,7 @@ export const hadronFindNodes: RunToolDef = {
       let byId: Map<string, { id: string; memoryId: string; loc: string; memory: { urn: string } }>;
       try {
         found = await resolvers.Query.findNodes({}, {
-          query: args.query.trim(), mode: 'keyword', filter: { memoryIds: ids }, limit: pageSize,
+          query: args.query.trim(), mode: 'keyword', filter: { memoryRefs: ids }, limit: pageSize,
           offset, expand: 0, includeTotal: false,
         }, principal);
         // Recheck metadata/identity before projecting the engine snapshot's text. This is not a

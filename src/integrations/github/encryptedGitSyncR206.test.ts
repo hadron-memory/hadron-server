@@ -107,7 +107,7 @@ describe('R206: encrypted memories never sync to Git', () => {
 
   it('does not export an update made with the request key, nor with only a warm session cache', async () => {
     sessionKeyCache.set('warm-session', memoryId, key);
-    await requestKeyStorage.run(new Map([[memoryId, key]]), () => M.updateNode(null, { input: { id: nodeId, content: 'new plaintext body' } }, ctx()));
+    await requestKeyStorage.run(new Map([[memoryId, key]]), () => M.updateNode(null, { input: { ref: nodeId, content: 'new plaintext body' } }, ctx()));
     await settle();
     expectUntouched();
     expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content).toMatch(/^enc:v1:/);
@@ -116,13 +116,13 @@ describe('R206: encrypted memories never sync to Git', () => {
 
   it('does not export a metadata-only update (all encrypted fields untouched)', async () => {
     sessionKeyCache.set('warm-session', memoryId, key);
-    await M.updateNode(null, { input: { id: nodeId, tags: ['meta-only'] } }, ctx());
+    await M.updateNode(null, { input: { ref: nodeId, tags: ['meta-only'] } }, ctx());
     await settle();
     expectUntouched();
   });
 
   it('does not export a search/replace made with the request key', async () => {
-    await requestKeyStorage.run(new Map([[memoryId, key]]), () => M.searchReplaceInNodes(null, { input: { nodeIds: [nodeId], fields: ['content'], oldText: 'private', newText: 'changed', dryRun: false } }, ctx()));
+    await requestKeyStorage.run(new Map([[memoryId, key]]), () => M.searchReplaceInNodes(null, { input: { nodeRefs: [nodeId], fields: ['content'], oldText: 'private', newText: 'changed', dryRun: false } }, ctx()));
     await settle();
     expectUntouched();
   });
@@ -234,7 +234,7 @@ describe('R206 positive controls: unencrypted memories still mirror', () => {
   });
 
   it('mirrors an unencrypted node update through the event subscriber', async () => {
-    await M.updateNode(null, { input: { id: nodeId, content: 'plain edit' } }, ctx());
+    await M.updateNode(null, { input: { ref: nodeId, content: 'plain edit' } }, ctx());
     await vi.waitFor(() => expect(execGit).toHaveBeenCalledWith(expect.arrayContaining(['push']), expect.anything()));
     expect(readFileSync(join(localPath, 'node.md'), 'utf8')).toContain('plain edit');
   });

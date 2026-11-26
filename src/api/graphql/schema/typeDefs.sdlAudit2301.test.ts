@@ -17,7 +17,7 @@ describe('#2301 SDL S1 audited claims', () => {
   });
   it('states queued and rootsOnly filter precedence', () => {
     const text = description('Query', 'agentTasks');
-    expect(text).toContain('take precedence over status and parentTaskId');
+    expect(text).toContain('take precedence over status and parentTaskRef');
   });
   it('includes the reporting worker in task reassignment authority', () => {
     expect(description('Mutation', 'reassignAgentTask')).toContain('a worker the owner reports to');

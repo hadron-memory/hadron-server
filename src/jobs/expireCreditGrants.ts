@@ -4,9 +4,11 @@
  * the owner at hand itself; this job catches everyone else.
  *
  * One run: owners holding a live grant that expired at least 60 s ago (ruling 10.1) and has no settlement, found in one
- * statement, `BATCH_SIZE` at a time, keyset by organization id within the run (so an owner whose settlement fails is
- * not selected again in the same run), at most `MAX_PASSES` batches. Each owner is settled through
- * settleExpiredGrants in its own try/catch: a failure logs one line (organization id, error code; no message, no
+ * statement, `BATCH_SIZE` at a time, keyset by owner id within the run (so an owner whose settlement fails is
+ * not selected again in the same run), at most `MAX_PASSES` batches. An owner is an organization or a person (#5014, A6):
+ * the organizations are searched first, then the persons, each leg keyset-paged by its own column, with its own
+ * `MAX_PASSES` budget (so a long organization leg never starves the persons). Each owner is settled through
+ * settleExpiredGrants in its own try/catch: a failure logs one line (the owner's kind and id, error code; no message, no
  * amount) and the run goes on. A second run, instance or reader is a no-op: the settlement pair is unique.
  *
  * No attempt cap and no alarm (#5100 item 7, a stated divergence from the chat-tool teardown and Git mirror sweeps): those
@@ -22,6 +24,8 @@
  */
 import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
 import { GRANT_EXPIRY_SOURCE_TYPE } from '../lib/metering/expiry.js';
+import type { OwnerRef } from '../lib/owner.js';
+import { repointMergedLedgerOwners } from '../lib/metering/repointMergedOwners.js';
 import {
   SETTLE_DELAY_MS,
   databaseNow,
@@ -53,12 +57,19 @@ export interface ExpireCreditGrantsResult {
   failures: number;
 }
 
-/** One batch of owners holding an expired, unsettled grant, after `after` in organization-id order. */
-async function ownersDue(db: PrismaClient, cutoff: Date, after: string | null, limit: number): Promise<string[]> {
+/** The two kinds of owner a grant can belong to, searched one after the other. */
+const OWNER_LEGS = ['organization', 'user'] as const;
+type OwnerLeg = (typeof OWNER_LEGS)[number];
+
+/** One batch of owners of one kind holding an expired, unsettled grant, after `after` in that kind's id order. */
+async function ownersDue(db: PrismaClient, leg: OwnerLeg, cutoff: Date, after: string | null, limit: number): Promise<string[]> {
+  // The column is chosen from a closed two-value set, never from input.
+  const col = Prisma.raw(leg === 'organization' ? 'g.organization_id' : 'g.owner_user_id');
   const rows = await db.$queryRaw<{ id: string }[]>(Prisma.sql`
-    SELECT DISTINCT g.organization_id AS id
+    SELECT DISTINCT ${col} AS id
       FROM credit_ledger_entries g
-     WHERE g.expires_at IS NOT NULL
+     WHERE ${col} IS NOT NULL
+       AND g.expires_at IS NOT NULL
        AND g.expires_at <= ${toNaiveUtc(cutoff)}::timestamp
        AND g.kind = 'grant'
        AND g.deleted_at IS NULL
@@ -66,11 +77,13 @@ async function ownersDue(db: PrismaClient, cutoff: Date, after: string | null, l
          SELECT 1 FROM credit_ledger_entries s
           WHERE s.source_type = ${GRANT_EXPIRY_SOURCE_TYPE} AND s.source_id = g.id
        )
-       ${after === null ? Prisma.empty : Prisma.sql`AND g.organization_id > ${after}`}
+       ${after === null ? Prisma.empty : Prisma.sql`AND ${col} > ${after}`}
      ORDER BY 1
      LIMIT ${limit}`);
   return rows.map((r) => r.id);
 }
+
+const ownerOf = (leg: OwnerLeg, id: string): OwnerRef => (leg === 'organization' ? { organizationId: id } : { userId: id });
 
 /** One run. */
 export async function expireCreditGrants(
@@ -83,21 +96,36 @@ export async function expireCreditGrants(
   const maxPasses = options.maxPasses ?? MAX_PASSES;
   const settle = options.settle ?? settleExpiredGrants;
   const out: ExpireCreditGrantsResult = { owners: 0, settlements: 0, failures: 0 };
-  let after: string | null = null;
-  for (let pass = 0; pass < maxPasses; pass++) {
-    const owners = await ownersDue(db, cutoff, after, batchSize);
-    for (const organizationId of owners) {
-      try {
-        const written = await settle(db, { organizationId }, { now });
-        out.owners += 1;
-        out.settlements += written.length;
-      } catch (err) {
-        out.failures += 1;
-        console.error(`${TAG}.owner_failed`, { organizationId, code: safeErrorCode(err) });
+  // #5014 (local review P2): entries a merge raced past are re-pointed to the survivor BEFORE settling, so a settlement is
+  // computed over the whole ledger. A failure logs and the PERSON leg is skipped this run (a settlement over a partial ledger could
+  // leave an expired credit unsettled for good); the organization leg is unaffected, and the next run retries.
+  let repointed = true;
+  try {
+    await repointMergedLedgerOwners(db);
+  } catch (err) {
+    repointed = false;
+    console.error(`${TAG}.repoint_failed`, { code: safeErrorCode(err) });
+  }
+  for (const leg of OWNER_LEGS) {
+    if (leg === 'user' && !repointed) continue;
+    let passes = 0;
+    let after: string | null = null;
+    while (passes < maxPasses) {
+      passes += 1;
+      const owners = await ownersDue(db, leg, cutoff, after, batchSize);
+      for (const id of owners) {
+        try {
+          const written = await settle(db, ownerOf(leg, id), { now });
+          out.owners += 1;
+          out.settlements += written.length;
+        } catch (err) {
+          out.failures += 1;
+          console.error(`${TAG}.owner_failed`, { ...(leg === 'organization' ? { organizationId: id } : { ownerUserId: id }), code: safeErrorCode(err) });
+        }
       }
+      if (owners.length < batchSize) break;
+      after = owners[owners.length - 1] ?? null;
     }
-    if (owners.length < batchSize) break;
-    after = owners[owners.length - 1];
   }
   return out;
 }

@@ -65,7 +65,7 @@ describe('findNodes sortProperty — no-query browse', () => {
   it('intersects with the memoryIds scope', async () => {
     const other = await createDbOrgAndGraph(db, { orgName: 'nsort-other', graphName: 'nsort/other' });
     await db.node.create({ data: { id: generateId(), memoryId: other.graph.id, loc: 'z', name: 'z', properties: { stage: 'aaa' } } as any });
-    const res = await findNodes({ filter: { memoryIds: [graph.id] }, sortProperty: { path: ['stage'] } });
+    const res = await findNodes({ filter: { memoryRefs: [graph.id] }, sortProperty: { path: ['stage'] } });
     expect(order(res)).toEqual(['n.a', 'n.b', 'n.c', 'n.d']); // the other memory's node is out of scope
   });
 
@@ -129,7 +129,7 @@ describe('findNodes sortProperty — vector re-sort', () => {
     await seed('v.b', 'vb', { rank: 10 });
     await seed('v.c', 'vc', { rank: 2 });
 
-    const res = await findNodes({ query: 'q', mode: 'vector', filter: { memoryIds: [memId] }, sortProperty: { path: ['rank'], as: 'number', direction: 'desc' } });
+    const res = await findNodes({ query: 'q', mode: 'vector', filter: { memoryRefs: [memId] }, sortProperty: { path: ['rank'], as: 'number', direction: 'desc' } });
     expect(order(res)).toEqual(['v.b', 'v.a', 'v.c']); // 10, 9, 2 — not similarity order
   });
 });

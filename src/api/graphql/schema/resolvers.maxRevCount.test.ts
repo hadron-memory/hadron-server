@@ -46,7 +46,7 @@ async function makeNode(loc: string) {
 }
 
 async function updateContent(id: string, content: string) {
-  await resolvers.Mutation.updateNode({}, { input: { id, content } } as never, ctx());
+  await resolvers.Mutation.updateNode({}, { input: { ref: id, content } } as never, ctx());
 }
 
 describe('Memory.maxRevCount default + column', () => {

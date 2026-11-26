@@ -11,7 +11,7 @@ vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.
 let userId: string;
 let memoryId: string;
 const ctx = (): Context => ({ db, userId, roles: [] });
-const edit = (id: string, input: Record<string, unknown>) => resolvers.Mutation.updateNode(null, { input: { id, ...input } }, ctx());
+const edit = (id: string, input: Record<string, unknown>) => resolvers.Mutation.updateNode(null, { input: { ref: id, ...input } }, ctx());
 beforeEach(async () => {
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: 'Prune Test', urn: 'prune2063.example' } });
@@ -126,7 +126,7 @@ it('#2751 bounds absence work at a real cap write without changing ordinary prun
       } });
     } })), options);
   } });
-  await resolvers.Mutation.updateNode(null, { input: { id: n.id, content: 'cap write' } }, { ...ctx(), db: observed });
+  await resolvers.Mutation.updateNode(null, { input: { ref: n.id, content: 'cap write' } }, { ...ctx(), db: observed });
   expect(snapshots).toBeGreaterThan(0); // interception reached the actual locked write
   expect(qualificationReads).toBe(0);
   expect(absenceProbes).toBe(1);

@@ -45,7 +45,7 @@ async function node(key: string, memoryId: string, loc: string, data: { role?: s
 
 const hitIds = (res: { hits: Array<{ node: { id: string } }> }) => res.hits.map((h) => h.node.id).sort();
 const find = (userId: string, filter: Record<string, unknown> = {}) =>
-  Q.findNodes({}, { filter: { memoryIds: [backend.mem], ...filter } }, ctx(userId));
+  Q.findNodes({}, { filter: { memoryRefs: [backend.mem], ...filter } }, ctx(userId));
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -73,7 +73,7 @@ describe('the reader\'s footing', () => {
   it('reads backend-engineer\'s system memory and not engineer\'s', async () => {
     expect((await Q.memory({}, { ref: backend.mem }, ctx(reader)))?.id).toBe(backend.mem);
     expect(await Q.memory({}, { ref: engineer.mem }, ctx(reader))).toBeNull();
-    expect(hitIds(await Q.findNodes({}, { filter: { memoryIds: [engineer.mem] } }, ctx(reader)))).toEqual([]);
+    expect(hitIds(await Q.findNodes({}, { filter: { memoryRefs: [engineer.mem] } }, ctx(reader)))).toEqual([]);
   });
 });
 
@@ -100,12 +100,12 @@ describe('S1 — findNodes over the child returns its effective memory', () => {
   });
 
   it('a keyword query ranks over the same set', async () => {
-    const res = await Q.findNodes({}, { filter: { memoryIds: [backend.mem] }, query: 'engOpenPr OR engRelease OR backOpenPr' }, ctx(reader));
+    const res = await Q.findNodes({}, { filter: { memoryRefs: [backend.mem] }, query: 'engOpenPr OR engRelease OR backOpenPr' }, ctx(reader));
     expect(hitIds(res)).toEqual([ids.backOpenPr, ids.engRelease].sort());
   });
 
   it('a manager who reads both memories sees engineer\'s own nodes unmarked when engineer is in the scope too', async () => {
-    const res = await Q.findNodes({}, { filter: { memoryIds: [backend.mem, engineer.mem] } }, ctx(manager));
+    const res = await Q.findNodes({}, { filter: { memoryRefs: [backend.mem, engineer.mem] } }, ctx(manager));
     expect(hitIds(res)).toContain(ids.engOpenPr);
     const engNode = res.hits.find((h: any) => h.node.id === ids.engOpenPr).node;
     expect(N.inheritedFrom(engNode)).toBeNull();
@@ -295,7 +295,7 @@ it('open-thread filter treats inherited summaries as zero across Prisma/SQL/lexi
     for (const value of [true,false]) {
       const result = await Q.findNodes(null, {
         ...(opts.query ? {query:opts.query,mode:opts.mode}:{}), includeTotal:true,
-        filter:{memoryIds:[backend.mem],hasOpenThreads:value,...(opts.filterWhere?{where:{path:['unused'],exists:false}}:{})},
+        filter:{memoryRefs:[backend.mem],hasOpenThreads:value,...(opts.filterWhere?{where:{path:['unused'],exists:false}}:{})},
       }, ctx(reader));
       const hit = result.hits.find((h:any)=>h.node.id===ids.engRelease);
       if(value) expect(hit).toBeUndefined();
@@ -303,6 +303,6 @@ it('open-thread filter treats inherited summaries as zero across Prisma/SQL/lexi
       if(!opts.query) expect(result.total).toBe(value?0:4);
     }
   }
-  const own = await Q.findNodes(null,{filter:{memoryIds:[engineer.mem],hasOpenThreads:true}},ctx(manager));
+  const own = await Q.findNodes(null,{filter:{memoryRefs:[engineer.mem],hasOpenThreads:true}},ctx(manager));
   expect(hitIds(own)).toContain(ids.engRelease);
 });
