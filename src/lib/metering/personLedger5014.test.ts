@@ -95,10 +95,12 @@ describe('pin 11: owner_user_id moves only along a merge recorded in user_merges
   });
 });
 
-describe('pin 12: the link may be cleared (plan section 13 item 18 is not built, the trigger allows it)', () => {
-  it('SET owner_user_id = NULL on a person row and SET organization_id = NULL on an organization row are allowed', async () => {
+describe('pin 12: the link to a deleted owner may be cleared (#5238 narrows it to deleted owners; live owners in creditLedgerOwnerClear5238.test.ts)', () => {
+  it('SET owner_user_id = NULL on a deleted person\'s row and SET organization_id = NULL on a deleted organization\'s row are allowed', async () => {
     const pid = (await insert({ user: a })).rows[0].id;
     const oid = (await insert({ org: orgId })).rows[0].id;
+    await pg.query('UPDATE users SET deleted_at = now() WHERE id = $1', [a]);
+    await pg.query('UPDATE organizations SET deleted_at = now() WHERE id = $1', [orgId]);
     await pg.query('UPDATE credit_ledger_entries SET owner_user_id = NULL WHERE id = $1', [pid]);
     await pg.query('UPDATE credit_ledger_entries SET organization_id = NULL WHERE id = $1', [oid]);
     // and the cleared link is what it says: no owner at all, which the CHECK ("at most one") admits (blind review F10)

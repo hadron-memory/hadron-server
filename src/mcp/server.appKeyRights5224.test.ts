@@ -405,7 +405,7 @@ const MEMBER_DOORS: typeof SHARE_DOORS = [
 type Refusal = string | { outside: string; inside: string };
 const WIDEN_DOORS: Array<[string, Refusal, (c: Caller, t: Target, w: World) => Promise<string>]> = [
   ['GraphQL addMemoryToAgent', 'AGENT_NOT_FOUND', (c, t, w) => gql(c, 'mutation($a: ID!, $m: ID!) { addMemoryToAgent(agentRef: $a, memoryRef: $m, role: "read") { id } }', { a: w.agentId, m: t.id })],
-  ['GraphQL attachMemoryToApp', 'MEMORY_NOT_FOUND', (c, t, w) => gql(c, 'mutation($m: ID!, $p: ID!, $a: ID!) { attachMemoryToApp(memoryRef: $m, appRef: $p, agentRef: $a) { id } }', { m: t.id, p: w.appId, a: w.agentId })],
+  ['GraphQL attachMemoryToApp', 'UNAUTHENTICATED', (c, t, w) => gql(c, 'mutation($m: ID!, $p: ID!, $a: ID!) { attachMemoryToApp(memoryRef: $m, appRef: $p, agentRef: $a) { id } }', { m: t.id, p: w.appId, a: w.agentId })],
   ['GraphQL updateMemory(visibility)', 'MEMORY_NOT_FOUND', (c, t) => gql(c, 'mutation($m: ID!) { updateMemory(ref: $m, visibility: PUBLIC) { id } }', { m: t.id })],
   ['GraphQL transferMemoryOwnership', 'MEMORY_NOT_FOUND', (c, t, w) => gql(c, 'mutation($m: ID!, $u: ID!) { transferMemoryOwnership(memoryRef: $m, userRef: $u) { __typename } }', { m: t.id, u: w.leo })],
   ['GraphQL cloneMemory', 'MEMORY_NOT_FOUND', (c, t, w) => gql(c, 'mutation($m: ID!, $u: String!) { cloneMemory(ref: $m, targetUrn: $u) { id } }', { m: t.id, u: `hrn:mem:${w.root}:stolen` })],
@@ -485,6 +485,18 @@ describe.each(['organization', 'user'] as const)('#5224 item 2: an App key of a 
     const [, query, vars] = SHARE_DOORS[0]!;
     expect(await gql(await userKey(w.leo), query, vars(t, w))).toContain('"code":"FORBIDDEN"');
     expect(await gql(w.miaKey, query, vars(t, w))).toContain('"role":"writer"');
+  });
+
+  // The key rows above stop at the door (UNAUTHENTICATED: attachMemoryToApp is person-only, main's #5224), so they no
+  // longer show the memory-visibility check. A signed-in person who cannot see the memory still gets MEMORY_NOT_FOUND.
+  it.each(['personal', 'private'] as const)('attachMemoryToApp: a signed-in person outsider to a %s memory gets MEMORY_NOT_FOUND, and nothing is written', async (cls) => {
+    const w = await makeWorld(kind);
+    const t = await seed(w, cls, SHAPES[2]);
+    const before = await audience();
+    const out = await gql(await userKey(w.leo), 'mutation($m: ID!, $p: ID!, $a: ID!) { attachMemoryToApp(memoryRef: $m, appRef: $p, agentRef: $a) { id } }', { m: t.id, p: w.appId, a: w.agentId });
+    expect(refusalCode(out)).toBe('MEMORY_NOT_FOUND');
+    for (const f of LIVE_MARKS) expect(out).not.toContain(`${t.mark}${f}`);
+    expect(await audience()).toBe(before);
   });
 
   it('an App key is never offered a member or share tool on MCP', async () => {

@@ -35,7 +35,9 @@ async function transferred(memoryClass: 'personal' | 'private') {
   expect(memory.createdBy).toBe(a.id);
   const result = await resolvers.Mutation.transferMemoryOwnership(null, { memoryRef: memory.id, userRef: b.id, targetClass: memoryClass }, user(b.id));
   expect(result.applied).toBe(true);
-  await resolvers.Mutation.attachMemoryToApp(null, { memoryRef: memory.id, appRef: app.id, agentRef: agent.id }, user(b.id));
+  // #5185: attach is a link now and no longer binds. This suite is about the holding's read boundary, so it sets the
+  // binding an older attach wrote directly.
+  await db.memory.update({ where: { id: memory.id }, data: { appId: app.id, userMemoryOfAgentId: agent.id } });
   const node = await resolvers.Mutation.createNode(null, { input: { memoryRef: memory.id, loc: 'owner-note', name: 'Owner note', content: 'Written by the owner after transfer' } }, user(b.id));
   await db.orgMember.deleteMany({ where: { userId: a.id } });
   expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({ class: memoryClass, createdBy: a.id, userId: b.id, ownerUserId: b.id, organizationId: null, appId: app.id, userMemoryOfAgentId: agent.id });

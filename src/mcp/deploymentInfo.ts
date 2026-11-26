@@ -296,6 +296,14 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // (APP_USER_MEMORY_ALREADY_EXISTS). A client that still sends `name` has it ignored for those classes. Also changed for those
 // classes: the memory's tenant moves from the App's organization to the user (organizationId null, URN rooted on their handle),
 // and an App key, worker session, run principal or impersonation is refused (authorization denied), before any read of the App.
+// 0.46.0 — BREAKING (behaviour, no SDL removal) (#5185, A3 of #5182): attachMemoryToApp LINKS a readable memory
+// (any class but system) to an App and no longer binds
+// or renames it; `agentRef` is optional and ignored; MEMORY_ALREADY_APP_SCOPED, ORGANIZATION_MISMATCH and AGENT_NOT_INSTALLED
+// are no longer answered by it. New: detachMemoryFromApp(memoryRef, appRef): Boolean! and App.attachedMemories. A pure App key and
+// a userless run read a linked memory (never write it) while its attacher can read it in their own right. A lagging client that
+// relied on the old bind and rename still parses the call but silently gets a link only. (0.45.0 is #5239, merged first.)
+// 0.47.0 — ADDITIVE, #5218: `App.viewerAppUserMemoryClasses: [MemoryClass!]!`, the personal/private classes the
+// signed-in viewer may still create in the App through `createMemoryInApp`. A lagging client still validates. (0.46.0 is #5258, merged first.)
 // 0.48.0 — BREAKING, #5163: `ResumeSessionInput.expectedWorkerId` is renamed `expectedWorkerRef`, no alias (cor:api:140:01),
 // and takes a worker reference: the id, as before, or a fully qualified worker URN resolved through `resolveWorkerRef`. A
 // lagging client's `expectedWorkerId` is an UNKNOWN input field and GraphQL refuses the whole operation, so the CLI's
@@ -303,8 +311,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // relative URN, another type) now refuses URN_NOT_QUALIFIED where it was BAD_USER_INPUT; blank stays BAD_USER_INPUT. A URN
 // naming no worker and one naming a worker the caller may not read get one answer (the WORKER_MISMATCH refusal carries
 // expectedWorkerId null, or NOTHING_TO_RESUME). The refusal extension `expectedWorkerId` keeps its name (an output id).
-// MCP tool inputs are unchanged (hadron_resume_session sends no expected worker). (0.46.0 and 0.47.0 are slotted for
-// earlier changes, #5240 being 0.47.0.)
+// MCP tool inputs are unchanged (hadron_resume_session sends no expected worker). (0.47.0 is #5240, merged first.)
 export const HADRON_SERVER_VERSION = '0.48.0';
 
 /**
