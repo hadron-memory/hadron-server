@@ -256,6 +256,14 @@ describe('the reads (A5, cor:agt:070:04)', () => {
     expect(uses.map((u) => [u.hostId, u.refusedCode])).toEqual([['mac1', 'HOST_NOT_FOUND'], ['mac1', 'HOST_NOT_FOUND'], ['mac1', null], ['mac1', null]]);
   });
 
+  it('a live host key whose host:operate grant was revoked reads no list: FORBIDDEN, never every host', async () => {
+    const mine = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
+    await join({ hostId: 'mac2' });
+    await db.appKeyScope.updateMany({ where: { appKeyId: mine, scope: 'host:operate', revokedAt: null }, data: { revokedAt: new Date(), revokedByUserId: manager.id } });
+    expect((await db.appKey.findUniqueOrThrow({ where: { id: mine } })).revokedAt).toBeNull();
+    expect(await code(hosts(keyCtx(mine)))).toBe('FORBIDDEN');
+  });
+
   it('the not-found read\'s use record is its own write after the rollback, not inside the read', async () => {
     const mine = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
     const order: string[] = [];
@@ -447,6 +455,9 @@ describe('the raw key (A10)', () => {
     const events = await db.agentTeamEvent.findMany({ where: { appId: app.id } });
     expect(JSON.stringify(events)).not.toContain('hdr_app_');
     expect(JSON.stringify(await db.agentTeamHost.findMany())).not.toContain(raw.slice(8));
+    // The key rows keep only the hash and the preview (prefix plus 4 + 4 characters): the raw key's body is in no
+    // column, the label included.
+    expect(JSON.stringify(await db.appKey.findMany({ where: { appId: app.id } }))).not.toContain(raw.slice(8));
     expect(JSON.stringify(await hosts(ctx(member.id)))).not.toContain('hdr_app_');
   });
 });
