@@ -76,10 +76,10 @@ describe('#5011 M1: one replay over 100,000 entries', () => {
       const reads: number[] = [];
       const replay: number[] = [];
       for (let r = 0; r < RUNS; r++) {
-        const p = await time(() => hasUnsettledExpiredGrant(db, orgId, now));
+        const p = await time(() => hasUnsettledExpiredGrant(db, { organizationId: orgId }, now));
         expect(p.value).toBe(true);
         probe.push(p.ms);
-        const w = await time(() => readReplayWindow(db, orgId, now));
+        const w = await time(() => readReplayWindow(db, { organizationId: orgId }, now));
         expect(w.value?.entries).toHaveLength(ENTRIES);
         reads.push(w.ms);
         const window = w.value!;
