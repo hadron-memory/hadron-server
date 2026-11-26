@@ -3596,7 +3596,7 @@ export const typeDefs = `#graphql
     """
     #5185 — the memories linked to this App with 'attachMemoryToApp'. You see only entries whose memory you can read in your
     own right; others are absent and not counted. 'active' is whether the link counts right now (its attacher still reads the
-    memory in their own right, the App is installed, and a personal or private memory is the App owner's).
+    memory in their own right, the App is installed, and a personal or private memory is the App owner's and was linked by the owner).
     """
     attachedMemories: [AppAttachedMemory!]!
     "The App's members. null means WITHHELD from this caller (#2089): an impersonated caller, or one who reaches a user-owned App only by an outer-object route. Never read null as an empty roster. The App's owning user, a current owner-role member of a user-owned App (ruling 0260, #3765), and callers of an org-owned App get the real list (a real empty list included)."
@@ -14753,8 +14753,9 @@ export const typeDefs = `#graphql
     #5185 — remove the link of a memory to an App; the memory is never changed. The person who attached it removes their own
     link (even after losing read); the memory's owner and the person who manages the App remove every link of that memory in
     that App. No link to remove is success. A caller with no authority over the link gets FORBIDDEN when they can read the
-    memory and MEMORY_NOT_FOUND when they cannot (the same answer as an unknown memory); an unknown or deleted App is
-    FORBIDDEN. Person only, as 'attachMemoryToApp'.
+    memory and MEMORY_NOT_FOUND when they cannot (the same answer as an unknown memory); an unknown or deleted App answers
+    the same way, so the App side is no existence oracle. The links of a soft-deleted memory cannot be detached; they sit inert
+    until it is restored. Person only, as 'attachMemoryToApp'.
     """
     detachMemoryFromApp(memoryRef: ID!, appRef: ID!): Boolean!
 
