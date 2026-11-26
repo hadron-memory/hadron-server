@@ -3,7 +3,7 @@
  * bind-variable cap, and a move whose transaction expires answers the typed `MOVE_TIMED_OUT` refusal on every door,
  * having written nothing.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { cleanDb, createDbOrgAndGraph, createDbNode } from '../../../test/helpers.js';
@@ -28,16 +28,21 @@ const auth = (): AuthContext => ({ userId, roles: ['ADMIN'], clientId: `user:${u
 const nodeUrn = (memory: { urn: string }, loc: string) => `hrn:node:${memory.urn.replace(/^hrn:mem:/, '')}:${loc}`;
 const pad = (n: number) => Array.from({ length: n }, (_, i) => `absent-${i}`);
 
+// Two tests here seed tens of thousands of rows, and clearing them outlasts the 10 s default hook timeout on a CI
+// runner: both the next test's cleanup and the one that leaves the worker's database empty for the next file get longer.
+const CLEANUP_TIMEOUT = 120_000;
+
 beforeEach(async () => {
   await cleanDb(db);
   userId = (await db.user.create({ data: { githubId: 5230, githubUsername: 'mv5230', roles: ['ADMIN'] } })).id;
   const made = await createDbOrgAndGraph(db, { orgName: 'mv5230', graphName: 'src' });
   src = made.graph;
   dest = await resolvers.Mutation.createMemory({}, { orgRef: made.org.id, name: 'dest' }, ctx());
-});
+}, CLEANUP_TIMEOUT);
 afterEach(() => {
   vi.restoreAllMocks();
 });
+afterAll(() => cleanDb(db), CLEANUP_TIMEOUT);
 
 describe('the content-link target lookup at any size', () => {
   it('takes more targets than the bind cap', async () => {
