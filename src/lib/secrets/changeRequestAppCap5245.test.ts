@@ -163,14 +163,27 @@ describe('#5245 staging room check', () => {
     expect(await db.secretChangeRequest.count({ where: { appId } })).toBe(0);
   });
 
-  it('P9: an open protected create counts toward the room; expiry frees it; completion is judged without it', async () => {
+  it('P9: an open protected create counts toward the room; an expired one does not', async () => {
     await fillSecrets(ROOM - 3); // one slot left
-    const first = await create(manager, 'slot-one');
-    staged(first);
+    await fill(1, fillers, { prefix: 'open-create' }); // an open protected create: no secret row yet
     expect(await create(member, 'slot-two')).toMatchObject({ code: 'SECRET_LIMIT_REACHED' });
     expect(await db.secretChangeRequest.count({ where: { appId } })).toBe(1);
-    await db.secretChangeRequest.update({ where: { id: first.requestId }, data: { expiresAt: new Date(0) } });
+  });
+
+  it('P9b: with that create expired the room is free', async () => {
+    await fillSecrets(ROOM - 3);
+    await fill(1, fillers, { prefix: 'old-create', expired: true });
     staged(await create(member, 'slot-two'));
+  });
+
+  it('P9c: completion at the limit is not blocked by its own request', async () => {
+    await fillSecrets(ROOM - 3); // one slot left
+    const first = await create(manager, 'completes');
+    staged(first);
+    const row = await db.secretChangeRequest.findUniqueOrThrow({ where: { id: first.requestId } });
+    // Completion judges room with assertAppSecretRoom (secrets only): one slot is free, so the request does not count itself.
+    const { assertAppSecretRoom } = await import('./appSecrets.js');
+    await expect(db.$transaction(tx => assertAppSecretRoom(tx as never, row.appId))).resolves.toBeUndefined();
   });
 
   it('P10: concurrent protected creates at the edge of the room admit exactly one', async () => {
