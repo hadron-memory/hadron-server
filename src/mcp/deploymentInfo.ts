@@ -291,7 +291,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // 0.44.0 — NEW REFUSAL, #5184: `updateMemory` with a `urn` (slug) argument on a `personal` or `private` memory that
 // belongs to an App answers APP_MEMORY_SLUG_FIXED (extension `memoryClass`) and applies nothing. An organization-owned
 // one renamed before; a user-owned one answered BAD_USER_INPUT. `name` still changes. No SDL change. (0.43.0 is #5080, merged first.)
-// 0.45.0 — #5183 (A1 of #5182): createMemoryInApp's `name` is optional. For a personal or private memory the server derives
+// 0.45.0 — BREAKING (behaviour, no SDL removal), #5183 (A1 of #5182): createMemoryInApp's `name` is optional. For a personal or private memory the server derives
 // slug and display name (<app>-<handle>-<class>), the memory is the user's own, one per class per App
 // (APP_USER_MEMORY_ALREADY_EXISTS). A client that still sends `name` has it ignored for those classes. Also changed for those
 // classes: the memory's tenant moves from the App's organization to the user (organizationId null, URN rooted on their handle),
@@ -302,7 +302,9 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // are no longer answered by it. New: detachMemoryFromApp(memoryRef, appRef): Boolean! and App.attachedMemories. A pure App key and
 // a userless run read a linked memory (never write it) while its attacher can read it in their own right. A lagging client that
 // relied on the old bind and rename still parses the call but silently gets a link only. (0.45.0 is #5239, merged first.)
-export const HADRON_SERVER_VERSION = '0.46.0';
+// 0.47.0 — ADDITIVE, #5218: `App.viewerAppUserMemoryClasses: [MemoryClass!]!`, the personal/private classes the
+// signed-in viewer may still create in the App through `createMemoryInApp`. A lagging client still validates. (0.46.0 is #5258, merged first.)
+export const HADRON_SERVER_VERSION = '0.47.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
