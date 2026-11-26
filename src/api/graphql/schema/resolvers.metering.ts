@@ -232,13 +232,16 @@ export const meteringQueries = {
     const owner = { organizationId: orgId };
     const asOf = await databaseNow(ctx.db);
     // One probe and at most one replay (#5100 items 2, 8): what is settled, what stays unsettled and the `expiring` list all
-    // come from that one read. A writing read settles first and reads the stored sum after it (see settleAndMeasure); a
-    // read that writes nothing (impersonated, or after a failed settlement) takes the probe, the replay and the sum in ONE
-    // REPEATABLE READ snapshot, so a settlement another reader or the sweep commits meanwhile cannot be counted twice.
-    const readOnly = async () =>
+    // come from that one read, and the probe, the replay, any settlement written and the stored sum are taken in ONE
+    // REPEATABLE READ snapshot, for the writing read and for the read that writes nothing alike (#5242 item 2). A settlement
+    // another reader or the sweep commits meanwhile is then in neither or in both of the replay and the sum, never counted
+    // twice (the sweep's clock can pass a grant's 60 s mark between this read's replay and its sum). A writing read whose
+    // snapshot collides with a concurrent settler of the same grant fails the transaction (a serialization failure) and
+    // answers from the read-only snapshot after logging one line (ruling 10.4).
+    const snapshot = (write: boolean) =>
       ctx.db.$transaction(
         async (tx) => {
-          const m = await settleAndMeasure(tx as unknown as typeof ctx.db, owner, asOf, { write: false });
+          const m = await settleAndMeasure(tx as unknown as typeof ctx.db, owner, asOf, { write });
           return { measure: m, sum: await creditBalance(tx as unknown as typeof ctx.db, orgId) };
         },
         { isolationLevel: 'RepeatableRead' },
@@ -246,14 +249,13 @@ export const meteringQueries = {
     let measure: CreditMeasure;
     let sum: bigint;
     if (isReadOnlyImpersonation(ctx)) {
-      ({ measure, sum } = await readOnly());
+      ({ measure, sum } = await snapshot(false));
     } else {
       try {
-        measure = await settleAndMeasure(ctx.db, owner, asOf, { write: true });
-        sum = await creditBalance(ctx.db, orgId);
+        ({ measure, sum } = await snapshot(true));
       } catch (err) {
         console.error('credit_expiry.settle_failed', { organizationId: orgId, code: safeErrorCode(err) });
-        ({ measure, sum } = await readOnly());
+        ({ measure, sum } = await snapshot(false));
       }
     }
     return { organizationId: orgId, balanceMicroCents: (sum - measure.unsettled).toString(), asOf, replay: measure.replay };

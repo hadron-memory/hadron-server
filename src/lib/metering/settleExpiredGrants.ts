@@ -216,11 +216,10 @@ export interface CreditMeasure {
  * #5100 items 2 and 8: the read path of `creditBalance` in ONE probe and AT MOST ONE replay (one window read). The probe
  * is made at `now`; when it finds an expired, unsettled grant the replay at `now` yields both what to settle (expired
  * 60 s ago or more, written when `write`) and what stays unsettled (the rest, or all of it when nothing is written),
- * so no second read of the ledger can disagree with the first. With `write: true` the caller reads the stored sum AFTER
- * this call: a settlement written here is in that sum and was excluded from `unsettled` (`dueIds`), one written by another
- * settler between the replay and the sum is the same grant, which this call also lists as due, and nobody settles a grant
- * inside the 60 s. With `write: false` that argument does not hold (nothing here is excluded), so the caller MUST run
- * this call and the sum read in ONE REPEATABLE READ snapshot (see `creditBalance`). `replay` is handed on so the
+ * so no second read of the ledger can disagree with the first. The caller MUST run this call and the stored-sum read
+ * in ONE REPEATABLE READ snapshot, with `write` true or false (see `creditBalance`): `unsettled` excludes only what THIS call
+ * settled, so a settlement another settler commits between the replay and an unsnapshotted sum read (the sweep's clock can
+ * pass a grant's 60 s mark in that gap) would be counted in both. `replay` is handed on so the
  * `expiring` field needs no second replay.
  */
 export async function settleAndMeasure(
