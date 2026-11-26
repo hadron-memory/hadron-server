@@ -158,3 +158,29 @@ it('#5211 stays linear on deep quotes inside list items', () => {
     expect({ unit: unit.slice(0, 20), fast: Date.now() - t0 < 5000 }).toEqual({ unit: unit.slice(0, 20), fast: true });
   }
 }, 120_000);
+
+describe('#5265 item 2: a list closed by an HTML block keeps its code', () => {
+  it.each(['- a\n<div>\n\n    <script>', '> - a\n> <div>\n>\n>     <script>', '- a\nb\n<div>\n\n    <script>'])('%j stays as written', (body) => {
+    expect(escapeUnterminatedHtml(body)).toBe(body);
+    expect(losers(body)).toEqual([]);
+  });
+});
+
+describe('#5265 item 4: a tab before a quote inside a list item', () => {
+  cases([['the quote continues the item', '> - a\n>\t> q\n>\n>     §script>', ['commonmark.js', 'markdown-it']]]);
+});
+
+describe('#5265 item 6: marked starts a fence right after a line-head declaration', () => {
+  cases([
+    ['with a final newline', '§!DOCTYPE html>```\n', ['marked']],
+    ['without one', '§!DOCTYPE html>```', ['marked']],
+    ['a tilde fence', '§!DOCTYPE html>~~~', ['marked']],
+  ]);
+});
+
+describe('#5265 item 9: a line of mixed -, * and _ is no thematic break', () => {
+  cases([
+    ['-*- continues the item', '- a\n-*-\n\n    §script>', ALL],
+    ['*-* too', '- a\n*-*\n\n    §script>', ALL],
+  ]);
+});
