@@ -158,11 +158,11 @@ describe('acceptance 2: a value that is not a token, or an unknown family, is BA
     expect(await db.hostWorkerAssignment.count()).toBe(0);
   });
 
-  it('a family the host has no launcher template for', async () => {
-    for (const family of ['gemini', 'bash', 'claude code', 'Claude/Code', '']) {
+  it('a family that is not a token (#5249: any family token is stored; a launcher is the host\'s to have)', async () => {
+    for (const family of ['bash -c x', 'claude code', 'Claude/Code', '']) {
       expect(await code(assign({ family })), family).toBe('BAD_LAUNCHER_PROFILE');
     }
-    for (const family of ['claude', 'Claude', 'anthropic', 'codex', 'openai', 'glm', 'kimi']) {
+    for (const family of ['claude', 'Claude', 'anthropic', 'codex', 'openai', 'glm', 'kimi', 'gemini', 'bash']) {
       await assign({ family, replace: true });
     }
     expect(await db.hostWorkerAssignment.count()).toBe(1);
