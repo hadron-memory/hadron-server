@@ -53,6 +53,11 @@ describe('#5211 item 2: a line indented to an open list item continues it', () =
     ['a tab', '1. a\n\n\t§script>', ALL],
     ['a nested item', '- a\n  - b\n\n    §script>', ALL],
     ['an item in a quote', '> - a\n>\n>     §script>', ALL],
+    // A quote inside the item continues it (QA, #5257 delta).
+    ['a quote inside the item', '- a\n  > q\n\n    §script>', ALL],
+    ['an ordered item', '1. a\n   > q\n\n     §script>', ALL],
+    ['a nested quote', '- a\n  > > q\n\n    §script>', ALL],
+    ['the second item', '- a\n- b\n  > q\n\n    §script>', ALL],
   ]);
   it('four columns past the item content is code in every reader, and stays as written', () => {
     for (const body of ['- a\n\n      <script>', '1. a\n\n       <script>', '- a\n\nb\n\n    <script>', '- a\n# H\n\n    <script>', '- a\n***\n\n    <script>', '- a\n> q\n\n    <script>', '> - a\n>\n>       <script>']) {
