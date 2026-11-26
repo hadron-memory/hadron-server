@@ -7,6 +7,10 @@
  * level inside an input object) is the door probe, `src/api/graphql/schema/resolvers.refEcho5168.test.ts`, which
  * calls each door and reads what comes back. This guard catches the shapes the probe cannot reach: MCP handlers, and
  * doors whose refusal sits behind an earlier gate the probe's caller does not pass.
+ *
+ * One more blind spot (blind seat F4 on #5255): the `console.*` argument is cut by counting parentheses without
+ * reading string literals, so a `(` inside a logged string can widen the cut past the call (hiding a refusal later on
+ * that line) and a `)` can end it early (a false hit). Keep a refusal off a line that logs.
  */
 
 /** Each pattern is one refusal shape that interpolates a value as the thing refused. */
@@ -36,6 +40,9 @@ export const ECHO_CLASS: RegExp[] = [
   // A value read from the caller's arguments (shorthand, `args.*`, `input.*`); a resolved row's id (`task.id`) is not one.
   /_NOT_FOUND['"], [^\n]*\{ ?(?:ref|id|eventId|hostId|taskId)(?:: (?:args|input)\.[\w.]+)? ?\}\)/,
   /code: ['"]\w+_NOT_FOUND['"], (?:ref|id|eventId|hostId|taskId):/,
+  // Blind seat F1 on #5255: any typed code (not only *_NOT_FOUND) relaying a caller-typed reference in its extensions
+  // (`ref: nodeRef`, `id: args.id`, `taskId: input.taskId`). A resolved row's field (`task.id`) is not one.
+  /code: ['"][A-Z_]+['"],[^\n]*\b(?:ref|id|eventId|hostId|taskId): (?:nodeRef|ref|urn|args\.[\w.]+|input\.[\w.]+)\b/,
 ];
 
 /**

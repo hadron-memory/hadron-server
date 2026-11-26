@@ -24,3 +24,14 @@ describe('#5225: the console exemption is the call argument only', () => {
     expect(echoesOnLine('`Node not found at loc "${input.loc}" in memory "${input.memoryId}"`')).toBe(false);
   });
 });
+
+describe("#5255 blind F1: a caller reference relayed in any typed code's extensions", () => {
+  it('is caught for a non-NOT_FOUND code', () => {
+    expect(echoesOnLine("{ extensions: { code: 'NODE_HAS_DESCENDANTS', count: descendantCount, ref: nodeRef } },")).toBe(true);
+    expect(echoesOnLine("{ extensions: { code: 'SOME_CONFLICT', id: args.id } }")).toBe(true);
+  });
+  it("a resolved row's field is not caller text", () => {
+    expect(echoesOnLine("{ extensions: { code: 'SOME_CONFLICT', id: task.id } }")).toBe(false);
+    expect(echoesOnLine("{ extensions: { code: 'NODE_HAS_DESCENDANTS', count: descendantCount } },")).toBe(false);
+  });
+});
