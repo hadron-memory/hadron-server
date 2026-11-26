@@ -86,6 +86,7 @@ import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
 import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
 import { loadOwnerDefaultLimits } from './lib/ownerLimits/defaults.js';
+import { loadOwnerDefaultMonthlyGrant } from './lib/metering/periodGrant.js';
 import { nodeContentMaxBytes } from './lib/nodeContentLimit.js';
 import { complexityAdmissionPlugin } from './api/graphql/admissionComplexity.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
@@ -1232,6 +1233,11 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // #5009: the deployment's default owner limits; a malformed value refuses boot.
   loadOwnerDefaultLimits();
   nodeContentMaxBytes(); // #5019: a malformed ceiling refuses boot
+  // #5022: the default monthly grant; a malformed value refuses boot. The effective amounts on one line (micro-cents).
+  const monthlyGrant = loadOwnerDefaultMonthlyGrant();
+  console.log(JSON.stringify({
+    event: 'period_grant.config', user: monthlyGrant.user.toString(), organization: monthlyGrant.organization.toString(),
+  }));
   // The effective L4 configuration, on one line, so ops can confirm the mode a deploy actually booted with.
   console.log(JSON.stringify({
     event: 'graphql.admission.config', mode: admission.complexityMode, maxDepth: admission.maxDepth,
