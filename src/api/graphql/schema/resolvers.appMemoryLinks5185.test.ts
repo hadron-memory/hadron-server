@@ -481,6 +481,38 @@ describe('detach is no App-existence oracle for a caller who cannot read the mem
   });
 });
 
+describe('detach for a caller who CAN read the memory, with a missing App', () => {
+  it('an unknown and a deleted App answer FORBIDDEN, the same as an App the caller has no say over', async () => {
+    const m = await memory({}); // alice reads it (org reader)
+    const deleted = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Gone', urn: `${org.urn}:gone4`, deletedAt: new Date() } as never });
+    const norm = (r: { code: string; message: string } | null) => r && { code: r.code, message: r.message.split(m.id).join('<ref>') };
+    const unknown = norm(await refusal(detach(asUser(alice), m.id, generateId())));
+    const gone = norm(await refusal(detach(asUser(alice), m.id, deleted.id)));
+    expect(unknown).toMatchObject({ code: 'FORBIDDEN' });
+    expect(gone).toEqual(unknown);
+  });
+});
+
+describe('a throwing own-right judgement', () => {
+  it('makes only that link inert; the rest of the listing survives and a fail-open catch would not', async () => {
+    const good = await memory({});
+    const bad = await memory({});
+    await attach(asUser(alice), good.id, orgApp.id);
+    await attach(asUser(alice), bad.id, orgApp.id);
+    try {
+      registerOwnRightReader((async (c: Context, memoryId: string) => {
+        if (memoryId === bad.id) throw new Error('boom');
+        return holdsContentReadIndependently(c, memoryId);
+      }) as never);
+      const judged = await (await import('../../../lib/appMemoryLinks.js')).judgeAppLinks(db as never, orgApp.id);
+      expect(judged.find((j) => j.memoryId === good.id)?.active).toBe(true);
+      expect(judged.find((j) => j.memoryId === bad.id)?.active).toBe(false);
+    } finally {
+      registerOwnRightReader(holdsContentReadIndependently as never);
+    }
+  });
+});
+
 describe('GraphQL memory(ref:) for a linked knowledge memory of another tenant', () => {
   it('the key reads the record once linked, and not before', async () => {
     const m = await memory({});
