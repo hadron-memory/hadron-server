@@ -2367,7 +2367,10 @@ export const typeDefs = `#graphql
     """
     markupBasisPoints: Int
     """
-    Defaults to now. Appends a new effective-dated row - never mutates.
+    When the row takes effect: an ISO 8601 date or date-time (a date alone is midnight UTC, no offset is UTC). It
+    must be at least 60 seconds from now, so every server applies the row from that instant and no row is ever dated
+    in the past; an earlier time is BAD_USER_INPUT. Defaults to now plus 60 seconds. Appends a new row: price rows
+    are never changed or deleted (hrn:node:hadronmemory.com:specs:cor:dmo:170:06).
     """
     effectiveAt: String
   }
@@ -14256,7 +14259,7 @@ export const typeDefs = `#graphql
     mintActionTickets(input: MintActionTicketsInput!): Int!
     "Set the stored (enforced) quota limit for a scope x action (#510) - the operator dial that previously required psql. Org-ADMIN."
     setQuotaLimit(input: SetQuotaLimitInput!): QuotaCounter!
-    "Append an effective-dated provider rate row (spec 046). PLATFORM ADMIN - org admins must never set the prices they are billed at."
+    "Append an effective-dated provider rate row (spec 046). PLATFORM ADMIN - org admins must never set the prices they are billed at. The row takes effect at least 60 seconds after it is written and is never changed or deleted (hrn:node:hadronmemory.com:specs:cor:dmo:170:06)."
     setAiModelPrice(input: SetAiModelPriceInput!): AiModelPrice!
     "Mint credits for an organization or a person (give exactly one of orgRef and userRef) - a positive grant ledger row (spec 046). PLATFORM ADMIN or the BILLING platform role only (self-grant risk; #5012); processor top-ups land here."
     grantCredits(input: GrantCreditsInput!): CreditLedgerEntry!

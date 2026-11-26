@@ -33,6 +33,7 @@ import {
   InvalidLedgerAmountError,
   isServerWrittenSourceType,
   LEDGER_SOURCE_CONFLICT_MESSAGE,
+  PRICE_CACHE_TTL_MS,
   PRICE_TIER_DEFAULT,
   PRICE_TIER_MAX,
   PRICE_TIER_MIN,
@@ -384,8 +385,22 @@ export const meteringMutations = {
     if (markupBasisPoints != null && (!Number.isInteger(markupBasisPoints) || markupBasisPoints < 0)) {
       throw badInput('markupBasisPoints must be a non-negative integer (2500 = 25%).');
     }
-    const effectiveAt = input.effectiveAt ? new Date(input.effectiveAt) : new Date();
-    if (Number.isNaN(effectiveAt.getTime())) throw badInput('effectiveAt is not a valid date.');
+    // #5021 (hrn:node:hadronmemory.com:specs:cor:dmo:170:06): a row may not take effect in the past, which would
+    // change which row covers units already recorded, nor before every process's price cache has had one lifetime
+    // to expire (or learn the new row's instant), so it takes effect everywhere at once. An omitted date is the
+    // earliest allowed instant. The text is read by the strict ISO rule (gate ruling 7, #5008's rule).
+    const earliest = new Date(Date.now() + PRICE_CACHE_TTL_MS);
+    let effectiveAt = earliest;
+    if (input.effectiveAt != null) {
+      const parsed = parseSpendInstant(input.effectiveAt);
+      if (!parsed) throw badInput('effectiveAt must be an ISO 8601 date or date-time, for example 2026-12-01T00:00:00Z.');
+      if (parsed.getTime() < earliest.getTime()) {
+        throw badInput(
+          `effectiveAt must be at least ${PRICE_CACHE_TTL_MS / 1000} seconds from now (not before ${earliest.toISOString()}): a price takes effect only once every server can apply it, and never in the past. Leave it out for the earliest allowed time.`,
+        );
+      }
+      effectiveAt = parsed;
+    }
     let row: AiModelPrice;
     try {
       row = await ctx.db.aiModelPrice.create({
@@ -409,8 +424,8 @@ export const meteringMutations = {
       }
       throw err;
     }
-    // The hot-path cache may hold the now-superseded row for up to its TTL;
-    // drop it so new events price correctly right away.
+    // #5021: no longer needed for correctness (the lead and the next-row expiry switch every process at the
+    // effective instant); dropping this process's cache just makes it look the new row up on its next unit.
     clearPriceCache();
     return projectPrice(row);
   },
