@@ -325,6 +325,8 @@ const EXPECTED_INPUT_REF_FIELDS: string[] = [
   'CreateAgentTaskInput.parentTaskRef', 'CloneAgentTaskInput.parentTaskRef',
   'TickerInput.channelRefs', 'TickerPatch.channelRefs',
   'BatchThrough.channelRef',
+  // #5163: the compare-and-set guard of resumeSession, an id or a worker URN through resolveWorkerRef.
+  'ResumeSessionInput.expectedWorkerRef',
 ];
 
 /** `Type.field` -> why it stays `*Id`. An empty reason, or an entry that no longer matches a field, fails. */
@@ -332,7 +334,6 @@ const ALLOWED_INPUT_ID_FIELDS: Record<string, string> = {
   // Ref-able entity, but exempt.
   'NodeInput.memoryId': 'the legacy shape of the retired replaceSubtree, which refuses without writing (#4219 kept replaceSubtree(memoryId:) so legacy callers still reach REPLACE_SUBTREE_RETIRED)',
   'LegacyNodeEdgeInput.targetId': 'the frozen edge shape of NodeInput.edges (the retired replaceSubtree); NodeEdgeInput is the live one',
-  'ResumeSessionInput.expectedWorkerId': 'compare-and-set guard, deferred: hadron-server#5163 (a known gap against cor:api:140:01; the id-only refusal is built behaviour of #3822, not a rule of cor:agt:020:03)',
   'RegisterContextResetRecoveryInput.taskId': "an echo of the reset's own task, compared raw: it confirms a value the server handed the host and looks nothing up",
   'SkillFileFactsInput.nodeId': "a value read from a provenance header on the caller's disk and reported as a fact, not a lookup",
   // Names no ref-able entity.
@@ -402,8 +403,8 @@ describe('#5080 — input-type fields that name an entity take <entity>Ref', () 
     expect(t, `${type} is missing from the SDL`).toBeDefined();
     expect(Object.keys(t!.getFields()), `${key}: cor:api:140:01`).toContain(field);
   });
-  it('lists all 21 renamed input fields', () => {
-    expect(EXPECTED_INPUT_REF_FIELDS).toHaveLength(21);
+  it('lists all 22 renamed input fields (21 from #5080, ResumeSessionInput.expectedWorkerRef from #5163)', () => {
+    expect(EXPECTED_INPUT_REF_FIELDS).toHaveLength(22);
   });
   it('no input type declares an unlisted <entity>Id / id field', () => {
     expect(inputIdProblems()).toEqual([]);
@@ -416,6 +417,7 @@ describe('#5080 — input-type fields that name an entity take <entity>Ref', () 
       ['NodeEdgeInput', 'targetId'], ['SearchReplaceInNodesInput', 'nodeIds'], ['SearchReplaceInNodesInput', 'memoryIds'],
       ['SpecSearchReplaceInput', 'nodeIds'], ['BeginAssetUploadV2Input', 'memoryId'], ['CreateAgentTaskInput', 'parentTaskId'],
       ['CloneAgentTaskInput', 'parentTaskId'], ['TickerInput', 'channelIds'], ['TickerPatch', 'channelIds'], ['BatchThrough', 'channelId'],
+      ['ResumeSessionInput', 'expectedWorkerId'],
     ];
     for (const [type, field] of old) {
       expect(Object.keys((schema.getType(type) as GraphQLInputObjectType).getFields()), `${type}.${field} still exists`).not.toContain(field);

@@ -42,12 +42,13 @@ import {
   normalizeUrnForLookup,
   legacyMemoryUrnToCanonical,
   agentSlugFromUrn,
+  parseUrnV2,
 } from '../../../lib/urn.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
-import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
+import { refNamesNothing, refHasUnstorableChars } from '../../../lib/entityRef/refNamesNothing.js';
 import { isAppGateRefusal, appNotFound } from '../../../lib/auth/workerRead.js';
 import { serveBindInTransaction, resolveReadableWorkerRef, resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
@@ -755,8 +756,11 @@ type ResumeSessionInput = {
   /** #4291: refreshed on an open session it resumes, recorded on one it starts. */
   effort?: string | null;
   transcriptPath?: string | null;
-  /** #3822: the worker the caller expects to recover (the CLI worktree's last-bound worker). */
-  expectedWorkerId?: string | null;
+  /**
+   * #3822: the worker the caller expects to recover (the CLI worktree's last-bound worker). #5163: a reference, an id
+   * or a worker URN (cor:api:140:01).
+   */
+  expectedWorkerRef?: string | null;
 };
 
 /**
@@ -802,18 +806,21 @@ const resumeRefused = (dormant: boolean) =>
  * Disclosure: the found worker is the caller's own (its claim or live session), so naming it tells nothing new. The
  * expected worker is caller-supplied, so its NAME is given only when the caller passes the worker read gate
  * (`resolveReadableWorkerRef`, the gate every worker-state read uses); otherwise only the id it sent is echoed, so this
- * is no id-to-name oracle (#3901 BLIND, Glen's limit).
+ * is no id-to-name oracle (#3901 BLIND, Glen's limit). #5163: a URN names no id the caller sent, so `expectedWorkerId`
+ * is the resolved id only when the caller passes that gate, and null otherwise, the same null an unknown URN gets: a
+ * URN is never a URN-to-id oracle.
  *
  * `picked`: the caller chose the found item by `session`. Then A may still have something waiting, so the message
  * says only that the pick is another worker's (#3901 BLIND, Glen P3-1).
  */
 const workerMismatch = (
-  expected: { id: string; name: string | null },
+  expected: { id: string | null; name: string | null },
   found: { id: string; name: string; source: 'CLAIM' | 'LIVE_SESSION' },
   picked: boolean,
 ) => {
   const what = found.source === 'CLAIM' ? 'resume claim' : 'live session';
-  const label = expected.name ?? `worker ${expected.id}`;
+  // #5163: a URN the caller may not read (or that names nothing) carries no id and no name, so it is named generically.
+  const label = expected.name ?? (expected.id ? `worker ${expected.id}` : 'the worker you named');
   const head = picked
     ? `The session you picked is ${found.name}'s ${what}, not ${label}'s.`
     : `Nothing of ${label}'s waits to resume: the ${what} waiting for you is ${found.name}'s.`;
@@ -2022,25 +2029,61 @@ export const sessionMutations = {
       const explicitFamily = explicitFamilyOrThrow(given.family);
       const explicitEffort = explicitEffortOrThrow(given.effort);
       // #3822: likewise a blank expected worker refuses before any read. Null or omitted means no narrowing.
-      const expectedWorkerId = given.expectedWorkerId == null ? null : given.expectedWorkerId.trim();
-      if (expectedWorkerId === '') {
-        throw new GraphQLError('expectedWorkerId must not be blank: omit it to resume without naming a worker.', { extensions: { code: 'BAD_USER_INPUT' } });
+      const expectedRef = given.expectedWorkerRef == null ? null : given.expectedWorkerRef.trim();
+      if (expectedRef === '') {
+        throw new GraphQLError('expectedWorkerRef must not be blank: omit it to resume without naming a worker.', { extensions: { code: 'BAD_USER_INPUT' } });
       }
-      // #3912: a URN or a name is not an id. Refuse it here, before any read, so it never reaches the read gate that
-      // would name it back ("Bea's, not Bea's"). After the NOTHING_TO_RESUME line above, so a caller who may not resume
-      // learns nothing about the value; a valid id takes the path it always did.
-      if (expectedWorkerId !== null && !isId(expectedWorkerId)) {
-        throw new GraphQLError('expectedWorkerId must be a worker id, not a URN or a name: pass the id the worker was bound with.', { extensions: { code: 'BAD_USER_INPUT' } });
+      // #5163 (cor:api:140:00, :01): the expected worker is a reference, an id or a fully qualified worker URN.
+      //  - An id takes the path it always did (#3822), byte for byte.
+      //  - Anything else must be a worker URN, judged on its shape alone before any read (a name, a relative URN, another
+      //    type, a wrong arity or a code point no stored URN holds): URN_NOT_QUALIFIED, the boundary's typed refusal,
+      //    which never quotes the value (#5168). After the NOTHING_TO_RESUME line above, so a caller who may not resume
+      //    learns nothing about the value.
+      //  - A well-formed URN resolves through the shared resolver. One that names nothing (an unknown App or worker, an
+      //    ambiguous legacy App URN) is `id: null`: nothing of it can wait, so the call takes today's mismatch or
+      //    nothing-to-resume path. One that resolves to a worker the caller may not read takes the same path (the
+      //    caller holds nothing of it) and echoes no id, so unknown and unreadable are one answer. Only a name-resolution
+      //    outcome folds; a database fault propagates.
+      // The mismatch refusal gives back as expectedWorkerId the id the caller sent, or for a URN the resolved id only
+      // once the caller passes the worker read gate (decided where the refusal is built, below).
+      let expected: { id: string | null; viaUrn: boolean } | null = null;
+      if (expectedRef !== null) {
+        if (isId(expectedRef)) {
+          expected = { id: expectedRef, viaUrn: false };
+        } else {
+          if (refHasUnstorableChars(expectedRef)) throw new UrnNotQualifiedError(expectedRef);
+          let parsed: ReturnType<typeof parseUrnV2>;
+          try {
+            parsed = parseUrnV2(expectedRef);
+          } catch (e) {
+            throw new UrnNotQualifiedError(expectedRef, e instanceof UrnParseError ? e : undefined);
+          }
+          if (parsed.type !== 'worker') throw new UrnNotQualifiedError(expectedRef);
+          let id: string | null = null;
+          try {
+            ({ id } = await resolveWorkerRefId(ctx.db, expectedRef));
+          } catch (e) {
+            if (!refNamesNothing(e, { ambiguousNamesNothing: true })) throw e;
+          }
+          expected = { id, viaUrn: true };
+        }
       }
+      const expectedWorkerId = expected?.id ?? null;
+      // #5163: a URN that names nothing narrows to nothing: no claim or live session of it can wait.
+      const namesNothing = expected !== null && expectedWorkerId === null;
       const now = new Date();
       // #3901 LOCAL (Gene P2): the expected worker's claims are filtered in the query, before the candidate cap.
-      const claims = await liveClaimsOf(ctx.db, userId, now, expectedWorkerId ? { workerId: expectedWorkerId } : {});
+      const claims = namesNothing
+        ? []
+        : await liveClaimsOf(ctx.db, userId, now, expectedWorkerId ? { workerId: expectedWorkerId } : {});
       // #3822: with an expected worker the call is the no-argument resume restricted to that worker; everything
       // below decides on its claims and live sessions only. Another worker's items are read only to refuse.
       // #3901 BLIND (Glen P2): the expected worker's live pool is filtered in the query, BEFORE the scan cap, so
       // other workers' sessions can never refuse RESUME_AMBIGUOUS on a resume of the expected worker.
       const liveOfExpected = () =>
-        liveWorkerSessionsOf(ctx.db, userId, now, expectedWorkerId ? { workerId: expectedWorkerId } : {});
+        namesNothing
+          ? Promise.resolve([] as Awaited<ReturnType<typeof liveWorkerSessionsOf>>)
+          : liveWorkerSessionsOf(ctx.db, userId, now, expectedWorkerId ? { workerId: expectedWorkerId } : {});
       /**
        * #3822: nothing of the expected worker's waits (or the pick is another worker's). Refuse WORKER_MISMATCH when
        * something of another worker of the caller's does (a claim first, as the no-argument resume decides claims
@@ -2049,24 +2092,31 @@ export const sessionMutations = {
        */
       type Found = { workerId: string; appId: string | null; source: 'CLAIM' | 'LIVE_SESSION' };
       const mismatchOrNothing = async (pick: string | null) => {
-        if (!expectedWorkerId) return nothingToResume();
-        const [other] = await liveClaimsOf(ctx.db, userId, now, { notWorkerId: expectedWorkerId, ...(pick ? { sessionId: pick } : {}) });
+        if (!expected) return nothingToResume();
+        // A URN that names nothing excludes no worker: every item of the caller's is another worker's.
+        const notExpected = expectedWorkerId ? { notWorkerId: expectedWorkerId } : {};
+        const [other] = await liveClaimsOf(ctx.db, userId, now, { ...notExpected, ...(pick ? { sessionId: pick } : {}) });
         let found: Found | null = other ? { workerId: other.workerId, appId: other.appId, source: 'CLAIM' } : null;
         if (!found) {
-          const otherLive = await firstLiveWorkerSessionOf(ctx.db, userId, now, { notWorkerId: expectedWorkerId, ...(pick ? { id: pick } : {}) });
+          const otherLive = await firstLiveWorkerSessionOf(ctx.db, userId, now, { ...notExpected, ...(pick ? { id: pick } : {}) });
           if (otherLive) found = { workerId: otherLive.workerId!, appId: otherLive.appId, source: 'LIVE_SESSION' };
         }
         if (!found) return nothingToResume();
         const foundWorker = await ctx.db.worker.findUnique({ where: { id: found.workerId }, select: { name: true } });
         let expectedName: string | null = null;
-        try {
-          expectedName = (await resolveReadableWorkerRef(ctx, expectedWorkerId)).worker.name;
-        } catch (e) {
-          // Narrow: an absent or unreadable worker is named by nothing but the id the caller sent.
-          if (!(e instanceof GraphQLError && e.extensions?.code === 'WORKER_NOT_FOUND')) throw e;
+        if (expectedWorkerId) {
+          try {
+            expectedName = (await resolveReadableWorkerRef(ctx, expectedWorkerId)).worker.name;
+          } catch (e) {
+            // Narrow: an absent or unreadable worker is named by nothing but the id the caller sent.
+            if (!(e instanceof GraphQLError && e.extensions?.code === 'WORKER_NOT_FOUND')) throw e;
+          }
         }
+        // #5163: a URN gives its resolved id back only to a caller who may read the worker (the name says so); an
+        // unreadable one echoes null, exactly as a URN naming nothing does.
+        const echoId = expected.viaUrn && expectedName === null ? null : expectedWorkerId;
         return workerMismatch(
-          { id: expectedWorkerId, name: expectedName },
+          { id: echoId, name: expectedName },
           { id: found.workerId, name: foundWorker?.name ?? found.workerId, source: found.source },
           pick !== null,
         );
