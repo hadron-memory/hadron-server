@@ -173,6 +173,19 @@ describe('#1173 — a refusal states the condition, never another surface\'s rem
   // `conventions:the-error-code-is-the-contract-the-prose-is-not`.
   const FOREIGN_VOCABULARY = /appRef|orgId|scopeRef|hadron_|\(MCP\)|\(GraphQL\)/;
 
+  it('#5188 control: the vocabulary guard knows every current argument name, so a green not.toMatch is proof of absence', async () => {
+    // A refusal message that DID say `orgRef` (or any other term) must be
+    // caught: each term matches on its own. Without this, dropping a renamed
+    // argument from the pattern would leave every `not.toMatch` green while
+    // proving nothing — the mutant the #5188 seat runs removes `orgRef` from
+    // FOREIGN_VOCABULARY and this goes red.
+    for (const term of ['appRef', 'orgRef', 'orgId', 'scopeRef', 'hadron_set_active_org', '(MCP)', '(GraphQL)']) {
+      expect(`a remedy that says ${term} here`).toMatch(FOREIGN_VOCABULARY);
+    }
+    // And the negative half: a message with none of the vocabulary stays green.
+    expect('name an organization to scope this search').not.toMatch(FOREIGN_VOCABULARY);
+  });
+
   const refusalOf = async (call: Promise<unknown>) => {
     try {
       await call;
