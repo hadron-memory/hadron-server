@@ -6246,9 +6246,10 @@ export const typeDefs = `#graphql
     modelGroups: [String!]
 
     """
-    #2252 (R189) — the coarse tier of model from the platform's one model-to-tier mapping: high (opus-class),
-    mid (sonnet-class), low (haiku-class); null when the model is unmapped (no guessed equivalence for another
-    family). Advisory: a coordinator's reading aid, never an authorization or routing input in this slice.
+    #2252 (R189) — the coarse tier of model from the platform's one model-to-tier mapping: high (opus- or
+    fable-class), mid (sonnet-class), low (haiku-class), with the glm, gpt and deepseek lines placed by their vendor's
+    positioning; null when the model is unmapped (no guessed tier for a model nobody has
+    placed). Advisory: a coordinator's reading aid, never an authorization or routing input in this slice.
     """
     tier: String
     """
