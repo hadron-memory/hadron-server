@@ -16,7 +16,7 @@
  */
 import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
-import { type Context, getAccessibleMemoryIds } from './resolvers.helpers.js';
+import { type Context, getAccessibleMemoryIds, requireCallerIdentity } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { nodeMutations, updateNodePropertiesWith } from './resolvers.mutation.node.js';
 import { nodeQueries } from './resolvers.query.node.js';
@@ -85,6 +85,7 @@ export const objectMutations = {
     { memoryRef, type, fields, key, name }: { memoryRef: string; type: string; fields: unknown; key?: string | null; name?: string | null },
     ctx: Context,
   ): Promise<StoredObject> => {
+    requireCallerIdentity(ctx);
     const t = requireType(type);
     const f = fields ?? {};
     if (!isPlainObject(f)) throw badInput('`fields` must be a JSON object.');

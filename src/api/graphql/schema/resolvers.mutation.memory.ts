@@ -902,6 +902,7 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1381: resolve the ref (id OR URN, cor:api:140:01) so a miss is a typed
       // MEMORY_NOT_FOUND rather than Prisma's own error text, and conceal a
       // memory the caller cannot open exactly as that miss. `id` is the
@@ -1310,6 +1311,7 @@ export const memoryMutations = {
       { memoryRef }: { memoryRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
       // #1316: a caller who cannot open the memory's record is denied as if
@@ -1335,6 +1337,7 @@ export const memoryMutations = {
     },
 
     deleteMemory: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      requireCallerIdentity(ctx);
       // includeDeleted: a re-delete on an already-soft-deleted memory must
       // return true (FR-014 idempotency). The default resolveMemoryRef
       // would throw MemoryNotFoundError on the second call.
@@ -1452,6 +1455,7 @@ export const memoryMutations = {
       { ref, targetUrn }: { ref: string; targetUrn: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN
       // (conventions:ref-param-naming — bare `ref` since the memory is the
       // obvious entity).
@@ -1620,6 +1624,7 @@ export const memoryMutations = {
       { parentRef, targetUrn, move: rawMove }: { parentRef: string; targetUrn: string; move?: boolean | null },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const move = rawMove ?? false;
 
       // Resolve the parent node (PK or fully-qualified URN). A miss surfaces as
@@ -1856,6 +1861,7 @@ export const memoryMutations = {
       { ref, token, expiresAt }: { ref: string; token: string; expiresAt?: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
       const { id } = await resolveMemoryRef(ctx.db, ref);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
@@ -1886,6 +1892,7 @@ export const memoryMutations = {
       { agentRef, memoryRef, role }: { agentRef: string; memoryRef: string; role?: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // 007-entity-id-or-urn: agentId and memoryId may be IDs, bare URNs,
       // or prefixed URNs. Resolve both to definite IDs before any
       // subsequent checks. #1944: the Agent through the read gate, so one
@@ -2013,6 +2020,7 @@ export const memoryMutations = {
       { agentRef, memoryRef }: { agentRef: string; memoryRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1944: an Agent the caller can't read answers as absent.
       const agent = await resolveReadableAgentRef(ctx, agentRef);
       const resolvedAgentId = agent.id;
@@ -2050,6 +2058,7 @@ export const memoryMutations = {
       { memoryRef, orgRef, role }: { memoryRef: string; orgRef: string; role: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #764 (was 007-entity-id-or-urn): memoryRef/orgRef accept id / URN /
       // (org) handle. #4142 (S6 chunk F) dropped the deprecated memoryId/orgId
       // aliases: the refs are required and the only way in.
@@ -2116,6 +2125,7 @@ export const memoryMutations = {
       { memoryRef, orgRef, role }: { memoryRef: string; orgRef: string; role: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const resolvedMemoryId = await resolveRequiredMemoryRef(ctx.db, memoryRef);
       // #1381: hidden from this caller ⇒ resolveRefArg's own miss, decided HERE,
       // before the org resolves — an org error arriving first would tell an
@@ -2153,6 +2163,7 @@ export const memoryMutations = {
       { memoryRef, orgRef }: { memoryRef: string; orgRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const resolvedMemoryId = await resolveRequiredMemoryRef(ctx.db, memoryRef);
       // #1381: unlike create/update, a caller who cannot open the memory CAN
       // succeed here — an admin of the subscribing org removing its own
@@ -2243,6 +2254,7 @@ export const memoryMutations = {
     },
 
     syncMemory: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      requireCallerIdentity(ctx);
       // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
       const { id } = await resolveMemoryRef(ctx.db, ref);
       const memory = await ctx.db.memory.findUniqueOrThrow({
@@ -2279,6 +2291,7 @@ export const memoryMutations = {
     },
 
     pushMemoryToGit: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      requireCallerIdentity(ctx);
       // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
       const { id } = await resolveMemoryRef(ctx.db, ref);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
@@ -2299,6 +2312,7 @@ export const memoryMutations = {
       { memoryRef, externalUserId }: { memoryRef: string; externalUserId: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
       // 007-entity-id-or-urn: memoryRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
@@ -2563,6 +2577,7 @@ export const memoryMutations = {
       { memoryRef }: { memoryRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // 007-entity-id-or-urn: memoryRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
@@ -2979,6 +2994,7 @@ export const memoryMutations = {
       }: { memoryRef: string; granteeRef: string; role: MemoryShareRoleType },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       if (!ctx.userId) {
         throw new GraphQLError('createMemoryShare requires an authenticated user', {
           extensions: { code: 'UNAUTHENTICATED' },
@@ -3042,6 +3058,7 @@ export const memoryMutations = {
       }: { memoryRef: string; granteeRef?: string | null },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       if (!ctx.userId) {
         throw new GraphQLError('deleteMemoryShare requires an authenticated user', {
           extensions: { code: 'UNAUTHENTICATED' },
@@ -3139,6 +3156,7 @@ export const memoryMutations = {
       }: { memoryRef: string; granteeRef: string; role: MemoryShareRoleType },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       if (!ctx.userId) {
         throw new GraphQLError('updateMemoryShareRole requires an authenticated user', {
           extensions: { code: 'UNAUTHENTICATED' },

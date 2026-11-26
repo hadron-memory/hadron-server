@@ -19,6 +19,7 @@ import {
   concealUnreadableDenial,
   loadReadableMemoryRecord,
   resolveOrgScope,
+  requireCallerIdentity,
 } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
@@ -123,6 +124,7 @@ export const channelMutations = {
     { input }: { input: { memoryRef: string; loc: string; name: string; description?: string | null } },
     ctx: Context,
   ): Promise<Channel> => {
+    requireCallerIdentity(ctx);
     if (ctx.impersonation) throw forbiddenError();
     if (!ctx.userId) throw unauthenticatedError();
     const memoryRef = input.memoryRef.trim();

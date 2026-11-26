@@ -159,6 +159,7 @@ async function answer(name: string, target: Target, args: Args, ctx: Context) {
   return text;
 }
 
+const userOnly = new Set(['createChannel', 'createNodeRoleRule', 'createMemoryShare', 'updateMemoryShareRole', 'deleteMemoryShare']);
 const resolverName = (label: string) => label.replace(/\(.*/, '');
 const signedOut = (): Context => ({ db, roles: [], clientId: 'anonymous' });
 
@@ -185,6 +186,8 @@ describe('write door target refusals', () => {
       ['another user', (): Context => ({ db, userId: outsiderId, roles: ['READER'], clientId: `user:${outsiderId}` })],
       ["another organization's App key", (): Context => ({ db, appId: foreignAppId, roles: [], clientId: `app:${foreignAppId}` })],
     ])('does not treat %s as signed out', async (_caller, ctx) => {
+      // These doors need a user by their own rule, so an App key is UNAUTHENTICATED there either way.
+      if (!ctx().userId && userOnly.has(resolverName(name))) return;
       for (const target of [miss, real]) {
         expect(await answer(resolverName(name), target, args, ctx())).not.toContain('"code":"UNAUTHENTICATED"');
       }

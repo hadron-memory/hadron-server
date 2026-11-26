@@ -1144,6 +1144,7 @@ export const specCorpusRenumberMutations = {
     { memoryRef, fromLoc, toLoc, dryRun }: { memoryRef: string; fromLoc: string; toLoc: string; dryRun?: boolean | null },
     ctx: Context,
   ): Promise<SpecRenumberResultOut> => {
+    requireCallerIdentity(ctx);
     const corpus = await loadScannableCorpus(ctx, memoryRef);
     // #4461: `fromLoc` names an EXISTING node (looked up below, a miss is NODE_NOT_FOUND), so it is not capped: an
     // existing over-cap spec must still be renumberable. Only `toLoc`, what the caller writes, is held to the

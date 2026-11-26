@@ -4031,6 +4031,7 @@ export const nodeMutations = {
       },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1300 (Holger, 2026-09-24): NO platform-role gate here. The global
       // `requireRole(ctx, 'CONTRIBUTOR')` this opened with refused every
       // self-signed-up user (default roles [READER]) on ANY node, even as OWNER
@@ -4211,6 +4212,7 @@ export const nodeMutations = {
       },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1300 (Holger, 2026-09-24): NO platform-role gate here. The global
       // `requireRole(ctx, 'CONTRIBUTOR')` this opened with refused every
       // self-signed-up user (default roles [READER]) on ANY node, even as OWNER
@@ -4329,6 +4331,7 @@ export const nodeMutations = {
       { edgeRef }: { edgeRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1300 (Holger, 2026-09-24): NO platform-role gate here. The global
       // `requireRole(ctx, 'CONTRIBUTOR')` this opened with refused every
       // self-signed-up user (default roles [READER]) on ANY node, even as OWNER
@@ -4430,6 +4433,7 @@ export const nodeMutations = {
       { sourceRef, targetUrn, targetMemoryRef }: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const selectedSource = await resolveExistingNode(ctx, sourceRef);
       // Cloning READS the source's content — require read access to the source
       // memory, or the URN-widened input becomes a cross-tenant exfiltration
@@ -5176,6 +5180,7 @@ export const nodeMutations = {
       { nodeRevRef, truncate = false }: { nodeRevRef: string; truncate?: boolean },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const notFound = () => new GraphQLError('Node revision not found', {
         extensions: { code: 'NOT_FOUND' },
       });
@@ -5511,6 +5516,7 @@ export const nodeMutations = {
     // (as restoreNodeRevision) — the memory you own the live node in, even if the
     // snapshot was captured in another memory before a move.
     deleteNodeRevision: async (_: unknown, { nodeRevRef }: { nodeRevRef: string }, ctx: Context) => {
+      requireCallerIdentity(ctx);
       const notFound = () => new GraphQLError('Node revision not found', { extensions: { code: 'NOT_FOUND' } }); // #5168: no caller ref relayed
       const revisionId = await resolveRevisionIdOrNotFound(ctx, nodeRevRef, notFound);
       // #3329: a revision whose node's memory is soft-deleted is answered as missing, in the same single lookup,
@@ -5548,6 +5554,7 @@ export const nodeMutations = {
       { nodeRevRef, revLabel }: { nodeRevRef: string; revLabel?: string | null },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const notFound = () =>
         new GraphQLError('Node revision not found', {
           extensions: { code: 'NOT_FOUND' },
@@ -5634,6 +5641,7 @@ export const nodeMutations = {
       }: { nodeRef: string; connectionRef: string; folderId?: string | null; title?: string | null },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       let nodeId: string;
       try {
         ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef));

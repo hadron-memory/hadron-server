@@ -15,6 +15,7 @@ import {
   concealUnreadableDenial,
   isPlatformAdmin,
   requireOrgRole,
+  requireCallerIdentity,
 } from './resolvers.helpers.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 
@@ -262,6 +263,7 @@ async function transferPreview(
 
 export const memoryTransferMutations = {
   transferMemoryOwnership: async (_: unknown, input: TransferInput, ctx: Context) => {
+    requireCallerIdentity(ctx);
     const { id } = await resolveMemoryRef(ctx.db, input.memoryRef);
     const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
     await authorizeSource(ctx, memory, input.memoryRef);
