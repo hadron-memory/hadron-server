@@ -56,6 +56,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
+import { derivedSlugBase, nextFreeDerivedSlug } from '../../../lib/derivedSlug.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import { uninstallApp, reinstallApp, locateForDelete } from './appInstallState.js';
@@ -77,6 +78,7 @@ import {
   requireReadableAgent,
   requirePersonalAppAgentInstall,
   assertAppNotUninstalled,
+  assertNameNotBlank,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
@@ -521,7 +523,15 @@ export const appMutations = {
       // namespace is an org domain OR the bare user handle for a user-owned App.
       // #574: shared slugify.
       //
-      const appSlug = deriveSlugFromName(urn ?? name);
+      // #5203 S3: with no `urn` supplied the slug is DERIVED from the name and never refuses the create
+      // (hrn:node:hadronmemory.com:specs:cor:urn:010:01). It skips a reserved word and any App row holding the URN on
+      // the active index (`uninstalled_at IS NULL`, the scope of apps_urn_active_uniq), live or deleted, so a deleted
+      // holder is never reclaimed. A supplied `urn` keeps today's answers below.
+      if (urn == null) assertNameNotBlank(name, 'App');
+      const appSlug = urn != null
+        ? deriveSlugFromName(urn)
+        : await nextFreeDerivedSlug(derivedSlugBase(name), async (candidate) =>
+          (await ctx.db.app.count({ where: { urn: `${namespace}:${candidate}`, uninstalledAt: null } })) > 0);
       const appUrn = `${namespace}:${appSlug}`;
 
       // 009-install-agent-flow: agentRef is required (typeDef gate). Resolve the
@@ -609,7 +619,7 @@ export const appMutations = {
         personalSubscription = !isOwnAgent;
       }
 
-      // Hard-delete a soft-deleted collision so the URN can be reused
+      // Hard-delete a soft-deleted collision so the URN can be reused (a supplied `urn` only, #5203 S3)
       // (same pattern as createAgent/createMemory).
       //
       // Spec 021 FR-027: App.urn is no longer globally unique — the
@@ -618,9 +628,9 @@ export const appMutations = {
       // active row via `findFirst` with the active-row filter so
       // uninstalled history rows sharing the same URN don't surface
       // here.
-      const existing = await ctx.db.app.findFirst({
+      const existing = urn != null ? await ctx.db.app.findFirst({
         where: { urn: appUrn, uninstalledAt: null },
-      });
+      }) : null;
       if (existing) {
         if (existing.deletedAt) {
           // #974 / cor:agt:020:02: a soft-deleted App keeps reserving all of

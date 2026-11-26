@@ -11,6 +11,7 @@ import { createHash, randomBytes } from 'crypto';
 import { APP_KEY_PREFIX } from '../middleware/auth.js';
 import type { PrismaClient, Role } from '../generated/prisma/index.js';
 import { drainNodeUsage } from '../lib/usageRecorder.js';
+import { clearPriceCache } from '../lib/metering/priceCache.js';
 
 /** Build a deterministic test App key with the canonical `hdr_app_` prefix. */
 export function buildAppKey(suffix?: string): string {
@@ -168,8 +169,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // hadron_server, which nothing below deletes) — clear them first.
   await db.aiServiceConfig.deleteMany();
   await db.hadronServer.deleteMany();
-  // Spec 046 — usage metering (prices are FK-free; ledger FKs org only).
-  await db.aiModelPrice.deleteMany();
+  // Spec 046 — usage metering. Price rows are cleared LAST, with the usage events that reference them (#5021).
   // #5010: the ledger is append-only by trigger (a row DELETE is refused); TRUNCATE fires no row trigger.
   await db.$executeRawUnsafe('TRUNCATE credit_ledger_entries');
   // Spec 043 — Slack integration (receipts have no FK; connections FK org + app).
@@ -290,9 +290,18 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // for an untracked writer overlapping parent deletion: new asynchronous
   // usage producers must use trackUsageWrite and finish before this boundary.
   // Safe in this position because every UsageEvent FK is nullable
-  // and `SetNull` — node, session, app, user, organization — and `memoryId` is a
-  // denormalized column with no FK at all (#796).
+  // and `SetNull` — node, session, app, user, organization, app run — and `memoryId` is a
+  // denormalized column with no FK at all (#796). The one exception, `priceRowId`,
+  // RESTRICTs, which is why price rows are cleared here and not earlier.
   await db.usageEvent.deleteMany();
+  // #5021: price rows are kept by trigger (a row DELETE is refused); TRUNCATE fires no row trigger. Postgres
+  // refuses to truncate a table another table references unless both are truncated, so usage_events joins it
+  // (already empty: the deleteMany above ran its rollup triggers). usage_events is listed first, the order a
+  // late usage insert takes them, so the two cannot deadlock.
+  await db.$executeRawUnsafe('TRUNCATE usage_events, ai_model_prices');
+  // The price cache describes rows that no longer exist: a cached row's id would make the next unit's insert
+  // fail its price-row key (#5021), so the cache is reset with the table.
+  clearPriceCache();
   // #992 — reinstall the per-chat seq unique index if a reader fixture
   // dropped it (see restoreChatSeqUniqueness): vitest workers reuse one
   // clone across files, and rows are gone by here, so reinstalling is safe.

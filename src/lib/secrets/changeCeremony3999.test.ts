@@ -11,7 +11,7 @@ import { buildSchema, type GraphQLObjectType } from 'graphql';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { formatGraphQLError } from '../../api/graphql/formatError.js';
 /** #3999 real database and real software-passkey assertions, no production or provider calls. */
-import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -40,8 +40,9 @@ async function complete(id:string,p:any,k=key){return completeSecretChange(db,{r
  assertion:k.assert({payload:Buffer.alloc(0),rawChallenge:Buffer.from(p.challenge,'base64url'),origin:ORIGIN,rpId:RP})});}
 const row=async(id:string)=>(await db.$queryRaw<ChangeRequest[]>`SELECT * FROM secret_change_requests WHERE id=${id}`)[0];
 beforeEach(async()=>{
- process.env.SECRET_ROOT_KEY='22'.repeat(32);process.env.PASSKEY_SIGNING_ENABLED='true';
- process.env.PASSKEY_RP_ID=RP;process.env.SIGNING_CEREMONY_ORIGINS=ORIGIN;
+ // #4626 item 14: stubbed, not written, so afterEach restores the worker process's environment for the next file.
+ vi.stubEnv('SECRET_ROOT_KEY','22'.repeat(32));vi.stubEnv('PASSKEY_SIGNING_ENABLED','true');
+ vi.stubEnv('PASSKEY_RP_ID',RP);vi.stubEnv('SIGNING_CEREMONY_ORIGINS',ORIGIN);
  await cleanDb(db); await upsertPlatformActions(db);
  userId=(await db.user.create({data:{email:`${generateId()}@s4.test`}})).id;
  appId=(await db.app.create({data:{ownerUserId:userId,name:'S4 ceremony',urn:`${generateId().toLowerCase()}:s4`}})).id;
@@ -49,6 +50,7 @@ beforeEach(async()=>{
  await db.secret.update({where:{id:secretId},data:{protected:true}});
  await insertSoftPasskey(db,userId,key,{rpId:RP});
 });
+afterEach(()=>{vi.restoreAllMocks();vi.unstubAllEnvs();});
 describe('#3999 own passkey ceremony',()=>{
  it('commits one re-encrypted version, clears staged ciphertext and retains completed polling',async()=>{
   const id=await stage(),r=await row(id);expect(r.staged_value_encrypted).toBeTruthy();
@@ -218,7 +220,7 @@ describe('#3999 update protection terms',()=>{
  it('shows an explicit protection change when updateSecret stages no new value',async()=>{
   const id=(await error(resolvers.Mutation.updateSecret({}, {ref:secretId,protected:false},ctx()))).extensions.requestId;
   const r=await row(id);expect(r.staged_value_encrypted).toBeNull();expect(r.key_version).toBeNull();
-  const p=await proof(id);expect(p.outcome).toBe('change');if(p.outcome==='change')expect(p.summary.change).toContain('turn protection off');
+  const p=await proof(id);expect(p.outcome).toBe('change');if(p.outcome==='change')expect(p.summary.change).toBe('Turn protection off');
   await complete(id,p);expect((await db.secret.findUniqueOrThrow({where:{id:secretId}})).protected).toBe(false);expect(await db.secretVersion.count({where:{secretId}})).toBe(1);
  });
  it('a protected metadata-only edit keeps the current version unchanged',async()=>{
@@ -271,13 +273,16 @@ describe('#3999 completion expiry clock',()=>{
  it('ends and clears an expired request using the decision clock after locks',async()=>{
   const id=await stage(),p=await proof(id);
   // This Vitest worker owns its private DB. Move only the shared signing-decision clock, then restore it in finally.
+  // #4626 item 15: restore the CAPTURED pg_get_functiondef text, not a hard-coded body — the real definition
+  // carries clauses (e.g. SET search_path) a hand-written reset would silently drop.
+  const original=String((await db.$queryRaw<{pg_get_functiondef:string}[]>`SELECT pg_get_functiondef('hadron_signing_now'::regproc)`)[0].pg_get_functiondef);
   await db.$executeRawUnsafe("CREATE OR REPLACE FUNCTION hadron_signing_now() RETURNS timestamp(3) LANGUAGE sql VOLATILE AS $$ SELECT (clock_timestamp() AT TIME ZONE 'UTC' + interval '2 hours')::timestamp(3) $$");
   try{
    await expect(complete(id,p)).rejects.toMatchObject({extensions:{code:'SECRET_CHANGE_REQUEST_EXPIRED'}});
    expect((await row(id)).state).toBe('expired');expect((await row(id)).staged_value_encrypted).toBeNull();
    expect(await db.secretVersion.count({where:{secretId}})).toBe(1);
   }finally{
-   await db.$executeRawUnsafe("CREATE OR REPLACE FUNCTION hadron_signing_now() RETURNS timestamp(3) LANGUAGE sql VOLATILE AS $$ SELECT (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) $$");
+   await db.$executeRawUnsafe(original);
   }
  });
 });

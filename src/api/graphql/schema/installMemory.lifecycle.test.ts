@@ -156,11 +156,15 @@ describe('#2044 install memory — URN reclaim (R29) and account erasure', () =>
     await f.create(f.admin);
     const [row] = await f.installRows();
     await M.deleteApp({}, { ref: f.app.id }, ctxOf(f.admin.id));
-    const reclaim = () => M.createApp({}, { orgRef: orgId, agentRef: f.agent.id, name: 'Reclaim Me' }, ctxOf(f.admin.id));
+    // #5203 S3: only a SUPPLIED urn reclaims a deleted App; a derived one iterates past it (pinned below).
+    const reclaim = () => M.createApp({}, { orgRef: orgId, agentRef: f.agent.id, name: 'Reclaim Me', urn: 'reclaim-me' }, ctxOf(f.admin.id));
     await expect(reclaim()).rejects.toMatchObject({ extensions: { code: 'INSTALL_MEMORIES_REMAIN' } });
     // Nothing was destroyed by the refused attempt.
     expect(await db.app.count({ where: { id: f.app.id } })).toBe(1);
     expect((await db.memory.findUniqueOrThrow({ where: { id: row!.id } })).deletedAt).toBeNull();
+    const derived = await M.createApp({}, { orgRef: orgId, agentRef: f.agent.id, name: 'Reclaim Me' }, ctxOf(f.admin.id));
+    expect(derived.urn).toBe('il-org:reclaim-me-2');
+    expect(await db.app.count({ where: { id: f.app.id } })).toBe(1);
     await expect(M.deleteMemory({}, { ref: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
     await expect(reclaim()).resolves.toBeTruthy();
     expect(await db.app.count({ where: { id: f.app.id } })).toBe(0);

@@ -65,10 +65,15 @@ beforeEach(async () => {
 
 // #5149: the name is no longer a root loc, so only a name that cannot be stored or yields no slug refuses. The names
 // #2730 refused and creation now admits are pinned in resolvers.memoryName5149.test.ts.
+// #5203 S3 (cor:urn:010:01): a name that yields no slug (':', '..') is no longer refused; it creates under the fallback
+// base, pinned below and in resolvers.memoryName5149.test.ts. An empty or blank name is the refusal that replaced it.
 const refusedNames: [string, string][] = [
+  ['a whitespace-only name', '   '],
+  ['a NUL', 'a\0b'],
+];
+const noSlug: [string, string][] = [
   ['a name with no slug', ':'],
   ['a parent directory', '..'],
-  ['a NUL', 'a\0b'],
 ];
 const admitted: [string, string][] = [
   ['spaces', 'Has Space'],
@@ -97,6 +102,17 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
       await d().create(`Private root ${door}`);
       expect(graphEntries()).toBe(entries);
     });
+    for (const [label, name] of noSlug) {
+      it(`creates ${label} under the fallback slug, with no graph residue and no root node (#5203 S3)`, async () => {
+        const entries = graphEntries();
+        const memory = await d().create(name);
+        const row = await db.memory.findUniqueOrThrow({ where: { id: memory.id } });
+        expect(row).toMatchObject({ organizationId: org.id, name });
+        expect(row.urn.split(':').pop()).toBe('untitled');
+        expect(await db.node.findMany({ where: { memoryId: memory.id } })).toEqual([]);
+        expect(graphEntries()).toBe(entries);
+      });
+    }
     for (const [label, name] of admitted) {
       it(`still creates a memory, and no root node (#3952), for ${label}`, async () => {
         const memory = await d().create(name);
@@ -108,7 +124,7 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
       // The run's graph root is shared by every worker (#1951); simulate a concurrent file writing a node.
       const other = join(process.env.GRAPHS_PATH!, `other-worker-2796-${generateId()}`);
       try {
-        await refusedWithoutResidue(() => d().create(':'), () => mkdirSync(other));
+        await refusedWithoutResidue(() => d().create('   '), () => mkdirSync(other));
       } finally {
         rmSync(other, { recursive: true, force: true });
       }
@@ -124,16 +140,17 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
 
 describe('#2730 MCP delegates', () => {
   const auth = () => ({ userId: admin.id, roles: [] as any[], clientId: `user:${admin.id}` });
-  it('hadron_create_memory refuses a name with no slug with the input message', async () => {
-    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_memory', { name: ':', org: org.id });
-    expect(text).toMatch(/^Error: Invalid memory name/);
+  // #5203 S3: a name with no slug now creates (fallback base); a blank name is the input refusal, typed (#5197 F5).
+  it('hadron_create_memory refuses a blank name with the input message', async () => {
+    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_memory', { name: '   ', org: org.id });
+    expect(text).toMatch(/^\[bad_user_input\] Memory name must not be empty/);
     expect(text).not.toMatch(/internal/i);
     expect(await db.memory.count()).toBe(0);
   });
-  it('hadron_create_app_memory refuses a name with no slug with the input message', async () => {
-    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_app_memory', { app: app.id, name: ':' });
+  it('hadron_create_app_memory refuses a blank name with the input message', async () => {
+    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_app_memory', { app: app.id, name: '   ' });
     expect(text).not.toMatch(/internal/i);
-    expect(text).toMatch(/^Error: /);
+    expect(text).toMatch(/^\[bad_user_input\] /);
     expect(await db.memory.count()).toBe(0);
   });
 });

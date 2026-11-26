@@ -2367,7 +2367,10 @@ export const typeDefs = `#graphql
     """
     markupBasisPoints: Int
     """
-    Defaults to now. Appends a new effective-dated row - never mutates.
+    When the row takes effect: an ISO 8601 date or date-time (a date alone is midnight UTC, no offset is UTC). It
+    must be at least 60 seconds from now, so every server applies the row from that instant and no row is ever dated
+    in the past; an earlier time is BAD_USER_INPUT. Defaults to now plus 60 seconds. Appends a new row: price rows
+    are never changed or deleted (hrn:node:hadronmemory.com:specs:cor:dmo:170:06).
     """
     effectiveAt: String
   }
@@ -6873,7 +6876,7 @@ export const typeDefs = `#graphql
     id: ID!
     """The effective state, with expiry judged on the server clock: open, completed, declined (the requester declined on the ceremony page), expired, withdrawn (the requester withdrew it) or stale (the secret changed first)."""
     state: String!
-    """The requested operation."""
+    """The requested operation: STORE, DELETE, SET_PROTECTED or CLEAR_PROTECTED. STORE is staged by createSecret and updateSecret (a create, a new value version, a metadata edit or a protection change); DELETE by deleteSecret; the protection pair by setSecretProtected."""
     operation: String!
     """Creation time."""
     createdAt: DateTime!
@@ -6922,7 +6925,7 @@ export const typeDefs = `#graphql
     grantId: ID!
     secretName: String!
     selfIssued: Boolean!
-    "The worker holder was held by the actual signer at issuance (R22); null for a pending or legacy client, sealed once captured."
+    "Whether the holder is the actual signer's own worker (#3999 R22): the marker is written when the read client is activated in the passkey issuance flow and judged against the worker's hold at that moment (not the hold at any earlier time). true — a worker the signer held then; false — a person-held client, a worker another person held, or a worker with no live hold then; null — not captured (pending) or a legacy row. Sealed once captured."
     issuedToOwnWorker: Boolean
   }
 
@@ -6945,7 +6948,7 @@ export const typeDefs = `#graphql
     secretId: ID!
     secretName: String!
     selfIssued: Boolean!
-    "The worker holder was held by the actual signer at issuance (R22); null for a pending or legacy client, sealed once captured."
+    "Whether the holder is the actual signer's own worker (#3999 R22): the marker is written when the read client is activated in the passkey issuance flow and judged against the worker's hold at that moment (not the hold at any earlier time). true — a worker the signer held then; false — a person-held client, a worker another person held, or a worker with no live hold then; null — not captured (pending) or a legacy row. Sealed once captured."
     issuedToOwnWorker: Boolean
     "Null while live, else one of SECRET_DELETED, PROTECTED, REVOKED, PENDING, SPENT, EXPIRED, NOT_STARTED, ISSUER_GONE (nothing else ended it) or ENDED. A stored end wins; otherwise the grant's own state, in the order the reveal door answers."
     endReason: String
@@ -14273,7 +14276,7 @@ export const typeDefs = `#graphql
     mintActionTickets(input: MintActionTicketsInput!): Int!
     "Set the stored (enforced) quota limit for a scope x action (#510) - the operator dial that previously required psql. Org-ADMIN."
     setQuotaLimit(input: SetQuotaLimitInput!): QuotaCounter!
-    "Append an effective-dated provider rate row (spec 046). PLATFORM ADMIN - org admins must never set the prices they are billed at."
+    "Append an effective-dated provider rate row (spec 046). PLATFORM ADMIN - org admins must never set the prices they are billed at. The row takes effect at least 60 seconds after it is written and is never changed or deleted (hrn:node:hadronmemory.com:specs:cor:dmo:170:06)."
     setAiModelPrice(input: SetAiModelPriceInput!): AiModelPrice!
     "Mint credits for an organization or a person (give exactly one of orgRef and userRef) - a positive grant ledger row (spec 046). PLATFORM ADMIN or the BILLING platform role only (self-grant risk; #5012); processor top-ups land here."
     grantCredits(input: GrantCreditsInput!): CreditLedgerEntry!
@@ -14678,7 +14681,7 @@ export const typeDefs = `#graphql
       orgRef: ID
       name: String!
       """
-      #5203: the slug to store, when the caller chose one. It is validated, not derived: a reserved word or a malformed slug is BAD_USER_INPUT and a taken one is refused as before. Omitted or null: the slug is derived from name.
+      #5203: the slug to store, when the caller chose one. It is validated, not derived: a reserved word or a malformed slug is BAD_USER_INPUT and a taken one is refused as before. Omitted or null: the slug is derived from name, and a derived slug never refuses the create: it skips a reserved word and any taken slug, a deleted holder's included, as base, base-2, base-3 (an empty or blank name is BAD_USER_INPUT; a name that yields no slug uses the base untitled).
       """
       slug: String
       shortDescription: String
@@ -15001,7 +15004,7 @@ export const typeDefs = `#graphql
     orgRef accepts the org's ID or URN; an empty orgRef is BAD_USER_INPUT. An empty
     systemMemoryRef means none (a system memory is provisioned).
     """
-    createAgent(orgRef: ID, name: String!, "#5203: the slug to store, when the caller chose one. It is validated, not derived: a reserved word or a malformed slug is BAD_USER_INPUT and a taken one is refused as before. Omitted or null: the slug is derived from name." slug: String, description: String, systemMemoryRef: ID, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null is LONG_LIVED." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted or null is no cap." contextCap: Int, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
+    createAgent(orgRef: ID, name: String!, "#5203: the slug to store, when the caller chose one. It is validated, not derived: a reserved word or a malformed slug is BAD_USER_INPUT and a taken one is refused as before. Omitted or null: the slug is derived from name, and a derived slug never refuses the create: it skips a reserved word and any taken slug, a deleted holder's included, as base, base-2, base-3 (an empty or blank name is BAD_USER_INPUT; a name that yields no slug uses the base untitled)." slug: String, description: String, systemMemoryRef: ID, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null is LONG_LIVED." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted or null is no cap." contextCap: Int, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
     """
     Clone an Agent into an organization you administer: a new PERSONAL-draft Agent
     with its own copy of the source's system memory, its links and imports, and a recorded origin. Needs a
@@ -15019,6 +15022,8 @@ export const typeDefs = `#graphql
     and grants. A base or import is licensed for the TARGET organization at clone time, or the clone refuses
     (CLONE_BASE_UNUSABLE, CLONE_IMPORT_UNUSABLE). A refusal's blocker subjects carry a name only when you can read the
     subject; otherwise only a position. The clone's origin is Agent.clonedFromAgentRef.
+    #5203: an empty or omitted name keeps the source's name. With no slug, the slug is derived from the name and never
+    refuses the clone: it skips a reserved word and any taken slug, a deleted holder's included, as base, base-2, base-3.
     """
     cloneAgent(source: ID!, target: ID!, name: String, slug: String): Agent!
 
@@ -15328,6 +15333,15 @@ export const typeDefs = `#graphql
     of a Secret, and nothing changes until the requester completes the passkey
     ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The expiry and the two
     caps are as for createSecret.
+    Legacy webfetch-auth rows (written before metadata.type was derived from
+    the value) recover differently per owner kind, because only org and user
+    rows are re-validated against their own decrypted stored value. There, any
+    edit — metadata-only included — re-derives the type. An App row keeps its
+    value in versions, which a metadata-only edit does not decrypt: rewriting
+    the VALUE re-validates the (metadata, value) pair and re-derives the type,
+    while a metadata-only edit of such a row is refused (the stored type is
+    unavailable) until a value rewrite restores it. This holds for protected
+    and unprotected App rows alike; it is not part of the passkey rules above.
     """
     updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean): Secret!
     """
@@ -16016,6 +16030,11 @@ export const typeDefs = `#graphql
       """
       agentRef: ID!
       name: String!
+      """
+      #5203: the App's slug, when the caller chose one; a taken one is refused CONFLICT. Omitted: the slug is derived
+      from name and never refuses the create: it skips a reserved word and any taken slug, a deleted holder's included,
+      as base, base-2, base-3 (an empty or blank name is BAD_USER_INPUT; a name that yields no slug uses the base untitled).
+      """
       urn: String
       appType: AppType
       role: AppMembershipRole @deprecated(reason: "${APP_ROLE_DEPRECATION_NOTICE}")
