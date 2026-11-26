@@ -255,6 +255,18 @@ describe('collisions: numeric tail, aliases, tombstones', () => {
     expect(await db.memory.findUnique({ where: { id: held.id } })).not.toBeNull();
   });
 
+  it("two own tombstones hold the derived URN (one by alias), the later holding a question log: the first is NOT removed (all-or-nothing)", async () => {
+    const [idA, idB] = [generateId(), generateId()].sort();
+    const base = { ownerUserId: alice.id, userId: alice.id, appId: app.id, userMemoryOfAgentId: agent.id, class: 'private', tags: [], deletedAt: new Date() };
+    const plain = await db.memory.create({ data: { ...base, id: idA, urn: 'alice:tutor-alice-private', name: 'plain' } as never });
+    const held = await db.memory.create({ data: { ...base, id: idB, urn: 'alice:elsewhere', name: 'held' } as never });
+    await db.node.create({ data: { id: generateId(), memoryId: held.id, loc: 'log', name: 'log', content: '', role: 'question.log' } as never });
+    await db.urnAlias.create({ data: { urn: 'alice:tutor-alice-private', entityType: 'MEMORY', entityId: held.id, reason: 'RENAME' } as never });
+    expect((await mk(alice, 'private')).urn).toBe('alice:tutor-alice-private-2');
+    expect(await db.memory.findUnique({ where: { id: plain.id } })).not.toBeNull();
+    expect(await db.memory.findUnique({ where: { id: held.id } })).not.toBeNull();
+  });
+
   it("the caller's own tombstone of another class is never reclaimed", async () => {
     const other = await db.memory.create({ data: {
       id: generateId(), ownerUserId: alice.id, userId: alice.id, appId: app.id, userMemoryOfAgentId: agent.id,

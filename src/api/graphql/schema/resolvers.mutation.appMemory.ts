@@ -49,7 +49,7 @@ import { agentSlugFromUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
 import { refusedAppUserMemoryPrincipal, heldAppUserMemoryClasses } from './appUserMemoryEligibility.js';
 import { appUserMemorySlug, APP_USER_MEMORY_MAX_TAIL } from '../../../lib/appUserMemoryName.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
-import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
+import { reclaimTombstonedMemory, SPEC_MINTED_PERMANENT } from '../../../lib/mintedSpecPermanence.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug, requireCallerIdentity } from './resolvers.helpers.js';
 
@@ -487,19 +487,26 @@ export const appMemoryMutations = {
                 const ownTombstones = blockers.filter((b) =>
                   b.deletedAt !== null && b.userId === ctx.userId && b.appId === app.id && b.class === klass);
                 if (ownTombstones.length !== blockers.length) continue;
-                // A tombstone that may not be removed (it holds a minted spec or a question) keeps its address:
-                // that candidate is taken, and the next tail is tried, so a name collision never refuses (R2).
+                // A tombstone the reclaim refuses to remove (it holds a question or a protected minted spec) keeps its
+                // address: that candidate is taken and the next tail is tried, so a name collision never refuses (R2).
+                // All-or-nothing per candidate: a savepoint undoes any tombstone already removed for this candidate.
+                await tx.$executeRaw`SAVEPOINT app_user_memory_reclaim`;
                 let kept = false;
                 for (const b of ownTombstones.sort((x, y) => x.id.localeCompare(y.id))) {
                   try {
                     await reclaimTombstonedMemory(tx, b.id);
                   } catch (e) {
-                    if (!(e instanceof GraphQLError)) throw e;
+                    const code = e instanceof GraphQLError ? e.extensions?.code : undefined;
+                    if (code !== 'QUESTION_CONTAINED' && code !== SPEC_MINTED_PERMANENT) throw e;
                     kept = true;
                     break;
                   }
                 }
-                if (kept) continue;
+                if (kept) {
+                  await tx.$executeRaw`ROLLBACK TO SAVEPOINT app_user_memory_reclaim`;
+                  continue;
+                }
+                await tx.$executeRaw`RELEASE SAVEPOINT app_user_memory_reclaim`;
               }
               return createRow(tx, {
                 urn, name: candidate, organizationId: null, ownerUserId: ctx.userId!, appUserMemory: true,
