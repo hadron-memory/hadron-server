@@ -267,7 +267,7 @@ describe('per-run cost', () => {
     let loggedCalls: unknown[][] = [];
     try {
       recorded = await recordLlmUsage(db, {
-        type: 'app-run', appId: f.app.id, appRunId: run.id,
+        type: 'app-run', appId: f.app.id, appRunId: run.id, billableAccount: null,
         provider: 'test', model: 'test', tokensIn: 1000, tokensOut: 500,
       });
     } finally { loggedCalls = [...logged.mock.calls]; injector.restore(); logged.mockRestore(); }

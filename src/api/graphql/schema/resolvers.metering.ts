@@ -316,29 +316,42 @@ export const meteringQueries = {
 
   /**
    * #5008 (Billing A2): the organization's AI spend for [from, to), one grouping. Org-ADMIN, the gate of `creditBalance`
-   * and answered first, so a caller who may not read gets FORBIDDEN whatever the range says. Rows are scalars: `APP` keys
+   * and answered first, so a caller who may not read gets FORBIDDEN whatever the range says. #5020 (A13): or one PERSON's, by
+   * `userRef`, read by the billable account (the units that name them as the owner of the work), never by the user the work
+   * was done for. Rows are scalars: `APP` keys
    * are ids, never an App object (cor:dmo:170:04 keeps cost and charge apart; see the SDL).
    */
   aiSpend: async (
     _: unknown,
-    { orgRef, from, to, groupBy }: { orgRef: string; from: string; to: string; groupBy: AiSpendGroup },
+    { orgRef, userRef, from, to, groupBy }: { orgRef?: string | null; userRef?: string | null; from: string; to: string; groupBy: AiSpendGroup },
     ctx: Context,
   ) => {
-    // A reference that names no organization answers the denial any non-admin gets for an existing one, so the
-    // refusal does not tell which organizations exist (and echoes nothing of the ref). A platform admin passes
-    // the gate for every organization, so for them nothing is concealed and the not-found stays. Only the RESPONSE is
-    // equalised, not the work: a missing organization skips the membership lookup an existing one runs, so a timing
-    // difference remains. That is not a secret kept: organizations are listable (the #5008 issue), and the refusal is
-    // identical so this surface does not read as an existence oracle. An App key (no user) is denied by
-    // requireOrgRole with the same authorizationDenied(), so it gets the same answer for either.
-    let orgId: string;
-    try {
-      ({ id: orgId } = await resolveOrgRef(ctx.db, orgRef));
-    } catch (e) {
-      if (e instanceof OrganizationNotFoundError && !isPlatformAdmin(ctx)) throw authorizationDenied();
-      throw e;
+    // #5020: exactly one of the two refs, judged before any read or gate, so a malformed call is answered the same for every
+    // caller and discloses nothing.
+    if ((orgRef == null) === (userRef == null)) throw badInput('Give exactly one of orgRef and userRef.');
+    let scope: { organizationId: string } | { userId: string };
+    if (userRef != null) {
+      // A person's spend: that person in a user session, or a platform admin (A6's gate, which refuses an App key and an
+      // impersonated session on the credential and answers a missing user as it answers another person's).
+      scope = { userId: await requirePersonRecordRead(ctx, userRef) };
+    } else {
+      // A reference that names no organization answers the denial any non-admin gets for an existing one, so the
+      // refusal does not tell which organizations exist (and echoes nothing of the ref). A platform admin passes
+      // the gate for every organization, so for them nothing is concealed and the not-found stays. Only the RESPONSE is
+      // equalised, not the work: a missing organization skips the membership lookup an existing one runs, so a timing
+      // difference remains. That is not a secret kept: organizations are listable (the #5008 issue), and the refusal is
+      // identical so this surface does not read as an existence oracle. An App key (no user) is denied by
+      // requireOrgRole with the same authorizationDenied(), so it gets the same answer for either.
+      let orgId: string;
+      try {
+        ({ id: orgId } = await resolveOrgRef(ctx.db, orgRef!));
+      } catch (e) {
+        if (e instanceof OrganizationNotFoundError && !isPlatformAdmin(ctx)) throw authorizationDenied();
+        throw e;
+      }
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      scope = { organizationId: orgId };
     }
-    await requireOrgRole(ctx, orgId, 'ADMIN');
     const fromAt = parseSpendInstant(from);
     const toAt = parseSpendInstant(to);
     if (!fromAt || !toAt) throw badInput('from and to must be ISO 8601 dates or date-times (a value with no offset is UTC).');
@@ -346,7 +359,7 @@ export const meteringQueries = {
     if (toAt.getTime() - fromAt.getTime() > AI_SPEND_MAX_DAYS * 86_400_000) {
       throw badInput(`The range may span at most ${AI_SPEND_MAX_DAYS} days.`);
     }
-    const summary = await aiSpendSummary(ctx.db, { organizationId: orgId, from: fromAt, to: toAt, groupBy });
+    const summary = await aiSpendSummary(ctx.db, { ...scope, from: fromAt, to: toAt, groupBy });
     return { from: fromAt.toISOString(), to: toAt.toISOString(), ...summary };
   },
 };
