@@ -319,7 +319,7 @@ export const appMemoryMutations = {
 
     const app = await loadAppAndAuthorize(ctx, appRef, klass);
     const agent = await resolveInstalledAgent(ctx, app.id, agentRef);
-    // #5149: the name's only refusals, after the gates and before the tombstone reclaim or any create. A personal or
+    // #5149: the name's only refusals, after the gates and before any create (#5203 S3 removed the tombstone reclaim). A personal or
     // private memory's slug is an opaque id, but its name is judged by the same rule.
     const slug = deriveMemorySlug(name);
     assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
