@@ -182,6 +182,12 @@ describe('resolveRegister', () => {
       });
     });
 
+  it('#5236 defense in depth: a loc that somehow carries a line break (no door writes one) still renders on one line', async () => {
+    await db.channel.update({ where: { id: channel.id }, data: { loc: 'chats:team\napp: FORGED' } });
+    const block = renderDerivedBlocks(await resolveRegister(db, { attendee: { workerId: worker.id }, actor: ctx(admin.id) }));
+    expect(block.split(/\r\n|[\n\r]/).filter((l) => l.startsWith('app: FORGED'))).toEqual([]);
+  });
+
   it('#5236 collapsing adds no cut: a long name and description render whole, and a plain row is unchanged', async () => {
     const longName = 'n'.repeat(250);
     const longDesc = 'd'.repeat(400);

@@ -38,6 +38,7 @@ import { normalizeUrnForLookup } from './urn.js';
 import { emitEntityUrnV2 } from './urnEmit.js';
 import { readStatesFor } from './channelReadState.js';
 import { openSessionPlacement } from './sessionPlacement.js';
+import { collapseLineBreaks } from './collapseLineBreaks.js';
 
 /** v2 entity URN for display; falls back to the bare urn (display strings never throw). */
 function safeEmitEntityUrnV2(type: 'memory' | 'agent', bareUrn: string): string {
@@ -489,15 +490,23 @@ export function describeDisclosure(d: RegisterDisclosure): string {
 
 /**
  * The register as a briefing block — DERIVED data, never an authored prompt
- * part. Both the Worker resolver (`Worker.prompt`) and the run kernel call
- * this one function, so when the D11 composer lands it absorbs one function
- * rather than a fourth string-concatenation path. Returns '' for an attendee
- * with no rows, so a caller can append it unconditionally.
+ * part. The Worker resolver (`Worker.prompt`) and `hadron_whoami` call this
+ * one function (the run kernel does not, at the #5236 head), so when the D11
+ * composer lands it absorbs one function rather than a fourth string-concatenation
+ * path. Returns '' for an attendee with no rows, so a caller can append it
+ * unconditionally.
+ *
+ * #5236: the channel name and the entry description are written by someone other
+ * than the reader, so each is collapsed to one line here, the one composition
+ * point (no cut: the block never cut them). `hostMemoryUrn` and `loc` are
+ * collapsed the same way, as defense in depth: a URN and a loc grammar already
+ * exclude a line break, so this changes nothing for a legal value.
  */
 export function renderDerivedBlocks(view: RegisterView | null): string {
   if (!view || view.rows.length === 0) return '';
   const lines = view.rows.map((r) => {
-    const where = r.channel.hostMemoryUrn ? `${r.channel.hostMemoryUrn}:${r.channel.loc}` : `${r.channel.loc} (host memory hidden from this viewer)`;
+    const loc = collapseLineBreaks(r.channel.loc);
+    const where = r.channel.hostMemoryUrn ? `${collapseLineBreaks(r.channel.hostMemoryUrn)}:${loc}` : `${loc} (host memory hidden from this viewer)`;
     let standing: string;
     if (r.disclosure === 'UNKNOWN_ACTOR' && r.canPost === false) {
       standing = 'no eligible driver (read + post unavailable)';
@@ -514,7 +523,7 @@ export function renderDerivedBlocks(view: RegisterView | null): string {
           ? `new since seq ${seen} (channel is at ${r.channel.lastSeq})`
           : `nothing new (at seq ${r.channel.lastSeq})`
         : 'no messages yet';
-    return `- ${r.channel.name} — ${where}: ${flags}; ${standing}; ${water}${r.entry.description ? `\n  ${r.entry.description}` : ''}`;
+    return `- ${collapseLineBreaks(r.channel.name)} — ${where}: ${flags}; ${standing}; ${water}${r.entry.description ? `\n  ${collapseLineBreaks(r.entry.description)}` : ''}`;
   });
   return `## Channels (register)\n${lines.join('\n')}`;
 }

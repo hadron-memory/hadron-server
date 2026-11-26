@@ -418,6 +418,7 @@ import { admitOperationRate } from '../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../lib/rateLimit/identity.js';
 // Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
 import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
+import { collapseLineBreaks } from '../lib/collapseLineBreaks.js';
 import { attendeeMentionTokens } from '../lib/channelReadState.js';
 import { mentionReach } from '../lib/mentionReach.js';
 import {
@@ -1360,7 +1361,7 @@ function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent' | 'org', bareUrn: 
  * session rows (worker name, role and App name, #4587).
  */
 function oneLineText(name: string, max = 100): string {
-  const flat = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
+  const flat = collapseLineBreaks(name);
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
