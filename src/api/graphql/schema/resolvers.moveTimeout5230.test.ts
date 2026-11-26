@@ -213,6 +213,7 @@ describe('a move whose transaction expires', () => {
     ['a query on a committed transaction', () => known('Transaction API error: Transaction already closed: A query cannot be executed on a committed transaction.')],
     ['another code with the same words', () => known('Transaction already closed', 'P2025')],
     ['a plain error with the same words', () => new Error('Transaction already closed')],
+    ['an error that only looks like Prisma\'s', () => Object.assign(new Error('Transaction already closed'), { code: 'P2028' })],
   ];
 
   it.each(others)('does not map %s', async (_name, fault) => {

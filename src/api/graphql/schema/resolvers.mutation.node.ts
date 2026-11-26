@@ -1,4 +1,4 @@
-import { assertMoveWithinSizeLimit, SubtreeMoveTooLargeError } from '../../../lib/moveSizeLimit.js';
+import { assertMoveWithinSizeLimit, mapMoveExpiry, SubtreeMoveTimedOutError, SubtreeMoveTooLargeError } from '../../../lib/moveSizeLimit.js';
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { assertNoGenericMessageSeqWrite } from '../../../lib/legacyMessageSeq.js';
@@ -2622,7 +2622,7 @@ export const nodeMoveOps = {
         // #2622: a move rebases whole loc subtrees, so it is a chat-message
         // writer like any other — the #992 conflict surfaces typed here, once,
         // for every move caller (moveNode + the spec-corpus relocation).
-        const moved = await mapChatSeqConflict(() => ctx.db.$transaction(
+        const moved = await mapMoveExpiry(() => mapChatSeqConflict(() => ctx.db.$transaction(
           async (tx) => {
             if (planOnly) await tx.$executeRaw`SET TRANSACTION READ ONLY`;
             // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
@@ -2701,7 +2701,7 @@ export const nodeMoveOps = {
           // A large subtree touches many rows; the default 5s interactive-txn
           // timeout is too tight (mirrors extractParentNodeGraph / cloneMemory).
           { timeout: 120_000, ...(planOnly ? { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : {}) },
-        ));
+        )));
         if (planOnly) {
           const urns = planMemoryUrns;
           const ordered = relocated.sort((a, b) => a.previousLoc < b.previousLoc ? -1 : a.previousLoc > b.previousLoc ? 1 : 0);
@@ -2751,6 +2751,9 @@ export const nodeMoveOps = {
         }
         if (e instanceof SubtreeMoveTooLargeError) {
           throw new GraphQLError(e.message, { extensions: { code: 'MOVE_TOO_LARGE', limit: e.limit, count: e.count } });
+        }
+        if (e instanceof SubtreeMoveTimedOutError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'MOVE_TIMED_OUT' } });
         }
         if (e instanceof SubtreeMoveMintedError) {
           throw new GraphQLError(e.message, {

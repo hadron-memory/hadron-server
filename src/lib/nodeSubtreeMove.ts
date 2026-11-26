@@ -199,21 +199,40 @@ function relativeContentLinks(content: string): Array<{ raw: string; target: str
   return links;
 }
 
-/** The live nodes of a memory at any of `locs`. */
+/**
+ * #5230: the live nodes of a memory at any of `locs` (distinct). The list follows a subtree's content links, not its node
+ * count, so it goes in chunks that stay under Postgres's 32,767 bind cap. A loc is unique in a memory, so the chunks'
+ * rows never repeat.
+ */
+export const LOC_LOOKUP_CHUNK = 10_000;
 export async function findLiveNodesByLoc(tx: Prisma.TransactionClient, memoryId: string, locs: string[]) {
-  return tx.node.findMany({
-    where: { memoryId, loc: { in: locs }, deletedAt: null },
-    select: { id: true, loc: true },
-  });
+  const found: Array<{ id: string; loc: string }> = [];
+  for (let i = 0; i < locs.length; i += LOC_LOOKUP_CHUNK) {
+    found.push(...await tx.node.findMany({
+      where: { memoryId, loc: { in: locs.slice(i, i + LOC_LOOKUP_CHUNK) }, deletedAt: null },
+      select: { id: true, loc: true },
+    }));
+  }
+  return found;
 }
 
-/** The edge locs a memory already holds (live OR soft-deleted) at any of `bases`, or under one as `<base>:…`. */
+/**
+ * The edge locs a memory already holds (live OR soft-deleted) at any of `bases`, or under one as `<base>:…`.
+ * #5230: each base binds twice and the bases follow the moved edges, so they go in chunks (10,001 binds each); the set
+ * merges a loc that two chunks both match.
+ */
+export const BASE_LOOKUP_CHUNK = 5_000;
 export async function findHeldEdgeLocs(tx: Prisma.TransactionClient, memoryId: string, bases: string[]): Promise<Set<string>> {
-  const rows = await tx.edge.findMany({
-    where: { memoryId, OR: [{ loc: { in: bases } }, ...bases.map((b) => ({ loc: { startsWith: `${b}:` } }))] },
-    select: { loc: true },
-  });
-  return new Set(rows.map((r) => r.loc));
+  const held = new Set<string>();
+  for (let i = 0; i < bases.length; i += BASE_LOOKUP_CHUNK) {
+    const chunk = bases.slice(i, i + BASE_LOOKUP_CHUNK);
+    const rows = await tx.edge.findMany({
+      where: { memoryId, OR: [{ loc: { in: chunk } }, ...chunk.map((b) => ({ loc: { startsWith: `${b}:` } }))] },
+      select: { loc: true },
+    });
+    for (const row of rows) held.add(row.loc);
+  }
+  return held;
 }
 
 /** A miss at a live loc may still resolve through a historical NODE alias. */
