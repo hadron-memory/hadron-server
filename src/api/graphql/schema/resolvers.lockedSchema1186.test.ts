@@ -38,7 +38,7 @@ const schema = { objectTypes: { item: { fields: {
 } } } };
 
 async function seed(loc = 'doc', extra: Record<string, unknown> = {}) {
-  return resolvers.Mutation.createNode({}, { input: { memoryId, loc, name: 'before', ...extra } as never }, ctx());
+  return resolvers.Mutation.createNode({}, { input: { memoryRef: memoryId, loc, name: 'before', ...extra } as never }, ctx());
 }
 async function snapshot(id: string) {
   // #2010: createNode starts a detached embedding enqueue. This test owns
@@ -76,8 +76,8 @@ for (const surface of ['GraphQL', 'MCP'] as const) {
           });
       }
       return mode === 'create'
-        ? resolvers.Mutation.createNode({}, { input: { memoryId, loc: 'doc', ...fields } as never }, ctx())
-        : resolvers.Mutation.updateNode({}, { input: { memoryId, loc: 'doc', ...fields } } as never, ctx());
+        ? resolvers.Mutation.createNode({}, { input: { memoryRef: memoryId, loc: 'doc', ...fields } as never }, ctx())
+        : resolvers.Mutation.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', ...fields } } as never, ctx());
     }
     async function refused(action: Promise<unknown>) {
       if (surface === 'MCP') expect(await action).toContain('Schema violation');
@@ -159,7 +159,7 @@ describe('GraphQL #1186 replacement-at-address (Cedar #1200 test 4)', () => {
       replacementState = await snapshot(replacement.id);
     };
     await expect(resolvers.Mutation.updateNode({}, { input: {
-      memoryId, loc: 'doc', properties: { priority: 'urgent' },
+      memoryRef: memoryId, loc: 'doc', properties: { priority: 'urgent' },
     } } as never, ctx())).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
     expect(await snapshot(original.id)).toEqual(originalState!);
     expect(await snapshot(replacement.id)).toEqual(replacementState!);

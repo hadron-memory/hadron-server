@@ -51,9 +51,9 @@ beforeEach(async () => {
 });
 
 const writers: Array<[string, () => Promise<unknown>]> = [
-  ['updateNode', () => resolvers.Mutation.updateNode(null, { input: { id: a.id, content: 'dog one' } }, ctx())],
+  ['updateNode', () => resolvers.Mutation.updateNode(null, { input: { ref: a.id, content: 'dog one' } }, ctx())],
   ['searchReplaceInNodes', () => resolvers.Mutation.searchReplaceInNodes({}, {
-    input: { oldText: 'cat', newText: 'dog', nodeIds: [a.id, b.id], fields: ['content'] },
+    input: { oldText: 'cat', newText: 'dog', nodeRefs: [a.id, b.id], fields: ['content'] },
   } as never, ctx())],
   ['mergeNodes', () => resolvers.Mutation.mergeNodes({}, {
     input: { source: a.id, target: b.id, include: ['CONTENT'] },
@@ -124,7 +124,7 @@ describe('#1753 — a deadlock victim reaches the caller as MEMORY_WRITE_CONFLIC
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
     }, { timeout: 20_000 }).then(() => null, (e: unknown) => e);
     await held;
-    const writer = resolvers.Mutation.updateNode(null, { input: { id: a.id, content: 'dog one' } }, ctx())
+    const writer = resolvers.Mutation.updateNode(null, { input: { ref: a.id, content: 'dog one' } }, ctx())
       .then(() => null, (e: unknown) => e);
     await vi.waitFor(async () => {
       const waiting = await db.$queryRaw<Array<{ pid: number }>>`

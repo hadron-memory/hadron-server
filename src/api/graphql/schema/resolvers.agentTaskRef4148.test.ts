@@ -62,7 +62,7 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'member' } });
   // Only the parent's assignee creates its children, so the parent is assigned to the test user.
   parent = await M.createAgentTask({}, { input: { appRef: app.id, title: 'parent', assignee: { user: user.id } } }, ctx());
-  child = await M.createAgentTask({}, { input: { appRef: app.id, title: 'child', parentTaskId: parent.id } }, ctx());
+  child = await M.createAgentTask({}, { input: { appRef: app.id, title: 'child', parentTaskRef: parent.id } }, ctx());
 });
 
 describe('#4148 agentTask(ref:)', () => {

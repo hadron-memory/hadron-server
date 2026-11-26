@@ -38,10 +38,11 @@ import { loadHostDesiredState, SWEEP_MODES, type SweepMode } from '../../../lib/
 export const LEAVE_ALONE_REASON_MAX = 500;
 
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
-const workerNotFound = (ref: string): GraphQLError => taskError('WORKER_NOT_FOUND', 'Worker not found.', { ref });
+/** #5225: the code only; the caller's ref is not relayed (cor:api:140:01). */
+const workerNotFound = (_ref: string): GraphQLError => taskError('WORKER_NOT_FOUND', 'Worker not found.');
 /** One answer for a host the App does not have and for a host the calling host key is not. */
 const hostNotFound = (hostId: string): GraphQLError =>
-  taskError('HOST_NOT_FOUND', 'No host with that id is registered in this App.', { hostId });
+  taskError('HOST_NOT_FOUND', 'No host with that id is registered in this App.'); // #5225: hostId not relayed
 
 export const desiredStateQueries = {
   /** The desired state of every worker one host runs (see the file header for who reads it). The optional #4260

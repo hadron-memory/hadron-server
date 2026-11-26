@@ -27,7 +27,8 @@ import { keyHostId, recordHostKeyUse, recordHostKeyUseApart, type HostKey } from
 import { liveCaller } from '../../../lib/tickers/liveCaller.js';
 import { batchProofPayload, loadDeliveryBatches, loadDeliveryChannelPolicy } from '../../../lib/tickers/deliveryBatch.js';
 import { signBatchProof, type BatchProof } from '../../../lib/tickers/wakeProof.js';
-import { acknowledgeBatchProofs, type BatchAck } from '../../../lib/tickers/acknowledge.js';
+import { acknowledgeBatchProofs, type BatchAck, type BatchThrough } from '../../../lib/tickers/acknowledge.js';
+import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
 
 const appAnchors = (app: TaskApp): AuthorityAnchor[] => [
   { kind: 'app', id: app.id },
@@ -242,6 +243,17 @@ async function currentBatchChannels(
 }
 
 /**
+ * #5080: `through[].channelRef` is an id or a chat-root node URN. Each is resolved to the channel id the proof names
+ * (`resolveChannelRefId`); a ref that names nothing keeps its own text as the id, which no batch contains, so it gets
+ * the same "not in this delivery batch" refusal as a channel that is not in the batch (cor:api:140:02), echoing the
+ * caller's own ref.
+ */
+async function throughFromRefs(db: Context['db'], through: Array<{ channelRef: string; seq: number }> | null | undefined): Promise<BatchThrough[] | undefined> {
+  if (!through || through.length === 0) return undefined;
+  return Promise.all(through.map(async (t) => ({ channelId: (await resolveChannelRefId(db, t.channelRef)) ?? t.channelRef, seq: t.seq, ref: t.channelRef })));
+}
+
+/**
  * Acknowledge typed batches (cor:agt:080:16/:17). Only the key the id names, with the authority re-derived INSIDE the
  * transaction (after the worker's wake lock) under the App's anchor: both scopes held now, the key still the same host,
  * the host's registration live, and the worker still one of its registered workers. Records the use like a read does.
@@ -250,7 +262,7 @@ async function currentBatchChannels(
 export const deliveryBatchMutations = {
   acknowledgeDeliveryBatches: async (
     _: unknown,
-    a: { batchIds: string[]; through?: Array<{ channelId: string; seq: number }> | null },
+    a: { batchIds: string[]; through?: Array<{ channelRef: string; seq: number }> | null },
     requestCtx: Context,
   ) => recordingBatchRefusal(requestCtx, async () => {
     const key = appKeyCaller(requestCtx);
@@ -260,8 +272,9 @@ export const deliveryBatchMutations = {
       if (!ctx) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
       const own = await ownBatchSession(ctx);
       if (a.through?.length && a.batchIds.length !== 1) throw taskError('BAD_USER_INPUT', 'through applies to exactly one batch.');
+      const through = await throughFromRefs(requestCtx.db, a.through);
       return acknowledgeBatchProofs({ ctx, requester: { sessionId: own.session.id },
-        acks: a.batchIds.map(proof => ({ proof, ...(a.through?.length ? { through: a.through } : {}) })),
+        acks: a.batchIds.map(proof => ({ proof, ...(through ? { through } : {}) })),
         mayAckBatch: async (p, tx, txCtx) => {
           if (p.appId !== own.session.appId || p.workerId !== own.worker.id || p.hostId !== null) return false;
           try {
@@ -290,7 +303,8 @@ export const deliveryBatchMutations = {
         return { acknowledged: 0, unchanged: 0 };
       });
     }
-    const acks: BatchAck[] = a.batchIds.map((proof) => ({ proof, ...(a.through && a.through.length > 0 ? { through: a.through } : {}) }));
+    const through = await throughFromRefs(requestCtx.db, a.through);
+    const acks: BatchAck[] = a.batchIds.map((proof) => ({ proof, ...(through ? { through } : {}) }));
     return acknowledgeBatchProofs({
       ctx: requestCtx,
       requester: { appKeyId: key.appKeyId },

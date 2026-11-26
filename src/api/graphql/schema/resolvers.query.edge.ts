@@ -15,9 +15,9 @@ import {
 } from './resolvers.helpers.js';
 
 export interface EdgeFilterInput {
-  memoryId?: string | null;
-  sourceNodeId?: string | null;
-  targetNodeId?: string | null;
+  memoryRef?: string | null;
+  sourceRef?: string | null;
+  targetRef?: string | null;
   isRunnable?: boolean | null;
   includeDeleted?: boolean | null;
 }
@@ -76,12 +76,12 @@ export const edgeQueries = {
 
     const accessible = await getAccessibleMemoryIds(ctx);
 
-    // Memory clause: readable set ∩ filter.memoryId ∩ org scope.
+    // Memory clause: readable set ∩ filter.memoryRef ∩ org scope.
     let memoryWhere: Record<string, unknown>;
-    if (f.memoryId != null) {
+    if (f.memoryRef != null) {
       let resolvedMemoryId: string;
       try {
-        ({ id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, f.memoryId));
+        ({ id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, f.memoryRef));
       } catch {
         return empty;
       }
@@ -98,7 +98,7 @@ export const edgeQueries = {
     // One outside the readable set is answered as one that does not resolve (hadron-internal#79).
     const readable = new Set(accessible);
     let endpointWhere: Record<string, unknown> = {};
-    for (const [ref, key] of [[f.sourceNodeId, 'sourceId'], [f.targetNodeId, 'targetId']] as const) {
+    for (const [ref, key] of [[f.sourceRef, 'sourceId'], [f.targetRef, 'targetId']] as const) {
       if (ref == null) continue;
       let id: string;
       try {

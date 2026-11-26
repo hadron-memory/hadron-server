@@ -193,7 +193,7 @@ describe('#2193 — controls that keep their memory', () => {
   it('createNode returns its memory to the writer', async () => {
     const r = await post(await keyFor('admin'),
       'mutation($i: CreateNodeInput!) { createNode(input: $i) { id memory { id name } } }',
-      { i: { memoryId: mem.know, loc: `notes:new-${n}`, name: 'new' } });
+      { i: { memoryRef: mem.know, loc: `notes:new-${n}`, name: 'new' } });
     expect(r.errors).toBeUndefined();
     expect(r.data.createNode.memory).toEqual({ id: mem.know, name: 'Know' });
   });

@@ -113,7 +113,7 @@ beforeEach(async () => {
     const configId = (await db.memoryConfig.create({ data: { id: generateId(), memoryId: mem } })).id;
     await db.nodeRoleRule.create({ data: { id: generateId(), configId, role: 'guide', validationTaskId: validationTask, validationTaskRequired: true } });
   }
-  nodeId = ((await M.createNode({}, { input: { memoryId, loc: 'doc', name: 'Doc', content: 'body', role: 'guide' } }, person(leo))) as { id: string }).id;
+  nodeId = ((await M.createNode({}, { input: { memoryRef: memoryId, loc: 'doc', name: 'Doc', content: 'body', role: 'guide' } }, person(leo))) as { id: string }).id;
   await stamp(null);
   // A run App whose agent may write both memories; runs act on behalf of leo (#3278).
   appId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'cv-app', urn: 'cv-org::cv-app' } })).id;
@@ -180,7 +180,7 @@ describe('#1332 who may record (cor:dmo:160:01 table)', () => {
 
   it('(3) a pruned past revision has no recorded stamp: AUTHOR_UNKNOWN, not refused', async () => {
     await stamp('HUMAN');
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(leo));
     await db.nodeRevision.deleteMany({ where: { nodeId, revNo: 1 } });
     const ok = await report(person(mia), { nodeRevision: 1 });
     expect((ok.report as Record<string, unknown>).authorCheck).toBe('AUTHOR_UNKNOWN');
@@ -188,7 +188,7 @@ describe('#1332 who may record (cor:dmo:160:01 table)', () => {
 
   it('a past revision is judged by its own snapshot stamp, not the current one', async () => {
     await stamp('HUMAN');
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(leo));
     // Revision 2 is leo's unstamped edit; revision 1 was mia's.
     expect(await refusal(report(person(mia), { nodeRevision: 1 }))).toBe('CONTENT_VALIDATION_REPORTER_IS_AUTHOR');
     const ok = await report(person(mia), { nodeRevision: 2 });
@@ -214,7 +214,7 @@ describe('#1332 who may record (cor:dmo:160:01 table)', () => {
 
 describe('#1332 state and history', () => {
   it('4. a late report for N after the content reached N+1 is stored and leaves N+1 unvalidated', async () => {
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(leo));
     const late = await report(person(mia), { nodeRevision: 1, outcome: 'PASS' });
     expect(late.state).toBe('STALE');
     expect(await reportCount()).toBe(1);
@@ -225,7 +225,7 @@ describe('#1332 state and history', () => {
   });
 
   it('#3762: an older FAIL is history after the current revision already has PASS', async () => {
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(leo));
     const pass = await report(person(mia), { nodeRevision: 2, outcome: 'PASS' });
     expect(pass.state).toBe('PASS');
     const late = await report(person(mia), { nodeRevision: 1, outcome: 'FAIL' });
@@ -244,7 +244,7 @@ describe('#1332 state and history', () => {
     expect(pass.state).toBe('PASS');
     const fail = await asRun(await mintRun(validationTask), (c) => report(c, { outcome: 'FAIL' }));
     expect(fail.state).toBe('FAIL');
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'edited' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'edited' } }, person(leo));
     const cur = await db.node.findUniqueOrThrow({ where: { id: nodeId }, select: { revSeq: true } });
     const { resolveContentValidation } = await import('./resolvers.types.js');
     expect((await resolveContentValidation({ nodeId, memoryId, revSeq: cur.revSeq }, person(mia))).state).toBe('STALE');
@@ -287,7 +287,7 @@ describe('#1332 refusal order and the report\'s own checks', () => {
 
   it('6d. a task revision older than current and an older node revision are accepted (late)', async () => {
     await db.node.update({ where: { id: validationTask }, data: { revSeq: 3 } });
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(leo));
     const ok = await report(person(leo), { validationTaskRef: 'hrn:node:cv-org:mem:validate-task', validationTaskRevision: 2, nodeRevision: 1 });
     expect(ok.report).toMatchObject({ nodeRevision: 1, validationTaskRevision: 2 });
   });
@@ -377,7 +377,7 @@ describe('#1332 runId replay (refusal 5)', () => {
 
   it('5c. no cross-node or cross-memory oracle: a runId elsewhere is a fresh insert', async () => {
     await report(person(leo), { runId: 'shared' });
-    const other = ((await M.createNode({}, { input: { memoryId: otherMemoryId, loc: 'doc', name: 'Doc', content: 'b', role: 'guide' } }, person(leo))) as { id: string }).id;
+    const other = ((await M.createNode({}, { input: { memoryRef: otherMemoryId, loc: 'doc', name: 'Doc', content: 'b', role: 'guide' } }, person(leo))) as { id: string }).id;
     const fresh = await report(person(mia), { nodeRef: other, runId: 'shared' });
     expect(fresh.replayed).toBe(false);
     // The node moves from mem to other: the old report stays in mem's snapshot.
@@ -547,7 +547,7 @@ describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', 
       return { db: proxy as typeof db, fired: () => fired };
     };
     // The content reached revision 2; a late PASS for revision 1 leaves revision 2 STALE.
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(leo));
     const moveOut = () => db.node.update({ where: { id: nodeId }, data: { memoryId: hidden, revSeq: 3 } });
     const fresh = racingWith(moveOut);
     const late = await report(person(mia, { db: fresh.db }), { nodeRevision: 1, runId: 'late' });
@@ -678,7 +678,7 @@ describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', 
 
   it('§10 P3-3: a runId replays only for the same node revision and the same task', async () => {
     await report(person(leo), { runId: 'r' });
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(mia));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(mia));
     expect(await refusal(report(person(leo), { runId: 'r', nodeRevision: 2 }))).toBe('CONTENT_VALIDATION_RUN_ID_CONFLICT');
     // The rule now names another task: the same runId with it conflicts, never replays.
     const next = (await db.node.create({ data: { id: generateId(), memoryId, loc: 'validate-2', name: 'V2', isRunnable: true, content: 'c' } })).id;

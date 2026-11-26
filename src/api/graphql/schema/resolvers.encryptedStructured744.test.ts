@@ -57,13 +57,13 @@ const keyless = (): Context => appCtx({ userId });
 const M = resolvers.Mutation as any;
 const updateMemory = (c: Context, s: unknown = schema) => M.updateMemory(null, { ref: memoryId, schema: s }, c);
 const createNode = (c: Context, input: Record<string, unknown>) =>
-  M.createNode({}, { input: { memoryId, ...input } }, c);
+  M.createNode({}, { input: { memoryRef: memoryId, ...input } }, c);
 const updateNode = (c: Context, input: Record<string, unknown>) =>
-  M.updateNode({}, { input: { memoryId, ...input } }, c);
+  M.updateNode({}, { input: { memoryRef: memoryId, ...input } }, c);
 const updateNodeProperties = (c: Context, nodeRef: string, properties: unknown) =>
   M.updateNodeProperties({}, { nodeRef, properties }, c);
 const findNodes = (c: Context, args: Record<string, unknown>) =>
-  (resolvers.Query as any).findNodes(null, { filter: { memoryIds: [memoryId] }, ...args }, c);
+  (resolvers.Query as any).findNodes(null, { filter: { memoryRefs: [memoryId] }, ...args }, c);
 const locsOf = (res: any): string[] => res.hits.map((h: any) => h.node.loc);
 const auth = (): AuthContext => ({ userId, roles: [], clientId: `user:${userId}` });
 
@@ -235,7 +235,7 @@ describe('#744 items 5 and 7 — findNodes where/sortProperty without a key', ()
 
   it('keyless: where over properties matches', async () => {
     await evictKey();
-    expect((await locsOf(await findNodes(keyless(), { filter: { memoryIds: [memoryId], where } }))).sort()).toEqual(['c.a', 'c.c']);
+    expect((await locsOf(await findNodes(keyless(), { filter: { memoryRefs: [memoryId], where } }))).sort()).toEqual(['c.a', 'c.c']);
   });
 
   it('keyless: sortProperty over properties orders numerically', async () => {
@@ -244,13 +244,13 @@ describe('#744 items 5 and 7 — findNodes where/sortProperty without a key', ()
   });
 
   it('keyed control: the same where and sort give the same answers', async () => {
-    expect((await locsOf(await findNodes(keyed(), { filter: { memoryIds: [memoryId], where } }))).sort()).toEqual(['c.a', 'c.c']);
+    expect((await locsOf(await findNodes(keyed(), { filter: { memoryRefs: [memoryId], where } }))).sort()).toEqual(['c.a', 'c.c']);
     expect(locsOf(await findNodes(keyed(), { sortProperty: sort }))).toEqual(['c.b', 'c.a', 'c.c']);
   });
 
   it('where over field data matches nothing on the encrypted memory (data is ciphertext at rest), keyed or not', async () => {
     const dataWhere = { field: 'data', path: ['tools'], contains: 'web_search' };
-    const filter = { memoryIds: [memoryId], where: dataWhere };
+    const filter = { memoryRefs: [memoryId], where: dataWhere };
     // Keyed first, while the key is live: the predicate runs in SQL on the stored ciphertext,
     // so a key does not change the answer.
     expect(locsOf(await findNodes(keyed(), { filter }))).toEqual([]);
@@ -268,7 +268,7 @@ describe('#744 items 5 and 7 — findNodes where/sortProperty without a key', ()
     });
     const res = await (resolvers.Query as any).findNodes(
       null,
-      { filter: { memoryIds: [plain.id], where: { field: 'data', path: ['tools'], contains: 'web_search' } } },
+      { filter: { memoryRefs: [plain.id], where: { field: 'data', path: ['tools'], contains: 'web_search' } } },
       adminCtx,
     );
     expect(locsOf(res)).toEqual(['p.a']);

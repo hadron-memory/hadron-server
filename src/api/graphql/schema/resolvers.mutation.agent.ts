@@ -58,6 +58,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
+import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
 import { generateId } from '../../../lib/id.js';
 import { seedAgentSkeleton } from '../../../lib/agentSkeleton.js';
@@ -86,6 +87,7 @@ import {
   AGENT_INCLUDE,
   assertAiConfigAppOwnerInstalled,
   lockAiConfigAppOwnerInstalled,
+  suppliedSlug,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
@@ -131,6 +133,8 @@ export interface CreateAgentCoreInput {
   ownerUserId: string | null;
   namespace: string;
   name: string;
+  /** #5203 S1: a slug the caller supplied; validated, never derived. Omitted or null: derived from the name. */
+  slug?: string | null;
   description?: string;
   systemMemoryId?: string;
   /** #4140: the caller's own reference to `systemMemoryId`, the only thing a not-found names. */
@@ -346,7 +350,9 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // #574: slugify the display name — a raw name would persist a
   // case-sensitive / space-bearing URN (and the system memory URN derives
   // from this one, so it inherits the clean slug).
-  const agentSlug = deriveSlugFromName(name);
+  // #5203 S1: a supplied slug skips the name-derived check, so the name's own storability is judged here, typed, before any write.
+  assertStorableText({ name });
+  const agentSlug = input.slug != null ? suppliedSlug(input.slug) : deriveSlugFromName(name);
   const agentUrn = `${namespace}:${agentSlug}`;
   // Check for existing agent with the same URN. A tombstone is reclaimed —
   // worker-name permanence lives on Worker rows (cor:agt:020:02), never on
@@ -660,7 +666,7 @@ function parseContextCap(v: unknown): number {
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgRef: orgId, name, description, systemMemoryRef, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, contextCap, memberRoles }: { orgRef?: string | null; name: string; description?: string; systemMemoryRef?: string | null; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; contextCap?: number | null; memberRoles?: string[] | null },
+      { orgRef: orgId, name, slug, description, systemMemoryRef, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, contextCap, memberRoles }: { orgRef?: string | null; name: string; slug?: string | null; description?: string; systemMemoryRef?: string | null; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; contextCap?: number | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgRef`
@@ -724,6 +730,7 @@ export const agentMutations = {
         ownerUserId,
         namespace,
         name,
+        slug,
         description,
         systemMemoryId,
         systemMemoryRef: systemMemoryRef || undefined,
@@ -1910,7 +1917,7 @@ export const agentMutations = {
       _: unknown,
       args: {
         ownerType: AiConfigOwnerType;
-        ownerId: string;
+        ownerRef: string;
         name: string;
         provider: string;
         model: string;
@@ -1923,7 +1930,7 @@ export const agentMutations = {
       ctx: Context,
     ) => {
       try {
-        const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, args.ownerType, args.ownerId);
+        const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, args.ownerType, args.ownerRef);
         await assertAiConfigAppOwnerInstalled(ctx.db, ownerWhere.appId);
         const name = validateAiConfigName(args.name);
         validateProviderAndParams(args.provider, args.params ?? null);

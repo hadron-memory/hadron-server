@@ -193,7 +193,7 @@ describe('#1339 review — multi-row writers reconcile drift before their snapsh
     const node = await db.node.create({ data: { id: generateId(), memoryId, loc: 'drift:replace', name: 'n', content: 'hello world' } });
     await db.node.update({ where: { id: node.id }, data: { description: 'drifted' } });
     await resolvers.Mutation.searchReplaceInNodes({}, {
-      input: { oldText: 'hello', newText: 'bye', nodeIds: [node.id], fields: ['content'] },
+      input: { oldText: 'hello', newText: 'bye', nodeRefs: [node.id], fields: ['content'] },
     } as never, ctx());
     const got = await labels(node.id);
     expect(got).toHaveLength(2);
@@ -280,7 +280,7 @@ describe('#1339 review round 5', () => {
     try {
       await expect(
         resolvers.Mutation.searchReplaceInNodes({}, {
-          input: { oldText: 'hello', newText: 'bye', nodeIds: [node.id], fields: ['content'] },
+          input: { oldText: 'hello', newText: 'bye', nodeRefs: [node.id], fields: ['content'] },
         } as never, ctx()),
       ).rejects.toSatisfy((e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT');
     } finally {

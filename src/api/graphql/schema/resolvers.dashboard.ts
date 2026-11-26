@@ -245,7 +245,7 @@ function requireUserId(ctx: Context): string {
  *  that cannot be rendered. Guards callers that bypass GraphQL enum validation. */
 function requirePresetType(type: string): void {
   if (!WIDGET_DATA_PROVIDERS.has(type)) {
-    throw badInput(`Unknown widget type: ${type}`);
+    throw badInput('Unknown widget type.');
   }
 }
 
@@ -432,7 +432,7 @@ export const dashboardMutations = {
     // that bypass schema validation (createTestableMcpServer parity, #312).
     for (const w of widgets) {
       if (!WIDGET_DATA_PROVIDERS.has(w.type)) {
-        throw new GraphQLError(`Unknown widget type: ${w.type}`, {
+        throw new GraphQLError('Unknown widget type.', {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }

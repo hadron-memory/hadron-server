@@ -42,7 +42,7 @@ async function ownedSystem() {
   const memory = await db.memory.create({ data: { name: 'fixture-brain', urn: `fixture.test:brain-${generateId()}`, class: 'system', ownerUserId: actor.id } });
   const agent = await db.agent.create({ data: { name: 'fixture-agent', urn: `fixture.test:agent-${generateId()}`, ownerUserId: actor.id, systemMemoryId: memory.id } });
   const ctx = context(actor.id, ['ADMIN']);
-  const node = await M.createNode({}, { input: { memoryId: memory.id, loc: 'source', name: 'Source', content: 'before' } }, ctx);
+  const node = await M.createNode({}, { input: { memoryRef: memory.id, loc: 'source', name: 'Source', content: 'before' } }, ctx);
   const destination = await db.memory.create({ data: { name: 'fixture-destination', urn: `fixture.test:dest-${generateId()}`, class: 'private', userId: actor.id, ownerUserId: actor.id } });
   const removeRead = () => db.$transaction(async tx => {
     await tx.agent.update({ where: { id: agent.id }, data: { ownerUserId: next.id } });
@@ -53,7 +53,7 @@ async function ownedSystem() {
 for (const door of ['moveNode', 'searchReplaceInNodes'] as const) {
   const call = (f: Awaited<ReturnType<typeof ownedSystem>>, ctx: Context) => door === 'moveNode'
     ? M.moveNode({}, { sourceRef: f.node.id, targetMemoryRef: f.destination.id }, ctx)
-    : M.searchReplaceInNodes({}, { input: { nodeIds: [f.node.id], oldText: 'before', newText: 'after', fields: ['content'] } }, ctx);
+    : M.searchReplaceInNodes({}, { input: { nodeRefs: [f.node.id], oldText: 'before', newText: 'after', fields: ['content'] } }, ctx);
   describe(`#3031 ${door} user-owned system read boundary`, () => {
     it('allows the reader and persists the change', async () => {
       const f = await ownedSystem();
@@ -134,7 +134,7 @@ it.each(['moveNode', 'searchReplaceInNodes', 'restoreNodeRevision', 'deleteNode'
     return original(ctx, memoryId);
   });
   if (door === 'moveNode') await M.moveNode({}, { sourceRef: f.current.node.id, targetUrn: `hrn:node:${(await db.memory.findUniqueOrThrow({ where: { id: f.current.node.memoryId } })).urn}:moved` }, f.ctx);
-  else if (door === 'searchReplaceInNodes') await M.searchReplaceInNodes({}, { input: { nodeIds: [f.current.node.id], oldText: 'before', newText: 'after', fields: ['content'] } }, f.ctx);
+  else if (door === 'searchReplaceInNodes') await M.searchReplaceInNodes({}, { input: { nodeRefs: [f.current.node.id], oldText: 'before', newText: 'after', fields: ['content'] } }, f.ctx);
   else if (door === 'restoreNodeRevision') await M.restoreNodeRevision({}, { nodeRevRef: f.revision.id }, f.ctx);
   else await M.deleteNode({}, { nodeRef: f.current.node.id }, f.ctx);
   expect(observed).toBe(true);

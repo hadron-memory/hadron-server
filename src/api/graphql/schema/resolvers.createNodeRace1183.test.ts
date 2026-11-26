@@ -100,7 +100,7 @@ async function create(loc: string, content: string): Promise<string> {
   try {
     await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId, loc, name: 'N', content } as never },
+      { input: { memoryRef: memoryId, loc, name: 'N', content } as never },
       gqlCtx(),
     );
     return 'OK';

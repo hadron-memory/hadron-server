@@ -54,7 +54,7 @@ const ok = (r: Result) => expect(r.errors).toBeUndefined();
 const node = (loc: string, extra: Record<string, unknown> = {}, memoryId = mem) =>
   db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, ...extra } });
 const row = (id: string) => db.node.findUniqueOrThrow({ where: { id } });
-const create = (input: Record<string, unknown>) => gql(CREATE, { input: { memoryId: mem, loc: 'n', name: 'n', ...input } });
+const create = (input: Record<string, unknown>) => gql(CREATE, { input: { memoryRef: mem, loc: 'n', name: 'n', ...input } });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -86,17 +86,17 @@ describe('#5019 create and update', () => {
   it('an update is refused and leaves the row and its revision unchanged', async () => {
     const n = await node('n', { content: 'before' });
     const before = await row(n.id);
-    refusedAt(await gql(UPDATE, { input: { id: n.id, content: a(1001) } }));
+    refusedAt(await gql(UPDATE, { input: { ref: n.id, content: a(1001) } }));
     expect(await row(n.id)).toEqual(before);
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
-    ok(await gql(UPDATE, { input: { id: n.id, content: a(1000) } }));
+    ok(await gql(UPDATE, { input: { ref: n.id, content: a(1000) } }));
   });
 
   it('a partial update is judged on the resulting node', async () => {
     const n = await node('n', { content: a(600) });
-    refusedAt(await gql(UPDATE, { input: { id: n.id, data: json(600) } }));
-    ok(await gql(UPDATE, { input: { id: n.id, data: json(400) } }));
-    ok(await gql(UPDATE, { input: { id: n.id, content: null, data: json(1000) } }));
+    refusedAt(await gql(UPDATE, { input: { ref: n.id, data: json(600) } }));
+    ok(await gql(UPDATE, { input: { ref: n.id, data: json(400) } }));
+    ok(await gql(UPDATE, { input: { ref: n.id, content: null, data: json(1000) } }));
     // #5160: what was measured is what was written.
     expect(await row(n.id)).toMatchObject({ content: null, data: json(1000) });
   });
@@ -108,19 +108,19 @@ describe('#5019 create and update', () => {
   });
 
   it('applies to a platform admin too', async () => {
-    refusedAt(await gql(CREATE, { input: { memoryId: mem, loc: 'n', name: 'n', content: a(1001) } }, { userId: admin, roles: ['ADMIN'] as never }));
+    refusedAt(await gql(CREATE, { input: { memoryRef: mem, loc: 'n', name: 'n', content: a(1001) } }, { userId: admin, roles: ['ADMIN'] as never }));
   });
 
   it('a node already over the ceiling: an edit that leaves it over is refused (a tag-only one too); shortening and deleting work', async () => {
     const n = await node('n', { content: a(2000) });
-    refusedAt(await gql(UPDATE, { input: { id: n.id, content: a(1500) } }));
-    refusedAt(await gql(UPDATE, { input: { id: n.id, tags: ['x'] } }));
+    refusedAt(await gql(UPDATE, { input: { ref: n.id, content: a(1500) } }));
+    refusedAt(await gql(UPDATE, { input: { ref: n.id, tags: ['x'] } }));
     const t = await node('t', { loc: 't' });
     // An edge-only or unchanged save is not an edit of the node's content.
-    ok(await gql(UPDATE, { input: { id: n.id, edges: [{ targetId: t.id, name: 'to' }] } }));
-    ok(await gql(UPDATE, { input: { id: n.id, content: a(2000) } }));
+    ok(await gql(UPDATE, { input: { ref: n.id, edges: [{ targetRef: t.id, name: 'to' }] } }));
+    ok(await gql(UPDATE, { input: { ref: n.id, content: a(2000) } }));
     expect((await gql(`query($r: ID!) { node(ref: $r) { content } }`, { r: n.id })).data!.node.content).toHaveLength(2000);
-    ok(await gql(UPDATE, { input: { id: n.id, content: a(900) } }));
+    ok(await gql(UPDATE, { input: { ref: n.id, content: a(900) } }));
     const over = await node('over', { content: a(2000) });
     ok(await gql(DELETE, { ref: over.id }));
   });
@@ -141,11 +141,11 @@ describe('#5019 an encrypted memory is measured in plaintext', () => {
     refusedAt(await create({ loc: 'n2', content: a(1001) }));
     const n = await db.node.findFirstOrThrow({ where: { memoryId: mem, loc: 'n' } });
     expect(n.content!.length).toBeGreaterThan(1000);
-    refusedAt(await gql(UPDATE, { input: { id: n.id, description: 'd' } }));
-    ok(await gql(UPDATE, { input: { id: n.id, content: a(990), description: a(10) } }));
+    refusedAt(await gql(UPDATE, { input: { ref: n.id, description: 'd' } }));
+    ok(await gql(UPDATE, { input: { ref: n.id, content: a(990), description: a(10) } }));
     // A merge of a plaintext field needs no session key: the stored body is measured from its envelope.
     // Fits only in plaintext: the stored ciphertext alone is over the ceiling.
-    ok(await gql(UPDATE, { input: { id: n.id, description: a(5) } }));
+    ok(await gql(UPDATE, { input: { ref: n.id, description: a(5) } }));
     const src = await node('src', { description: a(20) });
     const small = await node('small', { description: 'b' });
     sessionKeyCache.clear();
@@ -164,7 +164,7 @@ describe('#5160 restoreNodeRevision in an encrypted memory', () => {
     const restorable = async (loc: string, bytes: number) => {
       ok(await create({ loc, content: a(bytes) }));
       const n = await db.node.findFirstOrThrow({ where: { memoryId: mem, loc } });
-      ok(await gql(UPDATE, { input: { id: n.id, content: 'short' } }));
+      ok(await gql(UPDATE, { input: { ref: n.id, content: 'short' } }));
       return { n, rev: await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id } }) };
     };
     const fits = await restorable('fits', 1000);
@@ -216,12 +216,12 @@ describe('#5019 the other content doors', () => {
   it('searchReplaceInNodes refuses the whole batch and writes nothing, in a dry run too', async () => {
     const small = await node('a-small', { content: 'cat' });
     const big = await node('b-big', { content: `cat${a(990)}` });
-    const input = { oldText: 'cat', newText: a(20), nodeIds: [small.id, big.id], fields: ['content'] };
+    const input = { oldText: 'cat', newText: a(20), nodeRefs: [small.id, big.id], fields: ['content'] };
     refusedAt(await gql(REPLACE, { input: { ...input, dryRun: true } }));
     refusedAt(await gql(REPLACE, { input }));
     expect((await row(small.id)).content).toBe('cat');
     expect(await db.nodeRevision.count({ where: { nodeId: { in: [small.id, big.id] } } })).toBe(0);
-    ok(await gql(REPLACE, { input: { ...input, nodeIds: [small.id] } }));
+    ok(await gql(REPLACE, { input: { ...input, nodeRefs: [small.id] } }));
   });
 
   it('mergeNodes measures the merged target and writes nothing on refusal', async () => {
@@ -236,7 +236,7 @@ describe('#5019 the other content doors', () => {
   it('restoreNodeRevision refuses a revision over a lowered ceiling', async () => {
     cap('');
     const n = await node('n', { content: a(2000) });
-    ok(await gql(UPDATE, { input: { id: n.id, content: 'short' } }));
+    ok(await gql(UPDATE, { input: { ref: n.id, content: 'short' } }));
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id } });
     cap(1000);
     const before = await row(n.id);
@@ -249,7 +249,7 @@ describe('#5019 the other content doors', () => {
   it('searchReplaceInSpecNodes is refused and writes nothing', async () => {
     const draft = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'specs-draft', draftCorpus: true } as never, { db, roles: ['ADMIN'], userId: admin } as Context) as { id: string };
     const spec = await node('pas:010:01', { content: `cat ${a(990)}`, role: 'spec' }, draft.id);
-    const input = { memoryRef: draft.id, nodeIds: [spec.id], oldText: 'cat', newText: a(20), fields: ['content'], dryRun: true };
+    const input = { memoryRef: draft.id, nodeRefs: [spec.id], oldText: 'cat', newText: a(20), fields: ['content'], dryRun: true };
     const run = (extra = {}) => resolvers.Mutation.searchReplaceInSpecNodes(null, { input: { ...input, ...extra } } as never, { db, roles: ['ADMIN'], userId: admin } as Context);
     cap('');
     const { plan } = await run() as { plan: string };
@@ -260,17 +260,17 @@ describe('#5019 the other content doors', () => {
   });
 
   it('importNode is refused and writes nothing', async () => {
-    refusedAt(await gql(IMPORT, { input: { memoryId: mem, loc: 'i', name: 'i', content: a(1001), contentType: 'text/markdown' } }));
+    refusedAt(await gql(IMPORT, { input: { memoryRef: mem, loc: 'i', name: 'i', content: a(1001), contentType: 'text/markdown' } }));
     expect(await db.node.count({ where: { memoryId: mem, loc: 'i' } })).toBe(0);
   });
 
   it('#5160: importNode over a live node counts the fields it keeps, and leaves the row unchanged', async () => {
     const n = await node('i', { content: 'before', data: json(600) });
     const before = await row(n.id);
-    refusedAt(await gql(IMPORT, { input: { memoryId: mem, loc: 'i', name: 'i', content: a(600), contentType: 'text/markdown' } }));
+    refusedAt(await gql(IMPORT, { input: { memoryRef: mem, loc: 'i', name: 'i', content: a(600), contentType: 'text/markdown' } }));
     expect(await row(n.id)).toEqual(before);
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
-    ok(await gql(IMPORT, { input: { memoryId: mem, loc: 'i', name: 'i', content: a(100), contentType: 'text/markdown' } }));
+    ok(await gql(IMPORT, { input: { memoryRef: mem, loc: 'i', name: 'i', content: a(100), contentType: 'text/markdown' } }));
   });
 
   it('a copy is not checked: cloneNode of a node over the ceiling still works', async () => {

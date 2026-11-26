@@ -107,7 +107,7 @@ it('summary naming and seq use the locked counter without consuming a message sl
 it('restoring an actual legacy revision cannot roll back the counter; real content still revisions', async () => {
     const { nodeMutations } = await import('../api/graphql/schema/resolvers.mutation.node.js');
     const r = await root('chats:restore', 40);
-    await nodeMutations.updateNode(null, { input: { id: r.id, content: 'authored edit' } }, ctx);
+    await nodeMutations.updateNode(null, { input: { ref: r.id, content: 'authored edit' } }, ctx);
     expect((await db.node.findUniqueOrThrow({where:{id:r.id}})).revSeq).toBe(r.revSeq+1);
     const revision = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: r.id }, orderBy: { revNo: 'asc' } });
     expect(revision.data).toMatchObject({ messageCount: 40 });

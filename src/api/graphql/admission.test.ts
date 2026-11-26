@@ -131,7 +131,7 @@ describe('L1 query source bytes (POST, real stack)', () => {
     createNodeSpy.mockClear();
     const res = await post(base, {
       query: 'mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }',
-      variables: { i: { memoryId: 'x', loc: 'a', name: 'a', content: 'c'.repeat(5 * 1024 * 1024) } },
+      variables: { i: { memoryRef: 'x', loc: 'a', name: 'a', content: 'c'.repeat(5 * 1024 * 1024) } },
     });
     expect(res.status).toBe(200);
     expect((await res.json()).errors[0].message).toBe('Internal server error.'); // #1789: the spy's plain Error is a fault; reaching the resolver is asserted by the spy call below

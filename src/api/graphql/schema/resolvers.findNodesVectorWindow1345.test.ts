@@ -132,17 +132,17 @@ describe.each([
   afterEach(() => { searchDb = db; });
 
   it('node granularity: limit 1 finds the only spec-family node ranked past the old window', async () => {
-    const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryIds: [memId], role: 'spec' } });
+    const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryRefs: [memId], role: 'spec' } });
     expect(res.hits.map((h: any) => h.node.id)).toEqual([matchId]);
   });
 
   it('chunk granularity: the same', async () => {
-    const res = await findNodes({ query: 'q', mode: 'vector', granularity: 'chunk', limit: 1, filter: { memoryIds: [memId], role: 'spec' } });
+    const res = await findNodes({ query: 'q', mode: 'vector', granularity: 'chunk', limit: 1, filter: { memoryRefs: [memId], role: 'spec' } });
     expect(res.passages.map((p: any) => p.parentNodeId)).toEqual([matchId]);
   });
 
   it('hybrid: the widened vector leg is not truncated away', async () => {
-    const res = await findNodes({ query: 'zzzunmatchable', mode: 'hybrid', limit: 1, filter: { memoryIds: [memId], role: 'spec' } });
+    const res = await findNodes({ query: 'zzzunmatchable', mode: 'hybrid', limit: 1, filter: { memoryRefs: [memId], role: 'spec' } });
     expect(res.hits.map((h: any) => h.node.id)).toEqual([matchId]);
   });
 
@@ -158,7 +158,7 @@ describe.each([
     const match = await seed(memId, 'match2', 'far body match', { role: 'spec' });
     const [{ n }] = await db.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM node_embeddings WHERE memory_id = ${memId} AND kind = 'chunk'`;
     expect(Number(n)).toBeGreaterThan(200); // one node fills windows 1 (50) and 2 (200)
-    const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryIds: [memId], role: 'spec' } });
+    const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryRefs: [memId], role: 'spec' } });
     expect(res.hits.map((h: any) => h.node.id)).toEqual([match]);
   });
 
@@ -186,7 +186,7 @@ describe.each([
 
   it('CONTROL: with no filter the nearest node wins and nothing widens', async () => {
     const spy = vi.spyOn(getRetrievalProvider(), 'vectorSearch');
-    const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryIds: [memId] } });
+    const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryRefs: [memId] } });
     expect(res.hits[0].node.id).not.toBe(matchId);
     expect(spy).toHaveBeenCalledTimes(1);
   });
@@ -201,8 +201,8 @@ describe('@copilot — hydration re-asserts the memory scope', () => {
     vi.spyOn(provider, 'vectorSearchChunks').mockResolvedValue([
       { nodeId: outside, chunkIndex: 0, charStart: 0, charEnd: 5, chunkText: 'near', score: 1 },
     ]);
-    const node = await findNodes({ query: 'q', mode: 'vector', filter: { memoryIds: [memId] } });
-    const chunk = await findNodes({ query: 'q', mode: 'vector', granularity: 'chunk', filter: { memoryIds: [memId] } });
+    const node = await findNodes({ query: 'q', mode: 'vector', filter: { memoryRefs: [memId] } });
+    const chunk = await findNodes({ query: 'q', mode: 'vector', granularity: 'chunk', filter: { memoryRefs: [memId] } });
     expect(node.hits).toEqual([]);
     expect(chunk.passages).toEqual([]);
   });
@@ -245,7 +245,7 @@ describe('@copilot round 7 — lexical/regex hydration re-asserts scope and filt
       { nodeId: outside, score: 0.9 } as any,
       { nodeId: matchId, score: 0.8 } as any,
     ]);
-    const res = await findNodes({ query: 'body', mode: 'keyword', filter: { memoryIds: [memId], role: 'spec' } });
+    const res = await findNodes({ query: 'body', mode: 'keyword', filter: { memoryRefs: [memId], role: 'spec' } });
     expect(res.hits.map((h: any) => h.node.id)).toEqual([matchId]);
   });
 });
@@ -278,7 +278,7 @@ describe('#1970 — each handle gives the plan it names, and the HNSW plan keeps
     const match = await seed(memId, 'match2', 'far body match', { role: 'spec' });
     searchDb = withLocalSettings(db, PREFER_HNSW);
     try {
-      const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryIds: [memId], role: 'spec' } });
+      const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryRefs: [memId], role: 'spec' } });
       expect(res.hits.map((h: any) => h.node.id).filter((id: string) => id !== match)).toEqual([]);
     } finally {
       searchDb = db;

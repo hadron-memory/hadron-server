@@ -295,7 +295,8 @@ async function authorityAnchorsOf(ctx: Context, appIds: string[]): Promise<Autho
 // naming a channel not in the batch, a channel twice, or a seq the batch did not render → BAD_USER_INPUT. Nothing is
 // written unless every id in the call passes.
 
-export type BatchThrough = { channelId: string; seq: number };
+/** `ref` is the caller's own text for the channel (#5080: an id or a URN), echoed in a refusal; `channelId` is what it resolved to. */
+export type BatchThrough = { channelId: string; seq: number; ref?: string };
 export type BatchAck = { proof: string; through?: BatchThrough[] };
 
 export async function acknowledgeBatchProofs(args: {
@@ -399,10 +400,10 @@ function marksOf(proof: BatchProof, through: BatchThrough[] | undefined): Array<
   const seen = new Set<string>();
   return through.map((t) => {
     const c = proof.channels.find((x) => x.channelId === t.channelId);
-    if (!c) return refuse('BAD_USER_INPUT', `Channel ${t.channelId} is not in this delivery batch.`);
-    if (seen.has(t.channelId)) return refuse('BAD_USER_INPUT', `Channel ${t.channelId} is listed twice in through.`);
+    if (!c) return refuse('BAD_USER_INPUT', `Channel ${t.ref ?? t.channelId} is not in this delivery batch.`);
+    if (seen.has(t.channelId)) return refuse('BAD_USER_INPUT', `Channel ${t.ref ?? t.channelId} is listed twice in through.`);
     seen.add(t.channelId);
-    if (!c.seqs.includes(t.seq)) return refuse('BAD_USER_INPUT', `Seq ${t.seq} is not a message this delivery batch rendered in channel ${t.channelId}.`);
+    if (!c.seqs.includes(t.seq)) return refuse('BAD_USER_INPUT', `Seq ${t.seq} is not a message this delivery batch rendered in channel ${t.ref ?? t.channelId}.`);
     return { channelId: c.channelId, incarnation: c.incarnation, from: c.from, through: t.seq };
   });
 }

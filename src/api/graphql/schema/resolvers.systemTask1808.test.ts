@@ -13,7 +13,7 @@ const M = resolvers.Mutation;
 let orgId: string, foreignOrgId: string, memoryId: string, agentId: string, appId: string;
 const users: Record<string, string> = {};
 const context = (who: string): Context => ({ db, userId: users[who], roles: ['READER'] });
-const search = (ctx: Context, ids = [memoryId]) => Q.findNodes({}, { filter: { memoryIds: ids, isRunnable: true } }, ctx);
+const search = (ctx: Context, ids = [memoryId]) => Q.findNodes({}, { filter: { memoryRefs: ids, isRunnable: true } }, ctx);
 const scope = (ctx: Context, ref = memoryId) => M.createScope({}, { input: { name: 'export-tasks', organizationRef: orgId, memoryRefs: [ref] } }, ctx);
 
 beforeEach(async () => {

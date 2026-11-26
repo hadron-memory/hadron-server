@@ -159,7 +159,7 @@ describe('GraphQL — both ends of every served edge resolve for the child-only 
 
 describe('GraphQL — every #1891 surface carries the child', () => {
   it('a findNodes hit and an appNodes row resolve their edges too', async () => {
-    const hit = (await Q.findNodes({}, { filter: { memoryIds: [backend.mem] } }, ctx(reader))).hits
+    const hit = (await Q.findNodes({}, { filter: { memoryRefs: [backend.mem] } }, ctx(reader))).hits
       .map((h: any) => h.node).find((x: any) => x.id === ids.release);
     expect((await targets(hit, ctx(reader))).map((g: any) => g.target.id).sort()).toEqual([ids.backOpenPr, ids.ship, ids.openDoc].sort());
     const app = await db.app.findFirstOrThrow({ where: { organizationId: org.id } });

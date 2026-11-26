@@ -149,6 +149,23 @@ describe('#4428 acceptance 1: the effective assignee', () => {
     expect(ids(await Q.questions(null, { appRef: app.id, assigneeId: kay.id }, as(reader.id)))).toEqual([q.row.id]);
   });
 
+  it('maps a STALE holder row through the merge too (a holder the merge did not reach)', async () => {
+    // #4572: mergeUsers re-points workers.held_by_user_id to the survivor (mergeUsers.ts:679)
+    // before any read, so the pin above always finds the survivor as the holder and survivorOf is
+    // the identity on it — it cannot reach this arm. The defensive arm is a holder row the merge
+    // did not reach: put the merged-away id back as the holder by hand, and the read must still
+    // map it to the survivor, so display and the assigneeId filter agree (#4428).
+    await createDbWorkerAttribution(db, writer.id, 'worker-stale');
+    await db.worker.update({ where: { id: 'worker-stale' }, data: { heldByUserId: holger.id } });
+    const q = await asWorker('worker-stale', () => ask(logA.row.id));
+    await M.mergeUsers(null, { input: { source: holger.id, target: kay.id, consentProof: await approvedMergeProof(db, holger.id, kay.id, platformAdmin.id) } },
+      as(platformAdmin.id, { roles: ['ADMIN'] }));
+    await db.$executeRaw`UPDATE workers SET held_by_user_id = ${holger.id} WHERE id = 'worker-stale'`;
+    const view = await Q.question(null, { ref: q.row.id }, as(reader.id));
+    expect(D.effectiveAssigneeId(view, {}, as())).toBe(kay.id);
+    expect(ids(await Q.questions(null, { appRef: app.id, assigneeId: kay.id }, as(reader.id)))).toEqual([q.row.id]);
+  });
+
   it('shows the assignee by name and handle, and follows an account merge for the explicit assignee', async () => {
     const q = await ask(logA.row.id, simple({ assignee: holger.id }));
     const view = await Q.question(null, { ref: q.row.id }, as(reader.id));

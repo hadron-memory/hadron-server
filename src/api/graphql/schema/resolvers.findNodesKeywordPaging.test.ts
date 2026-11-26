@@ -70,7 +70,7 @@ describe('findNodes keyword offset paging while the vector index fills (#2991)',
         embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date(),
       })).reverse(),
     });
-    const page = (offset: number) => findNodes({ query: 'paging', mode: 'keyword', filter: { memoryIds: [memory.id] }, limit: 2, offset });
+    const page = (offset: number) => findNodes({ query: 'paging', mode: 'keyword', filter: { memoryRefs: [memory.id] }, limit: 2, offset });
 
     const seen = (await page(0)).hits.map((h: any) => h.node.id);
     // Two embeddings land between the reads, as the drain does it: the drain
