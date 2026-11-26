@@ -135,6 +135,7 @@ import {
 } from '../../../lib/nodeMerge.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import {
+  requireCallerIdentity,
   type Context,
   requireRole,
   requireOrgRole,
@@ -392,6 +393,7 @@ export const memoryMutations = {
       { input }: { input: MergeMemoriesInput },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const { source: rawSource, target: rawTarget } = input;
       const deleteSourceMem = input.deleteSourceMem ?? false;
       const fields = new Set<NodeMergeField>(input.include ?? ALL_NODE_MERGE_FIELDS);

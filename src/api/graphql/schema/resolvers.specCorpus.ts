@@ -14,6 +14,7 @@ import { mirrorNodeMoveToGit, type MovedNodeRef } from '../../../integrations/gi
 import type { Context } from './resolvers.js';
 import { nodeMoveOps, writeNodeCore } from './resolvers.mutation.node.js';
 import {
+  requireCallerIdentity,
   concealUnreadableDenial,
   isMemoryReadableCached,
   pageArgs,
@@ -93,6 +94,7 @@ export const specCorpusMutations = {
     { memoryRef, loc, name }: { memoryRef: string; loc: string; name?: string | null },
     ctx: Context,
   ) => {
+    requireCallerIdentity(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     // (@codex P2, PR #1452) Authorize BEFORE taking any lock or touching the
     // tombstone, with the same concealment writeNodeCore applies later: an
@@ -238,6 +240,7 @@ export const specCorpusMutations = {
     { memoryRef, parentLoc, after, name }: { memoryRef: string; parentLoc: string; after?: number | null; name?: string | null },
     ctx: Context,
   ) => {
+    requireCallerIdentity(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
     const kind = childKindOf(parentLoc);
@@ -1467,6 +1470,7 @@ async function mintMemoryNodes(
   memoryRef: string,
   dryRun: boolean,
 ): Promise<MintReport> {
+  requireCallerIdentity(ctx);
   const { id } = await resolveMemoryRef(ctx.db, memoryRef);
   await concealUnreadableDenial(ctx, id, memoryRef, () => mayMintNodes(ctx, id));
 
