@@ -234,6 +234,17 @@ describe('collisions: numeric tail, aliases, tombstones', () => {
     expect(row.deletedAt).not.toBeNull();
   });
 
+  it("the caller's own tombstone of the same class in ANOTHER App is never reclaimed", async () => {
+    const otherApp = await mkApp('other');
+    const other = await db.memory.create({ data: {
+      id: generateId(), ownerUserId: alice.id, userId: alice.id, appId: otherApp.id, userMemoryOfAgentId: agent.id,
+      urn: 'alice:tutor-alice-private', name: 'other-app', class: 'private', tags: [], deletedAt: new Date(),
+    } as never });
+    const m = await mk(alice, 'private');
+    expect(m.urn).toBe('alice:tutor-alice-private-2');
+    expect(await db.memory.findUnique({ where: { id: other.id } })).not.toBeNull();
+  });
+
   it("the caller's own tombstone of another class is never reclaimed", async () => {
     const other = await db.memory.create({ data: {
       id: generateId(), ownerUserId: alice.id, userId: alice.id, appId: app.id, userMemoryOfAgentId: agent.id,
