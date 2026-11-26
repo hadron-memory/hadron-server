@@ -13404,7 +13404,7 @@ const governedDoorArgs = {
   urn: z.string().describe('Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>).'),
   name: z.string().optional().describe('Node name. Required when creating.'),
   description: z.string().optional().describe('Short description'),
-  abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars).'),
+  abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars); for the long form use `content`.'),
   content: z.string().optional().describe('Markdown content'),
   // The same lenient schema as the generic node tools ("a,b" or an array),
   // so a call the generic tool accepted replays through the door
