@@ -104,9 +104,12 @@ describe('#5010 the trigger refuses every edit and delete', () => {
     expect((await entryRow()).organization_id).toBe(orgId);
   });
 
-  it('pin 7 (guard, flipped by #5014 A6): organization_id to NULL passes the trigger and the now-nullable column (no error)', async () => {
-    // A12 pinned 23502 here: the column was still NOT NULL, so the trigger's NULL arm was unreachable. A6 (#5014) makes the
-    // column nullable, so the arm is exercised and the update succeeds; the person-owner transitions are in personLedger5014.test.ts.
+  it('pin 7 (guard, flipped by #5014 A6, narrowed by #5238): organization_id to NULL passes only once the organization is deleted', async () => {
+    // A12 pinned 23502 here: the column was still NOT NULL, so the trigger's NULL arm was unreachable. A6 (#5014) made the
+    // column nullable; #5238 (cor:dmo:170:08) lets the link clear only for a deleted owner, so a live organization's clear is
+    // refused and the same clear after the soft delete succeeds. The rest of #5238's pins are in creditLedgerOwnerClear5238.test.ts.
+    expect(await code('UPDATE credit_ledger_entries SET organization_id = NULL WHERE id = $1', [entryId])).toBe('23514');
+    await pg.query('UPDATE organizations SET deleted_at = now() WHERE id = $1', [orgId]);
     expect(await code('UPDATE credit_ledger_entries SET organization_id = NULL WHERE id = $1', [entryId])).toBeNull();
   });
 

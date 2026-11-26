@@ -420,6 +420,8 @@ interface LedgerInsert {
   sourceId: string;
   note: string | null;
   createdBy: string | null;
+  /** Unset: the database default (the insert's own instant). See {@link GrantCreditsParams.createdAt}. */
+  createdAt?: Date;
 }
 
 /**
@@ -483,6 +485,13 @@ export interface GrantCreditsParams {
   sourceId: string;
   note?: string | null;
   createdBy?: string | null;
+  /**
+   * The entry's date; unset is the insert's own instant. A server-written grant made by a read is dated at that read's
+   * instant (#5022, the default monthly grant), so the read's replay at that instant includes it (QA P3 on #5317: the replay
+   * takes grants with createdAt <= its instant, and an insert dated a moment later fell outside `expiring`). Not reachable
+   * from the grantCredits mutation, whose input has no such field.
+   */
+  createdAt?: Date;
 }
 
 /**
@@ -506,6 +515,7 @@ export async function grantCredits(db: PrismaClient, params: GrantCreditsParams)
     sourceId: params.sourceId,
     note: params.note ?? null,
     createdBy: params.createdBy ?? null,
+    ...(params.createdAt ? { createdAt: params.createdAt } : {}),
   });
 }
 

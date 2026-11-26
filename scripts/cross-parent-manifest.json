@@ -616,6 +616,18 @@
       "resolver": "src/api/graphql/schema/resolvers.types.ts::sharedMemory",
       "gate": "canReadMemoryRecord"
     },
+    "App.attachedMemories": {
+      "target": "AppAttachedMemory",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::attachedMemories",
+      "gate": "holdsContentReadIndependently"
+    },
+    "AppAttachedMemory.memory": {
+      "target": "Memory",
+      "class": "parent-implies-child",
+      "audience": "Only an entry whose memory the viewer reads in their own right is listed by App.attachedMemories (holdsContentReadIndependently, per link); the field is that same row, so no entry names a memory its viewer cannot read.",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::attachedMemories"
+    },
     "App.selfJoin": {
       "target": "AppSelfJoin",
       "class": "self-gated",

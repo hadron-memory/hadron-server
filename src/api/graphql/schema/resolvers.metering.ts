@@ -52,6 +52,7 @@ import {
 } from '../../../lib/metering/settleExpiredGrants.js';
 import type { ReplayResult } from '../../../lib/metering/expiry.js';
 import { isReadOnlyImpersonation } from '../impersonationReadOnlyPlugin.js';
+import { ensurePeriodGrant, periodGrantDue } from '../../../lib/metering/periodGrant.js';
 import { safeErrorCode } from '../../../lib/safeErrorCode.js';
 import type { CreditLedgerEntry, AiModelPrice } from '../../../generated/prisma/index.js';
 
@@ -273,12 +274,16 @@ export const meteringQueries = {
     // (`credit_expiry.read_failed`) and not as a failed settlement. The whole snapshot stays in the one `try` (the sum read cannot be
     // moved out of the transaction); only the line's name differs. The fallback answers the same either way.
     let failedPhase = 'settle' as 'settle' | 'read';
-    const snapshot = (write: boolean): Promise<{ measure: CreditMeasure; sum: bigint }> =>
+    // `withDue`: the month's grant still owed (#5022, ruling 9a) is read in the SAME snapshot as the sum (sec10 P3-2 and the
+    // LOCAL and BLIND notes on #5317), so a grant another read commits meanwhile is in both or in neither, never counted twice.
+    const snapshot = (write: boolean, withDue = false): Promise<{ measure: CreditMeasure; sum: bigint; due: bigint }> =>
       ctx.db.$transaction(
         async (tx) => {
           const m = await settleAndMeasure(tx as unknown as typeof ctx.db, owner, asOf, { write });
           try {
-            return { measure: m, sum: await creditBalance(tx as unknown as typeof ctx.db, owner) };
+            const sum = await creditBalance(tx as unknown as typeof ctx.db, owner);
+            const due = withDue ? await periodGrantDue(tx, owner, asOf) : 0n;
+            return { measure: m, sum, due };
           } catch (err) {
             failedPhase = 'read';
             throw err;
@@ -288,13 +293,20 @@ export const meteringQueries = {
       );
     let measure: CreditMeasure;
     let sum: bigint;
+    // #5022 (Billing A9, hrn:node:hadronmemory.com:specs:cor:dmo:170:12): the grant this month still owes the owner. A read that
+    // may not write adds it to its figure (gate ruling 9a), so it answers what the next writing read will.
+    let due = 0n;
     if (isReadOnlyImpersonation(ctx)) {
-      ({ measure, sum } = await snapshot(false));
+      // S4: an impersonated session is read-only, so it writes no grant.
+      ({ measure, sum, due } = await snapshot(false, true));
     } else {
       try {
         // #5014 (local review P2): first bring in any entry still named by a person merged into this one, so the figure
         // and the settlement below see the whole ledger whatever the interleaving of a merge and a write.
         if ('userId' in owner) await repointMergedLedgerOwners(ctx.db, { survivor: owner.userId });
+        // #5022: the month's default grant, after the gate and for the owner it admitted, OUTSIDE the snapshot below (a concurrent
+        // writer of the same grant raises a unique violation that would abort it). Never throws (cor:dmo:170:09).
+        await ensurePeriodGrant(ctx.db, owner, asOf);
         // #5014 (the #5221 carry, #5242 item 2): the probe, the replay, any settlement written and the stored sum in ONE snapshot.
         ({ measure, sum } = await snapshot(true));
       } catch (err) {
@@ -308,7 +320,7 @@ export const meteringQueries = {
     return {
       organizationId: 'organizationId' in owner ? owner.organizationId : null,
       ownerUserId: 'userId' in owner ? owner.userId : null,
-      balanceMicroCents: (sum - measure.unsettled).toString(),
+      balanceMicroCents: (sum - measure.unsettled + due).toString(),
       asOf,
       replay: measure.replay,
     };

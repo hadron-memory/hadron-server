@@ -597,6 +597,11 @@ async function runMergeTxn(
     await tx.$executeRaw`DELETE FROM app_members s USING app_members t
       WHERE s.user_id = ${sourceUserId} AND t.user_id = ${targetUserId} AND s.app_id = t.app_id`;
     await tx.$executeRaw`UPDATE app_members SET user_id = ${targetUserId} WHERE user_id = ${sourceUserId}`;
+    // #5185: the links the merged-away person made. A link both accounts hold is the survivor's; the rest move to the survivor.
+    await tx.$executeRaw`DELETE FROM app_memory_links s USING app_memory_links t
+      WHERE s.attached_by = ${sourceUserId} AND t.attached_by = ${targetUserId}
+        AND s.app_id = t.app_id AND s.memory_id = t.memory_id`;
+    await tx.$executeRaw`UPDATE app_memory_links SET attached_by = ${targetUserId} WHERE attached_by = ${sourceUserId}`;
 
     // Preserve the union's strongest live subscription. When both are active,
     // keep the earlier activation and broader expiry (NULL = perpetual).

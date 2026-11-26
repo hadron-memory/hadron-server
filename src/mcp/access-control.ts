@@ -1,3 +1,4 @@
+import { isPureAppKeyShape, linkedReachFor } from '../lib/appMemoryLinks.js';
 import { personalOrgAgentTextBatch } from '../lib/auth/personalOrgAgentInstall.js';
 import { listAppInstallations, loadAppInstallationPage } from '../lib/appInstallations.js';
 /**
@@ -576,6 +577,9 @@ export async function getPrincipalAppMemoryAccess(
       }
     }
   }
+  // #5185: what a pure App key / userless run may read through its App's links (READ only, judged at use). One judge,
+  // shared with the GraphQL gate; it is never a user's, a session's or an impersonation's reach.
+  for (const id of await linkedReachFor(db, principal)) if (!access.has(id)) access.set(id, 'READ_ONLY');
   return access;
 }
 
@@ -1274,6 +1278,9 @@ async function canReadMemoryRow(
 ): Promise<boolean> {
   // #2044: an install memory's content is its live App's participants alone.
   if (isInstallMemoryRow(memory)) return (await installMemoryAudience(db, auth, memory)).read;
+  // #5185: a pure App key / userless run reads a linked memory (judged at use, READ only). Before the strict-owner and
+  // user-owned branches below, which would answer for it first; a miss falls through to today's logic unchanged.
+  if (isPureAppKeyShape(auth) && memory.class !== 'system' && (await linkedReachFor(db, auth, [memory.id])).has(memory.id)) return true;
   if (memory.class === 'personal' || memory.class === 'private') {
     // #1719 R5a: private is categorically unavailable to every AppRun,
     // including detached/free-standing holdings. No input or grant overrides it.

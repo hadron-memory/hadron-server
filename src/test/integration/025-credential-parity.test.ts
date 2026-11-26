@@ -34,16 +34,16 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
-import type { Request, Response } from 'express';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb } from '../helpers.js';
+import { cleanDb, makeMcpReq, makeMcpRes, walkOAuthDance } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { signJwt } from '../../auth/jwt.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import {
+  hashUserApiKey,
   resolveAuthContext,
   USER_API_KEY_PREFIX,
 } from '../../middleware/auth.js';
@@ -123,158 +123,14 @@ async function mintViaPortal(label: string): Promise<string> {
  * credential layer to one minted directly via the resolver.
  */
 async function mintViaOAuth(): Promise<string> {
-  // PKCE: 32 bytes → 43-char base64url verifier, SHA-256 → challenge.
-  const verifier = randomBytes(32).toString('base64url');
-  const challenge = createHash('sha256').update(verifier).digest('base64url');
-  const state = 'parity-state';
-
-  // 1. GET /oauth/authorize — render consent + issue CSRF.
-  const query = new URLSearchParams({
-    response_type: 'code',
-    client_id: TEST_CLIENT_ID,
-    redirect_uri: REGISTERED_REDIRECT,
-    code_challenge: challenge,
-    code_challenge_method: 'S256',
+  return walkOAuthDance({
+    baseUrl,
+    clientId: TEST_CLIENT_ID,
+    redirectUri: REGISTERED_REDIRECT,
     resource: RESOURCE_URL,
-    state,
+    jwt: testJwt,
+    state: 'parity-state',
   });
-  const getRes = await fetch(`${baseUrl}/oauth/authorize?${query.toString()}`, {
-    redirect: 'manual',
-    headers: { cookie: `hadron_token=${testJwt}` },
-  });
-  expect(getRes.status, 'consent GET').toBe(200);
-  const html = await getRes.text();
-  const csrfTokenMatch = html.match(/name="_csrf"\s+value="([^"]+)"/);
-  expect(csrfTokenMatch).not.toBeNull();
-  const csrfToken = csrfTokenMatch![1];
-  const grantProofMatch = html.match(/name="grant_proof"\s+value="([^"]+)"/);
-  expect(grantProofMatch).not.toBeNull();
-  const grantProof = grantProofMatch![1];
-  // Use `getSetCookie()` rather than `get('set-cookie')`: per the
-  // Fetch spec the latter returns only the first value when multiple
-  // Set-Cookie headers exist, and undici's current join-with-`, `
-  // behavior is non-standard. `getSetCookie()` returns a string[]
-  // and is the spec-compliant accessor.
-  const csrfCookieLine = getRes.headers
-    .getSetCookie()
-    .find((c) => c.startsWith('_hadron_csrf='));
-  expect(csrfCookieLine, '_hadron_csrf cookie must be in Set-Cookie response').toBeDefined();
-  const csrfCookieValue = csrfCookieLine!.slice('_hadron_csrf='.length).split(';')[0];
-
-  // 2. POST /oauth/authorize — approve.
-  const approveBody = new URLSearchParams({
-    _csrf: csrfToken,
-    decision: 'approve',
-    client_id: TEST_CLIENT_ID,
-    redirect_uri: REGISTERED_REDIRECT,
-    code_challenge: challenge,
-    code_challenge_method: 'S256',
-    resource: RESOURCE_URL,
-    scope: 'mcp',
-    state,
-    grant_proof: grantProof,
-  });
-  const postRes = await fetch(`${baseUrl}/oauth/authorize`, {
-    method: 'POST',
-    redirect: 'manual',
-    headers: {
-      'content-type': 'application/x-www-form-urlencoded',
-      cookie: `hadron_token=${testJwt}; _hadron_csrf=${csrfCookieValue}`,
-    },
-    body: approveBody.toString(),
-  });
-  expect(postRes.status, 'consent POST').toBe(302);
-  const location = postRes.headers.get('location');
-  expect(location).not.toBeNull();
-  const redirectUrl = new URL(location!);
-  const rawAuthCode = redirectUrl.searchParams.get('code');
-  expect(rawAuthCode).not.toBeNull();
-
-  // 3. POST /oauth/token — redeem.
-  const tokenBody = new URLSearchParams({
-    grant_type: 'authorization_code',
-    code: rawAuthCode!,
-    client_id: TEST_CLIENT_ID,
-    redirect_uri: REGISTERED_REDIRECT,
-    code_verifier: verifier,
-    resource: RESOURCE_URL,
-  });
-  const tokenRes = await fetch(`${baseUrl}/oauth/token`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: tokenBody.toString(),
-  });
-  expect(tokenRes.status, 'token redemption').toBe(200);
-  const tokenJson = (await tokenRes.json()) as { access_token: string };
-  return tokenJson.access_token;
-}
-
-/**
- * Build a minimal Express Request + Response stub the way
- * src/mcp/server.401.test.ts does. The Request carries a Bearer
- * token; the Response captures status + headers + body for
- * assertion.
- */
-function makeMcpReq(authorization: string): Request {
-  return {
-    method: 'POST',
-    headers: { authorization },
-    protocol: 'http',
-    body: { jsonrpc: '2.0', method: 'initialize', id: 1 },
-    get: (name: string) => {
-      if (name.toLowerCase() === 'host') return 'localhost:4000';
-      return undefined;
-    },
-  } as unknown as Request;
-}
-
-/**
- * Per Node's `http.ServerResponse.setHeader`, the value can be a
- * number, string, or readonly string[] (the array form is used for
- * multi-valued headers like Set-Cookie). The mock stores values
- * verbatim so callers can assert on whichever shape was passed; the
- * tests in this file only need to read string headers, but typing
- * the mock to the real surface keeps it correct if /mcp ever sets
- * a multi-valued header.
- */
-type HeaderValue = string | number | readonly string[];
-
-function makeMcpRes(): Response & {
-  _status: number;
-  _headers: Record<string, HeaderValue>;
-  _body: unknown;
-} {
-  const headers: Record<string, HeaderValue> = {};
-  let status = 200;
-  let body: unknown;
-  const res = {
-    setHeader: vi.fn((name: string, value: HeaderValue) => {
-      headers[name] = value;
-      return res;
-    }),
-    status: vi.fn((code: number) => {
-      status = code;
-      return res;
-    }),
-    json: vi.fn((payload: unknown) => {
-      body = payload;
-      return res;
-    }),
-    get _status() {
-      return status;
-    },
-    get _headers() {
-      return headers;
-    },
-    get _body() {
-      return body;
-    },
-  };
-  return res as unknown as Response & {
-    _status: number;
-    _headers: Record<string, HeaderValue>;
-    _body: unknown;
-  };
 }
 
 // ── Parity assertions ────────────────────────────────────────────────
@@ -334,16 +190,63 @@ describe('025-credential-parity: portal-minted vs OAuth-minted tokens', () => {
     expect(oauthRow!.label).toBe('OAuth: Parity Test Client');
   });
 
+  it('resolveAuthContext reads LIVE roles for both tokens: a role change after minting reaches both', async () => {
+    const portalKey = await mintViaPortal('portal-key');
+    const oauthKey = await mintViaOAuth();
+
+    // Neither key may carry roles captured at mint time.
+    await db.user.update({ where: { id: testUser.id }, data: { roles: ['ADMIN'] } });
+    try {
+      const portalCtx = await resolveAuthContext(
+        makeMcpReq({ authorization: `Bearer ${portalKey}` }),
+        db,
+      );
+      const oauthCtx = await resolveAuthContext(
+        makeMcpReq({ authorization: `Bearer ${oauthKey}` }),
+        db,
+      );
+
+      expect(portalCtx.roles, 'portal').toEqual(['ADMIN']);
+      expect(oauthCtx.roles, 'oauth').toEqual(['ADMIN']);
+    } finally {
+      // beforeEach recreates the user, but restore anyway so the test never leaks.
+      await db.user.update({ where: { id: testUser.id }, data: { roles: ['CONTRIBUTOR'] } });
+    }
+  });
+
+  it('resolving either token stamps lastUsedAt on its own key row', async () => {
+    const portalKey = await mintViaPortal('portal-key');
+    const oauthKey = await mintViaOAuth();
+    const rowOf = async (raw: string) =>
+      db.userApiKey.findFirstOrThrow({
+        where: { userId: testUser.id, keyHash: hashUserApiKey(raw) },
+      });
+    expect((await rowOf(portalKey)).lastUsedAt, 'portal before').toBeNull();
+    expect((await rowOf(oauthKey)).lastUsedAt, 'oauth before').toBeNull();
+
+    await resolveAuthContext(makeMcpReq({ authorization: `Bearer ${portalKey}` }), db);
+    await resolveAuthContext(makeMcpReq({ authorization: `Bearer ${oauthKey}` }), db);
+
+    // The write is fire-and-forget: poll for it rather than assert at once.
+    await vi.waitFor(
+      async () => {
+        expect((await rowOf(portalKey)).lastUsedAt, 'portal').not.toBeNull();
+        expect((await rowOf(oauthKey)).lastUsedAt, 'oauth').not.toBeNull();
+      },
+      { timeout: 5_000, interval: 50 },
+    );
+  });
+
   it('resolveAuthContext returns identical { userId, clientId, roles } for both tokens', async () => {
     const portalKey = await mintViaPortal('portal-key');
     const oauthKey = await mintViaOAuth();
 
     const portalCtx = await resolveAuthContext(
-      makeMcpReq(`Bearer ${portalKey}`),
+      makeMcpReq({ authorization: `Bearer ${portalKey}` }),
       db,
     );
     const oauthCtx = await resolveAuthContext(
-      makeMcpReq(`Bearer ${oauthKey}`),
+      makeMcpReq({ authorization: `Bearer ${oauthKey}` }),
       db,
     );
 
@@ -382,10 +285,10 @@ describe('025-credential-parity: portal-minted vs OAuth-minted tokens', () => {
     });
 
     const portalRes = makeMcpRes();
-    await handleMcpRequest(makeMcpReq(`Bearer ${portalKey}`), portalRes);
+    await handleMcpRequest(makeMcpReq({ authorization: `Bearer ${portalKey}` }), portalRes);
 
     const oauthRes = makeMcpRes();
-    await handleMcpRequest(makeMcpReq(`Bearer ${oauthKey}`), oauthRes);
+    await handleMcpRequest(makeMcpReq({ authorization: `Bearer ${oauthKey}` }), oauthRes);
 
     // Status, headers, body all identical byte-for-byte.
     expect(portalRes._status).toBe(401);
@@ -418,11 +321,11 @@ describe('025-credential-parity: portal-minted vs OAuth-minted tokens', () => {
     });
 
     const revokedRes = makeMcpRes();
-    await handleMcpRequest(makeMcpReq(`Bearer ${oauthKey}`), revokedRes);
+    await handleMcpRequest(makeMcpReq({ authorization: `Bearer ${oauthKey}` }), revokedRes);
 
     const fakeKey = `${USER_API_KEY_PREFIX}${'0'.repeat(64)}`;
     const unknownRes = makeMcpRes();
-    await handleMcpRequest(makeMcpReq(`Bearer ${fakeKey}`), unknownRes);
+    await handleMcpRequest(makeMcpReq({ authorization: `Bearer ${fakeKey}` }), unknownRes);
 
     expect(revokedRes._status).toBe(unknownRes._status);
     expect(revokedRes._headers['WWW-Authenticate']).toBe(
