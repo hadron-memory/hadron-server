@@ -284,13 +284,13 @@ describe('telegramConnection(ref) and telegramConnections', () => {
     expect(await resolvers.Query.telegramConnection({}, { ref: 'nope' }, ctxFor(member.id))).toBeNull();
   });
 
-  it('pages the member-scoped set; orgId narrows; an outsider gets an empty page; limit 0 counts', async () => {
+  it('pages the member-scoped set; orgRef narrows; an outsider gets an empty page; limit 0 counts', async () => {
     const connection = await create();
     const page = await resolvers.Query.telegramConnections({}, {}, ctxFor(member.id));
     expect(page.total).toBe(1);
     expect(page.items[0]!.id).toBe(connection.id);
     expect(await resolvers.Query.telegramConnections({}, { orgRef: org.id }, ctxFor(foreignAdmin.id))).toEqual({ items: [], total: 0 });
-    // The default (no orgId) scope is the caller's own orgs: another org's admin sees nothing of this org's connection.
+    // The default (no orgRef) scope is the caller's own orgs: another org's admin sees nothing of this org's connection.
     expect(await resolvers.Query.telegramConnections({}, {}, ctxFor(foreignAdmin.id))).toEqual({ items: [], total: 0 });
     expect(await resolvers.Query.telegramConnections({}, { limit: 0 }, ctxFor(member.id))).toEqual({ items: [], total: 1 });
     expect((await resolvers.Query.telegramConnections({}, { offset: -5 }, ctxFor(member.id))).items).toHaveLength(1);
