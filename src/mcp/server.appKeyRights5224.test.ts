@@ -487,6 +487,18 @@ describe.each(['organization', 'user'] as const)('#5224 item 2: an App key of a 
     expect(await gql(w.miaKey, query, vars(t, w))).toContain('"role":"writer"');
   });
 
+  // The key rows above stop at the door (UNAUTHENTICATED: attachMemoryToApp is person-only, main's #5224), so they no
+  // longer show the memory-visibility check. A signed-in person who cannot see the memory still gets MEMORY_NOT_FOUND.
+  it.each(['personal', 'private'] as const)('attachMemoryToApp: a signed-in person outsider to a %s memory gets MEMORY_NOT_FOUND, and nothing is written', async (cls) => {
+    const w = await makeWorld(kind);
+    const t = await seed(w, cls, SHAPES[2]);
+    const before = await audience();
+    const out = await gql(await userKey(w.leo), 'mutation($m: ID!, $p: ID!, $a: ID!) { attachMemoryToApp(memoryRef: $m, appRef: $p, agentRef: $a) { id } }', { m: t.id, p: w.appId, a: w.agentId });
+    expect(refusalCode(out)).toBe('MEMORY_NOT_FOUND');
+    for (const f of LIVE_MARKS) expect(out).not.toContain(`${t.mark}${f}`);
+    expect(await audience()).toBe(before);
+  });
+
   it('an App key is never offered a member or share tool on MCP', async () => {
     const w = await makeWorld(kind);
     await mcp(w.key, 'hadron_whoami', {});
