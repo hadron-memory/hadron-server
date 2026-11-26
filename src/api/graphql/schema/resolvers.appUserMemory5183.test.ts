@@ -4,6 +4,7 @@
  * principal but the signed-in member.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -14,6 +15,17 @@ import { detachAppOwnerMemories } from '../../../controller/operations/detachApp
 import { approvedMergeProof } from '../../../test/mergeConsent.js';
 import { appUserMemorySlug } from '../../../lib/appUserMemoryName.js';
 
+const reclaimFault = vi.hoisted(() => ({ code: null as string | null }));
+vi.mock('../../../lib/mintedSpecPermanence.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../lib/mintedSpecPermanence.js')>();
+  return {
+    ...real,
+    reclaimTombstonedMemory: (tx: never, id: string) => {
+      if (reclaimFault.code) throw new GraphQLError('fault', { extensions: { code: reclaimFault.code } });
+      return real.reclaimTombstonedMemory(tx, id);
+    },
+  };
+});
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
@@ -265,6 +277,26 @@ describe('collisions: numeric tail, aliases, tombstones', () => {
     expect((await mk(alice, 'private')).urn).toBe('alice:tutor-alice-private-2');
     expect(await db.memory.findUnique({ where: { id: plain.id } })).not.toBeNull();
     expect(await db.memory.findUnique({ where: { id: held.id } })).not.toBeNull();
+  });
+
+  it('a SPEC_MINTED_PERMANENT refusal of the reclaim keeps the tombstone and takes the next tail', async () => {
+    const t = await db.memory.create({ data: {
+      id: generateId(), ownerUserId: alice.id, userId: alice.id, appId: app.id, userMemoryOfAgentId: agent.id,
+      urn: 'alice:tutor-alice-private', name: 'minted', class: 'private', tags: [], deletedAt: new Date(),
+    } as never });
+    reclaimFault.code = 'SPEC_MINTED_PERMANENT';
+    try { expect((await mk(alice, 'private')).urn).toBe('alice:tutor-alice-private-2'); } finally { reclaimFault.code = null; }
+    expect(await db.memory.findUnique({ where: { id: t.id } })).not.toBeNull();
+  });
+
+  it('any other error from the reclaim is NOT swallowed: the create fails with it and nothing is created', async () => {
+    await db.memory.create({ data: {
+      id: generateId(), ownerUserId: alice.id, userId: alice.id, appId: app.id, userMemoryOfAgentId: agent.id,
+      urn: 'alice:tutor-alice-private', name: 'x', class: 'private', tags: [], deletedAt: new Date(),
+    } as never });
+    reclaimFault.code = 'SOMETHING_ELSE';
+    try { await expect(mk(alice, 'private')).rejects.toSatisfy((e) => code(e) === 'SOMETHING_ELSE'); } finally { reclaimFault.code = null; }
+    expect(await db.memory.count({ where: { userId: alice.id, class: 'private', deletedAt: null } })).toBe(0);
   });
 
   it("the caller's own tombstone of another class is never reclaimed", async () => {

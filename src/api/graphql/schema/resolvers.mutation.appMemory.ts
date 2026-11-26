@@ -205,6 +205,26 @@ function conflictWithoutUrn(): GraphQLError {
   return new GraphQLError('That memory name is taken. Try again.', { extensions: { code: 'MEMORY_URN_CONFLICT' } });
 }
 
+/**
+ * Remove every one of the caller's own tombstones in `ids`, all or none. A tombstone the reclaim refuses because it holds a
+ * question (QUESTION_CONTAINED) or a protected minted spec (SPEC_MINTED_PERMANENT) answers false with nothing removed: a
+ * savepoint undoes any tombstone already removed. Any other error undoes the savepoint too, then rethrows.
+ */
+async function reclaimAllOrKeep(tx: Prisma.TransactionClient, ids: string[]): Promise<boolean> {
+  await tx.$executeRaw`SAVEPOINT app_user_memory_reclaim`;
+  try {
+    for (const id of [...ids].sort((x, y) => x.localeCompare(y))) await reclaimTombstonedMemory(tx, id);
+  } catch (e) {
+    await tx.$executeRaw`ROLLBACK TO SAVEPOINT app_user_memory_reclaim`;
+    const held = e instanceof GraphQLError
+      && (e.extensions?.code === 'QUESTION_CONTAINED' || e.extensions?.code === SPEC_MINTED_PERMANENT);
+    if (held) return false;
+    throw e;
+  }
+  await tx.$executeRaw`RELEASE SAVEPOINT app_user_memory_reclaim`;
+  return true;
+}
+
 /** A P2002 whose violated unique is the memory URN (Prisma reports the column list, or the index name, in meta.target). */
 function isUrnUniqueViolation(err: unknown): boolean {
   if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') return false;
@@ -487,26 +507,9 @@ export const appMemoryMutations = {
                 const ownTombstones = blockers.filter((b) =>
                   b.deletedAt !== null && b.userId === ctx.userId && b.appId === app.id && b.class === klass);
                 if (ownTombstones.length !== blockers.length) continue;
-                // A tombstone the reclaim refuses to remove (it holds a question or a protected minted spec) keeps its
-                // address: that candidate is taken and the next tail is tried, so a name collision never refuses (R2).
-                // All-or-nothing per candidate: a savepoint undoes any tombstone already removed for this candidate.
-                await tx.$executeRaw`SAVEPOINT app_user_memory_reclaim`;
-                let kept = false;
-                for (const b of ownTombstones.sort((x, y) => x.id.localeCompare(y.id))) {
-                  try {
-                    await reclaimTombstonedMemory(tx, b.id);
-                  } catch (e) {
-                    const code = e instanceof GraphQLError ? e.extensions?.code : undefined;
-                    if (code !== 'QUESTION_CONTAINED' && code !== SPEC_MINTED_PERMANENT) throw e;
-                    kept = true;
-                    break;
-                  }
-                }
-                if (kept) {
-                  await tx.$executeRaw`ROLLBACK TO SAVEPOINT app_user_memory_reclaim`;
-                  continue;
-                }
-                await tx.$executeRaw`RELEASE SAVEPOINT app_user_memory_reclaim`;
+                // A tombstone the reclaim refuses to remove keeps its address: that candidate is taken and the next
+                // tail is tried, so a name collision never refuses (R2).
+                if (!(await reclaimAllOrKeep(tx, ownTombstones.map((b) => b.id)))) continue;
               }
               return createRow(tx, {
                 urn, name: candidate, organizationId: null, ownerUserId: ctx.userId!, appUserMemory: true,
