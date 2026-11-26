@@ -106,7 +106,7 @@ describe('hadron_run_task memory hint — URN forms (#4345)', () => {
     const b = await run(asOutsider(), missingUrn);
     expect(a).toContain('No memory matches.'); // #5168: the hint is not quoted back
     expect(a).not.toContain(foreignUrn);
-    expect(a.replace(foreignUrn, '<H>')).toBe(b.replace(missingUrn, '<H>'));
+    expect(a).toBe(b); // the hint is not quoted back, so the two texts are identical
     expect(a).not.toContain('Body of Foreign');
   });
 
@@ -117,7 +117,7 @@ describe('hadron_run_task memory hint — URN forms (#4345)', () => {
     const a = await run(asOutsider(), legacy);
     const b = await run(asOutsider(), missing);
     expect(a).not.toContain('Body of Foreign');
-    expect(a.replace(legacy, '<H>')).toBe(b.replace(missing, '<H>'));
+    expect(a).toBe(b); // the hint is not quoted back, so the two texts are identical
   });
 
   it('a legacy URN claimed by a readable and an unreadable memory resolves to the readable one', async () => {
@@ -139,6 +139,7 @@ describe('hadron_run_task memory hint — URN forms (#4345)', () => {
     });
     const text = await run(asAdmin(), 'urn:memory:amb-org:amb');
     expect(text).toContain('No memory matches.'); // #5168: the hint is not quoted back
+    expect(text).not.toContain('urn:memory:amb-org:amb'); // #5227: and nothing of it is echoed
     expect(text).not.toContain('Body of');
   });
 
