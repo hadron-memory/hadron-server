@@ -226,6 +226,8 @@ function quoteColumns(line: string, k: number): { marker: number; content: numbe
   return { marker: 0, content: 0 };
 }
 
+/** Main's list-closing line, kept for a text with a bare CR (#5265). */
+const LIST_CLOSING_LINE_MAIN = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|(?:[-*_][ \t]*){3,}$)/;
 /** #5265 — marked's line: any HTML tag or comment closes the item, but no instruction, CDATA or declaration. The mixed `-*-` line is left as main
  * reads it here: CommonMark's line decides those bodies (one escape serves both models). */
 const LIST_CLOSING_LINE_MARKED = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|(?:[-*_][ \t]*){3,}$|<(?:[a-z].*>|!--))/i;
@@ -243,6 +245,9 @@ type ReaderModel = 'commonmark' | 'marked';
 /** The index of the `<` that opens the first unterminated construct at or after `from`, or -1, as `model` reads the text. */
 function firstUnterminated(text: string, from: number, model: ReaderModel = 'commonmark'): number {
   scansRun += 1;
+  // #5265 — a bare CR ends a line for the readers but not for this walk, which then misreads the code line it sits in once the item-2 rule
+  // has closed the list: a text holding one keeps main's list close.
+  const bareCr = /\r(?!\n)/.test(text);
   const n = text.length;
   let fence: OpenFence | null = null;
   let fenceContainers: Container[] = [];
@@ -439,7 +444,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       else if (depth > listDepth && listCol > 0 && quoteColumns(line, listDepth + 1).marker - quoteColumns(line, listDepth).content < listCol) listCol = -1;
       else if (depth < listDepth) listCol = -1;
       // A line that starts another block closes the item; only a paragraph line may continue it lazily.
-      else if (depth === listDepth && inner.trim() !== '' && lineCols < listCol && (prev !== 'other' || (model === 'marked' ? LIST_CLOSING_LINE_MARKED : LIST_CLOSING_LINE).test(inner))) listCol = -1;
+      else if (depth === listDepth && inner.trim() !== '' && lineCols < listCol && (prev !== 'other' || (bareCr ? LIST_CLOSING_LINE_MAIN : model === 'marked' ? LIST_CLOSING_LINE_MARKED : LIST_CLOSING_LINE).test(inner))) listCol = -1;
       // Inside a deeper quote the item's content is that quote's to measure from.
       const opensQuote = depth > prevDepth;
       prevDepth = depth;

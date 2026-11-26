@@ -170,6 +170,12 @@ describe('#5265 item 2: a list closed by an HTML block keeps its code', () => {
   });
 });
 
+describe('#5265 item 2 in a text with a bare CR: main\'s list close', () => {
+  // Bradley, LOCAL at 6457cd8e: the readers end the code line at the CR and read `<plaintext>` as a new line, which this walk does not, so
+  // closing the item at `<div>` hid it. A text with a bare CR keeps main's list close, which reads the line as the item's paragraph.
+  cases([['a raw-text start after a bare CR in the code', '- a\n<div>\n\n    x\r§plaintext>', ALL]]);
+});
+
 describe('#5265 item 4: a tab before a quote inside a list item', () => {
   // CommonMark's half only: marked's model of a tab after a quote marker is left to #5332, with the bogus-comment rule it exposes.
   cases([
