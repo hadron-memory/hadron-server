@@ -17,12 +17,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { Client } from 'pg';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
+import { loadLaunchableFamilies } from '../../../lib/agentTasks/hosts.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -185,6 +187,13 @@ describe('joining an existing host (A3, Q6, N2)', () => {
     expect(live).toBe(1);
   });
 
+  it('a joined host whose keys were all revoked by hand is still AGENT_TEAM_HOST_EXISTS without replace', async () => {
+    const keyId = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
+    await M.revokeAppKey({}, { id: keyId }, ctx(manager.id));
+    expect(await code(join({ hostId: 'mac1' }))).toBe('AGENT_TEAM_HOST_EXISTS');
+    await join({ hostId: 'mac1', replace: true });
+  });
+
   it('N2: a live host key with no record (a rollout or rollback) answers AGENT_TEAM_HOST_EXISTS; replace revokes it', async () => {
     const stray = await mkKey(app.id, 'stray');
     await db.appKeyScope.create({ data: { id: generateId(), appKeyId: stray.id, scope: 'host:operate', hostId: 'mac1', grantedByUserId: manager.id } });
@@ -328,8 +337,16 @@ describe('removeAgentTeamHost: person-only (A6), and what it ends (A7, A8)', () 
     const keyId = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
     await register(keyId, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
     await remove({ hostId: 'mac1' });
+    // Each reader of launchability on its own: the matcher's (loadLaunchable) and the start's (liveRegistrationsFor).
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, new Date())).size).toBe(0);
     await M.createAgentTask({}, { input: { appRef: app.id, title: 'Work', assignee: { worker: kit.id }, closeSessionWhenDone: false } }, ctx(manager.id));
     expect(await db.hostOperation.count({ where: { hostId: 'mac1', type: 'worker.start' } })).toBe(0);
+  });
+
+  it('positive control for A7: before the removal the same worker is launchable through the host', async () => {
+    const keyId = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
+    await register(keyId, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, new Date())).get(kit.id)).toEqual(['claude']);
   });
 
   it('A8 (N1): the host\'s issued and collected operations fail in the removal with a reason naming it; a start whose session bound reads succeeded', async () => {
@@ -431,13 +448,37 @@ describe('removal ends the registration for every reader of liveness', () => {
 });
 
 describe('the guarded insert, without the doors\' locks (findings: resolver-race-pin-can-miss-the-consume-guard)', () => {
-  it('two transactions racing to insert one host id: one row, exactly one of them created it', async () => {
+  it('a writer that meets an uncommitted insert of the same host waits for it, then locks that row: one row, created once', async () => {
     const { insertOrLockTeamHost } = await import('../../../lib/hostOperations/teamHosts.js');
-    const one = () => db.$transaction((tx) => insertOrLockTeamHost(tx, { appId: app.id, hostId: 'mac1', label: 'Mac', createdByUserId: manager.id, now: new Date() }));
-    const results = await Promise.all([one(), one()]);
-    expect(results.map((r) => r.created).sort()).toEqual([false, true]);
-    expect(results[0]!.row.id).toBe(results[1]!.row.id);
-    expect(await db.agentTeamHost.count()).toBe(1);
+    const first = new Client({ connectionString: process.env.DATABASE_URL });
+    const probe = new Client({ connectionString: process.env.DATABASE_URL });
+    await first.connect();
+    await probe.connect();
+    try {
+      await first.query('BEGIN');
+      await first.query(`INSERT INTO agent_team_hosts (id, app_id, host_id, label, created_by_user_id) VALUES ($1, $2, 'mac1', 'First', $3)`, [generateId(), app.id, manager.id]);
+      const pids: number[] = [];
+      // The second writer cannot see the uncommitted row; it must wait on it rather than insert a second, or fail.
+      const second = db.$transaction(async (tx) => {
+        const [{ pid }] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+        pids.push(pid);
+        return insertOrLockTeamHost(tx, { appId: app.id, hostId: 'mac1', label: 'Second', createdByUserId: holder.id, now: new Date() });
+      });
+      for (let i = 0; i < 400; i++) {
+        if (pids.length && (await probe.query('SELECT 1 FROM pg_locks WHERE pid = $1 AND NOT granted', [pids[0]])).rowCount) break;
+        await new Promise((r) => setTimeout(r, 25));
+        if (i === 399) throw new Error('the second writer never waited');
+      }
+      await first.query('COMMIT');
+      const r = await second;
+      expect(r.created).toBe(false);
+      expect(r.row.label).toBe('First');
+      expect(await db.agentTeamHost.count()).toBe(1);
+    } finally {
+      await first.query('ROLLBACK').catch(() => undefined);
+      await first.end();
+      await probe.end();
+    }
   });
 });
 

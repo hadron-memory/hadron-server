@@ -141,6 +141,16 @@ describe('the ask (cor:agt:050:10)', () => {
 });
 
 describe('the fallback after the grace (cor:agt:050:10 S4, cor:agt:070:05)', () => {
+  it('#5259: a host removed inside its refresh window is no live host for the fallback: no worker.end is issued to it', async () => {
+    const t = await startedTask();
+    await finish(t.id);
+    const r = (await requestOf(t.id))!;
+    // Kit's session is open on orca1, so the removal is forced (cor:agt:070:01, Proposed: removal ends the registration at once).
+    expect(await M.removeAgentTeamHost({}, { input: { appRef: app.id, hostId: 'orca1', force: true } }, ctx(manager.id))).toBe(true);
+    expect(await resolveSessionEndRequest(db, r.id, r.dueAt)).toBe('no-live-host');
+    expect(await db.hostOperation.count({ where: { type: 'worker.end' } })).toBe(0);
+  });
+
   it('S4: still open at the grace, the platform issues worker.end for that exact session to Kit\'s live host; not a moment before', async () => {
     const t = await startedTask();
     await finish(t.id);
