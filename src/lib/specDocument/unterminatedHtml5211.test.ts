@@ -160,6 +160,9 @@ it('#5211 stays linear on deep quotes inside list items', () => {
 }, 120_000);
 
 describe('#5265 item 2: a list closed by an HTML block keeps its code', () => {
+  // CommonMark's own closing line: a type 7 block (`<span>`) does not close the item, so the code stays the item's (Bradley, LOCAL at 8dd599df:
+  // a mutant using marked's line leaves it raw for commonmark.js and markdown-it).
+  cases([['a type 7 line does not close it', '- a\n<span>\n\n    §script>', ['commonmark.js', 'markdown-it']]]);
   it.each(['- a\n<div>\n\n    <script>', '> - a\n> <div>\n>\n>     <script>', '- a\nb\n<div>\n\n    <script>'])('%j stays as written', (body) => {
     expect(escapeUnterminatedHtml(body)).toBe(body);
     expect(losers(body)).toEqual([]);
@@ -216,6 +219,8 @@ describe('#5265 rebuild on items 2, 4 and 9: the bodies main keeps', () => {
     // in commonmark.js and markdown-it, which keep it on main), and the `<xmp>` behind `<div/` is #5324 (not the window's).
     for (const [body, lost] of [
       ['<!<b>\n-\n<!x>~~~', []], ['<!\n\n</textarea>\n~~~', ['marked']], ['<!\n-\n</textarea>\n~~~', ['marked']], ['<x>\n```<!<xmp>', []],
+      // The `</` site's mirror of the `<!` one inside an HTML block (Bradley, LOCAL at 8dd599df).
+      ['<x>\n```</<xmp>', []], ['<div>\n</<script>', []],
       ['-<!<pre>\n<div/<xmp>', ['commonmark.js', 'markdown-it']],
     ] as Array<[string, string[]]>) {
       expect(escapeUnterminatedHtml(body), body).toBe(body);
