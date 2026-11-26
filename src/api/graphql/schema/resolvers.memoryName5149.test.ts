@@ -1,14 +1,16 @@
 /**
  * #5149 — a memory's display name has no grammar (cor:dmo:060:01); only the slug derived from it does (cor:urn:010:01/:02).
  * The #2730 refusals existed for the root node the name used to become, which #3952 (R11) removed. What still refuses is
- * a name that cannot be stored, or that yields no slug, and both refuse before any write.
+ * a name that cannot be stored, or that is empty or blank, and both refuse before any write.
+ * #5203 S3: a name that yields no slug is no longer refused; it creates under a fallback base (cor:urn:010:01, "the
+ * derivation must never refuse the entity's creation"). The name is judged before the slug is derived.
  */
 import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { generateId } from '../../../lib/id.js';
-import { isValidSlug } from '../../../lib/urn.js';
+import { isValidSlug, parseUrn } from '../../../lib/urn.js';
 import { cleanDb, createDbAppAgent, createDbAppMember, createDbAppWithKey } from '../../../test/helpers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -63,14 +65,19 @@ const admitted: [string, string, string][] = [
   ['a Windows parent directory', '..\\x', 'x'],
   ['a dot segment', '.:x', 'x'],
 ];
-/** Names that yield no slug, and names that cannot be stored. */
-const refused: [string, string][] = [
+/** #5203 S3: names that yield no slug, now created under a fallback base. */
+const noSlug: [string, string][] = [
   ['only a colon', ':'],
   ['a parent directory', '..'],
   ['a dot', '.'],
   ['only slashes', '///'],
   ['only characters outside the slug alphabet', 'é'.repeat(128)],
   ['only punctuation', '!!!'],
+];
+/** Names that are invalid as names: empty, blank (#5197 blind F2), or not storable. */
+const refused: [string, string][] = [
+  ['an empty name', ''],
+  ['a whitespace-only name', '   '],
   ['a NUL', 'a\0b'],
   ['an unpaired surrogate', 'a\uD800b'],
 ];
@@ -89,8 +96,21 @@ for (const [door, create] of doors) {
           expect(stored).toBe(slug);
           expect(isValidSlug(stored!)).toBe(true);
         }
+        // #5197 blind F6: the URN the door stored parses back as a memory URN.
+        expect(parseUrn(`hrn:mem:${row.urn}`)).toBeTruthy();
         expect(await db.node.count({ where: { memoryId: id } })).toBe(0);
         expect(readdirSync(graphsPath, { recursive: true })).toEqual([]);
+      });
+    }
+    for (const [label, name] of noSlug) {
+      it(`creates a memory named with ${label} under a valid fallback slug, keeping the name (#5203 S3)`, async () => {
+        const { id } = await create(name);
+        const row = await db.memory.findUniqueOrThrow({ where: { id } });
+        expect(row.name).toBe(name);
+        const [root, stored, ...rest] = row.urn.split(':');
+        expect([root, rest]).toEqual([org.urn, []]);
+        expect(isValidSlug(stored!)).toBe(true);
+        expect(parseUrn(`hrn:mem:${row.urn}`)).toBeTruthy();
       });
     }
     for (const [label, name] of refused) {
@@ -117,6 +137,14 @@ describe('#5149 createMemory in the caller\'s own namespace', () => {
       expect((await db.user.findUniqueOrThrow({ where: { id: admin.id } })).principalId).toBeNull();
     });
   }
+  it('creates a memory whose name yields no slug under the caller\'s handle (#5203 S3)', async () => {
+    const { id } = await M.createMemory({}, { name: '!!!', memoryClass: 'private' }, ctx(admin.id));
+    const { handle } = await db.user.findUniqueOrThrow({ where: { id: admin.id } });
+    const row = await db.memory.findUniqueOrThrow({ where: { id } });
+    expect(row.name).toBe('!!!');
+    expect(row.urn.startsWith(`${handle}:`)).toBe(true);
+    expect(isValidSlug(row.urn.slice(handle!.length + 1))).toBe(true);
+  });
   it('creates a memory whose name ends in a colon under the caller\'s handle', async () => {
     const { id } = await M.createMemory({}, { name: 'Notes:', memoryClass: 'private' }, ctx(admin.id));
     const { handle } = await db.user.findUniqueOrThrow({ where: { id: admin.id } });
@@ -125,9 +153,14 @@ describe('#5149 createMemory in the caller\'s own namespace', () => {
 });
 
 describe('#5149 a name admitted now still collides on its slug', () => {
-  it('createMemory refuses "abc:" where "abc" exists', async () => {
+  // #5203 S3: a collision on a derived slug iterates instead of refusing CONFLICT.
+  it('createMemory creates "abc:" under another slug where "abc" exists', async () => {
     await doors[0]![1]('abc');
-    await expect(doors[0]![1]('abc:')).rejects.toMatchObject({ extensions: { code: 'CONFLICT' } });
+    const { id } = await doors[0]![1]('abc:');
+    const row = await db.memory.findUniqueOrThrow({ where: { id } });
+    expect(row.name).toBe('abc:');
+    expect(row.urn).not.toBe(`${org.urn}:abc`);
+    expect(isValidSlug(row.urn.split(':')[1]!)).toBe(true);
   });
 });
 
@@ -145,6 +178,8 @@ describe('#5149 MCP delegates', () => {
     for (const [label, name] of refused) {
       it(`${tool} refuses ${label} as caller input, never a fault`, async () => {
         const text = await mcp().callToolText(tool, { ...args(), name });
+        // #5197 blind F5: the typed refusal itself, not just a mention of the name.
+        expect(text).toMatch(/^\[bad_user_input\]/);
         expect(text).toMatch(/name/i);
         expect(text).not.toMatch(/internal|request id/i);
         expect(await db.memory.count()).toBe(0);
