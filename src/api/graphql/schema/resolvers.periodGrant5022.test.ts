@@ -16,7 +16,9 @@ import { formatGraphQLError } from '../formatError.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import {
+  ensurePeriodGrant,
   PERIOD_GRANT_SOURCE_TYPE,
+  periodGrantDue,
   reloadOwnerDefaultMonthlyGrantForTests,
   resetPeriodGrantStateForTests,
   setPeriodGrantWriterForTests,
@@ -96,6 +98,26 @@ describe('G1: a person\'s first read of the month', () => {
     reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"1234","organization":"777"}' });
     expect((await gql(BALANCE, ctxOf(p), { orgRef: orgId })).errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
     expect((await gql(BALANCE, ctxOf(orgAdmin), { userRef: p })).errors).toBeDefined();
+    expect(await grants()).toHaveLength(0);
+  });
+});
+
+describe('G11: a soft-deleted owner never receives the grant (issue section 8; sec10 P3-1 on #5317)', () => {
+  it('a platform admin\'s read of a soft-deleted person writes no grant and adds none to the figure', async () => {
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"1234"}' });
+    await db.user.update({ where: { id: p }, data: { deletedAt: new Date() } });
+    const res = await gql(BALANCE, ctxOf(admin, ['ADMIN']), { userRef: p });
+    expect(res.errors).toBeUndefined();
+    expect(balanceOf(res)).toBe('0');
+    expect(await grants()).toHaveLength(0);
+  });
+
+  it('the library writes no grant and owes none for a soft-deleted organization', async () => {
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"organization":"777"}' });
+    await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    const now = new Date();
+    expect(await periodGrantDue(db, { organizationId: orgId }, now)).toBe(0n);
+    await ensurePeriodGrant(db, { organizationId: orgId }, now);
     expect(await grants()).toHaveLength(0);
   });
 });

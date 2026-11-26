@@ -138,6 +138,18 @@ async function storedGrant(db: PrismaClient, owner: OwnerRef, now: Date) {
 }
 
 /**
+ * Whether `owner` is soft-deleted: a deleted owner is owed no grant (issue #5022 section 8; the sec10 P3-1 on #5317 found a
+ * platform admin's read of a deleted person reaching the write, since that gate resolves deleted people for admins). A row
+ * that is gone altogether counts as deleted. One indexed read; safe inside a transaction.
+ */
+async function ownerDeleted(db: PrismaClient, owner: OwnerRef): Promise<boolean> {
+  const row = 'organizationId' in owner
+    ? await db.organization.findUnique({ where: { id: owner.organizationId }, select: { deletedAt: true } })
+    : await db.user.findUnique({ where: { id: owner.userId }, select: { deletedAt: true } });
+  return row == null || row.deletedAt != null;
+}
+
+/**
  * Write the month's default grant for `owner`, once (cor:dmo:170:12). `now` is the clock the caller judges expiry with: the
  * database's (`databaseNow`), as A4 settles with it. Never throws: a conflict (the amount changed mid-month, so the owner
  * keeps the first grant; cor:dmo:170:03) logs `period_grant.conflict` once and is not retried this month; any other failure
@@ -160,6 +172,8 @@ export async function ensurePeriodGrant(db: PrismaClient, owner: OwnerRef, now: 
     console.error('period_grant.conflict', { ownerType: ownerType(owner), ...logOwner(owner) });
   };
   try {
+    // Not cached as done: a deleted owner reaches this only through an admin's read, which is rare.
+    if (await ownerDeleted(db, owner)) return;
     const stored = await storedGrant(db, owner, now);
     if (stored) {
       if (sameOwner(stored, owner) && stored.amountMicroCents === amount && stored.kind === 'grant') done.add(key);
@@ -196,5 +210,6 @@ export async function ensurePeriodGrant(db: PrismaClient, owner: OwnerRef, now: 
 export async function periodGrantDue(db: PrismaClient | Prisma.TransactionClient, owner: OwnerRef, now: Date): Promise<bigint> {
   const amount = ownerDefaultMonthlyGrant()[ownerType(owner)];
   if (amount <= 0n) return 0n;
+  if (await ownerDeleted(db as PrismaClient, owner)) return 0n;
   return (await storedGrant(db as PrismaClient, owner, now)) ? 0n : amount;
 }

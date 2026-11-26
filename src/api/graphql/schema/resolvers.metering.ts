@@ -274,12 +274,16 @@ export const meteringQueries = {
     // (`credit_expiry.read_failed`) and not as a failed settlement. The whole snapshot stays in the one `try` (the sum read cannot be
     // moved out of the transaction); only the line's name differs. The fallback answers the same either way.
     let failedPhase = 'settle' as 'settle' | 'read';
-    const snapshot = (write: boolean): Promise<{ measure: CreditMeasure; sum: bigint }> =>
+    // `withDue`: the month's grant still owed (#5022, ruling 9a) is read in the SAME snapshot as the sum (sec10 P3-2 and the
+    // LOCAL and BLIND notes on #5317), so a grant another read commits meanwhile is in both or in neither, never counted twice.
+    const snapshot = (write: boolean, withDue = false): Promise<{ measure: CreditMeasure; sum: bigint; due: bigint }> =>
       ctx.db.$transaction(
         async (tx) => {
           const m = await settleAndMeasure(tx as unknown as typeof ctx.db, owner, asOf, { write });
           try {
-            return { measure: m, sum: await creditBalance(tx as unknown as typeof ctx.db, owner) };
+            const sum = await creditBalance(tx as unknown as typeof ctx.db, owner);
+            const due = withDue ? await periodGrantDue(tx, owner, asOf) : 0n;
+            return { measure: m, sum, due };
           } catch (err) {
             failedPhase = 'read';
             throw err;
@@ -294,8 +298,7 @@ export const meteringQueries = {
     let due = 0n;
     if (isReadOnlyImpersonation(ctx)) {
       // S4: an impersonated session is read-only, so it writes no grant.
-      due = await periodGrantDue(ctx.db, owner, asOf);
-      ({ measure, sum } = await snapshot(false));
+      ({ measure, sum, due } = await snapshot(false, true));
     } else {
       try {
         // #5014 (local review P2): first bring in any entry still named by a person merged into this one, so the figure
