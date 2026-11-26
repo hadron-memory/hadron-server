@@ -61,7 +61,7 @@ import {
   recordSecretEvent,
   secretActorOf,
 } from '../../../lib/secrets/appSecrets.js';
-import { stageSecretChange, changeSnapshot, needsPasskey, deliverStaged } from '../../../lib/secrets/changeRequests.js';
+import { stageSecretChange, requireStagingPerson, changeSnapshot, needsPasskey, deliverStaged } from '../../../lib/secrets/changeRequests.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/create.js';
 import { requireSecretReadClientIssuer } from '../../../lib/secrets/readClientIssuer.js';
@@ -441,6 +441,13 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
       // manager reaches it; left as `false` it staged a request (a spent slot and a ceremony) for nothing.
       const protectedChange = !secret.protected && requestedProtected === false ? undefined : requestedProtected;
       if (!secret.protected && protectedChange === undefined && args.metadata === undefined && args.value === undefined) return secret; // the silent no-op: nothing to record
+      // #5299: the other direction. `protected: true` on a secret that is already protected, with no value and no metadata, asks for no change; staging it
+      // spent a slot and a ceremony for a completion that does nothing. Unlike #4749 no gate runs before this transaction, so the silent answer is
+      // given only to a caller who passes the very checks staging would make (`requireStagingPerson`); every other caller keeps the refusal it had.
+      if (secret.protected && requestedProtected === true && args.metadata === undefined && args.value === undefined) {
+        await requireStagingPerson(tx, ctx);
+        return secret;
+      }
       if (secret.protected || protectedChange !== undefined) {
         const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
         return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
