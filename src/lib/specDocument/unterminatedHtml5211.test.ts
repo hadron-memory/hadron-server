@@ -172,7 +172,17 @@ describe('#5265 item 2: a list closed by an HTML block keeps its code', () => {
 
 describe('#5265 item 4: a tab before a quote inside a list item', () => {
   // CommonMark's half only: marked's model of a tab after a quote marker is left to #5332, with the bogus-comment rule it exposes.
-  cases([['the quote continues the item', '> - a\n>\t> q\n>\n>     §script>', ['commonmark.js', 'markdown-it']]]);
+  cases([
+    ['the quote continues the item', '> - a\n>\t> q\n>\n>     §script>', ['commonmark.js', 'markdown-it']],
+    // The marker at column 3: the tab after it is a full tab's worth again.
+    ['with the inner quote three columns in', '> - a\n   >\t> q\n>\n>     §script>', ['commonmark.js', 'markdown-it']],
+  ]);
+  // The marker at column 1 or 2 (Beryl, BLIND at 6457cd8e): at column 2 the tab after it is one column wide, all of it the marker's blank, so
+  // it is not measured again as a whole tab, and the code stays as written, as on main.
+  it.each(['> - a\n >\t> q\n>\n>     <script>', '> - a\n  >\t> q\n>\n>     <script>'])('%j stays as written', (body) => {
+    expect(escapeUnterminatedHtml(body)).toBe(body);
+    expect(losers(body)).toEqual([]);
+  });
 });
 
 describe('#5265 item 9: a line of mixed -, * and _ is no thematic break', () => {

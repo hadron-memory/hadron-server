@@ -218,8 +218,9 @@ function quoteColumns(line: string, k: number): { marker: number; content: numbe
     const marker = columnAfter(line.slice(at, p), col);
     col = marker + 1;
     at = p + 1;
-    // The marker's one blank: a space, or one column of a tab (the rest of the tab is the content's indent, so the walk stays on it).
-    if (line[at] === ' ') { col += 1; at += 1; } else if (line[at] === '\t') col += 1;
+    // The marker's one blank: a space, or one column of a tab. The rest of the tab is the content's indent, so the walk stays on it,
+    // unless that column was all of it (a tab at column 3, 7, ...), which the next pass would otherwise measure again as a whole tab.
+    if (line[at] === ' ') { col += 1; at += 1; } else if (line[at] === '\t') { col += 1; if (col % 4 === 0) at += 1; }
     if (q === k) return { marker, content: col };
   }
   return { marker: 0, content: 0 };
