@@ -4014,9 +4014,9 @@ export const typeDefs = `#graphql
   "#5185 — one link of a memory to an App."
   type AppAttachedMemory {
     memory: Memory!
-    "The user who attached it."
-    attachedById: ID!
-    attachedByHandle: String!
+    "The user who attached it. null means WITHHELD from this caller, as the App's member list is (#2089)."
+    attachedById: ID
+    attachedByHandle: String
     createdAt: DateTime!
     "Whether the link counts right now."
     active: Boolean!

@@ -10,8 +10,8 @@
  *  - A link counts only while the App is live and installed, the memory is live and not `system`, and the ATTACHER can read
  *    the memory NOW in their own right (not through any App-derived reach: `holdsContentReadIndependently`, #1349). A row whose
  *    attacher lost read stays, inert; restoring the read restores the reach.
- *  - For `personal` and `private` the link reaches the key only when the memory's owner is the App's owner (a user-owned App
- *    whose owner linked their own memory). In an organization's App, or for another person's memory shared with the attacher,
+ *  - For `personal` and `private` the link reaches the key only when the memory's owner is the App's owner AND the owner made
+ *    the link (a user-owned App whose owner linked their own memory). In an organization's App, or for another person's memory shared with the attacher,
  *    the link grants nothing (Victor's reading of Holger's rulings, Proposed in the spec). A run never reads a `private`
  *    memory, linked or not (#1719 R5a).
  *
@@ -28,15 +28,17 @@ import { isRunPrincipal } from './auth/runPrincipal.js';
  */
 type OwnRightReader = (ctx: { db: PrismaClient; userId: string; roles: never }, memoryId: string) => Promise<boolean>;
 let ownRightReader: OwnRightReader | null = null;
-export function registerOwnRightReader(reader: OwnRightReader): void {
+let warnedNoReader = false;
+export function registerOwnRightReader(reader: OwnRightReader | null): void {
   ownRightReader = reader;
+  if (reader) warnedNoReader = false;
 }
 
 /** The principal shape the link reach applies to: an App key or a userless run, nothing else. */
 export function isPureAppKeyShape(auth: {
-  appId?: string | null; userId?: string | null; sessionId?: string | null; impersonation?: unknown;
+  appId?: string | null; userId?: string | null; sessionId?: string | null; impersonation?: unknown; sessionBindingRefused?: boolean;
 }): boolean {
-  return Boolean(auth.appId) && !auth.userId && !auth.sessionId && !auth.impersonation;
+  return Boolean(auth.appId) && !auth.userId && !auth.sessionId && !auth.sessionBindingRefused && !auth.impersonation;
 }
 
 /** One link row and whether it counts right now (the judgement above), for a key that is not a run. */
@@ -71,19 +73,37 @@ export async function judgeAppLinks(
   const eligible = (link: (typeof links)[number]): boolean => {
     if (!appLive || link.memory.deletedAt || link.attacher.deletedAt || link.memory.class === 'system') return false;
     if (link.memory.class === 'personal' || link.memory.class === 'private') {
-      return app!.ownerUserId !== null && link.memory.userId === app!.ownerUserId;
+      // The consent is the owner's own: the link was made by the App's owner, of their own memory. A grantee's or an admin's
+      // attach of the owner's memory grants the key nothing.
+      return app!.ownerUserId !== null && link.memory.userId === app!.ownerUserId && link.attachedBy === app!.ownerUserId;
     }
     return true;
   };
   const holds = ownRightReader;
+  if (holds === null && !warnedNoReader) {
+    warnedNoReader = true;
+    console.warn(JSON.stringify({ event: 'app_memory_links.no_own_right_reader', note: 'links count for nothing until the GraphQL helpers have loaded' }));
+  }
+  // One judgement per distinct (attacher, memory), at most 8 at a time: a link is cheap to add, and a pool is not.
+  const verdicts = new Map<string, Promise<boolean>>();
+  const pairs = [...new Map(links.filter(eligible).map((l) => [`${l.attachedBy}:${l.memoryId}`, l])).values()];
+  let next = 0;
+  const worker = async () => {
+    while (next < pairs.length) {
+      const link = pairs[next++]!;
+      const verdict = holds === null ? Promise.resolve(false) : holds(
+        { db, userId: link.attachedBy, roles: link.attacher.roles as never },
+        link.memoryId,
+      );
+      verdicts.set(`${link.attachedBy}:${link.memoryId}`, verdict);
+      await verdict.catch(() => undefined);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, pairs.length) }, worker));
   return Promise.all(links.map(async (link) => ({
     memoryId: link.memoryId,
     attachedBy: link.attachedBy,
-    // Fails closed when no reader is registered (nothing loaded the GraphQL helpers): a link then counts for nothing.
-    active: eligible(link) && holds !== null && await holds(
-      { db, userId: link.attachedBy, roles: link.attacher.roles as never },
-      link.memoryId,
-    ),
+    active: eligible(link) && (await verdicts.get(`${link.attachedBy}:${link.memoryId}`)) === true,
   })));
 }
 
@@ -108,7 +128,7 @@ export async function linkedMemoryReach(
 /** Every id the pure-key shape may read through links, for a fold or a listing; empty for any other shape. */
 export async function linkedReachFor(
   db: PrismaClient,
-  auth: { appId?: string | null; userId?: string | null; sessionId?: string | null; impersonation?: unknown; clientId?: string | null },
+  auth: { appId?: string | null; userId?: string | null; sessionId?: string | null; impersonation?: unknown; sessionBindingRefused?: boolean; clientId?: string | null },
   onlyMemoryIds?: readonly string[],
 ): Promise<Set<string>> {
   if (!isPureAppKeyShape(auth)) return new Set();

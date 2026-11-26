@@ -11,7 +11,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { getAccessibleMemoryIds } from './resolvers.helpers.js';
+import { getAccessibleMemoryIds, holdsContentReadIndependently } from './resolvers.helpers.js';
+import { registerOwnRightReader, linkedMemoryReach } from '../../../lib/appMemoryLinks.js';
 import { canReadMemory, canWriteToMemory, getMemoryAccess } from '../../../mcp/access-control.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { mergeUsers } from '../../../test/mergeConsent.js';
@@ -52,6 +53,7 @@ async function personal(userId: string, tenant: 'org' | 'user', klass: 'personal
     ? { class: klass, userId, visibility: null }
     : { class: klass, userId, organizationId: null, ownerUserId: userId, visibility: null, urn: `hrn-test-${generateId().slice(-8)}` });
 }
+const judgeFor = async (appId: string, memoryId: string) => (await import('../../../lib/appMemoryLinks.js')).judgeAppLinks(db as never, appId, { onlyMemoryIds: [memoryId] });
 async function reachFor(auth: AuthContext, memoryId: string) {
   const mcp = await canReadMemory(db as never, auth, memoryId);
   const graphql = (await getAccessibleMemoryIds({ db, ...auth } as unknown as Context, memoryId)).includes(memoryId);
@@ -124,10 +126,16 @@ describe('attachMemoryToApp: the door', () => {
     const hidden = await personal(otto, 'user');
     const gone = await memory({});
     await db.memory.update({ where: { id: gone.id }, data: { deletedAt: new Date() } });
-    const a = await refusal(attach(asUser(alice), hidden.id, orgApp.id));
-    const b = await refusal(attach(asUser(alice), gone.id, orgApp.id));
-    expect(a?.code).toBe('MEMORY_NOT_FOUND');
-    expect(b?.code).toBe('MEMORY_NOT_FOUND');
+    const norm = (r: { code: string; message: string } | null, id: string) => r && { code: r.code, message: r.message.split(id).join('<ref>') };
+    const unknownId = generateId();
+    const answers = [
+      norm(await refusal(attach(asUser(alice), hidden.id, orgApp.id)), hidden.id),
+      norm(await refusal(attach(asUser(alice), gone.id, orgApp.id)), gone.id),
+      norm(await refusal(attach(asUser(alice), unknownId, orgApp.id)), unknownId),
+    ];
+    expect(answers[0]).toMatchObject({ code: 'MEMORY_NOT_FOUND' });
+    expect(answers[1]).toEqual(answers[0]);
+    expect(answers[2]).toEqual(answers[0]);
   });
 
   it('person only: no user, an App key, a run, a worker session and an impersonation are refused', async () => {
@@ -143,21 +151,20 @@ describe('attachMemoryToApp: the door', () => {
     expect(await links(m.id)).toEqual([]);
   });
 
-  it('the App side: unknown, deleted and not-a-member are the same FORBIDDEN; an uninstalled App answers APP_UNINSTALLED', async () => {
+  it('the App side: unknown, deleted and not-a-member are the same FORBIDDEN bytes; an uninstalled App answers APP_UNINSTALLED', async () => {
     const m = await memory({});
     const deleted = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Gone', urn: `${org.urn}:gone`, deletedAt: new Date() } as never });
-    const unknown = await refusal(attach(asUser(alice), m.id, 'no-such-app'.padEnd(8, 'x')));
-    const del = await refusal(attach(asUser(alice), m.id, deleted.id));
-    const nonMember = await refusal(attach(asUser(carol), m.id, orgApp.id));
     await db.orgMember.create({ data: { organizationId: org.id, userId: carol, role: 'READER' } });
-    const nonMember2 = await refusal(attach(asUser(carol), m.id, orgApp.id));
+    const unknown = await refusal(attach(asUser(carol), m.id, generateId()));
+    const del = await refusal(attach(asUser(carol), m.id, deleted.id));
+    const nonMember = await refusal(attach(asUser(carol), m.id, orgApp.id));
     expect(del).toMatchObject({ code: 'FORBIDDEN', message: 'Forbidden' });
-    expect(nonMember2).toEqual(del);
-    expect(unknown?.code === 'FORBIDDEN' || unknown?.code === 'BAD_USER_INPUT' || unknown?.code === 'URN_NOT_QUALIFIED').toBe(true);
-    expect(nonMember?.code).toBeTruthy();
+    expect(unknown).toEqual(del);
+    expect(nonMember).toEqual(del);
     await db.app.update({ where: { id: orgApp.id }, data: { uninstalledAt: new Date() } });
     expect(await refusal(attach(asUser(alice), m.id, orgApp.id))).toMatchObject({ code: 'APP_UNINSTALLED' });
-    expect(await refusal(attach(asUser(bob), m.id, deleted.id))).toEqual(del);
+    // a non-member of an uninstalled App still gets the one FORBIDDEN, not APP_UNINSTALLED
+    expect(await refusal(attach(asUser(carol), m.id, orgApp.id))).toEqual(del);
   });
 
   it('refuses a memory the attacher reads only through another App (own right, #1349)', async () => {
@@ -190,7 +197,16 @@ describe('attach waits for its revokers (the second of two writers really waits)
     const holder = await hold([{ kind: 'app', id: orgApp.id }], (tx) => tx.app.update({ where: { id: orgApp.id }, data: { deletedAt: new Date() } }));
     const racing = attach(asUser(alice), m.id, orgApp.id);
     try { await waitForLockWaitersOfType(db, 'advisory', 1); } finally { holder.release(); await holder.done; }
-    await expect(racing).rejects.toBeTruthy();
+    await expect(racing).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' }, message: 'Forbidden' });
+    expect(await links(m.id)).toEqual([]);
+  });
+
+  it('attach vs a concurrent uninstall: waits on the App anchor, then answers APP_UNINSTALLED and writes no link', async () => {
+    const m = await memory({});
+    const holder = await hold([{ kind: 'app', id: orgApp.id }], (tx) => tx.app.update({ where: { id: orgApp.id }, data: { uninstalledAt: new Date() } }));
+    const racing = attach(asUser(alice), m.id, orgApp.id);
+    try { await waitForLockWaitersOfType(db, 'advisory', 1); } finally { holder.release(); await holder.done; }
+    await expect(racing).rejects.toMatchObject({ extensions: { code: 'APP_UNINSTALLED' } });
     expect(await links(m.id)).toEqual([]);
   });
 
@@ -199,8 +215,20 @@ describe('attach waits for its revokers (the second of two writers really waits)
     const holder = await hold([{ kind: 'app', id: orgApp.id }], (tx) => tx.appMember.delete({ where: { appId_userId: { appId: orgApp.id, userId: alice } } }));
     const racing = attach(asUser(alice), m.id, orgApp.id);
     try { await waitForLockWaitersOfType(db, 'advisory', 1); } finally { holder.release(); await holder.done; }
-    await expect(racing).rejects.toBeTruthy();
+    await expect(racing).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' }, message: 'Forbidden' });
     expect(await links(m.id)).toEqual([]);
+  });
+
+  it('detach vs a transfer: the former owner, judged on the rows after the wait, removes nothing', async () => {
+    const m = await personal(alice, 'org');
+    await db.appMember.update({ where: { appId_userId: { appId: orgApp.id, userId: bob } }, data: { role: 'member' } });
+    await db.appMemoryLink.createMany({ data: [{ appId: orgApp.id, memoryId: m.id, attachedBy: alice }, { appId: orgApp.id, memoryId: m.id, attachedBy: bob }] });
+    const holder = await hold([{ kind: 'memory', id: m.id }], (tx) => tx.memory.update({ where: { id: m.id }, data: { userId: carol } }));
+    const racing = detach(asUser(alice), m.id, orgApp.id);
+    try { await waitForLockWaitersOfType(db, 'advisory', 1); } finally { holder.release(); await holder.done; }
+    // alice is still the attacher of her own row only: she is no longer the owner, so bob's link stays.
+    await expect(racing).resolves.toBe(true);
+    expect((await links(m.id)).map((l) => l.attachedBy)).toEqual([bob]);
   });
 
   it('attach vs a transfer of the memory: waits on the memory anchor, then judges the new owner (the attacher no longer reads it)', async () => {
@@ -220,15 +248,24 @@ describe('the reach of a link, on both surfaces', () => {
     await attach(asUser(alice), m.id, orgApp.id);
     expect(await reachFor(keyAuth(orgApp.id), m.id)).toEqual({ mcp: true, graphql: true });
     expect(await reachFor(runAuth(orgApp.id), m.id)).toEqual({ mcp: true, graphql: true });
-    // Another App's key, a user with the App selected, an impersonation and a session-bound key gain nothing.
+    // Another App's key gains nothing.
     expect(await reachFor(keyAuth(userApp.id), m.id)).toEqual({ mcp: false, graphql: false });
-    const hidden = await memory({ visibility: null, organizationId: null, ownerUserId: otto });
-    await attach(asUser(otto), hidden.id, userApp.id).catch(() => undefined);
-    const viaBob = await reachFor({ userId: bob, appId: orgApp.id, roles: [], clientId: `user:${bob}` } as AuthContext, hidden.id);
-    expect(viaBob).toEqual({ mcp: false, graphql: false });
-    expect((await reachFor(keyAuth(orgApp.id, { impersonation: { orgId: org.id } as never }), m.id)).mcp).toBe(false);
-    expect((await reachFor(keyAuth(orgApp.id, { sessionId: generateId() }), m.id)).mcp).toBe(false);
-    expect((await reachFor({ ...runAuth(orgApp.id), userId: bob } as AuthContext, hidden.id)).mcp).toBe(false);
+  });
+
+  it('a user, an impersonation, a session-bound key, a refused binding and a run with a user id gain nothing from a link (both surfaces)', async () => {
+    // alice's own user-owned knowledge memory: she reads it, bob does not, and she links it into the organization's App.
+    const mine = await memory({ visibility: null, organizationId: null, ownerUserId: alice });
+    await attach(asUser(alice), mine.id, orgApp.id);
+    expect(await reachFor(keyAuth(orgApp.id), mine.id)).toEqual({ mcp: true, graphql: true }); // the control: the key reads it
+    const shapes: Array<[string, AuthContext]> = [
+      ['bob, App selected', { userId: bob, appId: orgApp.id, roles: [], clientId: `user:${bob}` } as AuthContext],
+      ['bob, no selection', { userId: bob, roles: [], clientId: `user:${bob}` } as AuthContext],
+      ['impersonation', keyAuth(orgApp.id, { impersonation: { orgId: org.id } as never })],
+      ['session-bound key', keyAuth(orgApp.id, { sessionId: generateId() })],
+      ['refused binding', keyAuth(orgApp.id, { sessionBindingRefused: true })],
+      ['run with a user id', { ...runAuth(orgApp.id), userId: bob } as AuthContext],
+    ];
+    for (const [name, auth] of shapes) expect({ name, ...(await reachFor(auth, mine.id)) }).toEqual({ name, mcp: false, graphql: false });
   });
 
   it('a link grants READ only: the key cannot write the memory', async () => {
@@ -236,6 +273,18 @@ describe('the reach of a link, on both surfaces', () => {
     await attach(asUser(alice), m.id, orgApp.id);
     expect(await canReadMemory(db as never, keyAuth(orgApp.id), m.id)).toBe(true);
     expect(await canWriteToMemory(db as never, keyAuth(orgApp.id), m.id)).toBe(false);
+  });
+
+  it('a link grants no write through GraphQL either: createNode, updateNode and deleteNode with the App key are refused', async () => {
+    const m = await memory({});
+    const node = await db.node.create({ data: { id: generateId(), memoryId: m.id, loc: 'wnote', name: 'W', content: 'body' } });
+    await attach(asUser(alice), m.id, orgApp.id);
+    const keyCtx = { db, appId: orgApp.id, appKeyId: 'k1', roles: [], clientId: `app:${orgApp.id}` } as unknown as Context;
+    expect(await refusal(M.createNode(null, { input: { memoryId: m.id, loc: 'new', name: 'N', content: 'x' } }, keyCtx))).not.toBeNull();
+    expect(await refusal(M.updateNode(null, { input: { memoryId: m.id, loc: 'wnote', content: 'changed' } }, keyCtx))).not.toBeNull();
+    expect(await refusal(M.deleteNode(null, { nodeRef: node.id }, keyCtx))).not.toBeNull();
+    expect(await db.node.count({ where: { memoryId: m.id } })).toBe(1);
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content).toBe('body');
   });
 
   it('hadron_get_node through the key reads a node of the linked memory', async () => {
@@ -261,6 +310,14 @@ describe('the reach of a link, on both surfaces', () => {
     expect(await reachFor(keyAuth(userApp.id), ottos.id)).toEqual({ mcp: true, graphql: true });
     expect(await reachFor(keyAuth(userApp.id), ottosPrivate.id)).toEqual({ mcp: true, graphql: true });
     expect((await reachFor(runAuth(userApp.id), ottosPrivate.id)).mcp).toBe(false);
+    // (b2) the owner's memory attached by someone else who may read it (a grantee, an administrator): the owner did not link it.
+    const shared = await personal(otto, 'user');
+    await db.memoryShare.create({ data: { memoryId: shared.id, granteeId: alice, grantorId: otto, role: 'reader' } });
+    await attach(asUser(alice), shared.id, userApp.id);
+    expect(await links(shared.id)).toHaveLength(1);
+    expect(await reachFor(keyAuth(userApp.id), shared.id)).toEqual({ mcp: false, graphql: false });
+    await attach(asUser(otto), shared.id, userApp.id); // now the owner links it too: it reaches the key
+    expect(await reachFor(keyAuth(userApp.id), shared.id)).toEqual({ mcp: true, graphql: true });
     // (c) another person's personal memory shared with the attacher grants the key nothing.
     const theirs = await personal(carol, 'user');
     await db.memoryShare.create({ data: { memoryId: theirs.id, granteeId: alice, grantorId: carol, role: 'reader' } });
@@ -282,17 +339,26 @@ describe('the reach of a link, on both surfaces', () => {
     await db.memory.update({ where: { id: m.id }, data: { organizationId: null, ownerUserId: carol, visibility: null } });
     expect(await reachFor(key, m.id)).toEqual({ mcp: false, graphql: false });
     expect(await links(m.id)).toHaveLength(1);
-    // a share revoked
-    const shared = await personal(carol, 'user');
-    await db.memoryShare.create({ data: { memoryId: shared.id, granteeId: alice, grantorId: carol, role: 'reader' } });
-    await attach(asUser(alice), shared.id, orgApp.id);
-    await db.memoryShare.deleteMany({ where: { memoryId: shared.id } });
-    expect((await links(shared.id)).length).toBe(1);
-    // a soft-deleted memory and a deleted attacher are inert too
+    // a share revoked: a personal memory of the user-owned App's owner is reached through the owner's own link only (no share
+    // is involved), so the share way of losing read is pinned on the attacher's side: the grantee's link goes inert.
+    const sharedMem = await personal(carol, 'user');
+    await db.memoryShare.create({ data: { memoryId: sharedMem.id, granteeId: alice, grantorId: carol, role: 'reader' } });
+    await attach(asUser(alice), sharedMem.id, userApp.id);
+    expect((await judgeFor(userApp.id, sharedMem.id)).every((l) => !l.active)).toBe(true); // inert already: not the owner's link
+    await db.memoryShare.deleteMany({ where: { memoryId: sharedMem.id } });
+    expect((await links(sharedMem.id)).length).toBe(1);
+    // a soft-deleted memory is inert too
     const m2 = await memory({});
     await attach(asUser(alice), m2.id, orgApp.id);
     await db.memory.update({ where: { id: m2.id }, data: { deletedAt: new Date() } });
     expect(await reachFor(key, m2.id)).toEqual({ mcp: false, graphql: false });
+    // a deleted attacher grants nothing
+    const m4 = await memory({});
+    await attach(asUser(alice), m4.id, orgApp.id);
+    expect(await reachFor(key, m4.id)).toEqual({ mcp: true, graphql: true });
+    await db.user.update({ where: { id: alice }, data: { deletedAt: new Date() } });
+    expect(await reachFor(key, m4.id)).toEqual({ mcp: false, graphql: false });
+    await db.user.update({ where: { id: alice }, data: { deletedAt: null } });
     // an App that is uninstalled grants nothing
     const m3 = await memory({});
     await attach(asUser(alice), m3.id, orgApp.id);
@@ -349,6 +415,15 @@ describe('detachMemoryFromApp', () => {
     expect(await detach(asUser(bob), m.id, orgApp.id)).toBe(true);
   });
 
+  it('an administrator of the memory\'s organization removes the links of that memory, with no say over the App', async () => {
+    const m = await memory({});
+    await attach(asUser(alice), m.id, orgApp.id);
+    const other = await db.user.create({ data: { id: generateId(), githubId: 5_185_400, githubUsername: 'orgadmin', handle: `orgadmin-${generateId().slice(-6)}` } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: other.id, role: 'ADMIN' } });
+    expect(await detach(asUser(other.id), m.id, orgApp.id)).toBe(true);
+    expect(await links(m.id)).toEqual([]);
+  });
+
   it('the attacher removes their own link even after losing read; the memory never changes', async () => {
     const m = await memory({});
     await attach(asUser(alice), m.id, orgApp.id);
@@ -389,10 +464,41 @@ describe('App.attachedMemories', () => {
     expect(await field(orgApp.id, asUser(alice))).toHaveLength(1);
   });
 
+  it('a user-owned App\'s links are the owner\'s alone: neither a member nor a platform administrator sees them', async () => {
+    const m = await memory({ visibility: 'PUBLIC' });
+    await attach(asUser(alice), m.id, userApp.id);
+    // the owner sees who attached it; another member of the user-owned App does not (#2089), nor learns it any other way.
+    expect(await field(userApp.id, asUser(otto))).toMatchObject([{ attachedById: alice }]);
+    // nobody else reaches a user-owned App's links: not a platform administrator, not another member (the roster guard in the
+    // field stays as the second line)
+    const admin = await db.user.create({ data: { id: generateId(), githubId: 5_185_500, githubUsername: 'adm3', roles: ['ADMIN'] } });
+    expect(await field(userApp.id, asUser(admin.id, { roles: ['ADMIN'] }))).toEqual([]);
+    expect(await field(userApp.id, asUser(alice))).toEqual([]);
+  });
+
   it('reaches no other App\'s links', async () => {
     const m = await memory({});
     await attach(asUser(alice), m.id, userApp.id);
     expect(await field(orgApp.id, asUser(alice))).toEqual([]);
+  });
+});
+
+describe('the own-right reader is a registration, and a missing one fails closed', () => {
+  it('with no reader registered every link counts for nothing, and one warning is logged', async () => {
+    const m = await memory({});
+    await attach(asUser(alice), m.id, orgApp.id);
+    expect((await linkedMemoryReach(db as never, orgApp.id)).has(m.id)).toBe(true);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    registerOwnRightReader(null);
+    try {
+      expect((await linkedMemoryReach(db as never, orgApp.id)).size).toBe(0);
+      expect((await linkedMemoryReach(db as never, orgApp.id)).size).toBe(0);
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('no_own_right_reader'))).toHaveLength(1);
+    } finally {
+      registerOwnRightReader(holdsContentReadIndependently as never);
+      warn.mockRestore();
+    }
+    expect((await linkedMemoryReach(db as never, orgApp.id)).has(m.id)).toBe(true);
   });
 });
 
