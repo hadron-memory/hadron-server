@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { WHERE_MAX_DEPTH, WHERE_MAX_LEAVES } from '../../../lib/retrieval/nodeWhere.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -27,7 +28,6 @@ const schema = {
 };
 
 let adminId: string;
-let orgBId: string;
 let memId: string; // the admin's own memory, for items 2 and 3
 let pub: { id: string };
 let orgVisible: { id: string };
@@ -52,7 +52,6 @@ beforeEach(async () => {
   const suffix = generateId().toLowerCase();
   const orgA = await db.organization.create({ data: { name: 'Reader org', urn: `fo-reader-${suffix}.example` } });
   const orgB = await db.organization.create({ data: { name: 'Owner org', urn: `fo-owner-${suffix}.example` } });
-  orgBId = orgB.id;
   const { app, appKey } = await createDbAppWithKey(db, 'reader5202', orgA.id);
   const mk = (slug: string, visibility: string) =>
     db.memory.create({ data: { name: slug, urn: `${orgB.urn}:${slug}`, class: 'knowledge', visibility: visibility as never, organizationId: orgB.id, schema: schema as never } });
@@ -95,8 +94,29 @@ describe('#5202 item 1: a userless reader of a PUBLIC knowledge memory gets its 
   it('a caller who cannot read the memory answers as before: no refusal and no rows (an ORGANIZATION memory)', async () => {
     for (const ctx of [keyCtx, sessionCtx]) {
       const r = await outcome(find(orgVisible.id, { type: 'rec', match: { nope: 'x' } }, ctx));
-      expect(codeOf(r)).not.toBe('FIELD_NOT_DECLARED');
-      expect(r.ok?.objects ?? []).toHaveLength(0);
+      expect(r.error).toBeUndefined(); // not FORBIDDEN, not an internal fault, not the strict refusal: the answer is empty
+      expect(r.ok?.objects).toHaveLength(0);
+    }
+  });
+
+  it('a PUBLIC knowledge memory that belongs to another App is not admitted: no refusal and no rows (the whole predicate decides, not the visibility alone)', async () => {
+    const org = await db.organization.findFirstOrThrow({ where: { urn: { startsWith: 'fo-owner-' } } });
+    const { app: otherApp } = await createDbAppWithKey(db, 'other5202', org.id);
+    const scoped = await db.memory.create({
+      data: { name: 'scoped', urn: `${org.urn}:scoped`, class: 'knowledge', visibility: 'PUBLIC', organizationId: org.id, appId: otherApp.id, schema: schema as never },
+    });
+    await mkNode(scoped.id, 's1', { alpha_f: 'x', beta_f: 1 });
+    for (const ctx of [keyCtx, sessionCtx]) {
+      const r = await outcome(find(scoped.id, { type: 'rec', match: { nope: 'x' } }, ctx));
+      expect(r.error).toBeUndefined();
+      expect(r.ok?.objects).toHaveLength(0);
+    }
+  });
+
+  it('an over-cap predicate on a memory the caller cannot read answers BAD_USER_INPUT, as findNodes did before (validation does not depend on the memory)', async () => {
+    const leaves = Array.from({ length: WHERE_MAX_LEAVES + 1 }, () => ({ path: ['alpha_f'], eq: 'x' }));
+    for (const ctx of [keyCtx, sessionCtx]) {
+      expect(codeOf(await outcome(find(orgVisible.id, { type: 'rec', where: { and: leaves } }, ctx)))).toBe('BAD_USER_INPUT');
     }
   });
 
@@ -125,8 +145,9 @@ describe('#5202 item 2: an undeclared field under `not` is refused', () => {
 
 describe('#5202 item 3: the query\'s own refusal comes before FIELD_NOT_DECLARED', () => {
   const leaf = (field: string) => ({ path: [field], eq: 'x' });
-  // Depth 4 on its own (root = 1), valid; one more level once `match` is combined with it.
-  const deep = (field: string) => ({ and: [{ and: [{ and: [leaf(field)] }] }] });
+  // Exactly the max depth on its own (root = 1), valid; one more level once `match` is combined with it.
+  const nest = (inner: unknown, levels: number): unknown => (levels === 0 ? inner : { and: [nest(inner, levels - 1)] });
+  const deep = (field: string) => nest(leaf(field), WHERE_MAX_DEPTH - 1);
 
   it('depth over the cap only once `match` and `where` are combined, naming an undeclared field: BAD_USER_INPUT', async () => {
     const alone = await outcome(find(memId, { type: 'rec', where: deep('alpha_f') }, admin()));
@@ -137,15 +158,15 @@ describe('#5202 item 3: the query\'s own refusal comes before FIELD_NOT_DECLARED
 
   it('leaf count over the cap only once combined, naming an undeclared field: BAD_USER_INPUT', async () => {
     const leaves = (n: number, last: string) => Array.from({ length: n }, (_v, i) => leaf(i === n - 1 ? last : 'alpha_f'));
-    const alone = await outcome(find(memId, { type: 'rec', where: { and: leaves(32, 'alpha_f') } }, admin()));
-    expect(alone.error).toBeUndefined(); // 32 leaves: valid on its own
-    const r = await outcome(find(memId, { type: 'rec', match: { alpha_f: 'a1' }, where: { and: leaves(32, 'nope') } }, admin()));
+    const alone = await outcome(find(memId, { type: 'rec', where: { and: leaves(WHERE_MAX_LEAVES, 'alpha_f') } }, admin()));
+    expect(alone.error).toBeUndefined(); // the max leaf count: valid on its own
+    const r = await outcome(find(memId, { type: 'rec', match: { alpha_f: 'a1' }, where: { and: leaves(WHERE_MAX_LEAVES, 'nope') } }, admin()));
     expect(codeOf(r)).toBe('BAD_USER_INPUT');
   });
 
   it('`match` alone over the leaf cap, naming an undeclared field: BAD_USER_INPUT', async () => {
     const match: Record<string, unknown> = { nope: 'x' };
-    for (let i = 0; i < 32; i++) match[`alpha_f${i}`] = 'x';
+    for (let i = 0; i < WHERE_MAX_LEAVES; i++) match[`alpha_f${i}`] = 'x';
     const r = await outcome(find(memId, { type: 'rec', match }, admin()));
     expect(codeOf(r)).toBe('BAD_USER_INPUT');
   });

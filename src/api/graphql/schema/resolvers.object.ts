@@ -60,6 +60,7 @@ async function readMemorySchema(ctx: Context, memoryRef: string): Promise<Memory
     // caller (a pure App key, session-bound or not) who can read a PUBLIC knowledge memory's rows gets its schema applied as any
     // reader does. Nothing else is named, so no other memory is admitted; a caller who cannot read it, and a ref that does not
     // exist, still get null.
+    // (the second argument, `onlyMemoryId`, stays undefined: the set is read in full, as before; only the public target is named)
     const accessible = await getAccessibleMemoryIds(ctx, undefined, { publicTargetIds: [id] });
     if (!accessible.includes(id)) return null; // no disclosure
     const row = await ctx.db.memory.findUnique({ where: { id }, select: { schema: true } });
@@ -174,7 +175,7 @@ export const objectQueries = {
     // compile of `where` alone is then a no-op guard.
     if (combinedWhere) {
       try {
-        compileNodeWhere(combinedWhere, () => '$0');
+        compileNodeWhere(combinedWhere, () => '$0'); // validation only: the placeholder binder discards the SQL, and caps/shape checks never read a bound value
       } catch (e) {
         if (e instanceof NodeWhereError) throw badInput(`findNodes filter.where: ${e.message}`);
         throw e;
