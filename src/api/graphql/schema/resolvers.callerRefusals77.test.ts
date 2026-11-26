@@ -86,6 +86,15 @@ for (const k of ['a', 'aId'] as const) {
   door('createEdge(target)', k, t => ({ sourceRef: t.b, targetRef: t[k], name: 'r3' }));
   door('retireSpec', k, t => ({ input: { ref: t[k], form: 'RESCIND', reason: 'r', summary: 's', expectedRevision: 1 } }));
 }
+for (const k of ['mem', 'memId'] as const) {
+  door('createQuestionLog', `${k}, no deciders`, t => ({ memoryRef: t[k], loc: 'l3', name: 'L', defaultDeciders: [] }));
+  door('createQuestionLog', `${k}, bad loc`, t => ({ memoryRef: t[k], loc: '!!', name: 'L', defaultDeciders: [ownerId] }));
+  door('createNodeRoleRule', k, t => ({ memoryRef: t[k], input: { role: 'x' } }));
+}
+for (const k of ['a', 'aId'] as const) {
+  door('restoreNode', k, t => ({ nodeRef: t[k] }));
+  door('requestNodeSignature', k, t => ({ nodeRef: t[k], signers: [ownerId] }));
+}
 door('updateEdge', 'ref', t => ({ edgeRef: t.edge, name: 'q' }));
 door('deleteEdge', 'ref', t => ({ edgeRef: t.edge }));
 door('restoreNodeRevision', 'ref', t => ({ nodeRevRef: t.rev }));
@@ -150,26 +159,10 @@ async function answer(name: string, target: Target, args: Args, ctx: Context) {
   return text;
 }
 
-/** These refuse a signed-out caller before any lookup. */
-const refusedFirst = new Set([
-  'approveMemoryNodes', 'mintMemoryNodes', 'mintSpecCorpus', 'reserveSpecCitation', 'allocateSpecNode',
-  'searchReplaceInSpecNodes', 'retireSpec', 'mergeMemories', 'replaceSubtree',
-  'createNode', 'updateNode', 'updateNode(memoryRef+loc)', 'updateNodeData', 'updateNodeProperties',
-  'searchReplaceInNodes(memoryRefs)', 'searchReplaceInNodes(nodeRefs)', 'deleteNode', 'planNodeMove', 'moveNode',
-  'mergeNodes', 'clearNodeHistory', 'createObject', 'updateObject', 'deleteObject',
-  'createSpecNode', 'createReviewNode', 'createTaskNode', 'updateSpecNode', 'updateReviewNode', 'updateTaskNode',
-  'approveNode', 'recordNodeContentValidationReport', 'runTask', 'runTask(appRef)',
-]);
-
 const resolverName = (label: string) => label.replace(/\(.*/, '');
 const signedOut = (): Context => ({ db, roles: [], clientId: 'anonymous' });
 
 describe('write door target refusals', () => {
-  it('lists every door it claims to refuse first', () => {
-    const listed = new Set(doors.map(([name]) => name));
-    expect([...refusedFirst].filter((name) => !listed.has(name))).toEqual([]);
-  });
-
   describe.each(doors)('%s (%s)', (name, _spelling, args) => {
     it('gives a signed-out caller one answer for a real and a missing target', async () => {
       const before = await db.node.findMany({ orderBy: { id: 'asc' }, select: { id: true, loc: true, revSeq: true, deletedAt: true } });
@@ -177,12 +170,17 @@ describe('write door target refusals', () => {
       const present = await answer(resolverName(name), real, args, signedOut());
       expect(present).toBe(missing);
       expect(present).not.toBe('resolved');
-      if (refusedFirst.has(name)) expect(present).toContain('"code":"UNAUTHENTICATED"');
+      expect(present).toContain('"code":"UNAUTHENTICATED"');
       expect(await db.node.findMany({ orderBy: { id: 'asc' }, select: { id: true, loc: true, revSeq: true, deletedAt: true } })).toEqual(before);
+    });
+
+    // Ahead of argument validation, so a bad argument cannot tell two targets apart.
+    it('refuses a signed-out caller before it judges the arguments', async () => {
+      expect(await answer(resolverName(name), real, () => ({ input: {} }), signedOut())).toContain('"code":"UNAUTHENTICATED"');
     });
   });
 
-  describe.each(doors.filter(([name, spelling]) => refusedFirst.has(name) && spelling !== 'install'))('%s (%s), signed in', (name, _spelling, args) => {
+  describe.each(doors.filter(([, spelling]) => spelling !== 'install'))('%s (%s), signed in', (name, _spelling, args) => {
     it.each([
       ['another user', (): Context => ({ db, userId: outsiderId, roles: ['READER'], clientId: `user:${outsiderId}` })],
       ["another organization's App key", (): Context => ({ db, appId: foreignAppId, roles: [], clientId: `app:${foreignAppId}` })],
