@@ -60,7 +60,7 @@ const isAsciiPunct = (c: string | undefined): boolean => c !== undefined && /[!-
 /**
  * The end of the inline run that holds `i`: where a code span that opened at `i` can no longer close. A code span never crosses a
  * block boundary, so the run ends at a blank line (also with CRLF) or at a line that starts another block: an ATX heading, a fence,
- * a quote, a list item, a thematic break or an HTML block of CommonMark's types 1 to 6 (type 7 cannot interrupt a paragraph). A heading is one line, so a span that opens in one ends with it. Where a line only
+ * a quote, a list item, a thematic break, a setext underline (#5265; it ends the heading's paragraph) or an HTML block of CommonMark's types 1 to 6 (type 7 cannot interrupt a paragraph). A heading is one line, so a span that opens in one ends with it. Where a line only
  * looks like a block start the run is cut short, which means fewer code spans are skipped and more `<` are judged: the safe side.
  */
 /**
@@ -83,7 +83,7 @@ const BLOCK6_NAMES: ReadonlySet<string> = new Set(BLOCK6.split('|'));
 const TYPE1_NAMES: ReadonlySet<string> = new Set(['script', 'style', 'textarea', 'pre']);
 const BLOCK_START = new RegExp(
   `\\n(?: {0,3}(?:${[
-    '#{1,6}(?:[ \\t\\r]|$)', '`{3,}', '~{3,}', '>', '[-+*][ \\t]+\\S', '1[.)][ \\t]+\\S', '(?:[-*_][ \\t]*){3,}\\r?(?:\\n|$)',
+    '#{1,6}(?:[ \\t\\r]|$)', '`{3,}', '~{3,}', '>', '[-+*][ \\t]+\\S', '1[.)][ \\t]+\\S', '(?:[-*_][ \\t]*){3,}\\r?(?:\\n|$)', '(?:=+|-+)[ \\t]*\\r?(?:\\n|$)',
     '<(?:script|pre|style|textarea)(?:[ \\t>\\r]|$)', '<!--', '<\\?', '<![A-Za-z]', '<!\\[CDATA\\[',
     `<\\/?(?:${BLOCK6})(?:[ \\t>\\r]|\\/>|$)`,
   ].join('|')})|[ \\t\\r]*\\n)`,
@@ -97,6 +97,11 @@ const LIST_CLOSING_LINE = new RegExp(
   `^ {0,3}(?:#{1,6}(?:[ \\t]|$)|>|\`{3,}|~{3,}|(?:-[ \\t]*){3,}$|(?:\\*[ \\t]*){3,}$|(?:_[ \\t]*){3,}$|<(?:script|pre|style|textarea)(?:[\\s>]|$)|<!--|<\\?|<![A-Za-z]|<!\\[CDATA\\[|<\\/?(?:${BLOCK6})(?:[\\s/>]|$))`,
   'i',
 );
+/**
+ * #5265 — marked (17) closes an open list item at fewer HTML lines than CommonMark: its `htmlBeginRegex` takes a start tag (`<` and a
+ * letter, then a `>` on the line) or a comment, and no declaration, processing instruction, CDATA or end tag.
+ */
+const LIST_CLOSING_LINE_MARKED = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|(?:-[ \t]*){3,}$|(?:\*[ \t]*){3,}$|(?:_[ \t]*){3,}$|<(?:[a-z].*>|!--))/i;
 function paragraphEnd(text: string, i: number): number {
   const lineStart = text.lastIndexOf('\n', i - 1) + 1;
   const eol = text.indexOf('\n', i);
@@ -304,6 +309,8 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
   let lineFirst = -1;
   // marked ends a line-head declaration block at its first `>` and starts the next block right after it (#5211).
   let markedBlockAt = -1;
+  // #5265 — the `<` of the top-level declaration whose fence (marked) is still open, or -1.
+  let declFence = -1;
   // Whether the line before was taken for a link reference definition: marked's grammar for one is stricter, so it may be a paragraph there.
   let prevDefinition = false;
   let lineContent = -1;
@@ -410,9 +417,12 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       const fenceCut = fence !== null && within === null;
       if (within === null) fence = null;
       const wasOpen = fence !== null;
-      const step = stepFence(within ?? content, fence);
+      // marked closes a fence on the opening run followed by any backticks and tildes (`\\1[~`]* *`); kept to the declaration's fence.
+      const markedClose: boolean = declFence !== -1 && fence !== null && new RegExp(`^ {0,3}${fence.ch.repeat(fence.len)}[\`~]* *$`).test(line);
+      const step: { open: OpenFence | null; fenceLine: boolean } = markedClose ? { open: null, fenceLine: true } : stepFence(within ?? content, fence);
       if (!wasOpen && step.open !== null) fenceContainers = here.list;
       fence = step.open;
+      if (fence === null) declFence = -1;
       if (step.fenceLine || wasOpen) { prev = 'nonpara'; lrd = 0; inDefinition = false; i = end + 1; continue; }
       // An indented code block: a line of four spaces or a tab, after a blank line, the start of the text or another such line.
       const quotes = line.slice(0, line.length - inner.length);
@@ -436,7 +446,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       else if (depth > listDepth && listCol > 0 && quoteColumns(line, listDepth + 1).marker - quoteColumns(line, listDepth).content < listCol) listCol = -1;
       else if (depth < listDepth) listCol = -1;
       // A line that starts another block closes the item; only a paragraph line may continue it lazily.
-      else if (depth === listDepth && inner.trim() !== '' && lineCols < listCol && (prev !== 'other' || LIST_CLOSING_LINE.test(inner))) listCol = -1;
+      else if (depth === listDepth && inner.trim() !== '' && lineCols < listCol && (prev !== 'other' || (model === 'marked' ? LIST_CLOSING_LINE_MARKED : LIST_CLOSING_LINE).test(inner))) listCol = -1;
       // Inside a deeper quote the item's content is that quote's to measure from.
       const opensQuote = depth > prevDepth;
       prevDepth = depth;
@@ -460,7 +470,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
         titleCloser = label && label[0].length !== content.length ? titleOpens(content.slice(label[0].length)) : '';
         inDefinition = label !== null;
         lrd = label ? (label[0].length === content.length ? 1 : titleCloser ? 3 : 2) : 0;
-        prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:-[ \t]*){3,}$|(?:\*[ \t]*){3,}$|(?:_[ \t]*){3,}$|=+[ \t]*$)/.test(inner) || /^ {0,3}#{1,6}(?:[ \t]|$)/.test(content) ? 'nonpara' : /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]*$/.test(inner)
+        prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:-[ \t]*){3,}$|(?:\*[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(inner) || (prev === 'other' && /^ {0,3}=+[ \t]*$/.test(inner)) || /^ {0,3}#{1,6}(?:[ \t]|$)/.test(content) ? 'nonpara' : /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]*$/.test(inner)
           ? (prev === 'other' ? 'other' : 'marker')
           : prev === 'marker' && indent >= markerWidth + 4 ? 'marker' : 'other';
         if (prev === 'marker' && indent < 4) markerWidth = inner.trim().length + 1;
@@ -545,8 +555,26 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       // marked ends such a block at the declaration's first `>` and reads the rest of the line as text (#5211); CommonMark keeps it raw.
       if (startsLine(i) && isLetter(text[i + 2]) && model === 'commonmark') raw(lineEndAt(close));
       if (startsLine(i) && isLetter(text[i + 2]) && model === 'marked') {
-        // #5265 — marked starts the next block right after the `>`: a fence there swallows the rest of the document as code.
-        if (/^(?:`{3,}|~{3,})/.test(text.slice(close + 1, close + 4))) return i;
+        // #5265 — a declaration on one line at the top level (no quote or list marker before it), interrupting no paragraph: marked
+        // starts the next block right after its `>`, so a fence there opens; only one that never closes swallows the rest of the document,
+        // and that one is escaped. Elsewhere marked reads no fence there (or the escaped text would open the same one on the next line).
+        const lineHead = text.lastIndexOf('\n', i - 1) + 1;
+        const eol = text.indexOf('\n', close + 1);
+        const oneLine = text.lastIndexOf('\n', close) < i;
+        const opensBlock = prevBefore !== 'other' && prevBefore !== 'marker' && !prevDefinition;
+        // Escaped, the line is paragraph text, and an underline after it would make it a heading and change how the lines after it read.
+        const nextLine = eol === -1 ? '' : text.slice(eol + 1, text.indexOf('\n', eol + 1) === -1 ? n : text.indexOf('\n', eol + 1));
+        const underlined = /^ {0,3}(?:=+|-+)[ \t]*\r?$/.test(nextLine);
+        const opened = oneLine && opensBlock && !underlined && /^ {0,3}$/.test(text.slice(lineHead, i)) && /^(?:`{3,}|~{3,})/.test(text.slice(close + 1, close + 4))
+          ? stepFence(text.slice(close + 1, eol === -1 ? n : eol), null).open
+          : null;
+        if (opened !== null) {
+          fence = opened;
+          fenceContainers = [];
+          declFence = i;
+          i = eol === -1 ? n : eol + 1;
+          continue;
+        }
         markedBlockAt = close + 1;
       }
       i = close + 1;
@@ -640,7 +668,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     }
     i = tagEnd;
   }
-  const open = [rawStart, ...templates.slice(0, 1)].filter((x) => x !== -1);
+  const open = [rawStart, ...templates.slice(0, 1), fence === null ? -1 : declFence].filter((x) => x !== -1);
   return open.length === 0 ? -1 : Math.min(...open);
 }
 

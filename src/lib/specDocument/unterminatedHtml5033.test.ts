@@ -487,8 +487,10 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('<b y= <template>')).toBe('<b y= <template>'); // one complete tag: the value is `<template`
   });
   it('only a non-empty bullet or a list that starts at 1 ends a paragraph', () => {
-    // An empty bullet, and an ordered list not starting at 1, cannot interrupt a paragraph, so the span runs on and the `<` is code.
-    expect(escapeUnterminatedHtml("a `x\n-\n<b x='\ny` w")).toBe("a `x\n-\n<b x='\ny` w");
+    // An ordered list not starting at 1 cannot interrupt a paragraph, so the span runs on and the `<` is code.
+    // #5265 — a lone `-` after a paragraph line is no empty bullet but a setext underline (every reader renders `<h2>a `x</h2>`): it ends
+    // the paragraph, so the span cannot close, and the `<` is judged as after `1. t`.
+    expect(escapeUnterminatedHtml("a `x\n-\n<b x='\ny` w")).toBe("a `x\n-\n&lt;b x='\ny` w");
     expect(escapeUnterminatedHtml("a `x\n2. t\n<b x='\ny` w")).toBe("a `x\n2. t\n<b x='\ny` w");
     expect(escapeUnterminatedHtml("a `x\n1. t\n<b x='\ny` w")).toBe("a `x\n1. t\n&lt;b x='\ny` w");
   });

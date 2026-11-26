@@ -199,3 +199,54 @@ describe('#5265 item 7 is not changed (Victor #151094: a raw-string reader count
     expect(escapeUnterminatedHtml('</b>\n```\n<b x=\n```\nz')).toBe('</b>\n```\n&lt;b x=\n```\nz');
   });
 });
+
+describe('#5265 QA F1 and F2 (Charles, 5d444777): bodies that main keeps stay as written', () => {
+  it.each([
+    // (a) the fence after the declaration closes, in marked also on a run followed by more backticks or tildes.
+    '<!DOCTYPE html>```\n```',
+    '<!DOCTYPE html>```\n\nx\n```',
+    '<!x>~~~\n~~~',
+    '<!DOCTYPE html>````\n`````',
+    '<!x>\n\n<!DOCTYPE html>```\n```~~~\nx',
+    // After the declaration's fence closes, a later fence left open is no declaration's: escaping the `<` would not close it.
+    '<!DOCTYPE html>```\n```\n\n```\nx',
+    // (b) marked closes a list item at no declaration, so the indented line stays in the item.
+    '+ -*-\n<!DOCTYPE html>\n\n    1.    &lt;script>',
+    '- a\n<!DOCTYPE html>\n\n    &lt;script>',
+    // F2: inside a quote or a list item, or interrupting a paragraph, marked reads no fence after the declaration.
+    '> <!DOCTYPE html>```',
+    '- <!DOCTYPE html>```',
+    '1. <!DOCTYPE html>```',
+    '> > <!DOCTYPE html>```',
+    'x\n<!DOCTYPE html>```',
+    // Riana P2 (5d444777): a backtick in a backtick fence's info string opens no fence; a lone `=` with no paragraph above is no underline.
+    '<!x>```*-*```',
+    '<!DOCTYPE html>``` `` ',
+    '\n=\n<!DOCTYPE html>~~~ ',
+    // Escaped, the line would be a paragraph that the `-` below makes a heading, and the fence after it would leave the list item.
+    '<!x>~~~>\t    \n-\n  ```\n\n\n',
+    // A declaration closed on a later line: the escaped text would open the same fence on that line.
+    '<!X1. # h    \n```<!x>~~~<!x>~~~<pre x=   > y z',
+  ])('%j', (body) => {
+    expect(escapeUnterminatedHtml(body)).toBe(body);
+  });
+
+  it('(b) the script in the item is still escaped where marked reads it', () => {
+    const body = '+ -*-\n<!DOCTYPE html>\n\n    1.    <script>';
+    expect(escapeUnterminatedHtml(body)).toBe('+ -*-\n<!DOCTYPE html>\n\n    1.    &lt;script>');
+    expect(losers(body)).toEqual(['marked']);
+    expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+  });
+
+  it.each(['<!DOCTYPE html>```\n```', '<!x>~~~\n~~~', '<!x>\n\n<!DOCTYPE html>```\n```~~~\nx'])('(a) %j keeps the anchor in marked as written', (body) => {
+    expect(losers(body)).not.toContain('marked');
+  });
+});
+
+describe('#5265: a setext underline ends the run a code span may close in', () => {
+  cases([
+    ['`=` under the line', '&lt;!DOCTYPE html>```§script>\n=\nx<!-- c -->```', ALL],
+    ['`-` under the line', 'a `§script>\n-\nx`', ALL],
+    ['a longer run', 'a ```§script>\n=\nx```', ALL],
+  ]);
+});
