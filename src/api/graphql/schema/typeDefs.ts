@@ -12715,6 +12715,9 @@ export const typeDefs = `#graphql
     passed (hrn:node:hadronmemory.com:specs:cor:dmo:170:10). Before summing, the read settles the account's grants
     that expired more than a minute ago: it may write those settlement entries, once per grant,
     and never does for an impersonated session, which gets the same figure worked out and stored nowhere.
+    Where the deployment sets a default monthly grant (hrn:node:hadronmemory.com:specs:cor:dmo:170:12), the read also
+    writes the account's grant for the current UTC month if it has none yet, once per account and month; an impersonated
+    session writes none, and its figure includes the grant still due. A failed grant write never fails the read.
     """
     creditBalance(orgRef: String, userRef: ID): CreditBalance!
     "The owner limits of an organization or a person, one row per measure (hadron-server issue 5009). Give exactly one ref. An organization's: its ADMIN or OWNER. A person's: that person in their own session. A platform admin reads any."
