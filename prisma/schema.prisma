@@ -8752,7 +8752,7 @@ model HostWorkerAssignment {
 ///   the App, as a person acting as themselves (hrn:node:hadronmemory.com:specs:cor:agt:070:07). Joining a removed
 ///   host revives its row with its settings reset.
 /// - A null setting is the product default: `pollIntervalSeconds` (1 to 86400) is what the host's own configuration
-///   or the CLI says, `deliveryEnabled` is on. Changed by `updateAgentTeamHost`; applied at the host's next check-in.
+///   or the CLI says, `deliveryEnabled` is on. Changed by `updateAgentTeamHost`; stored for the host to read and apply, never consumed by the server.
 /// - Removing a host (`removeAgentTeamHost`, person-only) stamps `removedAt`, revokes its keys, ends its registration,
 ///   removes its assignments and fails its open operations, in one transaction.
 /// - Holds no path, program, credential, account detail or anything tool-specific (hrn:node:hadronmemory.com:specs:cor:agt:070:03).

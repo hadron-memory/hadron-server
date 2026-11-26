@@ -164,7 +164,8 @@ export const agentTeamHostMutations = {
 
   /**
    * #5259 — change a host's settings: omitted keeps, null clears to the product default (the label is never cleared).
-   * Applied at the host's next check-in. Refusals, in order: AGENT_TEAM_HOST_NOT_PERMITTED (an App key),
+   * Stored only: the server consumes none of them (the host reads its own record and applies them; liveness follows the
+   * interval registerHost declares). Refusals, in order: AGENT_TEAM_HOST_NOT_PERMITTED (an App key),
    * BAD_AGENT_TEAM_HOST_ARGS, APP_NOT_FOUND, AGENT_TEAM_HOST_NOT_PERMITTED (not a manager), HOST_NOT_FOUND.
    */
   updateAgentTeamHost: async (_: unknown, { input, instruction }: { input: UpdateInput; instruction?: ActInstruction | null }, ctx: Context) => {

@@ -13113,7 +13113,9 @@ export const typeDefs = `#graphql
     joinAgentTeamHost(input: JoinAgentTeamHostInput!): JoinAgentTeamHostPayload!
     """
     #5259 — change a host's settings (hrn:node:hadronmemory.com:specs:cor:agt:070:01, Proposed): an omitted field is
-    kept, null clears it to the product default; the label is never cleared. Applied at the host's next check-in.
+    kept, null clears it to the product default; the label is never cleared. The server stores the settings and uses
+    none of them itself: the host reads its own record (agentTeamHost, with its key) and applies them, and a
+    registration's liveness and lapse window follow the interval the host declares when it registers.
     Whoever manages the App, as a person or through their held worker on an instruction; never an App key. Refused
     AGENT_TEAM_HOST_NOT_PERMITTED, BAD_AGENT_TEAM_HOST_ARGS, APP_NOT_FOUND and HOST_NOT_FOUND (not joined, or removed).
     """
