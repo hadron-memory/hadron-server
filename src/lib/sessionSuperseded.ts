@@ -42,7 +42,7 @@ export async function refuseSupersededSession(ctx: Context, sessionId: string): 
 
 /** Only this typed refusal may bypass generic transport-fault handling. */
 export function isSessionSupersededError(error: unknown): error is GraphQLError {
-  return error instanceof GraphQLError && error.extensions.code === 'SESSION_SUPERSEDED';
+  return error instanceof GraphQLError && error.extensions?.code === 'SESSION_SUPERSEDED';
 }
 
 export function sessionSupersededEnvelope(error: GraphQLError) {

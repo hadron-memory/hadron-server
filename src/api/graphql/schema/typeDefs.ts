@@ -14777,6 +14777,14 @@ export const typeDefs = `#graphql
     reaches the organization lookup. An empty string \`orgRef: ""\` also
     answers USE_TRANSFER_MEMORY_OWNERSHIP.
 
+    A \`personal\` or \`private\` memory that belongs to an App keeps its slug
+    (hrn:node:hadronmemory.com:specs:cor:dmo:060:20): any \`urn\` argument on one,
+    the current slug included, answers APP_MEMORY_SLUG_FIXED (extension
+    \`memoryClass\`) and nothing in the call is applied. This covers memories made
+    before the rule, attached memories and session memories that carry an App.
+    The refusal follows the access check, so a caller who may not manage the
+    memory never receives it. Its display name (\`name\`) can still be changed.
+
     Spec 033 FR-026: enabling \`vectorIndexEnabled\` on an \`isEncrypted\` memory
     requires \`acknowledgeVectorInversionRisk: true\` in the same call. Without
     the flag, an \`EncryptedVectorIndexNotAcknowledgedError\` is thrown carrying
@@ -15233,8 +15241,12 @@ export const typeDefs = `#graphql
     secret exists yet, and the requester's own passkey ceremony at that URL makes
     it (hrn:node:hadronmemory.com:specs:cor:sec:070:02). A staged request lasts
     one hour; at most 5 are open per secret name and at most 2 per requester
-    (SECRET_CHANGE_REQUEST_LIMIT, SECRET_CHANGE_REQUESTER_LIMIT). Those numbers are
-    engineering bounds, not ruled values.
+    (SECRET_CHANGE_REQUEST_LIMIT, SECRET_CHANGE_REQUESTER_LIMIT). Across the App at
+    most 100 are open (SECRET_CHANGE_APP_LIMIT) and one requester holds at most 20
+    (SECRET_CHANGE_REQUESTER_LIMIT). A staged create counts open protected creates
+    toward the App's 500-secret limit and is refused SECRET_LIMIT_REACHED at staging
+    when there is no room; completion rejudges it. Those numbers are engineering
+    bounds, not ruled values (hrn:node:hadronmemory.com:specs:cor:sec:070:02).
     """
     createSecret(
       ownerType: String!

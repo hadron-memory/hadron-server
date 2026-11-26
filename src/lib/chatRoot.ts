@@ -141,7 +141,7 @@ export async function withChatRootLock<T>(
       where: { id: chat.id },
       select: { data: true, memoryId: true, loc: true, nodeType: true },
     });
-    if (!row) throw chatNotFoundError(chat.loc);
+    if (!row) throw chatNotFoundError();
     if (row.memoryId !== chat.memoryId || row.loc !== chat.loc) throw new GraphQLError('Chat authority changed.', { extensions: { code: 'CHAT_AUTHORITY_SCOPE_CHANGED' } });
     let decrypted: { data: unknown };
     try { decrypted = decryptNodeFields({ data: row.data }, memEncInfo); }

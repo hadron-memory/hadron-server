@@ -111,6 +111,7 @@ import {
   ConnectionNotFoundError,
   type SessionInput,
   type UsageEventInput,
+  requireCallerIdentity,
 } from './resolvers.helpers.js';
 import { assertRestoreKeepsRetirement } from '../../../lib/restoreUnretireGuard.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
@@ -3437,6 +3438,7 @@ export const sessionMutations = {
       },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #542 — the task node is identified by a single `nodeRef` (ID or a
       // fully-qualified node URN), resolved by the shared `resolveNodeRef`
       // (spec 007) exactly like every other `<object>Ref` arg. The loose

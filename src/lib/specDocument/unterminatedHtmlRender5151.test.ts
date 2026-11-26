@@ -7,9 +7,7 @@
  * A body is judged only where the same body with no `<` in it keeps the anchor: an unterminated fence swallows the rest by itself, and no
  * HTML escape changes that.
  *
- * Not covered (older limits of the pass, pinned below so that a change shows): an attribute that is an attribute to a browser and none to
- * Markdown (`<b y= <textarea>`), an end tag of a type 1 element alone on a line (a type 7 block), `<!-->` at the head of a line (a type 2
- * block on that line), and a four-space continuation of a list item.
+ * Not covered: a tag value holding `<template` (linkedom models no template; #5211).
  */
 import * as commonmark from 'commonmark';
 import { parseHTML } from 'linkedom';
@@ -90,8 +88,8 @@ describe('#5151 the escaped text through a Markdown renderer and an HTML parser'
       for (let n = 0; n < 5000; n += 1) {
         let body = '';
         for (let k = 2 + Math.floor(rnd() * 10); k > 0; k -= 1) body += FR[Math.floor(rnd() * FR.length)];
-        // A four-space line and an unfinished fence are the limits named above.
-        if (/^[ >]*? {4}/m.test(body) || !lives(body.replace(/</g, 'L'), renderer)) continue;
+        // An unfinished fence swallows the rest by itself.
+        if (!lives(body.replace(/</g, 'L'), renderer)) continue;
         judged += 1;
         const out = escapeUnterminatedHtml(body);
         if (out !== body) escaped += 1;
@@ -103,10 +101,7 @@ describe('#5151 the escaped text through a Markdown renderer and an HTML parser'
     }, 120_000);
   });
 
-  it.each([
-    'a <b y= <textarea>', '</textarea>\n<!-- \n\n<b>-->', '<!--> \\<textarea>', '1. a\n\n    <script>',
-  ])('known limit, unescaped today: %j', (body) => {
-    expect(escapeUnterminatedHtml(body)).toBe(body);
-    expect(lives(body, 'commonmark.js')).toBe(false);
+  it('known limit: a value holding `<template` is held back (#5211)', () => {
+    expect(escapeUnterminatedHtml('a <b y= <template>')).toBe('a <b y= <template>');
   });
 });
