@@ -2828,11 +2828,13 @@ export const typeDefs = `#graphql
     unresolvedFeedback: [UnresolvedFeedback!]!
   }
 
-  "#1610 — public identity of a Worker or Agent that wrote a node: never the full object, whose own read gate this does not pass."
+  "#1610, #5319 — public identity of a Worker, an Agent or a person (the owner of a ticker, the creator of a subscription): never the full object, whose own read gate this does not pass."
   type ActorRef {
     id: ID!
     name: String!
-    "The canonical hrn:worker:/hrn:agent: URN. Null when it cannot be composed."
+    "#5319 — the person's handle. Null for a Worker or an Agent, and for a person with no handle."
+    handle: String
+    "The canonical hrn:worker:/hrn:agent: URN, or hrn:user:<handle> for a person. Null when it cannot be composed, and for a person with no handle (such a person has no hrn:user: address)."
     urn: String
   }
 
