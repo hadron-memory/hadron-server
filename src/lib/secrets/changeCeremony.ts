@@ -168,7 +168,11 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
     const protectionOnly = !r.write_version && protectionChanged && before !== null && isDeepStrictEqual(r.metadata, before.metadata);
     if (!protectionOnly) await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:!r.write_version?'METADATA':newest?'VERSION':'STORE',versionNo,actor});
     if (protectionChanged) await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:protectedAfter?'PROTECT':'UNPROTECT',actor});
-   }finally{plaintext?.fill(0);}
+   }finally{
+    // The wipe clears the decrypted Buffer only. The UTF-8 string `toString('utf8')` makes inside addAppSecretVersion is
+    // an immutable JS string and cannot be zeroed; the staged ciphertext (cleared by the request's own trigger) and
+    // this Buffer are the copies we can reach. #4626 item 4 records the limit rather than pretending to more.
+    plaintext?.fill(0);}
   }else{
    if(!secret)throw refuse();
    await tx.secret.update({where:{id:secret.id},data:{protected:r.operation==='SET_PROTECTED',updatedBy:r.requester_id}});

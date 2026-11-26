@@ -6829,7 +6829,7 @@ export const typeDefs = `#graphql
     id: ID!
     """The effective state, with expiry judged on the server clock: open, completed, declined (the requester declined on the ceremony page), expired, withdrawn (the requester withdrew it) or stale (the secret changed first)."""
     state: String!
-    """The requested operation."""
+    """The requested operation: STORE, DELETE, SET_PROTECTED or CLEAR_PROTECTED. STORE is staged by createSecret and updateSecret (a create, a new value version, a metadata edit or a protection change); DELETE by deleteSecret; the protection pair by setSecretProtected."""
     operation: String!
     """Creation time."""
     createdAt: DateTime!
@@ -6878,7 +6878,7 @@ export const typeDefs = `#graphql
     grantId: ID!
     secretName: String!
     selfIssued: Boolean!
-    "The worker holder was held by the actual signer at issuance (R22); null for a pending or legacy client, sealed once captured."
+    "Whether the holder is the actual signer's own worker, captured at passkey issuance (R22): true — a worker the signer held; false — a person-held client, or a worker another person held; null — not captured (pending) or a legacy row. Sealed once captured."
     issuedToOwnWorker: Boolean
   }
 
@@ -6901,7 +6901,7 @@ export const typeDefs = `#graphql
     secretId: ID!
     secretName: String!
     selfIssued: Boolean!
-    "The worker holder was held by the actual signer at issuance (R22); null for a pending or legacy client, sealed once captured."
+    "Whether the holder is the actual signer's own worker, captured at passkey issuance (R22): true — a worker the signer held; false — a person-held client, or a worker another person held; null — not captured (pending) or a legacy row. Sealed once captured."
     issuedToOwnWorker: Boolean
     "Null while live, else one of SECRET_DELETED, PROTECTED, REVOKED, PENDING, SPENT, EXPIRED, NOT_STARTED, ISSUER_GONE (nothing else ended it) or ENDED. A stored end wins; otherwise the grant's own state, in the order the reveal door answers."
     endReason: String
@@ -15244,7 +15244,12 @@ export const typeDefs = `#graphql
     SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl instead
     of a Secret, and nothing changes until the requester completes the passkey
     ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The expiry and the two
-    caps are as for createSecret.
+    caps are as for createSecret. Rewriting the VALUE of a legacy
+    webfetch-auth secret whose stored metadata lacks the auth type recovers
+    the row: the (metadata, value) pair is re-validated and the type is
+    re-derived from the new value, while a metadata-only edit of such a row
+    is refused (the stored type is unavailable) until a value rewrite
+    restores it.
     """
     updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean): Secret!
     """
