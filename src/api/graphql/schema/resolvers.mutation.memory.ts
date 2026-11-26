@@ -766,7 +766,7 @@ export const memoryMutations = {
       if (existing) {
         if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id, [ctx.userId]));
         } else {
           // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${memoryUrn}" already exists`, {
@@ -1614,7 +1614,7 @@ export const memoryMutations = {
           // Reusing an org-owned memory's URN takes the authority createMemory's org-shared reuse takes (hadron-internal#78).
           if (existing.userId === null) await requireOrgAction(ctx, targetOrgId, 'memory.create');
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id, [ctx.userId]));
         } else {
           // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
@@ -1844,7 +1844,7 @@ export const memoryMutations = {
           // Reusing an org-owned memory's URN takes the authority createMemory's org-shared reuse takes (hadron-internal#78).
           if (existing.userId === null) await requireOrgAction(ctx, targetOrgId, 'memory.create');
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id, [ctx.userId]));
         } else {
           // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
