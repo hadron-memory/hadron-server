@@ -133,3 +133,52 @@ describe('importNode target refusals', () => {
     expect(result.status).toBe('STORED');
   });
 });
+
+describe.each(['personal', 'private'] as const)('importNode target refusals, an App %s memory with a computable address', (memoryClass) => {
+  // The address is built from a handle and an App slug alone.
+  const urnFor = (handle: string) => `${handle}:ref72-club-${handle}-${memoryClass}`;
+  let memberId: string;
+  let ownedId: string;
+
+  beforeEach(async () => {
+    const org = await db.organization.findFirstOrThrow({ where: { urn: 'ref72-theirs' } });
+    const agent = await db.agent.create({ data: { name: 'Club', urn: 'ref72-theirs:club-agent', organizationId: org.id } });
+    const app = await db.app.create({ data: { name: 'Club', urn: 'ref72-theirs:ref72-club', organizationId: org.id } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const person = async (handle: string) =>
+      (await db.user.create({ data: { id: generateId(), name: handle, handle, roles: ['READER'] } })).id;
+    const ownerId = await person('ref72-alice');
+    memberId = await person('ref72-bob');
+    // A real person with no such memory: the control address differs only in the handle.
+    await person('ref72-dora');
+    await db.appMember.create({ data: { appId: app.id, userId: ownerId, role: 'member' } });
+    await db.appMember.create({ data: { appId: app.id, userId: memberId, role: 'member' } });
+    ownedId = (await db.memory.create({ data: {
+      id: generateId(), name: 'owned', urn: urnFor('ref72-alice'), class: memoryClass,
+      userId: ownerId, ownerUserId: ownerId, appId: app.id, userMemoryOfAgentId: agent.id,
+    } })).id;
+  });
+
+  const classCallers: ReadonlyArray<readonly [string, () => Context, Record<string, unknown>]> = [
+    ['another member of the same App', () => userCtx(memberId), notFound],
+    ['an outsider', () => userCtx(outsiderId), notFound],
+    ['a signed-out caller', () => ({ db, roles: [], clientId: 'anonymous' }), { extensions: { code: 'UNAUTHENTICATED' } }],
+  ];
+
+  const spellings: ReadonlyArray<readonly [string, (handle: string) => [Record<string, string>, string]]> = [
+    ['memoryRef', (handle) => [{ memoryRef: `hrn:mem:${urnFor(handle)}`, loc: 'clips:x' }, `hrn:mem:${urnFor(handle)}`]],
+    ['nodeUrn', (handle) => [{ nodeUrn: `hrn:node:${urnFor(handle)}:clips:x` }, urnFor(handle)]],
+  ];
+
+  describe.each(classCallers)('%s', (_caller, ctx, expected) => {
+    it.each(spellings)('refuses (%s)', async (_spelling, target) => {
+      const [absentInput, absentRef] = target('ref72-dora');
+      const [ownedInput, ownedRef] = target('ref72-alice');
+      const missing = await refusal({ ...absentInput, ...body }, ctx(), absentRef);
+      const present = await refusal({ ...ownedInput, ...body }, ctx(), ownedRef);
+      expect(present).toEqual(missing);
+      expect(present).toMatchObject(expected);
+      expect(await db.node.count({ where: { memoryId: ownedId, loc: 'clips:x' } })).toBe(0);
+    });
+  });
+});
