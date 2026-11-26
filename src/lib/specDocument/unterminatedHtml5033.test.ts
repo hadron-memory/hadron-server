@@ -459,7 +459,8 @@ describe('escapeUnterminatedHtml', () => {
     expect(escapeUnterminatedHtml('<pre>\na\n</pre> `a <b x= b` c')).toBe('<pre>\na\n</pre> `a &lt;b x= b` c');
   });
   it('an end tag whose first `>` sits inside a quoted value is ambiguous (a browser reads attributes on it, htmlparser2 ends at the `>`): it is escaped', () => {
-    expect(escapeUnterminatedHtml('</textarea<div class="><xmp><noscript>"<pre>')).toBe('&lt;/textarea<div class="><xmp><noscript>"<pre>');
+    // #5211: what the ambiguous end tag holds is not a tag Markdown accepts, so it is read; on main all three readers lost the anchor.
+    expect(escapeUnterminatedHtml('</textarea<div class="><xmp><noscript>"<pre>')).toBe('&lt;/textarea<div class=">&lt;xmp>&lt;noscript>"<pre>');
     expect(escapeUnterminatedHtml('</b x=">">')).toBe('&lt;/b x=">">');
     // An ordinary end tag, and an end tag with a harmless attribute-like tail, are unchanged.
     expect(escapeUnterminatedHtml('</b>')).toBe('</b>');

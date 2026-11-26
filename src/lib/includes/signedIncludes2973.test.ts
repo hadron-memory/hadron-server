@@ -184,8 +184,10 @@ describe('#2973 PR3 selection on reads and compile', () => {
   });
   it('a cancelled first-key signature never satisfies an include', async () => {
     const passkeyId = await signPart(true);
-    await db.$executeRaw`UPDATE passkey_credentials SET revoked_at = public.hadron_passkey_wall_now(),
-      window_ended_at = public.hadron_passkey_wall_now(), window_outcome = 'cancelled' WHERE id = ${passkeyId}`;
+    // One clock read used twice (#5264): two wall_now() calls differ by microseconds, and chk_passkey_shape needs both equal.
+    await db.$executeRaw`WITH t AS (SELECT public.hadron_passkey_wall_now() AS at)
+      UPDATE passkey_credentials SET revoked_at = t.at, window_ended_at = t.at, window_outcome = 'cancelled'
+      FROM t WHERE id = ${passkeyId}`;
     await source(); await broken();
   });
   it('the writer stamp counts only in its capture memory, including a move back', async () => {

@@ -1,4 +1,4 @@
-import { assertMoveWithinSizeLimit, SubtreeMoveTooLargeError } from '../lib/moveSizeLimit.js';
+import { assertMoveWithinSizeLimit, mapMoveExpiry, SubtreeMoveTimedOutError, SubtreeMoveTooLargeError } from '../lib/moveSizeLimit.js';
 import { respondSessionSuperseded } from '../lib/sessionSuperseded.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/github/syncNotAttempted.js';
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
@@ -418,6 +418,7 @@ import { admitOperationRate } from '../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../lib/rateLimit/identity.js';
 // Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
 import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
+import { collapseLineBreaks } from '../lib/collapseLineBreaks.js';
 import { attendeeMentionTokens } from '../lib/channelReadState.js';
 import { mentionReach } from '../lib/mentionReach.js';
 import {
@@ -1360,7 +1361,7 @@ function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent' | 'org', bareUrn: 
  * session rows (worker name, role and App name, #4587).
  */
 function oneLineText(name: string, max = 100): string {
-  const flat = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
+  const flat = collapseLineBreaks(name);
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
@@ -8764,7 +8765,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
       let edgeUrnChanges: MoveNodeSubtreeResult['edgeUrnChanges'] = [];
       try {
-        const completed = await withArchivePlanRetries(async (timeout) => {
+        const completed = await mapMoveExpiry(() => withArchivePlanRetries(async (timeout) => {
           let relocated: MoveNodeSubtreeResult['moved'] = [];
           let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
           let edgeUrnChanges: MoveNodeSubtreeResult['edgeUrnChanges'] = [];
@@ -9006,7 +9007,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // here (mirrors extractParentNodeGraph / cloneMemory).
           { timeout });
           return { result: attemptResult, relocated, linkWarnings, edgeUrnChanges };
-        });
+        }));
         result = completed.result;
         relocated = completed.relocated;
         linkWarnings = completed.linkWarnings;
@@ -9038,6 +9039,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         if (e instanceof SubtreeMoveTooLargeError) {
           return refusalResult(`[move_too_large] ${e.message}`);
+        }
+        if (e instanceof SubtreeMoveTimedOutError) {
+          return refusalResult(`[move_timed_out] ${e.message}`);
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
           return refusalResult(`[spec_minted_permanent] ${e.message}`);

@@ -602,7 +602,7 @@ export function isMemoryReadableFresh(ctx: Context, memoryId: string, tx?: Prism
  * for a surface that does not already hold the caller's accessible set. A
  * surface that computes the full set anyway for its default
  * scope — `listAssets` is the live example — should intersect in memory against
- * that set instead. `listAssets` additionally narrows by `orgId` before checking
+ * that set instead. `listAssets` additionally narrows by `orgRef` before checking
  * refs, so swapping this helper in there would also drop that narrowing and
  * WIDEN the result. Unify the two only if you keep both checks.
  */

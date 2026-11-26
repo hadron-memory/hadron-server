@@ -91,8 +91,8 @@ async function readableChatForToolChoice(ctx: Context, chatId: string) {
     }),
     chatId,
   );
-  if (!chatNode) throw chatNotFoundError(chatId);
-  if (!(await isMemoryReadableCached(ctx, chatNode.memoryId))) throw chatNotFoundError(chatId);
+  if (!chatNode) throw chatNotFoundError();
+  if (!(await isMemoryReadableCached(ctx, chatNode.memoryId))) throw chatNotFoundError();
   return chatNode;
 }
 
@@ -103,7 +103,7 @@ export const chatbotAiConfigQueries = {
       where: { id: chatNode.memoryId },
       select: { id: true, appId: true, sharedMemoryOfAgentId: true, userMemoryOfAgentId: true },
     });
-    if (!memory) throw chatNotFoundError(chatId);
+    if (!memory) throw chatNotFoundError();
     const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
     const readable = memEncInfo.isEncrypted ? translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo)) : chatNode;
     const storedChoice = ((readable.data as Record<string, unknown> | null) ?? {}).aiConfigChoice;
@@ -197,9 +197,9 @@ export async function storedChatAiConfigChoice(ctx: Context, chatId: string, app
     }),
     chatId,
   );
-  if (!chatNode || !appId) throw chatNotFoundError(chatId);
+  if (!chatNode || !appId) throw chatNotFoundError();
   const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId }, select: { appId: true } });
-  if (!memory || memory.appId !== appId) throw chatNotFoundError(chatId);
+  if (!memory || memory.appId !== appId) throw chatNotFoundError();
   const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
   if (memEncInfo.isEncrypted) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo));
   return ((chatNode.data as Record<string, unknown> | null) ?? {}).aiConfigChoice;

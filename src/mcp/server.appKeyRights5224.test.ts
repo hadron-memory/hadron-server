@@ -9,7 +9,7 @@
  * their own credential, must get the marker through the SAME call, and a by-reference door must answer for a real
  * memory exactly as it answers for one that does not exist.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
@@ -19,9 +19,18 @@ import { generateId } from '../lib/id.js';
 import { APP_KEY_PREFIX, USER_API_KEY_PREFIX, hashAppKey, hashUserApiKey } from '../middleware/auth.js';
 import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
 import { resolvers } from '../api/graphql/schema/resolvers.js';
+import { typeDefs } from '../api/graphql/schema/typeDefs.js';
+import { QUESTION_LOG_ROLE } from '../lib/questions/index.js';
+import { QUESTION_LOG_CODEC } from '../lib/questions/codec.js';
+import { buildSchema, getNamedType } from 'graphql';
 
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+// assetDownloadUrl: no object store here, so the owner's download URL is minted by this stand-in.
+vi.mock('../integrations/objectstore/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../integrations/objectstore/index.js')>()),
+  mintGetUrl: vi.fn(async () => 'https://store.invalid/get'),
+}));
 
 let server: Server;
 let baseUrl: string;
@@ -34,11 +43,15 @@ afterAll(async () => { await closeServerIfStarted(server); });
 
 // ─── The wire ────────────────────────────────────────────────────────────
 
-interface Caller { bearer: string; session?: string; transport?: string }
+/**
+ * `hadronSession` is the worker session the key acts in (the `x-hadron-session` header); `mcpSessionId` is the MCP
+ * transport's own session id, set on the first MCP call. They are unrelated.
+ */
+interface Caller { bearer: string; hadronSession?: string; mcpSessionId?: string }
 
 const headersOf = (c: Caller) => ({
   'content-type': 'application/json', authorization: `Bearer ${c.bearer}`,
-  ...(c.session ? { 'x-hadron-session': c.session } : {}),
+  ...(c.hadronSession ? { 'x-hadron-session': c.hadronSession } : {}),
 });
 
 async function gql(c: Caller, query: string, variables: Record<string, unknown>): Promise<string> {
@@ -47,21 +60,31 @@ async function gql(c: Caller, query: string, variables: Record<string, unknown>)
 }
 
 let rpc = 1;
+/**
+ * One JSON-RPC call. Every HTTP answer must be 200 (202 for a notification), and the body is the message carrying this
+ * call's id, wherever it sits among the stream's `data:` lines.
+ */
 async function mcpPost(c: Caller, method: string, params: unknown) {
+  const notification = method.startsWith('notifications/');
+  const id = notification ? undefined : rpc++;
   const res = await fetch(`${baseUrl}/mcp`, {
     method: 'POST',
-    headers: { ...headersOf(c), accept: 'application/json, text/event-stream', ...(c.transport ? { 'mcp-session-id': c.transport } : {}) },
-    body: JSON.stringify({ jsonrpc: '2.0', ...(method.startsWith('notifications/') ? {} : { id: rpc++ }), method, params }),
+    headers: { ...headersOf(c), accept: 'application/json, text/event-stream', ...(c.mcpSessionId ? { 'mcp-session-id': c.mcpSessionId } : {}) },
+    body: JSON.stringify({ jsonrpc: '2.0', ...(id === undefined ? {} : { id }), method, params }),
   });
   const raw = await res.text();
-  const data = raw.split('\n').find((l) => l.startsWith('data:'))?.slice(5) ?? raw;
-  return { res, body: data ? (JSON.parse(data) as Record<string, any>) : {} };
+  expect(res.status, `${method}: ${raw}`).toBe(notification ? 202 : 200);
+  if (notification) return { res, body: {} as Record<string, any> };
+  const lines = raw.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5));
+  const messages = (lines.length > 0 ? lines : [raw]).map((l) => JSON.parse(l) as Record<string, any>);
+  const body = messages.find((x) => x.id === id);
+  expect(body, `${method}: no answer with id ${id} in ${raw}`).toBeDefined();
+  return { res, body: body! };
 }
 async function mcp(c: Caller, name: string, args: Record<string, unknown>): Promise<string> {
-  if (!c.transport) {
+  if (!c.mcpSessionId) {
     const { res } = await mcpPost(c, 'initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'p5224', version: '1' } });
-    expect(res.status).toBe(200);
-    c.transport = res.headers.get('mcp-session-id')!;
+    c.mcpSessionId = res.headers.get('mcp-session-id')!;
     await mcpPost(c, 'notifications/initialized', {});
   }
   const { body } = await mcpPost(c, 'tools/call', { name, arguments: args });
@@ -72,7 +95,7 @@ async function mcp(c: Caller, name: string, args: Record<string, unknown>): Prom
 
 interface Target {
   shape: string; id: string; urn: string; nodeId: string; childId: string; edgeId: string;
-  assetId: string; revId: string; commentBody: string; mark: string;
+  assetId: string; revId: string; objectId: string; goneId: string; commentId: string; commentBody: string; mark: string;
 }
 interface World {
   appId: string; agentId: string; mia: string; leo: string; root: string; tenant: Record<string, string>;
@@ -111,6 +134,19 @@ async function makeWorld(kind: 'organization' | 'user'): Promise<World> {
   return { appId, agentId, mia, leo, root, tenant, key: { bearer }, miaKey: await userKey(mia), space: { id: space.id, urn: space.urn, nodeId: node.id, mark } };
 }
 
+/**
+ * The marks: each seeded value is `<mark><letter>`, so an answer that carries one names the field it came from.
+ */
+const MARKS = {
+  M: 'memory name', N: 'node name', C: 'node content', A: 'node abstract', K: 'child node name', L: 'child node content',
+  E: 'edge name', R: 'revision name and content', F: 'asset filename', B: 'comment body', T: 'node tag',
+  O: 'object title', D: 'soft-deleted node name and content', U: 'usage event type', G: 'removed edge name',
+  Q: 'question log name',
+} as const;
+const MARK_LETTERS = Object.keys(MARKS);
+/** The marks a write door could echo: every mark of a live value. */
+const LIVE_MARKS = MARK_LETTERS.filter((l) => !'DUG'.includes(l));
+
 const SHAPES = ['in the App, the App owner\'s tenancy', 'in the App, the person\'s own tenancy', 'free-standing', 'free-standing, named by an agent memory item', 'in the App, named by an agent memory item', 'the App owner\'s tenancy, no Agent, named by an agent memory item'] as const;
 
 /** One of Mia's memories, with a distinguishable value in every field a read surface can return. */
@@ -128,7 +164,8 @@ async function seed(w: World, cls: 'personal' | 'private', shape: (typeof SHAPES
   });
   if (shape.endsWith('named by an agent memory item')) await db.agentMemoryItem.create({ data: { agentId: w.agentId, memoryId: memory.id, role: 'read-write' } });
   const node = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'diary', name: `${mark}N`, content: `${mark}C`, abstract: `${mark}A`, tags: [`${mark}T`] } });
-  const child = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'diary:one', name: `${mark}K`, content: `${mark}L`, seq: 1 } });
+  // The child cites a node that is no longer live, so the memory has an unresolved reference to report.
+  const child = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'diary:one', name: `${mark}K`, content: `${mark}L, see hrn:node:${memory.urn}:gone`, seq: 1 } });
   const edge = await db.edge.create({ data: { id: generateId(), memoryId: memory.id, sourceId: node.id, targetId: child.id, loc: `diary:e:${node.id}`, name: `${mark}E` } });
   const rev = await db.nodeRevision.create({ data: { id: generateId(), nodeId: node.id, memoryId: memory.id, revNo: 1, loc: 'diary', name: `${mark}R`, content: `${mark}R` } as never });
   const assetId = generateId();
@@ -136,22 +173,35 @@ async function seed(w: World, cls: 'personal' | 'private', shape: (typeof SHAPES
   // From the PUBLIC memory into hers: an edge to follow and an include to expand.
   await db.edge.create({ data: { id: generateId(), memoryId: w.space.id, sourceId: w.space.nodeId, targetId: node.id, loc: `diary:x:${node.id}`, name: 'x' } });
   await db.node.create({ data: { id: generateId(), memoryId: w.space.id, loc: `inc:${memory.id}`, name: 'inc', content: `{{> hrn:node:${memory.urn}:diary}}` } });
+  const object = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'goal:one', name: 'goal', objectType: 'goal', properties: { title: `${mark}O` } } });
+  const gone = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'gone', name: `${mark}D`, content: `${mark}D`, deletedAt: new Date() } });
+  const logData = {
+    codec: QUESTION_LOG_CODEC, kind: 'question.log', prefix: 'Q', lastCode: 0, defaultDeciders: [w.mia], eligibleDeciders: [], purges: [],
+    lastAction: { op: 'create', by: { userId: w.mia, workerId: null, appId: null }, at: new Date().toISOString(), reason: null },
+  };
+  await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'questions', name: `${mark}Q`, role: QUESTION_LOG_ROLE, data: logData } });
+  await db.usageEvent.create({ data: { type: `${mark}U`, nodeLoc: 'diary', nodeId: node.id, memoryId: memory.id } });
+  await db.usageEvent.create({ data: { type: 'read', nodeLoc: 'diary', nodeId: node.id, memoryId: memory.id } });
+  await db.nodeEdgeRemoval.create({ data: { sourceId: node.id, memoryId: memory.id, edgeId: generateId(), edgeLoc: 'diary:r', edgeName: `${mark}G`, targetId: generateId(), targetMemoryId: memory.id, targetLoc: 'r', reason: 'TARGET_HARD_DELETED' } });
+  let commentId = generateId();
   const commentBody = `${mark}B`;
   // A private memory takes no comments.
   if (cls === 'personal') {
     const out = await gql(w.miaKey, 'mutation($t: ID!, $b: String!) { createComment(targetRef: $t, body: $b) { id } }', { t: node.id, b: commentBody });
     expect(out).toContain('"createComment":{"id"');
+    commentId = (JSON.parse(out) as { data: { createComment: { id: string } } }).data.createComment.id;
   }
-  return { shape, id: memory.id, urn: memory.urn, nodeId: node.id, childId: child.id, edgeId: edge.id, assetId, revId: rev.id, commentBody, mark };
+  return { shape, id: memory.id, urn: memory.urn, nodeId: node.id, childId: child.id, edgeId: edge.id, assetId, revId: rev.id, objectId: object.id, goneId: gone.id, commentId, commentBody, mark };
 }
 
 /** A target that does not exist, for the same-answer comparison. */
 const ghostOf = (t: Target): Target => ({
   ...t, id: generateId(), urn: `${t.urn.split(':')[0]}:g${generateId().toLowerCase().slice(-8)}`, nodeId: generateId(),
   childId: generateId(), edgeId: generateId(), assetId: generateId(), revId: generateId(),
+  objectId: generateId(), goneId: generateId(), commentId: generateId(),
 });
 const normalise = (text: string, t: Target) =>
-  [t.id, t.urn, t.nodeId, t.childId, t.edgeId, t.assetId, t.revId].reduce((acc, v) => acc.split(v).join('<ref>'), text);
+  [t.id, t.urn, t.nodeId, t.childId, t.edgeId, t.assetId, t.revId, t.objectId, t.goneId, t.commentId].reduce((acc, v) => acc.split(v).join('<ref>'), text);
 
 // ─── The doors ───────────────────────────────────────────────────────────
 
@@ -160,13 +210,21 @@ interface Door {
   run: (c: Caller, t: Target, w: World) => Promise<string>;
   /** The door names the target, so its answer must equal the answer for a target that does not exist. */
   byRef: boolean;
-
-
+  /**
+   * How the owner's answer shows she reached her memory, for a door whose answer carries no mark and no id she did not
+   * send. Without it, the owner must get a mark or such an id.
+   */
+  reach?: (out: string, t: Target) => boolean;
+  /** The one place the door may repeat the query it was sent; everything else it returns is judged. */
+  echo?: (t: Target) => string;
 }
-const g = (name: string, query: string, vars: (t: Target, w: World) => Record<string, unknown>, byRef = true): Door =>
-  ({ name: `GraphQL ${name}`, byRef, run: (c, t, w) => gql(c, query, vars(t, w)) });
-const m = (name: string, tool: string, args: (t: Target, w: World) => Record<string, unknown>, byRef = true): Door =>
-  ({ name: `MCP ${name}`, byRef, run: (c, t, w) => mcp(c, tool, args(t, w)) });
+type Vars = (t: Target, w: World) => Record<string, unknown>;
+interface DoorOpts { byRef?: boolean; reach?: Door['reach']; echo?: Door['echo'] }
+const opts = (o: boolean | DoorOpts | undefined): DoorOpts => (typeof o === 'boolean' ? { byRef: o } : o ?? {});
+const g = (name: string, query: string, vars: Vars, o?: boolean | DoorOpts): Door =>
+  ({ name: `GraphQL ${name}`, ...opts(o), byRef: opts(o).byRef ?? true, run: (c, t, w) => gql(c, query, vars(t, w)) });
+const m = (name: string, tool: string, args: Vars, o?: boolean | DoorOpts): Door =>
+  ({ name: `MCP ${name}`, ...opts(o), byRef: opts(o).byRef ?? true, run: (c, t, w) => mcp(c, tool, args(t, w)) });
 
 const mem = (t: Target) => `hrn:mem:${t.urn}`;
 const node = (t: Target, loc = 'diary') => `hrn:node:${t.urn}:${loc}`;
@@ -194,6 +252,38 @@ const READ_DOORS: Door[] = [
   g('memoryAssets', 'query($r: ID!) { memoryAssets(memoryRef: $r) { assets { id filename } } }', (t) => ({ r: t.id })),
   g('memoryNodes', 'query($r: ID!) { memoryNodes(memoryRef: $r) { total nodes { id name } } }', (t) => ({ r: t.id })),
   g('memoryEdges', 'query($r: ID!) { memoryEdges(memoryRef: $r) { total edges { id name } } }', (t) => ({ r: mem(t) })),
+  g('comment', 'query($r: ID!) { comment(ref: $r) { id body } }', (t) => ({ r: t.commentId })),
+  g('object(id)', 'query($r: ID!) { object(ref: $r) }', (t) => ({ r: t.objectId })),
+  g('object(URN)', 'query($r: ID!) { object(ref: $r) }', (t) => ({ r: node(t, 'goal:one') })),
+  g('findObjects', 'query($r: String!) { findObjects(memoryRef: $r, type: "goal") { total objects } }', (t) => ({ r: t.id })),
+  g('recoveryNode', 'query($r: ID!) { recoveryNode(nodeRef: $r) { id name content } }', (t) => ({ r: t.goneId })),
+  g('recoveryNodes', 'query($r: ID!) { recoveryNodes(memoryRef: $r) { total items { id name } } }', (t) => ({ r: t.id })),
+  g('recoveryEdges', 'query($r: ID!) { recoveryEdges(memoryRef: $r) { total items { id name } } }', (t) => ({ r: t.id })),
+  // #5237: what the memory holds besides nodes, and what the platform says about it
+  g('memoryLocSegments', 'query($r: [ID!]!) { memoryLocSegments(memoryRefs: $r, parentLoc: "diary") { items { segment memoryId } } }', (t) => ({ r: [mem(t)] })),
+  g('memoryConfig', 'query($r: ID!) { memoryConfig(memoryRef: $r) { memoryId rules { role } } }', (t) => ({ r: mem(t) })),
+  g('memoryUsageSummary', 'query($r: ID!) { memoryUsageSummary(memoryRef: $r) { nodeLoc type count } }', (t) => ({ r: t.id })),
+  g('usageEvents(memoryRef)', 'query($r: ID!) { usageEvents(memoryRef: $r) { id type memoryId } }', (t) => ({ r: mem(t) })),
+  g('usageEventsPage', 'query($r: ID!) { usageEventsPage(memoryRef: $r) { total items { id type memoryId } } }', (t) => ({ r: mem(t) })),
+  g('usageActivity', 'query($r: [ID!]) { usageActivity(memoryRefs: $r) { date reads writes } }', (t) => ({ r: [t.id] }),
+    { reach: (out) => /"reads":[1-9]/.test(out) }),
+  g('validateMemory', 'query($r: ID!) { validateMemory(memoryRef: $r) { memoryId nodesChecked ok } }', (t) => ({ r: mem(t) })),
+  g('verifyMemoryNodes', 'query($r: String!) { verifyMemoryNodes(memoryRef: $r) { checked problems { nodeId urn state } } }', (t) => ({ r: mem(t) })),
+  g('verifyNode', 'query($r: ID!) { verifyNode(nodeRef: $r) { nodeId urn state } }', (t) => ({ r: node(t) })),
+  g('nodeAuthoringCheck', 'query($r: String) { nodeAuthoringCheck(input: { ref: $r }) { state code } }', (t) => ({ r: node(t) }),
+    { reach: (out) => out.includes('"nodeAuthoringCheck":{"state"') }),
+  g('nodeEdgeRemovals', 'query($r: ID!) { nodeEdgeRemovals(nodeRef: $r) { id edgeName targetId } }', (t) => ({ r: node(t) })),
+  g('specBacklinks', 'query($r: ID!) { specBacklinks(memoryRef: $r, loc: "diary:one") { kind sourceNodeId sourceLoc } }', (t) => ({ r: t.id })),
+  g('specBacklinksPage', 'query($r: ID!) { specBacklinksPage(memoryRef: $r, loc: "diary:one") { total items { sourceNodeId } } }', (t) => ({ r: t.id })),
+  g('specUnresolvedReferences', 'query($r: ID!) { specUnresolvedReferences(memoryRef: $r) { sourceNodeId targetLoc reason } }', (t) => ({ r: t.id })),
+  g('specUnresolvedReferencesPage', 'query($r: ID!) { specUnresolvedReferencesPage(memoryRef: $r) { total items { sourceNodeId } } }', (t) => ({ r: t.id })),
+  // The node has no compiled prompt, so the owner's answer is an empty one, where the key's is a refusal.
+  g('compiledPromptProvenance', 'query($r: ID!) { compiledPromptProvenance(nodeRef: $r, revNo: 1) { total } }', (t) => ({ r: node(t) }),
+    { reach: (out) => out.trim() === '{"data":{"compiledPromptProvenance":null}}' }),
+  g('assetDownloadUrl', 'query($r: ID!) { assetDownloadUrl(assetId: $r) { url filename } }', (t) => ({ r: t.assetId })),
+  g('automationReadGrants', 'query($a: String, $r: String) { automationReadGrants(appRef: $a, memoryRef: $r) { id } }', (t, w) => ({ a: w.appId, r: t.id }),
+    { reach: (out) => out.includes('"automationReadGrants":[') }),
+  g('questionLogs', 'query($r: ID) { questionLogs(memoryRef: $r) { id name } }', (t) => ({ r: t.id })),
   // lists
   g('memories', '{ memories(limit: 200) { total items { id name } } }', () => ({}), false),
   g('appNodes', 'query($a: ID!) { appNodes(appRef: $a, limit: 200) { id name content } }', (_t, w) => ({ a: w.appId }), false),
@@ -221,30 +311,43 @@ const READ_DOORS: Door[] = [
   m('get_nodes', 'hadron_get_nodes', (t) => ({ refs: [node(t), t.childId] })),
   m('get_next_node', 'hadron_get_next_node', (t) => ({ parent: node(t) })),
   m('list_nodes', 'hadron_list_nodes', (t) => ({ memoryUrn: mem(t) })),
-  m('validate', 'hadron_validate', (t) => ({ memoryUrn: mem(t) })),
+  m('validate', 'hadron_validate', (t) => ({ memoryUrn: mem(t) }), { reach: (out) => / in \d+ nodes/.test(out) }),
   m('list_comments', 'hadron_list_comments', (t) => ({ targetRef: node(t) })),
+  m('get_comment', 'hadron_get_comment', (t) => ({ commentRef: t.commentId })),
+  m('get_object(id)', 'hadron_get_object', (t) => ({ ref: t.objectId })),
+  m('get_object(URN)', 'hadron_get_object', (t) => ({ ref: node(t, 'goal:one') })),
+  m('find_objects', 'hadron_find_objects', (t) => ({ memoryUrn: mem(t), type: 'goal' })),
+  m('find_objects match', 'hadron_find_objects', (t) => ({ memoryUrn: t.id, type: 'goal', match: { title: `${t.mark}O` } })),
+  m('get_recovery_node', 'hadron_get_recovery_node', (t) => ({ nodeRef: t.goneId })),
+  m('list_recovery_nodes', 'hadron_list_recovery_nodes', (t) => ({ memoryRef: t.id })),
+  m('list_recovery_edges', 'hadron_list_recovery_edges', (t) => ({ memoryRef: mem(t) })),
   m('run_task by URN', 'hadron_run_task', (t) => ({ urn: node(t) })),
   m('run_action', 'hadron_run_action', (t) => ({ urn: node(t) })),
   m('find_nodes in the memory', 'hadron_find_nodes', (t) => ({ query: 'diary', memoryUrn: mem(t) })),
   m('list_memories', 'hadron_list_memories', () => ({}), false),
   m('find_nodes keyword', 'hadron_find_nodes', (t) => ({ query: `${t.mark}C`, mode: 'keyword', memoryUrns: [mem(t)] })),
   m('find_nodes regex', 'hadron_find_nodes', (t) => ({ query: `^${t.mark}C$`, mode: 'regex', memoryUrns: [mem(t)] })),
-  m('search', 'hadron_search', (t) => ({ query: `${t.mark}N`, scope: 'global' }), false),
+  m('search', 'hadron_search', (t) => ({ query: `${t.mark}N`, scope: 'global' }), { byRef: false, echo: (t) => `No results for \\"${t.mark}N\\".` }),
   m('include from PUBLIC knowledge', 'hadron_get_node', (t, w) => ({ urn: `hrn:node:${w.space.urn}:inc:${t.id}` }), false),
 ];
 
-/** What an answer discloses about the target: a marked value, or the URN or id of a thing the call did not name. */
-const leaks = (out: string, sent: string, t: Target) =>
-  [...'MNCAKLERFBT'].map((c) => `${t.mark}${c}`).concat([t.id, t.urn, t.nodeId, t.childId, t.edgeId, t.assetId, t.revId])
-    .filter((v) => out.includes(v) && !sent.includes(v));
-/** Run a door and keep what it sent, so an echoed argument is not read as a disclosure. */
+/**
+ * What an answer discloses about the target: any marked value, or the URN or id of a thing the call did not name. A
+ * mark counts even when the call sent it (a search door sends the content it looks for), so an answer may not echo the
+ * query; only an id or URN the call itself sent may come back.
+ */
+const leaks = (out: string, sent: string, t: Target) => [
+  ...MARK_LETTERS.map((c) => `${t.mark}${c}`).filter((v) => out.includes(v)),
+  ...[t.id, t.urn, t.nodeId, t.childId, t.edgeId, t.assetId, t.revId, t.objectId, t.goneId, t.commentId].filter((v) => out.includes(v) && !sent.includes(v)),
+];
+/** Run a door and keep what it sent, so an echoed id or URN is not read as a disclosure. */
 async function probe(d: Door, c: Caller, t: Target, w: World) {
   const real = globalThis.fetch;
   let sent = '';
   const spy = vi.spyOn(globalThis, 'fetch').mockImplementation((u, i) => { sent += String(i?.body ?? ''); return real(u, i); });
   try {
     const out = await d.run(c, t, w);
-    return { out, sent };
+    return { out: d.echo ? out.split(d.echo(t)).join('<the query>') : out, sent };
   } finally { spy.mockRestore(); }
 }
 
@@ -274,8 +377,7 @@ describe.each(['organization', 'user'] as const)('#5224 item 1: outside a sessio
         expect(normalise(key.out, t)).toBe(normalise((await probe(d, w.key, ghost, w)).out, ghost));
       }
       const owner = await probe(d, w.miaKey, t, w);
-      // hadron_validate reports on the memory without quoting it: there the owner's answer is simply another answer.
-      if (leaks(owner.out, owner.sent, t).length > 0 || (d.name === 'MCP validate' && owner.out !== key.out)) ownerReached += 1;
+      if (d.reach ? d.reach(owner.out, t) && !d.reach(key.out, t) : leaks(owner.out, owner.sent, t).length > 0) ownerReached += 1;
     }
     expect(ownerReached, 'the owner reaches her memory through the same call').toBeGreaterThan(0);
   }, 120_000);
@@ -296,19 +398,23 @@ const MEMBER_DOORS: typeof SHARE_DOORS = [
   ['removeMemoryMember', 'mutation($m: ID!, $u: ID!) { removeMemoryMember(memoryRef: $m, userRef: $u) { memoryId } }', (t, w) => ({ m: t.id, u: w.leo })],
 ];
 
-/** Doors that would widen a memory's audience some other way. */
-const WIDEN_DOORS: Array<[string, (c: Caller, t: Target, w: World) => Promise<string>]> = [
-  ['GraphQL addMemoryToAgent', (c, t, w) => gql(c, 'mutation($a: ID!, $m: ID!) { addMemoryToAgent(agentRef: $a, memoryRef: $m, role: "read") { id } }', { a: w.agentId, m: t.id })],
-  ['GraphQL attachMemoryToApp', (c, t, w) => gql(c, 'mutation($m: ID!, $p: ID!, $a: ID!) { attachMemoryToApp(memoryRef: $m, appRef: $p, agentRef: $a) { id } }', { m: t.id, p: w.appId, a: w.agentId })],
-  ['GraphQL updateMemory(visibility)', (c, t) => gql(c, 'mutation($m: ID!) { updateMemory(ref: $m, visibility: PUBLIC) { id } }', { m: t.id })],
-  ['GraphQL transferMemoryOwnership', (c, t, w) => gql(c, 'mutation($m: ID!, $u: ID!) { transferMemoryOwnership(memoryRef: $m, userRef: $u) { __typename } }', { m: t.id, u: w.leo })],
-  ['GraphQL cloneMemory', (c, t, w) => gql(c, 'mutation($m: ID!, $u: String!) { cloneMemory(ref: $m, targetUrn: $u) { id } }', { m: t.id, u: `hrn:mem:${w.root}:stolen` })],
-  ['GraphQL cloneNode', (c, t, w) => gql(c, 'mutation($m: ID!, $u: String) { cloneNode(sourceRef: $m, targetUrn: $u) { id } }', { m: t.nodeId, u: `hrn:node:${w.space.urn}:stolen` })],
-  ['GraphQL setAppMemoryWriteGrant', (c, t, w) => gql(c, 'mutation($m: String!, $p: String!) { setAppMemoryWriteGrant(appRef: $p, memoryRef: $m, prefix: "diary") { id } }', { m: t.id, p: w.appId })],
-  ['GraphQL setAutomationReadGrant', (c, t, w) => gql(c, 'mutation($m: String!, $p: String!) { setAutomationReadGrant(appRef: $p, triggerKind: "SCHEDULE", triggerId: "x", memoryRef: $m) { id } }', { m: t.id, p: w.appId })],
-  ['GraphQL setAssetPublicLink', (c, t) => gql(c, 'mutation($a: ID!) { setAssetPublicLink(assetRef: $a, enabled: true) { id } }', { a: t.assetId })],
-  ['MCP hadron_set_asset_public_link', (c, t) => mcp(c, 'hadron_set_asset_public_link', { asset: t.assetId, enabled: true })],
-  ['MCP hadron_set_automation_read_grant', (c, t, w) => mcp(c, 'hadron_set_automation_read_grant', { app: w.appId, triggerKind: 'SCHEDULE', triggerId: 'x', memory: t.id })],
+/**
+ * Doors that would widen a memory's audience some other way, each with the refusal it gives the key. cloneNode's
+ * differs in a session: there the key reads the source (ruling 0203), so the refusal is the write to the target.
+ */
+type Refusal = string | { outside: string; inside: string };
+const WIDEN_DOORS: Array<[string, Refusal, (c: Caller, t: Target, w: World) => Promise<string>]> = [
+  ['GraphQL addMemoryToAgent', 'AGENT_NOT_FOUND', (c, t, w) => gql(c, 'mutation($a: ID!, $m: ID!) { addMemoryToAgent(agentRef: $a, memoryRef: $m, role: "read") { id } }', { a: w.agentId, m: t.id })],
+  ['GraphQL attachMemoryToApp', 'UNAUTHENTICATED', (c, t, w) => gql(c, 'mutation($m: ID!, $p: ID!, $a: ID!) { attachMemoryToApp(memoryRef: $m, appRef: $p, agentRef: $a) { id } }', { m: t.id, p: w.appId, a: w.agentId })],
+  ['GraphQL updateMemory(visibility)', 'MEMORY_NOT_FOUND', (c, t) => gql(c, 'mutation($m: ID!) { updateMemory(ref: $m, visibility: PUBLIC) { id } }', { m: t.id })],
+  ['GraphQL transferMemoryOwnership', 'MEMORY_NOT_FOUND', (c, t, w) => gql(c, 'mutation($m: ID!, $u: ID!) { transferMemoryOwnership(memoryRef: $m, userRef: $u) { __typename } }', { m: t.id, u: w.leo })],
+  ['GraphQL cloneMemory', 'MEMORY_NOT_FOUND', (c, t, w) => gql(c, 'mutation($m: ID!, $u: String!) { cloneMemory(ref: $m, targetUrn: $u) { id } }', { m: t.id, u: `hrn:mem:${w.root}:stolen` })],
+  ['GraphQL cloneNode', { outside: 'NODE_NOT_FOUND', inside: 'FORBIDDEN' }, (c, t, w) => gql(c, 'mutation($m: ID!, $u: String) { cloneNode(sourceRef: $m, targetUrn: $u) { id } }', { m: t.nodeId, u: `hrn:node:${w.space.urn}:stolen` })],
+  ['GraphQL setAppMemoryWriteGrant', 'FORBIDDEN', (c, t, w) => gql(c, 'mutation($m: String!, $p: String!) { setAppMemoryWriteGrant(appRef: $p, memoryRef: $m, prefix: "diary") { id } }', { m: t.id, p: w.appId })],
+  ['GraphQL setAutomationReadGrant', 'FORBIDDEN', (c, t, w) => gql(c, 'mutation($m: String!, $p: String!) { setAutomationReadGrant(appRef: $p, triggerKind: "SCHEDULE", triggerId: "x", memoryRef: $m) { id } }', { m: t.id, p: w.appId })],
+  ['GraphQL setAssetPublicLink', 'UNAUTHENTICATED', (c, t) => gql(c, 'mutation($a: ID!) { setAssetPublicLink(assetRef: $a, enabled: true) { id } }', { a: t.assetId })],
+  ['MCP hadron_set_asset_public_link', 'UNAUTHENTICATED', (c, t) => mcp(c, 'hadron_set_asset_public_link', { asset: t.assetId, enabled: true })],
+  ['MCP hadron_set_automation_read_grant', 'FORBIDDEN', (c, t, w) => mcp(c, 'hadron_set_automation_read_grant', { app: w.appId, triggerKind: 'SCHEDULE', triggerId: 'x', memory: t.id })],
 ];
 
 /** Everything that decides who reaches the memories. */
@@ -321,6 +427,14 @@ const audience = async () => JSON.stringify([
   await db.appMemoryWriteGrant.findMany(), await db.appAutomationReadGrant.findMany(), await db.node.count(),
 ]);
 
+/** The refusal code of an answer, or what came back instead, so an unexpected success reads in the failure message. */
+function refusalCode(out: string): string {
+  const body = JSON.parse(out) as { errors?: Array<{ extensions?: { code?: string } }>; isError?: boolean; content?: Array<{ text?: string }> };
+  if (body.errors?.[0]?.extensions?.code) return body.errors[0].extensions.code;
+  if (body.isError) return /\[([a-z_]+)\]/.exec(body.content?.[0]?.text ?? '')?.[1]?.toUpperCase() ?? 'MCP_ERROR_WITHOUT_CODE';
+  return `NOT REFUSED: ${out}`;
+}
+
 describe.each(['organization', 'user'] as const)('#5224 item 2: an App key of a %s-owned App shares nothing', (kind) => {
   for (const cls of ['personal', 'private'] as const) {
     for (const bound of [false, true]) {
@@ -328,19 +442,19 @@ describe.each(['organization', 'user'] as const)('#5224 item 2: an App key of a 
         let w: World;
         let t: Target;
         let caller: Caller;
-        beforeEach(async () => {
+        // One world for the block: every test asserts it wrote nothing, against its own snapshot.
+        beforeAll(async () => {
           w = await makeWorld(kind);
           t = await seed(w, cls, SHAPES[0]);
           await db.memoryShare.create({ data: { memoryId: t.id, granteeId: w.leo, grantorId: w.mia, role: 'reader', createdBy: w.mia } });
           const sid = (await db.session.create({ data: { id: generateId(), appId: w.appId, userId: w.mia, agentId: w.agentId, memoryId: t.id } })).id;
-          caller = bound ? { ...w.key, session: sid } : { ...w.key };
+          caller = bound ? { ...w.key, hadronSession: sid } : { ...w.key };
         }, 60_000);
 
         it.each(SHARE_DOORS)('%s: typed, the same for a memory that does not exist, and writes nothing', async (_name, query, vars) => {
           const before = await audience();
           const out = await gql(caller, query, vars(t, w));
-          const body = JSON.parse(out) as { errors: Array<{ extensions: { code: string } }> };
-          expect(body.errors[0]!.extensions.code, out).toBe('UNAUTHENTICATED');
+          expect(refusalCode(out)).toBe('UNAUTHENTICATED');
           const ghost = ghostOf(t);
           expect(normalise(out, t)).toBe(normalise(await gql(caller, query, vars(ghost, w)), ghost));
           expect(await audience()).toBe(before);
@@ -349,21 +463,16 @@ describe.each(['organization', 'user'] as const)('#5224 item 2: an App key of a 
         it.each(MEMBER_DOORS)('%s: typed, and writes nothing', async (_name, query, vars) => {
           const before = await audience();
           const out = await gql(caller, query, vars(t, w));
-          const body = JSON.parse(out) as { errors: Array<{ extensions: { code: string } }> };
-          expect(['UNAUTHENTICATED', 'FORBIDDEN'], out).toContain(body.errors[0]!.extensions.code);
-          for (const f of 'MNCAKLERFBT') expect(out).not.toContain(`${t.mark}${f}`);
+          expect(['UNAUTHENTICATED', 'FORBIDDEN']).toContain(refusalCode(out));
+          for (const f of LIVE_MARKS) expect(out).not.toContain(`${t.mark}${f}`);
           expect(await audience()).toBe(before);
         });
 
-        it.each(WIDEN_DOORS)('%s: refused, writes nothing', async (_name, run) => {
+        it.each(WIDEN_DOORS)('%s: refused, writes nothing', async (_name, code, run) => {
           const before = await audience();
           const out = await run(caller, t, w);
-          const body = JSON.parse(out) as { errors?: Array<{ extensions?: { code?: string } }>; isError?: boolean };
-          expect(body.isError === true || typeof body.errors?.[0]?.extensions?.code === 'string', out).toBe(true);
-          expect(out).not.toContain('GRAPHQL_VALIDATION_FAILED');
-          expect(out).not.toContain('INTERNAL_SERVER_ERROR');
-          expect(out).not.toContain('-32602');
-          for (const f of 'MNCAKLERFBT') expect(out).not.toContain(`${t.mark}${f}`);
+          expect(refusalCode(out)).toBe(typeof code === 'string' ? code : code[bound ? 'inside' : 'outside']);
+          for (const f of LIVE_MARKS) expect(out).not.toContain(`${t.mark}${f}`);
           expect(await audience()).toBe(before);
         });
       });
@@ -384,14 +493,43 @@ describe.each(['organization', 'user'] as const)('#5224 item 2: an App key of a 
     const { body } = await mcpPost(w.key, 'tools/list', {});
     const names = (body.result.tools as Array<{ name: string }>).map((x) => x.name);
     expect(names).toContain('hadron_set_asset_public_link');
-    // A new share or member tool must be added to the doors above before it passes here.
-    expect(names.filter((n) => /share|member/.test(n))).toEqual([]);
+    // A new share or member tool must be added to the doors above before it passes here: matched by whole words of the
+    // name, and by the MCP names the GraphQL doors would have.
+    const words = (n: string) => n.split('_');
+    expect(names.filter((n) => words(n).some((x) => /^(share|shares|shared|member|members|collaborator|collaborators|invite|invites)$/.test(x)))).toEqual([]);
+    const MUTATION_NAMES = [...SHARE_DOORS, ...MEMBER_DOORS].map(([n]) => `hadron_${n.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)}`);
+    expect(names.filter((n) => MUTATION_NAMES.includes(n))).toEqual([]);
+    // A tool that sets a grant or a public link is a widening door, and must be in the matrix or say why it is not.
+    const NOT_MEMORY_GRANTS: Record<string, string> = {
+      hadron_set_automation_team_snapshot_grant: 'grants a read of the App\'s roster and tasks; it names no memory',
+    };
+    const widening = names.filter((n) => /^hadron_(set|create)_/.test(n) && words(n).some((x) => /^(grant|public)$/.test(x)));
+    expect(widening.filter((n) => !WIDEN_DOORS.some(([d]) => d === `MCP ${n}`) && !(n in NOT_MEMORY_GRANTS))).toEqual([]);
   });
 });
 
 it('#5224: every GraphQL share and memory-member mutation is in the matrix', () => {
   const doors = Object.keys(resolvers.Mutation).filter((n) => /Memory(Share|Member)/.test(n)).sort();
   expect(doors).toEqual([...SHARE_DOORS, ...MEMBER_DOORS].map(([n]) => n).sort());
+});
+
+/**
+ * #5237 item 2: a Query field that names a memory, node, asset, comment or revision, or returns one, is a read door. It
+ * must be in READ_DOORS, or listed here with the reason it is not.
+ */
+const NOT_READ_DOORS: Record<string, string> = {
+  installMemory: 'an install memory is system-class, never a person\'s personal or private memory',
+};
+it('#5237: every GraphQL read door that names or returns a memory, node, asset, comment or revision is in the matrix', () => {
+  const NAMES = /^(memoryRef|memoryRefs|memoryUrn|memoryId|memoryIds|memory|nodeRef|nodeRefs|nodeId|nodeRevRef|parentRef|targetRef|assetId|assetRef|commentRef)$/;
+  const RETURNS = new Set(['Memory', 'Node', 'Edge', 'Asset', 'Comment', 'NodeRevision']);
+  const fields = Object.values(buildSchema(typeDefs).getQueryType()!.getFields())
+    .filter((f) => f.args.some((x) => NAMES.test(x.name)) || RETURNS.has(getNamedType(f.type).name))
+    .map((f) => f.name);
+  const inMatrix = new Set(READ_DOORS.filter((d) => d.name.startsWith('GraphQL ')).flatMap((d) => [...d.name.matchAll(/^GraphQL (\w+)/g)].map((x) => x[1]!)));
+  expect(fields.filter((f) => !inMatrix.has(f) && !(f in NOT_READ_DOORS)).sort()).toEqual([]);
+  // A listed reason for a door that no longer exists, or that the matrix now covers, is stale.
+  expect(Object.keys(NOT_READ_DOORS).filter((f) => !fields.includes(f) || inMatrix.has(f))).toEqual([]);
 });
 
 // ─── Item 3: the session read of ruling 0203 is unchanged ────────────────
@@ -411,17 +549,17 @@ describe.each(['organization', 'user'] as const)('#5224 item 3: in a session, th
 
       it(`${surface}, ${cls}: read, until the subscription ends, on the same connection`, async () => {
         const { w, t, session, read } = await setup();
-        const c: Caller = { ...w.key, session: (await session()).id };
+        const c: Caller = { ...w.key, hadronSession: (await session()).id };
         expect(await read(c)).toContain(`${t.mark}C`);
         await db.agentSubscription.update({ where: { userId_agentId: { userId: w.mia, agentId: w.agentId } }, data: { revokedAt: new Date() } });
         const refused = await read(c);
-        for (const f of 'MNCA') expect(refused).not.toContain(`${t.mark}${f}`);
+        for (const f of LIVE_MARKS) expect(refused).not.toContain(`${t.mark}${f}`);
       });
 
       it(`${surface}, ${cls}: not in a session for another subscribed person`, async () => {
         const { w, t, session, read } = await setup();
         await createDbAgentSubscription(db, w.leo, w.agentId);
-        const c: Caller = { ...w.key, session: (await session({ userId: w.leo })).id };
+        const c: Caller = { ...w.key, hadronSession: (await session({ userId: w.leo })).id };
         expect(await read(c)).not.toContain(`${t.mark}C`);
       });
 
@@ -433,14 +571,27 @@ describe.each(['organization', 'user'] as const)('#5224 item 3: in a session, th
             : (await db.agent.create({ data: { id: generateId(), ...w.tenant, name: 'B', urn: `${w.root}:b` } as never })).id;
           await db.memory.update({ where: { id: t.id }, data: { [column]: other } });
           if (column === 'userMemoryOfAgentId') await createDbAgentSubscription(db, w.mia, other);
-          expect(await read({ ...w.key, session: (await session()).id }), column).not.toContain(`${t.mark}C`);
+          expect(await read({ ...w.key, hadronSession: (await session()).id }), column).not.toContain(`${t.mark}C`);
+        }
+      });
+
+      it(`${surface}, ${cls}: not the person's other memories, which the session does not name`, async () => {
+        const { w, t, session, read } = await setup();
+        const c: Caller = { ...w.key, hadronSession: (await session()).id };
+        expect(await read(c)).toContain(`${t.mark}C`);
+        for (const shape of SHAPES) {
+          const other = await seed(w, cls, shape);
+          const out = surface === 'GraphQL'
+            ? await gql(c, 'query($r: ID!) { node(ref: $r) { content } }', { r: node(other) })
+            : await mcp(c, 'hadron_get_node', { urn: node(other) });
+          for (const f of LIVE_MARKS) expect(out, shape).not.toContain(`${other.mark}${f}`);
         }
       });
 
       it(`${surface}, ${cls}: not once the session has ended`, async () => {
         const { w, t, session, read } = await setup();
         const s = await session();
-        const c: Caller = { ...w.key, session: s.id };
+        const c: Caller = { ...w.key, hadronSession: s.id };
         expect(await read(c)).toContain(`${t.mark}C`);
         await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
         expect(await read(c)).not.toContain(`${t.mark}C`);
