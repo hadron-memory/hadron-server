@@ -324,6 +324,32 @@ describe('#5242 item 1: the window drops a grant whose expiry precedes its creat
     expect(sum).toBe(500n);
   });
 
+  it('debits consume the soonest-expiring real grant first and the neutralised credit last: balance, settlements and unsettled all stay exact', async () => {
+    const owner = { organizationId: orgId };
+    const good = await grant(100, d('01-01'), d('02-01'));
+    await grant(500, d('02-10'), d('02-01')); // the backdated-expiry row: plain credit
+    await debit(150, d('01-20')); // before the odd row exists in the ledger's time: eaten from the expiring grant, then the rest
+    const now = d('02-20');
+    const m = await settleAndMeasure(db, owner, now, { write: true });
+    // The 150 debit used the whole expiring grant (100) and 50 of what is not expiring: nothing of the grant is left to take back.
+    expect(m.settled).toEqual([{ grantId: good.id, amountMicroCents: 0n }]);
+    expect(m.unsettled).toBe(0n);
+    const sum = (await db.creditLedgerEntry.aggregate({ where: { organizationId: orgId }, _sum: { amountMicroCents: true } }))._sum.amountMicroCents;
+    expect(sum).toBe(450n); // 100 + 500 - 150: the neutralised credit is never taken back
+  });
+
+  it('a debit smaller than the legitimate grant leaves the rest of it to expire, and the odd row is still untouched', async () => {
+    const owner = { organizationId: orgId };
+    const good = await grant(100, d('01-01'), d('02-01'));
+    await grant(500, d('02-10'), d('02-01'));
+    await debit(30, d('01-20'));
+    const m = await settleAndMeasure(db, owner, d('02-20'), { write: true });
+    expect(m.settled).toEqual([{ grantId: good.id, amountMicroCents: -70n }]);
+    expect(m.unsettled).toBe(0n);
+    const sum = (await db.creditLedgerEntry.aggregate({ where: { organizationId: orgId }, _sum: { amountMicroCents: true } }))._sum.amountMicroCents;
+    expect(sum).toBe(500n); // 100 + 500 - 30 - 70: the settlement takes the 70 left of the legitimate grant, the odd credit stays whole
+  });
+
   it('an organization that holds only such a row: no replay, nothing settled, the balance is the stored sum', async () => {
     const owner = { organizationId: orgId };
     await grant(500, d('02-10'), d('02-01'));
