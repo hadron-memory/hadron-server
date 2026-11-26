@@ -476,6 +476,7 @@ model User {
   // 023-app-shape: per-Memory authorization back-relations.
   memorySharesGranted           MemoryShare[]               @relation("MemorySharesGranted")
   memorySharesByGrantor         MemoryShare[]               @relation("MemorySharesByGrantor")
+  appMemoryLinks                AppMemoryLink[]             @relation("AppMemoryLinksByAttacher")
   memoryMemberships             MemoryMember[]              @relation("MemoryMemberships")
   // 025-oauth-for-mcp: user-level credential + OAuth back-relations.
   userApiKeys                   UserApiKey[]
@@ -1151,6 +1152,7 @@ model Memory {
   //                 symmetric team membership.
   shares              MemoryShare[]
   memberships         MemoryMember[]
+  appLinks            AppMemoryLink[]
   /// #1325 — this memory's rulebook, at most one row. ABSENT reads as the
   /// empty config: it is materialized on the first rule write, never at memory
   /// creation (there is no shared creation helper to hang that on —
@@ -4219,6 +4221,7 @@ model App {
   defaultChannel          Channel?                  @relation("AppDefaultChannel", fields: [defaultChannelId], references: [id], onDelete: SetNull)
   keys                    AppKey[]
   members                 AppMember[]
+  memoryLinks             AppMemoryLink[]
   memories                Memory[]                  @relation("AppMemories")
   users                   User[]
   sessions                Session[]
@@ -4842,6 +4845,30 @@ model Worker {
 ///
 /// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:060:08. Background (history, not law): the Spec Kit spec
 /// 023-app-shape. Background: #778.
+/// A link from an App to a memory it may read, made with `attachMemoryToApp` (cor:dmo:060:20, "An attached memory").
+///
+/// The memory is unchanged: no column of `memories` records a link. A link reaches the App's key and userless runs for
+/// READ only, and only while the attacher can read the memory in their own right, judged at use (`src/lib/appMemoryLinks.ts`);
+/// a row whose attacher lost read stays here, inert, until detached. One row per (App, memory, attacher).
+///
+/// Relationships: joins App, Memory and the attacher (User); a row goes with a hard-deleted App, memory or attacher, and
+/// `mergeUsers` moves the attacher.
+model AppMemoryLink {
+  appId      String   @map("app_id")
+  memoryId   String   @map("memory_id")
+  attachedBy String   @map("attached_by")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  app      App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  memory   Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  attacher User   @relation("AppMemoryLinksByAttacher", fields: [attachedBy], references: [id], onDelete: Cascade)
+
+  @@id([appId, memoryId, attachedBy])
+  @@index([memoryId])
+  @@index([attachedBy])
+  @@map("app_memory_links")
+}
+
 model MemoryShare {
   memoryId  String          @map("memory_id")
   granteeId String          @map("grantee_id")

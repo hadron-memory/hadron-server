@@ -3593,6 +3593,12 @@ export const typeDefs = `#graphql
     installedAgentUrn: String
     trainingMode: Boolean!
     surfaces: [String!]!
+    """
+    #5185 — the memories linked to this App with 'attachMemoryToApp'. You see only entries whose memory you can read in your
+    own right; others are absent and not counted. 'active' is whether the link counts right now (its attacher still reads the
+    memory in their own right, the App is installed, and a personal or private memory is the App owner's).
+    """
+    attachedMemories: [AppAttachedMemory!]!
     "The App's members. null means WITHHELD from this caller (#2089): an impersonated caller, or one who reaches a user-owned App only by an outer-object route. Never read null as an empty roster. The App's owning user, a current owner-role member of a user-owned App (ruling 0260, #3765), and callers of an org-owned App get the real list (a real empty list included)."
     members: [AppMember!]
     "Member count. null means WITHHELD from this caller (#2089), never zero; the real count (a real 0 included) for callers who may see the roster, a current owner-role member of a user-owned App among them (ruling 0260, #3765)."
@@ -4003,6 +4009,17 @@ export const typeDefs = `#graphql
     has left the org sees null here, and still gets id/handle/urn.
     """
     name: String
+  }
+
+  "#5185 — one link of a memory to an App."
+  type AppAttachedMemory {
+    memory: Memory!
+    "The user who attached it."
+    attachedById: ID!
+    attachedByHandle: String!
+    createdAt: DateTime!
+    "Whether the link counts right now."
+    active: Boolean!
   }
 
   type AppMember {
@@ -14710,18 +14727,30 @@ export const typeDefs = `#graphql
     ): Memory!
 
     """
-    Attach an EXISTING free-standing memory to an App.
+    #5185 — LINK a memory you can read to an App. The memory is not changed: same owner, class, App, Agent, URN and name. The
+    App's key and its userless runs may then READ it (never write it) for as long as you can read it in your own right (not
+    through any App); when you lose read the link goes inert, and it works again if you regain it. A user, with or without the
+    App selected, gains nothing from a link. For a 'personal' or 'private' memory the key reads it only when the memory's owner
+    is the App's owner (a user-owned App whose owner linked their own memory); in an organization's App the link is inert for
+    the key. Any class except 'system', in any tenant. One memory may be linked into several Apps. A link you already hold is
+    success and writes nothing. 'agentRef' is accepted and ignored (deployed clients keep working).
 
-    Applies only to 'personal'/'private' memories owned by the caller (an
-    'app'-class memory can't be free-standing, so there is nothing to attach).
-    Sets the App and Agent scope; the memory's URN, class, and owner are
-    unchanged. memoryRef/appRef/agentRef accept an ID, bare URN, or prefixed
-    URN; the Agent must be installed in the App. Requires App membership.
-
-    Typed errors: UNSUPPORTED_MEMORY_CLASS, MEMORY_ALREADY_APP_SCOPED,
-    APP_UNINSTALLED, AGENT_NOT_INSTALLED, FORBIDDEN, ORGANIZATION_MISMATCH.
+    Person only: a signed-in user acting as themselves, and a member of the App. Typed errors, judged in this order before any
+    write: UNAUTHENTICATED (no signed-in user); FORBIDDEN (an App key, run, worker session or impersonation; also an unknown or
+    deleted App, or a caller who is not a member, one identical answer); MEMORY_NOT_FOUND (unknown, deleted or not readable by
+    you in your own right, one identical answer); UNSUPPORTED_MEMORY_CLASS ('memoryClass: system'); APP_UNINSTALLED.
+    No longer answered: MEMORY_ALREADY_APP_SCOPED, ORGANIZATION_MISMATCH, AGENT_NOT_INSTALLED.
     """
-    attachMemoryToApp(memoryRef: ID!, appRef: ID!, agentRef: ID!): Memory!
+    attachMemoryToApp(memoryRef: ID!, appRef: ID!, agentRef: ID): Memory!
+
+    """
+    #5185 — remove the link of a memory to an App; the memory is never changed. The person who attached it removes their own
+    link (even after losing read); the memory's owner and the person who manages the App remove every link of that memory in
+    that App. No link to remove is success. A caller with no authority over the link gets FORBIDDEN when they can read the
+    memory and MEMORY_NOT_FOUND when they cannot (the same answer as an unknown memory); an unknown or deleted App is
+    FORBIDDEN. Person only, as 'attachMemoryToApp'.
+    """
+    detachMemoryFromApp(memoryRef: ID!, appRef: ID!): Boolean!
 
     """
     Update a Memory.

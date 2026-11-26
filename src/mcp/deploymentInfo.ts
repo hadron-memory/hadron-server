@@ -275,7 +275,12 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // agents, scopes, channels, registerEntries, assets) and the 3 named `org` (orgBootPromptSigning,
 // orgBootPromptSigningPreview, setOrgBootPromptSigning) are renamed. Scalars and gates are unchanged (impersonationSessions
 // keeps `String`); a lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation. (0.41.0 is #5168, merged first.)
-export const HADRON_SERVER_VERSION = '0.42.0';
+//
+// 0.43.0 (#5185, A3 of #5182): attachMemoryToApp LINKS a readable memory (any class but system) to an App and no longer binds
+// or renames it; `agentRef` is optional and ignored; MEMORY_ALREADY_APP_SCOPED, ORGANIZATION_MISMATCH and AGENT_NOT_INSTALLED
+// are no longer answered by it. New: detachMemoryFromApp(memoryRef, appRef): Boolean! and App.attachedMemories. A pure App key and
+// a userless run read a linked memory (never write it) while its attacher can read it in their own right.
+export const HADRON_SERVER_VERSION = '0.43.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

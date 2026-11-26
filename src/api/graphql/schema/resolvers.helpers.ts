@@ -1,3 +1,4 @@
+import { linkedReachFor } from '../../../lib/appMemoryLinks.js';
 import { currentAgentOrgMember } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireOrgRole, isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
 import { endGrantsOfAgentsNoLongerInstalled, importedPairsOfParent } from '../../../lib/grants/agentInstallDeparture.js';
@@ -773,7 +774,7 @@ function userPrincipalOnly(ctx: Context): Context {
  * audience, which is precisely what this gate exists to stop. Stripping the
  * active App made the reach broader, not narrower.
  */
-function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
+export function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
   const self = userPrincipalOnly(ctx);
   return getAccessibleMemoryIds(self, memoryId, { excludeAppDerived: true }).then(
     (ids) => ids.includes(memoryId),
@@ -2614,7 +2615,12 @@ export async function getAccessibleMemoryIds(
     // right, so an attachment gate asking "what does this caller hold?" gets
     // the empty set rather than that App's fold (#1349).
     if (options?.excludeAppDerived) return [];
-    const derived = await appDerivedMemoryIds(ctx, onlyMemoryId);
+    // #5185: plus what the App's links let a pure key / userless run read (judged at use). Added AFTER the strict-owner
+    // class filter above on purpose: the one judge applies its own personal/private rule.
+    const derived = [...new Set([
+      ...await appDerivedMemoryIds(ctx, onlyMemoryId),
+      ...await linkedReachFor(ctx.db, ctx, onlyMemoryId ? [onlyMemoryId] : undefined),
+    ])];
     // #3306 / ruling 0104: a pure App key or userless run also reads PUBLIC knowledge (App-less, ownerless, live),
     // read-only. One shared predicate with the MCP point gate; reads only (no list surface returns these ids).
     if (!readsPublicKnowledgeWithoutUser(ctx)) return derived;

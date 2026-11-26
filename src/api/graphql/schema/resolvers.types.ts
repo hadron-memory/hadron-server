@@ -1,3 +1,4 @@
+import { judgeAppLinks } from '../../../lib/appMemoryLinks.js';
 import { readableSupersedingSessionId } from '../../../lib/sessionSuperseded.js';
 import { isNewInstallPayload } from './installationPayload.js';
 import { listAppInstallations, appInstallationWhere } from '../../../lib/appInstallations.js';
@@ -111,6 +112,7 @@ import {
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
+  holdsContentReadIndependently,
   canWriteMemoryRecord,
   sessionScopeFilter,
   CONTENT_RAW_DEFAULT,
@@ -2177,6 +2179,32 @@ export const typeResolvers = {
         .sort(servedInstallationOrder(wholeAppReadable))
         .map(row=>row.agent)
         .filter((ag): ag is NonNullable<typeof ag> => ag !== null);
+    },
+    /**
+     * #5185: this App's memory links. Only entries whose memory the viewer reads in their OWN right (not through any App) are
+     * listed; the rest are absent and not counted. `active` is the shared at-use judgement of `src/lib/appMemoryLinks.ts`.
+     */
+    attachedMemories: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (!(await loadReadableNestedApp(ctx, a.id))) return [];
+      const links = await ctx.db.appMemoryLink.findMany({
+        where: { appId: a.id, memory: { deletedAt: null } },
+        orderBy: [{ createdAt: 'asc' }, { memoryId: 'asc' }],
+        select: { memoryId: true, attachedBy: true, createdAt: true, attacher: { select: { handle: true } } },
+      });
+      if (links.length === 0) return [];
+      const readable = await Promise.all(links.map((l) => holdsContentReadIndependently(ctx, l.memoryId)));
+      const visible = links.filter((_l, i) => readable[i]);
+      if (visible.length === 0) return [];
+      const judged = await judgeAppLinks(ctx.db, a.id, { onlyMemoryIds: [...new Set(visible.map((l) => l.memoryId))] });
+      const active = new Map(judged.map((j) => [`${j.memoryId}:${j.attachedBy}`, j.active]));
+      const memories = new Map((await ctx.db.memory.findMany({ where: { id: { in: visible.map((l) => l.memoryId) } } })).map((m) => [m.id, m]));
+      return visible.flatMap((l) => {
+        const memory = memories.get(l.memoryId);
+        return memory ? [{
+          memory, attachedById: l.attachedBy, attachedByHandle: l.attacher.handle, createdAt: l.createdAt,
+          active: active.get(`${l.memoryId}:${l.attachedBy}`) ?? false,
+        }] : [];
+      });
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
       if (await appRosterWithheld(ctx, a.id)) return null;

@@ -49,7 +49,9 @@ import { agentSlugFromUrn } from '../../../lib/urn.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
-import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug } from './resolvers.helpers.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
+import { type Context, holdsContentReadIndependently, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
 type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
@@ -437,93 +439,164 @@ export const appMemoryMutations = {
     return memory;
   },
 
+  /**
+   * #5185 (A3 of #5182; cor:dmo:060:20, "An attached memory"): LINK a memory the caller can read to an App. The memory row is not
+   * written. The App's key and userless runs may then READ it (`src/lib/appMemoryLinks.ts` is the one judge of that, at use).
+   * `agentRef` is accepted and ignored so deployed clients keep working.
+   *
+   * Judged top to bottom before any write, and again inside the authority transaction:
+   *   person only (UNAUTHENTICATED / FORBIDDEN) -> memory unknown, deleted or unreadable in the caller's OWN right (one
+   *   MEMORY_NOT_FOUND) -> class `system` (UNSUPPORTED_MEMORY_CLASS) -> App unknown, deleted or the caller not a member (one
+   *   FORBIDDEN) -> uninstalled App (APP_UNINSTALLED). A link already held is success with nothing written.
+   */
   attachMemoryToApp: async (
     _: unknown,
-    { memoryRef, appRef, agentRef }: { memoryRef: string; appRef: string; agentRef: string },
+    { memoryRef, appRef }: { memoryRef: string; appRef: string; agentRef?: string | null },
     ctx: Context,
   ) => {
+    if (!ctx.userId) {
+      throw new GraphQLError('Attaching a memory to an App requires a signed-in user.', { extensions: { code: 'UNAUTHENTICATED' } });
+    }
+    if (ctx.appKeyId || ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx)) {
+      throw authorizationDenied();
+    }
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-    const memory = await ctx.db.memory.findUniqueOrThrow({
-      where: { id: memoryId },
-      select: { id: true, class: true, appId: true, userId: true, organizationId: true },
+    const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { class: true } });
+    const notFound = () => new MemoryNotFoundError(memoryRef);
+    if (!(await holdsContentReadIndependently(ctx, memoryId))) throw notFound();
+    if (memory.class === 'system') {
+      throw new GraphQLError('A system memory cannot be attached to an App.', {
+        extensions: { code: 'UNSUPPORTED_MEMORY_CLASS', memoryClass: 'system' },
+      });
+    }
+    const app = await resolveAttachApp(ctx, appRef);
+    const anchors = (memoryOwner: { organizationId: string | null; ownerUserId: string | null; userId: string | null }) => [
+      { kind: 'app' as const, id: app.id },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+      { kind: 'memory' as const, id: memoryId },
+      ...(memoryOwner.organizationId ? [{ kind: 'org' as const, id: memoryOwner.organizationId }] : []),
+      ...(memoryOwner.ownerUserId ? [{ kind: 'user' as const, id: memoryOwner.ownerUserId }] : []),
+      ...(memoryOwner.userId ? [{ kind: 'user' as const, id: memoryOwner.userId }] : []),
+    ];
+    const owner = await ctx.db.memory.findUniqueOrThrow({
+      where: { id: memoryId }, select: { organizationId: true, ownerUserId: true, userId: true },
     });
-
-    // OWNERSHIP FIRST — before revealing anything about the memory's class or
-    // app-scoped state. Attach is owner-only, so a non-owner must get a uniform
-    // FORBIDDEN whatever the memory is; leaking class/appId here would let any
-    // caller enumerate other users' (incl. private) memories.
-    // #1381: a caller who cannot open this memory gets resolveMemoryRef's miss.
-    await concealUnreadableDenial(ctx, memoryId, memoryRef, async () => {
-      if (!ctx.userId || memory.userId !== ctx.userId) {
-        throw new GraphQLError('You can only attach a memory you own.', {
-          extensions: { code: 'FORBIDDEN' },
-        });
-      }
-    });
-
-    // Attach only applies to the owner-owned free-standing classes.
-    if (memory.class !== 'personal' && memory.class !== 'private') {
-      throw new GraphQLError(
-        `Only personal/private memories can be attached to an App; this memory is class='${memory.class}'.`,
-        { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS' } },
-      );
-    }
-    if (memory.appId) {
-      throw new GraphQLError('This memory is already scoped to an App.', {
-        extensions: { code: 'MEMORY_ALREADY_APP_SCOPED' },
-      });
-    }
-
-    // Authorize against the target App (App membership — personal/private path).
-    const app = await loadAppAndAuthorize(ctx, appRef, memory.class as AppMemoryClass);
-    const agent = await resolveInstalledAgent(ctx, app.id, agentRef);
-
-    if (memory.organizationId !== app.organizationId) {
-      throw new GraphQLError("The memory does not belong to this App's organization.", {
-        extensions: { code: 'ORGANIZATION_MISMATCH' },
-      });
-    }
-
-    // Transfer can change the owner, class and organization after the
-    // preflight checks. Recheck them under its Memory-row fence before setting
-    // the App/Agent pivot; a stale attachment must not scope the new tenant's
-    // knowledge or group memory to the former tenant's App.
-    return withAppMemoryAuthorityTx(ctx, app, agent.id, memory.class as AppMemoryClass, async (tx) => {
-      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memory.id} FOR NO KEY UPDATE`;
-      const current = await tx.memory.findUniqueOrThrow({
-        where: { id: memory.id },
-        select: { class: true, appId: true, userId: true, organizationId: true, deletedAt: true },
-      });
-      const txCtx = withoutRequestCaches(ctx, tx);
-      await concealUnreadableDenial(txCtx, memoryId, memoryRef, async () => {
-        if (!ctx.userId || current.deletedAt || current.userId !== ctx.userId) {
-          throw new GraphQLError('You can only attach a memory you own.', {
-            extensions: { code: 'FORBIDDEN' },
+    // The anchors fence a transfer, an App delete and the loss of membership: the second of two such writers waits here, and
+    // the judgement below is repeated on the transaction's own view.
+    return withAuthorizedTx(
+      ctx,
+      anchors(owner),
+      async (txCtx) => {
+        const live = await txCtx.db.memory.findFirst({ where: { id: memoryId, deletedAt: null }, select: { class: true } });
+        if (!live || !(await holdsContentReadIndependently(withoutRequestCaches(txCtx, txCtx.db), memoryId))) throw notFound();
+        if (live.class === 'system') {
+          throw new GraphQLError('A system memory cannot be attached to an App.', {
+            extensions: { code: 'UNSUPPORTED_MEMORY_CLASS', memoryClass: 'system' },
           });
         }
-      });
-      if (current.class !== 'personal' && current.class !== 'private') {
-        throw new GraphQLError(`Only personal/private memories can be attached to an App; this memory is class='${current.class}'.`, {
-          extensions: { code: 'UNSUPPORTED_MEMORY_CLASS' },
+        await requireAttachMembership(txCtx, app.id);
+      },
+      async (tx) => {
+        await tx.appMemoryLink.createMany({
+          data: [{ appId: app.id, memoryId, attachedBy: ctx.userId! }],
+          skipDuplicates: true,
         });
-      }
-      if (current.appId) {
-        throw new GraphQLError('This memory is already scoped to an App.', {
-          extensions: { code: 'MEMORY_ALREADY_APP_SCOPED' },
-        });
-      }
-      if (current.organizationId !== app.organizationId) {
-        throw new GraphQLError("The memory does not belong to this App's organization.", {
-          extensions: { code: 'ORGANIZATION_MISMATCH' },
-        });
-      }
-      // Keep URN/class/userId. Setting the agent satisfies
-      // chk_memory_personal_agent_id (app-scoped ⇒ agent required).
-      return tx.memory.update({
-        where: { id: memory.id },
-        data: { appId: app.id, userMemoryOfAgentId: agent.id, updatedBy: ctx.userId },
-        include: MEMORY_INCLUDE,
-      });
+        return tx.memory.findUniqueOrThrow({ where: { id: memoryId }, include: MEMORY_INCLUDE });
+      },
+    );
+  },
+
+  /**
+   * #5185: remove links, never the memory. The attacher removes their own link (even after losing read); the memory's strict
+   * owner and the person who manages the App remove every link of that memory in that App. A caller with no authority over
+   * the link gets FORBIDDEN when they can read the memory and MEMORY_NOT_FOUND when they cannot (the same answer as an
+   * unknown memory); an unknown or deleted App is FORBIDDEN. No link to remove is success.
+   */
+  detachMemoryFromApp: async (
+    _: unknown,
+    { memoryRef, appRef }: { memoryRef: string; appRef: string },
+    ctx: Context,
+  ) => {
+    if (!ctx.userId) {
+      throw new GraphQLError('Detaching a memory from an App requires a signed-in user.', { extensions: { code: 'UNAUTHENTICATED' } });
+    }
+    if (ctx.appKeyId || ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx)) {
+      throw authorizationDenied();
+    }
+    let appId: string;
+    try { ({ id: appId } = await resolveAppRef(ctx.db, appRef)); }
+    catch (error) {
+      if (isAppRefResolutionFailure(error)) throw authorizationDenied();
+      throw error;
+    }
+    const app = await ctx.db.app.findUniqueOrThrow({
+      where: { id: appId }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true },
     });
+    if (app.deletedAt) throw authorizationDenied();
+    const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+    const memory = await ctx.db.memory.findUniqueOrThrow({
+      where: { id: memoryId }, select: { userId: true, ownerUserId: true, organizationId: true },
+    });
+    const notFound = () => new MemoryNotFoundError(memoryRef);
+    const authority = async (c: Context): Promise<'owner' | 'attacher' | null> => {
+      if (memory.userId === ctx.userId || memory.ownerUserId === ctx.userId) return 'owner';
+      if (await managesApp({ db: c.db, userId: ctx.userId, roles: ctx.roles }, app)) return 'owner';
+      const own = await c.db.appMemoryLink.findUnique({
+        where: { appId_memoryId_attachedBy: { appId, memoryId, attachedBy: ctx.userId! } }, select: { appId: true },
+      });
+      return own ? 'attacher' : null;
+    };
+    const denyOrHide = async () => {
+      if (await holdsContentReadIndependently(ctx, memoryId)) throw authorizationDenied();
+      throw notFound();
+    };
+    if (!(await authority(ctx))) return denyOrHide();
+    return withAuthorizedTx(
+      ctx,
+      [
+        { kind: 'app', id: app.id },
+        ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+        ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+        { kind: 'memory', id: memoryId },
+      ],
+      async (txCtx) => {
+        if (!(await authority(txCtx))) await denyOrHide();
+      },
+      async (tx, txCtx) => {
+        const kind = await authority(txCtx);
+        await tx.appMemoryLink.deleteMany({
+          where: { appId, memoryId, ...(kind === 'attacher' ? { attachedBy: ctx.userId! } : {}) },
+        });
+        return true;
+      },
+    );
   },
 };
+
+/** The attach target: unknown or deleted App, or a caller who is not a member, are ONE refusal; an uninstalled App then answers APP_UNINSTALLED. */
+async function resolveAttachApp(ctx: Context, appRef: string) {
+  let appId: string;
+  try { ({ id: appId } = await resolveAppRef(ctx.db, appRef)); }
+  catch (error) {
+    if (isAppRefResolutionFailure(error)) throw authorizationDenied();
+    throw error;
+  }
+  const app = await ctx.db.app.findUniqueOrThrow({
+    where: { id: appId }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+  });
+  if (app.deletedAt) throw authorizationDenied();
+  await requireAttachMembership(ctx, app.id);
+  if (app.uninstalledAt) {
+    throw new GraphQLError('This App has been uninstalled and cannot be written to.', { extensions: { code: 'APP_UNINSTALLED' } });
+  }
+  return app;
+}
+
+/** A live App member: today's bar for attach, now for every admitted class. No platform-admin bypass. */
+async function requireAttachMembership(ctx: Context, appId: string): Promise<void> {
+  const member = await ctx.db.appMember.findUnique({
+    where: { appId_userId: { appId, userId: ctx.userId! } }, select: { appId: true },
+  });
+  if (!member) throw authorizationDenied();
+}

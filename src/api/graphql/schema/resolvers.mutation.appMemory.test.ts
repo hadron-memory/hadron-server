@@ -410,35 +410,38 @@ describe('attachMemoryToApp', () => {
     });
   }
 
-  it('attaches a free-standing personal memory owned by an App member', async () => {
+  /** #5185: attach LINKS; the memory row must come out byte-identical. */
+  const rowOf = (id: string) => db.memory.findUniqueOrThrow({ where: { id } });
+  const linksOf = (memoryId: string) => db.appMemoryLink.findMany({ where: { memoryId } });
+
+  it('links a free-standing personal memory owned by an App member and changes nothing on the memory', async () => {
     const mem = await freeStandingPersonal(memberUser.id);
+    const before = await rowOf(mem.id);
     const out = await attachMemoryToApp(
       null,
       { memoryRef: mem.id, appRef: app.id, agentRef: agent.id },
       asUser(memberUser.id),
     );
-    expect(out.appId).toBe(app.id);
-    expect(out.userMemoryOfAgentId).toBe(agent.id);
-    expect(out.userId).toBe(memberUser.id);
-    expect(out.class).toBe('personal');
-    expect(out.urn).toBe(mem.urn); // URN unchanged — no node re-addressing.
+    expect(out.id).toBe(mem.id);
+    expect(out.appId).toBeNull();
+    expect(out.userMemoryOfAgentId).toBeNull();
+    expect(out.urn).toBe(mem.urn);
+    expect(await rowOf(mem.id)).toEqual(before);
+    expect(await linksOf(mem.id)).toMatchObject([{ appId: app.id, memoryId: mem.id, attachedBy: memberUser.id }]);
   });
 
-  it('refuses an attachment when ownership transfers before the Memory write', async () => {
+  it('refuses a memory the attacher stops reading before the link is written (MEMORY_NOT_FOUND), writing no link', async () => {
     const mem = await freeStandingPersonal(adminUser.id);
-    const nextOrg = await db.organization.create({ data: { id: generateId(), name: 'next-org', urn: 'next-org' } });
-    await db.orgMember.create({ data: { organizationId: nextOrg.id, userId: adminUser.id, role: 'ADMIN' } });
     const transaction = db.$transaction.bind(db);
-    let transferred = false;
+    let lost = false;
     const raceDb = new Proxy(db, {
       get(target, key) {
         if (key === '$transaction') {
           return async (work: Parameters<typeof transaction>[0]) => {
-            if (!transferred) {
-              transferred = true;
-              await resolvers.Mutation.transferMemoryOwnership(null, {
-                memoryRef: mem.id, orgRef: nextOrg.id, targetClass: 'knowledge',
-              }, asUser(adminUser.id));
+            if (!lost) {
+              lost = true;
+              // The memory changes hands between the preflight and the anchored write.
+              await db.memory.update({ where: { id: mem.id }, data: { userId: memberUser.id } });
             }
             return transaction(work as never);
           };
@@ -448,30 +451,22 @@ describe('attachMemoryToApp', () => {
     });
     await expect(attachMemoryToApp(null, {
       memoryRef: mem.id, appRef: app.id, agentRef: agent.id,
-    }, { db: raceDb, userId: adminUser.id, roles: [] })).rejects.toMatchObject({
-      extensions: { code: 'FORBIDDEN' },
-    });
-    expect(transferred).toBe(true);
-    expect(await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).toMatchObject({
-      organizationId: nextOrg.id, appId: null, userMemoryOfAgentId: null,
-    });
+    }, { db: raceDb, userId: adminUser.id, roles: [] })).rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
+    expect(lost).toBe(true);
+    expect(await linksOf(mem.id)).toEqual([]);
+    expect(await rowOf(mem.id)).toMatchObject({ userId: memberUser.id, appId: null, userMemoryOfAgentId: null });
   });
 
-  it('rejects a memory already scoped to an App', async () => {
+  it('links a memory that is already scoped to an App, and writes nothing to it', async () => {
     const mem = await createMemoryInApp(
       null,
       { appRef: app.id, agentRef: agent.id, memoryClass: 'personal', name: 'Already' },
       asUser(memberUser.id),
     );
-    await expect(
-      attachMemoryToApp(
-        null,
-        { memoryRef: mem.id, appRef: app.id, agentRef: agent.id },
-        asUser(memberUser.id),
-      ).catch((e) => {
-        throw new Error(code(e));
-      }),
-    ).rejects.toThrow('MEMORY_ALREADY_APP_SCOPED');
+    const before = await rowOf(mem.id);
+    await attachMemoryToApp(null, { memoryRef: mem.id, appRef: app.id, agentRef: agent.id }, asUser(memberUser.id));
+    expect(await rowOf(mem.id)).toEqual(before);
+    expect(await linksOf(mem.id)).toHaveLength(1);
   });
 
   it('does not leak another user\'s app-scoped state to a non-owner (FORBIDDEN, not MEMORY_ALREADY_APP_SCOPED)', async () => {
@@ -513,10 +508,7 @@ describe('attachMemoryToApp', () => {
     ).rejects.toThrow('MEMORY_NOT_FOUND');
   });
 
-  it('returns a uniform FORBIDDEN for a non-owned memory regardless of class (no class/appId enumeration leak)', async () => {
-    // A knowledge memory has no owner, so ownership-first rejects it as FORBIDDEN
-    // BEFORE revealing its class/app-scoped state — the same error a non-owner
-    // gets for anyone else's private memory.
+  it('links an org knowledge memory the attacher reads (any class but system), writing nothing to it', async () => {
     const knowledge = await db.memory.create({
       data: {
         id: generateId(),
@@ -527,28 +519,18 @@ describe('attachMemoryToApp', () => {
         visibility: 'ORGANIZATION',
       },
     });
-    await expect(
-      attachMemoryToApp(
-        null,
-        { memoryRef: knowledge.id, appRef: app.id, agentRef: agent.id },
-        asUser(adminUser.id),
-      ).catch((e) => {
-        throw new Error(code(e));
-      }),
-    ).rejects.toThrow('FORBIDDEN');
+    const before = await rowOf(knowledge.id);
+    await attachMemoryToApp(null, { memoryRef: knowledge.id, appRef: app.id, agentRef: agent.id }, asUser(adminUser.id));
+    expect(await rowOf(knowledge.id)).toEqual(before);
+    expect(await linksOf(knowledge.id)).toMatchObject([{ attachedBy: adminUser.id }]);
   });
 
-  it('rejects a memory from a different organization', async () => {
+  it('links an own memory of another organization (no ORGANIZATION_MISMATCH any more)', async () => {
     const org2 = await db.organization.create({ data: { id: generateId(), name: 'org-b', urn: 'org-b' } });
     const mem = await freeStandingPersonal(memberUser.id, org2.id, 'cross-org');
-    await expect(
-      attachMemoryToApp(
-        null,
-        { memoryRef: mem.id, appRef: app.id, agentRef: agent.id },
-        asUser(memberUser.id),
-      ).catch((e) => {
-        throw new Error(code(e));
-      }),
-    ).rejects.toThrow('ORGANIZATION_MISMATCH');
+    const before = await rowOf(mem.id);
+    await attachMemoryToApp(null, { memoryRef: mem.id, appRef: app.id, agentRef: agent.id }, asUser(memberUser.id));
+    expect(await rowOf(mem.id)).toEqual(before);
+    expect(await linksOf(mem.id)).toHaveLength(1);
   });
 });
