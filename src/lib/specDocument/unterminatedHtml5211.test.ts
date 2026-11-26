@@ -526,7 +526,8 @@ describe('#5265 fix head after 02250085: bodies main kept that 02250085 lost', (
     ['<?>?><pre>\n```</\r', '<?>?><pre>\n```&lt;/\r', cm],
     ['- `\n-*-\n<xmp>`', '- `\n-*-\n&lt;xmp>`', []],
     ['+ >~~~\n  ~~~\r\n<script', '+ >~~~\n  ~~~\r\n&lt;script', []],
-    ['># ```\n<!x<textarea>```', '># ```\n&lt;!x&lt;textarea>```', []],
+    // #5265 (fix head after d5f941ae): no reader loses the anchor as written (marked carries the line into the heading's quote), so nothing is escaped.
+    ['># ```\n<!x<textarea>```', '># ```\n<!x<textarea>```', []],
     ['<!x>~~~\r\n~~~\r\n<xmp>', '<!x>~~~\r\n~~~\r\n&lt;xmp>', cm],
     ['>x\n>-\n    ><textarea', '>x\n>-\n    >&lt;textarea', []],
     // marked: a marker and one space is paragraph text, and a lone marker under it continues the paragraph.
@@ -568,7 +569,7 @@ describe('#5265 fix head after 02250085: guards the mutants left alive at 022500
   });
 
   it('more exempt declarations than the scan budget covers: every `<` is escaped', () => {
-    const body = Array(40).fill('<!T>```\n-\n  ~~~').join('\n');
+    const body = Array(80).fill('<!T>```\n-\n  ~~~').join('\n');
     expect(escapeUnterminatedHtml(body)).toBe(body.replace(/</g, '&lt;'));
   });
 });
@@ -620,5 +621,150 @@ describe('#5265 fix head after 02250085: guards left unpinned at 02250085', () =
     expect(out).toBe(escaped);
     expect(escapeUnterminatedHtml(out)).toBe(out);
     expect(losers(out)).toEqual([]);
+  });
+});
+
+describe('#5265 fix head after d5f941ae: the heading test under markers is linear', () => {
+  // Beryl (blind, d5f941ae): the regex that read a heading after quote and list markers took 2^n paths on a line of n markers that is
+  // no heading. At 40 markers that never ends, so the test's own timeout is the bound; the result is pinned as well.
+  it.each<[string, string]>([
+    ['> ', 'x <span a=`'],
+    ['>  ', 'x <span a=`'],
+    ['-  ', 'x <span a=`'],
+    ['1.  ', 'x <span a=`'],
+    ['> ', '# x <span a=`'],
+  ])('%j x 40 then %j', (marker, rest) => {
+    const body = `p\n\n${marker.repeat(40)}${rest}`;
+    const out = escapeUnterminatedHtml(body);
+    expect(out).toBe(body.replace('<span', '&lt;span'));
+    expect(escapeUnterminatedHtml(out)).toBe(out);
+    expect(losers(out)).toEqual([]);
+  }, 3000);
+});
+
+describe('#5265 fix head after d5f941ae: the bodies the seats found at d5f941ae', () => {
+  it.each<[string, string]>([
+    // QA F1 (Charles): `<!` and no letter is no declaration to Markdown, which reads the `<` after it as markup; a raw reader reads comment text.
+    ['<?><!<style>?>~~~', '&lt;?>&lt;!&lt;style>?>~~~'],
+    ['<?><!<xmp>?>~~~', '&lt;?>&lt;!&lt;xmp>?>~~~'],
+    ['<?><style>?>~~~', '&lt;?>&lt;style>?>~~~'],
+    ['<?>x<style>?>~~~', '&lt;?>x&lt;style>?>~~~'],
+    ['a <!<style>', 'a &lt;!&lt;style>'],
+    // LOCAL P2 (Bradley): marked starts no instruction block in a paragraph, so the paragraph goes on and the line indented under it is lazy text.
+    ["<div/\n<?>\n    <pre><b x='", "&lt;div/\n<?>\n    <pre>&lt;b x='"],
+    // LOCAL P2 (Bradley): escaping the declaration for marked makes CommonMark read the held-back `<b` and `<template>` as markup (#5211).
+    ['<!T>```<pre><b\n<template>', '&lt;!T>```<pre>&lt;b\n&lt;template>'],
+    // Where the text as written already reaches a held-back template, escaping the declaration changes nothing there, and marked needs it.
+    ['<!T>~~~<b y= x\n\n<ba <template>\n\n', '&lt;!T>~~~&lt;b y= x\n\n<ba <template>\n\n'],
+    // A heading after a quote marker and a tab is one line, so a tag in it cannot run on to the next.
+    ['>\t>\t # <b x="#"\n<b>', '>\t>\t # &lt;b x="#"\n<b>'],
+  ])('%j', (body, escaped) => {
+    const out = escapeUnterminatedHtml(body);
+    expect(out).toBe(escaped);
+    expect(escapeUnterminatedHtml(out)).toBe(out);
+    expect(losers(out)).toEqual([]);
+  });
+});
+
+describe('#5265 fix head after d5f941ae: the extended-alphabet fuzz bodies main keeps for marked', () => {
+  // Each is red at d5f941ae (marked loses the anchor there) and kept by main. The bodies whose fence opens in CommonMark as written keep
+  // that loss: the `~~~` line opens a fence there that never closes, and no escaped `<` closes it, so only marked's loss is the pass's.
+  const CM = ['commonmark.js', 'markdown-it'];
+  it.each<[string, string, string[]]>([
+    // A lone tag line marked reads as text: the `-` under it is an underline, and the line under that is a paragraph's, no code.
+    ['< >\n-\n    <script>', '< >\n-\n    &lt;script>', []],
+    // A quote right after a declaration marked ended: its lazy lines carry the quote's paragraph, so their `-` underlines nothing.
+    ['<!T>>a\ni\n-\n    <textarea>', '<!T>>a\ni\n-\n    &lt;textarea>', []],
+    ['>X\n-\na\n-\n    <xmp>', '>X\n-\na\n-\n    &lt;xmp>', []],
+    // marked ends a `<pre` block only at `</pre>`, so a `</textarea>` on its line leaves it open, and the `~~~` under it raw.
+    ['<pre </textarea>\n~~~\r\n<b', '<pre </textarea>\n~~~\r\n&lt;b', CM],
+    // A marker with two spaces is an empty item to marked, which then starts the instruction block on the next line.
+    ['-  \n<?>\n~~~\r\n<b', '-  \n<?>\n~~~\r\n&lt;b', CM],
+    // An empty quote leaves no paragraph for the `-` to underline: a rule, then the instruction block.
+    ['>\n-\n<?>\n~~~\r\n<p', '>\n-\n<?>\n~~~\r\n&lt;p', CM],
+    ['>\n-\n<?>\n~~~\n<p', '>\n-\n<?>\n~~~\n&lt;p', CM],
+    // marked restarts after the declaration (or instruction) it ended on the line, and its block rules take up to three spaces: ` <n>` is
+    // a type 7 block that runs raw to the blank line, so no fence opens under it and the `<script` is markup.
+    ['<!X> <n>\n~~~\n<script', '<!X> <n>\n~~~\n&lt;script', CM],
+    ['<!X> <n>\n~~~\r\n<script', '<!X> <n>\n~~~\r\n&lt;script', CM],
+    ['<?a?> <n>\n~~~\n<script', '<?a?> <n>\n~~~\n&lt;script', CM],
+    // marked carries the `<pre` line into the item lazily (CommonMark ends the item at the fence), so its block ends with the item and the
+    // `<template>` line, which ends the item, starts a block at the top level. Escaping only that keeps the `<pre` CommonMark needs.
+    ['- >```\n<pre\n<template>\n  ~~~', '- >```\n<pre\n&lt;template>\n  ~~~', []],
+    ['- >```\n<pre\nx\n<template>\n  ~~~', '- >```\n<pre\nx\n&lt;template>\n  ~~~', []],
+  ])('%j', (body, escaped, lose) => {
+    const out = escapeUnterminatedHtml(body);
+    expect(out).toBe(escaped);
+    expect(escapeUnterminatedHtml(out)).toBe(out);
+    expect(losers(out)).toEqual(lose);
+  });
+});
+
+describe('#5265 fix head after d5f941ae: the fuzz bodies of seeds 109-116 and the guards of the rules they took', () => {
+  const CM = ['commonmark.js', 'markdown-it'];
+  it.each<[string, string, string[]]>([
+    // Red at d5f941ae: marked's setext rule takes no underline under ` {0,3}<[^\n>]+>` that starts no HTML block in marked.
+    ['<b <>\n-\n    <script>', '<b <>\n-\n    &lt;script>', []],
+    ['<b?>\n-\n    <script>', '<b?>\n-\n    &lt;script>', []],
+    ['<!>\n-\n<!X<script>', '<!>\n-\n<!X&lt;script>', []],
+    // Red at d5f941ae: an HTML block in a bare marker's item ends with the item (CommonMark at the `~` line), so the declaration is read.
+    ['-\n  <b>\n~\n<!l>```</<script>', '-\n  <b>\n~\n<!l>```</<script>', []],
+    ['<!-->\n-\n  <!X`\n<script>', '<!-->\n-\n  &lt;!X`\n&lt;script>', []],
+    // Red at d5f941ae: inside marked's raw instruction block a browser reads `<!X` as a comment that runs to the end.
+    ['<?>\n~~~\nh<!X', '<?>\n~~~\nh&lt;!X', CM],
+    // Red at d5f941ae: a declaration over two lines is one block to marked, which restarts after its `>` (` <n>` there is a type 7 block).
+    ['<!X\n><n>\n~~~\n<script', '<!X\n><n>\n~~~\n&lt;script', CM],
+    // Red at d5f941ae: a backtick fence holds no backtick in its info string, so the code span from the line above closes on that line.
+    ['<!l>```\n```<xmp>```', '&lt;!l>```\n```&lt;xmp>```', []],
+    // Red at d5f941ae: `> ` holds nothing for marked (the space is the marker's) and `>\t>` is an empty quote inside one.
+    ['> \n-\n<?>\n~~~\r\n<p', '> \n-\n<?>\n~~~\r\n&lt;p', CM],
+    ['>\t>\n<?>\n~~~\n<p', '>\t>\n<?>\n~~~\n&lt;p', CM],
+    // Red at d5f941ae: an item whose first line is indented code has its content one column past the marker; the fence there is the item's.
+    ['-     >\n  ~~~\n<!X', '-     >\n  ~~~\n&lt;!X', []],
+    // Red at d5f941ae: an item that opens a fence right after a declaration leaves no paragraph open, so the instruction starts a block.
+    ['<!x>- ```\n<?>\n~~~\n<b', '<!x>- ```\n<?>\n~~~\n&lt;b', CM],
+    // Red at d5f941ae: marked carries a quote that holds a tab on through the next line, so the declaration's fence is the quote's.
+    ['>\t\n<!l>```\n>=\n<!x>~~~\n~~~', '>\t\n<!l>```\n>=\n<!x>~~~\n~~~', CM],
+    // Red at d5f941ae: this body needs 70 scans, past the old budget of 64 (every `<` was escaped, and the fence then took the anchor).
+    ['<pre><textarea\n<div/\n<pre><b<!<b\n~~~', '<pre>&lt;textarea\n<div/\n<pre>&lt;b&lt;!&lt;b\n~~~', []],
+    // Guards (green at d5f941ae, lost by a first cut of these rules): where CommonMark finds a closer for `<pre` and marked no `</pre>`,
+    // marked's block runs raw and loses nothing, so it is not escaped; marked ends an item at a backtick run whatever follows it; and an
+    // item whose content is a rule leaves the line indented into it the item's HTML.
+    ['<pre\n<div></textarea></<script>\n-', '<pre\n<div></textarea></<script>\n-', []],
+    ['- <pre </textarea>\n<x>\n~~~', '- <pre </textarea>\n<x>\n~~~', []],
+    ['- `\n```<script>`', '- `\n```&lt;script>`', []],
+    ['<!y>- ***\n    <script>', '<!y>- ***\n    &lt;script>', []],
+    // Red at d5f941ae: the `<div>` block ends with the bare marker's item, so CommonMark reads `<!<style>` under it as text and markup.
+    ['-\n  <div>\n<!<style>', '-\n  <div>\n&lt;!&lt;style>', []],
+    // Guards (green at d5f941ae): after an item line that is a heading or a fence marked takes no lazy line, so the `<pre` line starts its
+    // own block and the `<template>` is inside it; nothing is lost, and nothing is escaped.
+    ['- # h\n<pre\n<template>\n  ~~~', '- # h\n<pre\n<template>\n  ~~~', []],
+    ['- ```\n<pre\n<template>\n  ~~~', '- ```\n<pre\n<template>\n  ~~~', []],
+    // Guards (green at d5f941ae): marked ends a bare marker's item at a backtick run too, so the code span cannot reach the next line; and
+    // only marked takes a tab right before another quote marker for the marker's (CommonMark counts the rest of the tab as indent).
+    ['-\n  `\n```<script>`', '-\n  `\n```&lt;script>`', []],
+    ['-\n  >`\n```<script>`', '-\n  >`\n```&lt;script>`', []],
+    ['>><\n>-\n>\t>     <script>', '>><\n>-\n>\t>     &lt;script>', []],
+    ['>\t>\n>     ><xmp>', '>\t>\n>     >&lt;xmp>', []],
+  ])('%j', (body, escaped, lose) => {
+    const out = escapeUnterminatedHtml(body);
+    expect(out).toBe(escaped);
+    expect(escapeUnterminatedHtml(out)).toBe(out);
+    expect(losers(out)).toEqual(lose);
+  });
+});
+
+describe('#5265 fix head after d5f941ae: a tab-nested empty quote holds nothing to CommonMark', () => {
+  it.each<[string, string, string[]]>([
+    // Red at a55565f2 (the last residual of fuzz seeds 13/14): `>\t>` is an empty quote inside one to CommonMark (the tab gives the
+    // marker one column and leaves two of indent), so no paragraph is open under it and the declaration's fence is no reason to escape it.
+    // main keeps the body as written, which only marked loses; so does this head.
+    ['>\t>\n<!l>```\n-\n  ~~~', '>\t>\n<!l>```\n-\n  ~~~', ['marked']],
+    ['> \t>\n<!l>```\n-\n  ~~~', '> \t>\n<!l>```\n-\n  ~~~', ['marked']],
+  ])('%j', (body, escaped, lose) => {
+    const out = escapeUnterminatedHtml(body);
+    expect(out).toBe(escaped);
+    expect(escapeUnterminatedHtml(out)).toBe(out);
+    expect(losers(out)).toEqual(lose);
   });
 });
