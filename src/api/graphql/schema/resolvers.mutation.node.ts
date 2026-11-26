@@ -1290,12 +1290,10 @@ async function writeNodeCoreRaw(
         const movedMemory = currentMemoryId !== input.memoryId;
         return new GraphQLError(
           movedMemory
-            ? `Node "${opts?.targetNodeId ?? input.loc}" moved since it was read — it is no ` +
-              `longer in memory "${input.memoryId}", and this write was authorized against ` +
-              `"${input.loc}". Re-read and retry.`
-            : `Node "${opts?.targetNodeId ?? input.loc}" moved since it was read — it is now ` +
-              `at "${currentLoc}", and this write was authorized against "${input.loc}". ` +
-              `Re-read and retry.`,
+            ? 'The node moved since it was read: it is no longer in the memory this write was ' +
+              'authorized against. Re-read and retry.'
+            : `The node moved since it was read: it is now at "${currentLoc}", not at the loc this ` +
+              'write was authorized against. Re-read and retry.',
           {
             extensions: {
               code: 'NODE_WRITE_CONFLICT',
@@ -3822,11 +3820,11 @@ export const nodeMutations = {
           if (!current || current.memoryId !== memoryId || current.loc !== node.loc) {
             const movedMemory = !!current && current.memoryId !== memoryId;
             throw new GraphQLError(
-              `Node "${nodeRef}" moved while this delete waited — re-read it and retry.`,
+              'The node moved while this delete waited — re-read it and retry.',
               {
                 extensions: {
+                  // #5225: no `ref`; the caller's own reference is not relayed (cor:api:140:01).
                   code: 'NODE_WRITE_CONFLICT',
-                  ref: nodeRef,
                   memoryId,
                   movedMemory,
                   ...(!movedMemory && current ? { currentLoc: current.loc } : {}),
@@ -3848,8 +3846,8 @@ export const nodeMutations = {
             });
             if (descendantCount > 0) {
               throw new GraphQLError(
-                `Node "${nodeRef}" has ${descendantCount} descendant(s). Pass recursive: true to delete the whole subtree.`,
-                { extensions: { code: 'NODE_HAS_DESCENDANTS', count: descendantCount, ref: nodeRef } },
+                `The node has ${descendantCount} descendant(s). Pass recursive: true to delete the whole subtree.`,
+                { extensions: { code: 'NODE_HAS_DESCENDANTS', count: descendantCount } },
               );
             }
           }

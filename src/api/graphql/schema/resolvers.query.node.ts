@@ -2586,7 +2586,7 @@ export const nodeQueries = {
             // single-node node(ref:) read does (PR #815 review, Codex P2).
             const typeErr = validateUrnType(parseUrnInput(ref), 'node');
             if (typeErr) {
-              throw new GraphQLError(`nodeBatch: ${typeErr} (ref "${ref}")`, {
+              throw new GraphQLError(`nodeBatch: ${typeErr} (one of the refs)`, {
                 extensions: { code: 'BAD_USER_INPUT' },
               });
             }
