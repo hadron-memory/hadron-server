@@ -3,8 +3,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
-import { reportSymptomRanking, type SymptomResult } from './fixtures/agentTaskSymptomReport2665.js';
-import { taskSymptoms2421 } from './fixtures/agentTaskSymptoms2421.js';
+import { reportPhraseRanking, type PhraseResult } from './fixtures/agentTaskPhraseReport2665.js';
+import { taskPhrases2421 } from './fixtures/agentTaskPhrases2421.js';
 import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../../../lib/embedding/index.js';
 import { upsertAbstractVector, upsertChunkVectors } from '../../../services/embedding/vectors.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
@@ -24,40 +24,40 @@ beforeEach(async () => {
   vi.stubEnv('EMBEDDING_BACKEND', 'http');
   resetEmbeddingClientForTests();
   await cleanDb(db);
-  const org = await db.organization.create({ data: { urn: 'symptom2421.example', name: 'symptom' } });
+  const org = await db.organization.create({ data: { urn: 'phrase2421.example', name: 'phrase' } });
   const user = await db.user.create({ data: { handle: 'reader2421', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'READER' } });
   ctx = { db, userId: user.id, roles: ['READER'] };
   async function agent(slug: string, extendsAgentId?: string) {
-    const memory = await db.memory.create({ data: { urn: `symptom2421.example:${slug}`, name: slug, class: 'system', organizationId: org.id } });
-    const a = await db.agent.create({ data: { urn: `symptom2421.example:${slug}`, name: slug, visibility: 'ORGANIZATION', organizationId: org.id, systemMemoryId: memory.id, extendsAgentId } });
+    const memory = await db.memory.create({ data: { urn: `phrase2421.example:${slug}`, name: slug, class: 'system', organizationId: org.id } });
+    const a = await db.agent.create({ data: { urn: `phrase2421.example:${slug}`, name: slug, visibility: 'ORGANIZATION', organizationId: org.id, systemMemoryId: memory.id, extendsAgentId } });
     return { id: a.id, memoryId: memory.id };
   }
   base = await agent('base');
   child = await agent('child', base.id);
-  const app = await db.app.create({ data: { urn: 'symptom2421.example:app', name: 'app', organizationId: org.id } });
+  const app = await db.app.create({ data: { urn: 'phrase2421.example:app', name: 'app', organizationId: org.id } });
   await db.appAgent.create({ data: { appId: app.id, agentId: child.id } });
   await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'member' } });
   const otherOrg = await db.organization.create({ data: { urn: 'foreign2421.example', name: 'foreign' } });
   foreign = (await db.memory.create({ data: { urn: 'foreign2421.example:system', name: 'foreign', class: 'system', organizationId: otherOrg.id } })).id;
-  for (const row of taskSymptoms2421) await task(child.memoryId, row.loc, row.abstract);
+  for (const row of taskPhrases2421) await task(child.memoryId, row.loc, row.abstract);
 });
 const list = (args: Record<string, unknown> = {}) => Q.agentTaskList({}, { ref: child.id, ...args }, ctx);
-it('meets the fixed provisional 8/10 top-three symptom threshold', async () => {
-  const results: SymptomResult[] = [];
-  for (const row of taskSymptoms2421) {
-    const hits = await list({ symptom: row.symptom, limit: 99 });
+it('meets the fixed provisional 8/10 top-three phrase threshold', async () => {
+  const results: PhraseResult[] = [];
+  for (const row of taskPhrases2421) {
+    const hits = await list({ phrase: row.phrase, limit: 3 });
     expect(hits.length).toBeLessThanOrEqual(3);
-    results.push({ symptom: row.symptom, expectedLoc: row.loc, hits });
+    results.push({ phrase: row.phrase, expectedLoc: row.loc, hits });
   }
   const output = vi.spyOn(console, 'log');
-  const correct = reportSymptomRanking(results);
+  const correct = reportPhraseRanking(results);
   const lines = output.mock.calls.map(call => call[0]);
   output.mockRestore();
   expect(results).toHaveLength(10);
   expect(lines).toHaveLength(13); // disclosure, header, ten rows, total
-  taskSymptoms2421.forEach((row, i) => {
-    expect(lines[i + 2].startsWith(`${row.symptom} | ${row.loc} | `)).toBe(true);
+  taskPhrases2421.forEach((row, i) => {
+    expect(lines[i + 2].startsWith(`${row.phrase} | ${row.loc} | `)).toBe(true);
   });
   expect(lines.at(-1)).toBe(`Total hits: ${correct}/10`);
   expect(correct).toBeGreaterThanOrEqual(8);
@@ -74,31 +74,31 @@ it('ranks only abstract-bearing runnable nodes in the effective chain, nearest o
   const index = await db.node.create({data:{memoryId:child.memoryId,loc:'tasks',name:'index'}});
   await db.agent.update({where:{id:child.id},data:{tasksIndexRef:index.id}});
   await db.edge.create({data:{memoryId:child.memoryId,sourceId:nonRunnable.id,targetId:index.id,loc:'non-runnable-index',name:'unicorn recovery'}});
-  const hits = await list({ symptom: 'unicorn recovery' });
+  const hits = await list({ phrase: 'unicorn recovery' });
   expect(hits.map((h: any) => h.node.id).sort()).toEqual([inherited.id, nearest.id].sort());
   expect(hits.find((h: any) => h.node.id === inherited.id).node.inheritedFrom.agentId).toBe(base.id);
   expect(hits.every((h: any) => h.matchedBy === 'KEYWORD')).toBe(true);
 });
-it.each(['', '   '])('refuses empty symptom %j as BAD_USER_INPUT', async symptom => {
-  await expect(list({ symptom })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+it.each(['', '   '])('refuses empty phrase %j as BAD_USER_INPUT', async phrase => {
+  await expect(list({ phrase })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
 });
-it('keeps unfiltered GraphQL and MCP lists byte-identical when symptom is absent', async () => {
+it('keeps unfiltered GraphQL and MCP lists byte-identical when phrase is absent', async () => {
   const before = await list();
   expect(await list({ limit: 1 })).toEqual(before);
-  const locs = taskSymptoms2421.map(row=>row.loc).sort();
+  const locs = taskPhrases2421.map(row=>row.loc).sort();
   expect(before.map((entry:any)=>[entry.node.loc,entry.trigger])).toEqual(locs.map(loc=>[loc,null]));
   const srv = createTestableMcpServer({ ...ctx, clientId: `user:${ctx.userId}` });
   expect(await srv.callToolText('hadron_agent_tasks', { agentRef: child.id, limit: 1 })).toBe(await srv.callToolText('hadron_agent_tasks', { agentRef: child.id }));
-  const legacyText = [`10 task(s) for Agent ${child.id}:`, ...locs.map(loc=>`- ${loc} — hrn:node:symptom2421.example:child:${loc}`)].join('\n');
+  const legacyText = [`10 task(s) for Agent ${child.id}:`, ...locs.map(loc=>`- ${loc} — hrn:node:phrase2421.example:child:${loc}`)].join('\n');
   expect(await srv.callToolText('hadron_agent_tasks',{agentRef:child.id})).toBe(legacyText);
 });
 it('keeps the missing-system-memory refusal rather than an empty ranked list', async () => {
   await db.agent.update({ where: { id: child.id }, data: { systemMemoryId: null } });
-  await expect(list({ symptom: 'migration failure' })).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+  await expect(list({ phrase: 'migration failure' })).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
 });
 it('MCP renders at most three candidates with abstract and match reason', async () => {
   const srv = createTestableMcpServer({ ...ctx, clientId: `user:${ctx.userId}` });
-  const text = await srv.callToolText('hadron_agent_tasks', { agentRef: child.id, symptom: 'migration failure', limit: 99 });
+  const text = await srv.callToolText('hadron_agent_tasks', { agentRef: child.id, phrase: 'migration failure', limit: 3 });
   expect(text).toContain('1 task(s)');
   expect(text).toContain('Matched by: KEYWORD');
   expect(text).toContain('Abstract: Symptoms: migration failure');
@@ -106,18 +106,18 @@ it('MCP renders at most three candidates with abstract and match reason', async 
 
 it('excludes readable outside-chain index tasks and install memory', async () => {
   const a = await db.agent.findUniqueOrThrow({where:{id:child.id}});
-  const outside=await db.memory.create({data:{urn:'symptom2421.example:install',name:'install',class:'knowledge',visibility:'ORGANIZATION',organizationId:a.organizationId}});
+  const outside=await db.memory.create({data:{urn:'phrase2421.example:install',name:'install',class:'knowledge',visibility:'ORGANIZATION',organizationId:a.organizationId}});
   const source=await task(outside.id,'tasks:install-secret','migration failure');
   const index=await db.node.create({data:{memoryId:child.memoryId,loc:'tasks',name:'index'}});
   await db.agent.update({where:{id:child.id},data:{tasksIndexRef:index.id}});
   await db.edge.create({data:{memoryId:outside.id,sourceId:source.id,targetId:index.id,loc:'outside-index',name:'migration failure'}});
   expect((await list()).some((h:any)=>h.node.id===source.id)).toBe(true);
-  expect((await list({symptom:'migration failure'})).some((h:any)=>h.node.id===source.id)).toBe(false);
+  expect((await list({phrase:'migration failure'})).some((h:any)=>h.node.id===source.id)).toBe(false);
 });
 it('keeps unreadable Agent refusal identical to the unfiltered list', async () => {
   const stranger = await db.user.create({data:{handle:'unreadable2421',roles:['READER']}});
   const untrusted = {db,userId:stranger.id,roles:['READER']};
-  for(const args of [{ref:child.id},{ref:child.id,symptom:'migration failure'}])
+  for(const args of [{ref:child.id},{ref:child.id,phrase:'migration failure'}])
     await expect(Q.agentTaskList({},args,untrusted)).rejects.toMatchObject({code:'AGENT_NOT_FOUND'});
 });
 
@@ -132,20 +132,22 @@ it('uses abstract vectors only and labels BOTH versus VECTOR from ranking inputs
   const noAbstract = await task(child.memoryId, 'tasks:stale-abstract', null);
   for(const node of [both,vector,noAbstract]) await upsertAbstractVector(db,{nodeId:node.id,memoryId:node.memoryId,provider:'test',model:'2421',dim:768,embedding});
   await upsertChunkVectors(db,chunk.id,[{nodeId:chunk.id,memoryId:chunk.memoryId,provider:'test',model:'2421',dim:768,embedding,chunkIndex:0,charStart:0,charEnd:6,chunkText:'nebula'}]);
-  const hits = await list({symptom:'nebula recovery'});
+  const hits = await list({phrase:'nebula recovery'});
   expect(hits.map((h:any)=>[h.node.id,h.matchedBy])).toEqual([[both.id,'BOTH'],[vector.id,'VECTOR']]);
 });
-it('defaults to three, clamps a larger limit and honors a smaller limit', async () => {
-  for (let i=0;i<5;i++) await task(child.memoryId, `tasks:common-${i}`, 'common unique symptom');
-  expect(await list({symptom:'common unique symptom'})).toHaveLength(3);
-  expect(await list({symptom:'common unique symptom',limit:100})).toHaveLength(3);
-  expect(await list({symptom:'common unique symptom',limit:1})).toHaveLength(1);
+// #5284: the cap of a ranked list is 10 (default 3); a larger limit is refused, no longer clamped.
+it('defaults to three, accepts a limit up to 10, refuses 11 and honors a smaller limit', async () => {
+  for (let i=0;i<12;i++) await task(child.memoryId, `tasks:common-${i}`, 'common unique phrase');
+  expect(await list({phrase:'common unique phrase'})).toHaveLength(3);
+  expect(await list({phrase:'common unique phrase',limit:10})).toHaveLength(10);
+  await expect(list({phrase:'common unique phrase',limit:11})).rejects.toMatchObject({extensions:{code:'BAD_USER_INPUT'}});
+  expect(await list({phrase:'common unique phrase',limit:1})).toHaveLength(1);
 });
 
 it('abstract-only lexical ranking preserves stemming and relevance order', async () => {
   const strong = await task(child.memoryId, 'tasks:strong-abstract', 'migrations failing migrations failing');
   const weak = await task(child.memoryId, 'tasks:weak-abstract', 'unrelated words '.repeat(100) + 'migration failure');
-  const hits = await list({symptom:'migration'});
+  const hits = await list({phrase:'migration'});
   expect(hits.findIndex((h:any)=>h.node.id===strong.id)).toBeLessThan(hits.findIndex((h:any)=>h.node.id===weak.id));
   expect(hits.some((h:any)=>h.node.id===strong.id)).toBe(true);
   expect(hits.some((h:any)=>h.node.id===weak.id)).toBe(true);
@@ -160,11 +162,11 @@ it('MCP omits task abstracts when membership is revoked during embedding retriev
     return texts.map(()=>embedding);
   }});
   const srv = createTestableMcpServer({...ctx,clientId:`user:${ctx.userId}`});
-  const text = await srv.callToolText('hadron_agent_tasks',{agentRef:child.id,symptom:'zebra outage'});
+  const text = await srv.callToolText('hadron_agent_tasks',{agentRef:child.id,phrase:'zebra outage'});
   expect(text).not.toContain('secretabstract');
 });
 it.each([0, -1])('refuses a non-positive ranked limit %s', async limit => {
-  await expect(list({symptom:'migration failure',limit})).rejects.toMatchObject({extensions:{code:'BAD_USER_INPUT'}});
+  await expect(list({phrase:'migration failure',limit})).rejects.toMatchObject({extensions:{code:'BAD_USER_INPUT'}});
 });
 it('does not relax the keyword half of a true-hybrid task search', async () => {
   vi.stubEnv('EMBEDDING_API_URL','http://stub.invalid');
@@ -173,7 +175,7 @@ it('does not relax the keyword half of a true-hybrid task search', async () => {
   await task(child.memoryId,'tasks:keyword-partial','alpha partial');
   const vector = await task(child.memoryId,'tasks:vector-recall','galactic repair');
   await upsertAbstractVector(db,{nodeId:vector.id,memoryId:vector.memoryId,provider:'test',model:'no-relax',dim:768,embedding});
-  const hits = await list({symptom:'alpha zzmissing'});
+  const hits = await list({phrase:'alpha zzmissing'});
   expect(hits.map((h:any)=>[h.node.id,h.matchedBy])).toEqual([[vector.id,'VECTOR']]);
 });
 it('filters vector candidates before their ANN window rather than losing the eligible task', async () => {
