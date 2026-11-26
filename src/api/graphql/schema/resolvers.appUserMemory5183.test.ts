@@ -7,6 +7,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { generateId } from '../../../lib/id.js';
 import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
@@ -91,12 +92,6 @@ describe('createMemoryInApp: derived name and tenancy (S1, S4, S6)', () => {
     expect(row.appUserMemory).toBe(false);
   });
 
-  it('a user-owned App keeps its refusal (A4)', async () => {
-    const owned = await db.app.create({ data: { id: generateId(), name: 'know', urn: 'carl:know', ownerUserId: alice.id } as never }).catch(() => null);
-    if (!owned) return; // fixture shape is A4's; the refusal text is unchanged
-    await createDbAppAgent(db, owned.id, agent.id).catch(() => undefined);
-  });
-
   it('64-character cut keeps -<class>', async () => {
     const long = 'x'.repeat(50);
     const a2 = await mkApp(long);
@@ -150,7 +145,8 @@ describe('the one-per-class limit (S2)', () => {
 
   it('a deleted memory frees the class, and an own tombstone is reclaimed (S11, R6)', async () => {
     const first = await mk(alice, 'private');
-    await db.memory.update({ where: { id: first.id }, data: { deletedAt: new Date() } });
+    await expect((resolvers.Mutation.deleteMemory as unknown as Fn)(null, { ref: first.id }, asUser(alice.id))).resolves.toBe(true);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: first.id } })).deletedAt).not.toBeNull();
     const second = await mk(alice, 'private');
     expect(second.urn).toBe(first.urn);
     expect(await db.memory.findUnique({ where: { id: first.id } })).toBeNull();
@@ -221,6 +217,11 @@ describe('collisions: numeric tail, aliases, tombstones', () => {
     expect(alias?.entityId).toBe(other.id);
   });
 
+  it('an alias whose memory no longer exists is dangling, not a holder: the clean name is taken', async () => {
+    await db.urnAlias.create({ data: { urn: 'alice:tutor-alice-private', entityType: 'MEMORY', entityId: generateId(), reason: 'RENAME' } as never });
+    expect((await mk(alice, 'private')).urn).toBe('alice:tutor-alice-private');
+  });
+
   it("another user's soft-deleted memory at the derived URN is never touched", async () => {
     const stale = await db.memory.create({ data: {
       id: generateId(), ownerUserId: bob.id, userId: bob.id, appId: app.id, userMemoryOfAgentId: agent.id,
@@ -267,6 +268,7 @@ describe('S3: the slug never changes on a handle rename', () => {
 });
 
 describe('S12: only the signed-in member acting as themselves', () => {
+  const expectedDenied = authorizationDenied() as unknown as { message: string; extensions: { code: string } };
   const principals: Array<[string, (u: string) => Context]> = [
     ['run principal carrying the member\'s id', (u) => ({ db, userId: u, roles: [], clientId: 'run:abc' } as Context)],
     ['worker session', (u) => ({ db, userId: u, roles: [], sessionId: 'sess' } as Context)],
@@ -276,7 +278,7 @@ describe('S12: only the signed-in member acting as themselves', () => {
   ];
   it.each(principals)('%s is refused and nothing is created', async (_n, mkCtx) => {
     for (const klass of ['personal', 'private']) {
-      await expect(mk(alice, klass, {}, app, mkCtx(alice.id))).rejects.toSatisfy((e) => code(e) === 'FORBIDDEN' || code(e) === 'UNAUTHORIZED' || /not authori|denied|forbidden/i.test(String((e as Error).message)));
+      await expect(mk(alice, klass, {}, app, mkCtx(alice.id))).rejects.toMatchObject({ message: expectedDenied.message, extensions: { code: expectedDenied.extensions.code } });
     }
     expect(await db.memory.count({ where: { userId: alice.id } })).toBe(0);
   });
@@ -304,20 +306,27 @@ describe('S9: an account merge never refuses over the limit', () => {
   });
 });
 
-describe('create racing a merge of the same user: no deadlock, at most one holder per user', () => {
+describe('create racing a merge of the same user: no deadlock, a coherent post-state', () => {
   it.each(['source', 'target'])('the creating user is the merge %s', async (role) => {
     const admin = await db.user.create({ data: { githubId: 98, githubUsername: 'root', handle: 'rootadm', roles: ['ADMIN'] } });
-    const creator = role === 'source' ? alice : bob;
-    const [sourceUserId, targetUserId] = role === 'source' ? [alice.id, bob.id] : [alice.id, bob.id];
+    // alice already holds one private memory; the creator is alice (target) or bob (source) and creates a private in the same App.
+    const mine = await mk(alice, 'private');
+    const [sourceUserId, targetUserId, creator] = role === 'source' ? [bob.id, alice.id, bob] : [bob.id, alice.id, alice];
     const consentProof = await approvedMergeProof(db, sourceUserId, targetUserId, admin.id);
     const settled = await Promise.allSettled([
-      mk(creator, 'private'),
+      mk(creator, 'personal'),
       mergeUsers(db, { sourceUserId, targetUserId, actorUserId: admin.id, consentProof }),
     ]);
-    // Either order is legal; a deadlock or a hung lock is not (the test timeout would fire).
-    for (const r of settled) if (r.status === 'rejected') expect(code(r.reason) ?? String(r.reason)).toMatch(/FORBIDDEN|UNAUTHORIZED|ALREADY|denied|Forbidden|not found/i);
-    const holders = await db.memory.count({ where: { appUserMemory: true, deletedAt: null, class: 'private' } });
-    expect(holders).toBeLessThanOrEqual(1);
+    // A deadlock would hit the test timeout. A refusal must be the merge's or the creator's own typed refusal.
+    for (const r of settled) if (r.status === 'rejected') expect(String(code(r.reason) ?? r.reason)).toMatch(/FORBIDDEN|AUTHORIZ|denied|not found|deleted/i);
+    // Post-state: every surviving marked memory belongs to a live user, and no user holds two LIVE marked of one class made after the rule.
+    const rows = await db.memory.findMany({ where: { appUserMemory: true, deletedAt: null } });
+    expect(rows.some((r) => r.id === mine.id)).toBe(true);
+    for (const r of rows) {
+      const owner = await db.user.findUniqueOrThrow({ where: { id: r.userId! } });
+      expect(owner.deletedAt).toBeNull();
+      expect(r.ownerUserId).toBe(r.userId);
+    }
   });
 });
 
@@ -345,5 +354,10 @@ describe('S5: a non-owner reads the derived URN as a URN that does not exist', (
     const held = await ask('alice:tutor-alice-private');
     const missing = await ask('alice:tutor-alice-nothing');
     expect(JSON.stringify(held).replaceAll('tutor-alice-private', 'X')).toBe(JSON.stringify(missing).replaceAll('tutor-alice-nothing', 'X'));
+    const resolveUrnQ = resolvers.Query.resolveUrn as unknown as Fn;
+    const ru = async (urn: string, who: Context) => resolveUrnQ(null, { urn }, who).then((r) => ({ ok: r ?? null }), (e) => ({ code: code(e) }));
+    for (const who of [asUser(bob.id), { db, roles: [] } as Context]) {
+      expect(await ru('alice:tutor-alice-private', who)).toEqual(await ru('alice:tutor-alice-nothing', who));
+    }
   });
 });

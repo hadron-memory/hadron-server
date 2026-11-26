@@ -205,6 +205,14 @@ function conflictWithoutUrn(): GraphQLError {
   return new GraphQLError('That memory name is taken. Try again.', { extensions: { code: 'MEMORY_URN_CONFLICT' } });
 }
 
+/** A P2002 whose violated unique is the memory URN (Prisma reports the column list, or the index name, in meta.target). */
+function isUrnUniqueViolation(err: unknown): boolean {
+  if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') return false;
+  const target = err.meta?.target;
+  const names = Array.isArray(target) ? target.map(String) : [String(target ?? '')];
+  return names.some((n) => n === 'urn' || n.includes('urn'));
+}
+
 type UrnBlocker = { id: string; userId: string | null; appId: string | null; class: string; deletedAt: Date | null };
 
 /**
@@ -222,13 +230,8 @@ async function findUrnBlockers(tx: Prisma.TransactionClient, urn: string): Promi
   const known = new Set(direct.map((m) => m.id));
   const viaAlias = aliases.filter((a) => !known.has(a.entityId)).map((a) => a.entityId);
   const aliased = viaAlias.length > 0 ? await tx.memory.findMany({ where: { id: { in: viaAlias } }, select }) : [];
-  // An alias whose memory no longer exists still holds the address: report it as an unowned blocker.
-  const missing = viaAlias.filter((id) => !aliased.some((m) => m.id === id));
-  return [
-    ...direct,
-    ...aliased,
-    ...missing.map((id) => ({ id, userId: null, appId: null, class: '', deletedAt: null })),
-  ];
+  // An alias whose memory row no longer exists (hard-deleted, e.g. reclaimed) resolves to nothing: it is not a holder.
+  return [...direct, ...aliased];
 }
 
 export const appMemoryMutations = {
@@ -495,11 +498,15 @@ export const appMemoryMutations = {
             throw conflictWithoutUrn();
           }));
         } catch (err) {
-          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002' && attempt < 2) continue;
-          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') throw conflictWithoutUrn();
+          // Only a collision on the URN is a name collision: any other unique violation is a real fault.
+          if (isUrnUniqueViolation(err)) {
+            if (attempt < 2) continue;
+            throw conflictWithoutUrn();
+          }
           throw err;
         }
       }
+      // Unreachable: the last attempt returns or throws. Kept so the function's return type is total.
       throw conflictWithoutUrn();
     }
 

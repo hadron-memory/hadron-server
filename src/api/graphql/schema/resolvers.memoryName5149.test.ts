@@ -104,13 +104,13 @@ for (const [door, create] of doors) {
 }
 
 describe('#5183 createMemoryInApp personal/private ignore the name argument, refused names included', () => {
+  afterEach(async () => { await db.memory.deleteMany({ where: { appUserMemory: true } }); });
   for (const [label, name] of [...admitted.map(([l, n]) => [l, n]), ...refused]) {
     it(`a personal memory named with ${label} is created under the derived name`, async () => {
       const mem = await M.createMemoryInApp(
         {}, { appRef: app.id, agentRef: agent.id, memoryClass: 'personal', name }, ctx(admin.id));
       expect(mem.name).toBe(mem.urn.split(':')[1]);
       expect(mem.name).toMatch(/-personal$/);
-      await db.memory.delete({ where: { id: mem.id } });
     });
   }
 });
