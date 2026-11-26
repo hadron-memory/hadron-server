@@ -774,3 +774,25 @@ describe('#5265 fix head after d5f941ae: a tab-nested empty quote holds nothing 
     expect(losers(out)).toEqual(lose);
   });
 });
+
+describe('#5265 fix head after 54179b53: the marked rules the fourth fuzz alphabet drew', () => {
+  // [body, escaped, losers]: the escape is a fixed point, and only the readers listed lose. Each is red at 54179b53 (marked loses).
+  // The `~~~` line opens a fence in CommonMark as written that never closes, and no escaped `<` closes it, so that loss is not the pass's.
+  const CM = ['commonmark.js', 'markdown-it'];
+  it.each<[string, string, string[]]>([
+    // marked: a definition's next line opens a quote, whose content is lexed afresh, so its tab-indented `>` is code there and the
+    // fence under it is not the quote's: the processing instruction closes, and the open `<p` is escaped.
+    ['[a]: /u\n> \t>\n<?>\n~~~\n<p', '[a]: /u\n> \t>\n<?>\n~~~\n&lt;p', CM],
+    // marked: a paragraph with a line indented four columns past its first is no setext heading, so `-` opens an item and the indented
+    // `<script>` under it is live markup in that item (CommonMark: code); it is escaped.
+    ['x\n    x\n-\n    <script>', 'x\n    x\n-\n    &lt;script>', []],
+    // marked: a tag line ends the item's paragraph and opens an HTML block that runs to the raw-text element below it.
+    ['- a\n<x>\n>\n    <script', '- a\n<x>\n>\n    &lt;script', []],
+    ['- =\n<x>\n>\t>\n    <script', '- =\n<x>\n>\t>\n    &lt;script', []],
+  ])('%j', (body, escaped, lost) => {
+    const out = escapeUnterminatedHtml(body);
+    expect(out).toBe(escaped);
+    expect(escapeUnterminatedHtml(out)).toBe(out);
+    expect(losers(out)).toEqual(lost);
+  });
+});
