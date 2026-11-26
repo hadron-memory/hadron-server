@@ -65,6 +65,22 @@ for (const [door, create, urnOf, takenCode] of doors) {
       }
     });
 
+    it('the refusal carries the validator\'s reason, and does not echo the slug', async () => {
+      const e = await create({ name: 'x', slug: 'Has Space' }).catch((err) => err);
+      expect(e.extensions).toEqual({ code: 'BAD_USER_INPUT', reason: 'invalid-charset' });
+      expect(e.message).not.toContain('Has Space');
+      const r = await create({ name: 'x', slug: 'agent' }).catch((err) => err);
+      expect(r.extensions.code).toBe('BAD_USER_INPUT');
+      expect(typeof r.extensions.reason).toBe('string');
+      expect(r.extensions.reason).not.toBe('invalid-charset');
+    });
+
+    it('a name that cannot be stored is refused typed even with a valid slug, and creates nothing', async () => {
+      await expect(create({ name: 'a\0b', slug: 'fine' })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT', field: 'name' } });
+      expect(await db.agent.count({ where: { urn: `${org.urn}:fine` } })).toBe(0);
+      expect(await db.memory.count({ where: { urn: `${org.urn}:fine` } })).toBe(0);
+    });
+
     it('a malformed slug (empty, uppercase, spaces, colon) is refused BAD_USER_INPUT', async () => {
       for (const slug of ['', 'Has Space', 'a:b', 'UPPER']) {
         await expect(create({ name: 'x', slug }), JSON.stringify(slug)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });

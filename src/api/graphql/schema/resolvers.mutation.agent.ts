@@ -58,6 +58,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
+import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
 import { generateId } from '../../../lib/id.js';
 import { seedAgentSkeleton } from '../../../lib/agentSkeleton.js';
@@ -349,6 +350,8 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // #574: slugify the display name — a raw name would persist a
   // case-sensitive / space-bearing URN (and the system memory URN derives
   // from this one, so it inherits the clean slug).
+  // #5203 S1: a supplied slug skips the name-derived check, so the name's own storability is judged here, typed, before any write.
+  assertStorableText({ name });
   const agentSlug = input.slug != null ? suppliedSlug(input.slug) : deriveSlugFromName(name);
   const agentUrn = `${namespace}:${agentSlug}`;
   // Check for existing agent with the same URN. A tombstone is reclaimed —
