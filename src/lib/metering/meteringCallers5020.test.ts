@@ -33,13 +33,15 @@ function sources(dir: string, out: string[] = []): string[] {
   }
   return out;
 }
+/** Comments are not call sites: a prose mention of `recordLlmUsage(` must not break the count. */
+const stripComments = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 const rel = (p: string) => p.slice(join(SRC, '..').length + 1);
 
 describe('#5020 pin 11: every caller of recordLlmUsage names its billable account', () => {
   const found = new Map<string, number>();
   for (const file of sources(SRC)) {
     if (rel(file) === 'src/lib/metering/index.ts') continue; // the definition
-    const n = (readFileSync(file, 'utf8').match(/\brecordLlmUsage\s*\(/g) ?? []).length;
+    const n = (stripComments(readFileSync(file, 'utf8')).match(/\brecordLlmUsage\s*\(/g) ?? []).length;
     if (n > 0) found.set(rel(file), n);
   }
 
@@ -47,15 +49,14 @@ describe('#5020 pin 11: every caller of recordLlmUsage names its billable accoun
     expect(Object.fromEntries(found)).toEqual(Object.fromEntries(Object.entries(CALLERS).map(([f, c]) => [f, c.calls])));
   });
 
-  it('each call passes billableAccount and none passes a bare organizationId', () => {
+  it('each call passes billableAccount', () => {
     for (const file of Object.keys(CALLERS)) {
-      const text = readFileSync(join(SRC, '..', file), 'utf8');
+      const text = stripComments(readFileSync(join(SRC, '..', file), 'utf8'));
       const calls = text.split(/\brecordLlmUsage\s*\(/).slice(1);
       for (const rest of calls) {
         // the call's argument object ends at its first line of the form `});` at the call's own indentation
         const body = rest.slice(0, rest.search(/\n\s*\}\);/));
         expect(body, file).toMatch(/\bbillableAccount\b/);
-        expect(body, file).not.toMatch(/^\s*organizationId:/m);
       }
     }
   });

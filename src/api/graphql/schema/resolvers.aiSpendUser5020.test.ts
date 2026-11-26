@@ -84,6 +84,20 @@ describe('pin 9: who may read a person\'s spend', () => {
   });
 });
 
+describe('pin 9b: a platform admin naming a person who does not exist, and another grouping', () => {
+  it('the admin gets the typed not-found (nothing is concealed from them), not FORBIDDEN', async () => {
+    expect(code(await spendOf(generateId(), adminCtx()))).toBe('USER_NOT_FOUND');
+  });
+  it('the DAY grouping reads by the billable account too: the day of a P-billed unit, none for one done for P', async () => {
+    await ev({ billableUserId: p });
+    await ev({ organizationId: orgA, userId: p });
+    const res = await spendOf(p, ctxOf(p), { groupBy: 'DAY' });
+    expect(res.errors, JSON.stringify(res.errors)).toBeUndefined();
+    const s = (res.data as { aiSpend: { rows: Array<{ key: string; events: number }> } }).aiSpend;
+    expect(s.rows).toMatchObject([{ key: '2026-03-10', events: 1 }]);
+  });
+});
+
 describe('pin 10: exactly one of orgRef and userRef', () => {
   it('both, and neither: BAD_USER_INPUT, before any read', async () => {
     expect(code(await gql(SPEND, adminCtx(), { orgRef: orgA, userRef: p, from: FROM, to: TO, groupBy: 'DAY' }))).toBe('BAD_USER_INPUT');
