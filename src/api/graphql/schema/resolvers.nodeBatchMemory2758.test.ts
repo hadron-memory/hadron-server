@@ -135,7 +135,7 @@ it('lazy batch endpoints keep the cross-memory read gate', async () => {
   await db.edge.create({ data: { memoryId, loc: 'cross', sourceId: source.id, targetId: target.id } });
   const response = await run(`query($refs:[ID!]){nodeBatch(refs:$refs){nodes{outgoingEdges{target{id content}}}}}`, { refs: [source.id] });
   expect(response.errors).toBeUndefined();
-  expect((response.data as any).nodeBatch.nodes[0].outgoingEdges).toEqual([{ target: null }]);
+  expect((response.data as any).nodeBatch.nodes[0].outgoingEdges).toEqual([]); // hadron-internal#74
   expect(JSON.stringify(response)).not.toContain('NEVER_DISCLOSE');
 });
 
