@@ -761,6 +761,11 @@ describe('#5265 fix head after d5f941ae: a tab-nested empty quote holds nothing 
     // main keeps the body as written, which only marked loses; so does this head.
     ['>\t>\n<!l>```\n-\n  ~~~', '>\t>\n<!l>```\n-\n  ~~~', ['marked']],
     ['> \t>\n<!l>```\n-\n  ~~~', '> \t>\n<!l>```\n-\n  ~~~', ['marked']],
+    // Red at a55565f2 (lost by main in every reader): marked lexes a quote's content as a text of its own, so `> \t>` holds indented code
+    // (its tab counts four columns from there) and leaves no paragraph open; the instruction opens a block and `<p` is escaped for it. The
+    // fence that never closes still takes the anchor in CommonMark, as it does without the quote.
+    ['> \t>\n<?>\n~~~\n<p', '> \t>\n<?>\n~~~\n&lt;p', ['commonmark.js', 'markdown-it']],
+    ['>  \t>\n<?>\n~~~\n<p', '>  \t>\n<?>\n~~~\n&lt;p', ['commonmark.js', 'markdown-it']],
   ])('%j', (body, escaped, lose) => {
     const out = escapeUnterminatedHtml(body);
     expect(out).toBe(escaped);
