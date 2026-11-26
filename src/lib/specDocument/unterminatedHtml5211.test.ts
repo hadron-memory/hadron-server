@@ -135,6 +135,9 @@ describe('#5211 marked differential (#5257 delta)', () => {
     ['a line-head `<!-->` with a line after it is inline in marked', '> - <!--><!x>\t\n    §textarea><div>', ['marked']],
     ['marked reads the rest of a line-head declaration\'s line as a new block', '<!x>§pre x=  > > \n  >        <script><textarea>    ', ['marked']],
     ['a declaration after a line marked does not take as a definition', '[a]: /u> - # h\n<!X§textarea>', ['marked']],
+    ['a definition-shaped line after a paragraph is paragraph text (SECURITY delta)', 'a\n[a]: /u\n<!x§xmp>', ['marked']],
+    ['with a script', 'a\n[a]: /u\n<!x§script>', ['marked']],
+    ['with a tag before it', 'a\n[a]: /u\n<!x<b §script>', ['marked']],
     ['and so is what follows it', '  <!-->~~~`\n>   > # h<!X<b y= §script>', ['marked']],
   ]);
 });
