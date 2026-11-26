@@ -2641,12 +2641,12 @@ export const agentTaskMutations = {
     ctx: Context,
   ) => mutateTask(ctx, args.taskRef, async (tx, task, actor, app, txCtx) => {
     if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
-      throw taskError('TASK_NOT_OWNER', 'Only whoever may assign this task disposes its findings.', { taskId: args.taskRef });
+      throw taskError('TASK_NOT_OWNER', 'Only whoever may assign this task disposes its findings.', { taskId: task.id });
     }
-    if (task.status !== 'finished') throw taskError('TASK_NOT_FINISHED', 'Only a finished task has findings to dispose.', { taskId: args.taskRef });
+    if (task.status !== 'finished') throw taskError('TASK_NOT_FINISHED', 'Only a finished task has findings to dispose.', { taskId: task.id }); // #5225: the resolved id, not the caller's ref
     if (!['fixed', 'accepted', 'deferred', 'rejected'].includes(args.disposition as string)) throw badInput('A disposition is fixed, accepted, deferred or rejected; it cannot be cleared.');
     const findings = (task.resultFindings ?? []) as TaskFinding[];
-    if (!findings.some(f => f.id === args.findingId)) throw taskError('TASK_FINDING_NOT_FOUND', 'Finding not found.', { taskId: args.taskRef });
+    if (!findings.some(f => f.id === args.findingId)) throw taskError('TASK_FINDING_NOT_FOUND', 'Finding not found.', { taskId: task.id }); // #5225: the resolved id, not the caller's ref
     const reference = args.reference == null ? null : taskReferencesInput([args.reference])[0];
     const dispositions = task.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
     const unchanged = dispositions.some(d => d.findingId === args.findingId && d.disposition === args.disposition && isDeepStrictEqual(d.reference, reference));

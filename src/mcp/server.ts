@@ -5678,7 +5678,7 @@ export function createMcpServerInstance(
           // miss — the same screen hadron_get_node and nodeBatch(refs:) apply.
           const typeErr = validateUrnType(parseUrnInput(raw), 'node');
           if (typeErr) {
-            return textResult(`hadron_get_nodes: ${typeErr} (ref "${raw}")`);
+            return textResult(`hadron_get_nodes: ${typeErr} (one of the refs)`);
           }
           try {
             assertFullyQualifiedUrn(raw, 'node');
@@ -6116,14 +6116,14 @@ export function createMcpServerInstance(
       } else {
         const { memoryUrn: currentMemoryUrn, loc: currentLoc } = splitNodeUrn(rawCurrent);
         if (currentMemoryUrn !== memoryUrn) {
-          return textResult(`Current URN's memory (${currentMemoryUrn}) doesn't match parent's memory (${memoryUrn}).`);
+          return textResult('The current node is not in the parent\'s memory.');
         }
         const idx = children.findIndex((n) => n.loc === currentLoc);
         if (idx === -1) {
           return refusalResult('Current node not found among the parent\'s children.');
         }
         if (idx + 1 >= children.length) {
-          return textResult(`No more nodes after "${currentLoc}".`);
+          return textResult('No more nodes after the current node.');
         }
         next = children[idx + 1];
       }
@@ -8422,7 +8422,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       if (!existing) return refusalResult('Node not found.');
       if (existing.deletedAt && !hard) {
         return textResult(
-          `Node "${rawUrn}" is already soft-deleted. Pass hard: true to remove the row entirely.`,
+          'The node is already soft-deleted. Pass hard: true to remove the row entirely.',
         );
       }
 
@@ -8603,7 +8603,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
           );
         }
         if (result.refused === 'changed') {
-          return textResult(`Node "${rawUrn}" moved while this delete waited; re-read it and retry.`);
+          return textResult('The node moved while this delete waited; re-read it and retry.');
         }
         if (result.refused === 'mintedSpec') {
           return refusalResult(`[spec_minted_permanent] ${result.message}`);
@@ -8623,7 +8623,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
           return textResult(
-            `Node "${rawUrn}" has ${result.count} descendant(s). ` +
+            `The node has ${result.count} descendant(s). ` +
               `${mode} refuses without recursive: true. ` +
               `Pass recursive: true to apply the same ${hard ? 'hard' : 'soft'} delete to every descendant.`,
           );

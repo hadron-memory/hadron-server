@@ -33,7 +33,8 @@ export const ECHO_CLASS: RegExp[] = [
   /`[Nn]ode ['"]\$\{[^}`]+\}['"]( and its| does not satisfy|`)/,
   /`['"]\$\{loc\}['"] and its /,
   // #5225 item 6: a not-found that relays the caller's reference in its extensions (`{ id }`, `id: ref`, …).
-  /_NOT_FOUND['"], [^\n]*\{ ?(?:ref|id|eventId|hostId|taskId)(?:: [\w.]+)? ?\}\)/,
+  // A value read from the caller's arguments (shorthand, `args.*`, `input.*`); a resolved row's id (`task.id`) is not one.
+  /_NOT_FOUND['"], [^\n]*\{ ?(?:ref|id|eventId|hostId|taskId)(?:: (?:args|input)\.[\w.]+)? ?\}\)/,
   /code: ['"]\w+_NOT_FOUND['"], (?:ref|id|eventId|hostId|taskId):/,
 ];
 

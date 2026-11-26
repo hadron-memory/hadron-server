@@ -22,7 +22,7 @@ import {
 
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
 const hostNotFound = (hostId: string): GraphQLError =>
-  taskError('HOST_NOT_FOUND', 'No host with that id is registered in this App.', { hostId });
+  taskError('HOST_NOT_FOUND', 'No host with that id is registered in this App.'); // #5225: hostId not relayed
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;

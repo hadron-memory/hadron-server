@@ -273,10 +273,9 @@ export async function lockSourceForMove(
  * descendants that do not exist. The count is already in hand at every refusal
  * site, so the message can say the true shape instead of the worst case.
  */
-export function describeMoved(loc: string, size: number): string {
-  return size === 1
-    ? `node "${loc}"`
-    : `"${loc}" and its ${size - 1} descendant${size === 2 ? '' : 's'}`;
+export function describeMoved(size: number): string {
+  // #5225 (cor:api:140:01): the moved node is the one the caller named, so its loc is not repeated back.
+  return size === 1 ? 'the node' : `the node and its ${size - 1} descendant${size === 2 ? '' : 's'}`;
 }
 
 /**
@@ -501,7 +500,7 @@ export async function moveNodeSubtree(
       for (const c of liveCarried) perTarget.set(c.targetNodeId, (perTarget.get(c.targetNodeId) ?? 0) + 1);
       throw commentError(
         'COMMENT_MOVE_UNCOMMENTABLE',
-        `Cannot move ${describeMoved(source.loc, subtree.length)} into a ${dest.class} memory: it has comment threads. An admin of the memory deletes them first.`,
+        `Cannot move ${describeMoved(subtree.length)} into a ${dest.class} memory: it has comment threads. An admin of the memory deletes them first.`,
         { class: dest.class, nodes: subtree.filter((n) => perTarget.has(n.id)).map((n) => ({ nodeId: n.id, loc: n.loc, comments: perTarget.get(n.id)! })) },
       );
     }
@@ -525,7 +524,7 @@ export async function moveNodeSubtree(
     // source-key-bound ciphertext the dest key can't read). #781 follow-up.
     if (srcMem?.isEncrypted || destMem?.isEncrypted) {
       throw new CrossMemoryMoveUnsupportedError(
-        `Cannot move ${describeMoved(source.loc, subtree.length)} across memories: ` +
+        `Cannot move ${describeMoved(subtree.length)} across memories: ` +
           (srcMem?.isEncrypted && destMem?.isEncrypted
             ? 'both memories are encrypted'
             : srcMem?.isEncrypted
@@ -578,7 +577,7 @@ export async function moveNodeSubtree(
       // to tell which of its nodes triggered this, and the whole subtree is
       // refused for one of them.
       throw new CrossMemoryMoveUnsupportedError(
-        `Cannot move ${describeMoved(source.loc, subtree.length)} across memories: it ` +
+        `Cannot move ${describeMoved(subtree.length)} across memories: it ` +
           `${chatRoot.loc === source.loc ? 'is a chat' : `contains the chat "${chatRoot.loc}"`}, ` +
           'and a chat is bound to the memory that hosts it. Move it within its memory.',
       );
@@ -601,7 +600,7 @@ export async function moveNodeSubtree(
         } catch (e) {
           if (e instanceof NodeSchemaViolation) {
             throw new SubtreeMoveSchemaViolationError(
-              `Node "${n.loc}" does not satisfy the destination memory's schema: ${e.message}`,
+              `A node being moved does not satisfy the destination memory's schema: ${e.message}`,
             );
           }
           throw e;

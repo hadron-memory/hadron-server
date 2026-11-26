@@ -150,7 +150,7 @@ describe('update TOCTOU 1: the target moved after it was read (@codex P1)', () =
     expect(err.extensions?.movedMemory).toBe(true);
     expect(err.extensions?.currentLoc).toBeUndefined();
     expect(err.message).not.toContain('moved:here');
-    expect(err.message).toContain('no longer in memory');
+    expect(err.message).toContain('no longer in the memory'); // #5225: neither memory id is quoted
 
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
     expect(after.name).toBe('before');
