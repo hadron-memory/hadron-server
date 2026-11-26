@@ -26,6 +26,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { requireMemoryWriteAccess } from './resolvers.helpers.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
+import { computeEffectiveAccess } from '../../../lib/auth/effectiveAccess.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -117,7 +118,15 @@ describe('#329 memory — subscription grants (items 1–4)', () => {
     const res = await call(readerB.id, `hrn:memory:${kb.urn}`, asAdmin());
     expect(res.canRead).toBe(true);
     expect(res.canWrite).toBe(false);
-    expect(subGrants(res)).toHaveLength(1);
+    const grants = subGrants(res);
+    expect(grants).toHaveLength(1);
+    // role is the EFFECTIVE level conferred, never the subscription row's
+    // own CONTRIBUTOR: assemble() copies the strongest grant's label into the
+    // result's role (MEMORY_SUBSCRIPTION cannot be capability-shaped until
+    // the package's 0.4.0), so a raw sub.role would over-report a write the
+    // gates refuse — the one direction this audit must never go.
+    expect(grants[0].role).toBe('READER');
+    expect(res.role).toBe('READER');
   });
 
   it('item 4: CONTRIBUTOR member + READER subscription — read, NOT write (subscription role gates write)', async () => {
@@ -125,7 +134,10 @@ describe('#329 memory — subscription grants (items 1–4)', () => {
     const res = await call(contribB.id, `hrn:memory:${kb.urn}`, asAdmin());
     expect(res.canRead).toBe(true);
     expect(res.canWrite).toBe(false);
-    expect(subGrants(res)).toHaveLength(1);
+    const grants = subGrants(res);
+    expect(grants).toHaveLength(1);
+    expect(grants[0].role).toBe('READER');
+    expect(res.role).toBe('READER');
   });
 
   it('the owning org\'s own members keep their ORG_ROLE grants alongside (no regression in the composite)', async () => {
@@ -139,6 +151,27 @@ describe('#329 memory — subscription grants (items 1–4)', () => {
     expect(res.canWrite).toBe(true);
     expect(subGrants(res)).toHaveLength(0);
     expect(res.grants.map((g) => g.source)).toEqual(['ORG_ROLE']);
+  });
+
+  it('a subject in two subscribing orgs gets two grants with distinct via (the bulk URN map)', async () => {
+    await subscribe('READER');
+    const orgC = await db.organization.create({
+      data: { id: generateId(), name: 'subber2', urn: 'subber2' },
+    });
+    await db.orgMember.create({
+      data: { organizationId: orgC.id, userId: readerB.id, role: 'READER' },
+    });
+    // orgC's CONTRIBUTOR subscription cannot outrank readerB's READER
+    // membership there — each grant reports its own EFFECTIVE level.
+    await db.memorySubscription.create({
+      data: { memoryId: kb.id, organizationId: orgC.id, role: 'CONTRIBUTOR' },
+    });
+    const res = await call(readerB.id, `hrn:memory:${kb.urn}`, asAdmin());
+    const grants = subGrants(res);
+    expect(grants).toHaveLength(2);
+    expect(grants.map((g) => g.via).sort()).toEqual([orgB.urn, orgC.urn].sort());
+    expect(grants.every((g) => g.role === 'READER')).toBe(true);
+    expect(res.canWrite).toBe(false);
   });
 });
 
@@ -335,6 +368,27 @@ describe('#329 parity with the enforced gates (item 6)', () => {
     await assertParity(contribB.id, kb.id, kb.urn);
   });
 
+  it('revoked org membership under a live subscription', async () => {
+    await subscribe('CONTRIBUTOR');
+    await db.orgMember.updateMany({
+      where: { organizationId: orgB.id, userId: contribB.id },
+      data: { deletedAt: new Date() },
+    });
+    await assertParity(contribB.id, kb.id, kb.urn);
+  });
+
+  it('soft-deleted subscribing org under a live subscription and membership', async () => {
+    // Org liveness reaches both surfaces through the SAME spread
+    // (LIVE_ORG_MEMBERSHIP's organization.deletedAt relation filter on the
+    // membership join) — this pins that neither side drifts on it.
+    await subscribe('CONTRIBUTOR');
+    await db.organization.update({
+      where: { id: orgB.id },
+      data: { deletedAt: new Date() },
+    });
+    await assertParity(contribB.id, kb.id, kb.urn);
+  });
+
   it('group memory under a live subscription', async () => {
     const group = await db.memory.create({
       data: {
@@ -350,8 +404,106 @@ describe('#329 parity with the enforced gates (item 6)', () => {
     await assertParity(contribB.id, group.id, group.urn);
   });
 
+  it('personal and private memories under a live subscription (strict owner)', async () => {
+    for (const cls of ['personal', 'private'] as const) {
+      const mem = await db.memory.create({
+        data: {
+          id: generateId(),
+          organizationId: orgA.id,
+          urn: `${orgA.urn}:${cls}-p`,
+          name: `${cls}-p`,
+          class: cls,
+          userId: admin.id,
+        },
+      });
+      await subscribe('CONTRIBUTOR', mem.id);
+      await assertParity(contribB.id, mem.id, mem.urn);
+    }
+  });
+
+  it('app-scoped knowledge memory under a live subscription (#653)', async () => {
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:parapp`, name: 'parapp' },
+    });
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgA.id,
+        appId: app.id,
+        urn: `${orgA.urn}:parkb`,
+        name: 'parkb',
+        class: 'knowledge',
+      },
+    });
+    await subscribe('CONTRIBUTOR', mem.id);
+    await assertParity(contribB.id, mem.id, mem.urn);
+  });
+
+  it('per-user holding under a live subscription', async () => {
+    const agent = await db.agent.create({
+      data: { id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:parhold`, name: 'ph' },
+    });
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgA.id,
+        urn: `${orgA.urn}:parholding`,
+        name: 'parholding',
+        class: 'knowledge',
+        visibility: 'ORGANIZATION',
+        userMemoryOfAgentId: agent.id,
+        createdBy: readerB.id,
+      },
+    });
+    await subscribe('CONTRIBUTOR', mem.id);
+    await assertParity(contribB.id, mem.id, mem.urn);
+  });
+
   it('a stranger with no membership and no subscription', async () => {
     await assertParity(stranger.id, kb.id, kb.urn);
+  });
+});
+
+describe('#329 impersonation narrowing (restrictOrgId)', () => {
+  // The resolver's impersonation scope gate confines a session to its shared
+  // org's resources, and a subject's subscriptions only ever cover OTHER
+  // orgs' memories — so end-to-end only the narrowed (no-grant) direction is
+  // reachable. Both directions are pinned here on computeEffectiveAccess,
+  // the unit the narrowing lives in (Arden P3-3 / Rook F1: without the
+  // narrowing, a session would see the target's other-org membership).
+  async function kbRow() {
+    return db.memory.findUniqueOrThrow({
+      where: { id: kb.id },
+      select: {
+        id: true, urn: true, class: true, visibility: true, userId: true, appId: true,
+        userMemoryOfAgentId: true, organizationId: true, ownerUserId: true, isEncrypted: true,
+        workerOf: { select: { id: true, appId: true, heldByUserId: true, retiredAt: true } },
+      },
+    });
+  }
+  const subject = (id: string) => ({ id, roles: [] as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] });
+
+  it('restrictOrgId = the subscribing org keeps the subscription grant', async () => {
+    await subscribe('CONTRIBUTOR');
+    const res = await computeEffectiveAccess(
+      db, subject(contribB.id),
+      { kind: 'memory', memory: await kbRow() },
+      { restrictOrgId: orgB.id },
+    );
+    const grants = res.grants.filter((g) => (g.source as string) === 'MEMORY_SUBSCRIPTION');
+    expect(grants).toHaveLength(1);
+    expect(res.canWrite).toBe(true);
+  });
+
+  it('restrictOrgId = another org drops the grant (memberships narrowed to the session org)', async () => {
+    await subscribe('CONTRIBUTOR');
+    const res = await computeEffectiveAccess(
+      db, subject(contribB.id),
+      { kind: 'memory', memory: await kbRow() },
+      { restrictOrgId: orgA.id },
+    );
+    expect(res.grants.filter((g) => (g.source as string) === 'MEMORY_SUBSCRIPTION')).toHaveLength(0);
+    expect(res.canRead).toBe(false);
   });
 });
 

@@ -69,6 +69,7 @@ export type {
 } from '@hadron-memory/access-control';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 import { orgRoleAtLeast } from './orgRole.js';
+import { SUBSCRIPTION_EXCLUDED_CLASSES } from './memorySubscriptionAccess.js';
 import { isUserOwnedTeamSpaceMember } from './appParticipation.js';
 
 // #329: MEMORY_SUBSCRIPTION exists on the wire (the AccessSource SDL enum)
@@ -334,19 +335,29 @@ async function memoryGrants(
   // a live subscription, so the audit mirrors them exactly.
   //   - READ (getOrgReadableMemoryIds → subscribedMemoryWhere): any LIVE
   //     membership (any role) in a subscribing org, on a memory whose class
-  //     is outside personal/private/group/system with appId and
+  //     is outside SUBSCRIPTION_EXCLUDED_CLASSES (the gate's own exported
+  //     list — mirroring by construction, not convention) with appId and
   //     userMemoryOfAgentId both null. personal/private/system return earlier
-  //     in this function, so only 'group' excludes live here — the array
-  //     stays the gate's exact mirror so a new class can never ride it
-  //     silently (the #1440 lesson: an API-uncreatable row class must not
-  //     become a grant class).
+  //     in this function, so only 'group' excludes live here (the #1440
+  //     lesson: an API-uncreatable row class must not become a grant class).
   //   - WRITE (requireMemoryWriteAccess's subscription arm): additionally
   //     class === 'knowledge', a live CONTRIBUTOR+ membership AND a live
   //     CONTRIBUTOR+ subscription. A subscription never grants manage/delete
   //     — no manage/delete gate consults MemorySubscription.
-  // Liveness is filtered IN both queries (deletedAt: null), and `via` is the
-  // SUBSCRIBING org's URN — never the owning org's, which would mislabel the
-  // grant exactly the way reusing ORG_ROLE would (the gate's ruling on #329).
+  // `role` is the EFFECTIVE level this grant confers ('READER', or
+  // 'CONTRIBUTOR' where write holds) — never the subscription row's own
+  // role: assemble() takes the strongest grant's label as the result's
+  // `role` unless its source is capability-shaped, and MEMORY_SUBSCRIPTION
+  // cannot be in the package's CAPABILITY_SOURCES until 0.4.0, so a raw
+  // sub.role would make a READER-member + CONTRIBUTOR-subscription audit
+  // read 'CONTRIBUTOR' with canWrite false — the over-report this audit
+  // must never make.
+  // Liveness is filtered IN both queries (deletedAt: null — and the org's
+  // own liveness through LIVE_ORG_MEMBERSHIP's relation filter on the
+  // membership join, exactly as the gate derives its org ids), and `via` is
+  // the SUBSCRIBING org's URN — never the owning org's, which would
+  // mislabel the grant exactly the way reusing ORG_ROLE would (the gate's
+  // ruling on #329).
   // Under impersonation (restrictOrgId) the membership enumeration narrows to
   // the session's shared org, as getOrgReadableMemoryIds does — the write
   // gate has no such narrowing, so this under-reports there: the safe
@@ -354,7 +365,7 @@ async function memoryGrants(
   if (
     !isHolding &&
     memory.appId === null &&
-    !['personal', 'private', 'group', 'system'].includes(memory.class)
+    !(SUBSCRIPTION_EXCLUDED_CLASSES as readonly string[]).includes(memory.class)
   ) {
     const memberships = await db.orgMember.findMany({
       where: {
@@ -388,7 +399,7 @@ async function memoryGrants(
             orgRoleAtLeast(sub.role, 'CONTRIBUTOR');
           grants.push({
             source: 'MEMORY_SUBSCRIPTION',
-            role: sub.role,
+            role: write ? 'CONTRIBUTOR' : 'READER',
             via: urnById.get(sub.organizationId) ?? sub.organizationId,
             caps: write ? WRITE : READ,
           });

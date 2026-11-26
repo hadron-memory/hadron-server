@@ -3,13 +3,21 @@ import type { Prisma } from '../../generated/prisma/index.js';
 import { orgRoleAtLeast } from './orgRole.js';
 
 /**
+ * Classes a subscription never reaches — the gate's `notIn` list, exported so the
+ * effectiveAccess audit arm (#329) reuses the SAME list instead of hand-copying it:
+ * the audit mirrors the gate by construction, and a new excluded class cannot appear
+ * on one side only (the #1440 lesson, restated as code rather than convention).
+ */
+export const SUBSCRIPTION_EXCLUDED_CLASSES = ['personal', 'private', 'group', 'system'] as const;
+
+/**
  * Ordinary shared memories reached through an org's live subscription. Keep this identical for canonical reads
  * and Agent links: neither activation (a blended-graph flag) nor a license adds a check that read does not make.
  * Empty organization ids fail closed through Prisma's `in: []`, never an omitted filter.
  */
 export function subscribedMemoryWhere(orgIds: readonly string[]): Prisma.MemoryWhereInput {
   return {
-    class: { notIn: ['personal', 'private', 'group', 'system'] },
+    class: { notIn: [...SUBSCRIPTION_EXCLUDED_CLASSES] },
     appId: null,
     userMemoryOfAgentId: null,
     subscriptions: { some: { organizationId: { in: [...orgIds] }, deletedAt: null } },
