@@ -155,7 +155,12 @@ describe('the global re-point (the hourly job)', () => {
           if (prop === 'creditLedgerEntry')
             return new Proxy(target.creditLedgerEntry, {
               get: (m, name, r) =>
-                name === 'aggregate'
+                name === 'createMany'
+                  ? async () => {
+                      settleFailed = true;
+                      throw new Error('boom');
+                    }
+                  : name === 'aggregate'
                   ? async (...args: unknown[]) => {
                       const out = await (m.aggregate as (...a: unknown[]) => Promise<unknown>)(...args);
                       if (settleFailed && !injected) {
@@ -172,15 +177,11 @@ describe('the global re-point (the hourly job)', () => {
           return Reflect.get(target, prop, recv);
         },
       });
-    const failing = new Proxy(db.creditLedgerEntry, {
-      get: (m, name, r) => (name === 'createMany' ? async () => { settleFailed = true; throw new Error('boom'); } : Reflect.get(m, name, r)),
-    });
-    const base = new Proxy(db, { get: (target, prop, recv) => (prop === 'creditLedgerEntry' ? failing : Reflect.get(target, prop, recv)) }) as typeof db;
     const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const res = await server.executeOperation(
         { query: `query($u: ID) { creditBalance(userRef: $u) { balanceMicroCents } }`, variables: { u: t } },
-        { contextValue: { db: wrap(base), userId: t, roles: ['READER'] } as Context },
+        { contextValue: { db: wrap(db), userId: t, roles: ['READER'] } as Context },
       );
       if (res.body.kind !== 'single') throw new Error('unexpected');
       expect(res.body.singleResult.errors).toBeUndefined();
@@ -188,6 +189,44 @@ describe('the global re-point (the hourly job)', () => {
     } finally {
       quiet.mockRestore();
     }
+    expect(injected).toBe(true);
+  });
+  it('the WRITING read takes its figure in one snapshot too: a sweep settling inside a grant\'s 60 s between probe and sum is not subtracted twice', async () => {
+    // expired 59 s ago: inside the 60 s, so this read does not settle it and reports it unsettled; the sweep (a read that is
+    // 60 s on) settles it on another connection just before the sum is read.
+    const grant = await entry(t, { createdAt: new Date(Date.now() - 3 * DAY), expiresAt: new Date(Date.now() - 59_000) });
+    let injected = false;
+    const wrap = (client: typeof db): typeof db =>
+      new Proxy(client, {
+        get: (target, prop, recv) => {
+          if (prop === '$transaction')
+            return (fn: (tx: typeof db) => Promise<unknown>, opts: unknown) =>
+              (target.$transaction as (f: unknown, o: unknown) => Promise<unknown>)((tx: typeof db) => fn(wrap(tx)), opts);
+          if (prop === 'creditLedgerEntry')
+            return new Proxy(target.creditLedgerEntry, {
+              get: (m, name, r) =>
+                name === 'aggregate'
+                  ? async (args: { where?: { createdAt?: unknown } }) => {
+                      if (!injected && args?.where?.createdAt === undefined) {
+                        injected = true; // the stored-sum read: the sweep commits its settlement just before it
+                        await db.creditLedgerEntry.create({
+                          data: { id: generateId(), ownerUserId: t, kind: 'adjustment', amountMicroCents: -100n, sourceType: 'grant-expiry', sourceId: grant.id },
+                        });
+                      }
+                      return (m.aggregate as (a: unknown) => Promise<unknown>)(args);
+                    }
+                  : Reflect.get(m, name, r),
+            });
+          return Reflect.get(target, prop, recv);
+        },
+      });
+    const res = await server.executeOperation(
+      { query: `query($u: ID) { creditBalance(userRef: $u) { balanceMicroCents } }`, variables: { u: t } },
+      { contextValue: { db: wrap(db), userId: t, roles: ['READER'] } as Context },
+    );
+    if (res.body.kind !== 'single') throw new Error('unexpected');
+    expect(res.body.singleResult.errors).toBeUndefined();
+    expect((res.body.singleResult.data as { creditBalance: { balanceMicroCents: string } }).creditBalance.balanceMicroCents).toBe('0');
     expect(injected).toBe(true);
   });
 });

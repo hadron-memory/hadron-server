@@ -263,13 +263,15 @@ export const meteringQueries = {
     const owner = await resolveLedgerOwner(ctx, { orgRef, userRef }, 'read');
     const asOf = await databaseNow(ctx.db);
     // One probe and at most one replay (#5100 items 2, 8): what is settled, what stays unsettled and the `expiring` list all
-    // come from that one read. A writing read settles first and reads the stored sum after it (see settleAndMeasure); a
-    // read that writes nothing (impersonated, or after a failed settlement) takes the probe, the replay and the sum in ONE
-    // REPEATABLE READ snapshot, so a settlement another reader or the sweep commits meanwhile cannot be counted twice.
-    const readOnly = async () =>
+    // come from that one read, and the probe, the replay, any settlement written and the stored sum are taken in ONE
+    // REPEATABLE READ snapshot, for the writing read and the read that writes nothing alike (#5242 item 2): a settlement the
+    // sweep commits meanwhile is then in neither or in both of the replay and the sum, never counted twice. A writing read
+    // that fails (a serialization failure with a concurrent settler included) logs one line and answers from the read-only
+    // snapshot (ruling 10.4).
+    const snapshot = (write: boolean): Promise<{ measure: CreditMeasure; sum: bigint }> =>
       ctx.db.$transaction(
         async (tx) => {
-          const m = await settleAndMeasure(tx as unknown as typeof ctx.db, owner, asOf, { write: false });
+          const m = await settleAndMeasure(tx as unknown as typeof ctx.db, owner, asOf, { write });
           return { measure: m, sum: await creditBalance(tx as unknown as typeof ctx.db, owner) };
         },
         { isolationLevel: 'RepeatableRead' },
@@ -277,20 +279,20 @@ export const meteringQueries = {
     let measure: CreditMeasure;
     let sum: bigint;
     if (isReadOnlyImpersonation(ctx)) {
-      ({ measure, sum } = await readOnly());
+      ({ measure, sum } = await snapshot(false));
     } else {
       try {
         // #5014 (local review P2): first bring in any entry still named by a person merged into this one, so the figure
         // and the settlement below see the whole ledger whatever the interleaving of a merge and a write.
         if ('userId' in owner) await repointMergedLedgerOwners(ctx.db, { survivor: owner.userId });
-        measure = await settleAndMeasure(ctx.db, owner, asOf, { write: true });
-        sum = await creditBalance(ctx.db, owner);
+        // #5014 (the #5221 carry, #5242 item 2): the probe, the replay, any settlement written and the stored sum in ONE snapshot.
+        ({ measure, sum } = await snapshot(true));
       } catch (err) {
         console.error('credit_expiry.settle_failed', {
           ...('organizationId' in owner ? { organizationId: owner.organizationId } : { ownerUserId: owner.userId }),
           code: safeErrorCode(err),
         });
-        ({ measure, sum } = await readOnly());
+        ({ measure, sum } = await snapshot(false));
       }
     }
     return {
