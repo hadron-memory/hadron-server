@@ -711,6 +711,14 @@ export async function concealUnreadableDenial(
 }
 
 /**
+ * A door that names a target calls this before any lookup, so a signed-out
+ * caller (no user, no App) gets one answer for every target.
+ */
+export function requireCallerIdentity(ctx: Pick<Context, 'userId' | 'appId'>): void {
+  if (!ctx.userId && !ctx.appId) throw unauthenticatedError();
+}
+
+/**
  * The capability an `AgentMemoryItem` row confers (`cor:dmo:050:09`). `read`
  * admits the memory's node CONTENT to the agent's audience; `read-write` is
  * additionally the sole write cap for a knowledge memory.

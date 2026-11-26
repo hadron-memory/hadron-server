@@ -48,7 +48,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn } from '../../../lib/urn.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
-import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug } from './resolvers.helpers.js';
+import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug, requireCallerIdentity } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
 type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
@@ -430,6 +430,7 @@ export const appMemoryMutations = {
     { memoryRef, appRef, agentRef }: { memoryRef: string; appRef: string; agentRef: string },
     ctx: Context,
   ) => {
+    requireCallerIdentity(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     const memory = await ctx.db.memory.findUniqueOrThrow({
       where: { id: memoryId },

@@ -441,6 +441,6 @@ describe('deleteMemoryShare — grantee self-removal (#785)', () => {
   it('rejects an unauthenticated caller with UNAUTHENTICATED', async () => {
     await expect(
       M.deleteMemoryShare(null, { memoryRef: freeShared.id }, ctx(undefined)),
-    ).rejects.toThrow(/requires an authenticated user/);
+    ).rejects.toMatchObject({ extensions: { code: 'UNAUTHENTICATED' } });
   });
 });

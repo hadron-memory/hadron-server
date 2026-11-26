@@ -1,5 +1,5 @@
 # Written spec citations in hadronmemory.com:specs: what scripts/check-sdl-spec-citations.mjs checks SDL citations against (#4508).
-# Source: hadron spec list + describe, run 2026-11-24; newest node updatedAt 2026-11-24T21:48:05.473Z; 685 citations; 0 placeholder(s) excluded.
+# Source: hadron spec list + describe, run 2026-11-25; newest node updatedAt 2026-11-25T20:43:29.630Z; 688 citations; 0 placeholder(s) excluded.
 # GENERATED. Do not edit by hand: node scripts/refresh-sdl-spec-citation-snapshot.mjs (needs the hadron CLI and a token).
 cor:acl:000
 cor:acl:010
@@ -363,6 +363,7 @@ cor:api:240:02
 cor:api:260
 cor:api:260:01
 cor:api:260:02
+cor:api:260:03
 cor:api:270
 cor:api:270:01
 cor:api:280
@@ -486,6 +487,8 @@ cor:dmo:060:16
 cor:dmo:060:17
 cor:dmo:060:18
 cor:dmo:060:19
+cor:dmo:060:20
+cor:dmo:060:21
 cor:dmo:070
 cor:dmo:070:01
 cor:dmo:070:02

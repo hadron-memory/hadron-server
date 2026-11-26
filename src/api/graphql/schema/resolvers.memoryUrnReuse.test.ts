@@ -103,7 +103,8 @@ describe('URN reuse after a soft delete: personal/private memories (hadron-inter
 
   it('a caller with no user (not the owner) cannot reclaim through clone either', async () => {
     const id = await tombstone('private', aliceId);
-    const r = await refusal(doors[2]![1]({ db, userId: undefined, roles: ['ADMIN'] } as unknown as Context));
+    // An App principal passes the door's identity check, so this still reaches the reclaim rule.
+    const r = await refusal(doors[2]![1]({ db, userId: undefined, appId: generateId(), roles: ['ADMIN'] } as unknown as Context));
     expect(r.extensions?.code).toBe('CONFLICT');
     expect(await survives(id)).toEqual({ memory: 1, nodes: 1 });
   });

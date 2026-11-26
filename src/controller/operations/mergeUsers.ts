@@ -730,7 +730,10 @@ async function runMergeTxn(
     // second merge of the same account can't record a second target.
     // #1332: written BEFORE the reassignments below, because the content-validation report
     // trigger admits a reporter_user_id change only along a merge recorded here.
-    await tx.userMerge.create({ data: { sourceUserId, targetUserId, mergedBy: actor, ...consent } });
+    // #5212 (cor:api:010:02): the record is written by the owner-owned function hadron_record_user_merge, the one writer, which checks
+    // that this transaction consumed the consent for exactly this pair and retires the source (deleted_at, deleted_by) itself.
+    await tx.$queryRaw`SELECT public.hadron_record_user_merge(${sourceUserId}, ${targetUserId}, ${actor}, ${consent.consentHash},
+      ${JSON.stringify(consent.consentReceipt)}::jsonb)`;
 
     // #5009: the survivor's owner limits stay and the source's are deleted (never re-owned: one row per owner and key).
     limitChanges.push(...(await deleteOwnerLimits(tx, { userId: sourceUserId }, 'account-merge')));
@@ -754,10 +757,7 @@ async function runMergeTxn(
       await runWithIds(`UPDATE "${table}" SET ${assignments} WHERE ${predicate}`);
     }
 
-    await tx.user.update({
-      where: { id: sourceUserId },
-      data: { deletedAt: new Date(), deletedBy: actor, updatedBy: actor },
-    });
+    // The source was retired by hadron_record_user_merge above (#5212), before the transfers.
 
     return tx.user.findUniqueOrThrow({ where: { id: targetUserId } });
   }, {
