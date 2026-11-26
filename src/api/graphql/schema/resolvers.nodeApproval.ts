@@ -209,6 +209,7 @@ export const nodeApprovalMutations = {
     { nodeRef, revision }: { nodeRef: string; revision?: number | null },
     ctx: Context,
   ) => {
+    requireCallerIdentity(ctx);
     const { id, memoryId } = await resolveLiveNode(ctx, nodeRef);
     if (await isMemoryHiddenForWrite(ctx, memoryId, 'node')) throw nodeNotFound(nodeRef);
     // Authorize before looking at key availability, so a reader of an

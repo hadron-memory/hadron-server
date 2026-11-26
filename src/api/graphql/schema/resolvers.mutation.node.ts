@@ -2910,6 +2910,7 @@ export const nodeMutations = {
             { input: wire, index, skill }: { input: CreateNodeDoorInput; index?: TaskIndexInput | null; skill?: TaskSkillExportInput | null },
             ctx: Context,
           ) => {
+            requireCallerIdentity(ctx);
             const input = toCreateNodeInput(wire) as CreateNodeInput;
             // #4864: only the task door declares `index` and `skill` in the SDL; this keeps a direct call from
             // smuggling them onto another kind's door.
@@ -2930,14 +2931,16 @@ export const nodeMutations = {
         ],
         [
           entry.doors.update,
-          async (_: unknown, { input, mergeExports }: { input: UpdateNodeDoorInput; mergeExports?: boolean | null }, ctx: Context) =>
-            updateNodeCore(toUpdateNodeInput(input) as UpdateNodeInput, ctx, entry.doors.update, {
+          async (_: unknown, { input, mergeExports }: { input: UpdateNodeDoorInput; mergeExports?: boolean | null }, ctx: Context) => {
+            requireCallerIdentity(ctx);
+            return updateNodeCore(toUpdateNodeInput(input) as UpdateNodeInput, ctx, entry.doors.update, {
               ownsKind: entry.kind,
               governedContext: 'node-write',
               // #1291: only the task door declares the argument in the SDL; the others never see one, and this
               // keeps a direct call from smuggling it onto a different kind's door.
               ...(entry.kind === 'task' && mergeExports === true ? { mergeProperties: true } : {}),
-            }),
+            });
+          },
         ],
       ]),
     ),
