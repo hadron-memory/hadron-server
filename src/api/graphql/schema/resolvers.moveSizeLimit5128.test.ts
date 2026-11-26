@@ -67,6 +67,28 @@ describe('the limit setting', () => {
     // The ceiling stays under Postgres's 32,767 bind cap: the move's other lookups bind one id per node.
     expect(MOVE_NODE_MAX_NODES_CEILING).toBeLessThan(32_767);
     expect(at(String(MOVE_NODE_MAX_NODES_CEILING))).toBe(MOVE_NODE_MAX_NODES_CEILING);
+    // #5230: the ceiling pinned as a literal. Every pin above is relative to the constant, so a changed constant passed them.
+    expect(at('30000')).toBe(30000);
+    expect(at('30001')).toBe(5000);
+    expect(String(MOVE_NODE_MAX_NODES_CEILING)).toBe('30000');
+  });
+
+  it('#5230: warns once per process for an invalid value, never echoing it, and not for unset or valid', async () => {
+    for (const bad of ['', '0', '-1', '1.5', '1e3', '0x10', '+7', ' 7', '30001', 'sekrit-value']) {
+      vi.resetModules();
+      const { moveNodeMaxNodes: read } = await import('../../../lib/moveSizeLimit.js');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      expect(read({} as NodeJS.ProcessEnv)).toBe(5000);
+      expect(read({ MOVE_NODE_MAX_NODES: '7' } as NodeJS.ProcessEnv)).toBe(7);
+      expect(warn, 'unset and valid values are silent').not.toHaveBeenCalled();
+      expect(read({ MOVE_NODE_MAX_NODES: bad } as NodeJS.ProcessEnv)).toBe(5000);
+      expect(read({ MOVE_NODE_MAX_NODES: bad } as NodeJS.ProcessEnv)).toBe(5000);
+      expect(read({ MOVE_NODE_MAX_NODES: 'another-bad' } as NodeJS.ProcessEnv)).toBe(5000);
+      expect(warn.mock.calls, `one warning for ${JSON.stringify(bad)}`).toEqual([[
+        'move_node_max_nodes_env_invalid: MOVE_NODE_MAX_NODES must be an integer from 1 to 30000; using 5000',
+      ]]);
+      warn.mockRestore();
+    }
   });
 });
 
