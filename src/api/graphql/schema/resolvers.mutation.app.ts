@@ -1556,8 +1556,9 @@ export const appMutations = {
       if (!key) {
         // A worker session never learns whether the key exists; a person keeps the not-found answer of before.
         if (await callerIsWorkerSession(ctx)) throw authorizationDenied();
-        await ctx.db.appKey.findUniqueOrThrow({ where: { id }, include: { app: true } });
-        throw authorizationDenied();
+        // #5266: typed, as grantAppKeyScope answers it; judged before any write, and it never quotes the id (#5225). The raw
+        // findUniqueOrThrow this replaces reached the wire as INTERNAL_SERVER_ERROR.
+        throw new GraphQLError('App key not found.', { extensions: { code: 'APP_KEY_NOT_FOUND' } });
       }
       const target = key;
       let admission: ActAdmission = await admitAppManagement(ctx, target.app, authorizationDenied, instruction, undefined, true);

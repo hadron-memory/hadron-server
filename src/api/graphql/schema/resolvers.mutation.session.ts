@@ -112,6 +112,7 @@ import {
   type SessionInput,
   type UsageEventInput,
   requireCallerIdentity,
+  sessionScopeFilter,
 } from './resolvers.helpers.js';
 import { assertRestoreKeepsRetirement } from '../../../lib/restoreUnretireGuard.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
@@ -706,6 +707,30 @@ async function writeRevisionRow(
 function revisionNotFound(): GraphQLError {
   return new GraphQLError('Revision not found', { extensions: { code: 'BAD_USER_INPUT' } });
 }
+
+/**
+ * #5266: the two database faults of the session insert that are the caller's to cause, answered typed instead of as INTERNAL_SERVER_ERROR.
+ * A unique violation on the session's own id is SESSION_ID_TAKEN: the id is caller-chosen, a repeat is no resume (a resume goes through the
+ * claim and `--session` paths, cor:dmo:070:05), and the answer is the same whoever owns the existing row and names nothing of it. A foreign
+ * key violation on the parent or previous link (a session deleted between the check and the write) is SESSION_NOT_FOUND. No message quotes a
+ * value (#5225). Any other fault passes through untouched.
+ */
+async function answerStartSessionWriteFaults<T>(work: Promise<T>): Promise<T> {
+  try {
+    return await work;
+  } catch (e) {
+    const err = e as { code?: string; meta?: { target?: unknown; field_name?: unknown } } | null;
+    if (err?.code === 'P2002') {
+      const target = Array.isArray(err.meta?.target) ? (err.meta!.target as unknown[]).join(',') : String(err.meta?.target ?? '');
+      if (/^id$|sessions_pkey/.test(target)) throw new GraphQLError('A session with this id already exists.', { extensions: { code: 'SESSION_ID_TAKEN' } });
+    }
+    if (err?.code === 'P2003' && /parent_session_id|prev_session_id|parentSessionId|prevSessionId/.test(String(err.meta?.field_name ?? ''))) {
+      throw notFoundError('SESSION_NOT_FOUND', 'Session not found');
+    }
+    throw e;
+  }
+}
+
 
 function explicitFamilyOrThrow(family: string | null | undefined): string | null {
   const explicit = family != null ? normalizeFamily(family) : null;
@@ -1472,7 +1497,15 @@ export const sessionMutations = {
           { kind: 'user', id: ctx.userId },
         );
       }
-      const bound = await ctx.db.$transaction(async (tx) => {
+      // #5266: a parent or previous session that does not exist, or that the caller may not read, is one typed answer, judged before the
+      // bind writes anything (a raw foreign-key failure reached the wire as INTERNAL_SERVER_ERROR). The same code for both, so it is no
+      // existence oracle, and it never quotes the value (#5225).
+      for (const linked of [input.parentSessionId, input.prevSessionId]) {
+        if (linked === undefined || linked === null) continue;
+        const readable = await ctx.db.session.findFirst({ where: { AND: [{ id: linked }, await sessionScopeFilter(ctx)] }, select: { id: true } });
+        if (!readable) throw notFoundError('SESSION_NOT_FOUND', 'Session not found');
+      }
+      const bound = await answerStartSessionWriteFaults(ctx.db.$transaction(async (tx) => {
         if (launchAnchors.length) await lockAuthorityAnchors(tx, launchAnchors, 'shared');
         // #1001: appId may have come only from an App key or an MCP active-App
         // selection, so neither the appRef nor Worker branches necessarily
@@ -1839,7 +1872,7 @@ export const sessionMutations = {
           supersededIds = ids;
         }
         return created;
-      });
+      }));
       for (const id of supersededIds) sessionKeyCache.evict(id);
       return bound;
     }),
