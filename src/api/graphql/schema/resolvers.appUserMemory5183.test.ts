@@ -441,4 +441,21 @@ describe('isUrnUniqueViolation takes only the memories.urn unique (#5300 item 12
     expect(isUrnUniqueViolation(p2002('memories_legacy_urn_idx'))).toBe(false);
     expect(isUrnUniqueViolation(new Error('urn'))).toBe(false);
   });
+
+  it('a REAL duplicate memories.urn from the database is taken; a real violation of another unique is not (#5300 item 12)', async () => {
+    const row = (urn: string) => ({
+      id: generateId(), ownerUserId: alice.id, userId: alice.id, appId: app.id, userMemoryOfAgentId: agent.id,
+      urn, name: 'n', class: 'private', tags: [],
+    });
+    await db.memory.create({ data: row('alice:dup-one') as never });
+    const urnDup = await db.memory.create({ data: row('alice:dup-one') as never }).then(() => null, (e) => e);
+    expect(urnDup).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    expect((urnDup as Prisma.PrismaClientKnownRequestError).code).toBe('P2002');
+    expect(isUrnUniqueViolation(urnDup)).toBe(true);
+    // a duplicate PRIMARY KEY is a P2002 on a different unique: never read as the URN race
+    const first = await db.memory.create({ data: row('alice:dup-two') as never });
+    const idDup = await db.memory.create({ data: { ...row('alice:dup-three'), id: first.id } as never }).then(() => null, (e) => e);
+    expect((idDup as Prisma.PrismaClientKnownRequestError).code).toBe('P2002');
+    expect(isUrnUniqueViolation(idDup)).toBe(false);
+  });
 });
