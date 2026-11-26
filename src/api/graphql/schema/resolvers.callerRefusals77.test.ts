@@ -159,7 +159,7 @@ async function answer(name: string, target: Target, args: Args, ctx: Context) {
   return text;
 }
 
-const userOnly = new Set(['createChannel', 'createNodeRoleRule', 'createMemoryShare', 'updateMemoryShareRole', 'deleteMemoryShare']);
+const userOnly = new Set(['createChannel', 'createNodeRoleRule', 'createMemoryShare', 'updateMemoryShareRole', 'deleteMemoryShare', 'attachMemoryToApp']);
 const resolverName = (label: string) => label.replace(/\(.*/, '');
 const signedOut = (): Context => ({ db, roles: [], clientId: 'anonymous' });
 

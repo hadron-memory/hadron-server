@@ -1,3 +1,4 @@
+import { isPureAppKeyShape, linkedReachFor, registerOwnRightReader } from '../../../lib/appMemoryLinks.js';
 import { currentAgentOrgMember } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireOrgRole, isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
 import { endGrantsOfAgentsNoLongerInstalled, importedPairsOfParent } from '../../../lib/grants/agentInstallDeparture.js';
@@ -782,12 +783,15 @@ function userPrincipalOnly(ctx: Context): Context {
  * audience, which is precisely what this gate exists to stop. Stripping the
  * active App made the reach broader, not narrower.
  */
-function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
+export function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
   const self = userPrincipalOnly(ctx);
   return getAccessibleMemoryIds(self, memoryId, { excludeAppDerived: true }).then(
     (ids) => ids.includes(memoryId),
   );
 }
+
+// #5185: the link judge (src/lib/appMemoryLinks.ts) asks this question for each attacher; registered here so it imports no resolver.
+registerOwnRightReader(holdsContentReadIndependently as never);
 
 /**
  * The same-App attach (#1357; Holger's ruling, 2026-09-26): an appropriately
@@ -1315,6 +1319,9 @@ export async function canReadMemoryRecord(
     if (isStrictOwner(ctx, memory.userId)) return true;
     // No `as never`: the cast is what let a caller omit the fields this reads.
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
+    // #5185: a pure App key / userless run reads a personal or private memory its App owner linked (the one judge decides,
+    // including that a run never reads `private`), so `memory(ref:)` answers as the node reads and MCP do.
+    if (isPureAppKeyShape(ctx) && (await linkedReachFor(ctx.db, ctx, [memory.id])).has(memory.id)) return true;
     return false;
   }
   // System records follow the installed/licensed Agent or manager audience,
@@ -2505,7 +2512,7 @@ export async function granteeShareAccess(
  *
  * The filter is also what keeps this gate's own contract: `getAccessibleMemoryIds`
  * admits personal/private ONLY through its identity-scoped clauses (owner,
- * holdings, share grantee). Nothing App-derived may add to that set.
+ * holdings, share grantee). Nothing App-derived may add to that set, EXCEPT the App's links for a pure key (#5185), which `getAccessibleMemoryIds` unions in after this filter through `src/lib/appMemoryLinks.ts`, the one judge of them.
  *
  * Both strict-owner axes live upstream as well (PR #1102 and #1260 reviews):
  * a map carrying rows the canonical point gate hard-denies is wrong for every
@@ -2655,7 +2662,12 @@ export async function getAccessibleMemoryIds(
     // right, so an attachment gate asking "what does this caller hold?" gets
     // the empty set rather than that App's fold (#1349).
     if (options?.excludeAppDerived) return [];
-    const derived = await appDerivedMemoryIds(ctx, onlyMemoryId);
+    // #5185: plus what the App's links let a pure key / userless run read (judged at use). Added AFTER the strict-owner
+    // class filter above on purpose: the one judge applies its own personal/private rule.
+    const derived = [...new Set([
+      ...await appDerivedMemoryIds(ctx, onlyMemoryId),
+      ...await linkedReachFor(ctx.db, ctx, onlyMemoryId ? [onlyMemoryId] : undefined),
+    ])];
     // #3306 / ruling 0104: a pure App key or userless run also reads PUBLIC knowledge (App-less, ownerless, live),
     // read-only. One shared predicate with the MCP point gate; reads only (no list surface returns these ids).
     if (!readsPublicKnowledgeWithoutUser(ctx)) return derived;

@@ -54,7 +54,9 @@ const EXEMPT = [
 ] as const;
 
 // #1573: App-scoped memory writers delegate to ONE anchored helper.
-const APP_MEMORY_DELEGATED = ['createMemoryInApp', 'attachMemoryToApp'] as const;
+const APP_MEMORY_DELEGATED = ['createMemoryInApp'] as const;
+// #5185: the link doors take their own anchors (App, its owner, the memory and its owners) straight through withAuthorizedTx.
+const APP_MEMORY_LINK_DOORS = ['attachMemoryToApp', 'detachMemoryFromApp'] as const;
 
 function mutationBody(file: string, name: string): ts.Node {
   const path = `src/api/graphql/schema/${file}`;
@@ -110,6 +112,8 @@ describe('#1551 authority writer ratchet', () => {
     const missing = APP_MEMORY_DELEGATED.filter((name) =>
       !calls(mutationBody('resolvers.mutation.appMemory.ts', name), 'withAppMemoryAuthorityTx'));
     expect(missing).toEqual([]);
+    expect(APP_MEMORY_LINK_DOORS.filter((name) =>
+      !calls(mutationBody('resolvers.mutation.appMemory.ts', name), 'withAuthorizedTx'))).toEqual([]);
     const src = readFileSync('src/api/graphql/schema/resolvers.mutation.appMemory.ts', 'utf8');
     const helper = src.slice(src.indexOf('async function withAppMemoryAuthorityTx'), src.indexOf('export const appMemoryMutations'));
     expect(helper).toContain('withAuthorizedTx(');
