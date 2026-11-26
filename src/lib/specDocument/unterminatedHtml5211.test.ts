@@ -321,3 +321,77 @@ describe('#5265 blind review at 3fa46eef', () => {
     expect(escapeUnterminatedHtml('- a\n***\n    <script>')).toBe('- a\n***\n    <script>');
   });
 });
+
+describe('#5265 seats at 8652e68e (Bradley P1, Charles F1 and F2)', () => {
+  it('many declaration fences escape in linear time: the CommonMark check runs only for the declaration the scan reports', () => {
+    const body = Array(3000).fill("<!x>```\n<b x='\n```").join('\n');
+    const t = performance.now();
+    escapeUnterminatedHtml(body);
+    expect(performance.now() - t).toBeLessThan(2000);
+  });
+
+  // A line that opens a deeper quote starts a container with no paragraph in it, so its `-`, `--` or `=` underlines nothing: the
+  // four-space line after it is the quote's lazy text (or the empty item's), and the script in it is judged.
+  it.each([
+    'a\n>-\n    <script>', 'a\n>--\n    <script>', 'a\n>-\n    <textarea>', 'a\n>-\n\t<xmp>', 'a\r\n>-\r\n    <script>',
+    '.\n>=\n\t<script>', '.\r\n>=\r\n\t<script>',
+  ])('%j: the opener is escaped', (body) => {
+    expect(escapeUnterminatedHtml(body)).not.toBe(body);
+    expect(losers(body)).not.toEqual([]);
+    expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+  });
+
+  // A fence inside a list item ends with the item: a non-blank line indented less than the item's content is markup again.
+  it.each(['-\n  ~~~\n<xmp>', '-\r\n  ~~~\r\n<xmp>', '- a\n  ```\n<script>'])('%j: the tag after the item is escaped', (body) => {
+    expect(escapeUnterminatedHtml(body)).not.toBe(body);
+    expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+  });
+});
+
+describe('#5265 fix head after 8652e68e: bodies 3fa46eef kept that 8652e68e lost (Braxton fuzz)', () => {
+  // A bare marker opens an item whose content starts after the marker and its indent; a line indented to it is still in the item, so a
+  // fence there ends with the item, and escaping the declaration above (which makes the `-` an underline) is what would leave it open.
+  it.each(['<!l>```\n-\n  >\n  ~~~', '<!l>```\n-\n  -\n  ~~~'])('%j: the declaration is left as written', (body) => {
+    expect(escapeUnterminatedHtml(body)).toBe(body);
+    expect(losers(`&lt;${body.slice(1)}`)).toEqual(ALL);
+  });
+
+  it('a fence in a bare item after its paragraph ends with the item, so the tag after it is escaped', () => {
+    const body = '-\n  x\n  ~~~\n<textarea';
+    expect(losers(body)).toEqual(ALL);
+    expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+  });
+
+  // marked reads no underline under a paragraph whose first line is a lone tag, nor under a quote's lazy lines: the indented line after
+  // the `=` or `-` is its paragraph text there, so the raw-text tag in it is judged.
+  it.each(['<div/x>\n=\n    <xmp>', '>-\n->\n-\n\t<xmp>'])('%j: the tag is escaped for marked', (body) => {
+    expect(losers(body)).toEqual(['marked']);
+    expect(escapeUnterminatedHtml(body)).not.toBe(body);
+    expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+  });
+});
+
+describe('#5265 fix head after 8652e68e: guards the fuzz and the mutants found', () => {
+  // After an empty quote line marked carries nothing on lazily: the `=` or `-` there is CommonMark's underline in marked too, so the
+  // declaration's fence opens and never closes, and the declaration is escaped as on 8652e68e.
+  it.each(['>\n=\n=\n<!l>```', '>\n~\n-\n<!l>```', '>\na\n=\n<!l>```'])('%j: the declaration is escaped', (body) => {
+    expect(losers(body)).toEqual(['marked']);
+    expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+  });
+
+  // A declaration is an HTML block to marked, not a paragraph: the `-` under it underlines nothing there and the next declaration's fence opens.
+  it.each(['<!l>\n-\n<!x>~~~', '<!-->\n-\n<!x>~~~', '<!x>\n-\n<!x>~~~'])('%j: the second declaration is escaped', (body) => {
+    expect(losers(body)).toEqual(['marked']);
+    expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+  });
+
+  it('a fence CommonMark leaves open as written is no reason to keep the declaration: marked keeps the anchor once it is escaped', () => {
+    const body = '<!x>~~~  \n-\n<!DOCTYPE html>```\n\n  ```~~~';
+    expect(losers(escapeUnterminatedHtml(body))).toEqual(['commonmark.js', 'markdown-it']);
+  });
+
+  it('marked reads a line after a bare item\'s fence as its fence\'s text, so the item does not end it there', () => {
+    const body = '>\t\n-\n  ```\n\n```\n  > <xmp><!-->+ \n\n\n===';
+    expect(losers(escapeUnterminatedHtml(body))).toEqual(['commonmark.js', 'markdown-it']);
+  });
+});
