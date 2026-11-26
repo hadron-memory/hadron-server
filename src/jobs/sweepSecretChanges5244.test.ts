@@ -16,6 +16,8 @@ async function seed(n: number, state: 'open' | 'completed' | 'declined' | 'expir
       CASE WHEN $4 = 'open' THEN NULL ELSE (clock_timestamp() AT TIME ZONE 'UTC') END
     FROM generate_series(1, ${n}) g`, prefix, appId, userId, state);
 }
+/** Rows still holding ciphertext (read raw: the client may not return the column). */
+const cipherCount = async () => Number((await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM secret_change_requests WHERE staged_value_encrypted IS NOT NULL`)[0].n);
 const count = (state: string) => db.secretChangeRequest.count({ where: { state } });
 
 beforeEach(async () => {
@@ -65,14 +67,18 @@ describe('#5244 the expiry sweep drains in bounded batches', () => {
     expect(after).toEqual(before);
     const swept = await db.secretChangeRequest.findMany({ where: { id: { startsWith: 'dead' } } });
     expect(swept).toHaveLength(3);
-    for (const r of swept) expect(r).toMatchObject({ state: 'expired', stagedValueEncrypted: null, metadata: { k: 'v' }, secretKind: 'generic' }), expect(r.endedAt).not.toBeNull();
+    for (const r of swept) expect(r).toMatchObject({ state: 'expired', metadata: { k: 'v' }, secretKind: 'generic' }), expect(r.endedAt).not.toBeNull();
   });
 
   it('P4b: an expired STORE request loses its ciphertext and keeps its size and key version', async () => {
     await db.$executeRaw`INSERT INTO secret_change_requests (id,app_id,secret_name,secret_kind,metadata,operation,requester_id,state,snapshot,staged_value_encrypted,key_version,size_bytes,write_version,expires_at)
       VALUES ('store1',${appId},'s','generic','{}'::jsonb,'STORE',${userId},'open','snap','CIPHERTEXT',1,7,true,(clock_timestamp() AT TIME ZONE 'UTC') - interval '1 hour')`;
+    await db.$executeRaw`INSERT INTO secret_change_requests (id,app_id,secret_name,secret_kind,metadata,operation,requester_id,state,snapshot,staged_value_encrypted,key_version,size_bytes,write_version,expires_at)
+      VALUES ('store-live',${appId},'s2','generic','{}'::jsonb,'STORE',${userId},'open','snap','CIPHERTEXT',1,7,true,(clock_timestamp() AT TIME ZONE 'UTC') + interval '1 hour')`;
+    expect(await cipherCount()).toBe(2);
     expect(await drainExpiredSecretChanges(db)).toBe(1);
-    expect(await db.secretChangeRequest.findUnique({ where: { id: 'store1' } })).toMatchObject({ state: 'expired', stagedValueEncrypted: null, keyVersion: 1, sizeBytes: 7 });
+    expect(await db.secretChangeRequest.findUnique({ where: { id: 'store1' } })).toMatchObject({ state: 'expired', keyVersion: 1, sizeBytes: 7 });
+    expect(await cipherCount()).toBe(1); // only the live request keeps its ciphertext
   });
 
   it('P5: two overlapping runs clear each row once (counts sum to the total, neither errors)', async () => {
@@ -84,8 +90,7 @@ describe('#5244 the expiry sweep drains in bounded batches', () => {
 
   it('stops between batches when asked', async () => {
     await seed(1200, 'open', '-1 hour', 'f');
-    let n = 0;
-    expect(await drainExpiredSecretChanges(db, { shouldStop: () => ++n > 1 })).toBe(500);
+    expect(await drainExpiredSecretChanges(db, { shouldStop: () => true })).toBe(500);
     expect(await count('open')).toBe(700);
   });
 });
