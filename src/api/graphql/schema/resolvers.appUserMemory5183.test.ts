@@ -245,6 +245,16 @@ describe('collisions: numeric tail, aliases, tombstones', () => {
     expect(await db.memory.findUnique({ where: { id: other.id } })).not.toBeNull();
   });
 
+  it("an own tombstone that holds a question log keeps its address: the next tail is taken, never a refusal (R2)", async () => {
+    const held = await db.memory.create({ data: {
+      id: generateId(), ownerUserId: alice.id, userId: alice.id, appId: app.id, userMemoryOfAgentId: agent.id,
+      urn: 'alice:tutor-alice-private', name: 'held', class: 'private', tags: [], deletedAt: new Date(),
+    } as never });
+    await db.node.create({ data: { id: generateId(), memoryId: held.id, loc: 'log', name: 'log', content: '', role: 'question.log' } as never });
+    expect((await mk(alice, 'private')).urn).toBe('alice:tutor-alice-private-2');
+    expect(await db.memory.findUnique({ where: { id: held.id } })).not.toBeNull();
+  });
+
   it("the caller's own tombstone of another class is never reclaimed", async () => {
     const other = await db.memory.create({ data: {
       id: generateId(), ownerUserId: alice.id, userId: alice.id, appId: app.id, userMemoryOfAgentId: agent.id,

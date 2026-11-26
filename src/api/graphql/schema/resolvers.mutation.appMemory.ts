@@ -487,9 +487,19 @@ export const appMemoryMutations = {
                 const ownTombstones = blockers.filter((b) =>
                   b.deletedAt !== null && b.userId === ctx.userId && b.appId === app.id && b.class === klass);
                 if (ownTombstones.length !== blockers.length) continue;
+                // A tombstone that may not be removed (it holds a minted spec or a question) keeps its address:
+                // that candidate is taken, and the next tail is tried, so a name collision never refuses (R2).
+                let kept = false;
                 for (const b of ownTombstones.sort((x, y) => x.id.localeCompare(y.id))) {
-                  await reclaimTombstonedMemory(tx, b.id);
+                  try {
+                    await reclaimTombstonedMemory(tx, b.id);
+                  } catch (e) {
+                    if (!(e instanceof GraphQLError)) throw e;
+                    kept = true;
+                    break;
+                  }
                 }
+                if (kept) continue;
               }
               return createRow(tx, {
                 urn, name: candidate, organizationId: null, ownerUserId: ctx.userId!, appUserMemory: true,
