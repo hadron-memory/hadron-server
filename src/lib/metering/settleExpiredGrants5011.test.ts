@@ -20,6 +20,7 @@ import {
   settleExpiredGrants,
   unsettledRemainder,
   settleAndMeasure,
+  readReplayWindow,
   writeSettlements,
 } from './settleExpiredGrants.js';
 
@@ -299,5 +300,36 @@ describe('#5011 settleExpiredGrants', () => {
     const dbNow = await databaseNow(db);
     const g = await grant(100, later(dbNow, -3_600_000), later(dbNow, -120_000));
     expect(await settleExpiredGrants(db, { organizationId: orgId })).toEqual([{ grantId: g.id, amountMicroCents: -100n }]);
+  });
+});
+
+describe('#5242 item 1: the window drops a grant whose expiry precedes its creation', () => {
+  // A row only a direct database write can make (the mutation refuses a grant dated in the past): created at 02-10, "expired" at 02-01.
+  it('is no expiring grant: it stays in the running balance as plain credit, is never settled and never reported unsettled, next to a legitimate expired grant', async () => {
+    const owner = { organizationId: orgId };
+    const good = await grant(100, d('01-01'), d('02-01'));
+    const odd = await grant(500, d('02-10'), d('02-01'));
+    const now = d('02-20');
+    const window = await readReplayWindow(db, owner, now);
+    const entry = (id: string) => window?.entries.find((e) => e.id === id);
+    expect(entry(good.id)?.expiresAt).toEqual(d('02-01')); // the legitimate grant still expires
+    expect(entry(odd.id)).toBeDefined(); // its amount is a real entry of the ledger ...
+    expect(entry(odd.id)?.expiresAt).toBeNull(); // ... but it never expires
+    const m = await settleAndMeasure(db, owner, now, { write: true });
+    expect(m.settled).toEqual([{ grantId: good.id, amountMicroCents: -100n }]); // only the legitimate grant, nothing of the odd one
+    expect(m.unsettled).toBe(0n);
+    expect((await settlements()).map((r) => r.sourceId)).toEqual([good.id]);
+    // The balance keeps the odd row's credit: the stored sum less what the settlement took.
+    const sum = (await db.creditLedgerEntry.aggregate({ where: { organizationId: orgId }, _sum: { amountMicroCents: true } }))._sum.amountMicroCents;
+    expect(sum).toBe(500n);
+  });
+
+  it('an organization that holds only such a row: no replay, nothing settled, the balance is the stored sum', async () => {
+    const owner = { organizationId: orgId };
+    await grant(500, d('02-10'), d('02-01'));
+    const now = d('02-20');
+    expect(await readReplayWindow(db, owner, now)).toBeNull();
+    expect(await settleAndMeasure(db, owner, now, { write: true })).toEqual({ settled: [], unsettled: 0n, replay: undefined });
+    expect(await settlements()).toHaveLength(0);
   });
 });
