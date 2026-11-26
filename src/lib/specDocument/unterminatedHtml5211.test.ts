@@ -8,7 +8,7 @@ import { parseHTML } from 'linkedom';
 import MarkdownIt from 'markdown-it';
 import { marked } from 'marked';
 import { describe, expect, it } from 'vitest';
-import { escapeUnterminatedHtml } from './unterminatedHtml.js';
+import { escapeUnterminatedHtml, quoteColumnsForTests } from './unterminatedHtml.js';
 
 const reader = new commonmark.Parser();
 const writer = new commonmark.HtmlRenderer();
@@ -258,4 +258,66 @@ describe('#5265: a setext underline ends the run a code span may close in', () =
     ['`-` under the line', 'a `§script>\n-\nx`', ALL],
     ['a longer run', 'a ```§script>\n=\nx```', ALL],
   ]);
+});
+
+describe('#5265 blind review at 3fa46eef', () => {
+  it('a tab after a quote marker is measured once (a one-column tab ends at the next stop)', () => {
+    // `> >\t> q`: the second marker sits at column 2, its tab starts at column 3 and is one column wide, so the third marker is at column 4.
+    expect(quoteColumnsForTests('> >\t> q', 3)).toEqual({ marker: 4, content: 6 });
+    expect(quoteColumnsForTests('> >\t> q', 2)).toEqual({ marker: 2, content: 4 });
+    expect(quoteColumnsForTests('>\t> q', 2)).toEqual({ marker: 4, content: 6 });
+  });
+
+  // A mixed `-*-` line and a lazy underline in a quote are paragraph text: the code span runs on, and the `<` in it is code.
+  it.each([
+    'a `x\n-*-\n<b x=\'\ny` w',
+    'a `x\n*-*\n<b x=\'\ny` w',
+    '> a `x\n=\n<b x=\'\ny` w',
+    '> a `x\n--\n<b x=\'\ny` w',
+  ])('%j stays as written', (body) => {
+    expect(escapeUnterminatedHtml(body)).toBe(body);
+    expect(losers(body)).toEqual([]);
+  });
+
+  it('a lazy `=` in a list item is an underline to marked, so the span ends there and the tag is judged', () => {
+    expect(escapeUnterminatedHtml('- a `x\n=\n<b x=\'\ny` w')).toBe('- a `x\n=\n&lt;b x=\'\ny` w');
+  });
+
+  cases([
+    // A `-` or `--` underline ends the paragraph, so a type 7 tag under it starts an HTML block and the code span on the next line is raw.
+    ['a `-` underline', 'a\n-\n<x>\n`§b x=\'`', ALL],
+    ['a `--` underline', 'a\n--\n<x>\n`§b x=\'`', ALL],
+    // The declaration's fence: a lone `-` over an indented line escapes where no fence is left open after it.
+    ['a lone `-` over an indented line', '§!DOCTYPE html>```\n-\n  x', ['marked']],
+    ['the item\'s fence closes later', '§!DOCTYPE html>```\n-\n  ~~~\n  y\n~~~', ALL],
+    // The item ended (empty, then a blank line): the declaration is at the top level, where marked opens the fence.
+    ['after an empty item', '- a\n-\n\n  §!DOCTYPE html>```', ['marked']],
+    // `<div/x` is no type 6 block, so the line is paragraph text and the script in it is inline HTML.
+    ['`<div/x` opens no block', '§!DOCTYPE html>```\n<x>\n<div/x§script>', ['marked']],
+    // A lazy `=` in a quote is paragraph text, so the four-space line after it is too (no code): its script is judged.
+    ['a lazy `=` in a quote', '> a\n=\n    §script>', ALL],
+    // `<div/x` closes no list item, so the indented line after the blank line is the item's paragraph, not code.
+    ['`<div/x` keeps the item open', '- a\n<div/x>\n\n    §script>', ['commonmark.js', 'markdown-it']],
+  ]);
+
+  it('a lone `-` ends a quote\'s paragraph in every reader (an empty item, never lazy text), so the span ends there', () => {
+    expect(escapeUnterminatedHtml('> a `x\n-\n<b x=\'\ny` w')).toBe('> a `x\n-\n&lt;b x=\'\ny` w');
+  });
+
+  it('the declaration is left where escaping it would leave a fence open in CommonMark', () => {
+    // Escaped, the line is a paragraph, `<x>` no longer starts an HTML block, and the fence after it runs to the end.
+    const body = '<!x>~~~\n<x>\n```\n-*-\n';
+    expect(escapeUnterminatedHtml(body)).toBe(body);
+    expect(losers(body)).toEqual(['marked']);
+    expect(losers(`&lt;${body.slice(1)}`)).toEqual(ALL);
+    // The same with a lone `-` whose item holds the fence.
+    const bullet = '<!x>~~~>\t    \n-\n  ```\n\n\n';
+    expect(escapeUnterminatedHtml(bullet)).toBe(bullet);
+    expect(losers(`&lt;${bullet.slice(1)}`)).toEqual(ALL);
+  });
+
+  it('a CRLF line is read as its LF form', () => {
+    expect(escapeUnterminatedHtml('- a\r\n***\r\n    <script>')).toBe('- a\r\n***\r\n    <script>');
+    expect(escapeUnterminatedHtml('- a\n***\n    <script>')).toBe('- a\n***\n    <script>');
+  });
 });
