@@ -1294,6 +1294,18 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_credit_ledger_org_gone",
+      "kind": "function",
+      "file": "credit-ledger-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_credit_ledger_user_gone",
+      "kind": "function",
+      "file": "credit-ledger-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_credit_ledger_user_merged",
       "kind": "function",
       "file": "credit-ledger-invariants.sql",
