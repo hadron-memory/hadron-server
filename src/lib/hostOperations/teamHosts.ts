@@ -111,7 +111,7 @@ export async function insertOrLockTeamHost(
   const row = await lockTeamHost(tx, a.appId, a.hostId);
   // Only the App's cascade deletes a row, and the caller's App anchor excludes it. Should a delete path ever appear,
   // fail the transaction loudly rather than hand back a row that is not there.
-  if (!row) throw new Error('insertOrLockTeamHost: the host row vanished between the insert and the lock');
+  if (!row) throw new Error(`insertOrLockTeamHost: the host row (app ${a.appId}, host ${a.hostId}) vanished between the insert and the lock`);
   return { row, created: inserted.length > 0 };
 }
 

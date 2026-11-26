@@ -24,7 +24,7 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
-import { loadLaunchableFamilies } from '../../../lib/agentTasks/hosts.js';
+import { loadLaunchableFamilies, sweepLostHosts } from '../../../lib/agentTasks/hosts.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -370,6 +370,8 @@ describe('removeAgentTeamHost: person-only (A6), and what it ends (A7, A8)', () 
     const first = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
     await register(first, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
     await remove({ hostId: 'mac1' });
+    // The removal ended the registration, so the clear below is the re-registration's.
+    expect((await db.hostRegistration.findFirstOrThrow({ where: { hostId: 'mac1' } })).lostAt).not.toBeNull();
     const again = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
     // The removal revoked the old key and removed the assignment, so the rejoined host is assigned and registers afresh.
     await M.assignHostWorker({}, { input: { appRef: app.id, hostId: 'mac1', worker: 'Kit', workdir: 'hadron-server/kit', family: 'claude' } }, ctx(manager.id));
@@ -377,6 +379,17 @@ describe('removeAgentTeamHost: person-only (A6), and what it ends (A7, A8)', () 
     await register(again, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
     expect((await db.hostRegistration.findFirstOrThrow({ where: { hostId: 'mac1' } })).lostAt).toBeNull();
     expect(await db.hostRegistration.count({ where: { hostId: 'mac1' } })).toBe(1);
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, new Date())).get(kit.id)).toEqual(['claude']);
+  });
+
+  it('a host that lapsed and registers again with the same key is live again, with no join (the clear is registerHost\'s, not the join\'s)', async () => {
+    const keyId = await keyIdOf((await join({ hostId: 'mac1' })).rawKey);
+    await register(keyId, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
+    const later = new Date(Date.now() + 365 * 86_400_000);
+    expect(await sweepLostHosts(db, later)).toBe(1);
+    expect((await db.hostRegistration.findFirstOrThrow({ where: { hostId: 'mac1' } })).lostAt).not.toBeNull();
+    await register(keyId, [{ worker: 'Kit', family: 'claude', worktrees: ['hadron-server/kit'] }]);
+    expect((await db.hostRegistration.findFirstOrThrow({ where: { hostId: 'mac1' } })).lostAt).toBeNull();
     expect((await loadLaunchableFamilies(db, { appId: app.id }, new Date())).get(kit.id)).toEqual(['claude']);
   });
 
