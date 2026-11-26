@@ -293,6 +293,10 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
   let lineFrom = -1;
   let lineTo = -2;
   let lineFirst = -1;
+  // marked ends a line-head declaration block at its first `>` and starts the next block right after it (#5211).
+  let markedBlockAt = -1;
+  // Whether the line before was taken for a link reference definition: marked's grammar for one is stricter, so it may be a paragraph there.
+  let prevDefinition = false;
   let lineContent = -1;
   let lineContainers: Container[] = [];
   const startsLine = (j: number): boolean => {
@@ -311,7 +315,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       const from = columnAfter(text.slice(lineFrom, lineContent));
       lineFirst = columnAfter(text.slice(lineContent, f), from) - from <= 3 ? f : -1;
     }
-    return lineFirst === j;
+    return lineFirst === j || j === markedBlockAt;
   };
   // Where the containers of the line at `j` end (`blank`: or the first line that is blank inside them). `startsLine(j)` was asked first. A line
   // in the same containers below a known end has the same end, so a long quote is walked once.
@@ -408,6 +412,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       const indent = columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0], from) - from - (quotes.endsWith('>') && inner.startsWith('\t') ? 1 : 0);
       // A line right after a definition's line continues its paragraph, so its indent makes no code of it.
       const afterDefinition = inDefinition;
+      prevDefinition = afterDefinition;
       inDefinition = false;
       // #5211 — a list item: a line indented to its content continues it, and is code only four columns past that.
       // Columns are counted inside the line's quotes, and a list belongs to the quote depth it opened at.
@@ -521,12 +526,13 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     }
     // #5211 — marked takes a declaration only when a blank follows its name; any other `<!` and a name is text to it, so what follows is read.
     // At the head of a line that interrupts no paragraph it starts an HTML block in marked too, and is complete there.
-    if (model === 'marked' && /<![A-Za-z]+(?![A-Za-z\s])/y.test(text.slice(i, text.indexOf('\n', i) === -1 ? n : text.indexOf('\n', i) + 1)) && !(startsLine(i) && prevBefore !== 'other' && prevBefore !== 'marker')) { i += 2; continue; }
+    if (model === 'marked' && /<![A-Za-z]+(?![A-Za-z\s])/y.test(text.slice(i, text.indexOf('\n', i) === -1 ? n : text.indexOf('\n', i) + 1)) && !(startsLine(i) && prevBefore !== 'other' && prevBefore !== 'marker' && !prevDefinition)) { i += 2; continue; }
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
       // marked ends such a block at the declaration's first `>` and reads the rest of the line as text (#5211); CommonMark keeps it raw.
       if (startsLine(i) && isLetter(text[i + 2]) && model === 'commonmark') raw(lineEndAt(close));
+      if (startsLine(i) && isLetter(text[i + 2]) && model === 'marked') markedBlockAt = close + 1;
       i = close + 1;
       continue;
     }
