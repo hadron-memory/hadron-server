@@ -11,7 +11,7 @@
  * pattern as src/test/integration/025-auth-github-return-to.test.ts.
  */
 
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { makeMcpReq, makeMcpRes } from '../test/helpers.js';

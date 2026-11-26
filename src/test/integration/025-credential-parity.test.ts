@@ -36,13 +36,14 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb, makeMcpReq, makeMcpRes, walkOAuthDance } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { signJwt } from '../../auth/jwt.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import {
+  hashUserApiKey,
   resolveAuthContext,
   USER_API_KEY_PREFIX,
 } from '../../middleware/auth.js';
@@ -195,18 +196,22 @@ describe('025-credential-parity: portal-minted vs OAuth-minted tokens', () => {
 
     // Neither key may carry roles captured at mint time.
     await db.user.update({ where: { id: testUser.id }, data: { roles: ['ADMIN'] } });
+    try {
+      const portalCtx = await resolveAuthContext(
+        makeMcpReq({ authorization: `Bearer ${portalKey}` }),
+        db,
+      );
+      const oauthCtx = await resolveAuthContext(
+        makeMcpReq({ authorization: `Bearer ${oauthKey}` }),
+        db,
+      );
 
-    const portalCtx = await resolveAuthContext(
-      makeMcpReq({ authorization: `Bearer ${portalKey}` }),
-      db,
-    );
-    const oauthCtx = await resolveAuthContext(
-      makeMcpReq({ authorization: `Bearer ${oauthKey}` }),
-      db,
-    );
-
-    expect(portalCtx.roles, 'portal').toEqual(['ADMIN']);
-    expect(oauthCtx.roles, 'oauth').toEqual(['ADMIN']);
+      expect(portalCtx.roles, 'portal').toEqual(['ADMIN']);
+      expect(oauthCtx.roles, 'oauth').toEqual(['ADMIN']);
+    } finally {
+      // beforeEach recreates the user, but restore anyway so the test never leaks.
+      await db.user.update({ where: { id: testUser.id }, data: { roles: ['CONTRIBUTOR'] } });
+    }
   });
 
   it('resolving either token stamps lastUsedAt on its own key row', async () => {
@@ -214,7 +219,7 @@ describe('025-credential-parity: portal-minted vs OAuth-minted tokens', () => {
     const oauthKey = await mintViaOAuth();
     const rowOf = async (raw: string) =>
       db.userApiKey.findFirstOrThrow({
-        where: { userId: testUser.id, keyHash: createHash('sha256').update(raw).digest('hex') },
+        where: { userId: testUser.id, keyHash: hashUserApiKey(raw) },
       });
     expect((await rowOf(portalKey)).lastUsedAt, 'portal before').toBeNull();
     expect((await rowOf(oauthKey)).lastUsedAt, 'oauth before').toBeNull();

@@ -1,5 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Request } from 'express';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, makeMcpReq, makeMcpRes } from '../test/helpers.js';
 import { handleMcpRequest } from './server.js';
@@ -91,13 +90,7 @@ describe('/mcp 401 + WWW-Authenticate (FR-005, RFC 9728)', () => {
     // can't synthesize a meaningful resource_metadata URL. Respond 400
     // honestly rather than emit a partial URL that downstream clients
     // would 404 against.
-    const req = {
-      method: 'POST',
-      headers: {},
-      protocol: 'http',
-      body: { jsonrpc: '2.0', method: 'initialize', id: 1 },
-      get: () => undefined,
-    } as unknown as Request;
+    const req = makeMcpReq({ host: null });
     const res = makeMcpRes();
 
     await handleMcpRequest(req, res);

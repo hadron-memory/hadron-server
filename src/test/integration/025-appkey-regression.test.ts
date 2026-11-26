@@ -24,7 +24,7 @@
  * failure here points at the right place.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import type { Request } from 'express';
 import { randomBytes } from 'crypto';
 import { db } from '../../integrations/db/client.js';

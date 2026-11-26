@@ -858,9 +858,13 @@ export function makeMcpRes(): Response & {
       body = payload;
       return res;
     }),
-    writeHead: vi.fn((code: number, h?: Record<string, McpHeaderValue>) => {
+    // Node's writeHead(code, [statusMessage], [headers]): take the headers from
+    // whichever trailing argument is an object (the array-of-pairs form is not
+    // modelled; no test here uses it).
+    writeHead: vi.fn((code: number, ...rest: unknown[]) => {
       status = code;
-      if (h) Object.assign(headers, h);
+      const h = rest.find((a) => a !== null && typeof a === 'object' && !Array.isArray(a));
+      if (h) Object.assign(headers, h as Record<string, McpHeaderValue>);
       return res;
     }),
     write: vi.fn(() => true),
@@ -871,6 +875,8 @@ export function makeMcpRes(): Response & {
     removeListener: vi.fn(),
     addListener: vi.fn(),
     emit: vi.fn(),
+    // Stub limits (unlike Node): headersSent stays false and getHeader is
+    // case-sensitive. No test here depends on either.
     headersSent: false,
     get _status() {
       return status;
