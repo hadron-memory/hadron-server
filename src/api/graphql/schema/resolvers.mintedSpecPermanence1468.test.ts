@@ -429,15 +429,19 @@ describe('#1468 — whole-corpus removal', () => {
   it('createMemory refuses to reclaim the URN of a deleted minted corpus that still holds a spec', async () => {
     const dead = await memory('reuse', { mintedAt: new Date(), deletedAt: new Date() });
     await node(dead.id, 'pas:010', { tags: ['spec'] });
-    await expect(resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse' } as never, ctx()))
+    // #5203 S3: only a SUPPLIED slug reclaims; a derived one iterates past the deleted corpus (pinned below).
+    await expect(resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse', slug: 'reuse' } as never, ctx()))
       .rejects.toSatisfy(refusedPermanent);
+    expect(await db.memory.findUnique({ where: { id: dead.id } })).not.toBeNull();
+    const derived = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse' } as never, ctx());
+    expect(derived).toMatchObject({ urn: `${org.urn}:reuse-2` });
     expect(await db.memory.findUnique({ where: { id: dead.id } })).not.toBeNull();
   });
 
   it('control: createMemory still reclaims a deleted draft corpus', async () => {
     const dead = await memory('reuse', { deletedAt: new Date() });
     await node(dead.id, 'pas:010', { tags: ['spec'] });
-    await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse' } as never, ctx());
+    await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse', slug: 'reuse' } as never, ctx());
     expect(await db.memory.findUnique({ where: { id: dead.id } })).toBeNull();
   });
 });
@@ -457,8 +461,13 @@ describe('#1468 — cascades: App reclaim, account erasure, anonymous expiry', (
     });
     await marker(appMem.id, 'suite-mem:mint-marker', new Date());
     await node(appMem.id, 'pas:010', { tags: ['spec'] });
-    await expect(resolvers.Mutation.createApp({}, { orgRef: org.id, agentRef: a.id, name: 'Suite' } as never, ctx()))
+    // #5203 S3: only a SUPPLIED urn reclaims; a derived one iterates past the deleted App.
+    await expect(resolvers.Mutation.createApp({}, { orgRef: org.id, agentRef: a.id, name: 'Suite', urn: 'suite' } as never, ctx()))
       .rejects.toSatisfy(refusedPermanent);
+    expect(await db.app.findUnique({ where: { id: retired.id } })).not.toBeNull();
+    expect(await db.memory.findUnique({ where: { id: appMem.id } })).not.toBeNull();
+    const derived = await resolvers.Mutation.createApp({}, { orgRef: org.id, agentRef: a.id, name: 'Suite' } as never, ctx());
+    expect(derived).toMatchObject({ urn: `${org.urn}:suite-2` });
     expect(await db.app.findUnique({ where: { id: retired.id } })).not.toBeNull();
     expect(await db.memory.findUnique({ where: { id: appMem.id } })).not.toBeNull();
   });
@@ -520,15 +529,19 @@ describe('#1468 — address reclaims that erase a deleted minted corpus (Codex P
 
   it('createAgent refuses to reclaim its -system address from a deleted minted corpus', async () => {
     const corpus = await deletedCorpusAt(`${org.urn}:spec-bot-system`);
-    await expect(resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Spec Bot' } as never, ctx()))
+    // #5203 S3: only a SUPPLIED slug reclaims; a derived one iterates past the deleted corpus at `<urn>-system`.
+    await expect(resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Spec Bot', slug: 'spec-bot' } as never, ctx()))
       .rejects.toSatisfy(refusedPermanent);
     expect(await db.memory.findUnique({ where: { id: corpus.id } })).not.toBeNull();
     expect(await db.agent.findFirst({ where: { urn: `${org.urn}:spec-bot` } })).toBeNull();
+    const derived = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Spec Bot' } as never, ctx());
+    expect(derived).toMatchObject({ urn: `${org.urn}:spec-bot-2` });
+    expect(await db.memory.findUnique({ where: { id: corpus.id } })).not.toBeNull();
   });
 
   it('control: createAgent still reclaims a deleted draft memory at its -system address', async () => {
     await memory('draft-bot-system', { deletedAt: new Date() });
-    const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Draft Bot' } as never, ctx());
+    const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Draft Bot', slug: 'draft-bot' } as never, ctx());
     expect(agent).toMatchObject({ urn: `${org.urn}:draft-bot` });
   });
 

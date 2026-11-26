@@ -1,3 +1,4 @@
+import { judgeAppLinks } from '../../../lib/appMemoryLinks.js';
 import { readableSupersedingSessionId } from '../../../lib/sessionSuperseded.js';
 import { isNewInstallPayload } from './installationPayload.js';
 import { listAppInstallations, appInstallationWhere } from '../../../lib/appInstallations.js';
@@ -112,6 +113,7 @@ import {
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
+  holdsContentReadIndependently,
   canWriteMemoryRecord,
   sessionScopeFilter,
   CONTENT_RAW_DEFAULT,
@@ -2180,6 +2182,40 @@ export const typeResolvers = {
         .sort(servedInstallationOrder(wholeAppReadable))
         .map(row=>row.agent)
         .filter((ag): ag is NonNullable<typeof ag> => ag !== null);
+    },
+    /**
+     * #5185: this App's memory links. Only entries whose memory the viewer reads in their OWN right (not through any App) are
+     * listed; the rest are absent and not counted. `active` is the shared at-use judgement of `src/lib/appMemoryLinks.ts`.
+     */
+    attachedMemories: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (!(await loadReadableNestedApp(ctx, a.id))) return [];
+      // The attacher is a roster fact: withheld from a caller the member list is withheld from (#2089), as `members` does.
+      const rosterWithheld = await appRosterWithheld(ctx, a.id);
+      const links = await ctx.db.appMemoryLink.findMany({
+        where: { appId: a.id, memory: { deletedAt: null } },
+        orderBy: [{ createdAt: 'asc' }, { memoryId: 'asc' }, { attachedBy: 'asc' }],
+        select: { memoryId: true, attachedBy: true, createdAt: true, attacher: { select: { handle: true } } },
+      });
+      if (links.length === 0) return [];
+      // One own-right judgement per distinct memory for this viewer.
+      const memoryIds = [...new Set(links.map((l) => l.memoryId))];
+      const readableIds = new Set<string>();
+      await Promise.all(memoryIds.map(async (id) => { if (await holdsContentReadIndependently(ctx, id)) readableIds.add(id); }));
+      const visible = links.filter((l) => readableIds.has(l.memoryId));
+      if (visible.length === 0) return [];
+      const judged = await judgeAppLinks(ctx.db, a.id, { onlyMemoryIds: [...readableIds] });
+      const active = new Map(judged.map((j) => [`${j.memoryId}:${j.attachedBy}`, j.active]));
+      const memories = new Map((await ctx.db.memory.findMany({ where: { id: { in: [...readableIds] } } })).map((m) => [m.id, m]));
+      return visible.flatMap((l) => {
+        const memory = memories.get(l.memoryId);
+        return memory ? [{
+          memory,
+          attachedById: rosterWithheld ? null : l.attachedBy,
+          attachedByHandle: rosterWithheld ? null : (l.attacher.handle ?? null),
+          createdAt: l.createdAt,
+          active: active.get(`${l.memoryId}:${l.attachedBy}`) ?? false,
+        }] : [];
+      });
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
       if (await appRosterWithheld(ctx, a.id)) return null;

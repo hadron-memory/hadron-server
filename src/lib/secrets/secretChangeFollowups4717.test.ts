@@ -5,7 +5,7 @@
  * hrn:node:hadronmemory.com:specs:cor:sec:070:01, hrn:node:hadronmemory.com:specs:cor:sec:070:02.
  * Real database and real software-passkey assertions, no production or provider calls.
  */
-import { beforeEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
@@ -48,15 +48,17 @@ const member = async () => {
   return id;
 };
 
+// #4626 item 14: stubbed, not written, so afterEach restores the worker process's environment for the next file.
 beforeEach(async () => {
-  process.env.SECRET_ROOT_KEY = '22'.repeat(32); process.env.PASSKEY_SIGNING_ENABLED = 'true';
-  process.env.PASSKEY_RP_ID = RP; process.env.SIGNING_CEREMONY_ORIGINS = ORIGIN;
+  vi.stubEnv('SECRET_ROOT_KEY', '22'.repeat(32)); vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
+  vi.stubEnv('PASSKEY_RP_ID', RP); vi.stubEnv('SIGNING_CEREMONY_ORIGINS', ORIGIN);
   await cleanDb(db); await upsertPlatformActions(db);
   userId = (await db.user.create({ data: { email: `${generateId()}@s4.test` } })).id;
   appId = (await db.app.create({ data: { ownerUserId: userId, name: 'S4 follow-ups', urn: `${generateId().toLowerCase()}:s4f` } })).id;
   secretId = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'canary', kind: 'generic', value: 'original' }, ctx())).id;
   await insertSoftPasskey(db, userId, key, { rpId: RP });
 });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 describe('#4717 item 1: a protected create records its protection', () => {
   it('records the STORE and exactly one PROTECT event', async () => {

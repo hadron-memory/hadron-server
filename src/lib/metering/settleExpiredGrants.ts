@@ -141,7 +141,13 @@ export async function readReplayWindow(db: PrismaClient, owner: OwnerRef, now: D
       },
     }),
   ]);
-  return { entries, opening: opening._sum.amountMicroCents ?? 0n, settled };
+  // #5242 item 1: a grant whose expiry precedes its creation is no expiring grant (the probe and the window start skip it above), but its
+  // amount is a real entry of the ledger and stays in the running balance as plain credit that never expires. Left as it is, any OTHER
+  // hot grant that triggers a replay would carry it into `toSettle` and settle it (its credit gone, `unsettled` too high).
+  const live = entries.map((e) =>
+    e.kind === 'grant' && e.expiresAt !== null && e.createdAt.getTime() > e.expiresAt.getTime() ? { ...e, expiresAt: null } : e,
+  );
+  return { entries: live, opening: opening._sum.amountMicroCents ?? 0n, settled };
 }
 
 /** Replay the organization's ledger at `now` through its window; null when there is nothing to replay. */

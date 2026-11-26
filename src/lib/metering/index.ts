@@ -20,6 +20,7 @@ import { Prisma } from '../../generated/prisma/index.js';
 import type { AiModelPrice, PrismaClient, UsageEvent } from '../../generated/prisma/index.js';
 import type { AiConfigOwnerType } from '../aiConfig.js';
 import { generateId } from '../id.js';
+import { PRICE_CACHE_TTL_MS, priceCache } from './priceCache.js';
 import { ownerColumns, ownerWhere, sameOwner, type OwnedRow, type OwnerRef } from '../owner.js';
 
 /** Ledger entry kinds (string column, validated here — no enum by design). */
@@ -54,18 +55,7 @@ function markupPercent(): number {
 
 // ── Price lookup (FR-002) ────────────────────────────────────────────────
 
-interface CachedPrice {
-  row: AiModelPrice | null;
-  fetchedAt: number;
-}
-
-const PRICE_CACHE_TTL_MS = 60_000;
-const priceCache = new Map<string, CachedPrice>();
-
-/** Test hook: drop the price cache (e.g. after seeding AiModelPrice rows). */
-export function clearPriceCache(): void {
-  priceCache.clear();
-}
+export { clearPriceCache, PRICE_CACHE_TTL_MS } from './priceCache.js';
 
 /**
  * Pricing tiers are 1-3 (Holger, 2026-07-11) — schema headroom for future
@@ -77,8 +67,11 @@ export const PRICE_TIER_MAX = 3;
 export const PRICE_TIER_DEFAULT = 1;
 
 export interface GetAiModelPriceOpts {
-  /** Event instant; omit for "now" (the cached hot path). */
+  /** A historical instant; bypasses the cache. Omit for the current price (the cached hot path). */
   at?: Date;
+  /** #5021: the instant the caller is pricing NOW, on the cached path (recordLlmUsage passes the unit's own recorded
+   * instant, gate ruling 5). Defaults to the clock. Ignored when `at` is given. */
+  now?: Date;
   /** Pricing tier 1-3; defaults to tier 1. */
   tier?: number;
 }
@@ -90,9 +83,14 @@ export interface GetAiModelPriceOpts {
  * defaults to 1; there is deliberately NO cross-tier fallback — an unpriced
  * tier under-bills (cost NULL) rather than billing at another tier's rate.
  *
- * A 60s TTL cache serves the hot path (`at` = now); calls with an explicit
+ * A 60s TTL cache serves the hot path (`at` omitted); calls with an explicit
  * historical `at` bypass the cache, since the cached row is the CURRENT
- * price and may postdate `at`.
+ * price and may postdate `at`. #5021: a cache entry also holds the effective
+ * instant of the next row for its key and is not served from that instant
+ * on, so every process switches to a new row at its effective instant (a
+ * new row is always written at least one cache lifetime ahead, so a process
+ * whose entry predates the write has expired by then). Soft-deleted rows are
+ * still skipped (gate ruling 1); after #5021's trigger no row can be marked.
  */
 export async function getAiModelPrice(
   db: PrismaClient,
@@ -102,18 +100,35 @@ export async function getAiModelPrice(
 ): Promise<AiModelPrice | null> {
   const { at } = opts;
   const tier = opts.tier ?? PRICE_TIER_DEFAULT;
-  const now = Date.now();
-  const useCache = at === undefined;
-  const key = `${provider} ${model} ${tier}`;
-  if (useCache) {
-    const hit = priceCache.get(key);
-    if (hit && now - hit.fetchedAt < PRICE_CACHE_TTL_MS) return hit.row;
+  if (at !== undefined) {
+    return db.aiModelPrice.findFirst({
+      where: { provider, model, tier, deletedAt: null, effectiveAt: { lte: at } },
+      orderBy: { effectiveAt: 'desc' },
+    });
   }
-  const row = await db.aiModelPrice.findFirst({
-    where: { provider, model, tier, deletedAt: null, effectiveAt: { lte: at ?? new Date(now) } },
-    orderBy: { effectiveAt: 'desc' },
-  });
-  if (useCache) priceCache.set(key, { row, fetchedAt: now });
+  const now = (opts.now ?? new Date()).getTime();
+  const key = `${provider} ${model} ${tier}`;
+  const hit = priceCache.get(key);
+  if (
+    hit &&
+    now >= hit.fetchedAt &&
+    now - hit.fetchedAt < PRICE_CACHE_TTL_MS &&
+    (hit.nextEffectiveAt === null || now < hit.nextEffectiveAt)
+  ) {
+    return hit.row;
+  }
+  const [row, next] = await Promise.all([
+    db.aiModelPrice.findFirst({
+      where: { provider, model, tier, deletedAt: null, effectiveAt: { lte: new Date(now) } },
+      orderBy: { effectiveAt: 'desc' },
+    }),
+    db.aiModelPrice.findFirst({
+      where: { provider, model, tier, deletedAt: null, effectiveAt: { gt: new Date(now) } },
+      orderBy: { effectiveAt: 'asc' },
+      select: { effectiveAt: true },
+    }),
+  ]);
+  priceCache.set(key, { row, fetchedAt: now, nextEffectiveAt: next ? next.effectiveAt.getTime() : null });
   return row;
 }
 
@@ -206,15 +221,29 @@ export async function recordLlmUsage(
   params: LlmUsageParams,
 ): Promise<UsageEvent | null> {
   try {
+    // #1660 review (local P2-1): the event is stamped at the instant its
+    // activity was judged, so it cannot count for a session that lapsed after.
+    // #5021 (gate ruling 5): the instant is taken FIRST and the unit is priced
+    // at it, so a unit stamped just after a new row's effective time is never
+    // priced from the old row.
+    const at = new Date();
     const price = HOST_PRICED_PROVIDERS.has(params.provider)
       ? null
-      : await getAiModelPrice(db, params.provider, params.model, { tier: params.tier });
+      : await getAiModelPrice(db, params.provider, params.model, { tier: params.tier, now: at });
     const cost = price
       ? computeCostMicroCents(price, params.tokensIn, params.tokensOut)
       : null;
-    // #1660 review (local P2-1): the event is stamped at the instant its
-    // activity was judged, so it cannot count for a session that lapsed after.
-    const at = new Date();
+    // The debit condition, decided once: it gates both the markup the unit
+    // records and the debit itself (#5021, cor:dmo:170:06), so the two cannot
+    // disagree. Whether the debit then succeeded is read from the ledger.
+    const charged =
+      price != null &&
+      cost != null &&
+      cost > 0n &&
+      debitEnabled() &&
+      params.keyOwnerType === 'HADRON_SERVER' &&
+      !!params.organizationId;
+    const markupBasisPoints = charged ? markupBpFor(price) : null;
     // #1653 / DY-2: counts toward liveness only for a live, owned session.
     // The same door as every attributed request (#1660 review, Cloe P3):
     // counts for a live owned session, and a pure App key's own lapsed
@@ -240,6 +269,12 @@ export async function recordLlmUsage(
         tokensOut: params.tokensOut,
         keyOwnerType: params.keyOwnerType ?? null,
         costMicroCents: cost,
+        // #5021 (cor:dmo:170:06): the row that priced the unit and the markup
+        // of its charge; both null when the unit is unpriced or not charged.
+        priceRowId: price?.id ?? null,
+        markupBasisPoints,
+        // #5021 (gate ruling 9): the run, in the same insert.
+        appRunId: params.appRunId ?? null,
         createdBy: params.createdBy ?? null,
     };
     const event = params.appRunId && cost != null
@@ -250,16 +285,10 @@ export async function recordLlmUsage(
           return created;
         })
       : await db.usageEvent.create({ data });
-    if (
-      debitEnabled() &&
-      params.keyOwnerType === 'HADRON_SERVER' &&
-      cost != null &&
-      cost > 0n &&
-      params.organizationId
-    ) {
+    if (charged) {
       await debitCredits(db, {
-        owner: { organizationId: params.organizationId },
-        amountMicroCents: applyMarkupBp(cost, markupBpFor(price!)),
+        owner: { organizationId: params.organizationId! },
+        amountMicroCents: applyMarkupBp(cost!, markupBasisPoints!),
         sourceType: 'usage-event',
         sourceId: event.id,
         createdBy: params.createdBy ?? null,

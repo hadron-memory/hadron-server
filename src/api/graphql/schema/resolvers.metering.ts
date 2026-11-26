@@ -33,6 +33,7 @@ import {
   InvalidLedgerAmountError,
   isServerWrittenSourceType,
   LEDGER_SOURCE_CONFLICT_MESSAGE,
+  PRICE_CACHE_TTL_MS,
   PRICE_TIER_DEFAULT,
   PRICE_TIER_MAX,
   PRICE_TIER_MIN,
@@ -268,11 +269,20 @@ export const meteringQueries = {
     // sweep commits meanwhile is then in neither or in both of the replay and the sum, never counted twice. A writing read
     // that fails (a serialization failure with a concurrent settler included) logs one line and answers from the read-only
     // snapshot (ruling 10.4).
+    // #5242 item 3: which phase of the writing snapshot failed, so a failed stored-sum read is logged as one
+    // (`credit_expiry.read_failed`) and not as a failed settlement. The whole snapshot stays in the one `try` (the sum read cannot be
+    // moved out of the transaction); only the line's name differs. The fallback answers the same either way.
+    let failedPhase = 'settle' as 'settle' | 'read';
     const snapshot = (write: boolean): Promise<{ measure: CreditMeasure; sum: bigint }> =>
       ctx.db.$transaction(
         async (tx) => {
           const m = await settleAndMeasure(tx as unknown as typeof ctx.db, owner, asOf, { write });
-          return { measure: m, sum: await creditBalance(tx as unknown as typeof ctx.db, owner) };
+          try {
+            return { measure: m, sum: await creditBalance(tx as unknown as typeof ctx.db, owner) };
+          } catch (err) {
+            failedPhase = 'read';
+            throw err;
+          }
         },
         { isolationLevel: 'RepeatableRead' },
       );
@@ -288,7 +298,7 @@ export const meteringQueries = {
         // #5014 (the #5221 carry, #5242 item 2): the probe, the replay, any settlement written and the stored sum in ONE snapshot.
         ({ measure, sum } = await snapshot(true));
       } catch (err) {
-        console.error('credit_expiry.settle_failed', {
+        console.error(failedPhase === 'read' ? 'credit_expiry.read_failed' : 'credit_expiry.settle_failed', {
           ...('organizationId' in owner ? { organizationId: owner.organizationId } : { ownerUserId: owner.userId }),
           code: safeErrorCode(err),
         });
@@ -384,8 +394,22 @@ export const meteringMutations = {
     if (markupBasisPoints != null && (!Number.isInteger(markupBasisPoints) || markupBasisPoints < 0)) {
       throw badInput('markupBasisPoints must be a non-negative integer (2500 = 25%).');
     }
-    const effectiveAt = input.effectiveAt ? new Date(input.effectiveAt) : new Date();
-    if (Number.isNaN(effectiveAt.getTime())) throw badInput('effectiveAt is not a valid date.');
+    // #5021 (hrn:node:hadronmemory.com:specs:cor:dmo:170:06): a row may not take effect in the past, which would
+    // change which row covers units already recorded, nor before every process's price cache has had one lifetime
+    // to expire (or learn the new row's instant), so it takes effect everywhere at once. An omitted date is the
+    // earliest allowed instant. The text is read by the strict ISO rule (gate ruling 7, #5008's rule).
+    const earliest = new Date(Date.now() + PRICE_CACHE_TTL_MS);
+    let effectiveAt = earliest;
+    if (input.effectiveAt != null) {
+      const parsed = parseSpendInstant(input.effectiveAt);
+      if (!parsed) throw badInput('effectiveAt must be an ISO 8601 date or date-time, for example 2026-12-01T00:00:00Z.');
+      if (parsed.getTime() < earliest.getTime()) {
+        throw badInput(
+          `effectiveAt must be at least ${PRICE_CACHE_TTL_MS / 1000} seconds from now (not before ${earliest.toISOString()}): a price takes effect only once every server can apply it, and never in the past. Leave it out for the earliest allowed time.`,
+        );
+      }
+      effectiveAt = parsed;
+    }
     let row: AiModelPrice;
     try {
       row = await ctx.db.aiModelPrice.create({
@@ -409,8 +433,8 @@ export const meteringMutations = {
       }
       throw err;
     }
-    // The hot-path cache may hold the now-superseded row for up to its TTL;
-    // drop it so new events price correctly right away.
+    // #5021: no longer needed for correctness (the lead and the next-row expiry switch every process at the
+    // effective instant); dropping this process's cache just makes it look the new row up on its next unit.
     clearPriceCache();
     return projectPrice(row);
   },

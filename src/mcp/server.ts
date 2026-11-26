@@ -3464,7 +3464,7 @@ export function createMcpServerInstance(
         const who = app ? safeEmitEntityUrnV2('app', app.urn) : auth.appId;
         scope = auth.userId
           ? `Scope: user · active App ${who} — this App's agent memories + org-readable memories + your personal memories scoped to this App.`
-          : `Scope: App key · ${who} (App-scoped) — this App's agent memories only; personal and org-readable memories require user authentication and are not shown to an App key.`;
+          : `Scope: App key · ${who} (App-scoped) — this App's agent memories and the memories linked to it only; personal and org-readable memories require user authentication and are not shown to an App key, except a memory the App's owner linked.`;
       } else if (auth.userId) {
         scope = `Scope: user · no active App — the union across your Apps + org-readable memories + all your personal memories. Select one with hadron_set_active_app to narrow the view.`;
       } else {
@@ -3584,6 +3584,13 @@ export function createMcpServerInstance(
     },
   );
 
+  // #5203 S3 (#5197 blind F5): a refused NAME answers with the typed `[bad_user_input]` prefix, as an unstorable one does;
+  // every other refusal keeps its text.
+  const createMemoryRefusalText = (e: unknown): string =>
+    e instanceof GraphQLError && e.extensions?.code === 'BAD_USER_INPUT'
+      ? `[bad_user_input] ${e.message}`
+      : `Error: ${e instanceof Error ? e.message : 'create failed'}`;
+
   // ── hadron_create_memory (#2511) ──────────────────────────────────────────────
   //
   // A thin door onto the createMemory mutation: it calls the resolver, so the
@@ -3620,7 +3627,7 @@ export function createMcpServerInstance(
             'Use hadron_set_active_memory to work in it.',
         );
       } catch (e) {
-        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? createMemoryRefusalText(e), 'hadron_create_memory:resolver');
       }
     },
   );
@@ -3643,7 +3650,7 @@ export function createMcpServerInstance(
         const created = await resolvers.Mutation.createAppMemory({}, { appRef: app, name, shortDescription, description, tags }, ctx);
         return textResult(`Memory created: ${safeEmitEntityUrnV2('memory', created.urn)} (class: app, id: ${created.id}).`);
       } catch (e) {
-        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? createMemoryRefusalText(e), 'hadron_create_app_memory:resolver');
       }
     },
   );
@@ -13397,7 +13404,7 @@ const governedDoorArgs = {
   urn: z.string().describe('Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>).'),
   name: z.string().optional().describe('Node name. Required when creating.'),
   description: z.string().optional().describe('Short description'),
-  abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars).'),
+  abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars); for the long form use `content`.'),
   content: z.string().optional().describe('Markdown content'),
   // The same lenient schema as the generic node tools ("a,b" or an array),
   // so a call the generic tool accepted replays through the door

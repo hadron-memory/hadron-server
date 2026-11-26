@@ -87,12 +87,18 @@ describe('cloneAgent: success', () => {
     expect(a.content).toBe(`img ${asset} and cl-a:copy-system:b`);
   });
 
-  it('a second clone gets a new URN only when named differently; the same name is refused', async () => {
+  // #5203 S3 (cor:urn:010:01): a second clone under the same name no longer refuses; its DERIVED slug iterates.
+  // A SUPPLIED slug that a live Agent holds still refuses AGENT_URN_TAKEN.
+  it('a second clone under the same name iterates its derived slug; a supplied slug a live Agent holds is refused', async () => {
     const src = await sourceAgent(orgA, 'PUBLIC');
-    await clone(adminB, { source: src.urn, target: orgB.urn });
-    expect(await codeOf(clone(adminB, { source: src.urn, target: orgB.urn }))).toBe('AGENT_URN_TAKEN');
-    const second = await clone(adminB, { source: src.urn, target: orgB.urn, slug: 'src-2' });
+    const first = await clone(adminB, { source: src.urn, target: orgB.urn });
+    expect(first.urn).toBe('cl-b:src');
+    const second = await clone(adminB, { source: src.urn, target: orgB.urn });
     expect(second.urn).toBe('cl-b:src-2');
+    expect(await codeOf(clone(adminB, { source: src.urn, target: orgB.urn, slug: 'src' }))).toBe('AGENT_URN_TAKEN');
+    expect(await codeOf(clone(adminB, { source: src.urn, target: orgB.urn, slug: 'src-2' }))).toBe('AGENT_URN_TAKEN');
+    const third = await clone(adminB, { source: src.urn, target: orgB.urn, slug: 'src-9' });
+    expect(third.urn).toBe('cl-b:src-9');
   });
 
   it('a PUBLIC source clones cross-org for any ADMIN of the target; no grants are carried', async () => {

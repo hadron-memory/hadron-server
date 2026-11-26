@@ -390,7 +390,7 @@ describe('App-tombstone URN reclaim respects Worker castings (#974, cor:agt:020:
         id: generateId(),
         organizationId: orgX.id,
         name: 'Suite @ X',
-        urn: `${orgX.urn}:suite-x`, // the slug createApp derives from the name
+        urn: `${orgX.urn}:suite-x`, // the slug createApp derives from the name (supplied below, #5203 S3)
         deletedAt: new Date(),
       },
     });
@@ -401,12 +401,22 @@ describe('App-tombstone URN reclaim respects Worker castings (#974, cor:agt:020:
     await expect(
       resolvers.Mutation.createApp(
         {},
-        { orgRef: orgX.id, agentRef: suite.id, name: 'Suite @ X' },
+        { orgRef: orgX.id, agentRef: suite.id, name: 'Suite @ X', urn: 'suite-x' },
         adminCtx(bea.id),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'WORKER_NAMES_RESERVED' } });
 
     // The tombstone and its casting both survive the refused reclaim.
+    expect(await db.app.findUnique({ where: { id: retired.id } })).not.toBeNull();
+    expect(await db.worker.count({ where: { appId: retired.id } })).toBe(1);
+
+    // #5203 S3 (cor:urn:010:01): a URN DERIVED from the name never reclaims; it iterates past the tombstone.
+    const derived = await resolvers.Mutation.createApp(
+      {},
+      { orgRef: orgX.id, agentRef: suite.id, name: 'Suite @ X' },
+      adminCtx(bea.id),
+    );
+    expect(derived.urn).toBe(`${orgX.urn}:suite-x-2`);
     expect(await db.app.findUnique({ where: { id: retired.id } })).not.toBeNull();
     expect(await db.worker.count({ where: { appId: retired.id } })).toBe(1);
   });

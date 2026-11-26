@@ -5,7 +5,7 @@
  * real software-passkey assertions, no provider calls.
  */
 import { createHash } from 'node:crypto';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
@@ -41,9 +41,10 @@ async function complete(id: string, p: Proved, k = key) {
 }
 const row = async (id: string) => (await db.$queryRaw<ChangeRequest[]>`SELECT * FROM secret_change_requests WHERE id=${id}`)[0];
 
+// #4626 item 14: stubbed, not written, so afterEach restores the worker process's environment for the next file.
 beforeEach(async () => {
-  process.env.SECRET_ROOT_KEY = '22'.repeat(32); process.env.PASSKEY_SIGNING_ENABLED = 'true';
-  process.env.PASSKEY_RP_ID = RP; process.env.SIGNING_CEREMONY_ORIGINS = ORIGIN;
+  vi.stubEnv('SECRET_ROOT_KEY', '22'.repeat(32)); vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
+  vi.stubEnv('PASSKEY_RP_ID', RP); vi.stubEnv('SIGNING_CEREMONY_ORIGINS', ORIGIN);
   await cleanDb(db); await upsertPlatformActions(db);
   userId = (await db.user.create({ data: { email: `${generateId()}@s4.test` } })).id;
   appId = (await db.app.create({ data: { ownerUserId: userId, name: 'S4 decline', urn: `${generateId().toLowerCase()}:s4d` } })).id;
@@ -51,6 +52,7 @@ beforeEach(async () => {
   await db.secret.update({ where: { id: secretId }, data: { protected: true } });
   await insertSoftPasskey(db, userId, key, { rpId: RP });
 });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 describe('#4703 the requester declines their own open change', () => {
   it('moves it to declined, clears the staged value, shows declined on the poll, and leaves the secret untouched', async () => {

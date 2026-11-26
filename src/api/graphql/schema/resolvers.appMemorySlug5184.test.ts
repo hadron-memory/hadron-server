@@ -190,19 +190,24 @@ describe('#5184 memories made before the rule', () => {
     await expectUntouched(mem);
   });
 
-  it('a free-standing memory bound by attachMemoryToApp loses the rename', async () => {
+  // #5185: attachMemoryToApp LINKS a memory to an App; it no longer binds it. The memory stays free-standing (app_id null),
+  // so it is not App-owned and the rule above (an App's personal or private memory keeps its slug) does not reach it.
+  it('a free-standing memory linked by attachMemoryToApp stays free-standing and keeps its rename', async () => {
     const free = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: 'org-a:my-notes', name: 'my-notes', class: 'personal', userId: user.owner.id },
     });
     const attached = await gql(
       'owner',
-      'mutation($m: ID!, $a: ID!, $g: ID!) { attachMemoryToApp(memoryRef: $m, appRef: $a, agentRef: $g) { id } }',
-      { m: free.id, a: app.id, g: agent.id },
+      'mutation($m: ID!, $a: ID!) { attachMemoryToApp(memoryRef: $m, appRef: $a) { id } }',
+      { m: free.id, a: app.id },
     );
     expect(attached.errors).toBeUndefined();
-    const mem = await db.memory.findUniqueOrThrow({ where: { id: free.id } });
-    expectRefused(await gql('owner', RENAME, { r: free.id, u: 'readable-slug' }), 'personal');
-    await expectUntouched(mem);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: free.id } })).appId).toBeNull();
+    const renamed = await gql('owner', RENAME, { r: free.id, u: 'readable-slug' });
+    expect(renamed.errors).toBeUndefined();
+    const after = await db.memory.findUniqueOrThrow({ where: { id: free.id } });
+    expect(after.urn).toBe('org-a:readable-slug');
+    expect(after.appId).toBeNull();
   });
 });
 
