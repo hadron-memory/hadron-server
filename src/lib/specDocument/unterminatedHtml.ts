@@ -569,10 +569,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       }
       // marked ends such a block at the declaration's first `>` and reads the rest of the line as text (#5211); CommonMark keeps it raw.
       if (startsLine(i) && isLetter(text[i + 2]) && model === 'commonmark') raw(lineEndAt(close));
-      if (startsLine(i) && isLetter(text[i + 2]) && model === 'marked') {
-        // #5265 — marked starts the next block right after the `>`: a fence there swallows the rest of the document as code.
-        markedBlockAt = close + 1;
-      }
+      if (startsLine(i) && isLetter(text[i + 2]) && model === 'marked') markedBlockAt = close + 1;
       i = close + 1;
       continue;
     }
