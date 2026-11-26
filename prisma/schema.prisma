@@ -3852,7 +3852,7 @@ model Secret {
   /// the row, so any committed secret mutation invalidates earlier staged change requests, same-millisecond ones included.
   changeRevision Int @default(0) @map("change_revision")
   /// Only meaningful for App rows (`chk_secret_protected_app_only`). A protected App secret changes only through the
-  /// requester's passkey ceremony (cor:sec:070:02).
+  /// requester's passkey ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02).
   protected      Boolean  @default(false)
   versions       SecretVersion[]
 
