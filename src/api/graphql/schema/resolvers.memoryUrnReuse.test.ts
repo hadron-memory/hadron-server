@@ -51,9 +51,11 @@ const survives = async (id: string) => ({
   nodes: await db.node.count({ where: { memoryId: id } }),
 });
 
+// #5203 S3 (cor:urn:010:01): createMemory's tombstone answers below are the answers to a SUPPLIED slug, so its doors
+// pass `slug: 'diary'`. A DERIVED slug never reclaims a deleted holder; it iterates past it (pinned at the end).
 const doors: Array<[string, (c: Context) => Promise<unknown>]> = [
-  ['createMemory (personal)', (c) => M.createMemory({}, { orgRef: orgId, name: 'Diary', memoryClass: 'personal', vectorIndexEnabled: false }, c)],
-  ['createMemory (private)', (c) => M.createMemory({}, { orgRef: orgId, name: 'Diary', memoryClass: 'private', vectorIndexEnabled: false }, c)],
+  ['createMemory (personal)', (c) => M.createMemory({}, { orgRef: orgId, name: 'Diary', slug: 'diary', memoryClass: 'personal', vectorIndexEnabled: false }, c)],
+  ['createMemory (private)', (c) => M.createMemory({}, { orgRef: orgId, name: 'Diary', slug: 'diary', memoryClass: 'private', vectorIndexEnabled: false }, c)],
   ['cloneMemory', (c) => M.cloneMemory({}, { ref: sourceId, targetUrn: `hrn:mem:${orgUrn}:diary` }, c)],
   ['extractParentNodeToMemory', (c) => M.extractParentNodeToMemory({}, { parentRef: sourceParentId, targetUrn: `hrn:mem:${orgUrn}:diary` }, c)],
 ];
@@ -130,12 +132,25 @@ describe('URN reuse after a soft delete: personal/private memories (hadron-inter
       for (const [door, call] of [doors[0]!, doors[2]!, doors[3]!]) {
         const id = await tombstone('knowledge', null);
         const args = door.startsWith('createMemory')
-          ? (c: Context) => M.createMemory({}, { orgRef: orgId, name: 'Diary', vectorIndexEnabled: false }, c)
+          ? (c: Context) => M.createMemory({}, { orgRef: orgId, name: 'Diary', slug: 'diary', vectorIndexEnabled: false }, c)
           : call;
         await args(as(adminId, ['ADMIN']));
         expect(await db.memory.count({ where: { id } }), door).toBe(0);
         await db.memory.deleteMany({ where: { urn: `${orgUrn}:diary` } });
       }
     });
+  });
+
+  describe('a derived slug never reclaims (#5203 S3)', () => {
+    for (const cls of ['personal', 'private', 'knowledge'] as const) {
+      it(`createMemory with no slug skips a ${cls} tombstone, for its owner and an org admin alike; the tombstone survives`, async () => {
+        const id = await tombstone(cls, cls === 'knowledge' ? null : aliceId);
+        const caller = cls === 'knowledge' ? as(adminId, ['ADMIN']) : as(aliceId);
+        const memoryClass = cls === 'knowledge' ? undefined : cls;
+        const again = await M.createMemory({}, { orgRef: orgId, name: 'Diary', memoryClass, vectorIndexEnabled: false }, caller);
+        expect(again.urn).toBe(`${orgUrn}:diary-2`);
+        expect(await survives(id)).toEqual({ memory: 1, nodes: 1 });
+      });
+    }
   });
 });

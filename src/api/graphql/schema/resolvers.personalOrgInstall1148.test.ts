@@ -264,7 +264,10 @@ it('reusing a retired Agent name preserves the retained org-text install memory 
  await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{role:'ADMIN'}});
  await mutation.uninstallAgentFromApp({}, {appRef:appId,agentRef:agentId},context());
  expect(await mutation.deleteAgent({}, {ref:agentId},context())).toBe(true);
- await expect(mutation.createAgent({}, {orgRef: orgId,name:'Assistant',visibility:'ORGANIZATION'},context())).rejects.toMatchObject({extensions:{code:'AGENT_URN_TAKEN'}});
+ // #5203 S3: the refusal answers a SUPPLIED slug; a derived one iterates past the retained identity and leaves it alone.
+ await expect(mutation.createAgent({}, {orgRef: orgId,name:'Assistant',slug:'assistant',visibility:'ORGANIZATION'},context())).rejects.toMatchObject({extensions:{code:'AGENT_URN_TAKEN'}});
+ expect((await installRow()).installOfAgentId).toBe(agentId);
+ expect((await mutation.createAgent({}, {orgRef: orgId,name:'Assistant',visibility:'ORGANIZATION'},context())).urn).toBe('publisher1148.test:assistant-2');
  expect((await installRow()).installOfAgentId).toBe(agentId);
  expect((await installMemoryAudience(db,context(outsiderId),await installRow())).read).toBe(false);
  expect(await readableInstallMemoryIds(db,context(outsiderId))).not.toContain(installMemoryId);
