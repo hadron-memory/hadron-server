@@ -1,7 +1,7 @@
 /** #3999; cor:sec:070:02. A person's staged change, immutable and encrypted under request-specific AAD. */
 import { randomBytes, createHash } from 'node:crypto';
 import { GraphQLError } from 'graphql';
-import type { Prisma } from '../../generated/prisma/index.js';
+import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { requirePersonOnlyAct } from '../auth/personAsThemselves.js';
 import { signingSurfacePolicy } from '../signing/surface.js';
@@ -84,11 +84,39 @@ export function visibleChange(r: ChangeRequest, now: Date) {
  return { id: r.id, state: r.state === 'open' && r.expires_at <= now ? 'expired' : r.state,
   operation: r.operation, createdAt: r.created_at, expiresAt: r.expires_at, ceremonyUrl: secretChangeCeremonyUrl(r.id) };
 }
-/** Clear expired ciphertext in bounded batches; expiry remains enforced independently at every use. */
-export async function sweepExpiredSecretChanges(tx: Prisma.TransactionClient): Promise<number> {
+/**
+ * Engineering bounds of the expiry sweep (#5244; the Proposed sweep-backlog line of hrn:node:hadronmemory.com:specs:cor:sec:070:02),
+ * the same as the version purge: a batch is one transaction of at most this many rows, a run is at most this many batches, and a
+ * backlog beyond them waits for the next run. Numbers, not rules: they may change without a spec change.
+ */
+export const SECRET_CHANGE_SWEEP_BATCH = 500;
+export const SECRET_CHANGE_SWEEP_MAX_BATCHES = 20;
+
+/**
+ * Clear ONE batch of expired ciphertext; expiry remains enforced independently at every use. The row trigger nulls the ciphertext.
+ * The outer UPDATE repeats the predicate as a backstop (the subquery's row locks already hold the rows).
+ */
+export async function sweepExpiredSecretChanges(tx: Prisma.TransactionClient, limit: number = SECRET_CHANGE_SWEEP_BATCH): Promise<number> {
  return tx.$executeRaw`UPDATE secret_change_requests SET state='expired',ended_at=(clock_timestamp() AT TIME ZONE 'UTC')
- WHERE id IN (SELECT id FROM secret_change_requests WHERE state='open' AND expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')
- ORDER BY expires_at LIMIT 100 FOR UPDATE SKIP LOCKED)`;
+ WHERE state='open' AND expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')
+ AND id IN (SELECT id FROM secret_change_requests WHERE state='open' AND expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')
+ ORDER BY expires_at, id LIMIT ${limit}::int FOR UPDATE SKIP LOCKED)`;
+}
+
+/** Drain expired requests in batches, each its own transaction (an earlier batch stays cleared if a later one fails). Returns the number cleared. */
+export async function drainExpiredSecretChanges(
+ db: Pick<PrismaClient, '$transaction'>,
+ bounds: { batchSize?: number; maxBatches?: number; shouldStop?: () => boolean } = {},
+): Promise<number> {
+ const batchSize = bounds.batchSize ?? SECRET_CHANGE_SWEEP_BATCH, maxBatches = bounds.maxBatches ?? SECRET_CHANGE_SWEEP_MAX_BATCHES;
+ let total = 0;
+ for (let i = 0; i < maxBatches; i++) {
+  if (i > 0 && bounds.shouldStop?.()) break;
+  const n = await db.$transaction(tx => sweepExpiredSecretChanges(tx, batchSize));
+  total += n;
+  if (n < batchSize) break;
+ }
+ return total;
 }
 
 /** Commit a staged refusal, then deliver it to the API caller. Throwing inside the transaction would erase the request. */

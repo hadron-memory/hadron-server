@@ -2204,13 +2204,16 @@ export const typeDefs = `#graphql
   }
 
   """
-  046-usage-metering: append-only org credit ledger row. Signed
-  micro-cents as a base-10 integer string (grants +, debits -,
-  adjustments either sign).
+  046-usage-metering: append-only credit ledger row of an organization or a
+  person (hrn:node:hadronmemory.com:specs:cor:dmo:170:01). Signed micro-cents
+  as a base-10 integer string (grants +, debits -, adjustments either sign).
   """
   type CreditLedgerEntry {
     id: ID!
-    organizationId: ID!
+    "The owning organization, or null when the entry belongs to a person."
+    organizationId: ID
+    "The owning person, or null when the entry belongs to an organization. An account merge moves a merged-away person's entries to the survivor."
+    ownerUserId: ID
     kind: String!
     amountMicroCents: String!
     expiresAt: DateTime
@@ -2239,7 +2242,10 @@ export const typeDefs = `#graphql
   }
 
   type CreditBalance {
-    organizationId: ID!
+    "The organization the balance is of, or null for a person's."
+    organizationId: ID
+    "The person the balance is of, or null for an organization's."
+    ownerUserId: ID
     "The balance in micro-cents. Never includes credit whose expiry has passed."
     balanceMicroCents: String!
     """
@@ -2367,7 +2373,18 @@ export const typeDefs = `#graphql
   }
 
   input GrantCreditsInput {
-    orgRef: String!
+    """
+    Exactly one of orgRef and userRef (BAD_USER_INPUT for both or neither).
+    The organization to credit.
+    """
+    orgRef: String
+    """
+    The person to credit: an id, a handle or a hrn:user: URN
+    (hrn:node:hadronmemory.com:specs:cor:api:140:01). A soft-deleted person is
+    not found. Allowed to the same callers as for an organization: a platform
+    admin or the BILLING platform role.
+    """
+    userRef: ID
     """
     Positive micro-cents, base-10 integer string.
     """
@@ -2401,13 +2418,23 @@ export const typeDefs = `#graphql
   }
 
   """
-  A signed correction on an organization's credit ledger, such as a refund
+  A signed correction on an organization's or a person's credit ledger, such as a refund
   (hrn:node:hadronmemory.com:specs:cor:dmo:170:03). It is written as a new
   adjustment entry, never as an edit of another
   (hrn:node:hadronmemory.com:specs:cor:dmo:170:08).
   """
   input AdjustCreditsInput {
-    orgRef: String!
+    """
+    Exactly one of orgRef and userRef (BAD_USER_INPUT for both or neither).
+    The organization whose ledger is corrected.
+    """
+    orgRef: String
+    """
+    The person whose ledger is corrected: an id, a handle or a hrn:user: URN
+    (hrn:node:hadronmemory.com:specs:cor:api:140:01). A soft-deleted person is
+    not found.
+    """
+    userRef: ID
     """
     Signed, non-zero micro-cents, base-10 integer string within int8 (a
     leading minus lowers the balance; no plus sign or fraction).
@@ -12675,15 +12702,16 @@ export const typeDefs = `#graphql
     aiModelPrice(ref: ID!): AiModelPrice
     "Provider rate rows, newest effective first, optional provider/model filter (spec 046). Authenticated read."
     aiModelPrices(provider: String, model: String, tier: Int, limit: Int, offset: Int): AiModelPriceList!
-    "One org's append-only credit-ledger page, newest first (spec 046). Org-ADMIN."
-    creditLedgerEntries(orgRef: String!, limit: Int, offset: Int): CreditLedgerEntryList!
+    "One account's append-only credit-ledger page, newest first (spec 046). Give exactly one of orgRef and userRef (BAD_USER_INPUT for both or neither). An organization's: its ADMIN or OWNER, or a platform admin. A person's: that person in their own session, or a platform admin; an impersonated session and an App key are refused, and a caller who is not a platform admin gets FORBIDDEN whether or not the named person exists (hrn:node:hadronmemory.com:specs:cor:dmo:170:01)."
+    creditLedgerEntries(orgRef: String, userRef: ID, limit: Int, offset: Int): CreditLedgerEntryList!
     """
-    One organization's credit balance (spec 046). Org-ADMIN. The sum over the append-only ledger, less what is left of
-    any grant whose expiry has passed (hrn:node:hadronmemory.com:specs:cor:dmo:170:10). Before summing, the read settles
-    the organization's grants that expired more than a minute ago: it may write those settlement entries, once per grant,
+    One account's credit balance (spec 046): an organization's or a person's. Give exactly one of orgRef and userRef;
+    gated as creditLedgerEntries. The sum over the append-only ledger, less what is left of any grant whose expiry has
+    passed (hrn:node:hadronmemory.com:specs:cor:dmo:170:10). Before summing, the read settles the account's grants
+    that expired more than a minute ago: it may write those settlement entries, once per grant,
     and never does for an impersonated session, which gets the same figure worked out and stored nowhere.
     """
-    creditBalance(orgRef: String!): CreditBalance!
+    creditBalance(orgRef: String, userRef: ID): CreditBalance!
     "The owner limits of an organization or a person, one row per measure (hadron-server issue 5009). Give exactly one ref. An organization's: its ADMIN or OWNER. A person's: that person in their own session. A platform admin reads any."
     ownerLimits(orgRef: String, userRef: ID): [OwnerLimitUsage!]!
     """
@@ -13062,7 +13090,7 @@ export const typeDefs = `#graphql
     (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), or a held worker on its holder's instruction; never an App key.
     A worker may be assigned to several hosts. The assignment is a record until the App's hostSetupSource is SERVER.
     Refused BAD_HOST_ASSIGNMENT_ARGS (a workdir or host id that is not its token shape: a path, an option, a command),
-    BAD_LAUNCHER_PROFILE (a family no host has a launcher for, or a model, effort or accountProfile that is not a
+    BAD_LAUNCHER_PROFILE (a family that is not a model-family token, or a model, effort or accountProfile that is not a
     profile token), HOST_ASSIGNMENT_NOT_PERMITTED, WORKER_NOT_FOUND, WORKER_RETIRED, and HOST_ASSIGNMENT_EXISTS when this worker is
     already assigned to that host and replace is not set. A refusal writes nothing.
     """
@@ -14247,13 +14275,13 @@ export const typeDefs = `#graphql
     setQuotaLimit(input: SetQuotaLimitInput!): QuotaCounter!
     "Append an effective-dated provider rate row (spec 046). PLATFORM ADMIN - org admins must never set the prices they are billed at."
     setAiModelPrice(input: SetAiModelPriceInput!): AiModelPrice!
-    "Mint credits for an org - a positive grant ledger row (spec 046). PLATFORM ADMIN or the BILLING platform role only (self-grant risk; #5012); processor top-ups land here."
+    "Mint credits for an organization or a person (give exactly one of orgRef and userRef) - a positive grant ledger row (spec 046). PLATFORM ADMIN or the BILLING platform role only (self-grant risk; #5012); processor top-ups land here."
     grantCredits(input: GrantCreditsInput!): CreditLedgerEntry!
     "Set an owner's limits (hadron-server issue 5009). PLATFORM ADMIN ONLY. Returns the owner's limits after the change."
     setOwnerLimits(input: SetOwnerLimitsInput!): [OwnerLimitUsage!]!
     "Delete an owner's limits, so the deployment default applies again (hadron-server issue 5009). PLATFORM ADMIN ONLY. Returns the owner's limits after the change."
     clearOwnerLimits(input: ClearOwnerLimitsInput!): [OwnerLimitUsage!]!
-    "Write a signed adjustment entry on an org's credit ledger, e.g. a refund (hrn:node:hadronmemory.com:specs:cor:dmo:170:03; a correction is a new entry, hrn:node:hadronmemory.com:specs:cor:dmo:170:08). PLATFORM ADMIN or the BILLING platform role only (#5012). Idempotent on (sourceType, sourceId); a different account, amount or kind on that pair is IDEMPOTENCY_CONFLICT."
+    "Write a signed adjustment entry on an organization's or a person's credit ledger (give exactly one of orgRef and userRef), e.g. a refund (hrn:node:hadronmemory.com:specs:cor:dmo:170:03; a correction is a new entry, hrn:node:hadronmemory.com:specs:cor:dmo:170:08). PLATFORM ADMIN or the BILLING platform role only (#5012). Idempotent on (sourceType, sourceId); a different account, amount or kind on that pair is IDEMPOTENCY_CONFLICT."
     adjustCredits(input: AdjustCreditsInput!): CreditLedgerEntry!
     "Author YOUR user-layer action-policy link (cor:acl:040:02, #510). Null clears (= no restriction)."
     updateMyPolicy(policy: JSON): User!
@@ -14730,18 +14758,31 @@ export const typeDefs = `#graphql
     require the App's user-owner or owning-org OWNER/ADMIN. Personal/private
     require the caller's actual App membership (the caller becomes the owner),
     with no platform-admin membership bypass; they are not yet supported for
-    a user-owned App. The install is rechecked as live and licensed in the
-    deciding transaction. Live name collisions are aliased to a free URN.
+    a user-owned App. Only the signed-in member acting as themselves creates
+    one: a run principal, worker session, App key or impersonation is refused.
+    The install is rechecked as live and licensed in the deciding transaction.
+    Live name collisions of an app or knowledge memory are aliased to a free URN.
 
-    Typed errors: UNSUPPORTED_MEMORY_CLASS, BAD_USER_INPUT (maxRevCount < 1),
-    APP_UNINSTALLED, AGENT_NOT_INSTALLED, MEMORY_URN_CONFLICT, FORBIDDEN,
-    UNAUTHENTICATED.
+    A personal or private memory is always the caller's own (owner and tenant;
+    its URN roots on their handle). The server derives its slug and display name
+    as <app slug>-<handle>-<class> (a numeric tail, -2, -3, when taken); a name
+    argument sets neither. A user holds at most one of each class created this
+    way per App; a second is refused with APP_USER_MEMORY_ALREADY_EXISTS.
+    See hrn:node:hadronmemory.com:specs:cor:dmo:060:20.
+
+    Typed errors: UNSUPPORTED_MEMORY_CLASS, BAD_USER_INPUT (maxRevCount < 1, or
+    no name for an app or knowledge memory), APP_UNINSTALLED, AGENT_NOT_INSTALLED,
+    MEMORY_URN_CONFLICT, FORBIDDEN, UNAUTHENTICATED, APP_USER_MEMORY_ALREADY_EXISTS.
     """
     createMemoryInApp(
       appRef: ID!
       agentRef: ID!
       memoryClass: MemoryClass!
-      name: String!
+      """
+      The display name of an 'app' or 'knowledge' memory (required for those classes). Ignored for 'personal' and
+      'private': the server derives both the slug and the display name.
+      """
+      name: String
       shortDescription: String
       description: String
       data: JSON
@@ -18789,7 +18830,7 @@ export const typeDefs = `#graphql
     worker: String!
     "The name the host knows the working directory by: a name token (letters, digits and . _ / @ + -, starting with a letter or digit, no .., // or trailing /), at most 256 characters."
     workdir: String!
-    "The model family it runs as there: one a host has a launcher for (claude, codex, glm or kimi)."
+    "The model family it runs as there: any family token (letters, digits, . _ or -, starting with a letter or digit, at most 64 characters; case-insensitive and stored lowercase; anthropic is claude and openai is codex). Whether the host can run it is the host's to report: a start it cannot run is reported failed."
     family: String!
     "The model, a profile token: letters, digits, . _ or -, starting with a letter or digit, at most 128 characters. Optional."
     model: String

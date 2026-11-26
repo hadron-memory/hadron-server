@@ -60,6 +60,11 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   ['grants', 'issuer_user_id'],
   ['grants', 'requested_by_user_id'],
   ['grants', 'verified_by'],
+  // #5014 (billing A6; plan section 13 item 14, Proposed in cor:dmo:170:08): a person's credit ledger entries follow the survivor,
+  // keeping amount, kind, source, expiry and time. A ledger entry is never edited, so this is the one move the append-only trigger
+  // allows on owner_user_id, and only along the user_merges row this merge records before these rewrites
+  // (prisma/credit-ledger-invariants.sql). Not in AUDIT_USER_COLUMNS: it is the owner, not an audit actor.
+  ['credit_ledger_entries', 'owner_user_id'],
 ];
 
 /**

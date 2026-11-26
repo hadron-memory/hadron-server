@@ -944,6 +944,10 @@ CREATE INDEX IF NOT EXISTS agent_team_events_person_activity_idx
 -- 20261125140000_credit_ledger_expiring_grants_idx, which builds it CONCURRENTLY for production.
 CREATE INDEX IF NOT EXISTS credit_ledger_entries_expiring_grants_idx
   ON credit_ledger_entries (organization_id, expires_at) WHERE expires_at IS NOT NULL;
+-- #5014 (Billing A6): its owner_user_id twin, for a person's ledger. Same definition as migration
+-- 20261125170000_credit_ledger_person_expiring_grants_idx (CONCURRENTLY there).
+CREATE INDEX IF NOT EXISTS credit_ledger_entries_person_expiring_grants_idx
+  ON credit_ledger_entries (owner_user_id, expires_at) WHERE expires_at IS NOT NULL;
 
 -- #4273: the worker-liveness read (workerActivitySql) keeps a worker's open sessions and the ended ones that end at or after
 -- its latest start; these two partial indexes serve those ranges. Same definitions as migrations

@@ -103,11 +103,10 @@ describe('createMemoryInApp', () => {
     expect(mem.userId).toBe(memberUser.id);
     expect(mem.userMemoryOfAgentId).toBe(agent.id);
     expect(mem.visibility).toBeNull();
-    // Per-owner opaque URN (not name-derived) so two members can name their own
-    // memories the same without colliding / leaking names. #697 Stage 3: the v2
-    // form is a FLAT single-atom `<org>:<opaqueId>` (was `<org>:coach:app-user:…`).
-    expect(mem.urn.split(':')).toHaveLength(2);
-    expect(mem.urn.startsWith(`${org.urn}:`)).toBe(true);
+    // #5183: derived name, the member's own tenancy: `<handle>:<app>-<handle>-personal`.
+    const owner = await db.user.findUniqueOrThrow({ where: { id: memberUser.id } });
+    expect(mem.urn).toBe(`${owner.handle}:${app.urn.split(':').pop()}-${owner.handle}-personal`);
+    expect(mem.organizationId).toBeNull();
   });
 
   it('creates a private memory for an App member', async () => {

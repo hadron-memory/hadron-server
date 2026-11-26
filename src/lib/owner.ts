@@ -31,24 +31,32 @@ export function ownerOfWork(app: OwnedRow | null | undefined, agent: OwnedRow | 
 }
 
 /**
- * The rule (finding org-xor-owner-null-comparison-bypass; the person ledger of #5014, A6, implements the comparison):
- * compare owners explicitly by KIND, never by a nullable column, so a person owner can never read as "no organization" and
- * two persons' null organization columns are never "the same owner". This file states it; it adds no comparison code.
- * A function that only knows organizations refuses a person with the error below instead of treating it as an absent one.
- *
- * A person owner reached a ledger function that only knows organizations: a programming error, never a refusal.
+ * #5014 (billing A6): the two owner columns an OwnerRef names, exactly one set. A value naming neither, or both, is a
+ * programming error and is refused before any write: a ledger entry always has one owner, and a typed refusal here is what
+ * keeps an `{}` cast or a spread of two owners from reaching the CHECK as an opaque 23514.
  */
-export class PersonLedgerNotSupportedError extends Error {
-  constructor() {
-    super('A person ledger is not supported yet (Billing A6, #5014).');
-    this.name = 'PersonLedgerNotSupportedError';
-  }
+export function ownerColumns(owner: OwnerRef): { organizationId: string | null; ownerUserId: string | null } {
+  const org = 'organizationId' in owner ? (owner as { organizationId?: unknown }).organizationId : undefined;
+  const user = 'userId' in owner ? (owner as { userId?: unknown }).userId : undefined;
+  const hasOrg = typeof org === 'string' && org.length > 0;
+  const hasUser = typeof user === 'string' && user.length > 0;
+  if (hasOrg === hasUser) throw new Error('An owner names exactly one of an organization and a person.');
+  return hasUser ? { organizationId: null, ownerUserId: user as string } : { organizationId: org as string, ownerUserId: null };
 }
 
-/** The organization id of an organization owner; throws for a person owner until A6. */
-export function ownerOrganizationId(owner: OwnerRef): string {
-  if ('organizationId' in owner && typeof owner.organizationId === 'string' && owner.organizationId !== '') {
-    return owner.organizationId;
-  }
-  throw new PersonLedgerNotSupportedError();
+/**
+ * #5014: is a stored row owned by `owner`? Branches on the OWNER'S class first, then compares that one column, so two NULL
+ * columns (an organization's entry and a person's entry both have one) are never "the same owner" (Hadron finding
+ * hrn:node:hadronmemory.com:hadron-server:findings:org-xor-owner-null-comparison-bypass): comparing both columns with `===` would call a person's entry the same as another
+ * person's whenever both organization columns are null.
+ */
+export function sameOwner(row: OwnedRow, owner: OwnerRef): boolean {
+  const cols = ownerColumns(owner);
+  return cols.ownerUserId != null ? row.ownerUserId === cols.ownerUserId : row.organizationId === cols.organizationId;
+}
+/** #5014: the Prisma `where` that selects an owner's rows by the ONE column it sets (never both: a cleared link must not hide a row). */
+export function ownerWhere(owner: OwnerRef): { organizationId: string } | { ownerUserId: string } {
+  const cols = ownerColumns(owner);
+  return cols.ownerUserId != null ? { ownerUserId: cols.ownerUserId } : { organizationId: cols.organizationId as string };
+
 }
