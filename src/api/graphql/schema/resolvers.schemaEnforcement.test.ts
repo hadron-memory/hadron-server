@@ -64,49 +64,49 @@ beforeEach(async () => {
 
 describe('createNode — schema enforcement (GraphQL)', () => {
   it('accepts a valid collection member', async () => {
-    const n = await createNode({ memoryId: memId, loc: 'c.letta', name: 'Letta', objectType: 'competitor', properties: { name: 'Letta', stage: 'seed' } });
+    const n = await createNode({ memoryRef: memId, loc: 'c.letta', name: 'Letta', objectType: 'competitor', properties: { name: 'Letta', stage: 'seed' } });
     expect(n.objectType).toBe('competitor');
   });
 
   it('rejects a missing required field', async () => {
-    await expect(createNode({ memoryId: memId, loc: 'c.x', name: 'X', objectType: 'competitor', properties: { stage: 'seed' } }))
+    await expect(createNode({ memoryRef: memId, loc: 'c.x', name: 'X', objectType: 'competitor', properties: { stage: 'seed' } }))
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 
   it('rejects an undeclared collection', async () => {
-    await expect(createNode({ memoryId: memId, loc: 'g.x', name: 'X', objectType: 'gadget', properties: {} }))
+    await expect(createNode({ memoryRef: memId, loc: 'g.x', name: 'X', objectType: 'gadget', properties: {} }))
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 
   it('rejects an out-of-range enum value', async () => {
-    await expect(createNode({ memoryId: memId, loc: 'c.y', name: 'Y', objectType: 'competitor', properties: { name: 'Y', stage: 'series-z' } }))
+    await expect(createNode({ memoryRef: memId, loc: 'c.y', name: 'Y', objectType: 'competitor', properties: { name: 'Y', stage: 'series-z' } }))
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 
   it('rejects a non-numeric number field', async () => {
-    await expect(createNode({ memoryId: memId, loc: 'c.z', name: 'Z', objectType: 'competitor', properties: { name: 'Z', funding: 'lots' } }))
+    await expect(createNode({ memoryRef: memId, loc: 'c.z', name: 'Z', objectType: 'competitor', properties: { name: 'Z', funding: 'lots' } }))
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 
   it('a node without objectType is unaffected by the schema', async () => {
-    const n = await createNode({ memoryId: memId, loc: 'plain', name: 'Plain', properties: { anything: 1 } });
+    const n = await createNode({ memoryRef: memId, loc: 'plain', name: 'Plain', properties: { anything: 1 } });
     expect(n.objectType).toBeNull();
   });
 
   it('an unschema\'d memory keeps objectType free-form', async () => {
-    const n = await createNode({ memoryId: freeMemId, loc: 'x', name: 'X', objectType: 'whatever', properties: {} });
+    const n = await createNode({ memoryRef: freeMemId, loc: 'x', name: 'X', objectType: 'whatever', properties: {} });
     expect(n.objectType).toBe('whatever');
   });
 
   it('normalizes an empty objectType to null (no bypass)', async () => {
-    const n = await createNode({ memoryId: memId, loc: 'empty', name: 'E', objectType: '  ', properties: { anything: 1 } });
+    const n = await createNode({ memoryRef: memId, loc: 'empty', name: 'E', objectType: '  ', properties: { anything: 1 } });
     expect(n.objectType).toBeNull(); // stored as an ordinary node, not ""
   });
 
   it('a rejected update leaves no revision (validate before snapshot)', async () => {
-    const n = await createNode({ memoryId: memId, loc: 'c.rev', name: 'R', objectType: 'competitor', properties: { name: 'R' } });
+    const n = await createNode({ memoryRef: memId, loc: 'c.rev', name: 'R', objectType: 'competitor', properties: { name: 'R' } });
     await expect(
-      (resolvers.Mutation as any).updateNode(null, { input: { memoryId: memId, loc: 'c.rev', properties: {} } }, admin()),
+      (resolvers.Mutation as any).updateNode(null, { input: { memoryRef: memId, loc: 'c.rev', properties: {} } }, admin()),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
   });
@@ -117,24 +117,24 @@ describe('platform-owned exports on typed nodes (#1286)', () => {
     await (resolvers.Mutation as any).updateMemory(null, { ref: memId, schema: typedTaskSchema }, admin());
     const mutation = resolvers.Mutation as any;
     const node = await mutation.createTaskNode(null, {
-      input: { memoryId: memId, loc: 'tasks:typed', name: 'Typed', isRunnable: true, objectType: 'task', properties: { title: 'T' } },
+      input: { memoryRef: memId, loc: 'tasks:typed', name: 'Typed', isRunnable: true, objectType: 'task', properties: { title: 'T' } },
     }, admin());
     expect(node.properties).toEqual({ title: 'T' }); // collection-required exports has no authority
 
     await mutation.updateTaskNode(null, {
-      input: { id: node.id, properties: { title: 'T', exports: skillExports } },
+      input: { ref: node.id, properties: { title: 'T', exports: skillExports } },
     }, admin());
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).properties).toEqual({ title: 'T', exports: skillExports });
 
     await mutation.updateTaskNode(null, {
-      input: { id: node.id, properties: { title: 'T', exports: { claudeSkill: [] } } },
+      input: { ref: node.id, properties: { title: 'T', exports: { claudeSkill: [] } } },
     }, admin());
     const plan = await (resolvers.Query as any).skillPlan(null, { input: { intent: 'LINT' } }, admin());
     const entry = plan.entries.find((item: { urn: string }) => item.urn.endsWith('tasks:typed'));
     expect(entry.findings).toEqual(expect.arrayContaining([expect.objectContaining({ rule: 'skill-declaration-malformed', severity: 'error' })]));
 
     await expect(mutation.updateTaskNode(null, {
-      input: { id: node.id, properties: { title: 'T', exports: skillExports, unrelated: true } },
+      input: { ref: node.id, properties: { title: 'T', exports: skillExports, unrelated: true } },
     }, admin())).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 });

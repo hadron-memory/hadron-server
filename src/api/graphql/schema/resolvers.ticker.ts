@@ -72,7 +72,7 @@ import { recordHostKeyUseApart } from '../../../lib/hostOperations/hostKey.js';
 import { hostWorkersWhere } from '../../../lib/tickers/wakeKeyScope.js';
 import { composeWorkerUrn, resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
-import { isId } from '../../../lib/entityRef/shape.js';
+import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { mentionTokenOf } from '../../../lib/mentionToken.js';
 import { normalizeUrnForLookup } from '../../../lib/urn.js';
@@ -231,18 +231,23 @@ function parseDate(value: unknown, field: string): Date {
  * subscriber's own read gate at computation time (S2). Checking the author here
  * keeps a ticker from being a probe for channel ids.
  */
-async function checkChannels(ctx: Context, ids: unknown): Promise<string[]> {
-  if (!Array.isArray(ids)) throw badInput('channelIds is a list of channel ids.');
-  const unique = [...new Set(ids.map((x) => String(x)))];
-  if (unique.length > TICKER_CHANNELS_MAX) throw badInput(`At most ${TICKER_CHANNELS_MAX} channels.`);
-  if (unique.length === 0) return [];
+async function checkChannels(ctx: Context, refs: unknown): Promise<string[]> {
+  if (!Array.isArray(refs)) throw badInput('channelRefs is a list of channel ids or URNs.');
+  const uniqueRefs = [...new Set(refs.map((x) => String(x)))];
+  if (uniqueRefs.length > TICKER_CHANNELS_MAX) throw badInput(`At most ${TICKER_CHANNELS_MAX} channels.`);
+  if (uniqueRefs.length === 0) return [];
+  // #5080: each ref (an id or a chat-root node URN) is resolved first, and the read gate runs on the RESOLVED rows. A ref
+  // that names nothing, and one the caller cannot read, get the same single refusal (cor:api:140:02), worded alike for
+  // an id and a URN. The ticker stores the resolved ids, so the column is unchanged.
+  const resolved = await Promise.all(uniqueRefs.map((r) => resolveChannelRefId(ctx.db, r)));
+  const unique = [...new Set(resolved.filter((id): id is string => id !== null))];
   const rows = await ctx.db.channel.findMany({
-    where: { id: { in: unique.filter(isId) }, deletedAt: null },
+    where: { id: { in: unique }, deletedAt: null },
     select: { id: true, memoryId: true },
   });
   const accessible = await getAccessibleMemoryIds(ctx);
   const ok = new Set(rows.filter((r) => accessible.includes(r.memoryId)).map((r) => r.id));
-  if (unique.some((id) => !ok.has(id))) throw badInput('A channel in channelIds does not exist or is not readable by you.');
+  if (resolved.some((id) => id === null || !ok.has(id))) throw badInput('A channel in channelRefs does not exist or is not readable by you.');
   return unique;
 }
 
@@ -336,7 +341,7 @@ type TickerInput = {
   cadenceSeconds: number;
   anchorAt?: Date | string | null;
   quietHours?: unknown;
-  channelIds?: string[] | null;
+  channelRefs?: string[] | null;
   relevance?: string | null;
   reasons?: string[] | null;
   enabled?: boolean | null;
@@ -500,7 +505,7 @@ const crudMutations = {
     // Shape that needs no row, checked before the transaction.
     const name = cleanName(input.name);
     const quiet = input.quietHours == null ? null : checkQuietHours(input.quietHours);
-    const channelIds = input.channelIds == null ? [] : await checkChannels(ctx, input.channelIds);
+    const channelIds = input.channelRefs == null ? [] : await checkChannels(ctx, input.channelRefs);
     const relevance = input.relevance == null ? 'ALL' : checkRelevance(input.relevance);
     const reasons = input.reasons == null ? ['read-team-channel'] : checkReasons(input.reasons);
     const anchorAt = input.anchorAt == null ? new Date() : parseDate(input.anchorAt, 'anchorAt');
@@ -543,9 +548,9 @@ const crudMutations = {
     const actor = withInstruction(reached, instruction);
     const name = input.name == null ? undefined : cleanName(input.name);
     if (input.quietHours != null && input.clearQuietHours) throw badInput('Send quietHours or clearQuietHours, not both.');
-    if (input.channelIds != null && input.clearChannels) throw badInput('Send channelIds or clearChannels, not both.');
+    if (input.channelRefs != null && input.clearChannels) throw badInput('Send channelRefs or clearChannels, not both.');
     const quiet = input.quietHours == null ? undefined : checkQuietHours(input.quietHours);
-    const channelIds = input.channelIds == null ? undefined : await checkChannels(ctx, input.channelIds);
+    const channelIds = input.channelRefs == null ? undefined : await checkChannels(ctx, input.channelRefs);
     const relevance = input.relevance == null ? undefined : checkRelevance(input.relevance);
     const reasons = input.reasons == null ? undefined : checkReasons(input.reasons);
     const anchorAt = input.anchorAt == null ? undefined : parseDate(input.anchorAt, 'anchorAt');

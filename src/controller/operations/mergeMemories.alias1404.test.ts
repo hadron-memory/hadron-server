@@ -101,7 +101,7 @@ describe('#1404 mergeMemories node aliases', () => {
     expect(await resolveNodeRef(db, oldParent)).toEqual({ id: parent.id });
     expect((await resolvers.Query.node(null, { ref: oldChild }, ctx()))?.id).toBe(child.id);
     await resolvers.Mutation.updateNode(null, {
-      input: { id: oldChild, content: 'updated through predecessor' },
+      input: { ref: oldChild, content: 'updated through predecessor' },
     }, ctx());
     expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).content)
       .toBe('updated through predecessor');
@@ -183,7 +183,7 @@ describe('#1404 mergeMemories node aliases', () => {
     expect((await resolvers.Query.node(null, { ref: old }, ctx()))?.id).toBe(node.id);
     expect(await resolvers.Query.node(null, { ref: old }, ctx(sourceReaderId))).toBeNull();
     await expect(resolvers.Mutation.updateNode(null, {
-      input: { id: old, content: 'denied' },
+      input: { ref: old, content: 'denied' },
     }, ctx(sourceReaderId))).rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
     const occupant = await makeNode(source.id, 'reused');
     expect(await resolveNodeRef(db, old)).toEqual({ id: occupant.id });

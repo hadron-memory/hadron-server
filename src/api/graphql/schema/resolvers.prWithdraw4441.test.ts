@@ -35,7 +35,7 @@ const schedule = (slots = ['local', 'blind'], who = owner.id) => M.setReviewSche
 const freeze = (head = H) => M.freezePullRequestHead!({}, { taskRef: build.id, head }, ctx(author.id));
 const readiness = (head = H) => Q.pullRequestReadiness!({}, { taskRef: build.id, head }, ctx(owner.id));
 async function seat(slot: string, head = H, who = reviewer.id, supersedes?: string) {
-  const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: slot, assignee: { user: who }, source: 'synthetic' } }, ctx(author.id));
+  const t = await M.createAgentTask!({}, { input: { parentTaskRef: build.id, title: slot, assignee: { user: who }, source: 'synthetic' } }, ctx(author.id));
   await M.assignReviewSeat!({}, { taskRef: t.id, slot, head, supersedes }, ctx(author.id));
   return t;
 }
@@ -169,7 +169,7 @@ describe('#4441 the withdraw verb: who, on what, and the record', () => {
 
 /** A seat assigned to worker `w`, whose verdict `w` records through its own session, then finishes. */
 async function workerNegative(w: any, slot = 'blind') {
-  const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: slot, assignee: { worker: w.id }, source: 'synthetic' } }, ctx(author.id));
+  const t = await M.createAgentTask!({}, { input: { parentTaskRef: build.id, title: slot, assignee: { worker: w.id }, source: 'synthetic' } }, ctx(author.id));
   await M.assignReviewSeat!({}, { taskRef: t.id, slot, head: H }, ctx(author.id));
   await asWorker(w, (c) => M.startAgentTask!({}, { taskRef: t.id }, c));
   await asWorker(w, (c) => M.recordReviewVerdict!({}, { taskRef: t.id, head: H, verdict: 'CHANGES_REQUESTED', receipt: RECEIPT }, c));

@@ -149,7 +149,7 @@ export interface FindNodesArgs {
   mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
   minScore?: number | null;
   filter?: {
-    memoryIds?: string[] | null;
+    memoryRefs?: string[] | null;
     memoryClasses?: string[] | null;
     nodeType?: string | null;
     /** #3113 — an explicit list of node types (a union); see `checkNodeTypesFilter`. */
@@ -193,16 +193,16 @@ export interface FindNodesArgs {
  */
 export async function resolveNodeReadScopeIds(
   ctx: Context,
-  f: { memoryIds?: string[] | null; memoryClasses?: string[] | null; isRunnable?: boolean | null },
+  f: { memoryRefs?: string[] | null; memoryClasses?: string[] | null; isRunnable?: boolean | null },
   orgScopeId: string | null,
 ): Promise<string[]> {
   // ── Resolve scope: accessible ∩ requested memories (ID/URN mix) ──
-  const explicitIds = !!(f.memoryIds && f.memoryIds.length > 0);
+  const explicitIds = !!(f.memoryRefs && f.memoryRefs.length > 0);
   // #3306: resolve the named memories first so the PUBLIC-knowledge arm (pure App key / userless run) looks up
   // only those, never every PUBLIC memory.
   const requestedIds = explicitIds
     ? (await Promise.all(
-        f.memoryIds!.map((ref) =>
+        f.memoryRefs!.map((ref) =>
           isId(ref)
             ? Promise.resolve(ref)
             : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
@@ -256,7 +256,7 @@ type AppNodesFilter = {
     hasOpenThreads?: boolean | null;
     // Memory-scope fields — NOT supported by appNodes (the App's scope is
     // authoritative). Present only so we can reject them explicitly.
-    memoryIds?: string[] | null;
+    memoryRefs?: string[] | null;
     memoryClasses?: string[] | null;
     nodeType?: string | null;
     /** #3113 */
@@ -322,9 +322,9 @@ async function appNodesRead(ctx: Context, appRef: string, filter: AppNodesFilter
   // honor (its scope is the App's memories). Reject rather than silently
   // ignore them, so a caller who assumed they scoped fails fast instead of
   // getting a surprising superset. Use findNodes for cross-memory scoping.
-  if (f.memoryIds?.length || f.memoryClasses?.length) {
+  if (f.memoryRefs?.length || f.memoryClasses?.length) {
     throw badInput(
-      'appNodes: filter.memoryIds / filter.memoryClasses are not supported — ' +
+      'appNodes: filter.memoryRefs / filter.memoryClasses are not supported — ' +
         "the App's installed-agent memories are the authoritative scope. " +
         'Use findNodes for cross-memory scoping.',
     );
@@ -2437,7 +2437,7 @@ export const nodeQueries = {
       // Resolve it, then run the core with the scope's memories as the explicit
       // memory set (S2: already ∩ the caller's access — a lens never grants,
       // D-004) and, for `global`, the organization narrowing; add the
-      // disclosure envelope on the way out. `filter.memoryIds` narrows WITHIN
+      // disclosure envelope on the way out. `filter.memoryRefs` narrows WITHIN
       // the scope. Omitted ⇒ the pre-049 semantics are untouched: the portal
       // and the CLI pass orgRef and filters explicitly and never this argument,
       // so their results do not change under them from a flag they never passed
@@ -2453,10 +2453,10 @@ export const nodeQueries = {
       let innerOrgId = coreArgs.orgRef;
       if (scopeRes.memoryIds !== null) {
         let requested = scopeRes.memoryIds;
-        if (f.memoryIds && f.memoryIds.length > 0) {
+        if (f.memoryRefs && f.memoryRefs.length > 0) {
           const explicit = (
             await Promise.all(
-              f.memoryIds.map((ref) =>
+              f.memoryRefs.map((ref) =>
                 isId(ref) ? Promise.resolve(ref) : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
             )
           ).filter((id): id is string => id !== null);
@@ -2465,7 +2465,7 @@ export const nodeQueries = {
         if (requested.length === 0) {
           return { hits: [], passages: [], total: 0, reason: null, degraded: narrowed, scope: info };
         }
-        innerFilter = { ...f, memoryIds: requested };
+        innerFilter = { ...f, memoryRefs: requested };
       }
       // #1987: the global view's materialised memory list must still pass
       // through the org narrowing in core (the App-memory exclusion of the
@@ -2586,7 +2586,7 @@ export const nodeQueries = {
             // single-node node(ref:) read does (PR #815 review, Codex P2).
             const typeErr = validateUrnType(parseUrnInput(ref), 'node');
             if (typeErr) {
-              throw new GraphQLError(`nodeBatch: ${typeErr} (ref "${ref}")`, {
+              throw new GraphQLError(`nodeBatch: ${typeErr} (one of the refs)`, {
                 extensions: { code: 'BAD_USER_INPUT' },
               });
             }
@@ -2992,7 +2992,7 @@ export const nodeQueries = {
       const empty = { items: [], hasMore: false, endCursor: null };
       // Each memory is read once however many times (or by which alias) it was named: a repeat would repeat
       // its rows, break the continuation and multiply the walk (#3586 review).
-      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryRefs }, null))];
+      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryRefs: args.memoryRefs }, null))];
       if (gated.length === 0) return empty;
       const inheritance = await effectiveScope(ctx.db, gated);
       return readLocSegments(ctx.db, {

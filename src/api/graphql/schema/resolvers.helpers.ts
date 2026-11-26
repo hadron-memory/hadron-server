@@ -59,6 +59,7 @@ import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
   deriveSlugFromName,
   formatCanonicalUrn,
+  validateUserSlug,
   UrnNotQualifiedError,
   UrnParseError,
   type CanonicalUrnType,
@@ -600,7 +601,7 @@ export function isMemoryReadableFresh(ctx: Context, memoryId: string, tx?: Prism
  * for a surface that does not already hold the caller's accessible set. A
  * surface that computes the full set anyway for its default
  * scope — `listAssets` is the live example — should intersect in memory against
- * that set instead. `listAssets` additionally narrows by `orgId` before checking
+ * that set instead. `listAssets` additionally narrows by `orgRef` before checking
  * refs, so swapping this helper in there would also drop that narrowing and
  * WIDEN the result. Unify the two only if you keep both checks.
  */
@@ -4301,6 +4302,52 @@ export interface UpdateNodeInput
   name?: string;
 }
 
+/**
+ * #5080: the GraphQL (wire) shape of a node write names its refs `memoryRef`, `ref` and `targetRef`. The write core keeps
+ * `memoryId`, `id` and `targetId` (internal names, and every Prisma key), so each door maps at the edge and nothing below it moves.
+ */
+export interface NodeEdgeDoorInput extends Omit<NodeEdgeInput, 'targetId'> {
+  targetRef: string;
+}
+export type CreateNodeDoorInput = Omit<CreateNodeInput, 'memoryId' | 'edges'> & {
+  memoryRef?: string | null;
+  edges?: NodeEdgeDoorInput[] | null;
+};
+export type UpdateNodeDoorInput = Omit<UpdateNodeInput, 'id' | 'memoryId' | 'edges'> & {
+  ref?: string | null;
+  memoryRef?: string | null;
+  edges?: NodeEdgeDoorInput[] | null;
+};
+
+function edgesFromDoor(edges: NodeEdgeDoorInput[] | null | undefined): NodeEdgeInput[] | undefined {
+  return Array.isArray(edges) ? edges.map(({ targetRef, ...e }) => ({ ...e, targetId: targetRef })) : (edges as undefined);
+}
+
+/** A wire create input to the core's shape: `memoryRef` -> `memoryId`, `edges[].targetRef` -> `targetId`. Absent stays absent. */
+export function toCreateNodeInput<R extends { memoryRef?: string | null; edges?: NodeEdgeDoorInput[] | null }>(
+  input: R,
+): Omit<R, 'memoryRef' | 'edges'> & { memoryId?: string; edges?: NodeEdgeInput[] } {
+  const { memoryRef, edges, ...rest } = input;
+  return {
+    ...rest,
+    ...(memoryRef !== undefined ? { memoryId: memoryRef as string } : {}),
+    ...(edges !== undefined ? { edges: edgesFromDoor(edges) } : {}),
+  };
+}
+
+/** A wire update input to the core's shape: `ref` -> `id`, `memoryRef` -> `memoryId`, `edges[].targetRef` -> `targetId`. */
+export function toUpdateNodeInput<R extends { ref?: string | null; memoryRef?: string | null; edges?: NodeEdgeDoorInput[] | null }>(
+  input: R,
+): Omit<R, 'ref' | 'memoryRef' | 'edges'> & { id?: string; memoryId?: string; edges?: NodeEdgeInput[] } {
+  const { ref, memoryRef, edges, ...rest } = input;
+  return {
+    ...rest,
+    ...(ref !== undefined ? { id: ref as string } : {}),
+    ...(memoryRef !== undefined ? { memoryId: memoryRef as string } : {}),
+    ...(edges !== undefined ? { edges: edgesFromDoor(edges) } : {}),
+  };
+}
+
 export type NodeTextField = 'content' | 'name' | 'alias' | 'description' | 'abstract' | 'tags';
 
 export interface SearchReplaceInNodesInput {
@@ -4308,8 +4355,8 @@ export interface SearchReplaceInNodesInput {
   authoredWith?: AuthoredWith | null;
   oldText: string;
   newText: string;
-  nodeIds?: string[];
-  memoryIds?: string[];
+  nodeRefs?: string[];
+  memoryRefs?: string[];
   prefix?: string;
   fields: NodeTextField[];
   caseInsensitive?: boolean;
@@ -4422,14 +4469,31 @@ export interface UsageEventInput {
 }
 
 /**
+ * #5203 S1 — a slug the CALLER supplied is not derived (cor:urn:010:01): it is validated, and a reserved word, an empty
+ * string or any other bad slug is refused BAD_USER_INPUT (UrnParseError, formatError). A taken one is refused by the
+ * door's own existing check. Lowercase is required, as at every create boundary.
+ */
+export function suppliedSlug(slug: string): string {
+  try {
+    validateUserSlug(slug);
+  } catch (err) {
+    if (!(err instanceof UrnParseError)) throw err;
+    // The reason is the contract (#5168); the slug is the caller's own text and is not relayed.
+    throw new GraphQLError('Invalid slug.', { extensions: { code: 'BAD_USER_INPUT', reason: err.reason } });
+  }
+  return slug;
+}
+
+/**
  * #5149 — the slug a new memory takes from the caller's display name, or a typed BAD_USER_INPUT before any write.
  * The name itself has no grammar (hrn:node:hadronmemory.com:specs:cor:dmo:060:01) and reaches no path: the mirror checkout
  * is placed by the memory's URN, so only the slug is judged (hrn:node:hadronmemory.com:specs:cor:urn:010:02). Two names
  * still refuse: one that cannot be stored (a NUL or an unpaired surrogate), and one that yields no slug.
  * Call it after the authorization gates and before the door's first write.
  */
-export function deriveMemorySlug(name: string): string {
+export function deriveMemorySlug(name: string, supplied?: string | null): string {
   assertStorableText({ name });
+  if (supplied != null) return suppliedSlug(supplied);
   try {
     return deriveSlugFromName(name);
   } catch (err) {

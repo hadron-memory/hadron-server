@@ -161,12 +161,12 @@ describe('#2018 S2: a text-batch ack', () => {
     for (const t of ['a', 'b', 'c']) await say(`@kit ${t}`, { mentions: ['kit'] });
     await aged();
     const b = (await read(hostKey)).batches[0];
-    await M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelId: channel.id, seq: 2 }] }, keyCtx(hostKey));
+    await M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelRef: channel.id, seq: 2 }] }, keyCtx(hostKey));
     expect(await marks()).toEqual({ delivered: 2, read: 2 });
     // The full ack afterwards raises both to 3; an older partial replayed never lowers them.
     await M.acknowledgeDeliveryBatches({}, { batchIds: [b.id] }, keyCtx(hostKey));
     expect(await marks()).toEqual({ delivered: 3, read: 3 });
-    await M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelId: channel.id, seq: 2 }] }, keyCtx(hostKey));
+    await M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelRef: channel.id, seq: 2 }] }, keyCtx(hostKey));
     expect(await marks()).toEqual({ delivered: 3, read: 3 });
   });
 });
@@ -331,7 +331,7 @@ describe('#2018 S2: authority, exclusions, atomicity', () => {
     await aged();
     const b = (await read(hostKey)).batches[0];
     const park = parkAfterWakeLock();
-    const ack = (d = db) => M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelId: channel.id, seq: 2 }] }, keyCtx(hostKey, app.id, { db: d as never }));
+    const ack = (d = db) => M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelRef: channel.id, seq: 2 }] }, keyCtx(hostKey, app.id, { db: d as never }));
     const own = (d = db) => Q.channelMessages({}, { channelRef: channel.id, mentionsRef: kit.id, sinceSeq: 0, limit: 20 }, selfCtx(s, { db: d as never }));
     const first = order === 'read first' ? own(park.db) : ack(park.db);
     await park.reached;

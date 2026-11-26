@@ -58,17 +58,17 @@ describe('#4096 GraphQL node writes', () => {
   ];
   for (const [field, patch] of fields) {
     it(`createNode refuses a NUL in ${field} typed, naming the field, with no row written`, async () => {
-      await refused(M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', ...patch } }, ctx(admin.id)), field);
+      await refused(M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', ...patch } }, ctx(admin.id)), field);
       expect(await nodes()).toBe(0);
     });
   }
   for (const [field, patch] of fields) {
     it(`updateNode refuses a NUL in ${field} typed and leaves the node untouched`, async () => {
-      await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', content: 'before', description: 'd', abstract: 'a', tags: ['t'] } }, ctx(admin.id));
+      await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', content: 'before', description: 'd', abstract: 'a', tags: ['t'] } }, ctx(admin.id));
       const row = () => db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'n1' } });
       const snapshot = await row();
       const revisions = await db.nodeRevision.count({ where: { memoryId: memory.id } });
-      await refused(M.updateNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', ...patch } }, ctx(admin.id)), field);
+      await refused(M.updateNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', ...patch } }, ctx(admin.id)), field);
       expect(await row()).toEqual(snapshot);
       expect(await db.nodeRevision.count({ where: { memoryId: memory.id } })).toBe(revisions);
     });
@@ -84,33 +84,33 @@ describe('#4096 GraphQL node writes', () => {
     ['data', { data: { k: nul } }],
     ['data', { data: { [nul]: 1 } }],
     ['properties', { properties: { k: [nul] } }],
-    ['edges[0].name', { edges: [{ targetId: 'x', name: nul }] }],
-    ['edges[0].description', { edges: [{ targetId: 'x', description: nul }] }],
-    ['edges[0].targetId', { edges: [{ targetId: nul }] }],
+    ['edges[0].name', { edges: [{ targetRef: 'x', name: nul }] }],
+    ['edges[0].description', { edges: [{ targetRef: 'x', description: nul }] }],
+    ['edges[0].targetId', { edges: [{ targetRef: nul }] }],
   ];
   for (const [field, patch] of more) {
     it(`createNode refuses unstorable text in ${field} typed, with no row written`, async () => {
-      await refused(M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', ...patch } }, ctx(admin.id)), field);
+      await refused(M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', ...patch } }, ctx(admin.id)), field);
       expect(await nodes()).toBe(0);
     });
   }
   it('updateNode refuses it in reason, and in an edge, leaving the node untouched', async () => {
-    await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', content: 'before' } }, ctx(admin.id));
+    await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', content: 'before' } }, ctx(admin.id));
     const snap = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'n1' } });
-    await refused(M.updateNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', reason: nul } }, ctx(admin.id)), 'reason');
-    await refused(M.updateNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', edges: [{ targetId: 'x', name: nul }] } }, ctx(admin.id)), 'edges[0].name');
+    await refused(M.updateNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', reason: nul } }, ctx(admin.id)), 'reason');
+    await refused(M.updateNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', edges: [{ targetRef: 'x', name: nul }] } }, ctx(admin.id)), 'edges[0].name');
     expect(await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'n1' } })).toEqual(snap);
   });
   it('updateNodeData refuses a NUL in the patch typed', async () => {
-    await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', content: 'before' } }, ctx(admin.id));
+    await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', content: 'before' } }, ctx(admin.id));
     const e: any = await M.updateNodeData({}, { nodeRef: (await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'n1' } })).id, data: { k: nul } }, ctx(admin.id)).catch((x: any) => x);
     expect(e.extensions?.code).toBe('BAD_USER_INPUT');
     expect(e.message).not.toContain(SECRET);
   });
   it('searchReplaceInNodes refuses a NUL in newText typed (dry run too), after authorization, leaving every node untouched', async () => {
-    await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', content: 'hello world' } }, ctx(admin.id));
+    await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', content: 'hello world' } }, ctx(admin.id));
     const snap = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'n1' } });
-    const input = (dryRun: boolean) => ({ oldText: 'hello', newText: nul, memoryIds: [memory.id], fields: ['content'], dryRun });
+    const input = (dryRun: boolean) => ({ oldText: 'hello', newText: nul, memoryRefs: [memory.id], fields: ['content'], dryRun });
     await refused(M.searchReplaceInNodes({}, { input: input(false) }, ctx(admin.id)), 'newText');
     await refused(M.searchReplaceInNodes({}, { input: input(true) }, ctx(admin.id)), 'newText');
     expect(await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'n1' } })).toEqual(snap);
@@ -118,22 +118,22 @@ describe('#4096 GraphQL node writes', () => {
     expect(denied.extensions?.code).not.toBe('BAD_USER_INPUT');
   });
   it('keeps the authorization refusal ahead of the NUL refusal', async () => {
-    const e: any = await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', content: nul } }, ctx(outsider.id)).catch((x: any) => x);
+    const e: any = await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', content: nul } }, ctx(outsider.id)).catch((x: any) => x);
     expect(e.extensions?.code).not.toBe('BAD_USER_INPUT');
     expect(e.name).toBe('MemoryNotFoundError');
   });
   for (const [field, patch] of [['content', { content: 'a\ud800b' }], ['name', { name: 'a\udc00b' }], ['tags', { tags: ['a\ud83d'] }]] as [string, any][]) {
     it(`createNode refuses an unpaired surrogate in ${field} the same way (lone surrogates fail the same write)`, async () => {
-      await refused(M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', ...patch } }, ctx(admin.id)), field);
+      await refused(M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', ...patch } }, ctx(admin.id)), field);
       expect(await nodes()).toBe(0);
     });
   }
   it('still stores a valid non-BMP pair (control)', async () => {
-    const node = await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N 😀', content: 'a😀b' } }, ctx(admin.id));
+    const node = await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N 😀', content: 'a😀b' } }, ctx(admin.id));
     expect(node.content).toBe('a😀b');
   });
   it('still stores a U+0001 control character (control)', async () => {
-    const node = await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', content: 'a\u0001b' } }, ctx(admin.id));
+    const node = await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', content: 'a\u0001b' } }, ctx(admin.id));
     expect(node.content).toBe('a\u0001b');
   });
 });
@@ -153,7 +153,7 @@ describe('#4096 MCP node tools (parity: typed refusal with the code, no row writ
       expect(await nodes()).toBe(0);
     });
     it(`hadron_update_node refuses a NUL in ${field}`, async () => {
-      await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', content: 'before' } }, ctx(admin.id));
+      await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', content: 'before' } }, ctx(admin.id));
       const text = await mcp(admin.id).callToolText('hadron_update_node', { urn: urn('n1'), ...patch });
       shape(text, field);
       expect((await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'n1' } })).content).toBe('before');
@@ -165,13 +165,13 @@ describe('#4096 MCP node tools (parity: typed refusal with the code, no row writ
     expect(await nodes()).toBe(0);
   });
   it('hadron_replace_text refuses a NUL in newText and writes nothing', async () => {
-    await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', content: 'hello world' } }, ctx(admin.id));
+    await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', content: 'hello world' } }, ctx(admin.id));
     const text = await mcp(admin.id).callToolText('hadron_replace_text', { oldText: 'hello', newText: nul, memoryUrns: [`hrn:mem:${memoryUrn}`], fields: ['content'] });
     shape(text, 'newText');
     expect((await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'n1' } })).content).toBe('hello world');
   });
   it('hadron_update_node refuses a NUL in reason, data and an edge field', async () => {
-    await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', content: 'before' } }, ctx(admin.id));
+    await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', content: 'before' } }, ctx(admin.id));
     shape(await mcp(admin.id).callToolText('hadron_update_node', { urn: urn('n1'), reason: nul }), 'reason');
     shape(await mcp(admin.id).callToolText('hadron_update_node', { urn: urn('n1'), data: { k: nul } }), 'data');
     shape(await mcp(admin.id).callToolText('hadron_update_node', { urn: urn('n1'), edges: [{ targetUrn: urn('n1'), name: nul }] }), 'edges[0].name');
@@ -181,13 +181,13 @@ describe('#4096 MCP node tools (parity: typed refusal with the code, no row writ
     expect(await nodes()).toBe(1);
   });
   it('hadron_update_node_data refuses a NUL in the patch typed', async () => {
-    await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', content: 'before' } }, ctx(admin.id));
+    await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', content: 'before' } }, ctx(admin.id));
     const text = await mcp(admin.id).callToolText('hadron_update_node_data', { nodeUrn: urn('n1'), data: { k: nul } });
     shape(text, 'data');
     expect(text).not.toContain(SECRET);
   });
   it('a caller who cannot write gets the write denial, not the NUL refusal, on create and update', async () => {
-    await M.createNode({}, { input: { memoryId: memory.id, loc: 'n1', name: 'N', content: 'before' } }, ctx(admin.id));
+    await M.createNode({}, { input: { memoryRef: memory.id, loc: 'n1', name: 'N', content: 'before' } }, ctx(admin.id));
     const reader = await db.user.create({ data: { githubId: 409603, githubUsername: 'reader4096', roles: [] } });
     await db.memory.update({ where: { id: memory.id }, data: { class: 'knowledge', userId: null, ownerUserId: null, organizationId: org.id } });
     await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'READER' as any } });

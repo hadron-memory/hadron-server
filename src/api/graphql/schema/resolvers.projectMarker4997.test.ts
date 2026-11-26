@@ -59,9 +59,9 @@ describe('#4997 create sets the marker (cor:agt:050:01 Project marker)', () => {
     expect(underZero.handle).toMatch(/^AT0\.\d+$/);
     expect(await marked(underZero.id)).toBe(true);
     const top = await create({ title: 'Top', project: true });
-    const nested = await create({ title: 'Nested', parentTaskId: top.id, isProject: true });
+    const nested = await create({ title: 'Nested', parentTaskRef: top.id, isProject: true });
     expect(await marked(nested.id)).toBe(true);
-    const plain = await create({ title: 'Plain', parentTaskId: top.id });
+    const plain = await create({ title: 'Plain', parentTaskRef: top.id });
     expect(await marked(plain.id)).toBe(false);
     expect(await marked((await create({ title: 'No project' })).id)).toBe(false);
   });
@@ -102,16 +102,16 @@ describe('#4997 a clone keeps the marker unless overridden (cor:agt:050:02)', ()
     const top = await clone(markedTop.id);
     expect(top.parentTaskId, 'a top-level source makes a top-level clone').toBeNull();
     expect(await marked(top.id)).toBe(true);
-    const markedNested = await create({ title: 'Marked nested', parentTaskId: markedTop.id, isProject: true });
+    const markedNested = await create({ title: 'Marked nested', parentTaskRef: markedTop.id, isProject: true });
     expect(await marked((await clone(markedNested.id)).id)).toBe(true);
-    const plainNested = await create({ title: 'Plain nested', parentTaskId: markedTop.id });
+    const plainNested = await create({ title: 'Plain nested', parentTaskRef: markedTop.id });
     expect(await marked((await clone(plainNested.id)).id)).toBe(false);
   });
 
   it('isProject overrides the copied marker; project: true marks; a contradiction is refused', async () => {
     const markedTop = await create({ title: 'Marked', project: true });
     const parent = await create({ title: 'Parent', project: true });
-    const moved = await clone(markedTop.id, { isProject: false, parentTaskId: parent.id });
+    const moved = await clone(markedTop.id, { isProject: false, parentTaskRef: parent.id });
     expect(moved.parentTaskId).toBe(parent.id);
     expect(await marked(moved.id), 'a clone given a parent may drop the marker').toBe(false);
     const underZero = await clone(markedTop.id, { project: false });
@@ -225,11 +225,11 @@ describe('#4997 the metrics read the marker (cor:agt:150 A project, R4: count on
   /** Tree: Outer (marked, top, sourced) > Mid (marked) > Leaf; Outer > Direct; AT0 > Loose (NOT marked) > Stray; AT0 > Orphan. */
   async function tree() {
     const outer = await create({ title: 'Outer', project: true, source: SRC });
-    const mid = await create({ title: 'Mid', parentTaskId: outer.id, isProject: true, source: SRC });
-    const leaf = await create({ title: 'Leaf', parentTaskId: mid.id, source: SRC });
-    const direct = await create({ title: 'Direct', parentTaskId: outer.id, source: SRC });
+    const mid = await create({ title: 'Mid', parentTaskRef: outer.id, isProject: true, source: SRC });
+    const leaf = await create({ title: 'Leaf', parentTaskRef: mid.id, source: SRC });
+    const direct = await create({ title: 'Direct', parentTaskRef: outer.id, source: SRC });
     const loose = await create({ title: 'Loose' });
-    const stray = await create({ title: 'Stray', parentTaskId: loose.id, source: SRC });
+    const stray = await create({ title: 'Stray', parentTaskRef: loose.id, source: SRC });
     const orphan = await create({ title: 'Orphan', source: SRC });
     await db.agentTask.updateMany({ where: { appId: app.id, handle: { not: 'AT0' } }, data: { status: 'started', startedAt: new Date() } });
     return { outer, mid, leaf, direct, loose, stray, orphan };
@@ -272,11 +272,11 @@ describe('#4997 the metrics read the marker (cor:agt:150 A project, R4: count on
     const inOther = (input: Record<string, unknown>) => M.createAgentTask({}, { input: { appRef: other.id, assignee: { user: alice.id }, ...input } }, as(alice));
     // The same creation order in both Apps, so the handles match: AT1 > AT1.1 > AT1.1.1. The middle one is marked only in Q.
     const theirTop = await inOther({ title: 'Theirs', project: true });
-    const theirMid = await inOther({ title: 'Their mid', parentTaskId: theirTop.id, isProject: true });
-    const theirLeaf = await inOther({ title: 'Their leaf', parentTaskId: theirMid.id, source: SRC });
+    const theirMid = await inOther({ title: 'Their mid', parentTaskRef: theirTop.id, isProject: true });
+    const theirLeaf = await inOther({ title: 'Their leaf', parentTaskRef: theirMid.id, source: SRC });
     const ourTop = await create({ title: 'Ours', project: true });
-    const ourMid = await create({ title: 'Our mid', parentTaskId: ourTop.id });
-    const ourLeaf = await create({ title: 'Our leaf', parentTaskId: ourMid.id, source: SRC });
+    const ourMid = await create({ title: 'Our mid', parentTaskRef: ourTop.id });
+    const ourLeaf = await create({ title: 'Our leaf', parentTaskRef: ourMid.id, source: SRC });
     await db.agentTask.updateMany({ where: { appId: { in: [app.id, other.id] }, handle: { not: 'AT0' } }, data: { status: 'started', startedAt: new Date() } });
     const handle = async (id: string) => (await db.agentTask.findUniqueOrThrow({ where: { id }, select: { handle: true } })).handle!;
     expect(await handle(ourMid.id), 'precondition: the middle tasks share a handle').toBe(await handle(theirMid.id));

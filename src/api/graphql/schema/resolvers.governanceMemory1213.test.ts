@@ -394,7 +394,7 @@ async function assertOperationJoins(operation: (context: Context) => Promise<unk
 it('real PG: caller-owned task-export merge joins before its node lock', async () => {
   const { resolvers } = await import('./resolvers.js');
   await assertOperationJoins(context => (resolvers.Mutation as unknown as Record<string, (...args: any[]) => Promise<unknown>>).updateTaskNode({},
-    { input: { id: nodeId, properties: { keep: 'present' } }, mergeExports: true }, context), async pid => {
+    { input: { ref: nodeId, properties: { keep: 'present' } }, mergeExports: true }, context), async pid => {
       const [{ locked }] = await db.$queryRaw<Array<{ locked: boolean }>>`
         SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = ${pid}
           AND objid = (hashtext(${nodeId})::bigint & 4294967295)::oid AND objsubid = 1) AS locked`;
@@ -575,7 +575,7 @@ it.each([false, true])('task export missing edge keeps the shared refusal shape 
   const { resolvers } = await import('./resolvers.js');
   const before = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
   await expect(resolvers.Mutation.updateTaskNode({}, {
-    input: { id: nodeId, properties: { exports: {} }, edges: [{ targetId: 'tasks:nope' }] }, mergeExports,
+    input: { ref: nodeId, properties: { exports: {} }, edges: [{ targetRef: 'tasks:nope' }] }, mergeExports,
   }, ctx())).rejects.toMatchObject({
     message: 'Edge target not found',
     extensions: { code: 'NodeNotFoundError' },

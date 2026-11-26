@@ -107,11 +107,12 @@ const usageWindowInstant = z.string().datetime({ offset: true });
  * who may filter usage by App key K. K itself (`self`), and whoever manages K's App (cor:dmo:050:12) through the
  * one person-only manager predicate the key inventory uses. Anyone else, including a non-owner App member, another
  * key of the same App, a bound worker session and another tenant, gets EXACTLY the answer a nonexistent key gets:
- * APP_KEY_NOT_FOUND naming the caller's own reference (the resolvers.appKeyScope.ts shape). A revoked key is still
+ * APP_KEY_NOT_FOUND with the code only (#5225: the caller's reference is not relayed). A revoked key is still
  * a key: its history stays filterable.
  */
 async function admitUsageKeyFilter(ctx: Context, ref: string): Promise<{ id: string; self: boolean }> {
-  const unknownKey = () => new GraphQLError('App key not found.', { extensions: { code: 'APP_KEY_NOT_FOUND', id: ref } });
+  // #5225: the code only; the caller's reference is not relayed (cor:api:140:01).
+  const unknownKey = () => new GraphQLError('App key not found.', { extensions: { code: 'APP_KEY_NOT_FOUND' } });
   const key = await ctx.db.appKey.findUnique({
     where: { id: ref },
     select: { id: true, app: { select: { id: true, organizationId: true, ownerUserId: true } } },

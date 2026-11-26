@@ -509,11 +509,11 @@ describe('#3426 Q1 (ruling 0200): a broken REQUIRED default is planted fail-clos
     expect(rules).toMatchObject([{ role: 'guide', locked: true, authorTaskId: null, authorTaskRequired: true }]);
     expect(await skipsOf(m.id)).toEqual([]);
     const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>>;
-    await expect(M.createNode!({}, { input: { memoryId: m.id, loc: 'n1', name: 'n1', content: 'x', role: 'guide' } }, { db, roles: [], userId: admin } as Context))
+    await expect(M.createNode!({}, { input: { memoryRef: m.id, loc: 'n1', name: 'n1', content: 'x', role: 'guide' } }, { db, roles: [], userId: admin } as Context))
       .rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_BROKEN' } });
     // An admin repointing the rule clears the refusal.
     await db.nodeRoleRule.update({ where: { id: rules[0]!.id }, data: { authorTaskId: taskB.id } });
-    await expect(M.createNode!({}, { input: { memoryId: m.id, loc: 'n1', name: 'n1', content: 'x', role: 'guide' } }, { db, roles: [], userId: admin } as Context))
+    await expect(M.createNode!({}, { input: { memoryRef: m.id, loc: 'n1', name: 'n1', content: 'x', role: 'guide' } }, { db, roles: [], userId: admin } as Context))
       .rejects.toMatchObject({ extensions: { code: 'AUTHORING_ATTESTATION_MISSING' } });
   });
 

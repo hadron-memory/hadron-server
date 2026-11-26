@@ -749,7 +749,7 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
 
 describe('#1417 — known provider ranges bind what a write sets, never a stored row', () => {
   it('create refuses an anthropic temperature above 1; 1 is fine', async () => {
-    const base = { ownerType: 'AGENT', ownerId: agent.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001', apiKey: 'sk-ant-x-1234' };
+    const base = { ownerType: 'AGENT', ownerRef: agent.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001', apiKey: 'sk-ant-x-1234' };
     await expect(resolvers.Mutation.createAiServiceConfig({}, { ...base, name: 'hot', params: { temperature: 1.5 } } as never, ctxFor(admin.id)))
       .rejects.toThrow(/at most 1/);
     await expect(resolvers.Mutation.createAiServiceConfig({}, { ...base, name: 'ok', params: { temperature: 1 } } as never, ctxFor(admin.id)))
@@ -777,7 +777,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
       {},
       {
         ownerType: 'AGENT',
-        ownerId: agent.id,
+        ownerRef: agent.id,
         name: 'fast',
         provider: 'anthropic',
         model: 'claude-haiku-4-5-20251001',
@@ -798,7 +798,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
 
     const listedPage = await resolvers.Query.aiServiceConfigs(
       {},
-      { filter: { ownerType: 'AGENT', ownerId: agent.id } },
+      { filter: { ownerType: 'AGENT', ownerRef: agent.id } },
       ctxFor(admin.id),
     );
     const listed = listedPage!.items;
@@ -828,7 +828,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     // Org owner — org admin OK.
     const orgCfg = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'default', provider: 'openai', model: 'gpt-4o', apiKey: 'sk-org' },
+      { ownerType: 'ORGANIZATION', ownerRef: org.id, name: 'default', provider: 'openai', model: 'gpt-4o', apiKey: 'sk-org' },
       ctxFor(admin.id),
     );
     expect(orgCfg.ownerType).toBe('ORGANIZATION');
@@ -837,7 +837,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     await expect(
       resolvers.Mutation.createAiServiceConfig(
         {},
-        { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'glm', model: 'glm-4' },
+        { ownerType: 'APP', ownerRef: app.id, name: 'default', provider: 'glm', model: 'glm-4' },
         ctxFor(outsider.id),
       ),
     ).rejects.toThrow(/Forbidden/);
@@ -846,13 +846,13 @@ describe('AiServiceConfig CRUD (US2)', () => {
     await expect(
       resolvers.Mutation.createAiServiceConfig(
         {},
-        { ownerType: 'HADRON_SERVER', ownerId: server.id, name: 'default', provider: 'bedrock', model: 'claude-3' },
+        { ownerType: 'HADRON_SERVER', ownerRef: server.id, name: 'default', provider: 'bedrock', model: 'claude-3' },
         ctxFor(admin.id),
       ),
     ).rejects.toThrow(/Forbidden/);
     const hostCfg = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'HADRON_SERVER', ownerId: server.id, name: 'default', provider: 'bedrock', model: 'claude-3' },
+      { ownerType: 'HADRON_SERVER', ownerRef: server.id, name: 'default', provider: 'bedrock', model: 'claude-3' },
       platformAdminCtx(),
     );
     expect(hostCfg.ownerType).toBe('HADRON_SERVER');
@@ -861,7 +861,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     await expect(
       resolvers.Query.aiServiceConfigs(
         {},
-        { filter: { ownerType: 'ORGANIZATION', ownerId: org.id } },
+        { filter: { ownerType: 'ORGANIZATION', ownerRef: org.id } },
         ctxFor(outsider.id),
       ),
     ).rejects.toThrow(/Forbidden/);
@@ -870,13 +870,13 @@ describe('AiServiceConfig CRUD (US2)', () => {
   it('rejects duplicate names per owner with the typed error', async () => {
     await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'anthropic', model: 'm', apiKey: 'sk-a' },
+      { ownerType: 'AGENT', ownerRef: agent.id, name: 'fast', provider: 'anthropic', model: 'm', apiKey: 'sk-a' },
       ctxFor(admin.id),
     );
     await expect(
       resolvers.Mutation.createAiServiceConfig(
         {},
-        { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'openai', model: 'x', apiKey: 'sk-b' },
+        { ownerType: 'AGENT', ownerRef: agent.id, name: 'fast', provider: 'openai', model: 'x', apiKey: 'sk-b' },
         ctxFor(admin.id),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'DuplicateAiServiceConfigNameError' } });
@@ -886,7 +886,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     await expect(
       resolvers.Mutation.createAiServiceConfig(
         {},
-        { ownerType: 'AGENT', ownerId: agent.id, name: 'bad', provider: 'grok', model: 'm' },
+        { ownerType: 'AGENT', ownerRef: agent.id, name: 'bad', provider: 'grok', model: 'm' },
         ctxFor(admin.id),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'UnknownAiProviderError' } });
@@ -895,7 +895,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
         {},
         {
           ownerType: 'AGENT',
-          ownerId: agent.id,
+          ownerRef: agent.id,
           name: 'bad',
           provider: 'anthropic',
           model: 'm',
@@ -907,7 +907,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     await expect(
       resolvers.Mutation.createAiServiceConfig(
         {},
-        { ownerType: 'AGENT', ownerId: agent.id, name: 'Not Valid', provider: 'anthropic', model: 'm' },
+        { ownerType: 'AGENT', ownerRef: agent.id, name: 'Not Valid', provider: 'anthropic', model: 'm' },
         ctxFor(admin.id),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'AiConfigValidationError' } });
@@ -916,7 +916,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
   it('apiKey update semantics: value replaces; empty string clears, only where a keyless config may run (#1390)', async () => {
     const created = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'anthropic', model: 'm', apiKey: 'sk-one' },
+      { ownerType: 'AGENT', ownerRef: agent.id, name: 'fast', provider: 'anthropic', model: 'm', apiKey: 'sk-one' },
       ctxFor(admin.id),
     );
     const replaced = await resolvers.Mutation.updateAiServiceConfig(
@@ -936,7 +936,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     // The platform's own anthropic config may run on the server credential, so it may clear.
     const host = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'HADRON_SERVER', ownerId: server.id, name: 'hosted', provider: 'anthropic', model: 'm', apiKey: 'sk-host' },
+      { ownerType: 'HADRON_SERVER', ownerRef: server.id, name: 'hosted', provider: 'anthropic', model: 'm', apiKey: 'sk-host' },
       platformAdminCtx(),
     );
     const cleared = await resolvers.Mutation.updateAiServiceConfig({}, { id: host.id, apiKey: '' }, platformAdminCtx());
@@ -1035,7 +1035,7 @@ describe('legacy surface shims (US3)', () => {
     );
     await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'anthropic', model: 'claude-opus-4-6', apiKey: 'sk-app-override' },
+      { ownerType: 'APP', ownerRef: app.id, name: 'default', provider: 'anthropic', model: 'claude-opus-4-6', apiKey: 'sk-app-override' },
       ctxFor(admin.id),
     );
     const resolved = await resolvers.Query.resolveAIConfig(
@@ -1109,7 +1109,7 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
   const mk = (extra: Record<string, unknown>) =>
     resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'zai', provider: 'glm', model: 'GLM-5.3', apiKey: 'k-1234', ...extra },
+      { ownerType: 'ORGANIZATION', ownerRef: org.id, name: 'zai', provider: 'glm', model: 'GLM-5.3', apiKey: 'k-1234', ...extra },
       ctxFor(admin.id),
     );
 
@@ -1272,7 +1272,7 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
       await code(
         resolvers.Mutation.createAiServiceConfig(
           {},
-          { ownerType: 'HADRON_SERVER', ownerId: server.id, name: 'keyless-host', provider: 'openai', model: 'm' },
+          { ownerType: 'HADRON_SERVER', ownerRef: server.id, name: 'keyless-host', provider: 'openai', model: 'm' },
           platformAdminCtx(),
         ),
       ),
@@ -1334,7 +1334,7 @@ describe('write-time invariants hold against a concurrent edit (#1389 review)', 
   it('updateAgentAIConfig: a provider switch that cleared the endpoint in between is refused, not restored without one', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'AGENT', ownerId: agent.id, name: 'default', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
+      { ownerType: 'AGENT', ownerRef: agent.id, name: 'default', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
       ctxFor(admin.id),
     );
     const err = await race(c.id, { provider: 'openai', endpoint: null }, () =>
@@ -1347,7 +1347,7 @@ describe('write-time invariants hold against a concurrent edit (#1389 review)', 
   it('updateAiServiceConfig: a key cleared in between is judged on the locked row', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'compat', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
+      { ownerType: 'ORGANIZATION', ownerRef: org.id, name: 'compat', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
       ctxFor(admin.id),
     );
     const err = await race(c.id, { apiKeyEncrypted: null, apiKeyPreview: null }, () =>
@@ -1360,7 +1360,7 @@ describe('write-time invariants hold against a concurrent edit (#1389 review)', 
   it('updateApp (legacy aiProvider): the same re-judgement on the locked row', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
+      { ownerType: 'APP', ownerRef: app.id, name: 'default', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
       ctxFor(admin.id),
     );
     const err = await race(c.id, { provider: 'openai', endpoint: null }, () =>
@@ -1375,7 +1375,7 @@ describe('updateAiServiceConfig judges the provider/style pair on the locked row
   it('a concurrent provider switch between the read and the write refuses a style the new provider has no use for', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'oa', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
+      { ownerType: 'ORGANIZATION', ownerRef: org.id, name: 'oa', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
       ctxFor(admin.id),
     );
     let locked!: () => void;
@@ -1435,7 +1435,7 @@ describe('the legacy writers clear a stale endpoint/style against the LOCKED row
   it('updateAgentAIConfig switching back to openai clears the GLM endpoint and style', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'AGENT', ownerId: agent.id, name: 'default', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
+      { ownerType: 'AGENT', ownerRef: agent.id, name: 'default', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
       ctxFor(admin.id),
     );
     await holdAndSwitch(c.id, () =>
@@ -1447,7 +1447,7 @@ describe('the legacy writers clear a stale endpoint/style against the LOCKED row
   it('updateApp (legacy aiProvider) switching back to openai clears them too', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
+      { ownerType: 'APP', ownerRef: app.id, name: 'default', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
       ctxFor(admin.id),
     );
     await holdAndSwitch(c.id, () =>
@@ -1461,7 +1461,7 @@ describe('updateApp legacy: omitted provider/model come from the LOCKED row (#13
   it('a concurrent model change is not overwritten by the value read before the lock', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'openai', model: 'gpt-old', apiKey: 'k-1' },
+      { ownerType: 'APP', ownerRef: app.id, name: 'default', provider: 'openai', model: 'gpt-old', apiKey: 'k-1' },
       ctxFor(admin.id),
     );
     let locked!: () => void;

@@ -80,7 +80,7 @@ async function graphqlCreate(loc: string, withSession: boolean): Promise<void> {
     method: 'POST', headers: headers(withSession),
     body: JSON.stringify({
       query: 'mutation($input: CreateNodeInput!) { createNode(input: $input) { id } }',
-      variables: { input: { memoryId: memory.id, loc, name: loc } },
+      variables: { input: { memoryRef: memory.id, loc, name: loc } },
     }),
   });
   const body = await res.json() as { errors?: unknown };

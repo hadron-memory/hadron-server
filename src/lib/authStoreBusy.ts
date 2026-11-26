@@ -59,14 +59,25 @@ export const AUTH_STORE_UNREACHABLE_MESSAGE =
 export type AuthStoreBusyReason = 'POOL_WAIT' | 'STORE_UNREACHABLE';
 
 /**
- * The fixed prose for a reason — the ONE lookup both ends render from (#4519, BLIND P3-4): the
- * constructor's message AND the plain-HTTP boundary's body. Total on purpose: anything that is
+ * THE public reason (#4519, #4591): both boundaries, GraphQL and plain HTTP, read the thrown
+ * error's `reason` through this and nothing else. Total: `instanceof` proves the class, not that
+ * a subclass or a late mutation kept the value, so anything that is not exactly
+ * STORE_UNREACHABLE (absent and non-string values included) is POOL_WAIT. Either answer is the
+ * same retryable 503; no value passes through.
+ */
+export function normalizeAuthStoreBusyReason(reason: unknown): AuthStoreBusyReason {
+  return reason === 'STORE_UNREACHABLE' ? 'STORE_UNREACHABLE' : 'POOL_WAIT';
+}
+
+/**
+ * The fixed prose for a reason — the ONE lookup every end renders from (#4519, BLIND P3-4): the
+ * constructor's message, the plain-HTTP boundary's body and the GraphQL error. Total on purpose: anything that is
  * not STORE_UNREACHABLE answers the busy prose, so no message content — the driver's text, a
  * tampered `.message`, a subclass's own prose — can reach the wire; "no driver text rides the
  * message" is enforced by the render point, not by constructor convention alone.
  */
 export function authStoreBusyMessage(reason: unknown): string {
-  return reason === 'STORE_UNREACHABLE' ? AUTH_STORE_UNREACHABLE_MESSAGE : AUTH_STORE_BUSY_MESSAGE;
+  return normalizeAuthStoreBusyReason(reason) === 'STORE_UNREACHABLE' ? AUTH_STORE_UNREACHABLE_MESSAGE : AUTH_STORE_BUSY_MESSAGE;
 }
 
 /**

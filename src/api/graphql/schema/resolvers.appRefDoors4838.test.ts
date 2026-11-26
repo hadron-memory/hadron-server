@@ -418,7 +418,7 @@ describe('#4838 — a foreign org\'s PUBLIC Team Agent in a user-owned App (the 
     // gate), at this head exactly as on main.
     const updated = await M.updateNode(
       {},
-      { input: { memoryId: pubAgent.systemMemoryId, loc: 'roles:pub-role', description: 'edited through the generic surface' } },
+      { input: { memoryRef: pubAgent.systemMemoryId, loc: 'roles:pub-role', description: 'edited through the generic surface' } },
       ctx(fAdmin.id),
     );
     expect(updated).toBeTruthy();

@@ -185,7 +185,7 @@ describe('a base\'s comment is never inherited (#1891/#1899)', () => {
 
   it('findNodes over the child with comments asked for returns only the child\'s own', async () => {
     for (const contentScope of ['COMMENTS', 'ALL'] as const) {
-      const got = hitIds(await Q.findNodes({}, { filter: { memoryIds: [backend.mem], contentScope } }, ctx(reader)));
+      const got = hitIds(await Q.findNodes({}, { filter: { memoryRefs: [backend.mem], contentScope } }, ctx(reader)));
       for (const k of ['onEngIndex', 'onEngOpenPr', 'onEngBoot']) expect(got).not.toContain(comments[k]);
       for (const k of ['onBeIndex', 'onBeDeploy', 'onBeProcIndex', 'onBeRelease', 'onBeBoot']) expect(got).toContain(comments[k]);
     }
@@ -194,7 +194,7 @@ describe('a base\'s comment is never inherited (#1891/#1899)', () => {
 
 describe('agent retrieval over the system memory shows content only (cor:dmo:110:08)', () => {
   it('findNodes by default, and the MCP list / find / search tools', async () => {
-    const got = hitIds(await Q.findNodes({}, { filter: { memoryIds: [backend.mem] } }, ctx(reader)));
+    const got = hitIds(await Q.findNodes({}, { filter: { memoryRefs: [backend.mem] } }, ctx(reader)));
     expect(got).toContain(ids.beDeploy);
     expect(got).toContain(ids.engOpenPr);
     for (const id of allComments()) expect(got).not.toContain(id);

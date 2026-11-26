@@ -20,9 +20,9 @@ describe('#725 — objectType on the node surfaces', () => {
 
   it('createNode / updateNode inputs accept objectType', () => {
     expect(
-      errs(`mutation { createNode(input: { memoryId: "m", loc: "l", name: "n", objectType: "competitor" }) { objectType } }`),
+      errs(`mutation { createNode(input: { memoryRef: "m", loc: "l", name: "n", objectType: "competitor" }) { objectType } }`),
     ).toEqual([]);
-    expect(errs(`mutation { updateNode(input: { id: "x", objectType: null }) { objectType } }`)).toEqual([]);
+    expect(errs(`mutation { updateNode(input: { ref: "x", objectType: null }) { objectType } }`)).toEqual([]);
   });
 
   it('objectType is typed String — a non-string literal is rejected', () => {

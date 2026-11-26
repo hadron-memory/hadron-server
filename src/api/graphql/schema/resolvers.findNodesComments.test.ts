@@ -76,7 +76,7 @@ async function seed(n: number) {
 describe('findNodes content scope (cor:dmo:110:08)', () => {
   it('keyword, regex and filter-only: content by default; COMMENTS finds every comment beyond the first 500 general hits', async () => {
     const { comments } = await seed(520);
-    const byDefault = await findNodes({ query: 'retention', filter: { memoryIds: [memory.id] }, limit: 200 });
+    const byDefault = await findNodes({ query: 'retention', filter: { memoryRefs: [memory.id] }, limit: 200 });
     expect(types(byDefault)).not.toContain('comment');
 
     for (const args of [
@@ -84,27 +84,27 @@ describe('findNodes content scope (cor:dmo:110:08)', () => {
       { query: 'retention', mode: 'regex' },
       {},
     ]) {
-      const res = await findNodes({ ...args, filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 10 });
+      const res = await findNodes({ ...args, filter: { memoryRefs: [memory.id], contentScope: 'COMMENTS' }, limit: 10 });
       expect(types(res)).toEqual(['comment']);
       expect(res.hits.map((h: any) => h.node.id).sort()).toEqual([...comments].sort());
     }
     // An explicit nodeType 'comment' asks for comments by name.
-    const byType = await findNodes({ query: 'retention', filter: { memoryIds: [memory.id], nodeType: 'comment' }, limit: 10 });
+    const byType = await findNodes({ query: 'retention', filter: { memoryRefs: [memory.id], nodeType: 'comment' }, limit: 10 });
     expect(byType.hits).toHaveLength(3);
     // Paging happens AFTER the scope: two pages of the three comments.
     // #2986: keyword, not the hybrid default. createMemory turns the vector
     // index on and each comment's embedding lands after its write returns, so
     // a hybrid page 2 can rank against vectors page 1 did not see.
-    const page1 = await findNodes({ query: 'retention', mode: 'keyword', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 2 });
-    const page2 = await findNodes({ query: 'retention', mode: 'keyword', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 2, offset: 2 });
+    const page1 = await findNodes({ query: 'retention', mode: 'keyword', filter: { memoryRefs: [memory.id], contentScope: 'COMMENTS' }, limit: 2 });
+    const page2 = await findNodes({ query: 'retention', mode: 'keyword', filter: { memoryRefs: [memory.id], contentScope: 'COMMENTS' }, limit: 2, offset: 2 });
     expect([...page1.hits, ...page2.hits].map((h: any) => h.node.id).sort()).toEqual([...comments].sort());
     // ALL returns both kinds.
-    const all = await findNodes({ query: 'feedback', filter: { memoryIds: [memory.id], contentScope: 'ALL' }, limit: 10 });
+    const all = await findNodes({ query: 'feedback', filter: { memoryRefs: [memory.id], contentScope: 'ALL' }, limit: 10 });
     expect(types(all)).toEqual(['comment']);
     // The 200-row cap requires paging through the 520 content rows as well.
     const allTypes: string[] = [];
     for (let offset = 0; offset < 600; offset += 200) {
-      const page = await findNodes({ filter: { memoryIds: [memory.id], contentScope: 'ALL' }, sort: 'loc', limit: 200, offset });
+      const page = await findNodes({ filter: { memoryRefs: [memory.id], contentScope: 'ALL' }, sort: 'loc', limit: 200, offset });
       allTypes.push(...types(page));
     }
     expect(allTypes).toContain('comment');
@@ -125,10 +125,10 @@ describe('findNodes content scope (cor:dmo:110:08)', () => {
       expect(unembedded).toBe(0);
     });
     // limit 2 ⇒ a 20-row ANN window, all content (it outranks every comment).
-    const byDefault = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryIds: [memory.id] }, limit: 2 });
+    const byDefault = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryRefs: [memory.id] }, limit: 2 });
     expect(types(byDefault)).toEqual(['info']);
     for (const mode of ['vector', 'hybrid']) {
-      const res = await findNodes({ query: 'retention', mode, filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 5 });
+      const res = await findNodes({ query: 'retention', mode, filter: { memoryRefs: [memory.id], contentScope: 'COMMENTS' }, limit: 5 });
       expect(types(res)).toEqual(['comment']);
       expect(res.hits.map((h: any) => h.node.id).sort()).toEqual([...comments].sort());
     }
@@ -136,14 +136,14 @@ describe('findNodes content scope (cor:dmo:110:08)', () => {
 
   it('expand never pulls a comment into a content search through its anchor edge', async () => {
     const { target } = await seed(1);
-    const res = await findNodes({ query: 'policy', filter: { memoryIds: [memory.id] }, expand: 1, limit: 10 });
+    const res = await findNodes({ query: 'policy', filter: { memoryRefs: [memory.id] }, expand: 1, limit: 10 });
     expect(res.hits.map((h: any) => h.node.id)).toContain(target.id);
     expect(types(res)).not.toContain('comment');
   });
 
   it('Node.asComment exposes the comment a hit is (author, target, anchor, thread); null for content', async () => {
     const { target, comments } = await seed(1);
-    const res = await findNodes({ query: 'retention', filter: { memoryIds: [memory.id], contentScope: 'ALL' }, limit: 10 });
+    const res = await findNodes({ query: 'retention', filter: { memoryRefs: [memory.id], contentScope: 'ALL' }, limit: 10 });
     const N = (resolvers as any).Node;
     const commentHit = res.hits.find((h: any) => h.node.id === comments[1]);
     const view = await N.asComment(commentHit.node, {}, as());
@@ -212,7 +212,7 @@ describe('#1674 review cycle (Jane)', () => {
       const { comments } = await seed(2);
       await sweep();
       expect(await db.nodeEmbedding.count({ where: { nodeId: comments[0] } })).toBeGreaterThan(0);
-      const res = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS' }, limit: 5 });
+      const res = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryRefs: [memory.id], contentScope: 'COMMENTS' }, limit: 5 });
       expect(ids(res)).toEqual([...comments].sort());
     }
   });
@@ -230,7 +230,7 @@ describe('#1674 review cycle (Jane)', () => {
     void target;
     await sweep();
     // limit 2 ⇒ a 20-candidate window; 28 comment vectors outrank every content vector.
-    const res = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryIds: [memory.id] }, limit: 2 });
+    const res = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryRefs: [memory.id] }, limit: 2 });
     expect(res.hits).toHaveLength(2);
     expect(types(res)).toEqual(['info']);
   });
@@ -246,7 +246,7 @@ describe('#1674 review cycle (Jane)', () => {
     const deep = await M.replyToComment(null, { commentRef: rootId, body: 'retention low-ranked' }, { db, userId: other.id, roles: [] });
     void target;
     await sweep();
-    const res = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryIds: [memory.id], contentScope: 'COMMENTS', createdBy: other.id }, limit: 1 });
+    const res = await findNodes({ query: 'retention', mode: 'vector', filter: { memoryRefs: [memory.id], contentScope: 'COMMENTS', createdBy: other.id }, limit: 1 });
     expect(ids(res)).toEqual([deep.id]);
   });
 
@@ -259,7 +259,7 @@ describe('#1674 review cycle (Jane)', () => {
     expect(await db.nodeEmbedding.count({ where: { nodeId: comments[1] } })).toBeGreaterThan(0);
     for (const granularity of ['node', 'chunk']) {
       for (const contentScope of ['COMMENTS', 'ALL']) {
-        const res = await findNodes({ query: 'retention', mode: 'vector', granularity, filter: { memoryIds: [memory.id], contentScope }, limit: 10 });
+        const res = await findNodes({ query: 'retention', mode: 'vector', granularity, filter: { memoryRefs: [memory.id], contentScope }, limit: 10 });
         const seen = [...(res.hits ?? []).map((h: any) => h.node.id), ...(res.passages ?? []).map((p: any) => p.parentNodeId)];
         expect(seen).not.toContain(comments[1]);
       }

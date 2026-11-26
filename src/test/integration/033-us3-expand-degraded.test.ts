@@ -200,7 +200,7 @@ describe('US3 — GraphQL findNodes carries the degraded flag in the envelope', 
 
     const result = await resolvers.Query.findNodes(
       {},
-      { query: 'gamma', filter: { memoryIds: [memUrn] }, mode: 'hybrid' },
+      { query: 'gamma', filter: { memoryRefs: [memUrn] }, mode: 'hybrid' },
       adminCtx(),
     );
 
@@ -217,7 +217,7 @@ describe('US3 — GraphQL findNodes carries the degraded flag in the envelope', 
 
     const result = await resolvers.Query.findNodes(
       {},
-      { query: 'gamma', filter: { memoryIds: [memUrn] }, mode: 'vector' },
+      { query: 'gamma', filter: { memoryRefs: [memUrn] }, mode: 'vector' },
       adminCtx(),
     );
 
@@ -230,7 +230,7 @@ describe('US3 — GraphQL findNodes carries the degraded flag in the envelope', 
     await seedNode({ loc: 'kw-x', description: 'matches delta' });
     const result = await resolvers.Query.findNodes(
       {},
-      { query: 'delta', filter: { memoryIds: [memUrn] }, mode: 'keyword' },
+      { query: 'delta', filter: { memoryRefs: [memUrn] }, mode: 'keyword' },
       adminCtx(),
     );
     expect(result.reason).toBeNull();

@@ -261,7 +261,7 @@ describe('#1468 — mergeNodes, moves and extract', () => {
 
 describe('#1468 — the spec marker stays on a minted spec (Vera #4403)', () => {
   const update = (id: string, input: Record<string, unknown>) =>
-    resolvers.Mutation.updateNode({}, { input: { id, ...input } } as never, ctx());
+    resolvers.Mutation.updateNode({}, { input: { ref: id, ...input } } as never, ctx());
   const tagsOf = async (id: string) => (await db.node.findUniqueOrThrow({ where: { id } })).tags;
 
   it("closes the bypass: dropping a minted spec's tag is refused, so the delete after it still refuses", async () => {
@@ -309,7 +309,7 @@ describe('#1468 — the spec marker stays on a minted spec (Vera #4403)', () => 
     const spec = await node(minted.id, 'pas:010', { tags: ['spec'] });
     const note = await node(minted.id, 'notes', { tags: ['spec-draft'] });
     await expect(resolvers.Mutation.searchReplaceInNodes({}, {
-      input: { oldText: '^spec', newText: 'was', regex: true, fields: ['tags'], nodeIds: [spec.id, note.id] },
+      input: { oldText: '^spec', newText: 'was', regex: true, fields: ['tags'], nodeRefs: [spec.id, note.id] },
     } as never, ctx())).rejects.toSatisfy(refusedPermanent);
     expect([await tagsOf(spec.id), await tagsOf(note.id)]).toEqual([['spec'], ['spec-draft']]);
   });
@@ -327,7 +327,7 @@ describe('#1468 — the spec marker stays on a minted spec (Vera #4403)', () => 
     const mintedAt = await mintedAtOf(minted.id);
     const tomb = await node(minted.id, 'pas:010', { tags: ['spec'], deletedAt: new Date(mintedAt.getTime() + 1000) });
     await expect(resolvers.Mutation.createNode({}, {
-      input: { memoryId: minted.id, loc: 'pas:010', name: 'n', content: 'x', tags: ['other'] },
+      input: { memoryRef: minted.id, loc: 'pas:010', name: 'n', content: 'x', tags: ['other'] },
     } as never, ctx())).rejects.toSatisfy(refusedPermanent);
     // MCP writes omitted tags as [], so the plain create is the unmark there.
     const text = await createTestableMcpServer(auth()).callToolText('hadron_create_node', {
@@ -639,7 +639,7 @@ describe('#1468 — a whole-corpus delete cannot race the first spec (Codex P1)'
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${minted.id} FOR UPDATE`;
       await tx.memory.update({ where: { id: minted.id }, data: { deletedAt: new Date() } });
     });
-    const marking = resolvers.Mutation.updateNode({}, { input: { id: n.id, tags: ['spec'] } } as never, ctx());
+    const marking = resolvers.Mutation.updateNode({}, { input: { ref: n.id, tags: ['spec'] } } as never, ctx());
     try {
       await vi.waitFor(async () => {
         const waits = await db.$queryRaw<Array<{ pid: number }>>`

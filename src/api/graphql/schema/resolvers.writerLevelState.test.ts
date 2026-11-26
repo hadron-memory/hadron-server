@@ -41,7 +41,7 @@ const node = (loc: string, extra: Record<string, unknown> = {}) => db.node.creat
 });
 const state = (loc: string) => db.node.findFirst({ where: { memoryId, loc } });
 const door = (name: string, u: { id: string }, input: Record<string, unknown>) =>
-  (resolvers.Mutation as any)[name](null, { input: { memoryId, name: String(input.loc), content: 'x', ...input } }, as(u));
+  (resolvers.Mutation as any)[name](null, { input: { memoryRef: memoryId, name: String(input.loc), content: 'x', ...input } }, as(u));
 const edgeCount = () => db.edge.count({ where: { memoryId } });
 const mcp = (u: { id: string }) => createTestableMcpServer({ userId: u.id, roles: [], clientId: `user:${u.id}` });
 const urn = (loc: string) => `hrn:node:${memoryUrn}:${loc}`;
@@ -90,7 +90,7 @@ describe('writer levels: node state judged before and after', () => {
 
   it('generic door routing is unchanged', async () => {
     await node('task', { isRunnable: true });
-    expect(await code(resolvers.Mutation.updateNode(null, { input: { memoryId, loc: 'task', content: 'x' } }, as(admin)))).toBe('ROLE_GOVERNED');
+    expect(await code(resolvers.Mutation.updateNode(null, { input: { memoryRef: memoryId, loc: 'task', content: 'x' } }, as(admin)))).toBe('ROLE_GOVERNED');
   });
 
   it('MCP kind writers', async () => {
@@ -143,7 +143,7 @@ describe('writer levels: node state judged before and after', () => {
     await node('task', { isRunnable: true, content: 'alpha' });
     await node('plain', { content: 'alpha' });
     await resolvers.Mutation.searchReplaceInNodes(null, {
-      input: { memoryIds: [memoryId], fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false },
+      input: { memoryRefs: [memoryId], fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false },
     }, as(contrib)).catch(() => null);
     expect((await state('task'))!.content).toBe('alpha');
     expect((await state('plain'))!.content).toBe('beta');
@@ -190,7 +190,7 @@ describe('writer levels: dependent edge writes', () => {
 
   it('inline edges', async () => {
     await mkEdge(task.id, 'task:e1');
-    const withEdges = (u: { id: string }) => door('updateTaskNode', u, { loc: 'task', edges: [{ targetId: other.id, name: 'new' }] });
+    const withEdges = (u: { id: string }) => door('updateTaskNode', u, { loc: 'task', edges: [{ targetRef: other.id, name: 'new' }] });
     expect(await code(withEdges(contrib))).toBe(REFUSED);
     expect((await db.edge.findMany({ where: { sourceId: task.id } })).map((e) => e.name)).toEqual(['task:e1']);
     expect(await code(withEdges(admin))).toBe('OK');

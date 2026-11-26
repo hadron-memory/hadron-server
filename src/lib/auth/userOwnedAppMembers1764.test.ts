@@ -401,7 +401,7 @@ describe('membership-backed write authority is held through commit (Riana P2, #1
     } });
     let refused = false;
     try {
-      await M.createNode({}, { input: { memoryId: teamSpace.id, loc: 'review-race', name: 'race', content: 'queued-write' } }, ctx(member.id, { db: wrapped as any }));
+      await M.createNode({}, { input: { memoryRef: teamSpace.id, loc: 'review-race', name: 'race', content: 'queued-write' } }, ctx(member.id, { db: wrapped as any }));
     } catch { refused = true; }
     expect(removed).toBe(true);
     expect({ refused, memberRows: await db.appMember.count({ where: { appId: app.id, userId: member.id } }), nodeRows: await db.node.count({ where: { memoryId: teamSpace.id, loc: 'review-race' } }) })
@@ -430,7 +430,7 @@ describe('membership-backed write authority is held through commit (Riana P2, #1
     expect(results).toEqual(['write committed', 'removed']);
     // An unrevoked member just writes (control).
     await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'reader' } });
-    const made = await M.createNode({}, { input: { memoryId: teamSpace.id, loc: 'control', name: 'control', content: 'ok' } }, ctx(member.id));
+    const made = await M.createNode({}, { input: { memoryRef: teamSpace.id, loc: 'control', name: 'control', content: 'ok' } }, ctx(member.id));
     expect(made.id).toBeTruthy();
   });
 });

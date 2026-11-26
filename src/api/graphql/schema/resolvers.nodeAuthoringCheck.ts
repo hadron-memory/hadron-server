@@ -33,7 +33,7 @@ import { mayRecordIn } from './resolvers.validationTaskSet.js';
 
 export interface NodeAuthoringCheckInput {
   ref?: string | null;
-  memoryId?: string | null;
+  memoryRef?: string | null;
   loc?: string | null;
   role?: string | null;
   isRunnable?: boolean | null;
@@ -50,9 +50,9 @@ function badInput(message: string): GraphQLError {
 export const nodeAuthoringCheckQueries = {
   nodeAuthoringCheck: async (_: unknown, { input }: { input: NodeAuthoringCheckInput }, ctx: Context) => {
     const byRef = input.ref != null;
-    const byAddress = input.memoryId != null || input.loc != null;
-    if (byRef === byAddress || (byAddress && (input.memoryId == null || input.loc == null))) {
-      throw badInput('Name the node by ref, or by memoryId and loc together, and not both.');
+    const byAddress = input.memoryRef != null || input.loc != null;
+    if (byRef === byAddress || (byAddress && (input.memoryRef == null || input.loc == null))) {
+      throw badInput('Name the node by ref, or by memoryRef and loc together, and not both.');
     }
 
     let memoryId: string;
@@ -65,8 +65,8 @@ export const nodeAuthoringCheckQueries = {
       memoryId = node.memoryId;
       existing = node;
     } else {
-      memoryId = (await resolveMemoryRef(ctx.db, input.memoryId!)).id;
-      if (!(await isMemoryReadableCached(ctx, memoryId))) throw new MemoryNotFoundError(input.memoryId!);
+      memoryId = (await resolveMemoryRef(ctx.db, input.memoryRef!)).id;
+      if (!(await isMemoryReadableCached(ctx, memoryId))) throw new MemoryNotFoundError(input.memoryRef!);
     }
 
     // One answer for a reader who does not write, before the node's loc or the rules are looked at.
