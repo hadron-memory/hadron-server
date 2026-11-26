@@ -69,7 +69,8 @@ describe('#5211 item 3: a tag Markdown does not accept is text to it, so what it
     ['at the head of a line', '<x a b§textarea>', ALL],
   ]);
   it('the hold-back names the template element only', () => {
-    expect(escapeUnterminatedHtml('a <b y= <templates>')).toBe('a <b y= &lt;templates>');
+    expect(escapeUnterminatedHtml('a <b y= <templates><textarea>')).toBe('a <b y= <templates>&lt;textarea>');
+    expect(losers('a <b y= <templates><textarea>')).toEqual(['commonmark.js', 'markdown-it', 'marked']);
   });
   it('inside an HTML block the browser grammar applies, and the tag is complete', () => {
     expect(escapeUnterminatedHtml('<div>\n<b y= <template>')).toBe('<div>\n<b y= <template>');
