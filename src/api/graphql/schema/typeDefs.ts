@@ -18747,7 +18747,7 @@ export const typeDefs = `#graphql
     worker: String!
     "The name the host knows the working directory by: a name token (letters, digits and . _ / @ + -, starting with a letter or digit, no .., // or trailing /), at most 256 characters."
     workdir: String!
-    "The model family it runs as there: any family token (lowercase letters, digits, . _ or -, starting with a letter or digit, at most 64 characters; anthropic is claude and openai is codex). Whether the host can run it is the host's to report: a start it cannot run is reported failed."
+    "The model family it runs as there: any family token (letters, digits, . _ or -, starting with a letter or digit, at most 64 characters; case-insensitive and stored lowercase; anthropic is claude and openai is codex). Whether the host can run it is the host's to report: a start it cannot run is reported failed."
     family: String!
     "The model, a profile token: letters, digits, . _ or -, starting with a letter or digit, at most 128 characters. Optional."
     model: String

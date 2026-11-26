@@ -19,6 +19,7 @@ import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { loadLaunchableFamilies } from '../../../lib/agentTasks/hosts.js';
 import { fenceHostDecision } from '../../../lib/hostOperations/launch.js';
 import { resolvers, type Context } from './resolvers.js';
+import { taskMatcherTick } from '../../../jobs/taskMatcher.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -394,6 +395,21 @@ describe('a start uses the assignment (cor:agt:070:08 unchanged: with none, noth
     const op = await task();
     expect(op).toMatchObject({ hostId: 'orca1', issuedBy: 'platform' });
     expect(op!.args).toMatchObject({ worktree: 'hadron-cli/kit', family: 'deepseek' });
+  });
+
+  it('#5249: a start the host reports failed is not issued again, by a matcher pass or a fresh registration', async () => {
+    await assign({ workdir: 'hadron-cli/kit', family: 'deepseek' });
+    await setSource('SERVER');
+    await hostLists(['hadron-server/kit', 'hadron-cli/kit']);
+    const op = await task();
+    expect(op!.args).toMatchObject({ family: 'deepseek' });
+    await M.collectHostOperations({}, { appRef: app.id }, keyCtx(orca1));
+    await M.reportHostOperation({}, { input: { appRef: app.id, id: op!.id, outcome: 'FAILED', failureReason: 'no launcher for family deepseek' } }, keyCtx(orca1));
+    expect((await db.hostOperation.findUniqueOrThrow({ where: { id: op!.id } })).status).toBe('failed');
+    await taskMatcherTick(db, new Date());
+    await hostLists(['hadron-server/kit', 'hadron-cli/kit']);
+    await taskMatcherTick(db, new Date());
+    expect(await db.hostOperation.count({ where: { workerId: kit.id, type: 'worker.start' } })).toBe(1);
   });
 
   it('SERVER: no assignment issues nothing and the task waits', async () => {

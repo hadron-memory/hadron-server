@@ -42,14 +42,6 @@ export const isHostSetupSource = (v: unknown): v is HostSetupSource =>
 export const HOST_WORKER_NOT_ASSIGNED = 'HOST_WORKER_NOT_ASSIGNED';
 
 /**
- * #5249 (#5228 S1) — the family an assignment names is any family token, the same pattern as a session's family
- * (`normalizeFamily`: trimmed, lowercased, `anthropic` is `claude` and `openai` is `codex`), and the database's own
- * check. Whether a host can run a family is the host's to say: a start it cannot run is reported failed by the host
- * (cor:agt:070:01). Before this, only the four families a host had a built-in launcher for (`claude`, `codex`, `glm`,
- * `kimi`) were stored, so a new family needed a server release. The family is a matching input, never an authorization
- * input (cor:agt:060:04), and the token pattern keeps it inert as a launch argument (cor:agt:070:03).
- */
-/**
  * A launcher profile value (model, effort, accountProfile): a plain token, letters, digits and . _ -, starting with a
  * letter or digit, at most 128 characters. No slash, space or shell character, and never an option: the host types the
  * command it builds from these into a shell (hadron-cli C3), so the token itself must be inert there.
@@ -79,6 +71,13 @@ const TOKEN_RULE = 'a name token (letters, digits and . _ / @ + -, starting with
 /**
  * Validate an assignment's fields, returning them exactly as they will be stored. Throws
  * {@link HostAssignmentArgsError}: the refusal depends only on the caller's own input.
+ *
+ * #5249 (#5228 S1) — the family an assignment names is any family token, the same pattern as a session's family
+ * (`normalizeFamily`: trimmed, lowercased, `anthropic` is `claude` and `openai` is `codex`), and the database's own
+ * check. Whether a host can run a family is the host's to say: a start it cannot run is reported failed by the host
+ * (cor:agt:070:01). Before this, only the four families a host had a built-in launcher for (`claude`, `codex`, `glm`,
+ * `kimi`) were stored, so a new family needed a server release. The family is a matching input, never an authorization
+ * input (cor:agt:060:04), and the token pattern keeps it inert as a launch argument (cor:agt:070:03).
  */
 export function validateHostAssignment(input: {
   hostId: unknown; workdir: unknown; family: unknown; model?: unknown; effort?: unknown; accountProfile?: unknown;
@@ -94,7 +93,7 @@ export function validateHostAssignment(input: {
   }
   const family = typeof input.family === 'string' ? normalizeFamily(input.family) : null;
   if (!family) {
-    throw badProfile('family is a model-family token: lowercase letters, digits, ".", "_" or "-", starting with a letter or digit, at most 64 characters.');
+    throw badProfile('family is a model-family token: letters, digits, ".", "_" or "-", starting with a letter or digit, at most 64 characters (stored lowercase).');
   }
   return {
     hostId, workdir: input.workdir, family,
