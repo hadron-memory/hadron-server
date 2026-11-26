@@ -182,7 +182,10 @@ describe('read-state', () => {
         expect(found[0]).toContain('new since seq 0');
       });
       it('stays on its one line on a mention-only row', async () => {
-        const found = await forged(async () => { await db.registerEntry.updateMany({ where: { appId: app.id }, data: { mentionOnly: true } }); });
+        const found = await forged(async () => {
+          await db.registerEntry.updateMany({ where: { appId: app.id }, data: { mentionOnly: true } });
+          await postAs('plain, no mention', []);
+        });
         expect(found).toHaveLength(1);
         expect(found[0]!.startsWith('- team')).toBe(true);
         expect(found[0]).toContain('nothing new for you');

@@ -491,7 +491,8 @@ export function describeDisclosure(d: RegisterDisclosure): string {
 /**
  * The register as a briefing block — DERIVED data, never an authored prompt
  * part. The Worker resolver (`Worker.prompt`) and `hadron_whoami` call this
- * one function (the run kernel does not, at the #5236 head), so when the D11
+ * one function; the run kernel's attention section is rendered by `renderAttentionSection`
+ * (`channelReadState.ts`), which collapses the channel name the same way (#5236). So when the D11
  * composer lands it absorbs one function rather than a fourth string-concatenation
  * path. Returns '' for an attendee with no rows, so a caller can append it
  * unconditionally.
