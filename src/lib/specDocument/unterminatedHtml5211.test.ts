@@ -68,6 +68,9 @@ describe('#5211 item 3: a tag Markdown does not accept is text to it, so what it
     ['an attribute name holding a tag', 'a <b b§textarea> c', ALL],
     ['at the head of a line', '<x a b§textarea>', ALL],
   ]);
+  it('the hold-back names the template element only', () => {
+    expect(escapeUnterminatedHtml('a <b y= <templates>')).toBe('a <b y= &lt;templates>');
+  });
   it('inside an HTML block the browser grammar applies, and the tag is complete', () => {
     expect(escapeUnterminatedHtml('<div>\n<b y= <template>')).toBe('<div>\n<b y= <template>');
   });
@@ -90,7 +93,7 @@ describe('#5211 item 6: a declaration whose name is followed by `<` is text to m
     ['on a second line', 'x\n<!X§xmp>', ['marked']],
   ]);
   it('a declaration with a blank after its name, or one that starts a block (marked reads it as HTML there), is complete', () => {
-    for (const body of ['<!DOCTYPE html>', 'a <!X y> b', '<!X<xmp>', '<!x<xmp>', '# h\n<!X<xmp>']) {
+    for (const body of ['<!DOCTYPE html>', 'a <!X y> b', '<!X<xmp>', '<!x<xmp>', '# h\n<!X<xmp>', 'a <!X\n<b>c</b>']) {
       expect(escapeUnterminatedHtml(body), body).toBe(body);
       expect(losers(body), body).toEqual([]);
     }

@@ -236,6 +236,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
   let inList = false;
   // #5211 — the column the content of the innermost open list item starts at, or -1: a line indented to it continues the item.
   let listCol = -1;
+  let listDepth = 0;
   // A raw-text element opened in the middle of a line is inline HTML: Markdown goes on parsing after it, so only an end tag
   // that Markdown also reads as HTML (outside code, a fence and a backslash escape) closes it. -1 when none is open.
   let rawStart = -1;
@@ -387,10 +388,15 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       const afterDefinition = inDefinition;
       inDefinition = false;
       // #5211 — a list item: a line indented to its content continues it, and is code only four columns past that.
-      const lineCols = columnAfter((/^[ \t]*/.exec(line) as RegExpExecArray)[0]);
-      if (here.list.some((c) => !c.quote)) listCol = quotes === '' ? columnAfter(line.slice(0, here.at)) : -1;
-      else if (line.trim() !== '' && lineCols < listCol && prev !== 'other') listCol = -1;
-      const codeIndent = listCol > 0 && quotes === '' && here.list.length === 0 && lineCols >= listCol ? lineCols - listCol : indent;
+      // Columns are counted inside the line's quotes, and a list belongs to the quote depth it opened at.
+      const depth = here.list.filter((c) => c.quote).length;
+      const lineCols = columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0], from) - from;
+      const listedHere = here.list.some((c) => !c.quote);
+      if (listedHere) { listCol = columnAfter(line.slice(0, here.at)) - from; listDepth = depth; }
+      else if (depth !== listDepth) listCol = -1;
+      // A line that starts another block closes the item; only a paragraph line may continue it lazily.
+      else if (inner.trim() !== '' && lineCols < listCol && (prev !== 'other' || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|(?:[-*_][ \t]*){3,}$)/.test(inner))) listCol = -1;
+      const codeIndent = listCol > 0 && !listedHere && lineCols >= listCol ? lineCols - listCol : indent;
       if (codeIndent >= 4 && inner.trim() !== '' && prev !== 'other' && prev !== 'marker' && !afterDefinition && !(fenceCut && model === 'marked')) { prev = 'code'; lrd = 0; i = end + 1; continue; }
       if (lrd === 3) {
         // Inside a title that opened on an earlier line: still the definition, until the line that closes it (or a blank line, which ends the attempt).
@@ -481,7 +487,8 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       continue;
     }
     // #5211 — marked takes a declaration only when a blank follows its name; any other `<!` and a name is text to it, so what follows is read.
-    if (model === 'marked' && /^<![A-Za-z]+(?![A-Za-z\s])/.test(text.slice(i, i + 64))) { i += 2; continue; }
+    // At the head of a line that interrupts no paragraph it starts an HTML block in marked too, and is complete there.
+    if (model === 'marked' && /<![A-Za-z]+(?![A-Za-z\s])/y.test(text.slice(i, text.indexOf('\n', i) === -1 ? n : text.indexOf('\n', i) + 1)) && !(startsLine(i) && prevBefore !== 'other')) { i += 2; continue; }
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
@@ -523,7 +530,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     if (i >= rawUntil && !RAW_TEXT.has(name) && name !== 'template' && name !== 'plaintext' && !(startsLine(i) && opensBlock)
       && !(isEnd ? CM_CLOSE_TAG : CM_OPEN_TAG).test(text.slice(i, tagEnd))
       // Held back while no reader the tests can run shows the loss: linkedom does not model `template` (#5211, a parser waits on a ruling).
-      && !/<template/i.test(text.slice(i + 1, tagEnd))) { i += 1; continue; }
+      && !/<template(?=[\s/>]|$)/i.test(text.slice(i + 1, tagEnd))) { i += 1; continue; }
     // A block-level tag at the head of a line (type 6), or a complete tag alone on its line that does not interrupt a paragraph (type 7),
     // starts an HTML block that runs to the next blank line.
     if (startsLine(i)) {
