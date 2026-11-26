@@ -36,6 +36,7 @@ import { mentionReachSql } from './mentionReach.js';
 import { parseRunRegisterSnapshot, type RegisterAttendee } from './resolveRegister.js';
 import { escapePrismaLikePattern } from './literalLocPrefix.js';
 import { TEAM_CHAT_LOC } from './teamChatLoc.js';
+import { collapseLineBreaks } from './collapseLineBreaks.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -349,9 +350,11 @@ export async function renderAttentionSection(
     const row = snap.rows.find((r) => r.channelId === c.id)!;
     const seen = cursors.get(c.id) ?? 0;
     captured.set(c.id, c.lastSeq);
-    const where = `${c.memory.urn}:${c.loc}`;
+    // #5236: the channel name is written by someone other than the reader; collapse any line break so it cannot plant a line.
+    const label = collapseLineBreaks(c.name);
+    const where = collapseLineBreaks(`${c.memory.urn}:${c.loc}`);
     if (c.lastSeq <= seen) {
-      lines.push(`- ${c.name} (${where}): nothing new`);
+      lines.push(`- ${label} (${where}): nothing new`);
       continue;
     }
     if (row.mentionOnly && c.memory.isEncrypted) {
@@ -360,7 +363,7 @@ export async function renderAttentionSection(
       // "nothing new for you" — and the checkpoint would then advance past a
       // mention (#1362 review, Codex P1). Mentions cannot be filtered here, so
       // fail toward duplicate attention, never toward loss: report it as new.
-      lines.push(`- ${c.name} (${where}): new since seq ${seen} (channel is at ${c.lastSeq}; encrypted, so mentions were not filtered)`);
+      lines.push(`- ${label} (${where}): new since seq ${seen} (channel is at ${c.lastSeq}; encrypted, so mentions were not filtered)`);
       continue;
     }
     if (row.mentionOnly) {
@@ -374,15 +377,15 @@ export async function renderAttentionSection(
       )[0]?.n ?? 0;
       lines.push(
         mentions > 0
-          ? `- ${c.name} (${where}): ${mentions} new mention${mentions === 1 ? '' : 's'} of you since seq ${seen} (channel is at ${c.lastSeq})`
-          : `- ${c.name} (${where}): nothing new for you (mention-only; channel is at ${c.lastSeq})`,
+          ? `- ${label} (${where}): ${mentions} new mention${mentions === 1 ? '' : 's'} of you since seq ${seen} (channel is at ${c.lastSeq})`
+          : `- ${label} (${where}): nothing new for you (mention-only; channel is at ${c.lastSeq})`,
       );
       continue;
     }
     if (c.memory.isEncrypted) {
       // The author is sealed in the envelope: say so rather than decrypt per
       // hop (#1388, accepted noise).
-      lines.push(`- ${c.name} (${where}): new since seq ${seen} (channel is at ${c.lastSeq}; encrypted, so your own posts were not filtered)`);
+      lines.push(`- ${label} (${where}): new since seq ${seen} (channel is at ${c.lastSeq}; encrypted, so your own posts were not filtered)`);
       continue;
     }
     // One indexed EXISTS per row: only someone else's live post is news
@@ -391,10 +394,10 @@ export async function renderAttentionSection(
       SELECT EXISTS (SELECT 1 ${othersInWindow(c, seen, Prisma.empty)}) AS found`;
     lines.push(
       found
-        ? `- ${c.name} (${where}): new since seq ${seen} (channel is at ${c.lastSeq})`
+        ? `- ${label} (${where}): new since seq ${seen} (channel is at ${c.lastSeq})`
         : // Own posts, or deleted ones: either way nothing live from anyone
           // else, so say exactly that (#1393 QA, Chip).
-          `- ${c.name} (${where}): nothing new from others since seq ${seen} (channel is at ${c.lastSeq})`,
+          `- ${label} (${where}): nothing new from others since seq ${seen} (channel is at ${c.lastSeq})`,
     );
   }
   return { text: `## Channels (attention)\n${lines.join('\n')}`, captured };
