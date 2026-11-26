@@ -25,10 +25,10 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Request, Response } from 'express';
+import type { Request } from 'express';
 import { randomBytes } from 'crypto';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb } from '../helpers.js';
+import { cleanDb, makeMcpReq, makeMcpRes } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import {
   APP_KEY_PREFIX,
@@ -76,56 +76,6 @@ beforeEach(async () => {
   });
 });
 
-function makeReq(authorization: string, host = 'localhost:4000'): Request {
-  return {
-    method: 'POST',
-    headers: { authorization },
-    protocol: 'http',
-    body: { jsonrpc: '2.0', method: 'initialize', id: 1 },
-    get: (name: string) => (name.toLowerCase() === 'host' ? host : undefined),
-    on: vi.fn(),
-    pipe: vi.fn(),
-  } as unknown as Request;
-}
-
-function makeRes(): Response & {
-  _status: number;
-  _headers: Record<string, string>;
-  _body: unknown;
-} {
-  const headers: Record<string, string> = {};
-  let status = 200;
-  let body: unknown;
-  const res = {
-    setHeader: vi.fn((n: string, v: string) => { headers[n] = v; return res; }),
-    getHeader: vi.fn((n: string) => headers[n]),
-    status: vi.fn((c: number) => { status = c; return res; }),
-    json: vi.fn((p: unknown) => { body = p; return res; }),
-    writeHead: vi.fn((c: number, h?: Record<string, string>) => {
-      status = c;
-      if (h) Object.assign(headers, h);
-      return res;
-    }),
-    write: vi.fn(() => true),
-    end: vi.fn(),
-    on: vi.fn(),
-    once: vi.fn(),
-    off: vi.fn(),
-    removeListener: vi.fn(),
-    addListener: vi.fn(),
-    emit: vi.fn(),
-    headersSent: false,
-    get _status() { return status; },
-    get _headers() { return headers; },
-    get _body() { return body; },
-  };
-  return res as unknown as Response & {
-    _status: number;
-    _headers: Record<string, string>;
-    _body: unknown;
-  };
-}
-
 function appKeyCtx(): Context {
   // What the middleware produces for AppKey: appId + organizationId
   // set, userId / clientId deliberately absent. Matches the shape
@@ -170,8 +120,8 @@ describe('spec 025 US6 — AppKey regression suite', () => {
     //
     // Deeper coverage: src/mcp/server.app-resolution.test.ts
     // §"skips App resolution entirely for AppKey-resolved callers".
-    const req = makeReq(`Bearer ${rawKey}`);
-    const res = makeRes();
+    const req = makeMcpReq({ authorization: `Bearer ${rawKey}` });
+    const res = makeMcpRes();
 
     await handleMcpRequest(req, res);
 

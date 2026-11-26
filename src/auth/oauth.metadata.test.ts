@@ -12,9 +12,9 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import type { Request, Response } from 'express';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { makeMcpReq, makeMcpRes } from '../test/helpers.js';
 import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
 import {
   buildProtectedResourceMetadata,
@@ -160,63 +160,17 @@ describe('GET /.well-known/oauth-protected-resource (PRM endpoint)', () => {
 });
 
 describe('handleProtectedResourceMetadata + handleAuthorizationServerMetadata â€” Host header missing', () => {
-  function makeReq(opts: { host?: string; protocol?: string } = {}): Request {
-    return {
-      protocol: opts.protocol ?? 'http',
-      get: (name: string) =>
-        name.toLowerCase() === 'host' ? opts.host : undefined,
-    } as unknown as Request;
-  }
-
-  function makeRes(): Response & {
-    _status: number;
-    _body: unknown;
-    _headers: Record<string, string>;
-  } {
-    let status = 200;
-    let body: unknown;
-    const headers: Record<string, string> = {};
-    const res = {
-      status: vi.fn((c: number) => {
-        status = c;
-        return res;
-      }),
-      json: vi.fn((p: unknown) => {
-        body = p;
-        return res;
-      }),
-      setHeader: vi.fn((name: string, value: string) => {
-        headers[name] = value;
-        return res;
-      }),
-      get _status() {
-        return status;
-      },
-      get _body() {
-        return body;
-      },
-      get _headers() {
-        return headers;
-      },
-    };
-    return res as unknown as Response & {
-      _status: number;
-      _body: unknown;
-      _headers: Record<string, string>;
-    };
-  }
-
   it('PRM handler returns 400 + diagnostic when Host header is missing', () => {
-    const req = makeReq({}); // no host
-    const res = makeRes();
+    const req = makeMcpReq({ host: null }); // no host
+    const res = makeMcpRes();
     handleProtectedResourceMetadata(req, res);
     expect(res._status).toBe(400);
     expect(res._body).toEqual({ error: 'Missing Host header' });
   });
 
   it('AS metadata handler returns 400 + diagnostic when Host header is missing', () => {
-    const req = makeReq({});
-    const res = makeRes();
+    const req = makeMcpReq({ host: null });
+    const res = makeMcpRes();
     handleAuthorizationServerMetadata(req, res);
     expect(res._status).toBe(400);
     expect(res._body).toEqual({ error: 'Missing Host header' });
@@ -228,16 +182,16 @@ describe('handleProtectedResourceMetadata + handleAuthorizationServerMetadata â€
     // listener is plain HTTP; trust-proxy + X-Forwarded-Proto set
     // req.protocol = 'https'. Claude Desktop refuses non-HTTPS
     // metadata URLs (EF-003), so this is load-bearing for prod.
-    const req = makeReq({ host: 'hadron.example.com', protocol: 'https' });
-    const res = makeRes();
+    const req = makeMcpReq({ host: 'hadron.example.com', protocol: 'https' });
+    const res = makeMcpRes();
     handleProtectedResourceMetadata(req, res);
     const body = res._body as { resource: string };
     expect(body.resource).toBe('https://hadron.example.com/mcp');
   });
 
   it('AS metadata handler emits HTTPS URLs when req.protocol = "https"', () => {
-    const req = makeReq({ host: 'hadron.example.com', protocol: 'https' });
-    const res = makeRes();
+    const req = makeMcpReq({ host: 'hadron.example.com', protocol: 'https' });
+    const res = makeMcpRes();
     handleAuthorizationServerMetadata(req, res);
     const body = res._body as { registration_endpoint: string; issuer: string };
     expect(body.issuer).toBe('https://hadron.example.com');

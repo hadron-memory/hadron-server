@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Request, Response } from 'express';
+import type { Request } from 'express';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, makeMcpReq, makeMcpRes } from '../test/helpers.js';
 import { handleMcpRequest } from './server.js';
 import { hashUserApiKey, USER_API_KEY_PREFIX } from '../middleware/auth.js';
 
@@ -14,67 +14,10 @@ beforeEach(async () => {
   await cleanDb(db);
 });
 
-function makeReq(opts: {
-  authorization?: string;
-  protocol?: 'http' | 'https';
-  host?: string;
-}): Request {
-  return {
-    method: 'POST',
-    headers: opts.authorization
-      ? { authorization: opts.authorization }
-      : {},
-    protocol: opts.protocol ?? 'http',
-    body: { jsonrpc: '2.0', method: 'initialize', id: 1 },
-    get: (name: string) => {
-      if (name.toLowerCase() === 'host') return opts.host ?? 'localhost:4000';
-      return undefined;
-    },
-  } as unknown as Request;
-}
-
-function makeRes(): Response & {
-  _status: number;
-  _headers: Record<string, string>;
-  _body: unknown;
-} {
-  const headers: Record<string, string> = {};
-  let status = 200;
-  let body: unknown;
-  const res = {
-    setHeader: vi.fn((name: string, value: string) => {
-      headers[name] = value;
-      return res;
-    }),
-    status: vi.fn((code: number) => {
-      status = code;
-      return res;
-    }),
-    json: vi.fn((payload: unknown) => {
-      body = payload;
-      return res;
-    }),
-    get _status() {
-      return status;
-    },
-    get _headers() {
-      return headers;
-    },
-    get _body() {
-      return body;
-    },
-  };
-  return res as unknown as Response & {
-    _status: number;
-    _headers: Record<string, string>;
-    _body: unknown;
-  };
-}
-
 describe('/mcp 401 + WWW-Authenticate (FR-005, RFC 9728)', () => {
   it('returns 401 with Bearer challenge + resource_metadata URL when no Authorization header', async () => {
-    const req = makeReq({});
-    const res = makeRes();
+    const req = makeMcpReq({});
+    const res = makeMcpRes();
 
     await handleMcpRequest(req, res);
 
@@ -108,8 +51,8 @@ describe('/mcp 401 + WWW-Authenticate (FR-005, RFC 9728)', () => {
       },
     });
 
-    const req = makeReq({ authorization: `Bearer ${rawKey}` });
-    const res = makeRes();
+    const req = makeMcpReq({ authorization: `Bearer ${rawKey}` });
+    const res = makeMcpRes();
 
     await handleMcpRequest(req, res);
 
@@ -128,11 +71,11 @@ describe('/mcp 401 + WWW-Authenticate (FR-005, RFC 9728)', () => {
     // req.protocol to "https" from X-Forwarded-Proto when the request
     // arrives over a Cloudflare tunnel / load balancer. Claude Desktop
     // refuses non-HTTPS metadata URLs (EF-003).
-    const req = makeReq({
+    const req = makeMcpReq({
       protocol: 'https',
       host: 'hadron.example.com',
     });
-    const res = makeRes();
+    const res = makeMcpRes();
 
     await handleMcpRequest(req, res);
 
@@ -155,7 +98,7 @@ describe('/mcp 401 + WWW-Authenticate (FR-005, RFC 9728)', () => {
       body: { jsonrpc: '2.0', method: 'initialize', id: 1 },
       get: () => undefined,
     } as unknown as Request;
-    const res = makeRes();
+    const res = makeMcpRes();
 
     await handleMcpRequest(req, res);
 
