@@ -1,7 +1,6 @@
 -- #5010 (billing A12, hrn:node:hadronmemory.com:specs:cor:dmo:170:08): a credit ledger entry is never edited and never deleted,
--- not even by an operator; a correction is a new entry. One source, shared verbatim with migration
--- 20261125130000_credit_ledger_append_only (pinned by src/test/migrations/creditLedgerAppendOnly5010.test.ts), applied by
--- post-push.sql and the test globalSetup.
+-- not even by an operator; a correction is a new entry. One source: the newest migration that carries this file ends with it
+-- verbatim (pin 11 of src/lib/metering/creditLedgerAppendOnly5010.test.ts), and post-push.sql and the test globalSetup apply it.
 --
 -- DELETE: always refused (the owner relation is ON DELETE RESTRICT, so the owner can never be gone first).
 -- UPDATE: refused unless only these change, and each only as follows:
@@ -10,10 +9,13 @@
 --     no organizations row with deleted_at IS NULL: soft delete, or a row already gone. Any other value is refused.
 --   * owner_user_id (#5014, A6): may stay, become NULL only when that person is deleted or erased (#5238, same test on users),
 --     or move from a person to the person they were merged into, along a user_merges row (mergeUsers writes it before it
---     re-points). A move to anyone else is refused, so an entry never changes hands outside a merge. Whole-row, an entry also never changes between an organization and a person: the CHECK below
---     keeps exactly one owner, and the two arms together refuse a switch.
+--     re-points). A move to anyone else is refused, so an entry never changes hands outside a merge. Whole-row, an entry
+--     also never changes between an organization and a person, and a cleared link never comes back: each arm refuses any
+--     non-NULL value other than the one it allows, and the CHECK below keeps at most one owner.
 --   * created_by, updated_by, deleted_by: may move only from a user to the user it was merged into, along a user_merges row
 --     (mergeUsers writes it before it re-points).
+--   The deleted test assumes soft delete is final: no path restores an organization or a person (deleted_at back to NULL).
+--   A later restore door must account for it: an entry cleared while its owner was deleted stays ownerless after a restore.
 -- Every other column (id, kind, amount, expiry, source, note, created_at, updated_at, deleted_at...) is frozen, and so is any
 -- column a later slice adds until that slice exempts it on purpose.
 -- #5014: an entry names one owner, an organization or a person (hrn:node:hadronmemory.com:specs:cor:dmo:170:01). The CHECK is

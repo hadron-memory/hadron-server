@@ -95,7 +95,7 @@ describe('pin 11: owner_user_id moves only along a merge recorded in user_merges
   });
 });
 
-describe('pin 12: the link to a deleted owner may be cleared (#5238 narrows it to deleted owners; live owners in ledgerOwnerClear5238.test.ts)', () => {
+describe('pin 12: the link to a deleted owner may be cleared (#5238 narrows it to deleted owners; live owners in creditLedgerOwnerClear5238.test.ts)', () => {
   it('SET owner_user_id = NULL on a deleted person\'s row and SET organization_id = NULL on a deleted organization\'s row are allowed', async () => {
     const pid = (await insert({ user: a })).rows[0].id;
     const oid = (await insert({ org: orgId })).rows[0].id;

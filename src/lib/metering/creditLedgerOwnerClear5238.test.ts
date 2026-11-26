@@ -76,9 +76,11 @@ describe('#5238: a deleted owner\'s link may be cleared', () => {
       expect((await rejected(pg.query('UPDATE credit_ledger_entries SET organization_id = NULL WHERE id = $1', [id])))?.code).toBe('23514');
     } finally { await pg.query('ROLLBACK'); }
     await pg.query('BEGIN');
-    await pg.query('UPDATE organizations SET deleted_at = now() WHERE id = $1', [orgId]);
-    await pg.query('UPDATE credit_ledger_entries SET organization_id = NULL WHERE id = $1', [id]);
-    await pg.query('COMMIT');
+    try {
+      await pg.query('UPDATE organizations SET deleted_at = now() WHERE id = $1', [orgId]);
+      await pg.query('UPDATE credit_ledger_entries SET organization_id = NULL WHERE id = $1', [id]);
+      await pg.query('COMMIT');
+    } catch (e) { await pg.query('ROLLBACK'); throw e; }
     expect(await owners(id)).toEqual({ organization_id: null, owner_user_id: null });
   });
 
@@ -99,5 +101,30 @@ describe('#5238: a deleted owner\'s link may be cleared', () => {
     await pg.query('UPDATE organizations SET deleted_at = now() WHERE id = $1', [orgId]);
     expect((await rejected(pg.query('UPDATE credit_ledger_entries SET organization_id = $2 WHERE id = $1', [id, other])))?.code).toBe('23514');
     expect(await owners(id)).toEqual({ organization_id: orgId, owner_user_id: null });
+  });
+
+  it('pin 8: a deleted person\'s link is cleared, never moved: re-pointing to a person they were not merged into stays refused', async () => {
+    const other = (await db.user.create({ data: { id: generateId(), handle: 'clr-r' } })).id;
+    const id = await insert({ user: person });
+    await pg.query('UPDATE users SET deleted_at = now() WHERE id = $1', [person]);
+    expect((await rejected(pg.query('UPDATE credit_ledger_entries SET owner_user_id = $2 WHERE id = $1', [id, other])))?.code).toBe('23514');
+    expect(await owners(id)).toEqual({ organization_id: null, owner_user_id: person });
+  });
+
+  it('pin 9: a cleared link never comes back, to the old owner or anyone else', async () => {
+    const other = (await db.organization.create({ data: { id: generateId(), name: 'clr-c', urn: `clr-c-${generateId()}` } })).id;
+    const orgEntry = await insert({ org: orgId });
+    const personEntry = await insert({ user: person });
+    await pg.query('UPDATE organizations SET deleted_at = now() WHERE id = $1', [orgId]);
+    await pg.query('UPDATE users SET deleted_at = now() WHERE id = $1', [person]);
+    await pg.query('UPDATE credit_ledger_entries SET organization_id = NULL WHERE id = $1', [orgEntry]);
+    await pg.query('UPDATE credit_ledger_entries SET owner_user_id = NULL WHERE id = $1', [personEntry]);
+    for (const [col, val] of [['organization_id', orgId], ['organization_id', other], ['owner_user_id', person]] as const) {
+      for (const id of [orgEntry, personEntry]) {
+        expect((await rejected(pg.query(`UPDATE credit_ledger_entries SET ${col} = $2 WHERE id = $1`, [id, val])))?.code).toBe('23514');
+      }
+    }
+    expect(await owners(orgEntry)).toEqual({ organization_id: null, owner_user_id: null });
+    expect(await owners(personEntry)).toEqual({ organization_id: null, owner_user_id: null });
   });
 });
