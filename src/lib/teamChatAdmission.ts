@@ -21,7 +21,7 @@
  * its own issue).
  */
 
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from '../generated/prisma/index.js';
 import { toNaiveUtc } from './sessionActivity.js';
 
 /** A message blocks an identical one for this long after it was admitted. */
