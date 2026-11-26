@@ -1,4 +1,4 @@
-import { linkedReachFor, registerOwnRightReader } from '../../../lib/appMemoryLinks.js';
+import { isPureAppKeyShape, linkedReachFor, registerOwnRightReader } from '../../../lib/appMemoryLinks.js';
 import { currentAgentOrgMember } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireOrgRole, isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
 import { endGrantsOfAgentsNoLongerInstalled, importedPairsOfParent } from '../../../lib/grants/agentInstallDeparture.js';
@@ -1310,6 +1310,9 @@ export async function canReadMemoryRecord(
     if (isStrictOwner(ctx, memory.userId)) return true;
     // No `as never`: the cast is what let a caller omit the fields this reads.
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
+    // #5185: a pure App key / userless run reads a personal or private memory its App owner linked (the one judge decides,
+    // including that a run never reads `private`), so `memory(ref:)` answers as the node reads and MCP do.
+    if (isPureAppKeyShape(ctx) && (await linkedReachFor(ctx.db, ctx, [memory.id])).has(memory.id)) return true;
     return false;
   }
   // System records follow the installed/licensed Agent or manager audience,

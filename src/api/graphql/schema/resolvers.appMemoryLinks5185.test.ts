@@ -444,6 +444,36 @@ describe('detachMemoryFromApp', () => {
   });
 });
 
+describe('detach is no App-existence oracle for a caller who cannot read the memory', () => {
+  it('an existing, an unknown and a deleted App answer the same missing-memory error', async () => {
+    const hidden = await personal(otto, 'user'); // alice cannot read it
+    const deleted = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Gone', urn: `${org.urn}:gone3`, deletedAt: new Date() } as never });
+    const norm = (r: { code: string; message: string } | null) => r && { code: r.code, message: r.message.split(hidden.id).join('<ref>') };
+    const a = norm(await refusal(detach(asUser(alice), hidden.id, orgApp.id)));
+    const b = norm(await refusal(detach(asUser(alice), hidden.id, generateId())));
+    const c = norm(await refusal(detach(asUser(alice), hidden.id, deleted.id)));
+    expect(a).toMatchObject({ code: 'MEMORY_NOT_FOUND' });
+    expect(b).toEqual(a);
+    expect(c).toEqual(a);
+  });
+});
+
+describe('GraphQL memory(ref:) for a linked personal memory of the App owner', () => {
+  it('the key reads the record, a run does not read a private one, and an unlinked one stays missing', async () => {
+    const ottos = await personal(otto, 'user');
+    const ottosPrivate = await personal(otto, 'user', 'private');
+    const keyCtx = { db, appId: userApp.id, appKeyId: 'k1', roles: [], clientId: `app:${userApp.id}` } as unknown as Context;
+    const runCtx = { db, appId: userApp.id, roles: [], clientId: 'run:r1' } as unknown as Context;
+    const get = (c: Context, id: string) => (resolvers.Query as any).memory(null, { ref: id }, c).then((r: any) => r?.id ?? null, () => null);
+    expect(await get(keyCtx, ottos.id)).toBeNull();
+    await attach(asUser(otto), ottos.id, userApp.id);
+    await attach(asUser(otto), ottosPrivate.id, userApp.id);
+    expect(await get(keyCtx, ottos.id)).toBe(ottos.id);
+    expect(await get(keyCtx, ottosPrivate.id)).toBe(ottosPrivate.id);
+    expect(await get(runCtx, ottosPrivate.id)).toBeNull();
+  });
+});
+
 describe('App.attachedMemories', () => {
   const field = (appId: string, c: Context) => (resolvers as any).App.attachedMemories({ id: appId }, {}, c);
 

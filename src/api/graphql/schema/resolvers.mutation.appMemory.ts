@@ -534,17 +534,23 @@ export const appMemoryMutations = {
     if (ctx.appKeyId || ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx)) {
       throw authorizationDenied();
     }
+    // The memory first, as attach does: a caller who cannot read it gets the missing-memory answer whatever the App, so the
+    // App-side answer is never an existence oracle for someone who has nothing to do with the memory.
+    const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+    const missingApp = async (): Promise<never> => {
+      if (await holdsContentReadIndependently(ctx, memoryId)) throw authorizationDenied();
+      throw new MemoryNotFoundError(memoryRef);
+    };
     let appId: string;
     try { ({ id: appId } = await resolveAppRef(ctx.db, appRef)); }
     catch (error) {
-      if (isAppRefResolutionFailure(error)) throw authorizationDenied();
+      if (isAppRefResolutionFailure(error)) return missingApp();
       throw error;
     }
     const app = await ctx.db.app.findUniqueOrThrow({
       where: { id: appId }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true },
     });
-    if (app.deletedAt) throw authorizationDenied();
-    const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+    if (app.deletedAt) return missingApp();
     const first = await ctx.db.memory.findUniqueOrThrow({
       where: { id: memoryId }, select: { organizationId: true, ownerUserId: true, userId: true },
     });
