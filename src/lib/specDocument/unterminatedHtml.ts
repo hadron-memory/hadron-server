@@ -54,6 +54,8 @@ import { stepFence, type OpenFence } from './fences.js';
 /** Elements whose content is text up to their own end tag. */
 const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript']);
 const MAX_RESTARTS = 32;
+/** The next blank line or raw-text element (or `plaintext`) start: which comes first decides whether a block holds such an element. */
+const BLANK_OR_RAW_TEXT = /\n[ \t]*\r?(?=\n|$)|<(?:script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext)(?=[\s/>]|$)/gi;
 /**
  * The scans one call of escapeUnterminatedHtml may run (a body of the fuzz alphabets needs at most 70: the pre exemptions and the reads of
  * endsInOpenFence nest). Each escape costs at least two (both models), and more where a declaration's fence is judged: measured, 32
@@ -520,6 +522,8 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
   // #5265 — the line before was quote markers alone only by CommonMark's tab columns (`>\t>`): an empty quote nested by a tab.
   let tabNested = false;
   let prevTabNested = false;
+  // #5265 — this line ended, in marked, the list item whose paragraph the line before was (`- a`, then `<x>`): no paragraph is open here.
+  let markedItemCut = false;
   // #5265 — whether the quote line being read (and the one before) ends its quote's content in code (a fence or indented code): marked
   // carries no line after such a quote into it (its blockquote rule stops when the last block it read is code).
   let quoteCode = false;
@@ -644,10 +648,27 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
     return to;
   };
   const inQuote = (): boolean => lineContainers.some((c) => c.quote);
+  // Whether a raw-text element opens between `j` and the next blank line. The scan only moves forward, so the last answer stands for every
+  // `j` short of the hit it found: one pass over the text per scan.
+  let aheadHit = -1;
+  let aheadRaw = false;
+  const rawTextAhead = (j: number): boolean => {
+    if (j > aheadHit) {
+      BLANK_OR_RAW_TEXT.lastIndex = j;
+      const m = BLANK_OR_RAW_TEXT.exec(text);
+      aheadHit = m === null ? n : m.index;
+      aheadRaw = m !== null && m[0][0] === '<';
+    }
+    return aheadRaw;
+  };
   // Whether a type 7 tag at the head of the line at `j` would interrupt a paragraph. A line that opens a list item or a deeper quote starts afresh.
   const interrupts = (): boolean => {
     // #5265 — marked reads a marker with one blank after it (`+ `, ONE_BLANK_END) as paragraph text, so a tag line under it continues that paragraph.
     if (prevBefore !== 'other' && !(model === 'marked' && prevBefore === 'marker' && markerText)) return false;
+    // #5265 — the tag line ended the item's paragraph in marked, so it opens a block there; taken only where that block holds a raw-text
+    // element (live markup to marked, and code to CommonMark: `- a`, `<x>`, `>`, `    <script`). Elsewhere the reading stays the paragraph's,
+    // which leaves CommonMark's code as written where no reader loses (`- a`, `<b>`, a fence holding `<i x=`).
+    if (markedItemCut && rawTextAhead(lineFrom)) return false;
     // #5265 — marked's setext heading stops at a line that is only a tag (` {0,3}<[^\n>]+>`), and a `-` underline under it ends the paragraph
     // before that line: the tag opens an HTML block there (`a`, `<x>`, `-`). Not in a quote, whose paragraph takes both lines lazily.
     if (model === 'marked' && lineContainers.every((c) => !c.quote) && !inQuote() && /^ {0,3}<[^\n>]+>\r?$/.test(text.slice(lineFrom, lineTo))
@@ -778,6 +799,7 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
       prevQuoteText = quoteText;
       prevQuoteLine = quoteLine;
       prevTabNested = tabNested;
+      markedItemCut = false;
       tabNested = model === 'commonmark' && inner.trim() !== '' && commonmarkQuoteOnly(line);
       quoteLine = /^ {0,3}>/.test(line);
       prevQuoteCode = quoteCode;
@@ -851,8 +873,11 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
       const from = columnAfter(quotes);
       // A tab right after a quote marker gives its first column to the marker in CommonMark; marked strips the whole tab with the marker (#5265).
       const tabAfterQuote = quotes.endsWith('>') && inner.startsWith('\t');
+      // marked lexes a quote's content as a text of its own, so a line's indent inside quotes counts its tabs from column 0 (`> \t>`: code).
       const indent = model === 'marked' && tabAfterQuote
         ? columnAfter((/^[ \t]*/.exec(inner.slice(1)) as RegExpExecArray)[0])
+        : model === 'marked' && from > 0
+        ? columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0])
         : columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0], from) - from - (tabAfterQuote ? 1 : 0);
       // A line right after a definition's line continues its paragraph, so its indent makes no code of it.
       const afterDefinition = inDefinition;
@@ -876,7 +901,10 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
       else if (depth > listDepth && listCol > 0 && quoteColumns(line, listDepth + 1).marker - quoteColumns(line, listDepth).content < listCol) leaveItems(quoteColumns(line, listDepth + 1).marker - quoteColumns(line, listDepth).content);
       else if (depth < listDepth) listCol = -1;
       // A line that starts another block closes the item; only a paragraph line may continue it lazily.
-      else if (depth === listDepth && inner.trim() !== '' && lineCols < listCol && (prev !== 'other' || (model === 'marked' ? LIST_CLOSING_LINE_MARKED : LIST_CLOSING_LINE).test(inner))) leaveItems(lineCols);
+      else if (depth === listDepth && inner.trim() !== '' && lineCols < listCol && (prev !== 'other' || (model === 'marked' ? LIST_CLOSING_LINE_MARKED : LIST_CLOSING_LINE).test(inner))) {
+        markedItemCut = model === 'marked' && prev === 'other' && depth === 0;
+        leaveItems(lineCols);
+      }
       // Inside a deeper quote the item's content is that quote's to measure from.
       const opensQuote = depth > prevDepth;
       // A line outside the quote or short of the list item the line before was in: lazy paragraph text, never a setext underline.
@@ -900,7 +928,7 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
       // #5265 — markdown-it takes a `>` indented four or more columns, right under a quote line, for that quote's marker: the line is no code to it.
       // The same under such a tab-nested empty quote (`>\t>`, then `>     >`): the indented `>` continues that quote to markdown-it.
       const miQuote = model === 'commonmark' && ((depthBefore > 0 && lineIndent >= 4 && /^[ \t]*>/.test(line)) || (prevTabNested && /^[ \t]{2,}>/.test(inner)));
-      if (codeIndent >= 4 && inner.trim() !== '' && ((prev !== 'other' && prev !== 'marker') || opensQuote) && !afterDefinition && !(fenceCut && model === 'marked') && !miQuote) { quoteCode = depth > 0; prev = 'code'; lrd = 0; i = end + 1; continue; }
+      if (codeIndent >= 4 && inner.trim() !== '' && ((prev !== 'other' && prev !== 'marker') || opensQuote) && (!afterDefinition || (model === 'marked' && opensQuote)) && !(fenceCut && model === 'marked') && !miQuote) { quoteCode = depth > 0; prev = 'code'; lrd = 0; i = end + 1; continue; }
       if (lrd === 3) {
         // Inside a title that opened on an earlier line: still the definition, until the line that closes it (or a blank line, which ends the attempt).
         if (inner.trim() === '') { prev = prev === 'code' ? 'code' : 'blank'; lrd = 0; } else { prev = 'nonpara'; inDefinition = true; lrd = hasCloser(inner, titleCloser) ? 0 : 3; }
@@ -930,7 +958,9 @@ function scan(text: string, from: number, model: ReaderModel, exempt: ReadonlySe
         // #5265 — marked's setext rule also refuses a paragraph any line of which is ` {0,3}<[^\n>]+>` (`< >`, `<b <>`, `<!>`: no HTML block to
         // marked, which tries its blocks first, so paragraph text; its lheading's `html` lookahead), and
         // the lazy lines it carries a quote on through, whose underlines it turns into text (its blockquoteSetextReplace).
-        markedNoSetext = prev === 'other' && ((quoteLazy && prevQuoted) || (markedCarry && !quoted) || markedTextTagLine(inner)
+        // #5265 — and a paragraph with a line indented four columns past its first one's (`x`, then `    x`): lheading's lines may not look
+        // like indented code, so no `-` under it underlines (a lone `-` there is an item, and the line under it the item's).
+        markedNoSetext = prev === 'other' && ((quoteLazy && prevQuoted) || (markedCarry && !quoted) || markedTextTagLine(inner) || (paraBefore && codeIndent >= 4)
           || (paraBefore && !MARKED_ORDERED_TEXT.test(inner) ? markedNoSetext : /^ {0,3}<[A-Za-z][A-Za-z0-9-]*\/(?!>)[^\n>]*>$/.test(inner) || MARKED_BULLET_HEAD.test(inner)));
         // #5265 — a lazy line of a quote's paragraph is still in the quote (CommonMark): the line after it that has no marker leaves the quote,
         // so a lone `-` there opens an item rather than continuing the paragraph.
@@ -1262,3 +1292,6 @@ function escapeWithinBudget(text: string): string {
 
 /** Test seam: {@link quoteColumns} (a one-column tab after a quote marker is not observable through the pass in any body found). */
 export const quoteColumnsForTests = quoteColumns;
+
+/** Test seam: the scans the last call of escapeUnterminatedHtml ran (the one that found its budget spent counts too), so a pin bounds the work and not the wall clock. */
+export const scansOfLastCallForTests = (): number => MAX_SCANS - scansLeft;
