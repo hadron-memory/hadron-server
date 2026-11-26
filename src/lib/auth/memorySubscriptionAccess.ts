@@ -11,6 +11,22 @@ import { orgRoleAtLeast } from './orgRole.js';
 export const SUBSCRIPTION_EXCLUDED_CLASSES = ['personal', 'private', 'group', 'system'] as const;
 
 /**
+ * Classes a live CONTRIBUTOR+ subscription may WRITE once the read scope above
+ * admits the row: ordinary shared knowledge only. Shared by every copy of the
+ * write arm — requireMemoryWriteAccess's subscription arm,
+ * getSubscribedWritableMemoryIds, and the #329 effectiveAccess audit — the same
+ * mirroring-by-construction SUBSCRIPTION_EXCLUDED_CLASSES gives the read side
+ * (#5309 review: the last hand-copied class predicate, now one list).
+ *
+ * `knowledge` is the only member by construction, not by accident: an app-class
+ * row always carries an appId (chk_memory_class_app_id), which the read scope's
+ * `appId: null` already keeps out, and the excluded list keeps every other
+ * class out — so no second class is both reachable and writable today. A class
+ * joins this list only together with the gate change that admits it.
+ */
+export const SUBSCRIPTION_WRITE_CLASSES = ['knowledge'] as const;
+
+/**
  * Ordinary shared memories reached through an org's live subscription. Keep this identical for canonical reads
  * and Agent links: neither activation (a blended-graph flag) nor a license adds a check that read does not make.
  * Empty organization ids fail closed through Prisma's `in: []`, never an omitted filter.

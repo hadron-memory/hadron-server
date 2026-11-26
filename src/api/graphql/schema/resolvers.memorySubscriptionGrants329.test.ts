@@ -57,7 +57,10 @@ let stranger: { id: string }; // member of nothing
 
 const asAdmin = () => ctx({ userId: admin.id, roles: ['OWNER'] });
 
-/** A live subscription row of org B on the memory, at the given role. */
+/**
+ * A live subscription row of org B on the given memory (default: the shared kb
+ * fixture), at the given role.
+ */
 async function subscribe(role: 'READER' | 'CONTRIBUTOR', memoryId = kb.id) {
   return db.memorySubscription.create({
     data: { memoryId, organizationId: orgB.id, role },
@@ -172,6 +175,42 @@ describe('#329 memory — subscription grants (items 1–4)', () => {
     expect(grants.map((g) => g.via).sort()).toEqual([orgB.urn, orgC.urn].sort());
     expect(grants.every((g) => g.role === 'READER')).toBe(true);
     expect(res.canWrite).toBe(false);
+  });
+
+  // Mixed-source ranking (#5309 BLIND P2-1): a subscription grant competing
+  // with a grant of ANOTHER source on the same memory. assemble() orders by
+  // strength(caps) — never by label — and copies the strongest grant's label
+  // into res.role, so these pin both the ranking and the label it produces.
+  it('mixed sources: a WRITE subscription grant outranks a READER ORG_ROLE grant (res.role follows the strongest, by caps)', async () => {
+    await subscribe('CONTRIBUTOR');
+    // contribB is ALSO a READER member of the OWNING org A: ORG_ROLE caps READ.
+    await db.orgMember.create({
+      data: { organizationId: orgA.id, userId: contribB.id, role: 'READER' },
+    });
+    const res = await call(contribB.id, `hrn:memory:${kb.urn}`, asAdmin());
+    expect(res.canRead).toBe(true);
+    expect(res.canWrite).toBe(true);
+    expect(res.canManage).toBe(false);
+    // The subscription's WRITE outranks the org role's READ, so the result's
+    // role is the subscription grant's effective CONTRIBUTOR — casing follows
+    // ORG_ROLE's tier vocabulary either way, and ranking never reads labels.
+    expect(res.role).toBe('CONTRIBUTOR');
+    expect(res.grants.map((g) => g.source).sort()).toEqual(['MEMORY_SUBSCRIPTION', 'ORG_ROLE']);
+  });
+
+  it('mixed sources: an owning-org ADMIN\'s FULL ORG_ROLE grant outranks the subscription WRITE grant', async () => {
+    await subscribe('CONTRIBUTOR');
+    // CONTRIBUTOR member of subscribing org B AND ADMIN of the owning org A.
+    const adminB = await db.user.create({ data: { githubId: 10, githubUsername: 'ab2', roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: orgB.id, userId: adminB.id, role: 'CONTRIBUTOR' } });
+    await db.orgMember.create({ data: { organizationId: orgA.id, userId: adminB.id, role: 'ADMIN' } });
+    const res = await call(adminB.id, `hrn:memory:${kb.urn}`, asAdmin());
+    expect(res.canWrite).toBe(true);
+    expect(res.canManage).toBe(true);
+    // ORG_ROLE's FULL outranks the subscription's WRITE: the role is the org
+    // grant's ADMIN, never the subscription's CONTRIBUTOR.
+    expect(res.role).toBe('ADMIN');
+    expect(res.grants.map((g) => g.source).sort()).toEqual(['MEMORY_SUBSCRIPTION', 'ORG_ROLE']);
   });
 });
 
@@ -331,7 +370,11 @@ describe('#329 parity with the enforced gates (item 6)', () => {
       await requireMemoryWriteAccess(ctx({ userId: subjectId, roles: ['READER'] }), memoryId);
       gateWrite = true;
     } catch (e) {
-      expect((e as Error).message).toBe('Forbidden: no write access to this memory');
+      // The refusal's CODE is the pin, not its prose: the new fixtures route
+      // the gate through several early exits, and any FORBIDDEN refusal is a
+      // write refusal — while anything else (a not-found, a DB fault) must
+      // surface as this test's own failure, not a message-mismatch accident.
+      expect((e as { extensions?: { code?: string } }).extensions?.code).toBe('FORBIDDEN');
     }
     expect({ read: res.canRead, write: res.canWrite }).toEqual({
       read: gateRead,
@@ -439,6 +482,35 @@ describe('#329 parity with the enforced gates (item 6)', () => {
     await assertParity(contribB.id, mem.id, mem.urn);
   });
 
+  it('app-CLASS memory under a live subscription (#5309 BLIND P2-3: read and write BOTH false)', async () => {
+    // Premise correction, stated here so the expectation is not misread: no
+    // non-knowledge class can be read-reachable AND writable, so a
+    // read-true/write-false parity fixture cannot be built. app is the only
+    // class outside SUBSCRIPTION_EXCLUDED_CLASSES besides knowledge, and an
+    // app-class row always carries an appId (chk_memory_class_app_id), which
+    // the read scope's `appId: null` excludes — so BOTH sides refuse. The
+    // fixture still pins the shape: if the write list (SUBSCRIPTION_WRITE_CLASSES,
+    // shared by gate and audit) or the read scope ever admitted this class on
+    // one side only, parity would break right here.
+    const app = await db.app.create({
+      data: { id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:parclsapp`, name: 'parclsapp' },
+    });
+    const mem = await db.memory.create({
+      data: {
+        id: generateId(),
+        organizationId: orgA.id,
+        appId: app.id,
+        urn: `${orgA.urn}:parclsteam`,
+        name: 'parclsteam',
+        class: 'app',
+      },
+    });
+    await subscribe('CONTRIBUTOR', mem.id);
+    const res = await call(contribB.id, `hrn:memory:${mem.urn}`, asAdmin());
+    expect(subGrants(res)).toHaveLength(0);
+    await assertParity(contribB.id, mem.id, mem.urn);
+  });
+
   it('per-user holding under a live subscription', async () => {
     const agent = await db.agent.create({
       data: { id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:parhold`, name: 'ph' },
@@ -469,8 +541,9 @@ describe('#329 impersonation narrowing (restrictOrgId)', () => {
   // org's resources, and a subject's subscriptions only ever cover OTHER
   // orgs' memories — so end-to-end only the narrowed (no-grant) direction is
   // reachable. Both directions are pinned here on computeEffectiveAccess,
-  // the unit the narrowing lives in (Arden P3-3 / Rook F1: without the
-  // narrowing, a session would see the target's other-org membership).
+  // the unit the narrowing lives in (first-round review findings on #5309,
+  // BLIND P3-3 / SEC10 F1: without the narrowing, a session would see the
+  // target's other-org membership).
   async function kbRow() {
     return db.memory.findUniqueOrThrow({
       where: { id: kb.id },
