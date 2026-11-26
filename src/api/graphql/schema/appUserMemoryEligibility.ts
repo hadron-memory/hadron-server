@@ -1,6 +1,8 @@
 /**
- * #5183 / #5218 (cor:dmo:060:20): the two judgements `createMemoryInApp` makes for a personal or private memory,
- * shared so a read of "which classes may I still create" (#5218) runs the door's own check, never a copy.
+ * #5183 / #5218 (cor:dmo:060:20): what `createMemoryInApp` judges for a personal or private memory and the read of
+ * "which classes may I still create" (#5218) judges too. The principal, the user-owned refusal, the install licence and
+ * the one-per-class count are shared functions. The read does its own membership, deleted-caller and any-Agent steps:
+ * a refusal added to the door must be added to {@link creatableAppUserMemoryClasses}, and its differential tests.
  */
 import type { Prisma, PrismaClient } from '../../../generated/prisma/index.js';
 import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';

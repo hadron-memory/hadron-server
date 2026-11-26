@@ -3531,12 +3531,13 @@ export const typeDefs = `#graphql
     viewerManages: Boolean!
     """
     #5218 (hrn:node:hadronmemory.com:specs:cor:dmo:060:20) — the classes, personal and private, that the signed-in viewer
-    may still create in this App through createMemoryInApp, judged by that mutation's own check: a class is listed when
-    creating it would not be refused for this caller. Read from the viewer's own rows only, so nothing another user holds
-    changes it. Empty for a caller who is not a member of the App, a request with no user, an App key, an impersonated
+    may still create in this App through createMemoryInApp: a class is listed when that mutation's checks on the caller, the
+    App and the one-per-class limit would admit it through at least one installed Agent. Read from the viewer's own rows
+    only, so nothing another user holds changes it. Empty for a caller who is not a member of the App, a request with no user, an App key, an impersonated
     session, an AppRun and a request bound to a worker session; for an uninstalled App, an App with no usable installed
     Agent, and a user-owned App while createMemoryInApp refuses those classes there. It reserves nothing: a later create
-    is judged again.
+    is judged again, and two refusals about the memory's name are not predicted (the caller's own deleted memory at that
+    name that cannot be removed, and no free name left).
     """
     viewerAppUserMemoryClasses: [MemoryClass!]!
     """

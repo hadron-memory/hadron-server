@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
+import { cleanDb, createDbAgentImport, createDbAgentOrgGrant, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { requestActorStorage, emptyActor, publishAmbiguousActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -58,29 +58,50 @@ async function field(ctx: Context, id = appId): Promise<string[]> {
 const create = (ctx: Context, memoryClass: string, app = appId, agentRef = agentId) =>
   createMemoryInApp(null, { appRef: app, agentRef, memoryClass, name: `n-${memoryClass}-${generateId()}` }, ctx);
 
-/** What the door admits for this caller, asked one class at a time, through any Agent installed in the App. */
-async function doorAdmits(ctx: Context, app = appId): Promise<string[]> {
-  const admitted: string[] = [];
+/**
+ * What the door answers this caller, one class at a time, through every Agent installed in the App or imported by one.
+ * Each refusal is kept as `CODE: message`, so a case can say WHY the door refused: a bare "refused" would let a broken
+ * fixture agree with the field for the wrong reason.
+ */
+async function door(ctx: Context, app = appId): Promise<{ admitted: string[]; refusals: string[] }> {
   const rows = await db.appAgent.findMany({ where: { appId: app }, select: { agentId: true } });
+  const imported = await db.agentImport.findMany({
+    where: { parentAgentId: { in: rows.map((r) => r.agentId) } }, select: { importedAgentId: true },
+  });
+  const agents = [...new Set([...rows.map((r) => r.agentId), ...imported.map((i) => i.importedAgentId)])];
+  // An App with no Agent still has to answer: ask through the seeded one.
+  if (agents.length === 0) agents.push(agentId);
+  const admitted: string[] = [];
+  const refusals: string[] = [];
   for (const klass of CLASSES) {
-    for (const row of rows) {
+    for (const agentRef of agents) {
       try {
-        await create(ctx, klass, app, row.agentId);
+        await create(ctx, klass, app, agentRef);
         admitted.push(klass);
         break;
-      } catch {
-        // refused through this Agent
+      } catch (error) {
+        const e = error as { message: string; code?: string; extensions?: { code?: string } };
+        refusals.push(`${e.extensions?.code ?? e.code ?? 'ERROR'}: ${e.message}`);
       }
     }
   }
-  return admitted;
+  return { admitted, refusals };
 }
 
 /** Read the field FIRST (the door's successes change the answer), then compare with the door. */
-async function differential(ctx: Context, expected: readonly string[], app = appId): Promise<void> {
+async function differential(ctx: Context, expected: readonly string[], app = appId): Promise<string[]> {
   const answer = await field(ctx, app);
   expect(answer).toEqual(expected);
-  expect(await doorAdmits(ctx, app)).toEqual(answer);
+  const { admitted, refusals } = await door(ctx, app);
+  expect(admitted).toEqual(answer);
+  return refusals;
+}
+
+/** Nothing is listed, and the door refuses both classes for the named reason and no other. */
+async function refusedBecause(ctx: Context, reason: RegExp, app = appId): Promise<void> {
+  const refusals = await differential(ctx, [], app);
+  expect(refusals.length).toBeGreaterThanOrEqual(CLASSES.length);
+  for (const refusal of refusals) expect(refusal).toMatch(reason);
 }
 
 beforeEach(async () => {
@@ -119,7 +140,8 @@ describe('#5218 App.viewerAppUserMemoryClasses', () => {
 
   it('a member with neither: the door admits exactly what is listed', async () => {
     await differential(ctxFor(member), ['personal', 'private']);
-    expect(await field(ctxFor(member))).toEqual([]);
+    // The door's creates above now hold both classes.
+    await refusedBecause(ctxFor(member), /^APP_USER_MEMORY_ALREADY_EXISTS: /);
   });
 
   it('a soft-deleted memory frees its class (R6)', async () => {
@@ -155,62 +177,66 @@ describe('#5218 App.viewerAppUserMemoryClasses', () => {
     expect(await read()).toBe(before);
   });
 
-  const refused: Array<[string, () => Context]> = [
-    ['a non-member (org ADMIN)', () => ctxFor(outsider)],
-    ['a platform admin who is not a member', () => ctxFor(outsider, { roles: ['ADMIN'] })],
-    ['an unauthenticated caller', () => ctxFor(undefined)],
-    ['an App key', () => ctxFor(undefined, { appId, appKeyId: 'key5218' })],
-    ['an App key carrying a member', () => ctxFor(member, { appId, appKeyId: 'key5218' })],
-    ['an impersonation of a member', () => ctxFor(member, { impersonation: { adminUserId: outsider } as never })],
-    ['a run principal carrying a member', () => ctxFor(member, { appId, clientId: 'run:r5218' })],
-    ['a worker session of a member', () => ctxFor(member, { sessionId: 'session5218' })],
-    ['a refused session binding', () => ctxFor(member, { sessionBindingRefused: true as never })],
+  const DENIED = /^FORBIDDEN: |denied|not authorized/i;
+  const NOT_MEMBER = /must be a member of this App/;
+  const NOT_INSTALLED = /^AGENT_NOT_INSTALLED: /;
+  const refused: Array<[string, () => Context, RegExp]> = [
+    ['a non-member (org ADMIN)', () => ctxFor(outsider), NOT_MEMBER],
+    ['a platform admin who is not a member', () => ctxFor(outsider, { roles: ['ADMIN'] }), NOT_MEMBER],
+    ['an unauthenticated caller', () => ctxFor(undefined), /^UNAUTHENTICATED: /],
+    ['an App key', () => ctxFor(undefined, { appId, appKeyId: 'key5218' }), /^UNAUTHENTICATED: /],
+    ['an App key carrying a member', () => ctxFor(member, { appId, appKeyId: 'key5218' }), DENIED],
+    ['an impersonation of a member', () => ctxFor(member, { impersonation: { adminUserId: outsider } as never }), DENIED],
+    ['a run principal carrying a member', () => ctxFor(member, { appId, clientId: 'run:r5218' }), DENIED],
+    ['a worker session of a member', () => ctxFor(member, { sessionId: 'session5218' }), DENIED],
+    ['a refused session binding', () => ctxFor(member, { sessionBindingRefused: true }), DENIED],
   ];
-  for (const [label, ctx] of refused) {
+  for (const [label, ctx, reason] of refused) {
     it(`${label} reads [] and the door refuses both classes`, async () => {
-      await differential(ctx(), []);
+      await refusedBecause(ctx(), reason);
     });
   }
 
+  // The door's principal check does not consult the request's worker attribution, so neither does the field.
   it('a request naming more than one session reads what the door answers', async () => {
     await requestActorStorage.run(emptyActor(), async () => {
       publishAmbiguousActor(['s1', 's2']);
-      const answer = await field(ctxFor(member));
-      expect(await doorAdmits(ctxFor(member))).toEqual(answer);
+      await differential(ctxFor(member), ['personal', 'private']);
     });
   });
 
   it('an uninstalled App lists nothing', async () => {
     await db.app.update({ where: { id: appId }, data: { uninstalledAt: new Date() } });
-    await differential(ctxFor(member), []);
+    await refusedBecause(ctxFor(member), /^APP_UNINSTALLED: /);
   });
 
   it('an App with no Agent installed lists nothing', async () => {
     await db.appAgent.deleteMany({ where: { appId } });
-    await differential(ctxFor(member), []);
+    await refusedBecause(ctxFor(member), NOT_INSTALLED);
   });
 
-  const dead: Array<[string, () => Promise<unknown>]> = [
-    ['a soft-deleted App', () => db.app.update({ where: { id: appId }, data: { deletedAt: new Date() } })],
-    ["a soft-deleted organization", () => db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } })],
-    ['a soft-deleted caller', () => db.user.update({ where: { id: member }, data: { deletedAt: new Date() } })],
-    ['an App whose only Agent is deleted', () => db.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } })],
+  const foreignOrg = (urn: string) => db.organization.create({ data: { id: generateId(), name: urn, urn } });
+  const dead: Array<[string, () => Promise<unknown>, RegExp]> = [
+    ['a soft-deleted App', () => db.app.update({ where: { id: appId }, data: { deletedAt: new Date() } }), /^APP_NOT_FOUND: /],
+    ['a soft-deleted organization', () => db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } }), /^FORBIDDEN: Forbidden$/],
+    ['a soft-deleted caller', () => db.user.update({ where: { id: member }, data: { deletedAt: new Date() } }), /^FORBIDDEN: Forbidden$/],
+    ['an App whose only Agent is deleted', () => db.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } }), NOT_INSTALLED],
     // The Agent row stays installed, but another organization's private Agent has no licence here (#1526).
     ['an App whose only Agent is installed but unlicensed', async () => {
-      const foreign = await db.organization.create({ data: { id: generateId(), name: 'F', urn: 'foreign5218.test' } });
+      const foreign = await foreignOrg('foreign5218.test');
       await db.agent.update({ where: { id: agentId }, data: { organizationId: foreign.id, visibility: 'PERSONAL' } });
-    }],
+    }, NOT_INSTALLED],
+    ['a soft-deleted organization whose App has a PUBLIC Agent of another one', async () => {
+      const foreign = await foreignOrg('public5218.test');
+      await db.agent.update({ where: { id: agentId }, data: { organizationId: foreign.id, visibility: 'PUBLIC' } });
+      await db.agentOrgGrant.create({ data: { orgId, agentId } });
+      await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    }, /^FORBIDDEN: Forbidden$/],
   ];
-  dead.push(['a soft-deleted organization whose App has a PUBLIC Agent of another one', async () => {
-    const foreign = await db.organization.create({ data: { id: generateId(), name: 'P', urn: 'public5218.test' } });
-    await db.agent.update({ where: { id: agentId }, data: { organizationId: foreign.id, visibility: 'PUBLIC' } });
-    await db.agentOrgGrant.create({ data: { orgId, agentId } });
-    await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
-  }]);
-  for (const [label, kill] of dead) {
+  for (const [label, kill, reason] of dead) {
     it(`${label} lists nothing`, async () => {
       await kill();
-      await differential(ctxFor(member), []);
+      await refusedBecause(ctxFor(member), reason);
     });
   }
 
@@ -224,10 +250,22 @@ describe('#5218 App.viewerAppUserMemoryClasses', () => {
     await differential(ctxFor(member), ['personal', 'private']);
   });
 
+  it('a usable imported (derived) Agent is enough, as at the door', async () => {
+    const foreign = await db.organization.create({ data: { id: generateId(), name: 'F', urn: 'foreign5218.test' } });
+    await db.agent.update({ where: { id: agentId }, data: { organizationId: foreign.id, visibility: 'PERSONAL' } });
+    const child = await db.agent.create({
+      data: { id: generateId(), name: 'child', urn: 'org5218.test:child', organizationId: orgId },
+    });
+    for (const grantee of [orgId, foreign.id]) await createDbAgentOrgGrant(db, grantee, child.id);
+    await createDbAgentImport(db, agentId, child.id);
+    expect(await db.appAgent.count({ where: { appId, agentId: child.id } })).toBe(0);
+    await differential(ctxFor(member), ['personal', 'private']);
+  });
+
   it("a member of a user-owned App gets exactly the door's answer", async () => {
     // The owner's own Agent is licensed there, so the App's ownership is what the door judges.
     await db.agent.update({ where: { id: agentId }, data: { organizationId: null, ownerUserId: userOwner } });
-    const answer = await field(ctxFor(userOwner), userAppId);
-    expect(await doorAdmits(ctxFor(userOwner), userAppId)).toEqual(answer);
+    // Today the door refuses both for this reason; #5186 changes the door and this expectation together.
+    await refusedBecause(ctxFor(userOwner), /not yet supported for a user-owned App/, userAppId);
   });
 });
