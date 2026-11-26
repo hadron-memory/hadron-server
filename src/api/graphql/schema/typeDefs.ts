@@ -15220,8 +15220,12 @@ export const typeDefs = `#graphql
     secret exists yet, and the requester's own passkey ceremony at that URL makes
     it (hrn:node:hadronmemory.com:specs:cor:sec:070:02). A staged request lasts
     one hour; at most 5 are open per secret name and at most 2 per requester
-    (SECRET_CHANGE_REQUEST_LIMIT, SECRET_CHANGE_REQUESTER_LIMIT). Those numbers are
-    engineering bounds, not ruled values.
+    (SECRET_CHANGE_REQUEST_LIMIT, SECRET_CHANGE_REQUESTER_LIMIT). Across the App at
+    most 100 are open (SECRET_CHANGE_APP_LIMIT) and one requester holds at most 20
+    (SECRET_CHANGE_REQUESTER_LIMIT). A staged create counts open protected creates
+    toward the App's 500-secret limit and is refused SECRET_LIMIT_REACHED at staging
+    when there is no room; completion rejudges it. Those numbers are engineering
+    bounds, not ruled values (hrn:node:hadronmemory.com:specs:cor:sec:070:02).
     """
     createSecret(
       ownerType: String!

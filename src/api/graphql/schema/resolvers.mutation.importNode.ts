@@ -29,7 +29,8 @@ import { attestedAuthoring, type AuthoredWith } from '../../../lib/authoringAtte
 import { assertManualRunAllowed, mintManualRun } from './resolvers.appRun.js';
 import { publishRunRequested } from '../../../jobs/appRuns.js';
 import { lockInstallAuthorityFirst } from './installMemory.js';
-import { type Context, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
+import { type Context, requireMemoryWriteAccess, concealUnreadableDenial, withoutRequestCaches } from './resolvers.helpers.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
 
 export interface ImportNodeInput {
   /** #1328 — import always attests, from any surface. */
@@ -90,20 +91,26 @@ export const importNodeMutations = {
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }
+    // Before any lookup: a signed-out caller gets one answer for every target.
+    if (!ctx.userId && !ctx.appId) throw unauthenticatedError();
     let memoryId: string;
     let loc: string;
+    // The caller's own spelling of the memory, carried by the preflight refusal.
+    let memoryRef: string;
     if (hasUrn) {
       // splitNodeUrn self-validates qualification (spec 022) and returns the
       // bare memory URN — resolve that to an id here so a bad memory fails
       // before any network fetch.
       const split = splitWholeNodeUrn(input.nodeUrn as string);
-      ({ id: memoryId } = await resolveMemoryRef(ctx.db, split.memoryUrn));
+      memoryRef = split.memoryUrn;
+      ({ id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef));
       loc = split.loc;
     } else {
       // Resolve here (ID-or-URN dispatch) rather than leaving it to the
       // write core: the name-preservation existence check below needs the
       // definite id, and a bad memory ref should fail before any fetch.
-      ({ id: memoryId } = await resolveMemoryRef(ctx.db, memoryIdIn as string));
+      memoryRef = memoryIdIn as string;
+      ({ id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef));
       loc = locIn as string;
     }
 
@@ -121,7 +128,11 @@ export const importNodeMutations = {
     // `lockInstallAuthorityFirst`). Without the flag an App manager was refused here
     // (cor:api:130:00 (1): an import admits exactly the direct-write audience;
     // cor:agt:040:06). A reader who doesn't manage the App is still refused pre-fetch.
-    await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, memoryId);
+    // cor:api:140:03: the shared classifier, as the direct node doors use it.
+    const preflight: Context = { ...ctx, installWritePreflight: true };
+    await concealUnreadableDenial(preflight, memoryId, memoryRef, () =>
+      requireMemoryWriteAccess(preflight, memoryId),
+    );
 
     // ── #528 — validate the post-import task-run preconditions BEFORE the
     // fetch/write, so a bad taskRef / missing App / non-runnable task fails

@@ -11,7 +11,7 @@
 import { GraphQLError } from 'graphql';
 import type { NodeContentValidationOutcome } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
-import { isMemoryHiddenForWrite, isMemoryReadableCached, memoryWriteForbidden, requireMemoryWriteAccess } from './resolvers.helpers.js';
+import { isMemoryHiddenForWrite, isMemoryReadableCached, memoryWriteForbidden, requireCallerIdentity, requireMemoryWriteAccess } from './resolvers.helpers.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveContentValidation, resolveNodeUrnField } from './resolvers.types.js';
 import { liveReadSnapshotContext, liveTxContext, withAuthorizedMemoryTx } from './authorizedTx.js';
@@ -181,6 +181,8 @@ export async function recordContentValidationReport(
 }
 
 export const contentValidationReportMutations = {
-  recordNodeContentValidationReport: (_: unknown, args: RecordContentValidationArgs, ctx: Context) =>
-    recordContentValidationReport(args, ctx),
+  recordNodeContentValidationReport: async (_: unknown, args: RecordContentValidationArgs, ctx: Context) => {
+    requireCallerIdentity(ctx);
+    return recordContentValidationReport(args, ctx);
+  },
 };
