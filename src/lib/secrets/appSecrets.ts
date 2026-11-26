@@ -73,6 +73,23 @@ export async function assertAppSecretRoom(tx: Prisma.TransactionClient, appId: s
 }
 
 /**
+ * #5245 (R3, Proposed, cor:sec:070:02): the room check at STAGING. Same lock, refusal and message as
+ * {@link assertAppSecretRoom}, but the count is the App's secrets plus its open, unexpired protected creates (no secret
+ * row yet), so nothing is staged that cannot complete. Completion keeps {@link assertAppSecretRoom}, so a request never
+ * counts itself. Depends on READ COMMITTED: the count runs after the lock wait and sees a create that committed meanwhile.
+ */
+export async function assertAppSecretRoomForStaging(tx: Prisma.TransactionClient, appId: string): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`hadron:secret-app-count:${appId}`}))`;
+  const [{ n }] = await tx.$queryRaw<Array<{ n: bigint }>>`SELECT
+    (SELECT count(*) FROM secrets WHERE owner_type='app' AND owner_id=${appId})
+    + (SELECT count(*) FROM secret_change_requests WHERE app_id=${appId} AND state='open' AND secret_id IS NULL
+        AND operation='STORE' AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')) AS n`;
+  if (Number(n) >= MAX_SECRETS_PER_APP) {
+    throw limitRefusal('SECRET_LIMIT_REACHED', `An App holds at most ${MAX_SECRETS_PER_APP} secrets.`);
+  }
+}
+
+/**
  * Add the next version of an App secret: the caller holds the secret row's lock (`lockSecretRow`). Encrypts under the
  * App's active key, stamps the previous current version superseded, and keeps at most {@link MAX_SECRET_VERSIONS}
  * (the oldest superseded go first). Returns the new version number.
