@@ -960,7 +960,7 @@ describe('deleteMemory (spec 013)', () => {
           { ref: personalMemory.id },
           { db },
         ),
-      ).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
+      ).rejects.toMatchObject({ extensions: { code: 'UNAUTHENTICATED' } });
     });
 
     it('personal-class authz is idempotent for the owner', async () => {

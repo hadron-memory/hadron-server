@@ -1630,6 +1630,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_record_user_merge",
+      "kind": "function",
+      "file": "user-merge-record-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_refresh_task_blocked",
       "kind": "function",
       "file": "task-blocker-invariants.sql",

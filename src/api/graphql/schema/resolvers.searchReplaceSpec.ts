@@ -36,6 +36,7 @@ import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import {
+  requireCallerIdentity,
   type Context,
   requireMemoryWriteAccess,
   concealUnreadableDenial,
@@ -118,6 +119,7 @@ export async function searchReplaceInSpecNodes(
   { input }: { input: SpecSearchReplaceInput },
   ctx: Context,
 ) {
+  requireCallerIdentity(ctx);
   if (!Array.isArray(input.nodeRefs) || input.nodeRefs.length === 0) {
     throw error('Select at least one spec node.', 'SEARCH_REPLACE_NO_SELECTION');
   }
