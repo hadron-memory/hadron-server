@@ -1,6 +1,6 @@
 -- #5010 (billing A12, hrn:node:hadronmemory.com:specs:cor:dmo:170:08): a credit ledger entry is never edited and never deleted,
 -- not even by an operator; a correction is a new entry. One source: the newest migration that carries this file ends with it
--- verbatim (pin 11 of src/lib/metering/creditLedgerAppendOnly5010.test.ts), and post-push.sql and the test globalSetup apply it.
+-- verbatim (pin 11 of src/test/migrations/creditLedgerAppendOnly5010.test.ts), and post-push.sql and the test globalSetup apply it.
 --
 -- DELETE: always refused (the owner relation is ON DELETE RESTRICT, so the owner can never be gone first).
 -- UPDATE: refused unless only these change, and each only as follows:
