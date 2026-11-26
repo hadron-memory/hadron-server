@@ -14664,8 +14664,10 @@ export const typeDefs = `#graphql
     (023-app-shape US4; the caller is auto-added as the first owner),
     or memoryClass: personal | private for an owner-only memory the
     caller owns (free-standing, no app/agent). An org-anchored personal/private
-    memory requires actual membership of that org container; the org-less
-    owner-only path requires no org membership. system- and app-class
+    memory requires actual membership of that org container, and reusing the
+    name of a deleted organization-owned memory there also requires the org's
+    memory.create grant; the org-less owner-only path requires no org
+    membership. system- and app-class
     memories are NOT created here — they auto-provision via
     Agent.systemMemoryId / the App install path.
     """

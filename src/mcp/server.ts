@@ -3603,7 +3603,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_memory',
-    "Create a memory. `memoryClass` is 'knowledge' (default), 'group', 'personal' or 'private'. knowledge and group are shared with an organization, so they need `org` and the organization's memory.create permission (a group's creator becomes its first owner). personal and private are owner-only: omit `org` to create one in your own namespace, or pass `org` to create it in an organization you belong to. Exactly the same rules as the createMemory GraphQL mutation. System and App memories are not created here. This does not select the new memory: pass its URN to hadron_set_active_memory.",
+    "Create a memory. `memoryClass` is 'knowledge' (default), 'group', 'personal' or 'private'. knowledge and group are shared with an organization, so they need `org` and the organization's memory.create permission (a group's creator becomes its first owner). personal and private are owner-only: omit `org` to create one in your own namespace, or pass `org` to create it in an organization you belong to (reusing the name of a deleted organization-owned memory there also needs memory.create). Exactly the same rules as the createMemory GraphQL mutation. System and App memories are not created here. This does not select the new memory: pass its URN to hadron_set_active_memory.",
     SHAPE_HADRON_CREATE_MEMORY,
     async ({ name, memoryClass, org, shortDescription, description, tags, visibility }) => {
       const ctx: Context = {
