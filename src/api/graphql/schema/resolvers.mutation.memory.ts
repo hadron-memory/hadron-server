@@ -546,6 +546,7 @@ export const memoryMutations = {
       {
         orgRef,
         name,
+        slug,
         shortDescription,
         description,
         data,
@@ -570,6 +571,7 @@ export const memoryMutations = {
         orgRef?: string | null; name: string;
         shortDescription?: string; description?: string; data?: Record<string, unknown> | null; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
+        slug?: string | null;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
         // Both are nullable in the GraphQL schema — a client may pass an
@@ -712,7 +714,7 @@ export const memoryMutations = {
       }
 
       // #5149: the name's only refusals, after the gates and before ensureUserHandle, the tombstone reclaim or any create.
-      const memorySlug = deriveMemorySlug(name);
+      const memorySlug = deriveMemorySlug(name, slug); // #5203 S1: a supplied slug is validated, not derived
       assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
 
       // The URN root is the owner principal's bare namespace atom — an org
