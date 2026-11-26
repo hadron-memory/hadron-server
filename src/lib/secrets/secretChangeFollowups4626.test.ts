@@ -74,7 +74,7 @@ describe('#4626 item 7: the proof summary carries the staged inspectable metadat
 });
 
 describe('#4626 item 8: a non-value STORE with no existing secret is refused at completion', () => {
-  it('refuses the forged row with the refusal message, leaves the request open and creates no secret', async () => {
+  it('refuses the forged row at the no-secret guard, leaves the request open and creates no secret', async () => {
     // A row no resolver can stage: STORE with no value and no secret (neither by id nor by name). Only a direct
     // insert forges it; without the guard its completion would create a valueless App secret.
     const id = generateId();
@@ -83,11 +83,17 @@ describe('#4626 item 8: a non-value STORE with no existing secret is refused at 
       snapshot: hash(`forged-${id}`), stagedValueEncrypted: null, keyVersion: null, sizeBytes: null,
       protectedResult: null, writeVersion: false, expiresAt: new Date(Date.now() + 60_000) } });
     const p = await proof(id);
-    // The class alone would accept any refusal; the message pins it to the no-secret guard at completion
-    // (changeCeremony.ts `else if(!secret)throw refuse()`), whose only text is this fixed sentence.
+    // What pins the no-secret guard at completion (changeCeremony.ts `else if(!secret)throw refuse()`) is the
+    // FIXTURE, not the error's text: secret_id is null and the secret_name matches no row, so the stale gate tests
+    // name existence (the snapshot hash is compared against secret state only when secret_id is set — the arbitrary
+    // value here is never read), and write_version=false leaves the staged-value arm unreachable. Every refuse()
+    // site throws the same one-sentence class, so the class and the message below pin only THAT a ceremony refusal
+    // happened; every GraphQLError gate (stale, expired, cooling-off) carries extensions.code and extensions stays
+    // undefined on SecretCeremonyRefused, which is the observable separating the two refusal families.
     const err = await error(complete(id, p));
     expect(err).toBeInstanceOf(SecretCeremonyRefused);
     expect(err.message).toBe('Secret ceremony refused.');
+    expect(err.extensions).toBeUndefined();
     expect((await row(id)).state).toBe('open');
     expect(await db.secret.count({ where: { ownerType: 'app', ownerId: appId, name: 'forged-no-value' } })).toBe(0);
   });
