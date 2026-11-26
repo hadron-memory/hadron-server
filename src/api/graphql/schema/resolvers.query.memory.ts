@@ -424,12 +424,14 @@ export const memoryQueries = {
             { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
             { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId },
           ],
-          // Per-user agent holdings stay out of the regular memory list
-          // (cor:api:120:03), so the owner slice excludes them too — a filter
-          // that surfaced rows the default list hides would WIDEN rather than
-          // narrow. No live row is both today (measured: 0 of 24 user-owned
-          // rows carry `userMemoryOfAgentId`); the clause keeps it that way.
-          userMemoryOfAgentId: null,
+          // #5026: no `userMemoryOfAgentId` clause. A person's own per-user
+          // Agent memory is one of their own user-owned memories and the
+          // default list includes it for its owner
+          // (hrn:node:hadronmemory.com:specs:cor:api:120:03, amended
+          // 2026-11-24), so a slice that hid it would be narrower than the list
+          // it narrows. The arms above admit only the caller's own rows, and
+          // `organizationId: null` keeps an ORG-owned per-user memory (the
+          // common shape) out of this org-less slice.
           ...(f.visibility ? { visibility: f.visibility as any } : {}),
           ...classFilter,
           // A memory the caller owns AND was granted: narrows this slice
@@ -565,9 +567,18 @@ export const memoryQueries = {
       //       on the same always-visible terms as (1) — see below,
       //   (2) memories their member orgs OWN,
       //   (3) memories their member orgs SUBSCRIBE to.
-      // Per-user agent memories (userMemoryOfAgentId) are excluded — they
-      // belong to the chatbot flow, not the regular memory list. 034:
-      // owner-owned personal/private never come in via the org.
+      //   (4) their OWN per-user Agent memories (#5026), on the same
+      //       always-visible, identity-scoped terms as (1).
+      // #5026 (hrn:node:hadronmemory.com:specs:cor:api:120:03, amended
+      // 2026-11-24; per-user memory hrn:node:hadronmemory.com:specs:cor:cht:010:02):
+      // a per-user Agent memory (`userMemoryOfAgentId` set) lists to its OWNER
+      // and to nobody else. The exclusion is therefore per arm, not top-level:
+      // every shared arm (org, install, app, group, subscription) keeps
+      // `userMemoryOfAgentId: null`, because the no-App holding is class
+      // `knowledge` and org-owned and would otherwise list to every member of
+      // its org; only the identity arms (strict owner, user owner, creator of a
+      // no-App holding) drop it. 034: owner-owned personal/private never come
+      // in via the org.
       if (ctx.userId) {
         // A caller with zero memberships still gets their own personal/private
         // memories: `in: []` in the org clauses simply matches nothing.
@@ -596,20 +607,20 @@ export const memoryQueries = {
         return page({
           deletedAt: null,
           ...(f.visibility ? { visibility: f.visibility as any } : {}),
-          userMemoryOfAgentId: null,
           AND: [classFilter],
           OR: [
             // #2044: an install memory is NOT an org-wide record (its customisation is the App's):
             // the org clause skips it, and the clause below lists it to its own audience alone.
-            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any }, isInstallMemory: false },
+            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any }, isInstallMemory: false, userMemoryOfAgentId: null },
             // #4181 / cor:api:100, cor:acl:010:01: with `orgRef` the install clause is narrowed like its org
             // neighbour: the memory sits in its App's own org (user-owned Apps' install memories have no org
             // and reach their owner through the user-owned clause below, pinned in the #4181 test). A ternary on
             // `scopedOrgId`, not `orgIds`: unscoped, `orgIds` is the caller's MEMBER orgs, which would drop an App
             // owner's install memory outside them; scoped, `orgIds` is exactly [scopedOrgId] (resolveOrgScope).
-            { class: 'system' as any, isInstallMemory: true, id: { in: installListable }, ...(scope.scopedOrgId ? { organizationId: scope.scopedOrgId } : {}) },
+            { class: 'system' as any, isInstallMemory: true, userMemoryOfAgentId: null, id: { in: installListable }, ...(scope.scopedOrgId ? { organizationId: scope.scopedOrgId } : {}) },
             {
               class: 'app' as any,
+              userMemoryOfAgentId: null,
               id: { in: accessibleIds },
               OR: [
                 { organizationId: { in: orgIds } },
@@ -629,7 +640,7 @@ export const memoryQueries = {
             // GROUP excluded (#3781): a group-subscription row is API-invalid
             // state (createMemorySubscription admits PUBLIC only; group
             // visibility is CHECK-forced to GROUP) — never a listing grant.
-            { class: { notIn: ['personal', 'private', 'group', 'app'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
+            { class: { notIn: ['personal', 'private', 'group', 'app'] as any }, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds } } } },
             // Admin impersonation: the identity-scoped clauses are dropped —
             // the shared-org session never lists the target's personal/private
             // or user-owned memories (matches getAccessibleMemoryIds).
@@ -678,6 +689,14 @@ export const memoryQueries = {
                   // line since spec 047 ("the map is personal-free by design");
                   // this is the GraphQL side catching up, not a new rule.
                   { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId },
+                  // #5026 — the caller's own no-App holding: the class-`knowledge`, org-owned memory `startChat`
+                  // provisions when no licensed App qualifies (resolvers.mutation.chat.ts). It carries neither
+                  // `userId` nor `ownerUserId`, so neither identity arm above reaches it; its reader is its
+                  // CREATOR (hrn:node:hadronmemory.com:specs:cor:cht:010:02, #3519). The same predicate the node
+                  // gate admits (`getAccessibleMemoryIds`, the `createdBy` holding clause) and MCP's
+                  // `readsOwnNoAppHolding`, narrowed to `appId: null` like the latter. `createdBy` is compared
+                  // with the user id only: an anonymous session memory stores an App id there and is class `app`.
+                  { class: 'knowledge' as any, appId: null, userMemoryOfAgentId: { not: null }, createdBy: ctx.userId },
                 ]),
           ],
         });
