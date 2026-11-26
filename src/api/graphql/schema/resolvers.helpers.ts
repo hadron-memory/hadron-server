@@ -60,6 +60,7 @@ import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
   deriveSlugFromName,
   formatCanonicalUrn,
+  validateUserSlug,
   UrnNotQualifiedError,
   UrnParseError,
   type CanonicalUrnType,
@@ -4434,14 +4435,31 @@ export interface UsageEventInput {
 }
 
 /**
+ * #5203 S1 — a slug the CALLER supplied is not derived (cor:urn:010:01): it is validated, and a reserved word, an empty
+ * string or any other bad slug is refused BAD_USER_INPUT (UrnParseError, formatError). A taken one is refused by the
+ * door's own existing check. Lowercase is required, as at every create boundary.
+ */
+export function suppliedSlug(slug: string): string {
+  try {
+    validateUserSlug(slug);
+  } catch (err) {
+    if (!(err instanceof UrnParseError)) throw err;
+    // The reason is the contract (#5168); the slug is the caller's own text and is not relayed.
+    throw new GraphQLError('Invalid slug.', { extensions: { code: 'BAD_USER_INPUT', reason: err.reason } });
+  }
+  return slug;
+}
+
+/**
  * #5149 — the slug a new memory takes from the caller's display name, or a typed BAD_USER_INPUT before any write.
  * The name itself has no grammar (hrn:node:hadronmemory.com:specs:cor:dmo:060:01) and reaches no path: the mirror checkout
  * is placed by the memory's URN, so only the slug is judged (hrn:node:hadronmemory.com:specs:cor:urn:010:02). Two names
  * still refuse: one that cannot be stored (a NUL or an unpaired surrogate), and one that yields no slug.
  * Call it after the authorization gates and before the door's first write.
  */
-export function deriveMemorySlug(name: string): string {
+export function deriveMemorySlug(name: string, supplied?: string | null): string {
   assertStorableText({ name });
+  if (supplied != null) return suppliedSlug(supplied);
   try {
     return deriveSlugFromName(name);
   } catch (err) {

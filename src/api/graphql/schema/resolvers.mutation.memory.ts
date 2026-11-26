@@ -111,6 +111,7 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import {
   agentSlugFromUrn,
   deriveSlugFromName,
+  UrnParseError,
   assertFullyQualifiedUrn,
   parseUrn,
   validateUserSlug,
@@ -546,6 +547,7 @@ export const memoryMutations = {
       {
         orgRef,
         name,
+        slug,
         shortDescription,
         description,
         data,
@@ -570,6 +572,7 @@ export const memoryMutations = {
         orgRef?: string | null; name: string;
         shortDescription?: string; description?: string; data?: Record<string, unknown> | null; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
+        slug?: string | null;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
         // Both are nullable in the GraphQL schema — a client may pass an
@@ -712,7 +715,7 @@ export const memoryMutations = {
       }
 
       // #5149: the name's only refusals, after the gates and before ensureUserHandle, the tombstone reclaim or any create.
-      const memorySlug = deriveMemorySlug(name);
+      const memorySlug = deriveMemorySlug(name, slug); // #5203 S1: a supplied slug is validated, not derived
       assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
 
       // The URN root is the owner principal's bare namespace atom — an org
@@ -905,6 +908,13 @@ export const memoryMutations = {
       ({ id } = await resolveMemoryRef(ctx.db, ref));
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory));
+      // #5200 (cor:api:260:01): every caller-text field this update writes, refused typed when it cannot be stored (a NUL or an
+      // unpaired surrogate), after the gate above (a caller who may not manage the memory keeps that answer, whatever the text
+      // holds) and before the transaction. `name` is the display column only: it gets this check and no root-loc check.
+      assertStorableText({
+        name, urn, shortDescription, description, data, tags, schema, license, category0, category1, category2,
+        iconUrl, heroUrl, homeUrl, source, readBranch, writeBranch,
+      });
       // #4140 (cor:api:140:01): `orgRef` resolves only AFTER the memory's own gate (resource before
       // counterparty), and the resolved id is what is compared (here and under the row lock below), so a
       // URN of the memory's OWN org is a no-op. An unknown org is the resolver's typed
@@ -1018,7 +1028,16 @@ export const memoryMutations = {
           );
         }
         // #574: slugify an explicit client slug (lowercase, illegal chars → '-').
-        const slug = deriveSlugFromName(urn);
+        // #5200: a slug with no ASCII letter or digit is the same typed refusal #5149 gives a name, not an untyped parse error.
+        let slug: string;
+        try {
+          slug = deriveSlugFromName(urn);
+        } catch (err) {
+          if (!(err instanceof UrnParseError)) throw err;
+          throw new GraphQLError('Invalid memory slug: it must contain at least one ASCII letter or digit.', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
         newUrn = `${org.urn}:${slug}`;
       }
 

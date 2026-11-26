@@ -10,6 +10,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { insertSoftPasskey, softPasskey } from '../../test/softPasskey.js';
 import { DB_NOW, dropTestActions, insertGrant, seedWorld, type World } from '../grants/grantFixtures3668.js';
 import { newSigningRequestId } from './requests.js';
+import { withdrawGrantSigningRequestInTransaction } from './grantRequests.js';
 import { GRANT_SELECTION_CAP } from './grantSelectionPayload.js';
 
 const RP = 'localhost';
@@ -86,12 +87,25 @@ const item = (grantId: string, over: Record<string, unknown> = {}) => ({ grantId
 const stateOf = async (table: string, id: string) => (await query<{ state: string }>(`SELECT state FROM ${table} WHERE id = $1`, id))[0].state;
 
 describe('parity', () => {
-  it('the new migration ends with the selection invariants file and holds the two others whole; post-push includes it after the signing file', () => {
+  it('the new migration ends with the selection invariants file and holds the two others whole, each exactly once, after the DDL they guard, in the post-push order', () => {
     const read = (p: string) => readFileSync(new URL(`../../../${p}`, import.meta.url), 'utf8');
     const migration = read('prisma/migrations/20261125130000_grant_selection_signing/migration.sql');
-    expect(migration.endsWith(read('prisma/grant-selection-signing-invariants.sql'))).toBe(true);
-    expect(migration.includes(read('prisma/grant-signing-invariants.sql'))).toBe(true);
-    expect(migration.includes(read('prisma/passkey-registration-invariants.sql'))).toBe(true);
+    const signing = read('prisma/grant-signing-invariants.sql');
+    const registration = read('prisma/passkey-registration-invariants.sql');
+    const selection = read('prisma/grant-selection-signing-invariants.sql');
+    expect(migration.endsWith(selection)).toBe(true);
+    expect(migration.includes(signing)).toBe(true);
+    expect(migration.includes(registration)).toBe(true);
+    // #5192 item 4: `includes` alone lets a copy sit anywhere, or twice. Each copy appears exactly once, comes AFTER the DDL it
+    // guards (the shape CHECKs name the columns the ALTERs add; the triggers need their tables), and the three keep the order
+    // post-push \ir's them in.
+    const at = (s: string) => migration.indexOf(s);
+    for (const copy of [signing, registration, selection]) expect(migration.lastIndexOf(copy), 'exactly one copy').toBe(at(copy));
+    expect(at(signing)).toBeGreaterThan(migration.indexOf('ALTER TABLE "grant_signing_requests" ADD COLUMN'));
+    expect(at(selection)).toBeGreaterThan(migration.indexOf('CREATE TABLE "grant_signing_selections"'));
+    expect(at(selection)).toBeGreaterThan(migration.indexOf('ALTER TABLE "grant_signing_requests" ADD COLUMN'));
+    expect(at(registration)).toBeGreaterThan(at(signing));
+    expect(at(selection)).toBeGreaterThan(at(registration));
     const postPush = read('prisma/post-push.sql');
     expect(postPush.indexOf('\\ir grant-selection-signing-invariants.sql')).toBeGreaterThan(postPush.indexOf('\\ir grant-signing-invariants.sql'));
   });
@@ -163,9 +177,11 @@ describe('P19 selection lifecycle', () => {
     await refused(exec(`UPDATE grant_signing_selections SET state = 'expired' WHERE id = $1`, f.sel), /ends exactly once/);
   });
   it('expiry: refused before the lifetime has passed; after it the selection and its open items expire together and nothing else ends it', async () => {
-    const f = await fixture('1 second');
+    // #5192 item 4: 5 s, not 1 s — the early-refusal assertion below must hold however long the shard stalls between the
+    // fixture and the statement, and 1 s of lifetime made it a race (the poll ceiling below covers the longer wait).
+    const f = await fixture('5 seconds');
     await refused(exec(`UPDATE grant_signing_selections SET state = 'expired' WHERE id = $1`, f.sel), /only once its lifetime has passed/);
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 300; i++) {
       const [{ over }] = await query<{ over: boolean }>(`SELECT hadron_signing_now() >= expires_at AS over FROM grant_signing_selections WHERE id = $1`, f.sel);
       if (over) break;
       await new Promise((r) => setTimeout(r, 50));
@@ -176,6 +192,20 @@ describe('P19 selection lifecycle', () => {
     expect(await stateOf('grant_signing_requests', f.r2)).toBe('expired');
     const [row] = await query<{ same: boolean }>(`SELECT ended_at = expires_at AS same FROM grant_signing_selections WHERE id = $1`, f.sel);
     expect(row.same).toBe(true);
+  }, 20000);
+});
+
+// #5192 item 2, lib site (Riana's SECURITY P3-2): the one-grant withdraw's lockRequest refuses a selection item — an item ends
+// with its selection, never alone. The caller below IS the requester over the item's own App, so only the selection link refuses it.
+describe('#5192 item 2 (lib site): an item is never withdrawn alone', () => {
+  it('the one-grant withdraw of a selection item is SIGNING_REQUEST_NOT_FOUND; the item and its selection stay open', async () => {
+    const f = await fixture();
+    await refused(db.$transaction((tx) => withdrawGrantSigningRequestInTransaction(tx, f.r1, {
+      appId: w.appId, caller: { userId: w.userId, appId: null },
+    })), /Signing request not found/);
+    expect(await stateOf('grant_signing_requests', f.r1)).toBe('open');
+    expect(await stateOf('grant_signing_requests', f.r2)).toBe('open');
+    expect(await stateOf('grant_signing_selections', f.sel)).toBe('open');
   });
 });
 
