@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as ceremony from '../lib/secrets/changeCeremony.js';
 import express from 'express';
 import { type Server } from 'node:http';
+import { inspect } from 'node:util';
 import { mountSecretChangeCeremonyRoutes } from './secretChangeCeremonyRoutes.js';
 let server:Server|undefined;
 afterEach(async()=>{vi.restoreAllMocks();vi.unstubAllEnvs();if(server)await new Promise<void>(r=>server!.close(()=>r()));server=undefined;});
@@ -24,7 +25,9 @@ describe('#3999 server ceremony shell',()=>{
   const base=await host(true),r=await fetch(base+'/secret-changes/request/proof/challenge',{method:'POST',headers:{origin:'http://localhost:4000'}});
   expect(r.status).toBe(500);const out=await r.json() as {requestId:string};expect(out).toMatchObject({code:'INTERNAL_SERVER_ERROR',error:'Internal server error.',requestId:expect.any(String)});
   expect(log).toHaveBeenCalledTimes(1);expect(log.mock.calls[0][1]).toMatchObject({requestId:out.requestId,site:'secret-change-ceremony'});
-  expect(JSON.stringify(log.mock.calls)).not.toContain('database-staged-ciphertext-canary');expect(JSON.stringify(out)).not.toContain('canary');
+  // #4626 item 11: inspect, not JSON.stringify — stringify flattens an Error to {}, so a canary riding in an
+  // error message would evade the assertion. inspect renders message and nested args at any depth.
+  expect(inspect(log.mock.calls,{depth:null})).not.toContain('database-staged-ciphertext-canary');expect(JSON.stringify(out)).not.toContain('canary');
  });
  it('refuses a missing Origin before opening any proof',async()=>{
   const base=await host(true),r=await fetch(base+'/secret-changes/missing/proof/challenge',{method:'POST'});
