@@ -204,7 +204,10 @@ describe('#5184 memories made before the rule', () => {
     expect(attached.errors).toBeUndefined();
     expect((await db.memory.findUniqueOrThrow({ where: { id: free.id } })).appId).toBeNull();
     const renamed = await gql('owner', RENAME, { r: free.id, u: 'readable-slug' });
-    expect(renamed.errors?.[0]?.extensions?.code).not.toBe(REFUSAL);
+    expect(renamed.errors).toBeUndefined();
+    const after = await db.memory.findUniqueOrThrow({ where: { id: free.id } });
+    expect(after.urn).toBe('org-a:readable-slug');
+    expect(after.appId).toBeNull();
   });
 });
 
