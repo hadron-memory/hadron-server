@@ -1,5 +1,5 @@
 /**
- * #4626 (S4 follow-ups, items 10 and 12): the APPROVE side of the ceremony route over real HTTP. Item 12: a full
+ * #4626 (follow-ups to #3991 slice 4, items 10 and 12): the APPROVE side of the ceremony route over real HTTP. Item 12: a full
  * approve (challenge -> proof -> complete) ends with a new version and a completed row — only decline had an end-to-end
  * pin (secretChangeDecline4703.test.ts). Item 10: a foreign Origin is refused with 403, changing nothing, on the
  * challenge, proof and complete legs (the decline route already has its own). Real express app on a real socket, a real
@@ -9,6 +9,7 @@ import express from 'express';
 import type { Server } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
+import type { Prisma } from '../generated/prisma/index.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { insertSoftPasskey, softPasskey } from '../test/softPasskey.js';
@@ -61,7 +62,12 @@ function browser(id: string) {
   };
   return { post, assertion };
 }
-const stage = async () => (await error(resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'staged-canary' }, ctx()))).extensions.requestId as string;
+const stage = async () => {
+  const e = await error(resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'staged-canary' }, ctx()));
+  // Assert the code before reading the extension, so a different refusal cannot masquerade as a staged request.
+  expect(e.extensions?.code).toBe('SECRET_PROTECTED_NEEDS_PASSKEY');
+  return e.extensions.requestId as string;
+};
 const state = async (id: string) => (await db.$queryRaw<Array<{ state: string; staged_value_encrypted: string | null }>>`SELECT state, staged_value_encrypted FROM secret_change_requests WHERE id=${id}`)[0];
 
 describe('#4626 item 12: a full HTTP approve (challenge, proof, complete)', () => {
@@ -77,15 +83,18 @@ describe('#4626 item 12: a full HTTP approve (challenge, proof, complete)', () =
     expect(done).toMatchObject({ status: 200, json: { ok: true } });
     expect(await state(id)).toMatchObject({ state: 'completed', staged_value_encrypted: null });
     expect(await db.secretVersion.count({ where: { secretId } })).toBe(2);
-    expect(await currentAppSecretValue(db as never, { id: secretId, ownerId: appId })).toBe('staged-canary');
+    expect(await currentAppSecretValue(db as unknown as Prisma.TransactionClient, { id: secretId, ownerId: appId })).toBe('staged-canary');
   });
 });
 
 describe('#4626 item 10: a foreign Origin is refused on every approve leg, changing nothing', () => {
+  // The 403 body is pinned in full (toEqual, not toMatchObject): the refusal must carry nothing but the code —
+  // no echoed assertion, request detail or staged data can ride in a "leaky" extra field.
   it('proof/challenge answers 403 and opens no proof ceremony', async () => {
     const id = await stage(), b = browser(id);
     const res = await b.post('proof/challenge', {}, FOREIGN_ORIGIN);
-    expect(res).toMatchObject({ status: 403, json: { code: 'FORBIDDEN' } });
+    expect(res.status).toBe(403);
+    expect(res.json).toEqual({ code: 'FORBIDDEN' });
     expect((await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM passkey_ceremonies WHERE purpose='SECRET_CHANGE_PROOF'`)[0].n).toBe(0n);
     expect((await state(id)).state).toBe('open');
   });
@@ -94,7 +103,8 @@ describe('#4626 item 10: a foreign Origin is refused on every approve leg, chang
     const challenge = await b.post('proof/challenge');
     expect(challenge.status).toBe(200);
     const res = await b.post('proof', b.assertion(challenge.json), FOREIGN_ORIGIN);
-    expect(res).toMatchObject({ status: 403, json: { code: 'FORBIDDEN' } });
+    expect(res.status).toBe(403);
+    expect(res.json).toEqual({ code: 'FORBIDDEN' });
     expect((await state(id)).state).toBe('open');
   });
   it('complete answers 403, and neither a version nor a completion is written', async () => {
@@ -102,9 +112,34 @@ describe('#4626 item 10: a foreign Origin is refused on every approve leg, chang
     const proof = await b.post('proof', b.assertion((await b.post('proof/challenge')).json));
     expect(proof.status).toBe(200);
     const res = await b.post('complete', b.assertion(proof.json), FOREIGN_ORIGIN);
-    expect(res).toMatchObject({ status: 403, json: { code: 'FORBIDDEN' } });
+    expect(res.status).toBe(403);
+    expect(res.json).toEqual({ code: 'FORBIDDEN' });
     expect((await state(id)).state).toBe('open');
     expect((await state(id)).staged_value_encrypted).toBeTruthy();
+    expect(await db.secretVersion.count({ where: { secretId } })).toBe(1);
+  });
+});
+
+describe('#4626 item 10 (held open): a MISSING Origin header is refused like a foreign one', () => {
+  // The Origin gate reads `typeof req.headers.origin!=='string'`: an absent header must refuse exactly like a
+  // foreign one, on the legs that carry assertions, not only on the challenge (pinned in secretChangeCeremony3999).
+  it('proof answers 403 with no Origin header at all', async () => {
+    const id = await stage(), b = browser(id);
+    const challenge = await b.post('proof/challenge');
+    expect(challenge.status).toBe(200);
+    const res = await b.post('proof', b.assertion(challenge.json), null);
+    expect(res.status).toBe(403);
+    expect(res.json).toEqual({ code: 'FORBIDDEN' });
+    expect((await state(id)).state).toBe('open');
+  });
+  it('complete answers 403 with no Origin header at all', async () => {
+    const id = await stage(), b = browser(id);
+    const proof = await b.post('proof', b.assertion((await b.post('proof/challenge')).json));
+    expect(proof.status).toBe(200);
+    const res = await b.post('complete', b.assertion(proof.json), null);
+    expect(res.status).toBe(403);
+    expect(res.json).toEqual({ code: 'FORBIDDEN' });
+    expect((await state(id)).state).toBe('open');
     expect(await db.secretVersion.count({ where: { secretId } })).toBe(1);
   });
 });

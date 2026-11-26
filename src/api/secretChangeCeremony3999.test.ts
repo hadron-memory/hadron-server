@@ -75,6 +75,15 @@ describe('#3999 readable approval model (Node VM; no browser)',()=>{
   const rows=elements.review.children[0].children;
   expect(rows.some(n=>n.textContent==='New metadata')).toBe(false);
  });
+ it('renders the word null for null metadata instead of throwing, and the page lives on (#5295 blind seat)',async()=>{
+  // The staged metadata column is nullable JSON; a forged or legacy row can send null for a STORE. Object.entries(null)
+  // is a TypeError that would leave the ceremony page dead; the page must render exactly what the old JSON.stringify did.
+  const {elements}=await pageModel({operation:'STORE',change:'Update secret metadata',sizeBytes:null,metadata:null});await elements.start.onclick!();
+  const rows=elements.review.children[0].children;const i=rows.findIndex(n=>n.textContent==='New metadata');expect(i).toBeGreaterThan(-1);
+  expect(rows[i+1].textContent).toBe('null');
+  expect(rows.some(n=>n.textContent==='Request expires')).toBe(true);
+  expect(elements.status.textContent).toBe('');
+ });
  it('a dismissed proof prompt is a retryable cancellation, not an unavailable request',async()=>{
   const {elements}=await pageModel({}, {cancelled:true});await elements.start.onclick!();
   expect(elements.status.textContent).toMatch(/prompt.*closed|cancelled/i);expect(elements.status.textContent).not.toMatch(/unavailable/);expect(elements.start.disabled).toBe(false);expect(elements.review.hidden).toBe(true);

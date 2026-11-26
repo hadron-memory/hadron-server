@@ -96,7 +96,8 @@ export async function proveSecretChange(db: PrismaClient, a: SecretAssertion) {
   const declineCeremony=await createCeremony(tx,{purpose:'SECRET_CHANGE',browserNonceHash:hash(nonce).toString('hex'),ttlSeconds:600,challengeHash:hash(declineChallenge).toString('hex')});
   const app=await tx.app.findUniqueOrThrow({where:{id:r.app_id}});
   const appUrn = emitEntityUrnV2('app', app.urn);
-  // The pinned urn-lib version has only the former org/user secret arity; the App owner marker is cor:urn:010:01.
+  // The pinned urn-lib version has only the former org/user secret arity; the App owner marker is
+  // hrn:node:hadronmemory.com:specs:cor:urn:010:01.
   const secretUrn = appUrn.replace(/^hrn:app:([^:]+):(.+)$/, 'hrn:secret:$1:app:$2') + ':' + current.secret_name;
   // #4626 item 17: a STORE that stages neither a value nor a metadata change is a protection-flag-only change. Its text
   // names the flag alone and its summary carries no metadata, so the page never claims a metadata change. The live row is

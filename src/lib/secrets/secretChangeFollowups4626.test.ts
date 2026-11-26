@@ -1,8 +1,9 @@
 /**
- * #4626 (S4 follow-ups: contract descriptions, pins and hygiene): the proof summary's metadata equality (item 7), the
- * forged non-value STORE refused at completion (item 8), removed-member completion for DELETE and SET_PROTECTED with the
- * request left open (item 9), the emitted App-secret URN shape (item 13, coverage only), and item 17 — the slice's only
- * behaviour change — where a protection-flag-only change must not claim a metadata change.
+ * #4626 (follow-ups to #3991 slice 4 — contract descriptions, pins and hygiene): the proof summary's metadata equality
+ * (item 7), the forged non-value STORE refused at completion (item 8), removed-member completion for DELETE and
+ * SET_PROTECTED with the request left open (item 9), the emitted App-secret URN shape (item 13, coverage only), the
+ * updateSecret description's legacy webfetch-auth recovery pair (item 1), and item 17 — the slice's only behaviour
+ * change — where a protection-flag-only change must not claim a metadata change.
  * hrn:node:hadronmemory.com:specs:cor:sec:070:02. Real database and real software-passkey assertions, no production or
  * provider calls.
  */
@@ -73,7 +74,7 @@ describe('#4626 item 7: the proof summary carries the staged inspectable metadat
 });
 
 describe('#4626 item 8: a non-value STORE with no existing secret is refused at completion', () => {
-  it('refuses the forged row, leaves the request open and creates no secret', async () => {
+  it('refuses the forged row with the refusal message, leaves the request open and creates no secret', async () => {
     // A row no resolver can stage: STORE with no value and no secret (neither by id nor by name). Only a direct
     // insert forges it; without the guard its completion would create a valueless App secret.
     const id = generateId();
@@ -82,7 +83,11 @@ describe('#4626 item 8: a non-value STORE with no existing secret is refused at 
       snapshot: hash(`forged-${id}`), stagedValueEncrypted: null, keyVersion: null, sizeBytes: null,
       protectedResult: null, writeVersion: false, expiresAt: new Date(Date.now() + 60_000) } });
     const p = await proof(id);
-    await expect(complete(id, p)).rejects.toBeInstanceOf(SecretCeremonyRefused);
+    // The class alone would accept any refusal; the message pins it to the no-secret guard at completion
+    // (changeCeremony.ts `else if(!secret)throw refuse()`), whose only text is this fixed sentence.
+    const err = await error(complete(id, p));
+    expect(err).toBeInstanceOf(SecretCeremonyRefused);
+    expect(err.message).toBe('Secret ceremony refused.');
     expect((await row(id)).state).toBe('open');
     expect(await db.secret.count({ where: { ownerType: 'app', ownerId: appId, name: 'forged-no-value' } })).toBe(0);
   });
@@ -130,29 +135,57 @@ describe('#4626 item 13 (coverage only): the App-secret URN the proof emits', ()
 });
 
 describe('#4626 item 17: a protection-flag-only change does not claim a metadata change', () => {
-  it('names the flag alone when turning protection off leaves the metadata unchanged', async () => {
+  it('names the flag alone, and carries no metadata key, when turning protection off leaves the metadata unchanged', async () => {
     const id = await staged(resolvers.Mutation.updateSecret({}, { ref: secretId, protected: false }, ctx()));
     const p = await proof(id);
     expect(p.outcome).toBe('change');
     if (p.outcome === 'change') {
       expect(p.summary.change).toBe('Turn protection off');
-      expect(p.summary.change).not.toMatch(/metadata/i);
+      expect(p.summary).not.toHaveProperty('metadata');
     }
   });
-  it('names the flag alone when turning protection on leaves the metadata unchanged', async () => {
+  it('names the flag alone, and carries no metadata key, when turning protection on leaves the metadata unchanged', async () => {
     await db.secret.update({ where: { id: secretId }, data: { protected: false } });
     const id = await staged(resolvers.Mutation.updateSecret({}, { ref: secretId, protected: true }, ctx()));
     const p = await proof(id);
     expect(p.outcome).toBe('change');
     if (p.outcome === 'change') {
       expect(p.summary.change).toBe('Turn protection on');
-      expect(p.summary.change).not.toMatch(/metadata/i);
+      expect(p.summary).not.toHaveProperty('metadata');
     }
   });
-  it('still names the metadata when it changes together with the flag', async () => {
+  it('still names the metadata, and carries it, when it changes together with the flag', async () => {
     const id = await staged(resolvers.Mutation.updateSecret({}, { ref: secretId, protected: false, metadata: { note: 'changed' } }, ctx()));
     const p = await proof(id);
     expect(p.outcome).toBe('change');
-    if (p.outcome === 'change') expect(p.summary.change).toBe('Update secret metadata and turn protection off');
+    if (p.outcome === 'change') {
+      expect(p.summary.change).toBe('Update secret metadata and turn protection off');
+      expect(p.summary.metadata).toEqual({ note: 'changed' });
+    }
+  });
+});
+
+describe('#4626 item 1: the updateSecret description\'s legacy webfetch-auth recovery, as the code behaves', () => {
+  // A "legacy" row is one written before metadata.type was derived from the value; forge one by stripping the
+  // derived type from a row created through the real door (the derivation itself is pinned in resolvers.secret.test.ts).
+  async function legacyRow() {
+    const id = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: `legacy-${generateId()}`,
+      kind: 'webfetch-auth', metadata: { urlPrefix: 'https://api.example.test/v1' }, value: { type: 'bearer', token: 'synthetic' } }, ctx())).id;
+    await db.secret.update({ where: { id }, data: { metadata: { urlPrefix: 'https://api.example.test/v1' } } });
+    return id;
+  }
+  it('refuses a metadata-only edit of an App legacy row: the stored type is unavailable', async () => {
+    const id = await legacyRow();
+    const err = await error(resolvers.Mutation.updateSecret({}, { ref: id, metadata: { urlPrefix: 'https://api.example.test/v2/' } }, ctx()));
+    expect(err.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(err.message).toBe('Stored webfetch-auth type is unavailable.');
+  });
+  it('recovers the row on a value rewrite: the type is re-derived from the new value, and a metadata-only edit works after', async () => {
+    const id = await legacyRow();
+    const recovered = await resolvers.Mutation.updateSecret({}, { ref: id, value: { type: 'basic', username: 'u', password: 'p' } }, ctx());
+    expect(recovered.metadata).toEqual({ urlPrefix: 'https://api.example.test/v1', type: 'basic' });
+    // "until a value rewrite restores it": the previously refused metadata-only edit now goes through.
+    const after = await resolvers.Mutation.updateSecret({}, { ref: id, metadata: { urlPrefix: 'https://api.example.test/v2/' } }, ctx());
+    expect(after.metadata).toEqual({ urlPrefix: 'https://api.example.test/v2/', type: 'basic' });
   });
 });

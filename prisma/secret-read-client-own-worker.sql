@@ -1,6 +1,8 @@
 -- #3999 R22: capture at passkey issuance, not at request. Legacy and pending rows have no captured fact.
--- LIMIT OF THE TRIGGER BELOW (the migration copy in
--- prisma/migrations/20261120180000_secret_change_requests/migration.sql carries the same function and this limit):
+-- LIMIT OF THE TRIGGER BELOW (the applied migration
+-- prisma/migrations/20261120180000_secret_change_requests/migration.sql, born with this function in #3999 and not
+-- edited since, carries a byte-identical function body and so this same limit; this file is the idempotent
+-- refresh copy post-push.sql re-applies):
 -- a first NULL->value stamp of issued_to_own_worker is judged against the worker's CURRENT hold
 -- (held_by_user_id = the grant's issuer at the moment of the write), not against the hold at any earlier moment.
 -- The application writes the marker in grant activation (ensureSecretReadClient, src/lib/signing/grantCeremony.ts),
