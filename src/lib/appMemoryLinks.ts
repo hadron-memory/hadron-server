@@ -95,8 +95,10 @@ export async function judgeAppLinks(
         { db, userId: link.attachedBy, roles: link.attacher.roles as never },
         link.memoryId,
       );
-      verdicts.set(`${link.attachedBy}:${link.memoryId}`, verdict);
-      await verdict.catch(() => undefined);
+      // A judgement that throws makes that link inert (fail closed); it never fails the whole listing.
+      const safe = verdict.catch(() => false);
+      verdicts.set(`${link.attachedBy}:${link.memoryId}`, safe);
+      await safe;
     }
   };
   await Promise.all(Array.from({ length: Math.min(8, pairs.length) }, worker));

@@ -280,9 +280,17 @@ describe('the reach of a link, on both surfaces', () => {
     const node = await db.node.create({ data: { id: generateId(), memoryId: m.id, loc: 'wnote', name: 'W', content: 'body' } });
     await attach(asUser(alice), m.id, orgApp.id);
     const keyCtx = { db, appId: orgApp.id, appKeyId: 'k1', roles: [], clientId: `app:${orgApp.id}` } as unknown as Context;
-    expect(await refusal(M.createNode(null, { input: { memoryId: m.id, loc: 'new', name: 'N', content: 'x' } }, keyCtx))).not.toBeNull();
-    expect(await refusal(M.updateNode(null, { input: { memoryId: m.id, loc: 'wnote', content: 'changed' } }, keyCtx))).not.toBeNull();
-    expect(await refusal(M.deleteNode(null, { nodeRef: node.id }, keyCtx))).not.toBeNull();
+    const denied = { code: 'FORBIDDEN', message: 'Forbidden: no write access to this memory' };
+    expect(await refusal(M.createNode(null, { input: { memoryId: m.id, loc: 'new', name: 'N', content: 'x' } }, keyCtx))).toEqual(denied);
+    expect(await refusal(M.updateNode(null, { input: { memoryId: m.id, loc: 'wnote', content: 'changed' } }, keyCtx))).toEqual(denied);
+    expect(await refusal(M.deleteNode(null, { nodeRef: node.id }, keyCtx))).toEqual(denied);
+    // The control: the same calls reach the write gate and pass it for someone who may write the memory, so the refusals
+    // above are the gate's, not argument validation or a missing App key shape.
+    const admin = await db.user.create({ data: { id: generateId(), githubId: 5_185_600, githubUsername: 'adm4', roles: ['ADMIN'] } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
+    const adminCtx = { db, userId: admin.id, roles: ['ADMIN'] } as unknown as Context;
+    expect(await refusal(M.createNode(null, { input: { memoryId: m.id, loc: 'new', name: 'N', content: 'x' } }, adminCtx))).toBeNull();
+    await db.node.deleteMany({ where: { memoryId: m.id, loc: 'new' } });
     expect(await db.node.count({ where: { memoryId: m.id } })).toBe(1);
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).content).toBe('body');
   });
@@ -457,6 +465,17 @@ describe('detach is no App-existence oracle for a caller who cannot read the mem
     expect(a).toMatchObject({ code: 'MEMORY_NOT_FOUND' });
     expect(b).toEqual(a);
     expect(c).toEqual(a);
+  });
+});
+
+describe('GraphQL memory(ref:) for a linked knowledge memory of another tenant', () => {
+  it('the key reads the record once linked, and not before', async () => {
+    const m = await memory({});
+    const keyCtx = { db, appId: userApp.id, appKeyId: 'k1', roles: [], clientId: `app:${userApp.id}` } as unknown as Context;
+    const get = (id: string) => (resolvers.Query as any).memory(null, { ref: id }, keyCtx).then((r: any) => r?.id ?? null, () => null);
+    expect(await get(m.id)).toBeNull();
+    await attach(asUser(alice), m.id, userApp.id);
+    expect(await get(m.id)).toBe(m.id);
   });
 });
 
