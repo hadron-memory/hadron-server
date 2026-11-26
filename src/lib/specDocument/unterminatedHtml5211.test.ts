@@ -212,6 +212,8 @@ describe('#5265 rebuild on items 2, 4 and 9: the bodies main keeps', () => {
   it('a lesser tag behind `<!`, a later line past a blank, and an HTML block are left as main leaves them', () => {
     // [body, the readers that lose it, the same on main]: a line-head `<!<b>`, a raw-text element two lines on or past a blank, `<!` inside
     // an HTML block (a browser's bogus comment is the only reading there), and a lesser tag.
+    // Known losses that main has too (Xan, team chat #152402): the `</textarea>` two lines on is #5323 (escaping it would lose the anchor
+    // in commonmark.js and markdown-it, which keep it on main), and the `<xmp>` behind `<div/` is #5324 (not the window's).
     for (const [body, lost] of [
       ['<!<b>\n-\n<!x>~~~', []], ['<!\n\n</textarea>\n~~~', ['marked']], ['<!\n-\n</textarea>\n~~~', ['marked']], ['<x>\n```<!<xmp>', []],
       ['-<!<pre>\n<div/<xmp>', ['commonmark.js', 'markdown-it']],
