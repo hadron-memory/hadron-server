@@ -10688,14 +10688,16 @@ export const typeDefs = `#graphql
     The uniform single-edge read (#473) — edges are first-class, loc-addressed
     peers of nodes (spec 037). 'ref' accepts a primary key or a
     fully-qualified edge URN (\`hrn:edge:<root>:<memory>:<loc>\`; the edge's
-    memory is its SOURCE node's memory). Access: the edge's memory must be in
-    the caller's readable set; denied and missing are both null.
+    memory is its SOURCE node's memory). Access: the edge's memory and the memory
+    of each of its nodes must be in the caller's readable set; denied and missing
+    are both null.
     """
     edge(ref: ID!): Edge
 
     """
     Uniform paginated edge list (#473). Scope: edges whose (denormalized,
-    source-side) memory the caller can read, AND-narrowed by the filter.
+    source-side) memory, and the memory of each of whose nodes, the caller can
+    read, AND-narrowed by the filter.
     orgRef follows hrn:node:hadronmemory.com:specs:cor:api:100:01 (member -> scope, non-member -> empty page,
     no disclosure, no admin bypass). Deterministic loc-ascending order
     (id tiebreak); limit default 20 / cap 200; limit: 0 -> count only.

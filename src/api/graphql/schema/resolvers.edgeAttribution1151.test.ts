@@ -95,13 +95,14 @@ describe('Edge timestamps and attribution (#1151)', () => {
     expect(JSON.stringify(r.data)).not.toContain('client-abc');
   });
 
-  it('an edge whose own memory the caller cannot read names nobody (cross-memory, other tenant)', async () => {
+  it('an edge whose own memory the caller cannot read is not listed (hadron-internal#74), and names nobody where it is reached', async () => {
     const r = await run(`{ node(ref: "${nodeA.id}") { incomingEdges { ${Q} } } }`, rctx(reader.id));
     expect(r.errors).toBeUndefined();
-    const e = (r.data as any).node.incomingEdges.find((i: any) => i.loc === 'e:foreign');
-    expect(e).toBeDefined();
-    expect(e.createdByUser).toBeNull();
-    expect(e.updatedByUser).toBeNull();
+    expect((r.data as any).node.incomingEdges.map((i: any) => i.loc)).not.toContain('e:foreign');
+    const row = await db.edge.findUniqueOrThrow({ where: { id: edges.foreign } });
+    const E = resolvers.Edge as any;
+    expect(await E.createdByUser(row, {}, rctx(reader.id))).toBeNull();
+    expect(await E.updatedByUser(row, {}, rctx(reader.id))).toBeNull();
   });
 });
 
