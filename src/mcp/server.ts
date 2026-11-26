@@ -3584,6 +3584,13 @@ export function createMcpServerInstance(
     },
   );
 
+  // #5203 S3 (#5197 blind F5): a refused NAME answers with the typed `[bad_user_input]` prefix, as an unstorable one does;
+  // every other refusal keeps its text.
+  const createMemoryRefusalText = (e: unknown): string =>
+    e instanceof GraphQLError && e.extensions?.code === 'BAD_USER_INPUT'
+      ? `[bad_user_input] ${e.message}`
+      : `Error: ${e instanceof Error ? e.message : 'create failed'}`;
+
   // ── hadron_create_memory (#2511) ──────────────────────────────────────────────
   //
   // A thin door onto the createMemory mutation: it calls the resolver, so the
@@ -3620,7 +3627,7 @@ export function createMcpServerInstance(
             'Use hadron_set_active_memory to work in it.',
         );
       } catch (e) {
-        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? createMemoryRefusalText(e), 'hadron_create_memory:resolver');
       }
     },
   );
@@ -3643,7 +3650,7 @@ export function createMcpServerInstance(
         const created = await resolvers.Mutation.createAppMemory({}, { appRef: app, name, shortDescription, description, tags }, ctx);
         return textResult(`Memory created: ${safeEmitEntityUrnV2('memory', created.urn)} (class: app, id: ${created.id}).`);
       } catch (e) {
-        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? createMemoryRefusalText(e), 'hadron_create_app_memory:resolver');
       }
     },
   );

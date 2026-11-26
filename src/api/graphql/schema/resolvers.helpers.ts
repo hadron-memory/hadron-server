@@ -57,13 +57,13 @@ import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
-  deriveSlugFromName,
   formatCanonicalUrn,
   validateUserSlug,
   UrnNotQualifiedError,
   UrnParseError,
   type CanonicalUrnType,
 } from '../../../lib/urn.js';
+import { derivedSlugBase } from '../../../lib/derivedSlug.js';
 import { safeEntityUrnV2 } from '../../../lib/urnEmit.js';
 import {
   validateEdgeCondition,
@@ -4485,21 +4485,27 @@ export function suppliedSlug(slug: string): string {
 }
 
 /**
- * #5149 — the slug a new memory takes from the caller's display name, or a typed BAD_USER_INPUT before any write.
- * The name itself has no grammar (hrn:node:hadronmemory.com:specs:cor:dmo:060:01) and reaches no path: the mirror checkout
- * is placed by the memory's URN, so only the slug is judged (hrn:node:hadronmemory.com:specs:cor:urn:010:02). Two names
- * still refuse: one that cannot be stored (a NUL or an unpaired surrogate), and one that yields no slug.
+ * #5149 / #5203 S3 — the slug BASE a new memory takes from the caller's display name, or a typed BAD_USER_INPUT before
+ * any write. The name itself has no grammar (hrn:node:hadronmemory.com:specs:cor:dmo:060:01) and reaches no path: the
+ * mirror checkout is placed by the memory's URN, so only the slug is judged (hrn:node:hadronmemory.com:specs:cor:urn:010:02).
+ *
+ * A supplied slug is validated and returned as is (S1). Otherwise the NAME is judged first: one that cannot be stored
+ * (a NUL or an unpaired surrogate) or that is empty or blank is refused, as an invalid name. Then the base is derived,
+ * and a name that yields no slug gets the fallback base: the derivation never refuses (hrn:node:hadronmemory.com:specs:cor:urn:010:01).
+ * The base may still be a reserved word or taken; the door mints the final slug from it ({@link nextFreeDerivedSlug},
+ * or `mintMemoryUrnV2`, which skip both).
  * Call it after the authorization gates and before the door's first write.
  */
 export function deriveMemorySlug(name: string, supplied?: string | null): string {
   assertStorableText({ name });
   if (supplied != null) return suppliedSlug(supplied);
-  try {
-    return deriveSlugFromName(name);
-  } catch (err) {
-    if (!(err instanceof UrnParseError)) throw err;
-    throw new GraphQLError('Invalid memory name: it must contain at least one ASCII letter or digit.', {
-      extensions: { code: 'BAD_USER_INPUT' },
-    });
+  assertNameNotBlank(name, 'Memory');
+  return derivedSlugBase(name);
+}
+
+/** #5203 S3: an empty or whitespace-only name is an invalid NAME, refused before any slug is derived from it. */
+export function assertNameNotBlank(name: string, entity: 'Memory' | 'Agent' | 'App'): void {
+  if (!name.trim()) {
+    throw new GraphQLError(`${entity} name must not be empty.`, { extensions: { code: 'BAD_USER_INPUT' } });
   }
 }

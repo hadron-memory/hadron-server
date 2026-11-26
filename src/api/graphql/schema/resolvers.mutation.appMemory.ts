@@ -47,7 +47,6 @@ import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn } from '../../../lib/urn.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
-import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug } from './resolvers.helpers.js';
 
@@ -346,23 +345,12 @@ export const appMemoryMutations = {
     // round-trip through splitNodeUrn. Root is the owning org or user (from
     // the App URN); the Memory inherits the matching tenant-owner column.
     const memRoot = app.organizationUrn ?? app.urn.split(':')[0]!;
-    // Recreate-after-delete keeps its clean slug: hard-delete an EXACT
-    // soft-deleted collision on the desired slug before minting, so the mint
-    // reuses the freed slug rather than aliasing around its own tombstone.
-    // (app-user's fresh opaque id can't collide, so this only ever fires for a
-    // named app-mem slug.)
+    // #5203 S3: the slug is derived from the name, so a deleted holder of it is never reclaimed: the mint aliases
+    // past it like a live one, which keeps the deleted memory restorable (hrn:node:hadronmemory.com:specs:cor:urn:010:01;
+    // gate answers on #5203, section 3). A collision, live or deleted, DETERMINISTICALLY aliases (`<slug>-<agent>`)
+    // via mintLocalSlug, and so does a reserved word, so two apps/agents in one org can each name a memory the same
+    // (they differ by the `appId`/agent columns). The personal and private classes take a fresh opaque id instead.
     const desiredSlug = isUserOwned ? generateId() : slug;
-    const tombstone = await ctx.db.memory.findFirst({
-      where: { urn: `${memRoot}:${desiredSlug}`, deletedAt: { not: null } },
-      select: { id: true },
-    });
-    // #1468 — refused for a stamped corpus still holding a spec.
-    if (tombstone) await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, tombstone.id));
-    // A LIVE collision on a name-addressable app-mem slug now DETERMINISTICALLY
-    // aliases (`<slug>-<agent>`) via mintLocalSlug — replacing the pre-v2 hard
-    // MEMORY_URN_CONFLICT — so two apps/agents in one org can each name a memory
-    // the same (they differ by the `appId`/agent columns). The mint probe covers
-    // live + soft-deleted rows, so the minted urn is never already occupied.
     const memoryUrn = await mintMemoryUrnV2(ctx.db, {
       root: memRoot,
       desiredSlug,

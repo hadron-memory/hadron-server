@@ -12,6 +12,7 @@ import { generateId } from '../../../lib/id.js';
 import { UrnNotQualifiedError } from '../../../lib/urn.js';
 import { AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
+import { nextFreeDerivedSlug } from '../../../lib/derivedSlug.js';
 import { generateUniqueHandle, ensureUserHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import {
@@ -730,9 +731,18 @@ export const memoryMutations = {
         : (await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId! }, select: { urn: true } })).urn;
       // #574: slugify the display name — a raw name would persist a
       // case-sensitive / space-bearing URN that can't round-trip through parseUrn.
-      const memoryUrn = `${memRoot}:${memorySlug}`;
-      // Check for existing memory with the same URN
-      const existing = await ctx.db.memory.findUnique({ where: { urn: memoryUrn } });
+      // #5203 S3: a slug DERIVED from the name never refuses the create (hrn:node:hadronmemory.com:specs:cor:urn:010:01):
+      // it skips a reserved word and every row holding the URN, live or deleted, as `urn` or `legacyUrn` (the probe
+      // mintMemoryUrnV2 uses), so a deleted holder is never reclaimed and stays restorable. A SUPPLIED slug keeps
+      // today's answers below: a deleted holder is reclaimed, a live one refused CONFLICT.
+      const memoryUrn = slug != null
+        ? `${memRoot}:${memorySlug}`
+        : `${memRoot}:${await nextFreeDerivedSlug(memorySlug, async (candidate) =>
+          (await ctx.db.memory.count({
+            where: { OR: [{ urn: `${memRoot}:${candidate}` }, { legacyUrn: `${memRoot}:${candidate}` }] },
+          })) > 0)}`;
+      // Check for existing memory with the same URN (a supplied slug only: a derived one was minted free above)
+      const existing = slug != null ? await ctx.db.memory.findUnique({ where: { urn: memoryUrn } }) : null;
       if (existing) {
         if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
           // #1468 — refused for a stamped corpus still holding a spec.
