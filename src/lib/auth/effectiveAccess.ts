@@ -24,7 +24,12 @@ import { systemMemoryReadGrants } from './systemMemoryRead.js';
  * for manage, getOrgReadableMemoryIds for read) rather than the narrower
  * `resolveMemoryAuthorization` predicate — so for `group` an org member's read
  * matches getOrgReadableMemoryIds, NOT the (stricter) MemoryMember-only
- * predicate. The app class is shape-aware: only team/free-standing rows grant
+ * predicate. Cross-org MemorySubscription access is modeled the same way
+ * (#329): read mirrors subscribedMemoryWhere (any live membership, classes
+ * outside personal/private/group/system, never app-scoped, never a per-user
+ * holding), write mirrors requireMemoryWriteAccess's subscription arm
+ * (knowledge only, live CONTRIBUTOR+ membership AND subscription).
+ * The app class is shape-aware: only team/free-standing rows grant
  * standing App-participant read/write, Worker rows grant their current holder
  * and App managers, and session rows need their binding. We never reveal access
  * a per-table query wouldn't.
@@ -63,7 +68,17 @@ export type {
   Subject,
 } from '@hadron-memory/access-control';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
+import { orgRoleAtLeast } from './orgRole.js';
 import { isUserOwnedTeamSpaceMember } from './appParticipation.js';
+
+// #329: MEMORY_SUBSCRIPTION exists on the wire (the AccessSource SDL enum)
+// ahead of the shared package's union — @hadron-memory/access-control 0.3.0
+// does not carry the value, and releasing 0.4.0 needs npm (token-blocked
+// host-wide when this landed). The server widens the grant-source vocabulary
+// locally; when the package carries the value, delete this alias and the one
+// cast at the assemble() boundary in computeEffectiveAccess.
+type ServerAccessSource = InternalGrant['source'] | 'MEMORY_SUBSCRIPTION';
+type ServerGrant = Omit<InternalGrant, 'source'> & { source: ServerAccessSource };
 
 // ─── Resource resolution ────────────────────────────────────────────────────
 
@@ -147,14 +162,14 @@ async function memoryGrants(
   subject: Subject,
   memory: MemoryForAccess,
   restrictOrgId?: string,
-): Promise<InternalGrant[]> {
+): Promise<ServerGrant[]> {
   if (memory.class === 'system') {
     return systemMemoryReadGrants(db, {
       userId: subject.id, roles: subject.roles,
       impersonation: restrictOrgId ? { orgId: restrictOrgId } : null,
     }, memory.id);
   }
-  const grants: InternalGrant[] = [];
+  const grants: ServerGrant[] = [];
   const strictOwnerClass = memory.class === 'personal' || memory.class === 'private';
 
   if (strictOwnerClass) {
@@ -314,11 +329,73 @@ async function memoryGrants(
     grants.push({ source: 'PUBLIC_VISIBILITY', role: 'reader', via: null, caps: READ });
   }
 
-  // NOTE (deliberate omission, tracked by #329): cross-org
-  // MemorySubscription access — requireMemoryWriteAccess + getOrgReadableMemoryIds
-  // both confer read/write when the caller's org holds a CONTRIBUTOR+
-  // MemorySubscription — is not yet modeled here, so a purely subscription-based
-  // grant is under-reported. Under-reporting is the safe direction for an audit.
+  // #329 — cross-org MemorySubscription access, the omission this issue
+  // closed: the ENFORCED gates confer read/write when the caller's org holds
+  // a live subscription, so the audit mirrors them exactly.
+  //   - READ (getOrgReadableMemoryIds → subscribedMemoryWhere): any LIVE
+  //     membership (any role) in a subscribing org, on a memory whose class
+  //     is outside personal/private/group/system with appId and
+  //     userMemoryOfAgentId both null. personal/private/system return earlier
+  //     in this function, so only 'group' excludes live here — the array
+  //     stays the gate's exact mirror so a new class can never ride it
+  //     silently (the #1440 lesson: an API-uncreatable row class must not
+  //     become a grant class).
+  //   - WRITE (requireMemoryWriteAccess's subscription arm): additionally
+  //     class === 'knowledge', a live CONTRIBUTOR+ membership AND a live
+  //     CONTRIBUTOR+ subscription. A subscription never grants manage/delete
+  //     — no manage/delete gate consults MemorySubscription.
+  // Liveness is filtered IN both queries (deletedAt: null), and `via` is the
+  // SUBSCRIBING org's URN — never the owning org's, which would mislabel the
+  // grant exactly the way reusing ORG_ROLE would (the gate's ruling on #329).
+  // Under impersonation (restrictOrgId) the membership enumeration narrows to
+  // the session's shared org, as getOrgReadableMemoryIds does — the write
+  // gate has no such narrowing, so this under-reports there: the safe
+  // direction for an audit.
+  if (
+    !isHolding &&
+    memory.appId === null &&
+    !['personal', 'private', 'group', 'system'].includes(memory.class)
+  ) {
+    const memberships = await db.orgMember.findMany({
+      where: {
+        userId: subject.id,
+        ...LIVE_ORG_MEMBERSHIP,
+        ...(restrictOrgId ? { organizationId: restrictOrgId } : {}),
+      },
+      select: { organizationId: true, role: true },
+    });
+    if (memberships.length > 0) {
+      const subs = await db.memorySubscription.findMany({
+        where: {
+          memoryId: memory.id,
+          organizationId: { in: memberships.map((m) => m.organizationId) },
+          deletedAt: null,
+        },
+        select: { organizationId: true, role: true },
+      });
+      if (subs.length > 0) {
+        const memberRoleByOrg = new Map(memberships.map((m) => [m.organizationId, m.role]));
+        // Bulk-resolve the subscribing orgs' URNs (one query, not one per grant).
+        const orgs = await db.organization.findMany({
+          where: { id: { in: subs.map((s) => s.organizationId) } },
+          select: { id: true, urn: true },
+        });
+        const urnById = new Map(orgs.map((o) => [o.id, o.urn]));
+        for (const sub of subs) {
+          const write =
+            memory.class === 'knowledge' &&
+            orgRoleAtLeast(memberRoleByOrg.get(sub.organizationId), 'CONTRIBUTOR') &&
+            orgRoleAtLeast(sub.role, 'CONTRIBUTOR');
+          grants.push({
+            source: 'MEMORY_SUBSCRIPTION',
+            role: sub.role,
+            via: urnById.get(sub.organizationId) ?? sub.organizationId,
+            caps: write ? WRITE : READ,
+          });
+        }
+      }
+    }
+  }
 
   // Individual action grants (design:grant-model, cor:acl:040:06). Mirrors
   // requireOrgAction exactly: grants count only alongside a LIVE membership
@@ -765,7 +842,14 @@ export async function computeEffectiveAccess(
   switch (resolved.kind) {
     case 'memory': {
       const grants = await memoryGrants(db, subject, resolved.memory, opts?.restrictOrgId);
-      return assemble(subject.id, safeEntityUrnV2('memory', resolved.memory.urn), 'memory', grants);
+      // The one bridge to the package's not-yet-widened vocabulary (#329, see
+      // ServerGrant): the wire value flows through assemble untouched.
+      return assemble(
+        subject.id,
+        safeEntityUrnV2('memory', resolved.memory.urn),
+        'memory',
+        grants as InternalGrant[],
+      );
     }
     case 'node': {
       // A node's access IS its memory's access (memoryAccessFilter coupling).
