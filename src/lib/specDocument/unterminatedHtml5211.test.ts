@@ -104,6 +104,17 @@ describe('#5211 item 6: a declaration whose name is followed by `<` is text to m
   });
 });
 
+describe('#5211 a declaration at the head of a line ends at its first `>` in marked (#5257 delta, LOCAL and SECURITY)', () => {
+  cases([
+    ['a tag value holding a raw-text tag after it', '<!x><b y=§script>', ['marked']],
+    ['a title', '<!x><b y=§title>', ['marked']],
+    ['an attribute name holding one', '<!x><b §script>', ['marked']],
+    ['text between', '<!x>a<b y=§script>', ['marked']],
+    ['backticks in the value', '<!x><b y=```§textarea>', ['marked']],
+    ['an xmp', '<!x><b §xmp>', ['marked']],
+  ]);
+});
+
 describe('#5211 item 7: content four columns past a bare marker', () => {
   it('a line between four and markerWidth + 4 columns in is the item paragraph, so the code span stays', () => {
     const body = '-\n     x\n  <span>\n  use `<pre x=` here';
