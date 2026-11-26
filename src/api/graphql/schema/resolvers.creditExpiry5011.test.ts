@@ -371,4 +371,43 @@ describe('#5011 creditBalance and grant expiry', () => {
     // 100 granted, all of it expired: 0. Counting the racing settlement in the sum AND the remainder would answer -100.
     expect((res.data as { creditBalance: { balanceMicroCents: string } }).creditBalance.balanceMicroCents).toBe('0');
   });
+  it('#5242 item 3 (Jack N3): a failed SUM read inside the writing snapshot is named as one: exactly one `credit_expiry.read_failed` line (owner id, code, nothing else), not `settle_failed`; the read answers the correct figure from the read-only snapshot and the failed attempt wrote nothing', async () => {
+    const now = await dbNow();
+    await entry('grant', 100, shift(now, -3_600_000), shift(now, -120_000)); // would be settled by the writing attempt
+    await entry('debit', 30, shift(now, -1_800_000));
+    // The stored-sum read (the aggregate with no createdAt bound) fails ONCE, as a database error would; the settlement write is fine.
+    let failed = false;
+    const failing = withLedger(db, (ledger) =>
+      new Proxy(ledger, {
+        get(target, key) {
+          if (key === 'aggregate') {
+            return (args: { where?: { createdAt?: unknown } }) => {
+              if (args?.where?.createdAt === undefined && !failed) {
+                failed = true;
+                return Promise.reject(Object.assign(new Error('secret detail 70 sum'), { code: 'P1001' }));
+              }
+              return (target.aggregate as (a: unknown) => unknown)(args);
+            };
+          }
+          const value = Reflect.get(target, key);
+          return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+        },
+      }),
+    );
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await run(failing, BALANCE_ONLY, orgAdminCtx());
+      expect(res.errors).toBeUndefined();
+      expect(failed).toBe(true);
+      expect((res.data as { creditBalance: { balanceMicroCents: string } }).creditBalance.balanceMicroCents).toBe('0');
+      expect(log.mock.calls.filter((c) => c[0] === 'credit_expiry.settle_failed')).toEqual([]);
+      expect(log.mock.calls.filter((c) => c[0] === 'credit_expiry.read_failed')).toEqual([
+        ['credit_expiry.read_failed', { organizationId: orgId, code: 'P1001' }],
+      ]);
+      expect(JSON.stringify(log.mock.calls)).not.toContain('secret detail');
+    } finally {
+      log.mockRestore();
+    }
+    expect(await settlementCount()).toBe(0); // the failed writing attempt rolled back; the fallback read writes nothing
+  });
 });

@@ -269,11 +269,20 @@ export const meteringQueries = {
     // sweep commits meanwhile is then in neither or in both of the replay and the sum, never counted twice. A writing read
     // that fails (a serialization failure with a concurrent settler included) logs one line and answers from the read-only
     // snapshot (ruling 10.4).
+    // #5242 item 3: which phase of the writing snapshot failed, so a failed stored-sum read is logged as one
+    // (`credit_expiry.read_failed`) and not as a failed settlement. The whole snapshot stays in the one `try` (the sum read cannot be
+    // moved out of the transaction); only the line's name differs. The fallback answers the same either way.
+    let failedPhase = 'settle' as 'settle' | 'read';
     const snapshot = (write: boolean): Promise<{ measure: CreditMeasure; sum: bigint }> =>
       ctx.db.$transaction(
         async (tx) => {
           const m = await settleAndMeasure(tx as unknown as typeof ctx.db, owner, asOf, { write });
-          return { measure: m, sum: await creditBalance(tx as unknown as typeof ctx.db, owner) };
+          try {
+            return { measure: m, sum: await creditBalance(tx as unknown as typeof ctx.db, owner) };
+          } catch (err) {
+            failedPhase = 'read';
+            throw err;
+          }
         },
         { isolationLevel: 'RepeatableRead' },
       );
@@ -289,7 +298,7 @@ export const meteringQueries = {
         // #5014 (the #5221 carry, #5242 item 2): the probe, the replay, any settlement written and the stored sum in ONE snapshot.
         ({ measure, sum } = await snapshot(true));
       } catch (err) {
-        console.error('credit_expiry.settle_failed', {
+        console.error(failedPhase === 'read' ? 'credit_expiry.read_failed' : 'credit_expiry.settle_failed', {
           ...('organizationId' in owner ? { organizationId: owner.organizationId } : { ownerUserId: owner.userId }),
           code: safeErrorCode(err),
         });
