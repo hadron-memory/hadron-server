@@ -20,6 +20,7 @@ import { resolveSessionEndRequest, sweepSessionEndRequests } from './sessionEnd.
 import { pendingTaskWakes } from '../agentTasks/taskWakes.js';
 import { loadWorkerWorkStates } from '../agentTasks/matcher.js';
 import { writeSessionHandoff } from '../../api/graphql/schema/resolvers.mutation.session.js';
+import { joinHostForKey } from '../../test/agentTeamHost.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -83,6 +84,7 @@ beforeEach(async () => {
   kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Kit', slug: 'kit', heldByUserId: holder.id, reportsToWorkerId: ada.id }, select: { id: true } });
   const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   orca1 = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4) }, select: { id: true } });
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
   // A 10-minute check-in, so the registration is still live when the 10-minute grace runs out (it lapses after 30).
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] }] } }, keyCtx(orca1));

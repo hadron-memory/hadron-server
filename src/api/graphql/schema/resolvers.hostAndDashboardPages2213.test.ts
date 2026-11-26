@@ -24,6 +24,7 @@ import { generateId } from '../../../lib/id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
@@ -176,6 +177,7 @@ describe('hostRegistrationsPage', () => {
   it('the App\'s own key reads the page, and its read is recorded once with count = the items on that page', async () => {
     await seedRegistrations(app.id, 9);
     const key = await mkKey(app.id, 'orca1');
+    await joinHostForKey(db, key.id, 'orca1');
     await M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
     // The old field records the same way: one use, count = what it returned.
     await Q.hostRegistrations({}, { appRef: app.id }, keyCtx(key, app.id));
