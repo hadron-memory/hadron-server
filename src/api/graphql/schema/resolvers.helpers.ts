@@ -1,4 +1,4 @@
-import { linkedReachFor } from '../../../lib/appMemoryLinks.js';
+import { linkedReachFor, registerOwnRightReader } from '../../../lib/appMemoryLinks.js';
 import { currentAgentOrgMember } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireOrgRole, isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
 import { endGrantsOfAgentsNoLongerInstalled, importedPairsOfParent } from '../../../lib/grants/agentInstallDeparture.js';
@@ -780,6 +780,9 @@ export function holdsContentReadIndependently(ctx: Context, memoryId: string): P
     (ids) => ids.includes(memoryId),
   );
 }
+
+// #5185: the link judge (src/lib/appMemoryLinks.ts) asks this question for each attacher; registered here so it imports no resolver.
+registerOwnRightReader(holdsContentReadIndependently as never);
 
 /**
  * The same-App attach (#1357; Holger's ruling, 2026-09-26): an appropriately

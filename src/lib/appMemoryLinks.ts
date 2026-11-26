@@ -22,6 +22,16 @@
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { isRunPrincipal } from './auth/runPrincipal.js';
 
+/**
+ * "Reads it in their own right" is `holdsContentReadIndependently` (#1349), which lives with the GraphQL read gate. This module
+ * sits under the MCP gate, so it must not import that one (the leaf import-graph guard); the helpers register it at load.
+ */
+type OwnRightReader = (ctx: { db: PrismaClient; userId: string; roles: never }, memoryId: string) => Promise<boolean>;
+let ownRightReader: OwnRightReader | null = null;
+export function registerOwnRightReader(reader: OwnRightReader): void {
+  ownRightReader = reader;
+}
+
 /** The principal shape the link reach applies to: an App key or a userless run, nothing else. */
 export function isPureAppKeyShape(auth: {
   appId?: string | null; userId?: string | null; sessionId?: string | null; impersonation?: unknown;
@@ -65,12 +75,12 @@ export async function judgeAppLinks(
     }
     return true;
   };
-  // Imported here, not at the top: the GraphQL helpers import the MCP gate, which imports this module.
-  const { holdsContentReadIndependently } = await import('../api/graphql/schema/resolvers.helpers.js');
+  const holds = ownRightReader;
   return Promise.all(links.map(async (link) => ({
     memoryId: link.memoryId,
     attachedBy: link.attachedBy,
-    active: eligible(link) && await holdsContentReadIndependently(
+    // Fails closed when no reader is registered (nothing loaded the GraphQL helpers): a link then counts for nothing.
+    active: eligible(link) && holds !== null && await holds(
       { db, userId: link.attachedBy, roles: link.attacher.roles as never },
       link.memoryId,
     ),

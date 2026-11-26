@@ -4827,25 +4827,7 @@ model Worker {
   @@map("workers")
 }
 
-/// A grant by the owner of a personal memory that lets one other user into it, as a reader or as a writer. It is the
-/// only way someone other than the owner reaches a personal memory.
-///
-/// Relationships: `memory` is the shared Memory, `grantee` the User who receives access, `grantor` the User the grant
-/// is made on behalf of. One row per memory and grantee (the primary key). The row is deleted with the memory, the
-/// grantee or the grantor.
-///
-/// Behaviour:
-/// - Applies only to memories of class `personal`; `createMemoryShare` refuses every other class. The check is in the
-///   operation, not in the database.
-/// - `grantorId` is always the memory's owner (`Memory.userId`), stored on the row so it can be read without a join.
-///   Whoever made the API call, which may be an App backend acting for the owner, is recorded in `createdBy`.
-/// - A personal memory that an organization owns can be shared only with a current member of that organization.
-/// - There is no time window. To keep grantees apart over time, a new personal memory is made for each pairing.
-/// - `role` can be changed (`updateMemoryShareRole`). Revoking deletes the row; there is no soft delete.
-///
-/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:060:08. Background (history, not law): the Spec Kit spec
-/// 023-app-shape. Background: #778.
-/// A link from an App to a memory it may read, made with `attachMemoryToApp` (cor:dmo:060:20, "An attached memory").
+/// A link from an App to a memory it may read, made with `attachMemoryToApp` (hrn:node:hadronmemory.com:specs:cor:dmo:060:20, "An attached memory").
 ///
 /// The memory is unchanged: no column of `memories` records a link. A link reaches the App's key and userless runs for
 /// READ only, and only while the attacher can read the memory in their own right, judged at use (`src/lib/appMemoryLinks.ts`);
@@ -4869,6 +4851,24 @@ model AppMemoryLink {
   @@map("app_memory_links")
 }
 
+/// A grant by the owner of a personal memory that lets one other user into it, as a reader or as a writer. It is the
+/// only way someone other than the owner reaches a personal memory.
+///
+/// Relationships: `memory` is the shared Memory, `grantee` the User who receives access, `grantor` the User the grant
+/// is made on behalf of. One row per memory and grantee (the primary key). The row is deleted with the memory, the
+/// grantee or the grantor.
+///
+/// Behaviour:
+/// - Applies only to memories of class `personal`; `createMemoryShare` refuses every other class. The check is in the
+///   operation, not in the database.
+/// - `grantorId` is always the memory's owner (`Memory.userId`), stored on the row so it can be read without a join.
+///   Whoever made the API call, which may be an App backend acting for the owner, is recorded in `createdBy`.
+/// - A personal memory that an organization owns can be shared only with a current member of that organization.
+/// - There is no time window. To keep grantees apart over time, a new personal memory is made for each pairing.
+/// - `role` can be changed (`updateMemoryShareRole`). Revoking deletes the row; there is no soft delete.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:060:08. Background (history, not law): the Spec Kit spec
+/// 023-app-shape. Background: #778.
 model MemoryShare {
   memoryId  String          @map("memory_id")
   granteeId String          @map("grantee_id")
