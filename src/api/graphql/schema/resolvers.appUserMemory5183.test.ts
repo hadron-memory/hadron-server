@@ -14,6 +14,8 @@ import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 import { approvedMergeProof } from '../../../test/mergeConsent.js';
 import { appUserMemorySlug } from '../../../lib/appUserMemoryName.js';
+import { Prisma } from '../../../generated/prisma/index.js';
+import { isUrnUniqueViolation } from './resolvers.mutation.appMemory.js';
 
 const reclaimFault = vi.hoisted(() => ({ code: null as string | null }));
 vi.mock('../../../lib/mintedSpecPermanence.js', async (importOriginal) => {
@@ -424,5 +426,19 @@ describe('S5: a non-owner reads the derived URN as a URN that does not exist', (
     for (const who of [asUser(bob.id), { db, roles: [] } as Context]) {
       expect(await ru('alice:tutor-alice-private', who)).toEqual(await ru('alice:tutor-alice-nothing', who));
     }
+  });
+});
+
+describe('isUrnUniqueViolation takes only the memories.urn unique (#5300 item 12)', () => {
+  const p2002 = (target: unknown) =>
+    new Prisma.PrismaClientKnownRequestError('x', { code: 'P2002', clientVersion: 't', meta: { target } });
+  it('accepts the column list and the index name', () => {
+    expect(isUrnUniqueViolation(p2002(['urn']))).toBe(true);
+    expect(isUrnUniqueViolation(p2002('memories_urn_key'))).toBe(true);
+  });
+  it('refuses any other constraint, even one naming urn, and other errors', () => {
+    expect(isUrnUniqueViolation(p2002(['legacy_urn']))).toBe(false);
+    expect(isUrnUniqueViolation(p2002('memories_legacy_urn_idx'))).toBe(false);
+    expect(isUrnUniqueViolation(new Error('urn'))).toBe(false);
   });
 });
