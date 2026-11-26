@@ -52,9 +52,10 @@ describe('#5211 item 2: a line indented to an open list item continues it', () =
     ['a two-digit marker', '10. a\n\n     §script>', ALL],
     ['a tab', '1. a\n\n\t§script>', ALL],
     ['a nested item', '- a\n  - b\n\n    §script>', ALL],
+    ['an item in a quote', '> - a\n>\n>     §script>', ALL],
   ]);
   it('four columns past the item content is code in every reader, and stays as written', () => {
-    for (const body of ['- a\n\n      <script>', '1. a\n\n       <script>', '- a\n\nb\n\n    <script>']) {
+    for (const body of ['- a\n\n      <script>', '1. a\n\n       <script>', '- a\n\nb\n\n    <script>', '- a\n# H\n\n    <script>', '- a\n***\n\n    <script>', '- a\n> q\n\n    <script>', '> - a\n>\n>       <script>']) {
       expect(escapeUnterminatedHtml(body), body).toBe(body);
       expect(losers(body), body).toEqual([]);
     }
@@ -88,8 +89,11 @@ describe('#5211 item 6: a declaration whose name is followed by `<` is text to m
     ['inline', 'a <!X§xmp>', ['marked']],
     ['on a second line', 'x\n<!X§xmp>', ['marked']],
   ]);
-  it('a declaration with a blank after its name is complete', () => {
-    for (const body of ['<!DOCTYPE html>', 'a <!X y> b']) expect(escapeUnterminatedHtml(body)).toBe(body);
+  it('a declaration with a blank after its name, or one that starts a block (marked reads it as HTML there), is complete', () => {
+    for (const body of ['<!DOCTYPE html>', 'a <!X y> b', '<!X<xmp>', '<!x<xmp>', '# h\n<!X<xmp>']) {
+      expect(escapeUnterminatedHtml(body), body).toBe(body);
+      expect(losers(body), body).toEqual([]);
+    }
   });
 });
 
