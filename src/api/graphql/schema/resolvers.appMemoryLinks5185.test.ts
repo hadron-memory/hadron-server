@@ -434,6 +434,19 @@ describe('detachMemoryFromApp', () => {
     expect(await links(m.id)).toEqual([]);
   });
 
+  it('the memory-org administrator arm stands alone: an admin of the memory\'s organization, with no relation to the App\'s, detaches', async () => {
+    const orgB = await db.organization.create({ data: { id: generateId(), name: 'org-b-5185', urn: 'org-b-5185.example' } });
+    const memB = await db.memory.create({ data: { id: generateId(), name: 'mb', urn: `${orgB.urn}:mb`, class: 'knowledge', visibility: 'PUBLIC', organizationId: orgB.id } as never });
+    await attach(asUser(alice), memB.id, orgApp.id); // public knowledge of another tenant: alice reads it, links it into orgApp
+    expect(await links(memB.id)).toHaveLength(1);
+    const adminB = await db.user.create({ data: { id: generateId(), githubId: 5_185_700, githubUsername: 'admb', handle: `admb-${generateId().slice(-6)}` } });
+    // no say over orgApp (not its org's member, not an App member): refused, can read the public memory, so FORBIDDEN
+    expect(await refusal(detach(asUser(adminB.id), memB.id, orgApp.id))).toMatchObject({ code: 'FORBIDDEN' });
+    await db.orgMember.create({ data: { organizationId: orgB.id, userId: adminB.id, role: 'ADMIN' } });
+    expect(await detach(asUser(adminB.id), memB.id, orgApp.id)).toBe(true);
+    expect(await links(memB.id)).toEqual([]);
+  });
+
   it('the attacher removes their own link even after losing read; the memory never changes', async () => {
     const m = await memory({});
     await attach(asUser(alice), m.id, orgApp.id);
@@ -528,6 +541,9 @@ describe('App.attachedMemories', () => {
     expect(await field(orgApp.id, asUser(alice))).toHaveLength(1);
   });
 
+  // The roster guard in App.attachedMemories (appRosterWithheld) is a second line behind loadReadableNestedApp: every caller the guard
+  // would withhold from (an impersonated owner, a member, an administrator) already gets [] before it runs, so no viewer reaches
+  // attachedById: null today and the branch cannot be pinned from outside. The tests below pin the first line.
   it('a user-owned App\'s links are the owner\'s alone: neither a member nor a platform administrator sees them', async () => {
     const m = await memory({ visibility: 'PUBLIC' });
     await attach(asUser(alice), m.id, userApp.id);
