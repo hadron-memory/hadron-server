@@ -8,7 +8,7 @@ import { parseHTML } from 'linkedom';
 import MarkdownIt from 'markdown-it';
 import { marked } from 'marked';
 import { describe, expect, it } from 'vitest';
-import { escapeUnterminatedHtml, quoteColumnsForTests } from './unterminatedHtml.js';
+import { escapeUnterminatedHtml, quoteColumnsForTests, scansOfLastCallForTests } from './unterminatedHtml.js';
 
 const reader = new commonmark.Parser();
 const writer = new commonmark.HtmlRenderer();
@@ -580,9 +580,10 @@ describe('#5265 fix head after 02250085: one call is linear in the text', () => 
   it('160 KB of exempt declarations with 30 open tags after them', () => {
     const unit = '<!T>```\n-\n  ~~~';
     const body = `${Array(Math.ceil((160 * 1024) / (unit.length + 1))).fill(unit).join('\n')}${"\n<b x='".repeat(30)}`;
-    const t = performance.now();
+    // The work, not the wall clock (a loaded CI shard missed an 8 s bound at 2.9 s locally): the call stops at its budget of 128 scans,
+    // each one linear in the text, where an unbounded call ran thousands.
     const out = escapeUnterminatedHtml(body);
-    expect({ fast: performance.now() - t < 8000 }).toEqual({ fast: true });
+    expect(scansOfLastCallForTests()).toBe(129);
     expect(out).toBe(body.replace(/</g, '&lt;'));
   }, 60_000);
 });

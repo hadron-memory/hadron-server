@@ -1292,3 +1292,6 @@ function escapeWithinBudget(text: string): string {
 
 /** Test seam: {@link quoteColumns} (a one-column tab after a quote marker is not observable through the pass in any body found). */
 export const quoteColumnsForTests = quoteColumns;
+
+/** Test seam: the scans the last call of escapeUnterminatedHtml ran (the one that found its budget spent counts too), so a pin bounds the work and not the wall clock. */
+export const scansOfLastCallForTests = (): number => MAX_SCANS - scansLeft;
