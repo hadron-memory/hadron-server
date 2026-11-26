@@ -1,5 +1,5 @@
 /**
- * Issue #355 — `findNodes(filter: { memoryIds })` plural memory-set scope.
+ * Issue #355 — `findNodes(filter: { memoryRefs: memoryIds })` plural memory-set scope.
  *
  * Lets the portal run one node-content search across an agent's / app's
  * SET of memories in a single round-trip, instead of one-memory-or-all.
@@ -88,7 +88,7 @@ describe('findNodes filter.memoryIds (plural) scope — issue #355', () => {
     const s = await seedThreeMemoriesEachWithMatch();
     const res = await resolvers.Query.findNodes(
       {},
-      { query: 'start-here', mode: 'keyword', filter: { memoryIds: [s.alphaId, s.betaId] } },
+      { query: 'start-here', mode: 'keyword', filter: { memoryRefs: [s.alphaId, s.betaId] } },
       adminCtx(),
     );
     expect(memIdsOf(res)).toEqual(new Set([s.alphaId, s.betaId]));
@@ -98,7 +98,7 @@ describe('findNodes filter.memoryIds (plural) scope — issue #355', () => {
     const s = await seedThreeMemoriesEachWithMatch();
     const res = await resolvers.Query.findNodes(
       {},
-      { query: 'start-here', mode: 'keyword', filter: { memoryIds: [s.alphaId, generateId()] } },
+      { query: 'start-here', mode: 'keyword', filter: { memoryRefs: [s.alphaId, generateId()] } },
       adminCtx(),
     );
     expect(memIdsOf(res)).toEqual(new Set([s.alphaId]));
@@ -108,7 +108,7 @@ describe('findNodes filter.memoryIds (plural) scope — issue #355', () => {
     const s = await seedThreeMemoriesEachWithMatch();
     const res = await resolvers.Query.findNodes(
       {},
-      { query: 'start-here', mode: 'keyword', filter: { memoryIds: [] } },
+      { query: 'start-here', mode: 'keyword', filter: { memoryRefs: [] } },
       adminCtx(),
     );
     expect(memIdsOf(res)).toEqual(new Set([s.alphaId, s.betaId, s.gammaId]));

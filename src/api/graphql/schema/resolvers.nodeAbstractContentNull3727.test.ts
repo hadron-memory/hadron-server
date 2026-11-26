@@ -104,13 +104,13 @@ async function gql<T = unknown>(query: string, variables: Record<string, unknown
 async function update(patch: Record<string, unknown>, userId = owner) {
   return gql(
     'mutation($input:UpdateNodeInput!){updateNode(input:$input){id abstract content abstractOriginHash}}',
-    { input: { id: node.id, ...patch } },
+    { input: { ref: node.id, ...patch } },
     userId,
   );
 }
 async function updateExpectingCode(patch: Record<string, unknown>, userId = owner): Promise<string> {
   const out = await server.executeOperation(
-    { query: 'mutation($input:UpdateNodeInput!){updateNode(input:$input){id}}', variables: { input: { id: node.id, ...patch } } },
+    { query: 'mutation($input:UpdateNodeInput!){updateNode(input:$input){id}}', variables: { input: { ref: node.id, ...patch } } },
     { contextValue: { db, userId, roles: ['READER'] } },
   );
   if (out.body.kind !== 'single') throw new Error('unexpected incremental response');
@@ -256,7 +256,7 @@ describe('#3727 entry points', () => {
   it('RED: the memoryId+loc selector clears too (shared core, both selectors)', async () => {
     await gql(
       'mutation($input:UpdateNodeInput!){updateNode(input:$input){id abstract}}',
-      { input: { memoryId: memory.id, loc: node.loc, abstract: null } },
+      { input: { memoryRef: memory.id, loc: node.loc, abstract: null } },
     );
     expect((await raw()).abstract).toBeNull();
     expect((await raw()).abstractOriginHash).toBeNull();
@@ -266,13 +266,13 @@ describe('#3727 entry points', () => {
     const before = await raw();
     await gql(
       'mutation($input:UpdateNodeInput!){updateNode(input:$input){id}}',
-      { input: { memoryId: memory.id, loc: node.loc, name: 'Selector rename' } },
+      { input: { memoryRef: memory.id, loc: node.loc, name: 'Selector rename' } },
     );
     expect((await raw()).content).toBe(before.content);
     expect((await raw()).abstract).toBe(before.abstract);
     await gql(
       'mutation($input:UpdateNodeInput!){updateNode(input:$input){id}}',
-      { input: { memoryId: memory.id, loc: node.loc, content: null } },
+      { input: { memoryRef: memory.id, loc: node.loc, content: null } },
     );
     const row = await raw();
     expect(row.content).toBeNull();
@@ -285,7 +285,7 @@ describe('#3727 entry points', () => {
     await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date(), deletedBy: 'test' } });
     await gql(
       'mutation($input:CreateNodeInput!){createNode(input:$input){id}}',
-      { input: { memoryId: memory.id, loc: node.loc, name: 'Back', abstract: 'revived summary', content: null } },
+      { input: { memoryRef: memory.id, loc: node.loc, name: 'Back', abstract: 'revived summary', content: null } },
     );
     const row = await raw();
     expect(row.deletedAt).toBeNull();
@@ -297,7 +297,7 @@ describe('#3727 entry points', () => {
     await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date(), deletedBy: 'test' } });
     await gql(
       'mutation($input:CreateNodeInput!){createNode(input:$input){id}}',
-      { input: { memoryId: memory.id, loc: node.loc, name: 'Back', abstract: 'revived summary' } },
+      { input: { memoryRef: memory.id, loc: node.loc, name: 'Back', abstract: 'revived summary' } },
     );
     expect((await raw()).deletedAt).toBeNull();
     expect((await logical()).content).toBe(OLD_CONTENT);
@@ -307,7 +307,7 @@ describe('#3727 entry points', () => {
     await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date(), deletedBy: 'test' } });
     await gql(
       'mutation($input:CreateNodeInput!){createNode(input:$input){id abstract}}',
-      { input: { memoryId: memory.id, loc: node.loc, name: 'Back', content: 'resurrected', abstract: null } },
+      { input: { memoryRef: memory.id, loc: node.loc, name: 'Back', content: 'resurrected', abstract: null } },
     );
     const row = await raw();
     expect(row.deletedAt).toBeNull(); // resurrected
@@ -321,7 +321,7 @@ describe('#3727 entry points', () => {
     await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date(), deletedBy: 'test' } });
     await gql(
       'mutation($input:CreateNodeInput!){createNode(input:$input){id abstract}}',
-      { input: { memoryId: memory.id, loc: node.loc, name: 'Back3', content: 'resurrected 3' } },
+      { input: { memoryRef: memory.id, loc: node.loc, name: 'Back3', content: 'resurrected 3' } },
     );
     expect((await logical()).abstract).toBe('kept through death');
   });
@@ -331,7 +331,7 @@ describe('#3727 entry points', () => {
       const loc = `fresh-${generateId()}`;
       const out = await gql<{ createNode: { id: string } }>(
         'mutation($input:CreateNodeInput!){createNode(input:$input){id}}',
-        { input: { memoryId: memory.id, loc, name: 'Fresh', content: 'body', ...extra } },
+        { input: { memoryRef: memory.id, loc, name: 'Fresh', content: 'body', ...extra } },
       );
       return db.node.findUniqueOrThrow({ where: { id: out.createNode.id } });
     };
@@ -346,7 +346,7 @@ describe('#3727 entry points', () => {
     const created = async (extra: Record<string, unknown>) => {
       const out = await gql<{ createNode: { id: string } }>(
         'mutation($input:CreateNodeInput!){createNode(input:$input){id}}',
-        { input: { memoryId: memory.id, loc: `fresh-c-${generateId()}`, name: 'FreshC', ...extra } },
+        { input: { memoryRef: memory.id, loc: `fresh-c-${generateId()}`, name: 'FreshC', ...extra } },
       );
       return db.node.findUniqueOrThrow({ where: { id: out.createNode.id } });
     };
@@ -360,7 +360,7 @@ describe('#3727 entry points', () => {
   it('CONTROL: a create onto a live loc still conflicts', async () => {
     const code = await gql(
       'mutation($input:CreateNodeInput!){createNode(input:$input){id}}',
-      { input: { memoryId: memory.id, loc: node.loc, name: 'Clash', content: 'x', abstract: null } },
+      { input: { memoryRef: memory.id, loc: node.loc, name: 'Clash', content: 'x', abstract: null } },
     ).then(
       () => 'NONE',
       (error: { extensions?: { code?: string } }) => error.extensions?.code ?? 'UNKNOWN',

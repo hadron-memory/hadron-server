@@ -21,6 +21,7 @@ import type { AiModelPrice, PrismaClient, UsageEvent } from '../../generated/pri
 import type { AiConfigOwnerType } from '../aiConfig.js';
 import { generateId } from '../id.js';
 import { PRICE_CACHE_TTL_MS, priceCache } from './priceCache.js';
+import { ownerColumns, ownerWhere, sameOwner, type OwnedRow, type OwnerRef } from '../owner.js';
 
 /** Ledger entry kinds (string column, validated here — no enum by design). */
 export const LEDGER_KINDS = ['grant', 'debit', 'adjustment'] as const;
@@ -286,7 +287,7 @@ export async function recordLlmUsage(
       : await db.usageEvent.create({ data });
     if (charged) {
       await debitCredits(db, {
-        organizationId: params.organizationId!,
+        owner: { organizationId: params.organizationId! },
         amountMicroCents: applyMarkupBp(cost!, markupBasisPoints!),
         sourceType: 'usage-event',
         sourceId: event.id,
@@ -389,7 +390,7 @@ function requireSource(sourceType: string | null | undefined, sourceId: string |
 }
 
 interface LedgerInsert {
-  organizationId: string;
+  owner: OwnerRef;
   kind: LedgerKind;
   amountMicroCents: bigint;
   expiresAt: Date | null;
@@ -404,15 +405,16 @@ interface LedgerInsert {
  * same amount and the same kind (hrn:node:hadronmemory.com:specs:cor:dmo:170:03,
  * plus kind, #5007). The pair is unique across the WHOLE ledger, so without the
  * kind an adjustment reusing a grant's pair would get the grant back as a
- * success. `expiresAt` is deliberately not compared (#5007 ruling 5, A4). A6
- * adds the person owner here, null-safely, in this one place.
+ * success. `expiresAt` is deliberately not compared (#5007 ruling 5, A4). The owner is
+ * compared by its class, null-safely, in `sameOwner` (#5014): an organization's entry
+ * never equals a person's, and two persons' entries never equal each other.
  */
 function isSameLedgerEntry(
-  existing: { organizationId: string; amountMicroCents: bigint; kind: string },
-  params: Pick<LedgerInsert, 'organizationId' | 'amountMicroCents' | 'kind'>,
+  existing: OwnedRow & { amountMicroCents: bigint; kind: string },
+  params: Pick<LedgerInsert, 'owner' | 'amountMicroCents' | 'kind'>,
 ): boolean {
   return (
-    existing.organizationId === params.organizationId &&
+    sameOwner(existing, params.owner) &&
     existing.amountMicroCents === params.amountMicroCents &&
     existing.kind === params.kind
   );
@@ -425,8 +427,9 @@ function isSameLedgerEntry(
  * disagreement is {@link IdempotencyConflictError}, never silently absorbed.
  */
 async function insertOrReplay(db: PrismaClient, params: LedgerInsert) {
+  const { owner, ...rest } = params;
   try {
-    return await db.creditLedgerEntry.create({ data: { id: generateId(), ...params } });
+    return await db.creditLedgerEntry.create({ data: { id: generateId(), ...ownerColumns(owner), ...rest } });
   } catch (err) {
     if ((err as { code?: string }).code !== 'P2002') throw err;
     const existing = await db.creditLedgerEntry.findFirstOrThrow({
@@ -438,7 +441,8 @@ async function insertOrReplay(db: PrismaClient, params: LedgerInsert) {
 }
 
 export interface GrantCreditsParams {
-  organizationId: string;
+  /** The account: an organization or a person (hrn:node:hadronmemory.com:specs:cor:dmo:170:01). */
+  owner: OwnerRef;
   /** Positive micro-cents. */
   amountMicroCents: bigint;
   /**
@@ -472,7 +476,7 @@ export async function grantCredits(db: PrismaClient, params: GrantCreditsParams)
   }
   requireSource(params.sourceType, params.sourceId);
   return insertOrReplay(db, {
-    organizationId: params.organizationId,
+    owner: params.owner,
     kind: 'grant',
     amountMicroCents: params.amountMicroCents,
     expiresAt: params.expiresAt ?? null,
@@ -484,7 +488,8 @@ export async function grantCredits(db: PrismaClient, params: GrantCreditsParams)
 }
 
 export interface AdjustCreditsParams {
-  organizationId: string;
+  /** The account: an organization or a person. */
+  owner: OwnerRef;
   /** Signed, non-zero micro-cents (a refund is negative). */
   amountMicroCents: bigint;
   /** Required, non-blank: the idempotency + provenance pair. */
@@ -513,7 +518,7 @@ export async function adjustCredits(db: PrismaClient, params: AdjustCreditsParam
     throw new InvalidLedgerAmountError('note is required and must not be blank.');
   }
   return insertOrReplay(db, {
-    organizationId: params.organizationId,
+    owner: params.owner,
     kind: 'adjustment',
     amountMicroCents: params.amountMicroCents,
     expiresAt: null,
@@ -525,7 +530,8 @@ export async function adjustCredits(db: PrismaClient, params: AdjustCreditsParam
 }
 
 export interface DebitCreditsParams {
-  organizationId: string;
+  /** The account: an organization or a person. */
+  owner: OwnerRef;
   /** Positive micro-cents; stored negated. */
   amountMicroCents: bigint;
   sourceType?: string | null;
@@ -547,7 +553,7 @@ export async function debitCredits(db: PrismaClient, params: DebitCreditsParams)
   return db.creditLedgerEntry.create({
     data: {
       id: generateId(),
-      organizationId: params.organizationId,
+      ...ownerColumns(params.owner),
       kind: 'debit',
       amountMicroCents: -params.amountMicroCents,
       sourceType: params.sourceType ?? null,
@@ -558,13 +564,13 @@ export async function debitCredits(db: PrismaClient, params: DebitCreditsParams)
   });
 }
 
-/** Org balance = SUM over the append-only ledger; 0n for an empty ledger. */
-export async function creditBalance(db: PrismaClient, organizationId: string): Promise<bigint> {
+/** An account's balance = SUM over its append-only ledger (an organization's or a person's); 0n for an empty ledger. */
+export async function creditBalance(db: PrismaClient, owner: OwnerRef): Promise<bigint> {
   const agg = await db.creditLedgerEntry.aggregate({
     // deletedAt null: since #5010 the database refuses a soft-deleted entry (cor:dmo:170:08), so this only keeps
     // the balance unchanged where that migration refused (HDPRF) and the old schema is still served. Sanctioned
     // corrections are `adjustment` rows, which DO count.
-    where: { organizationId, deletedAt: null },
+    where: { ...ownerWhere(owner), deletedAt: null },
     _sum: { amountMicroCents: true },
   });
   return agg._sum.amountMicroCents ?? 0n;

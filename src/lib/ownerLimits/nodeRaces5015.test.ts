@@ -33,7 +33,7 @@ const limitRow = (owner: OwnerRef, limitValue: number) => db.ownerLimit.create({
 });
 /** An explicit `seq`, so a root-level create takes no root-sibling seq key and two creates meet first at the owner key. */
 const create = (memoryId: string, loc: string, seq: number) =>
-  resolvers.Mutation.createNode(null, { input: { memoryId, loc, name: loc, seq } } as never, ctx(u));
+  resolvers.Mutation.createNode(null, { input: { memoryRef: memoryId, loc, name: loc, seq } } as never, ctx(u));
 
 /** Run `hold` in a transaction that keeps its locks until `release()`; resolves with that backend's pid once it holds them. */
 async function holder(hold: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<void>) {

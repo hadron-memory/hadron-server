@@ -55,8 +55,8 @@ beforeEach(async () => {
   memoryId = mem.id;
   memoryUrn = mem.urn;
   const c = await ownerCtx();
-  aId = (await M.createNode({}, { input: { memoryId, loc: 'n:a', name: 'a' } }, c)).id;
-  bId = (await M.createNode({}, { input: { memoryId, loc: 'n:b', name: 'b' } }, c)).id;
+  aId = (await M.createNode({}, { input: { memoryRef: memoryId, loc: 'n:a', name: 'a' } }, c)).id;
+  bId = (await M.createNode({}, { input: { memoryRef: memoryId, loc: 'n:b', name: 'b' } }, c)).id;
 });
 
 describe('#2803 createEdge onto an occupied loc', () => {
@@ -82,7 +82,7 @@ describe('#2803 createEdge onto an occupied loc', () => {
 
   it('1c. an explicit occupied loc with different endpoints is also refused', async () => {
     const c = await ownerCtx();
-    const cId = (await M.createNode({}, { input: { memoryId, loc: 'n:c', name: 'c' } }, c)).id;
+    const cId = (await M.createNode({}, { input: { memoryRef: memoryId, loc: 'n:c', name: 'c' } }, c)).id;
     const first = await M.createEdge({}, { sourceRef: aId, targetRef: bId, name: 'rel' }, c);
     const code = await codeOf(M.createEdge({}, { sourceRef: aId, targetRef: cId, name: 'rel', loc: first.loc }, c));
     expect(code).toBe('EDGE_LOC_CONFLICT');

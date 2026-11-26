@@ -238,7 +238,7 @@ describe('writer-share write gate (#778)', () => {
     await locked;
 
     const write = M.createNode(null, {
-      input: { memoryId: writerShared.id, loc, name: 'queued note' },
+      input: { memoryRef: writerShared.id, loc, name: 'queued note' },
     }, ctx(grantee.id)).then(
       () => ({ ok: true }), (error: unknown) => ({ ok: false, error }),
     );
@@ -257,13 +257,13 @@ describe('writer-share write gate (#778)', () => {
 
   it('a WRITER grantee may create a node; a READER grantee may not', async () => {
     const written = await M.createNode(
-      null, { input: { memoryId: writerShared.id, loc: 'sw:writer-note', name: 'n' } }, ctx(grantee.id),
+      null, { input: { memoryRef: writerShared.id, loc: 'sw:writer-note', name: 'n' } }, ctx(grantee.id),
     );
     expect(written?.loc).toBe('sw:writer-note');
 
     await expect(
       M.createNode(
-        null, { input: { memoryId: freeShared.id, loc: 'sw:reader-note', name: 'n' } }, ctx(grantee.id),
+        null, { input: { memoryRef: freeShared.id, loc: 'sw:reader-note', name: 'n' } }, ctx(grantee.id),
       ),
     ).rejects.toThrow(/Forbidden|no write access/);
   });
@@ -441,6 +441,6 @@ describe('deleteMemoryShare — grantee self-removal (#785)', () => {
   it('rejects an unauthenticated caller with UNAUTHENTICATED', async () => {
     await expect(
       M.deleteMemoryShare(null, { memoryRef: freeShared.id }, ctx(undefined)),
-    ).rejects.toThrow(/requires an authenticated user/);
+    ).rejects.toMatchObject({ extensions: { code: 'UNAUTHENTICATED' } });
   });
 });

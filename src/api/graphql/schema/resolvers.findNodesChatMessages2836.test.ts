@@ -86,16 +86,16 @@ const MODES: Array<[string, Record<string, unknown>]> = [
 
 describe('findNodes leaves chat-message nodes out of unqualified search (cor:api:090:02)', () => {
   it.each(MODES)('%s: no chat-message hit without a nodeType; record and chatbot record messages stay', async (_m, args) => {
-    const res = await findNodes({ ...args, filter: { memoryIds: [memory.id] }, limit: 50 });
+    const res = await findNodes({ ...args, filter: { memoryRefs: [memory.id] }, limit: 50 });
     const got = locs(res);
     for (const loc of MSG_LOCS) expect(got).not.toContain(loc);
     expect(got).toEqual(expect.arrayContaining(['doc', 'run-output', BOT_MSG]));
   });
 
   it('a loc-prefix read of a team chat root returns no messages; of a chatbot root, its record messages', async () => {
-    const team = await findNodes({ filter: { memoryIds: [memory.id], locPrefix: `${CHAT_ROOT}:` }, limit: 50 });
+    const team = await findNodes({ filter: { memoryRefs: [memory.id], locPrefix: `${CHAT_ROOT}:` }, limit: 50 });
     expect(locs(team)).toEqual([]);
-    const bot = await findNodes({ filter: { memoryIds: [memory.id], locPrefix: `${BOT_ROOT}:` }, limit: 50 });
+    const bot = await findNodes({ filter: { memoryRefs: [memory.id], locPrefix: `${BOT_ROOT}:` }, limit: 50 });
     expect(locs(bot)).toEqual([BOT_MSG]);
   });
 
@@ -110,7 +110,7 @@ describe('findNodes leaves chat-message nodes out of unqualified search (cor:api
         name: 'harbor msg', abstract: 'harbor plan', nodeType: 'chat-message', seq: i + 1,
       })),
     });
-    const res = await findNodes({ query: 'harbor', ...args, sort: 'loc', filter: { memoryIds: [memory.id] }, limit: 2 });
+    const res = await findNodes({ query: 'harbor', ...args, sort: 'loc', filter: { memoryRefs: [memory.id] }, limit: 2 });
     expect(locs(res)).toEqual([BOT_ROOT, BOT_MSG]);
   });
 
@@ -122,53 +122,53 @@ describe('findNodes leaves chat-message nodes out of unqualified search (cor:api
     for (const n of await db.node.findMany({ where: { memoryId: memory.id, nodeType: { not: 'chat-message' }, deletedAt: null } })) {
       await upsertAbstractVector(db as any, { nodeId: n.id, memoryId: memory.id, provider: 'test', model: 'stub-model', dim: DIM, embedding: ortho });
     }
-    const res = await findNodes({ query: 'harbor', mode: 'vector', filter: { memoryIds: [memory.id] }, limit: 1 });
+    const res = await findNodes({ query: 'harbor', mode: 'vector', filter: { memoryRefs: [memory.id] }, limit: 1 });
     expect(res.hits).toHaveLength(1);
     expect(MSG_LOCS).not.toContain(res.hits[0].node.loc);
   });
 
   it('the browse total counts what the page can show', async () => {
-    const res = await findNodes({ filter: { memoryIds: [memory.id], locPrefix: `${CHAT_ROOT}` }, includeTotal: true, limit: 50 });
+    const res = await findNodes({ filter: { memoryRefs: [memory.id], locPrefix: `${CHAT_ROOT}` }, includeTotal: true, limit: 50 });
     expect(locs(res)).toEqual([CHAT_ROOT]);
     expect(res.total).toBe(1);
   });
 
   it.each(MODES)('%s: explicit nodeType chat-message returns them', async (_m, args) => {
-    const res = await findNodes({ ...args, filter: { memoryIds: [memory.id], nodeType: 'chat-message' }, limit: 50 });
+    const res = await findNodes({ ...args, filter: { memoryRefs: [memory.id], nodeType: 'chat-message' }, limit: 50 });
     expect(locs(res)).toEqual(MSG_LOCS);
   });
 
   it('explicit nodeType chat-message under a loc prefix returns the direct messages; a non-reader still gets nothing', async () => {
-    const res = await findNodes({ filter: { memoryIds: [memory.id], nodeType: 'chat-message', locPrefix: `${CHAT_ROOT}:messages:` }, limit: 50 });
+    const res = await findNodes({ filter: { memoryRefs: [memory.id], nodeType: 'chat-message', locPrefix: `${CHAT_ROOT}:messages:` }, limit: 50 });
     expect(locs(res)).toEqual(MSG_LOCS);
     // The access gate is unchanged: an inaccessible memory is dropped silently (090:02).
-    const denied = await findNodes({ filter: { memoryIds: [memory.id], nodeType: 'chat-message' }, limit: 50 }, as(outsider.id));
+    const denied = await findNodes({ filter: { memoryRefs: [memory.id], nodeType: 'chat-message' }, limit: 50 }, as(outsider.id));
     expect(denied.hits).toEqual([]);
   });
 
   // #2832's direct-children read: the default holds under childrenOf, and an
   // explicit nodeType still returns the messages (acceptance 1 and 2).
   it.each(MODES)('%s: childrenOf a team chat messages branch returns no messages without a nodeType', async (_m, args) => {
-    const team = await findNodes({ ...args, filter: { memoryIds: [memory.id], childrenOf: `${CHAT_ROOT}:messages` }, limit: 50 });
+    const team = await findNodes({ ...args, filter: { memoryRefs: [memory.id], childrenOf: `${CHAT_ROOT}:messages` }, limit: 50 });
     expect(locs(team)).toEqual([]);
-    const bot = await findNodes({ ...args, filter: { memoryIds: [memory.id], childrenOf: `${BOT_ROOT}:messages` }, limit: 50 });
+    const bot = await findNodes({ ...args, filter: { memoryRefs: [memory.id], childrenOf: `${BOT_ROOT}:messages` }, limit: 50 });
     expect(locs(bot)).toEqual([BOT_MSG]);
   });
 
   it.each(MODES)('%s: childrenOf with nodeType chat-message returns the direct messages', async (_m, args) => {
-    const res = await findNodes({ ...args, filter: { memoryIds: [memory.id], childrenOf: `${CHAT_ROOT}:messages`, nodeType: 'chat-message' }, limit: 50 });
+    const res = await findNodes({ ...args, filter: { memoryRefs: [memory.id], childrenOf: `${CHAT_ROOT}:messages`, nodeType: 'chat-message' }, limit: 50 });
     expect(locs(res)).toEqual(MSG_LOCS);
   });
 
   it.each(MODES)('%s: an explicit nodeTypes list naming chat-message returns them', async (_m, args) => {
-    const res = await findNodes({ ...args, filter: { memoryIds: [memory.id], nodeTypes: ['chat-message', 'record'] }, limit: 50 });
+    const res = await findNodes({ ...args, filter: { memoryRefs: [memory.id], nodeTypes: ['chat-message', 'record'] }, limit: 50 });
     expect(locs(res)).toEqual([...MSG_LOCS, BOT_MSG, 'run-output'].sort());
   });
 
   it('system stays excluded and explicit system still wins (the list is shared, not replaced)', async () => {
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'sys', name: 'harbor sys', nodeType: 'system', abstract: 'harbor plan' } });
-    expect(locs(await findNodes({ query: 'harbor', mode: 'keyword', filter: { memoryIds: [memory.id] }, limit: 50 }))).not.toContain('sys');
-    expect(locs(await findNodes({ filter: { memoryIds: [memory.id], nodeType: 'system' }, limit: 50 }))).toEqual(['sys']);
+    expect(locs(await findNodes({ query: 'harbor', mode: 'keyword', filter: { memoryRefs: [memory.id] }, limit: 50 }))).not.toContain('sys');
+    expect(locs(await findNodes({ filter: { memoryRefs: [memory.id], nodeType: 'system' }, limit: 50 }))).toEqual(['sys']);
   });
 });
 

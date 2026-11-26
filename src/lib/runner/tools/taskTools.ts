@@ -42,7 +42,7 @@ export const hadronTaskCreate: RunToolDef = {
     // Only the named fields are read: nothing else in `args` reaches the task (no creator, no App, no parent).
     const task = await createRootTaskForRun(ctx.principal, ctx.run, {
       appRef: typeof args.appRef === 'string' ? args.appRef : null,
-      parentTaskId: args.parentTaskId,
+      parentTaskRef: args.parentTaskId,
       // Forwarded only to be refused (#1832): the helper turns any non-null status away, so it is never silently dropped here.
       status: args.status as never,
       title: args.title as string,

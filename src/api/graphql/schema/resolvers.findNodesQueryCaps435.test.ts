@@ -43,36 +43,36 @@ afterEach(() => { vi.restoreAllMocks(); resetEmbeddingClientForTests(); });
 
 describe('#435 the raw length bound, at the findNodes entry', () => {
   it.each(['keyword', 'regex', 'vector', 'hybrid'])('%s: 513 characters is BAD_USER_INPUT, 512 is not', async (mode) => {
-    expect(await code(findNodes({ query: long(513), mode, filter: { memoryIds: [graph.id] } }))).toBe('BAD_USER_INPUT');
-    expect(await code(findNodes({ query: long(512), mode, filter: { memoryIds: [graph.id] } }))).toBeUndefined();
+    expect(await code(findNodes({ query: long(513), mode, filter: { memoryRefs: [graph.id] } }))).toBe('BAD_USER_INPUT');
+    expect(await code(findNodes({ query: long(512), mode, filter: { memoryRefs: [graph.id] } }))).toBeUndefined();
   });
 
   it('is raised before the embed call, and nothing is truncated (a 600-character query whose first 512 would match is refused)', async () => {
-    expect(await code(findNodes({ query: `foo ${long(600)}`, mode: 'hybrid', filter: { memoryIds: [graph.id] } }))).toBe('BAD_USER_INPUT');
-    expect(await code(findNodes({ query: `foo ${long(600)}`, mode: 'vector', filter: { memoryIds: [graph.id] } }))).toBe('BAD_USER_INPUT');
+    expect(await code(findNodes({ query: `foo ${long(600)}`, mode: 'hybrid', filter: { memoryRefs: [graph.id] } }))).toBe('BAD_USER_INPUT');
+    expect(await code(findNodes({ query: `foo ${long(600)}`, mode: 'vector', filter: { memoryRefs: [graph.id] } }))).toBe('BAD_USER_INPUT');
     expect(embed).not.toHaveBeenCalled();
   });
 
   it('the bound counts the trimmed text', async () => {
-    expect(await code(findNodes({ query: `   ${long(512)}   `, mode: 'keyword', filter: { memoryIds: [graph.id] } }))).toBeUndefined();
+    expect(await code(findNodes({ query: `   ${long(512)}   `, mode: 'keyword', filter: { memoryRefs: [graph.id] } }))).toBeUndefined();
   });
 });
 
 describe('#435 unindexable negation is refused, judged by the database', () => {
   it.each(['-foo', 'foo OR -bar', 'NOT NOT foo', '-foo -bar', 'the -foo'])('keyword: %s is BAD_USER_INPUT', async (query) => {
-    expect(await code(findNodes({ query, mode: 'keyword', filter: { memoryIds: [graph.id] } }))).toBe('BAD_USER_INPUT');
+    expect(await code(findNodes({ query, mode: 'keyword', filter: { memoryRefs: [graph.id] } }))).toBe('BAD_USER_INPUT');
   });
 
   it.each(['foo -bar', '(foo OR bar) -foobar', 'foo OR (bar -foobar)'])('keyword: %s is accepted and answers', async (query) => {
-    expect(await code(findNodes({ query, mode: 'keyword', filter: { memoryIds: [graph.id] } }))).toBeUndefined();
+    expect(await code(findNodes({ query, mode: 'keyword', filter: { memoryRefs: [graph.id] } }))).toBeUndefined();
   });
 
   it('keeps the meaning of an accepted exclusion', async () => {
-    expect(locs(await findNodes({ query: 'foo -bar', mode: 'keyword', filter: { memoryIds: [graph.id] } }))).toEqual(['n:foo']);
+    expect(locs(await findNodes({ query: 'foo -bar', mode: 'keyword', filter: { memoryRefs: [graph.id] } }))).toEqual(['n:foo']);
   });
 
   it('hybrid: a refused keyword half fails the whole call, never vector-only', async () => {
-    expect(await code(findNodes({ query: '-foo', mode: 'hybrid', filter: { memoryIds: [graph.id] } }))).toBe('BAD_USER_INPUT');
+    expect(await code(findNodes({ query: '-foo', mode: 'hybrid', filter: { memoryRefs: [graph.id] } }))).toBe('BAD_USER_INPUT');
   });
 
   it('a refused query issues exactly the pre-flight and never the nodes scan', async () => {
@@ -92,13 +92,13 @@ describe('#435 unindexable negation is refused, judged by the database', () => {
   });
 
   it('an accepted negation that matches nothing returns an honest empty result: the relax retry never rewrites a query holding NOT', async () => {
-    const r = await findNodes({ query: 'zzzunknownzzz -bar', mode: 'keyword', filter: { memoryIds: [graph.id] } });
+    const r = await findNodes({ query: 'zzzunknownzzz -bar', mode: 'keyword', filter: { memoryRefs: [graph.id] } });
     expect(r.hits).toEqual([]);
     expect(r.degraded ?? null).toBeNull();
   });
 
   it('the relax-to-OR retry of a bare conjunction still works (its OR query is indexable)', async () => {
-    const r = await findNodes({ query: 'gardening zzzunknownzzz', mode: 'keyword', filter: { memoryIds: [graph.id] } });
+    const r = await findNodes({ query: 'gardening zzzunknownzzz', mode: 'keyword', filter: { memoryRefs: [graph.id] } });
     expect(r.degraded).toBe('and_relaxed_to_or');
     expect(locs(r)).toEqual(['n:foo']);
   });
@@ -109,26 +109,26 @@ describe('#435 structure overflow degrades to the literal fallback, never a 500'
     ['65 leaves', Array.from({ length: 65 }, (_, i) => `w${i}`).join(' ')],
     ['depth 9', '((((((((( foo )))))))))'],
   ])('keyword: %s', async (_n, query) => {
-    const r = await findNodes({ query, mode: 'keyword', filter: { memoryIds: [graph.id] } });
+    const r = await findNodes({ query, mode: 'keyword', filter: { memoryRefs: [graph.id] } });
     expect(r.degraded).toBe('literal_fallback');
   });
 
   it('a quote-heavy 512-character query: the literal fallback (quotes become spaces) still fits and answers', async () => {
     const query = `${'"a" '.repeat(127)}"aa"`;
     expect(query.length).toBe(512);
-    const r = await findNodes({ query, mode: 'keyword', filter: { memoryIds: [graph.id] } });
+    const r = await findNodes({ query, mode: 'keyword', filter: { memoryRefs: [graph.id] } });
     expect(r.degraded).toBe('literal_fallback');
   });
 
   it('hybrid keeps the literal_fallback flag too', async () => {
-    const r = await findNodes({ query: '((((((((( foo )))))))))', mode: 'hybrid', filter: { memoryIds: [graph.id] } });
+    const r = await findNodes({ query: '((((((((( foo )))))))))', mode: 'hybrid', filter: { memoryRefs: [graph.id] } });
     expect(r.degraded).toContain('literal_fallback');
   });
 });
 
 describe('#435 stop-words-only is an empty answer, not a refusal or a flag', () => {
   it('keyword', async () => {
-    const r = await findNodes({ query: 'the of and', mode: 'keyword', filter: { memoryIds: [graph.id] } });
+    const r = await findNodes({ query: 'the of and', mode: 'keyword', filter: { memoryRefs: [graph.id] } });
     expect(r.hits).toEqual([]);
     expect(r.degraded ?? null).toBeNull();
   });

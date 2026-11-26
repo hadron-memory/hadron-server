@@ -79,7 +79,7 @@ describe('#3009 typed encrypted-memory refusals on the wire', () => {
     const before = await db.node.count({ where: { memoryId: memory.id } });
     const extensions = await refusal(
       'mutation($input: CreateNodeInput!){ createNode(input: $input){ id } }',
-      { input: { memoryId: memory.id, loc: 'entry', name: 'Entry', content: 'synthetic content' } },
+      { input: { memoryRef: memory.id, loc: 'entry', name: 'Entry', content: 'synthetic content' } },
     );
     expect(extensions).toEqual({ code: 'SESSION_EXPIRED', memoryId: memory.id });
     expect(vi.mocked(Sentry.captureException)).not.toHaveBeenCalled();

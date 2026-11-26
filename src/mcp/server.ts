@@ -1,4 +1,4 @@
-import { assertMoveWithinSizeLimit, SubtreeMoveTooLargeError } from '../lib/moveSizeLimit.js';
+import { assertMoveWithinSizeLimit, mapMoveExpiry, SubtreeMoveTimedOutError, SubtreeMoveTooLargeError } from '../lib/moveSizeLimit.js';
 import { respondSessionSuperseded } from '../lib/sessionSuperseded.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/github/syncNotAttempted.js';
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
@@ -418,6 +418,7 @@ import { admitOperationRate } from '../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../lib/rateLimit/identity.js';
 // Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
 import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
+import { collapseLineBreaks } from '../lib/collapseLineBreaks.js';
 import { attendeeMentionTokens } from '../lib/channelReadState.js';
 import { mentionReach } from '../lib/mentionReach.js';
 import {
@@ -1360,7 +1361,7 @@ function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent' | 'org', bareUrn: 
  * session rows (worker name, role and App name, #4587).
  */
 function oneLineText(name: string, max = 100): string {
-  const flat = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
+  const flat = collapseLineBreaks(name);
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
@@ -1777,8 +1778,8 @@ type ReadProjectionNode = {
   abstract: string | null;
   abstractOriginHash: string | null;
   memory: { isEncrypted: boolean };
-  outgoingEdges: Array<{ name: string | null; loc: string; governedKind?: unknown; target: { id: string; loc: string; memoryId: string; name: string } }>;
-  incomingEdges: Array<{ name: string | null; loc: string; governedKind?: unknown; source: { id: string; loc: string; memoryId: string; name: string } }>;
+  outgoingEdges: Array<{ name: string | null; loc: string; memoryId: string; governedKind?: unknown; target: { id: string; loc: string; memoryId: string; name: string } }>;
+  incomingEdges: Array<{ name: string | null; loc: string; memoryId: string; governedKind?: unknown; source: { id: string; loc: string; memoryId: string; name: string } }>;
 };
 
 const readProjectionInclude = {
@@ -2021,15 +2022,16 @@ function inheritedReadRow<T extends ReadProjectionNode>(node: T): T {
  * #1647 (cor:api:140:03, concealment): a readable near endpoint does not authorize returning an unreadable far
  * endpoint's metadata. Drops edges whose far node lives in another memory the caller cannot read, as if absent, so the
  * far URN, id and name never reach the projection. Same-memory edges ride the near node's own gate.
+ * hadron-internal#79: the memory that holds the edge is asked the same way.
  */
 async function concealUnreadableEdgeEnds<N extends {
   memoryId: string;
-  outgoingEdges: Array<{ target: { memoryId: string } }>;
-  incomingEdges: Array<{ source: { memoryId: string } }>;
+  outgoingEdges: Array<{ memoryId: string; target: { memoryId: string } }>;
+  incomingEdges: Array<{ memoryId: string; source: { memoryId: string } }>;
 }>(auth: AuthContext | undefined, node: N): Promise<N> {
   const foreign = new Set<string>();
-  for (const e of node.outgoingEdges) if (e.target.memoryId !== node.memoryId) foreign.add(e.target.memoryId);
-  for (const e of node.incomingEdges) if (e.source.memoryId !== node.memoryId) foreign.add(e.source.memoryId);
+  for (const e of node.outgoingEdges) for (const id of [e.memoryId, e.target.memoryId]) if (id !== node.memoryId) foreign.add(id);
+  for (const e of node.incomingEdges) for (const id of [e.memoryId, e.source.memoryId]) if (id !== node.memoryId) foreign.add(id);
   if (foreign.size === 0) return node;
   const readable = new Set<string>();
   if (auth) {
@@ -2038,8 +2040,8 @@ async function concealUnreadableEdgeEnds<N extends {
   const ok = (memoryId: string) => memoryId === node.memoryId || readable.has(memoryId);
   return {
     ...node,
-    outgoingEdges: node.outgoingEdges.filter((e) => ok(e.target.memoryId)),
-    incomingEdges: node.incomingEdges.filter((e) => ok(e.source.memoryId)),
+    outgoingEdges: node.outgoingEdges.filter((e) => ok(e.memoryId) && ok(e.target.memoryId)),
+    incomingEdges: node.incomingEdges.filter((e) => ok(e.memoryId) && ok(e.source.memoryId)),
   };
 }
 
@@ -4781,13 +4783,13 @@ export function createMcpServerInstance(
       // Resolved scope handed to findNodes. When neither memoryUrn nor a
       // memory-resolvable parentRel is supplied, both stay undefined and
       // findNodes falls back to its own accessible-set scoping.
-      let filterMemoryIds: string[] | undefined;
+      let filterMemoryRefs: string[] | undefined;
       let filterLocPrefix: string | undefined;
 
       // #498 — at most one memory selector. memoryUrn (single), memoryUrns (a
       // set), and allMemories (everything accessible) are three ways to say
       // "where"; combining them is ambiguous. allMemories needs no scope work —
-      // leaving filterMemoryIds undefined makes findNodes use the accessible set
+      // leaving filterMemoryRefs undefined makes findNodes use the accessible set
       // (session-scoped downstream); it exists as the explicit, discoverable
       // form of "omit the scope" so agents reach for the org-wide probe.
       const memSelectors = [
@@ -4823,7 +4825,7 @@ export function createMcpServerInstance(
             `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
           );
         }
-        filterMemoryIds = [mem.id];
+        filterMemoryRefs = [mem.id];
       }
 
       // Scope to a SET of memories (#498). Each URN gets the SAME gates as the
@@ -4854,7 +4856,7 @@ export function createMcpServerInstance(
         );
         const bad = resolved.find((r): r is { error: string } => 'error' in r);
         if (bad) return refusalResult(bad.error);
-        filterMemoryIds = resolved.map((r) => (r as { id: string }).id);
+        filterMemoryRefs = resolved.map((r) => (r as { id: string }).id);
       }
 
       // Explicit org-wide scope (#498). Materialize the readable set so
@@ -4866,7 +4868,7 @@ export function createMcpServerInstance(
       // really means all. The resolver re-gates whatever ids we pass, so this
       // cannot broaden beyond the caller's actual reach.
       if (allMemories) {
-        filterMemoryIds =
+        filterMemoryRefs =
           accessibleMemoryIds ??
           (
             await db.memory.findMany({ where: { deletedAt: null }, select: { id: true } })
@@ -4883,7 +4885,7 @@ export function createMcpServerInstance(
             : refusalResult(parent.message);
         }
         filterLocPrefix = parent.loc;
-        if (parent.memoryId) filterMemoryIds = [parent.memoryId];
+        if (parent.memoryId) filterMemoryRefs = [parent.memoryId];
       }
 
       // Build a GraphQL Context from the MCP auth, including appId + sessionId so
@@ -4915,8 +4917,8 @@ export function createMcpServerInstance(
       }
       if (scopeRes?.memoryIds) {
         const inScope = new Set(scopeRes.memoryIds);
-        filterMemoryIds = filterMemoryIds ? filterMemoryIds.filter((id) => inScope.has(id)) : scopeRes.memoryIds;
-        if (filterMemoryIds.length === 0) {
+        filterMemoryRefs = filterMemoryRefs ? filterMemoryRefs.filter((id) => inScope.has(id)) : scopeRes.memoryIds;
+        if (filterMemoryRefs.length === 0) {
           // This valid empty result returns before the resolver. Charge it
           // here once through the same admission engine, without turning an
           // empty filter into an unscoped core retrieval.
@@ -4946,7 +4948,7 @@ export function createMcpServerInstance(
             mode: effectiveMode,
             orgRef: scopeOrgId,
             filter: {
-              memoryIds: filterMemoryIds,
+              memoryRefs: filterMemoryRefs,
               isRunnable: isRunnable ?? undefined,
               hasOpenThreads: hasOpenThreads ?? undefined,
               role: role ?? undefined,
@@ -5109,6 +5111,7 @@ export function createMcpServerInstance(
             target: { loc: string; memoryId: string; deletedAt: Date | null } | null;
             name: string | null;
             loc: string;
+            memoryId: string;
           }>;
         };
         score: number | null;
@@ -5175,9 +5178,11 @@ export function createMcpServerInstance(
                   canReadMemory: (memoryId) => canReadMemory(db, auth, memoryId, EXPLICIT_REF),
                 })).map(({ edge, endpoint }) => ({ ...edge, target: endpoint }))
               : [])
-            : (n.outgoingEdges ?? []).filter(
-                (e) => e.target && e.target.deletedAt == null,
-              );
+            : (await concealUnreadableEdgeEnds(auth, {
+                memoryId: n.memoryId,
+                outgoingEdges: (n.outgoingEdges ?? []).flatMap((e) => (e.target && e.target.deletedAt == null ? [{ ...e, target: e.target }] : [])),
+                incomingEdges: [],
+              })).outgoingEdges;
           if (edges.length) {
             const edgeStrs = await Promise.all(
               edges.map(async (e) => {
@@ -5678,7 +5683,7 @@ export function createMcpServerInstance(
           // miss — the same screen hadron_get_node and nodeBatch(refs:) apply.
           const typeErr = validateUrnType(parseUrnInput(raw), 'node');
           if (typeErr) {
-            return textResult(`hadron_get_nodes: ${typeErr} (ref "${raw}")`);
+            return textResult(`hadron_get_nodes: ${typeErr} (one of the refs)`);
           }
           try {
             assertFullyQualifiedUrn(raw, 'node');
@@ -6116,14 +6121,14 @@ export function createMcpServerInstance(
       } else {
         const { memoryUrn: currentMemoryUrn, loc: currentLoc } = splitNodeUrn(rawCurrent);
         if (currentMemoryUrn !== memoryUrn) {
-          return textResult(`Current URN's memory (${currentMemoryUrn}) doesn't match parent's memory (${memoryUrn}).`);
+          return textResult('The current node is not in the parent\'s memory.');
         }
         const idx = children.findIndex((n) => n.loc === currentLoc);
         if (idx === -1) {
           return refusalResult('Current node not found among the parent\'s children.');
         }
         if (idx + 1 >= children.length) {
-          return textResult(`No more nodes after "${currentLoc}".`);
+          return textResult('No more nodes after the current node.');
         }
         next = children[idx + 1];
       }
@@ -7933,7 +7938,7 @@ export function createMcpServerInstance(
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
       )[doorName](
         {},
-        { input: { memoryId: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}), ...(taskIndex ? { index: taskIndex } : {}), ...(taskSkill ? { skill: taskSkill } : {}) },
+        { input: { memoryRef: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}), ...(taskIndex ? { index: taskIndex } : {}), ...(taskSkill ? { skill: taskSkill } : {}) },
         ctx,
       );
       return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${taskIndex ? ` · listed in the tasks index of ${taskIndex.agent} (trigger: ${taskIndex.trigger.trim()})` : ''}${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
@@ -8202,8 +8207,8 @@ export function createMcpServerInstance(
               authoredWith,
               oldText,
               newText,
-              nodeIds: nodeUrns,
-              memoryIds: memoryUrns,
+              nodeRefs: nodeUrns,
+              memoryRefs: memoryUrns,
               prefix,
               fields,
               caseInsensitive: caseInsensitive ?? false,
@@ -8422,7 +8427,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       if (!existing) return refusalResult('Node not found.');
       if (existing.deletedAt && !hard) {
         return textResult(
-          `Node "${rawUrn}" is already soft-deleted. Pass hard: true to remove the row entirely.`,
+          'The node is already soft-deleted. Pass hard: true to remove the row entirely.',
         );
       }
 
@@ -8603,7 +8608,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
           );
         }
         if (result.refused === 'changed') {
-          return textResult(`Node "${rawUrn}" moved while this delete waited; re-read it and retry.`);
+          return textResult('The node moved while this delete waited; re-read it and retry.');
         }
         if (result.refused === 'mintedSpec') {
           return refusalResult(`[spec_minted_permanent] ${result.message}`);
@@ -8623,7 +8628,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
           return textResult(
-            `Node "${rawUrn}" has ${result.count} descendant(s). ` +
+            `The node has ${result.count} descendant(s). ` +
               `${mode} refuses without recursive: true. ` +
               `Pass recursive: true to apply the same ${hard ? 'hard' : 'soft'} delete to every descendant.`,
           );
@@ -8760,7 +8765,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
       let edgeUrnChanges: MoveNodeSubtreeResult['edgeUrnChanges'] = [];
       try {
-        const completed = await withArchivePlanRetries(async (timeout) => {
+        const completed = await mapMoveExpiry(() => withArchivePlanRetries(async (timeout) => {
           let relocated: MoveNodeSubtreeResult['moved'] = [];
           let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
           let edgeUrnChanges: MoveNodeSubtreeResult['edgeUrnChanges'] = [];
@@ -9002,7 +9007,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // here (mirrors extractParentNodeGraph / cloneMemory).
           { timeout });
           return { result: attemptResult, relocated, linkWarnings, edgeUrnChanges };
-        });
+        }));
         result = completed.result;
         relocated = completed.relocated;
         linkWarnings = completed.linkWarnings;
@@ -9034,6 +9039,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         if (e instanceof SubtreeMoveTooLargeError) {
           return refusalResult(`[move_too_large] ${e.message}`);
+        }
+        if (e instanceof SubtreeMoveTimedOutError) {
+          return refusalResult(`[move_timed_out] ${e.message}`);
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
           return refusalResult(`[spec_minted_permanent] ${e.message}`);

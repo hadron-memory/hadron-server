@@ -37,7 +37,7 @@ describe('issue #372 (PR3) — findNodes NodeFilter declares the isRunnable fiel
   it('composes isRunnable with the other filter + query args', () => {
     expect(
       validationErrorMessages(
-        `query { findNodes(query: "x", filter: { memoryIds: ["m1"], isRunnable: true }, limit: 50) { hits { node { loc name } } } }`,
+        `query { findNodes(query: "x", filter: { memoryRefs: ["m1"], isRunnable: true }, limit: 50) { hits { node { loc name } } } }`,
       ),
     ).toEqual([]);
   });

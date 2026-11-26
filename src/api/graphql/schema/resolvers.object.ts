@@ -16,12 +16,12 @@
  */
 import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
-import { type Context, getAccessibleMemoryIds } from './resolvers.helpers.js';
+import { type Context, getAccessibleMemoryIds, requireCallerIdentity } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { nodeMutations, updateNodePropertiesWith } from './resolvers.mutation.node.js';
 import { nodeQueries } from './resolvers.query.node.js';
 import type { MemorySchema } from '../../../lib/memorySchema.js';
-import type { NodeWhere } from '../../../lib/retrieval/nodeWhere.js';
+import { compileNodeWhere, NodeWhereError, type NodeWhere } from '../../../lib/retrieval/nodeWhere.js';
 import {
   ObjectStoreError,
   projectNodeToObject,
@@ -56,7 +56,12 @@ function mapObjectError(e: unknown): never {
 async function readMemorySchema(ctx: Context, memoryRef: string): Promise<MemorySchema | null> {
   try {
     const { id } = await resolveMemoryRef(ctx.db, memoryRef);
-    const accessible = await getAccessibleMemoryIds(ctx);
+    // #5202: the one named memory is a public target, exactly as node search passes it (resolvers.query.node.ts), so a userless
+    // caller (a pure App key, session-bound or not) who can read a PUBLIC knowledge memory's rows gets its schema applied as any
+    // reader does. Nothing else is named, so no other memory is admitted; a caller who cannot read it, and a ref that does not
+    // exist, still get null.
+    // (the second argument, `onlyMemoryId`, stays undefined: the set is read in full, as before; only the public target is named)
+    const accessible = await getAccessibleMemoryIds(ctx, undefined, { publicTargetIds: [id] });
     if (!accessible.includes(id)) return null; // no disclosure
     const row = await ctx.db.memory.findUnique({ where: { id }, select: { schema: true } });
     return (row?.schema as unknown as MemorySchema | null) ?? null;
@@ -80,6 +85,7 @@ export const objectMutations = {
     { memoryRef, type, fields, key, name }: { memoryRef: string; type: string; fields: unknown; key?: string | null; name?: string | null },
     ctx: Context,
   ): Promise<StoredObject> => {
+    requireCallerIdentity(ctx);
     const t = requireType(type);
     const f = fields ?? {};
     if (!isPlainObject(f)) throw badInput('`fields` must be a JSON object.');
@@ -93,7 +99,7 @@ export const objectMutations = {
     const nodeName = deriveObjectName(t, f, name ?? undefined);
     const node = await nodeMutations.createNode(
       _,
-      { input: { memoryId: memoryRef, loc, name: nodeName, objectType: t, properties: f } },
+      { input: { memoryRef: memoryRef, loc, name: nodeName, objectType: t, properties: f } },
       ctx,
     );
     return projectNodeToObject(node);
@@ -164,6 +170,18 @@ export const objectQueries = {
     } catch (e) {
       mapObjectError(e);
     }
+    // #5202: the predicate the query actually runs is `match` AND `where` combined, so it is compiled here, with the same refusal and
+    // text findNodes gives it, BEFORE the undeclared-field check: an over-cap or malformed query that also names an undeclared field
+    // is BAD_USER_INPUT ("malformed input is refused as bad input first"), never FIELD_NOT_DECLARED. `firstUndeclaredField`'s own
+    // compile of `where` alone is then a no-op guard.
+    if (combinedWhere) {
+      try {
+        compileNodeWhere(combinedWhere, () => '$0'); // validation only: the placeholder binder discards the SQL, and caps/shape checks never read a bound value
+      } catch (e) {
+        if (e instanceof NodeWhereError) throw badInput(`findNodes filter.where: ${e.message}`);
+        throw e;
+      }
+    }
     // #725 (cor:api:170:03): after the schema read, which is null for a memory the caller cannot read (so such a caller gets today's
     // answer, never this refusal) and after malformed input has been refused; before any row is read.
     const undeclared = firstUndeclaredField(schema, t, { match, where, sort });
@@ -171,7 +189,7 @@ export const objectQueries = {
     const result = await nodeQueries.findNodes(
       _,
       {
-        filter: { memoryIds: [memoryRef], objectType: t, ...(combinedWhere ? { where: combinedWhere } : {}) },
+        filter: { memoryRefs: [memoryRef], objectType: t, ...(combinedWhere ? { where: combinedWhere } : {}) },
         includeTotal: true,
         ...(sortProperty ? { sortProperty } : {}),
         limit: limit ?? undefined,

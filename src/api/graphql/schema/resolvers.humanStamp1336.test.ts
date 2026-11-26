@@ -29,9 +29,9 @@ const ctx = (): Context => ({ db, roles: [], userId }) as Context;
 const portal = (): Context => ({ ...ctx(), portalHumanUserId: userId }) as Context;
 const claim = () => ({ task: taskId, revision: 1 });
 const create = (loc: string, extra: Record<string, unknown> = {}, c: Context = ctx()) =>
-  M.createNode({}, { input: { memoryId, loc, name: loc, content: 'body', role: 'guide', ...extra } }, c);
+  M.createNode({}, { input: { memoryRef: memoryId, loc, name: loc, content: 'body', role: 'guide', ...extra } }, c);
 const update = (loc: string, extra: Record<string, unknown> = {}, c: Context = ctx()) =>
-  M.updateNode({}, { input: { memoryId, loc, ...extra } }, c);
+  M.updateNode({}, { input: { memoryRef: memoryId, loc, ...extra } }, c);
 const stored = (loc: string) => db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc, memoryId } } });
 const NO_STAMP = { authorshipKind: null, authoredByTask: null, authoredByRevision: null, authoredByHuman: null, authoredAt: null };
 const refusedWith = async (promise: Promise<unknown>) => {
@@ -94,7 +94,7 @@ describe('#1336 the portal human mints HUMAN', () => {
     await M.updateNodeProperties({}, { nodeRef: node.id, properties: { t: 1 } }, portal());
     expect(await stored('a')).toMatchObject({ authorshipKind: 'HUMAN', authoredByHuman: userId, authoredByTask: null });
     await update('a', { content: 'body', authoredWith: claim() }, ctx());
-    await M.searchReplaceInNodes({}, { input: { oldText: 'body', newText: 'edited', fields: ['content'], nodeIds: [node.id as string] } }, portal());
+    await M.searchReplaceInNodes({}, { input: { oldText: 'body', newText: 'edited', fields: ['content'], nodeRefs: [node.id as string] } }, portal());
     expect(await stored('a')).toMatchObject({ content: 'edited', authorshipKind: 'HUMAN', authoredByHuman: userId, authoredByTask: null });
   });
 });
@@ -122,7 +122,7 @@ describe('#1336 no other path mints HUMAN', () => {
 
   it('import attests and never mints, even with the portal signal on the request', async () => {
     await create('imp', { authoredWith: claim() });
-    const base = { memoryId, loc: 'imp', content: 'imported', contentType: 'text/markdown' };
+    const base = { memoryRef: memoryId, loc: 'imp', content: 'imported', contentType: 'text/markdown' };
     expect(await refusedWith(M.importNode({}, { input: base }, portal()))).toBe('AUTHORING_ATTESTATION_MISSING');
     await M.importNode({}, { input: { ...base, authoredWith: claim() } }, portal());
     expect(await stored('imp')).toMatchObject({ authorshipKind: 'TASK', authoredByHuman: null });

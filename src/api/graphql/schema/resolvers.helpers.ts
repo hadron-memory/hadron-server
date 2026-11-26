@@ -59,6 +59,7 @@ import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
   deriveSlugFromName,
   formatCanonicalUrn,
+  validateUserSlug,
   UrnNotQualifiedError,
   UrnParseError,
   type CanonicalUrnType,
@@ -75,7 +76,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveAiConfigByUrn } from '../../../lib/entityRef/aiConfigRef.js';
 import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
-import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
+import { resolveUserRef, resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import {
   UserNotFoundError,
@@ -600,7 +601,7 @@ export function isMemoryReadableFresh(ctx: Context, memoryId: string, tx?: Prism
  * for a surface that does not already hold the caller's accessible set. A
  * surface that computes the full set anyway for its default
  * scope — `listAssets` is the live example — should intersect in memory against
- * that set instead. `listAssets` additionally narrows by `orgId` before checking
+ * that set instead. `listAssets` additionally narrows by `orgRef` before checking
  * refs, so swapping this helper in there would also drop that narrowing and
  * WIDEN the result. Unify the two only if you keep both checks.
  */
@@ -707,6 +708,14 @@ export async function concealUnreadableDenial(
     if (await canOpenMemoryRecordById(ctx, memoryId)) throw error;
     throw missing();
   }
+}
+
+/**
+ * A door that names a target calls this before any lookup, so a signed-out
+ * caller (no user, no App) gets one answer for every target.
+ */
+export function requireCallerIdentity(ctx: Pick<Context, 'userId' | 'appId'>): void {
+  if (!ctx.userId && !ctx.appId) throw unauthenticatedError();
 }
 
 /**
@@ -1560,6 +1569,38 @@ export async function requireOwnerOrOrgRole(
     await requireOrgRole(ctx, entity.organizationId, required);
     return;
   }
+  throw authorizationDenied();
+}
+
+/**
+ * #5014 (Billing A6): may this caller read ONE PERSON's money records (their credit ledger), and which person is it?
+ * Resolves `userRef` (cor:api:140:01: an id, a handle or a `hrn:user:` URN) and returns the user id. Admits the person
+ * themselves in an ordinary user session, and a platform ADMIN/OWNER (hrn:node:hadronmemory.com:specs:cor:acl:100:03,
+ * Proposed access notes of cor:api:010:01, ruling 3). Everyone else is refused with the one `FORBIDDEN`, and a caller who
+ * is not a platform admin gets that SAME answer whether the named person exists, so the refusal is no user-existence
+ * oracle (cor:api:140:02). A platform admin, for whom nothing is concealed, gets the typed not-found for a missing
+ * person, and may name a soft-deleted one (their entries are kept, cor:dmo:170:08, so a dispute after deletion can still
+ * be answered; ruling 4).
+ *
+ * Why this is NOT `requireOwnerOrOrgRole`: that gate is strictly owner-only for a user-owned entity, with no
+ * platform-admin arm (spec 047). A ledger is a money record an operator must read for refunds and disputes; it holds no
+ * content. A7a's `ownerLimits(userRef:)` and A13's `aiSpend(userRef:)` reuse this rule.
+ *
+ * Judged on the CREDENTIAL, before the ref is resolved: an impersonated session (the target's identity does not admit
+ * the shared-org-only support session, cor:acl:100:03) and an App key (acts for an App, never for a person, even when its
+ * context carries a userId) are refused first, so neither learns anything from the lookup.
+ */
+export async function requirePersonRecordRead(ctx: Context, userRef: string): Promise<string> {
+  if (ctx.impersonation || ctx.appKeyId || ctx.appId) throw authorizationDenied();
+  const admin = isPlatformAdmin(ctx);
+  let id: string;
+  try {
+    ({ id } = await resolveUserRef(ctx.db, userRef, { includeDeleted: admin }));
+  } catch (e) {
+    if (e instanceof UserNotFoundError && !admin) throw authorizationDenied();
+    throw e;
+  }
+  if (admin || isStrictOwner(ctx, id)) return id;
   throw authorizationDenied();
 }
 
@@ -4301,6 +4342,52 @@ export interface UpdateNodeInput
   name?: string;
 }
 
+/**
+ * #5080: the GraphQL (wire) shape of a node write names its refs `memoryRef`, `ref` and `targetRef`. The write core keeps
+ * `memoryId`, `id` and `targetId` (internal names, and every Prisma key), so each door maps at the edge and nothing below it moves.
+ */
+export interface NodeEdgeDoorInput extends Omit<NodeEdgeInput, 'targetId'> {
+  targetRef: string;
+}
+export type CreateNodeDoorInput = Omit<CreateNodeInput, 'memoryId' | 'edges'> & {
+  memoryRef?: string | null;
+  edges?: NodeEdgeDoorInput[] | null;
+};
+export type UpdateNodeDoorInput = Omit<UpdateNodeInput, 'id' | 'memoryId' | 'edges'> & {
+  ref?: string | null;
+  memoryRef?: string | null;
+  edges?: NodeEdgeDoorInput[] | null;
+};
+
+function edgesFromDoor(edges: NodeEdgeDoorInput[] | null | undefined): NodeEdgeInput[] | undefined {
+  return Array.isArray(edges) ? edges.map(({ targetRef, ...e }) => ({ ...e, targetId: targetRef })) : (edges as undefined);
+}
+
+/** A wire create input to the core's shape: `memoryRef` -> `memoryId`, `edges[].targetRef` -> `targetId`. Absent stays absent. */
+export function toCreateNodeInput<R extends { memoryRef?: string | null; edges?: NodeEdgeDoorInput[] | null }>(
+  input: R,
+): Omit<R, 'memoryRef' | 'edges'> & { memoryId?: string; edges?: NodeEdgeInput[] } {
+  const { memoryRef, edges, ...rest } = input;
+  return {
+    ...rest,
+    ...(memoryRef !== undefined ? { memoryId: memoryRef as string } : {}),
+    ...(edges !== undefined ? { edges: edgesFromDoor(edges) } : {}),
+  };
+}
+
+/** A wire update input to the core's shape: `ref` -> `id`, `memoryRef` -> `memoryId`, `edges[].targetRef` -> `targetId`. */
+export function toUpdateNodeInput<R extends { ref?: string | null; memoryRef?: string | null; edges?: NodeEdgeDoorInput[] | null }>(
+  input: R,
+): Omit<R, 'ref' | 'memoryRef' | 'edges'> & { id?: string; memoryId?: string; edges?: NodeEdgeInput[] } {
+  const { ref, memoryRef, edges, ...rest } = input;
+  return {
+    ...rest,
+    ...(ref !== undefined ? { id: ref as string } : {}),
+    ...(memoryRef !== undefined ? { memoryId: memoryRef as string } : {}),
+    ...(edges !== undefined ? { edges: edgesFromDoor(edges) } : {}),
+  };
+}
+
 export type NodeTextField = 'content' | 'name' | 'alias' | 'description' | 'abstract' | 'tags';
 
 export interface SearchReplaceInNodesInput {
@@ -4308,8 +4395,8 @@ export interface SearchReplaceInNodesInput {
   authoredWith?: AuthoredWith | null;
   oldText: string;
   newText: string;
-  nodeIds?: string[];
-  memoryIds?: string[];
+  nodeRefs?: string[];
+  memoryRefs?: string[];
   prefix?: string;
   fields: NodeTextField[];
   caseInsensitive?: boolean;
@@ -4422,14 +4509,31 @@ export interface UsageEventInput {
 }
 
 /**
+ * #5203 S1 — a slug the CALLER supplied is not derived (cor:urn:010:01): it is validated, and a reserved word, an empty
+ * string or any other bad slug is refused BAD_USER_INPUT (UrnParseError, formatError). A taken one is refused by the
+ * door's own existing check. Lowercase is required, as at every create boundary.
+ */
+export function suppliedSlug(slug: string): string {
+  try {
+    validateUserSlug(slug);
+  } catch (err) {
+    if (!(err instanceof UrnParseError)) throw err;
+    // The reason is the contract (#5168); the slug is the caller's own text and is not relayed.
+    throw new GraphQLError('Invalid slug.', { extensions: { code: 'BAD_USER_INPUT', reason: err.reason } });
+  }
+  return slug;
+}
+
+/**
  * #5149 — the slug a new memory takes from the caller's display name, or a typed BAD_USER_INPUT before any write.
  * The name itself has no grammar (hrn:node:hadronmemory.com:specs:cor:dmo:060:01) and reaches no path: the mirror checkout
  * is placed by the memory's URN, so only the slug is judged (hrn:node:hadronmemory.com:specs:cor:urn:010:02). Two names
  * still refuse: one that cannot be stored (a NUL or an unpaired surrogate), and one that yields no slug.
  * Call it after the authorization gates and before the door's first write.
  */
-export function deriveMemorySlug(name: string): string {
+export function deriveMemorySlug(name: string, supplied?: string | null): string {
   assertStorableText({ name });
+  if (supplied != null) return suppliedSlug(supplied);
   try {
     return deriveSlugFromName(name);
   } catch (err) {

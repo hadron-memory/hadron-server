@@ -80,7 +80,7 @@ beforeEach(async () => {
 
 describe('filter-only list: union, exact total, paging', () => {
   it('returns exactly the listed types with an exact union total', async () => {
-    const res = await findNodes({ includeTotal: true, filter: { memoryIds: [memoryId], nodeTypes: ['task', 'record'] } });
+    const res = await findNodes({ includeTotal: true, filter: { memoryRefs: [memoryId], nodeTypes: ['task', 'record'] } });
     expect(locs(res)).toEqual(['n.record', 'n.task']);
     expect(res.total).toBe(2);
   });
@@ -99,54 +99,54 @@ describe('filter-only list: union, exact total, paging', () => {
   it('the paged SQL browse (a where predicate) honours the list and its total', async () => {
     const res = await findNodes({
       includeTotal: true,
-      filter: { memoryIds: [memoryId], nodeTypes: ['task', 'info'], where: { path: ['zz'], exists: false } },
+      filter: { memoryRefs: [memoryId], nodeTypes: ['task', 'info'], where: { path: ['zz'], exists: false } },
     });
     expect(locs(res)).toEqual(['n.info', 'n.task']);
     expect(res.total).toBe(2);
   });
 
   it('keyword and regex keep total null even with includeTotal (as on main); the union still filters them', async () => {
-    const kw = await findNodes({ includeTotal: true, query: 'marker', mode: 'keyword', filter: { memoryIds: [memoryId], nodeTypes: ['task', 'record'] } });
+    const kw = await findNodes({ includeTotal: true, query: 'marker', mode: 'keyword', filter: { memoryRefs: [memoryId], nodeTypes: ['task', 'record'] } });
     expect(locs(kw)).toEqual(['n.record', 'n.task']);
     expect(kw.total).toBeNull();
-    const rx = await findNodes({ includeTotal: true, query: 'marker', mode: 'regex', filter: { memoryIds: [memoryId], nodeTypes: ['task', 'record'] } });
+    const rx = await findNodes({ includeTotal: true, query: 'marker', mode: 'regex', filter: { memoryRefs: [memoryId], nodeTypes: ['task', 'record'] } });
     expect(locs(rx)).toEqual(['n.record', 'n.task']);
     expect(rx.total).toBeNull();
   });
 
   it('an explicit list replaces the system-type default; it is not defaults plus the list', async () => {
-    const withSystem = await findNodes({ filter: { memoryIds: [memoryId], nodeTypes: ['system', 'task'] } });
+    const withSystem = await findNodes({ filter: { memoryRefs: [memoryId], nodeTypes: ['system', 'task'] } });
     expect(locs(withSystem)).toEqual(['n.system', 'n.task']);
-    const baseline = await findNodes({ filter: { memoryIds: [memoryId] } });
+    const baseline = await findNodes({ filter: { memoryRefs: [memoryId] } });
     expect(locs(baseline)).not.toContain('n.system');
   });
 
   it('ANDs the other filters', async () => {
     await mk('n.task.runnable', 'task', { isRunnable: true });
     await mk('n.widget.runnable', 'widget', { isRunnable: true });
-    const res = await findNodes({ filter: { memoryIds: [memoryId], nodeTypes: ['task', 'info'], isRunnable: true } });
+    const res = await findNodes({ filter: { memoryRefs: [memoryId], nodeTypes: ['task', 'info'], isRunnable: true } });
     expect(locs(res)).toEqual(['n.task.runnable']);
   });
 
   it('unknown values match nothing and values are exact and case-sensitive', async () => {
-    expect(locs(await findNodes({ filter: { memoryIds: [memoryId], nodeTypes: ['nope'] } }))).toEqual([]);
-    expect(locs(await findNodes({ filter: { memoryIds: [memoryId], nodeTypes: ['TASK', ' task'] } }))).toEqual([]);
-    expect(locs(await findNodes({ filter: { memoryIds: [memoryId], nodeTypes: ['nope', 'task'] } }))).toEqual(['n.task']);
+    expect(locs(await findNodes({ filter: { memoryRefs: [memoryId], nodeTypes: ['nope'] } }))).toEqual([]);
+    expect(locs(await findNodes({ filter: { memoryRefs: [memoryId], nodeTypes: ['TASK', ' task'] } }))).toEqual([]);
+    expect(locs(await findNodes({ filter: { memoryRefs: [memoryId], nodeTypes: ['nope', 'task'] } }))).toEqual(['n.task']);
   });
 
   it('a duplicated list is the same set; exactly 20 supplied entries are allowed', async () => {
-    const dup = await findNodes({ includeTotal: true, filter: { memoryIds: [memoryId], nodeTypes: ['task', 'task', 'task'] } });
+    const dup = await findNodes({ includeTotal: true, filter: { memoryRefs: [memoryId], nodeTypes: ['task', 'task', 'task'] } });
     expect(locs(dup)).toEqual(['n.task']);
     expect(dup.total).toBe(1);
     const twenty = Array.from({ length: 19 }, (_, i) => `t${i}`).concat('task');
-    expect(locs(await findNodes({ filter: { memoryIds: [memoryId], nodeTypes: twenty } }))).toEqual(['n.task']);
+    expect(locs(await findNodes({ filter: { memoryRefs: [memoryId], nodeTypes: twenty } }))).toEqual(['n.task']);
   });
 
   it('null is omitted: the unqualified result is unchanged; singular nodeType is unchanged', async () => {
-    const omitted = await findNodes({ filter: { memoryIds: [memoryId] } });
-    const nulled = await findNodes({ filter: { memoryIds: [memoryId], nodeTypes: null } });
+    const omitted = await findNodes({ filter: { memoryRefs: [memoryId] } });
+    const nulled = await findNodes({ filter: { memoryRefs: [memoryId], nodeTypes: null } });
     expect(locs(nulled)).toEqual(locs(omitted));
-    const single = await findNodes({ filter: { memoryIds: [memoryId], nodeType: 'task', nodeTypes: null } });
+    const single = await findNodes({ filter: { memoryRefs: [memoryId], nodeType: 'task', nodeTypes: null } });
     expect(locs(single)).toEqual(['n.task']);
   });
 
@@ -158,14 +158,14 @@ describe('filter-only list: union, exact total, paging', () => {
     const all = await findNodes({ filter: { nodeTypes: ['info', 'system'] } });
     expect(locs(all).filter((l: string) => l.startsWith('s.'))).toEqual([]);
     // Naming the system memory is the existing override; the list still narrows.
-    const named = await findNodes({ filter: { memoryIds: [sys.id], nodeTypes: ['system'] } });
+    const named = await findNodes({ filter: { memoryRefs: [sys.id], nodeTypes: ['system'] } });
     expect(locs(named)).toEqual(['s.sys']);
   });
 
   it('does not lift access: a non-reader gets nothing from a listed type', async () => {
     const stranger = await db.user.create({ data: { githubId: 311301, githubUsername: 'nt-stranger', handle: 'nt-stranger', roles: [] } });
     const res = await findNodes(
-      { filter: { memoryIds: [memoryId], nodeTypes: ['task', 'info'] } },
+      { filter: { memoryRefs: [memoryId], nodeTypes: ['task', 'info'] } },
       { db, userId: stranger.id, roles: ['READER'] } as Context,
     );
     expect(res.hits).toEqual([]);
@@ -174,14 +174,14 @@ describe('filter-only list: union, exact total, paging', () => {
   it('does not lift soft-deletion', async () => {
     const id = await mk('n.task.gone', 'task');
     await db.node.update({ where: { id }, data: { deletedAt: new Date() } });
-    const res = await findNodes({ filter: { memoryIds: [memoryId], nodeTypes: ['task'] } });
+    const res = await findNodes({ filter: { memoryRefs: [memoryId], nodeTypes: ['task'] } });
     expect(locs(res)).toEqual(['n.task']);
   });
 });
 
 describe('ranked lexical modes', () => {
   it.each(['keyword', 'regex'])('%s: the list narrows the ranked set', async (mode) => {
-    const res = await findNodes({ query: mode === 'regex' ? 'marker n\\.(task|record|info)' : 'marker', mode, filter: { memoryIds: [memoryId], nodeTypes: ['task', 'record'] } });
+    const res = await findNodes({ query: mode === 'regex' ? 'marker n\\.(task|record|info)' : 'marker', mode, filter: { memoryRefs: [memoryId], nodeTypes: ['task', 'record'] } });
     expect(locs(res)).toEqual(['n.record', 'n.task']);
   });
 });
@@ -221,9 +221,9 @@ describe('refusals (BAD_USER_INPUT, field named, value never echoed, every path)
   });
 
   it('the singular nodeType and contentScope keep their meaning', async () => {
-    const single = await findNodes({ filter: { memoryIds: [memoryId], nodeType: 'comment' } });
+    const single = await findNodes({ filter: { memoryRefs: [memoryId], nodeType: 'comment' } });
     expect(single.hits).toEqual([]);
-    const scoped = await findNodes({ filter: { memoryIds: [memoryId], nodeType: 'task', contentScope: 'ALL' } });
+    const scoped = await findNodes({ filter: { memoryRefs: [memoryId], nodeType: 'task', contentScope: 'ALL' } });
     expect(locs(scoped)).toEqual(['n.task']);
   });
 });
@@ -278,24 +278,24 @@ describe('vector and hybrid: the list rides the bounded window, total stays null
   });
 
   it('vector: limit 1 finds the only listed-type node ranked past the first window; total is null', async () => {
-    const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryIds: [memoryId], nodeTypes: ['widget', 'nope'] } });
+    const res = await findNodes({ query: 'q', mode: 'vector', limit: 1, filter: { memoryRefs: [memoryId], nodeTypes: ['widget', 'nope'] } });
     expect(res.hits.map((h: any) => h.node.id)).toEqual([farId]);
     expect(res.total).toBeNull();
   });
 
   it('vector chunk granularity: the same', async () => {
-    const res = await findNodes({ query: 'q', mode: 'vector', granularity: 'chunk', limit: 1, filter: { memoryIds: [memoryId], nodeTypes: ['widget'] } });
+    const res = await findNodes({ query: 'q', mode: 'vector', granularity: 'chunk', limit: 1, filter: { memoryRefs: [memoryId], nodeTypes: ['widget'] } });
     expect(res.passages.map((p: any) => p.parentNodeId)).toEqual([farId]);
   });
 
   it('hybrid: the widened vector leg keeps the listed node; total is null', async () => {
-    const res = await findNodes({ query: 'zzzunmatchable', mode: 'hybrid', limit: 1, filter: { memoryIds: [memoryId], nodeTypes: ['widget'] } });
+    const res = await findNodes({ query: 'zzzunmatchable', mode: 'hybrid', limit: 1, filter: { memoryRefs: [memoryId], nodeTypes: ['widget'] } });
     expect(res.hits.map((h: any) => h.node.id)).toEqual([farId]);
     expect(res.total).toBeNull();
   });
 
   it('the list narrows: other types never appear', async () => {
-    const res = await findNodes({ query: 'q', mode: 'vector', limit: 20, filter: { memoryIds: [memoryId], nodeTypes: ['widget'] } });
+    const res = await findNodes({ query: 'q', mode: 'vector', limit: 20, filter: { memoryRefs: [memoryId], nodeTypes: ['widget'] } });
     expect(res.hits.every((h: any) => h.node.nodeType === 'widget')).toBe(true);
   });
 });

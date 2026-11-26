@@ -287,7 +287,7 @@ export const chatQueries = {
         }),
         chatId,
       );
-      if (!chatNode) throw chatNotFoundError(chatId);
+      if (!chatNode) throw chatNotFoundError();
       // #1196 — the SHARED node-content gate, replacing a hand-rolled
       // per-class one. `cor:acl:030:01`: a chat has no access layer of its own;
       // read falls through the host memory's per-class rules. This resolver

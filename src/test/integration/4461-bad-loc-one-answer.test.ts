@@ -113,21 +113,21 @@ describe('#4461 — createNode (resolvers.mutation.node.ts core write)', () => {
   it('invalid charset: BAD_USER_INPUT, field loc, reason, no echo', async () => {
     const err = await graphqlError(
       `mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }`,
-      { i: { memoryId, loc: BAD, name: 'x' } },
+      { i: { memoryRef: memoryId, loc: BAD, name: 'x' } },
     );
     expectOneAnswer(err, 'loc', 'invalid-charset');
   });
   it('an atom over 64 characters: reason too-long', async () => {
     const err = await graphqlError(
       `mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }`,
-      { i: { memoryId, loc: LONG_ATOM, name: 'x' } },
+      { i: { memoryRef: memoryId, loc: LONG_ATOM, name: 'x' } },
     );
     expectOneAnswer(err, 'loc', 'too-long');
   });
   it('a loc whose atoms are each valid but whose total is over the cap: too-long', async () => {
     const err = await graphqlError(
       `mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }`,
-      { i: { memoryId, loc: LONG_TOTAL, name: 'x' } },
+      { i: { memoryRef: memoryId, loc: LONG_TOTAL, name: 'x' } },
     );
     expectOneAnswer(err, 'loc', 'too-long');
   });

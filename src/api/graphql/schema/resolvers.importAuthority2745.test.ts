@@ -35,7 +35,7 @@ async function fixture(kind: 'install' | 'agent') {
     content: 'Process {{importedNodeUrn}}',
   } });
   const ctx = { db, userId: user.id, roles: ['READER'], clientId: `user:${user.id}` } as Context;
-  const input = { memoryId, loc: 'clips:authority', content: '# Imported', contentType: 'text/markdown', taskRef: task.id, appRef: app.id };
+  const input = { memoryRef: memoryId, loc: 'clips:authority', content: '# Imported', contentType: 'text/markdown', taskRef: task.id, appRef: app.id };
   return { org, user, app, agent, memoryId, ctx, input };
 }
 

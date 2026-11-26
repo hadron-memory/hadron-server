@@ -111,6 +111,7 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import {
   agentSlugFromUrn,
   deriveSlugFromName,
+  UrnParseError,
   assertFullyQualifiedUrn,
   parseUrn,
   validateUserSlug,
@@ -134,6 +135,7 @@ import {
 } from '../../../lib/nodeMerge.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import {
+  requireCallerIdentity,
   type Context,
   requireRole,
   requireOrgRole,
@@ -175,6 +177,24 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { refuseBillingMemberRole } from '../../../lib/auth/billingRole.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
+
+/**
+ * #5184 — a personal or private memory with an App keeps its slug
+ * (`hrn:node:hadronmemory.com:specs:cor:dmo:060:20`, "The slug never changes",
+ * S10). `updateMemory` calls this only for a `urn` argument, after the manage
+ * gate and again on the locked row.
+ *
+ * One test on the row, so it covers memories made before the rule. The row does
+ * not record how it came by its App, so an attached memory, and a session's
+ * memory that kept its `appId`, are covered too. The display name stays free.
+ */
+function assertMemorySlugMayChange(memory: { class: string; appId: string | null }): void {
+  if (memory.appId !== null && (memory.class === 'personal' || memory.class === 'private')) {
+    throw new GraphQLError('A personal or private memory in an App keeps its slug. Its display name can be changed.', {
+      extensions: { code: 'APP_MEMORY_SLUG_FIXED', memoryClass: memory.class },
+    });
+  }
+}
 
 /**
  * #561 — refuse a `Memory.source` that is not a GitHub repository URL.
@@ -391,6 +411,7 @@ export const memoryMutations = {
       { input }: { input: MergeMemoriesInput },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const { source: rawSource, target: rawTarget } = input;
       const deleteSourceMem = input.deleteSourceMem ?? false;
       const fields = new Set<NodeMergeField>(input.include ?? ALL_NODE_MERGE_FIELDS);
@@ -546,6 +567,7 @@ export const memoryMutations = {
       {
         orgRef,
         name,
+        slug,
         shortDescription,
         description,
         data,
@@ -570,6 +592,7 @@ export const memoryMutations = {
         orgRef?: string | null; name: string;
         shortDescription?: string; description?: string; data?: Record<string, unknown> | null; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
+        slug?: string | null;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
         // Both are nullable in the GraphQL schema — a client may pass an
@@ -712,7 +735,7 @@ export const memoryMutations = {
       }
 
       // #5149: the name's only refusals, after the gates and before ensureUserHandle, the tombstone reclaim or any create.
-      const memorySlug = deriveMemorySlug(name);
+      const memorySlug = deriveMemorySlug(name, slug); // #5203 S1: a supplied slug is validated, not derived
       assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
 
       // The URN root is the owner principal's bare namespace atom — an org
@@ -897,6 +920,7 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1381: resolve the ref (id OR URN, cor:api:140:01) so a miss is a typed
       // MEMORY_NOT_FOUND rather than Prisma's own error text, and conceal a
       // memory the caller cannot open exactly as that miss. `id` is the
@@ -905,6 +929,15 @@ export const memoryMutations = {
       ({ id } = await resolveMemoryRef(ctx.db, ref));
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory));
+      // #5184: before any other argument is judged or any ref resolved.
+      if (urn !== undefined) assertMemorySlugMayChange(memory);
+      // #5200 (cor:api:260:01): every caller-text field this update writes, refused typed when it cannot be stored (a NUL or an
+      // unpaired surrogate), after the gate above (a caller who may not manage the memory keeps that answer, whatever the text
+      // holds) and before the transaction. `name` is the display column only: it gets this check and no root-loc check.
+      assertStorableText({
+        name, urn, shortDescription, description, data, tags, schema, license, category0, category1, category2,
+        iconUrl, heroUrl, homeUrl, source, readBranch, writeBranch,
+      });
       // #4140 (cor:api:140:01): `orgRef` resolves only AFTER the memory's own gate (resource before
       // counterparty), and the resolved id is what is compared (here and under the row lock below), so a
       // URN of the memory's OWN org is a no-op. An unknown org is the resolver's typed
@@ -1018,7 +1051,16 @@ export const memoryMutations = {
           );
         }
         // #574: slugify an explicit client slug (lowercase, illegal chars → '-').
-        const slug = deriveSlugFromName(urn);
+        // #5200: a slug with no ASCII letter or digit is the same typed refusal #5149 gives a name, not an untyped parse error.
+        let slug: string;
+        try {
+          slug = deriveSlugFromName(urn);
+        } catch (err) {
+          if (!(err instanceof UrnParseError)) throw err;
+          throw new GraphQLError('Invalid memory slug: it must contain at least one ASCII letter or digit.', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
         newUrn = `${org.urn}:${slug}`;
       }
 
@@ -1117,6 +1159,10 @@ export const memoryMutations = {
             extensions: { code: 'CONFLICT' },
           });
         }
+        // #5184: judged again on the locked row. The staleness check above does
+        // not compare `appId`, so an attach that committed since the first read
+        // is caught only here.
+        if (urn !== undefined) assertMemorySlugMayChange(lockedMemory);
         if (newOrgId != null && newOrgId !== lockedRow?.organizationId) {
           throw new GraphQLError('Use transferMemoryOwnership to change a memory owner.', {
             extensions: { code: 'USE_TRANSFER_MEMORY_OWNERSHIP' },
@@ -1289,6 +1335,7 @@ export const memoryMutations = {
       { memoryRef }: { memoryRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
       // #1316: a caller who cannot open the memory's record is denied as if
@@ -1314,6 +1361,7 @@ export const memoryMutations = {
     },
 
     deleteMemory: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      requireCallerIdentity(ctx);
       // includeDeleted: a re-delete on an already-soft-deleted memory must
       // return true (FR-014 idempotency). The default resolveMemoryRef
       // would throw MemoryNotFoundError on the second call.
@@ -1431,6 +1479,7 @@ export const memoryMutations = {
       { ref, targetUrn }: { ref: string; targetUrn: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN
       // (conventions:ref-param-naming — bare `ref` since the memory is the
       // obvious entity).
@@ -1599,6 +1648,7 @@ export const memoryMutations = {
       { parentRef, targetUrn, move: rawMove }: { parentRef: string; targetUrn: string; move?: boolean | null },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const move = rawMove ?? false;
 
       // Resolve the parent node (PK or fully-qualified URN). A miss surfaces as
@@ -1835,6 +1885,7 @@ export const memoryMutations = {
       { ref, token, expiresAt }: { ref: string; token: string; expiresAt?: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
       const { id } = await resolveMemoryRef(ctx.db, ref);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
@@ -1865,6 +1916,7 @@ export const memoryMutations = {
       { agentRef, memoryRef, role }: { agentRef: string; memoryRef: string; role?: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // 007-entity-id-or-urn: agentId and memoryId may be IDs, bare URNs,
       // or prefixed URNs. Resolve both to definite IDs before any
       // subsequent checks. #1944: the Agent through the read gate, so one
@@ -1992,6 +2044,7 @@ export const memoryMutations = {
       { agentRef, memoryRef }: { agentRef: string; memoryRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1944: an Agent the caller can't read answers as absent.
       const agent = await resolveReadableAgentRef(ctx, agentRef);
       const resolvedAgentId = agent.id;
@@ -2029,6 +2082,7 @@ export const memoryMutations = {
       { memoryRef, orgRef, role }: { memoryRef: string; orgRef: string; role: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #764 (was 007-entity-id-or-urn): memoryRef/orgRef accept id / URN /
       // (org) handle. #4142 (S6 chunk F) dropped the deprecated memoryId/orgId
       // aliases: the refs are required and the only way in.
@@ -2095,6 +2149,7 @@ export const memoryMutations = {
       { memoryRef, orgRef, role }: { memoryRef: string; orgRef: string; role: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const resolvedMemoryId = await resolveRequiredMemoryRef(ctx.db, memoryRef);
       // #1381: hidden from this caller ⇒ resolveRefArg's own miss, decided HERE,
       // before the org resolves — an org error arriving first would tell an
@@ -2132,6 +2187,7 @@ export const memoryMutations = {
       { memoryRef, orgRef }: { memoryRef: string; orgRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const resolvedMemoryId = await resolveRequiredMemoryRef(ctx.db, memoryRef);
       // #1381: unlike create/update, a caller who cannot open the memory CAN
       // succeed here — an admin of the subscribing org removing its own
@@ -2222,6 +2278,7 @@ export const memoryMutations = {
     },
 
     syncMemory: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      requireCallerIdentity(ctx);
       // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
       const { id } = await resolveMemoryRef(ctx.db, ref);
       const memory = await ctx.db.memory.findUniqueOrThrow({
@@ -2258,6 +2315,7 @@ export const memoryMutations = {
     },
 
     pushMemoryToGit: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      requireCallerIdentity(ctx);
       // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
       const { id } = await resolveMemoryRef(ctx.db, ref);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
@@ -2278,6 +2336,7 @@ export const memoryMutations = {
       { memoryRef, externalUserId }: { memoryRef: string; externalUserId: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
       // 007-entity-id-or-urn: memoryRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
@@ -2542,6 +2601,7 @@ export const memoryMutations = {
       { memoryRef }: { memoryRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // 007-entity-id-or-urn: memoryRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
@@ -2958,6 +3018,7 @@ export const memoryMutations = {
       }: { memoryRef: string; granteeRef: string; role: MemoryShareRoleType },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       if (!ctx.userId) {
         throw new GraphQLError('createMemoryShare requires an authenticated user', {
           extensions: { code: 'UNAUTHENTICATED' },
@@ -3021,6 +3082,7 @@ export const memoryMutations = {
       }: { memoryRef: string; granteeRef?: string | null },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       if (!ctx.userId) {
         throw new GraphQLError('deleteMemoryShare requires an authenticated user', {
           extensions: { code: 'UNAUTHENTICATED' },
@@ -3118,6 +3180,7 @@ export const memoryMutations = {
       }: { memoryRef: string; granteeRef: string; role: MemoryShareRoleType },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       if (!ctx.userId) {
         throw new GraphQLError('updateMemoryShareRole requires an authenticated user', {
           extensions: { code: 'UNAUTHENTICATED' },

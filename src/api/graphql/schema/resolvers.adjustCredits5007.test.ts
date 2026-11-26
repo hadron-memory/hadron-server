@@ -281,7 +281,7 @@ describe('the source types the server writes itself (#5007 ruling 3)', () => {
 
   it('the library itself does not refuse them (A4 and A15 write their own types)', async () => {
     const row = await metering.adjustCredits(db, {
-      organizationId: orgId,
+      owner: { organizationId: orgId },
       amountMicroCents: -10n,
       sourceType: 'cost-correction',
       sourceId: 'ue_1',
@@ -294,7 +294,7 @@ describe('the source types the server writes itself (#5007 ruling 3)', () => {
 describe('library replay rules (#5007)', () => {
   it('pin 5: a grant reusing an adjustment\'s source (same org and amount) is IdempotencyConflictError', async () => {
     await metering.adjustCredits(db, {
-      organizationId: orgId,
+      owner: { organizationId: orgId },
       amountMicroCents: 500n,
       sourceType: 'refund',
       sourceId: 'x',
@@ -302,7 +302,7 @@ describe('library replay rules (#5007)', () => {
     });
     const err = await metering
       .grantCredits(db, {
-        organizationId: orgId,
+        owner: { organizationId: orgId },
         amountMicroCents: 500n,
         sourceType: 'refund',
         sourceId: 'x',
@@ -317,19 +317,19 @@ describe('library replay rules (#5007)', () => {
     const bad: Array<() => Promise<unknown>> = [
       () =>
         metering.grantCredits(db, {
-          organizationId: orgId,
+          owner: { organizationId: orgId },
           amountMicroCents: 1n,
         } as metering.GrantCreditsParams),
       () =>
         metering.grantCredits(db, {
-          organizationId: orgId,
+          owner: { organizationId: orgId },
           amountMicroCents: 1n,
           sourceType: ' ',
           sourceId: 'a',
         }),
       () =>
         metering.adjustCredits(db, {
-          organizationId: orgId,
+          owner: { organizationId: orgId },
           amountMicroCents: 1n,
           sourceType: 'refund',
           sourceId: ' ',
@@ -337,7 +337,7 @@ describe('library replay rules (#5007)', () => {
         }),
       () =>
         metering.adjustCredits(db, {
-          organizationId: orgId,
+          owner: { organizationId: orgId },
           amountMicroCents: 1n,
           sourceType: 'refund',
           sourceId: 'a',
@@ -345,7 +345,7 @@ describe('library replay rules (#5007)', () => {
         }),
       () =>
         metering.adjustCredits(db, {
-          organizationId: orgId,
+          owner: { organizationId: orgId },
           amountMicroCents: 0n,
           sourceType: 'refund',
           sourceId: 'a',
@@ -367,8 +367,10 @@ describe('GrantCreditsInput keeps its shape (#5007, a guard pin)', () => {
         d.kind === 'InputObjectTypeDefinition' && d.name.value === 'GrantCreditsInput',
     );
     const fields = input?.fields?.map((f) => `${f.name.value}: ${print(f.type)}`);
+    // #5014 (A6): orgRef becomes optional and userRef is new; exactly one of the two is required by the resolver.
     expect(fields).toEqual([
-      'orgRef: String!',
+      'orgRef: String',
+      'userRef: ID',
       'amountMicroCents: String!',
       'expiresAt: String',
       'sourceType: String',

@@ -42,7 +42,7 @@ const session = (facts: SessionFacts = {}) => {
 /** A seat on `slot` at H, assigned to Ada (or to a person) and started by its assignee. */
 async function seat(slot: string, who: 'ada' | { user: string } = 'ada') {
   const person = who === 'ada' ? holder.id : who.user;
-  const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: slot, assignee: { user: person }, source: 'synthetic' } }, ctx(author.id));
+  const t = await M.createAgentTask!({}, { input: { parentTaskRef: build.id, title: slot, assignee: { user: person }, source: 'synthetic' } }, ctx(author.id));
   await M.assignReviewSeat!({}, { taskRef: t.id, slot, head: H }, ctx(author.id));
   if (who === 'ada') {
     await db.agentTask.update({ where: { id: t.id }, data: { assigneeUserId: null, assigneeWorkerId: ada.id } });

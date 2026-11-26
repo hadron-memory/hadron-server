@@ -1,7 +1,7 @@
 -- #5021 (billing A16, cor:dmo:170:06): price rows are kept. Expand-safe: the previous image only inserts price rows and
 -- re-points their audit user ids along a recorded merge (the trigger's own exception); no shipped code updates or
 -- deletes one. Applied LAST of #5021's migrations on purpose: if this one refuses, boot serves the schema that exists,
--- and the columns 20261125170000 added are already there for recordLlmUsage to write.
+-- and the columns 20261126080000 added are already there for recordLlmUsage to write.
 
 -- Preflight: a soft-deleted price row is already a violation of the rule (a row is never retired), and the lookup
 -- skips it, so it has to be settled by hand before rows are frozen. Refuses with HDPRF: boot then serves the schema
@@ -21,7 +21,7 @@ END $$;
 -- #5021 (billing A16, hrn:node:hadronmemory.com:specs:cor:dmo:170:06): price rows are kept. A row a recorded cost came
 -- from is never edited or deleted, and price rows are "effective-dated and kept", so no row is changed or deleted, not
 -- even one nothing references and not even by an operator; a new price is a new row. One source, shared verbatim with
--- migration 20261125170400_ai_model_prices_kept (pinned by src/test/migrations/priceRowKept5021.test.ts), applied by
+-- migration 20261126080400_ai_model_prices_kept (pinned by src/test/migrations/priceRowKept5021.test.ts), applied by
 -- post-push.sql and the test globalSetup.
 --
 -- DELETE: always refused.

@@ -69,7 +69,7 @@ describe('findNodes where + vector/hybrid', () => {
     const res = await findNodes({
       query: 'q',
       mode: 'vector',
-      filter: { memoryIds: [memId], where: { path: ['sourceKind'], eq: 'substack' } },
+      filter: { memoryRefs: [memId], where: { path: ['sourceKind'], eq: 'substack' } },
     });
     expect(locs(res)).toEqual(['vec.a']); // vec.b (reddit) is a vector hit but dropped by where
     expect(res.hits[0].vector?.similarity).toBeGreaterThan(0);
@@ -79,14 +79,14 @@ describe('findNodes where + vector/hybrid', () => {
     const res = await findNodes({
       query: 'q',
       mode: 'hybrid',
-      filter: { memoryIds: [memId], where: { path: ['sourceKind'], eq: 'substack' } },
+      filter: { memoryRefs: [memId], where: { path: ['sourceKind'], eq: 'substack' } },
     });
     expect(locs(res)).toEqual(['vec.a']);
   });
 
   it('where + vector no longer rejects (former BAD_USER_INPUT is gone)', async () => {
     await expect(
-      findNodes({ query: 'q', mode: 'vector', filter: { memoryIds: [memId], where: { path: ['sourceKind'], eq: 'reddit' } } }),
+      findNodes({ query: 'q', mode: 'vector', filter: { memoryRefs: [memId], where: { path: ['sourceKind'], eq: 'reddit' } } }),
     ).resolves.toMatchObject({ hits: [{ node: { loc: 'vec.b' } }] });
   });
 });

@@ -30,7 +30,7 @@ const schedule = (slots = ['local', 'blind'], who = owner.id) => M.setReviewSche
 const freeze = (head = H) => M.freezePullRequestHead!({}, { taskRef: build.id, head }, ctx(author.id));
 const readiness = (head = H) => Q.pullRequestReadiness!({}, { taskRef: build.id, head }, ctx(owner.id));
 async function seat(slot: string, head = H, who = reviewer.id, supersedes?: string) {
-  const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: slot, assignee: { user: who }, source: 'synthetic' } }, ctx(author.id));
+  const t = await M.createAgentTask!({}, { input: { parentTaskRef: build.id, title: slot, assignee: { user: who }, source: 'synthetic' } }, ctx(author.id));
   await M.assignReviewSeat!({}, { taskRef: t.id, slot, head, supersedes }, ctx(author.id));
   return t;
 }
@@ -123,7 +123,7 @@ describe('#5036 a review seat is not finished with no verdict at its assigned he
   });
 
   it('exempt: a task never bound as a seat finishes unchanged', async () => {
-    const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: 'plain', assignee: { user: reviewer.id }, source: 'synthetic' } }, ctx(author.id));
+    const t = await M.createAgentTask!({}, { input: { parentTaskRef: build.id, title: 'plain', assignee: { user: reviewer.id }, source: 'synthetic' } }, ctx(author.id));
     await M.startAgentTask!({}, { taskRef: t.id }, ctx(reviewer.id));
     expect(await code(finishWith(t, 'reviewed'))).toBe('RESOLVED');
   });

@@ -4,10 +4,10 @@
 --
 -- usage_events is the append-only, high-volume firehose, so nothing here scans it (precedent: #2944's
 -- 20261107220000): the columns are nullable with no default (catalog-only) and the foreign keys are added NOT VALID,
--- which takes only a brief lock on each table and checks new writes from then on. 20261125170100 validates them
--- (without blocking writes) and 20261125170200 / 20261125170300 build the indexes CONCURRENTLY.
+-- which takes only a brief lock on each table and checks new writes from then on. 20261126080100 validates them
+-- (without blocking writes) and 20261126080200 / 20261126080300 build the indexes CONCURRENTLY.
 --
--- The price-row key restricts both ways: price rows are never deleted or re-keyed (the trigger in 20261125170400
+-- The price-row key restricts both ways: price rows are never deleted or re-keyed (the trigger in 20261126080400
 -- refuses it too). The run key sets null, like the table's other keys.
 ALTER TABLE "usage_events" ADD COLUMN "price_row_id" TEXT,
 ADD COLUMN "markup_basis_points" INTEGER,

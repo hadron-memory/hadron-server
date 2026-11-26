@@ -70,7 +70,7 @@ describe('findNodes where — chunk granularity', () => {
       query: 'q',
       mode: 'vector',
       granularity: 'chunk',
-      filter: { memoryIds: [memId], where: { path: ['sourceKind'], eq: 'substack' } },
+      filter: { memoryRefs: [memId], where: { path: ['sourceKind'], eq: 'substack' } },
     });
     expect(res.passages.length).toBeGreaterThan(0);
     // Every returned passage belongs to chunk.a (substack); none to chunk.b (reddit).

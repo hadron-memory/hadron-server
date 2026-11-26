@@ -7,7 +7,7 @@ import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { projectUsageRowsFor } from './resolvers.usageProjection.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
-import { markBatchReadNodes } from './resolvers.nodeBatchEdges.js';
+import { markAdmittedMemories, markBatchReadNodes } from './resolvers.nodeBatchEdges.js';
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
 import { isConcealedCommentHistory } from './resolvers.comments.js';
@@ -67,7 +67,7 @@ import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { foreignIncludeReader } from '../../../lib/includes/foreignIncludeReader.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { appMemoryScopePage, resolveAppNodeScope } from './resolvers.appMemoryScope.js';
+import { appMemoryScopePage, resolveAppNodeScope, type AppMemorySourceKind } from './resolvers.appMemoryScope.js';
 // Spec 049 Phase 3 — the search ladder's GraphQL entry + disclosure envelope.
 import { resolveNamedScopeForQuery, scopeInfoOf, mergeDegraded as mergeDegradedCodes, SCOPE_NARROWED } from '../../../lib/scopes.js';
 import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
@@ -149,7 +149,7 @@ export interface FindNodesArgs {
   mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
   minScore?: number | null;
   filter?: {
-    memoryIds?: string[] | null;
+    memoryRefs?: string[] | null;
     memoryClasses?: string[] | null;
     nodeType?: string | null;
     /** #3113 — an explicit list of node types (a union); see `checkNodeTypesFilter`. */
@@ -193,16 +193,16 @@ export interface FindNodesArgs {
  */
 export async function resolveNodeReadScopeIds(
   ctx: Context,
-  f: { memoryIds?: string[] | null; memoryClasses?: string[] | null; isRunnable?: boolean | null },
+  f: { memoryRefs?: string[] | null; memoryClasses?: string[] | null; isRunnable?: boolean | null },
   orgScopeId: string | null,
 ): Promise<string[]> {
   // ── Resolve scope: accessible ∩ requested memories (ID/URN mix) ──
-  const explicitIds = !!(f.memoryIds && f.memoryIds.length > 0);
+  const explicitIds = !!(f.memoryRefs && f.memoryRefs.length > 0);
   // #3306: resolve the named memories first so the PUBLIC-knowledge arm (pure App key / userless run) looks up
   // only those, never every PUBLIC memory.
   const requestedIds = explicitIds
     ? (await Promise.all(
-        f.memoryIds!.map((ref) =>
+        f.memoryRefs!.map((ref) =>
           isId(ref)
             ? Promise.resolve(ref)
             : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
@@ -256,7 +256,7 @@ type AppNodesFilter = {
     hasOpenThreads?: boolean | null;
     // Memory-scope fields — NOT supported by appNodes (the App's scope is
     // authoritative). Present only so we can reject them explicitly.
-    memoryIds?: string[] | null;
+    memoryRefs?: string[] | null;
     memoryClasses?: string[] | null;
     nodeType?: string | null;
     /** #3113 */
@@ -322,9 +322,9 @@ async function appNodesRead(ctx: Context, appRef: string, filter: AppNodesFilter
   // honor (its scope is the App's memories). Reject rather than silently
   // ignore them, so a caller who assumed they scoped fails fast instead of
   // getting a surprising superset. Use findNodes for cross-memory scoping.
-  if (f.memoryIds?.length || f.memoryClasses?.length) {
+  if (f.memoryRefs?.length || f.memoryClasses?.length) {
     throw badInput(
-      'appNodes: filter.memoryIds / filter.memoryClasses are not supported — ' +
+      'appNodes: filter.memoryRefs / filter.memoryClasses are not supported — ' +
         "the App's installed-agent memories are the authoritative scope. " +
         'Use findNodes for cross-memory scoping.',
     );
@@ -372,8 +372,12 @@ async function appNodesRead(ctx: Context, appRef: string, filter: AppNodesFilter
       ...(inheritance.excludeNodeIds.length > 0 ? [{ id: { notIn: inheritance.excludeNodeIds } }] : []),
     ],
   };
-  return { where, inheritance };
+  const admitted = new Set([...scope.sources].filter(([, s]) => s.some((x) => ADMITTING_SOURCES.has(x.kind))).map(([id]) => id));
+  return { where, inheritance, admitted };
 }
+
+/** The scope sources that admit a memory itself; an inherited base is in scope through its child only. */
+const ADMITTING_SOURCES: ReadonlySet<string> = new Set<AppMemorySourceKind>(['AGENT_SYSTEM', 'AGENT_LINK', 'TEAM_SPACE', 'APP_MEMORY']);
 
 /** Everything a returned `appNodes` / `appNodesPage` row carries. */
 const APP_NODES_INCLUDE = {
@@ -390,13 +394,14 @@ type AppNodeRow = Prisma.NodeGetPayload<{ include: typeof APP_NODES_INCLUDE }>;
  * the reads, for the rows RETURNED only. Splices the dropped rows out of `rows`.
  */
 async function finishAppNodes(
-  ctx: Context, rows: AppNodeRow[], inheritance: Parameters<typeof retainEffective>[2],
+  ctx: Context, rows: AppNodeRow[], inheritance: Parameters<typeof retainEffective>[2], admitted: ReadonlySet<string>,
 ): Promise<AppNodeRow[]> {
   // The exclusion list was a snapshot: re-check what was read (P2-1).
   const kept = new Set((await retainEffective(ctx.db, rows, inheritance)).map((r) => r.id));
   for (let i = rows.length - 1; i >= 0; i--) if (!kept.has(rows[i]!.id)) rows.splice(i, 1);
   await decryptNodesBatch(ctx.db, rows);
   markInherited(rows, inheritance.inheritedFrom);
+  markAdmittedMemories(rows, admitted);
   // #1061 — the App-scoped node list returns full node projections, so each one is a read. Scope is the
   // App's installed-agent memories, established by `appNodesRead`.
   recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(rows), ctx);
@@ -2432,7 +2437,7 @@ export const nodeQueries = {
       // Resolve it, then run the core with the scope's memories as the explicit
       // memory set (S2: already ∩ the caller's access — a lens never grants,
       // D-004) and, for `global`, the organization narrowing; add the
-      // disclosure envelope on the way out. `filter.memoryIds` narrows WITHIN
+      // disclosure envelope on the way out. `filter.memoryRefs` narrows WITHIN
       // the scope. Omitted ⇒ the pre-049 semantics are untouched: the portal
       // and the CLI pass orgRef and filters explicitly and never this argument,
       // so their results do not change under them from a flag they never passed
@@ -2448,10 +2453,10 @@ export const nodeQueries = {
       let innerOrgId = coreArgs.orgRef;
       if (scopeRes.memoryIds !== null) {
         let requested = scopeRes.memoryIds;
-        if (f.memoryIds && f.memoryIds.length > 0) {
+        if (f.memoryRefs && f.memoryRefs.length > 0) {
           const explicit = (
             await Promise.all(
-              f.memoryIds.map((ref) =>
+              f.memoryRefs.map((ref) =>
                 isId(ref) ? Promise.resolve(ref) : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
             )
           ).filter((id): id is string => id !== null);
@@ -2460,7 +2465,7 @@ export const nodeQueries = {
         if (requested.length === 0) {
           return { hits: [], passages: [], total: 0, reason: null, degraded: narrowed, scope: info };
         }
-        innerFilter = { ...f, memoryIds: requested };
+        innerFilter = { ...f, memoryRefs: requested };
       }
       // #1987: the global view's materialised memory list must still pass
       // through the org narrowing in core (the App-memory exclusion of the
@@ -2581,7 +2586,7 @@ export const nodeQueries = {
             // single-node node(ref:) read does (PR #815 review, Codex P2).
             const typeErr = validateUrnType(parseUrnInput(ref), 'node');
             if (typeErr) {
-              throw new GraphQLError(`nodeBatch: ${typeErr} (ref "${ref}")`, {
+              throw new GraphQLError(`nodeBatch: ${typeErr} (one of the refs)`, {
                 extensions: { code: 'BAD_USER_INPUT' },
               });
             }
@@ -2956,7 +2961,7 @@ export const nodeQueries = {
         take: limit ?? 20,
         include: APP_NODES_INCLUDE,
       });
-      return finishAppNodes(ctx, results, read.inheritance);
+      return finishAppNodes(ctx, results, read.inheritance, read.admitted);
     },
 
     /**
@@ -2987,7 +2992,7 @@ export const nodeQueries = {
       const empty = { items: [], hasMore: false, endCursor: null };
       // Each memory is read once however many times (or by which alias) it was named: a repeat would repeat
       // its rows, break the continuation and multiply the walk (#3586 review).
-      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryRefs }, null))];
+      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryRefs: args.memoryRefs }, null))];
       if (gated.length === 0) return empty;
       const inheritance = await effectiveScope(ctx.db, gated);
       return readLocSegments(ctx.db, {
@@ -3030,7 +3035,7 @@ export const nodeQueries = {
         }),
       ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
       const rawRows = rows.length;
-      const items = await finishAppNodes(ctx, rows, read.inheritance);
+      const items = await finishAppNodes(ctx, rows, read.inheritance, read.admitted);
       return { items, total, hasMore: skip + rawRows < total };
     },
 

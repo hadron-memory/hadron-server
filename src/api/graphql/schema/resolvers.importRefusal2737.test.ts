@@ -36,7 +36,7 @@ beforeEach(async () => {
 afterEach(() => {vi.restoreAllMocks();vi.unstubAllEnvs();});
 // The installed Agent loses its prompt, so the run is refused BOOT_PROMPT_NOT_SET (cor:agt:040:10).
 const unserve=()=>db.agent.update({where:{id:agentId},data:{bootPromptNodeId:null,bootPromptUrn:null}});
-const input=()=>({memoryId,loc:'clips:refused',content:'# Imported',contentType:'text/markdown',taskRef:taskId,appRef:appId});
+const input=()=>({memoryRef:memoryId,loc:'clips:refused',content:'# Imported',contentType:'text/markdown',taskRef:taskId,appRef:appId});
 describe('#2737 importNode run refusal',()=>{
   it('BOOT_PROMPT_NOT_SET leaves no imported node or run',async()=>{
     await unserve();

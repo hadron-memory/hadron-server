@@ -180,7 +180,7 @@ describe('#3456 S6 and the findNodes defaults', () => {
     for (const l of ['x:1', 'x:2:3', 'y', 'z:q:r', 'a_b:c', 'plain']) await mk(l);
     await mk('gone:1', { deletedAt: new Date() });
     await mkComment('cm:1');
-    const fn = await findNodes({ filter: { memoryIds: [M.id] }, limit: 200 });
+    const fn = await findNodes({ filter: { memoryRefs: [M.id] }, limit: 200 });
     const expected = [...new Set<string>(fn.hits.map((h: any) => (h.node.loc as string).split(':')[0]))].sort();
     expect(names(await segs({ memoryRefs: [M.id], parentLoc: '', limit: 200 })).sort()).toEqual(expected);
   });
@@ -332,14 +332,14 @@ describe('#2836: chat-message is a default exclusion for segments', () => {
     expect(names(await segs({ memoryRefs: [M.id], parentLoc: 'mixed' }))).toEqual(['note']);
 
     // Parity with findNodes' unqualified read of the same memory.
-    const fn = await findNodes({ filter: { memoryIds: [M.id] }, limit: 200 });
+    const fn = await findNodes({ filter: { memoryRefs: [M.id] }, limit: 200 });
     const expected = [...new Set<string>(fn.hits.map((h: any) => (h.node.loc as string).split(':')[0]))].sort();
     expect(names(root).sort()).toEqual(expected);
   });
 
   it('an explicit chat-message read is still findNodes\' job: the messages exist and stay readable there', async () => {
     await msg('team-chat:messages:001');
-    const fn = await findNodes({ filter: { memoryIds: [M.id], nodeType: 'chat-message' }, limit: 10 });
+    const fn = await findNodes({ filter: { memoryRefs: [M.id], nodeType: 'chat-message' }, limit: 10 });
     expect(fn.hits.map((h: any) => h.node.loc)).toEqual(['team-chat:messages:001']);
     expect(names(await segs({ memoryRefs: [M.id], parentLoc: '' }))).toEqual([]);
   });

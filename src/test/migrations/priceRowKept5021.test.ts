@@ -10,7 +10,7 @@ import { cleanDb } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 
 const read = (p: string) => readFileSync(new URL(`../../../prisma/${p}`, import.meta.url), 'utf8');
-const MIGRATION = read('migrations/20261125170400_ai_model_prices_kept/migration.sql');
+const MIGRATION = read('migrations/20261126080400_ai_model_prices_kept/migration.sql');
 const SOURCE = read('ai-model-price-invariants.sql');
 
 let pg: Client;
@@ -90,7 +90,7 @@ describe('#5021 migration', () => {
   });
 
   it('pin 16: each concurrent index migration is a single statement', () => {
-    for (const dir of ['20261125170200_usage_events_price_row_id_idx', '20261125170300_usage_events_app_run_id_idx']) {
+    for (const dir of ['20261126080200_usage_events_price_row_id_idx', '20261126080300_usage_events_app_run_id_idx']) {
       const sql = read(`migrations/${dir}/migration.sql`).split('\n').filter((l) => !l.startsWith('--') && l.trim()).join('\n');
       expect(sql).toMatch(/^CREATE INDEX CONCURRENTLY IF NOT EXISTS "[a-z_]+" ON "usage_events"\("[a-z_]+"\);$/);
     }
