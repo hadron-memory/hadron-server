@@ -380,7 +380,7 @@ async function createAppSecret(ctx: Context, appId: string, name: string, args: 
             throw secretNameTaken(name);
           }
           return stageSecretChange(tx, ctx, { appId, secretId: null, name, kind: args.kind,
-            metadata: metadata as never, operation: 'STORE', snapshot: 'absent', valueJson, sizeBytes });
+            metadata: metadata as never, operation: 'STORE', snapshot: 'absent', valueJson, sizeBytes, requireAppRoom: true });
         }
         await assertAppSecretRoom(tx, appId);
         const secret = await tx.secret.create({

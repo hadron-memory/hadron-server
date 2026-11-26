@@ -22,7 +22,7 @@ import { isDeadlockVictim } from '../../../lib/memoryLockConflict.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { liveTxContext } from './authorizedTx.js';
 import { lockInstallAuthorityFirst } from './installMemory.js';
-import { type Context, getAccessibleMemoryIds, isAuthorizationDenial, isMemoryReadableCached, nodeNotFoundError, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
+import { type Context, getAccessibleMemoryIds, isAuthorizationDenial, isMemoryReadableCached, nodeNotFoundError, requireMemoryWriteAccess, withoutRequestCaches, requireCallerIdentity } from './resolvers.helpers.js';
 import { ownerLimitCaller, requireNodeHeadroom } from '../../../lib/ownerLimits/nodes.js';
 
 /** Expected authorization failures alone collapse to a concealed recovery miss. */
@@ -302,6 +302,7 @@ function changed(): GraphQLError {
 export const recoveryMutations = {
   /** One retained ordinary node, restored under the same authority/address/row/rulebook protocol as supported writers. */
   restoreNode: async (_: unknown, args: { nodeRef: string }, ctx: Context) => {
+    requireCallerIdentity(ctx);
     const candidate = await recoveryTarget(ctx, args.nodeRef);
     if (!candidate) throw nodeNotFoundError(args.nodeRef);
     const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: candidate.memoryId } });

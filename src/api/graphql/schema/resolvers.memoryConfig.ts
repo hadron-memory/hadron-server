@@ -62,6 +62,7 @@ import {
   requireOrgRole,
   requireMemoryManageAccess,
   withoutRequestCaches,
+  requireCallerIdentity,
 } from './resolvers.helpers.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
@@ -462,6 +463,7 @@ export const memoryConfigMutations = {
     { memoryRef, input }: { memoryRef: string; input: CreateNodeRoleRuleInput },
     ctx: Context,
   ) => {
+    requireCallerIdentity(ctx);
     const actor = requireWriter(ctx);
     const memory = await managedMemory(ctx, memoryRef);
     const role = input.role;

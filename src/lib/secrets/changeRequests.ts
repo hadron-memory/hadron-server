@@ -7,11 +7,15 @@ import { requirePersonOnlyAct } from '../auth/personAsThemselves.js';
 import { signingSurfacePolicy } from '../signing/surface.js';
 import { ensureAppKey, stagedValueAad } from './appKeys.js';
 import { encryptBytesAad } from '../tokenCrypto.js';
+import { assertAppSecretRoomForStaging } from './appSecrets.js';
 import { getProjectBaseUrl } from '../baseUrl.js';
 
 export const SECRET_CHANGE_TTL_SECONDS = 3600;
 export const MAX_OPEN_SECRET_CHANGES = 5;
 export const MAX_OPEN_SECRET_CHANGES_PER_REQUESTER = 2;
+/** #5245; cor:sec:070:02 (Proposed): open requests across one App, and one requester's share of them. Engineering bounds. */
+export const MAX_OPEN_SECRET_CHANGES_PER_APP = 100;
+export const MAX_OPEN_SECRET_CHANGES_PER_REQUESTER_PER_APP = 20;
 export const SECRET_CHANGE_PATH = '/secret-changes';
 export type ChangeOperation = 'STORE' | 'DELETE' | 'SET_PROTECTED' | 'CLEAR_PROTECTED';
 export interface ChangeRequest {
@@ -37,16 +41,32 @@ export function secretChangeCeremonyUrl(id: string): string {
 export async function stageSecretChange(tx: Prisma.TransactionClient, ctx: Context, a: {
  appId: string; secretId: string | null; name: string; kind: string; metadata: Prisma.JsonValue;
  operation: ChangeOperation; snapshot: string; valueJson?: string; sizeBytes?: number; protectedResult?: boolean; writeVersion?: boolean;
+ /** #5245: a protected create is refused at staging when the App has no room (secrets plus open protected creates). */
+ requireAppRoom?: boolean;
 }): Promise<GraphQLError> {
  if (!signingSurfacePolicy().signing || ctx.appKeyId) throw needsPasskey();
  const requester = await requirePersonOnlyAct({ ...ctx, db: tx } as Context, 'secret.change', needsPasskey);
  // A protected create has no secret row to lock: its name lock also serializes ordinary creates at completion.
  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`hadron:secret-change:${a.appId}:${a.name}`}))`;
- const [{ n, requester_n }] = await tx.$queryRaw<Array<{ n: bigint; requester_n: bigint }>>`SELECT count(*) AS n,
-  count(*) FILTER (WHERE requester_id=${requester}) AS requester_n FROM secret_change_requests
-  WHERE app_id=${a.appId} AND secret_name=${a.name} AND state='open' AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')`;
+ // #5245: the App-wide lock is the last staging lock before the count (two-int form, objsubid=2: it cannot collide with the
+ // single-key name or app-count locks). The count below depends on READ COMMITTED: it is a new statement after both lock
+ // waits, so it sees any stage that committed meanwhile; under SERIALIZABLE it would keep its pre-wait snapshot.
+ await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('hadron:secret-change-app'), hashtext(${a.appId}))`;
+ // #5245 (R3): after the name and App-wide locks (so two creates of one name still queue on the name lock), after the person
+ // check (a non-person still gets the passkey refusal), and judged before the caps. It takes the app-count lock last; completion
+ // holds that lock but never the name or App-wide lock, so the order is acyclic.
+ if (a.requireAppRoom) await assertAppSecretRoomForStaging(tx, a.appId);
+ const [{ n, requester_n, app_n, requester_app_n }] = await tx.$queryRaw<Array<{ n: bigint; requester_n: bigint; app_n: bigint; requester_app_n: bigint }>>`SELECT
+  count(*) FILTER (WHERE secret_name=${a.name}) AS n,
+  count(*) FILTER (WHERE secret_name=${a.name} AND requester_id=${requester}) AS requester_n,
+  count(*) AS app_n,
+  count(*) FILTER (WHERE requester_id=${requester}) AS requester_app_n FROM secret_change_requests
+  WHERE app_id=${a.appId} AND state='open' AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')`;
  if (Number(n) >= MAX_OPEN_SECRET_CHANGES) throw new GraphQLError('Too many open secret changes.', { extensions: { code: 'SECRET_CHANGE_REQUEST_LIMIT' } });
- if (Number(requester_n) >= MAX_OPEN_SECRET_CHANGES_PER_REQUESTER) throw new GraphQLError('Too many open secret changes for this requester.', { extensions: { code: 'SECRET_CHANGE_REQUESTER_LIMIT' } });
+ if (Number(requester_n) >= MAX_OPEN_SECRET_CHANGES_PER_REQUESTER || Number(requester_app_n) >= MAX_OPEN_SECRET_CHANGES_PER_REQUESTER_PER_APP) {
+  throw new GraphQLError('Too many open secret changes for this requester.', { extensions: { code: 'SECRET_CHANGE_REQUESTER_LIMIT' } });
+ }
+ if (Number(app_n) >= MAX_OPEN_SECRET_CHANGES_PER_APP) throw new GraphQLError('Too many open secret changes in this App.', { extensions: { code: 'SECRET_CHANGE_APP_LIMIT' } });
  const id = randomBytes(16).toString('hex');
  let ciphertext: string | null = null, keyVersion: number | null = null;
  if (a.valueJson !== undefined) {
