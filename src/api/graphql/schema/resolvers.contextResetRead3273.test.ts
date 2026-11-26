@@ -136,7 +136,6 @@ describe('#3273 ContextReset read', () => {
     const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
     const key = await db.appKey.create({ data: { appId: foreign.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4) } });
     await joinHostForKey(db, key.id, 'orca1');
-    await joinHostForKey(db, key.id, 'orca1');
     await M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate', hostId: 'orca1' }, ctx(f.manager.id));
     await same(s.resetId, { db, appId: foreign.id, appKeyId: key.id, roles: [] }, foreign.id);
     // Operation history is append-only and reset identity immutable. Insert a separate synthetic reset;

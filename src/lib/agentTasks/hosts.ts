@@ -72,7 +72,7 @@ export function registrationLapsesAt(
  * SQL reader of liveness carries the same `lost_at IS NULL`.
  */
 export function isRegistrationLive(
-  r: { refreshedAt: Date; pollIntervalSeconds: number; lostAt?: Date | null },
+  r: { refreshedAt: Date; pollIntervalSeconds: number; lostAt: Date | null },
   now: Date,
   checkIns: number = HOST_LAPSE_CHECK_INS_DEFAULT,
 ): boolean {
