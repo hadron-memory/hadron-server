@@ -1,4 +1,4 @@
-import { assertMoveWithinSizeLimit, SubtreeMoveTooLargeError } from '../lib/moveSizeLimit.js';
+import { assertMoveWithinSizeLimit, mapMoveExpiry, SubtreeMoveTimedOutError, SubtreeMoveTooLargeError } from '../lib/moveSizeLimit.js';
 import { respondSessionSuperseded } from '../lib/sessionSuperseded.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/github/syncNotAttempted.js';
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
@@ -8764,7 +8764,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
       let edgeUrnChanges: MoveNodeSubtreeResult['edgeUrnChanges'] = [];
       try {
-        const completed = await withArchivePlanRetries(async (timeout) => {
+        const completed = await mapMoveExpiry(() => withArchivePlanRetries(async (timeout) => {
           let relocated: MoveNodeSubtreeResult['moved'] = [];
           let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
           let edgeUrnChanges: MoveNodeSubtreeResult['edgeUrnChanges'] = [];
@@ -9006,7 +9006,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // here (mirrors extractParentNodeGraph / cloneMemory).
           { timeout });
           return { result: attemptResult, relocated, linkWarnings, edgeUrnChanges };
-        });
+        }));
         result = completed.result;
         relocated = completed.relocated;
         linkWarnings = completed.linkWarnings;
@@ -9038,6 +9038,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         if (e instanceof SubtreeMoveTooLargeError) {
           return refusalResult(`[move_too_large] ${e.message}`);
+        }
+        if (e instanceof SubtreeMoveTimedOutError) {
+          return refusalResult(`[move_timed_out] ${e.message}`);
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
           return refusalResult(`[spec_minted_permanent] ${e.message}`);

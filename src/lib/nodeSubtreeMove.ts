@@ -199,6 +199,42 @@ function relativeContentLinks(content: string): Array<{ raw: string; target: str
   return links;
 }
 
+/**
+ * #5230: the live nodes of a memory at any of `locs` (distinct). The list follows a subtree's content links, not its node
+ * count, so it goes in chunks that stay under Postgres's 32,767 bind cap. A loc is unique in a memory, so the chunks'
+ * rows never repeat.
+ */
+export const LOC_LOOKUP_CHUNK = 10_000;
+export async function findLiveNodesByLoc(tx: Prisma.TransactionClient, memoryId: string, locs: string[]) {
+  const found: Array<{ id: string; loc: string }> = [];
+  for (let i = 0; i < locs.length; i += LOC_LOOKUP_CHUNK) {
+    found.push(...await tx.node.findMany({
+      where: { memoryId, loc: { in: locs.slice(i, i + LOC_LOOKUP_CHUNK) }, deletedAt: null },
+      select: { id: true, loc: true },
+    }));
+  }
+  return found;
+}
+
+/**
+ * The edge locs a memory already holds (live OR soft-deleted) at any of `bases`, or under one as `<base>:…`.
+ * #5230: each base binds twice and the bases follow the moved edges, so they go in chunks (10,001 binds each); the set
+ * merges a loc that two chunks both match.
+ */
+export const BASE_LOOKUP_CHUNK = 5_000;
+export async function findHeldEdgeLocs(tx: Prisma.TransactionClient, memoryId: string, bases: string[]): Promise<Set<string>> {
+  const held = new Set<string>();
+  for (let i = 0; i < bases.length; i += BASE_LOOKUP_CHUNK) {
+    const chunk = bases.slice(i, i + BASE_LOOKUP_CHUNK);
+    const rows = await tx.edge.findMany({
+      where: { memoryId, OR: [{ loc: { in: chunk } }, ...chunk.map((b) => ({ loc: { startsWith: `${b}:` } }))] },
+      select: { loc: true },
+    });
+    for (const row of rows) held.add(row.loc);
+  }
+  return held;
+}
+
 /** A miss at a live loc may still resolve through a historical NODE alias. */
 async function aliasTargetId(
   tx: Prisma.TransactionClient,
@@ -438,10 +474,7 @@ export async function moveNodeSubtree(
     : [];
   const targets = [...new Set(contentLinks.map((link) => link.target))];
   const sourceTargets = targets.length
-    ? await tx.node.findMany({
-        where: { memoryId: srcMemoryId, loc: { in: targets }, deletedAt: null },
-        select: { id: true, loc: true },
-      })
+    ? await findLiveNodesByLoc(tx, srcMemoryId, targets)
     : [];
   const sourceIdByLoc = new Map(sourceTargets.map((n) => [n.loc, n.id]));
   for (const target of targets) {
@@ -645,10 +678,7 @@ export async function moveNodeSubtree(
   /** Compare content links against either the committed or virtual destination. */
   async function linkWarningsAfterMove(virtual: boolean): Promise<MoveLinkWarning[]> {
     const destinationTargets = targets.length
-      ? await tx.node.findMany({
-          where: { memoryId: destMemoryId, loc: { in: targets }, deletedAt: null },
-          select: { id: true, loc: true },
-        })
+      ? await findLiveNodesByLoc(tx, destMemoryId, targets)
       : [];
     const destinationIdByLoc = new Map<string, string>(destinationTargets.map((n) => [n.loc, n.id]));
     if (virtual) {
@@ -968,11 +998,7 @@ async function rebaseMovedEdges(
   const taken = new Map<string, Set<string>>();
   for (const memoryId of new Set(plans.map((p) => p.memoryId))) {
     const bases = [...new Set(plans.filter((p) => p.memoryId === memoryId).map((p) => p.base))];
-    const rows = await tx.edge.findMany({
-      where: { memoryId, OR: [{ loc: { in: bases } }, ...bases.map((b) => ({ loc: { startsWith: `${b}:` } }))] },
-      select: { loc: true },
-    });
-    taken.set(memoryId, new Set(rows.map((r) => r.loc)));
+    taken.set(memoryId, await findHeldEdgeLocs(tx, memoryId, bases));
   }
 
   const changes: EdgeUrnChange[] = [];
