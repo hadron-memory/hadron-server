@@ -14,6 +14,8 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { parse } from 'graphql';
 import { createServerOnCleanDb } from '../../test/startServerFixture.js';
+import { db } from '../../integrations/db/client.js';
+import { signJwt } from '../../auth/jwt.js';
 import { resolvers } from './schema/resolvers.js';
 import {
   GRAPHQL_ADMISSION_DEFAULTS,
@@ -129,10 +131,17 @@ describe('L1 query source bytes (POST, real stack)', () => {
 
   it('control: a small query carrying a 5 MB content variable is still admitted and reaches its resolver', async () => {
     createNodeSpy.mockClear();
-    const res = await post(base, {
-      query: 'mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }',
-      variables: { i: { memoryRef: 'x', loc: 'a', name: 'a', content: 'c'.repeat(5 * 1024 * 1024) } },
-    });
+    // #85: createNode takes an App ref (install target), so a signed-out caller is refused before the resolver.
+    const user = await db.user.create({ data: { handle: 'admission-control', roles: ['READER'] } });
+    const token = await signJwt({ sub: user.id, roles: ['READER'] });
+    const res = await fetch(base + '/graphql', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        query: 'mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }',
+        variables: { i: { memoryRef: 'x', loc: 'a', name: 'a', content: 'c'.repeat(5 * 1024 * 1024) } },
+      }),
+    }) as Reply;
     expect(res.status).toBe(200);
     expect((await res.json()).errors[0].message).toBe('Internal server error.'); // #1789: the spy's plain Error is a fault; reaching the resolver is asserted by the spy call below
     expect(createNodeSpy).toHaveBeenCalledTimes(1);
