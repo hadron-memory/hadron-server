@@ -54,7 +54,7 @@ describe('#5211 item 2: a line indented to an open list item continues it', () =
     ['a nested item', '- a\n  - b\n\n    §script>', ALL],
   ]);
   it('four columns past the item content is code in every reader, and stays as written', () => {
-    for (const body of ['- a\n\n      <script>', '1. a\n\n       <script>']) {
+    for (const body of ['- a\n\n      <script>', '1. a\n\n       <script>', '- a\n\nb\n\n    <script>']) {
       expect(escapeUnterminatedHtml(body), body).toBe(body);
       expect(losers(body), body).toEqual([]);
     }

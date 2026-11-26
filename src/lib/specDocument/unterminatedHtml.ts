@@ -1,5 +1,5 @@
 /**
- * #5033 (cor:spc:030:02, ruling 0206; option (b), Proposed): authored text that ends in an UNTERMINATED raw-HTML construct
+ * #5033 (cor:spc:030:02, ruling 0206; option (b), Decided by Holger 2026-11-25): authored text that ends in an UNTERMINATED raw-HTML construct
  * swallows what follows it. The renderer puts the server's own `<a id>` anchor (and the next heading) right after a part's
  * body, so in an HTML5 parser an open tag takes the anchor's `id` as one of its own attributes, an open quoted value takes the
  * anchor and the heading with it, and a raw-text element (`<textarea>`, `<script>`, `<style>`, `<title>`), a comment, a
@@ -68,6 +68,13 @@ const isAsciiPunct = (c: string | undefined): boolean => c !== undefined && /[!-
  * quote and the like are legal in it and the tag rules do not apply: it is complete as written.
  */
 const AUTOLINK = /<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>/y;
+
+/**
+ * #5211 — a tag CommonMark accepts as raw HTML (spec 0.31, 6.6): a name, attributes whose names and unquoted values hold none of the
+ * characters it forbids, and a closing `>`. Anything else is text to Markdown, which then reads what the tag holds.
+ */
+const CM_OPEN_TAG = /^<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>$/;
+const CM_CLOSE_TAG = /^<\/[A-Za-z][A-Za-z0-9-]*\s*>$/;
 
 /** CommonMark HTML block type 6 (spec 0.31): the tag names that start a block (the name may be an opening or a closing tag). */
 const BLOCK6 = 'address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul';
@@ -191,8 +198,16 @@ function contentInside(line: string, list: readonly Container[]): string | null 
 /** What a line of the text was, for the rules that depend on whether a paragraph is open. */
 type LineKind = 'blank' | 'code' | 'nonpara' | 'marker' | 'other';
 
-/** The index of the `<` that opens the first unterminated construct at or after `from`, or -1. */
-function firstUnterminated(text: string, from: number): number {
+/**
+ * #5211 — the Markdown reader a scan models. They differ on three shapes, and the pass escapes what either needs (escapeUnterminatedHtml):
+ * CommonMark (commonmark.js, markdown-it) starts a type 7 block at a type 1 end tag alone on a line and reads any `<!` and a name as a
+ * declaration; marked (the portal's) does neither (it needs a blank after the name), and reads a line after a fence its containers ended
+ * as markup.
+ */
+type ReaderModel = 'commonmark' | 'marked';
+
+/** The index of the `<` that opens the first unterminated construct at or after `from`, or -1, as `model` reads the text. */
+function firstUnterminated(text: string, from: number, model: ReaderModel = 'commonmark'): number {
   const n = text.length;
   let fence: OpenFence | null = null;
   let fenceContainers: Container[] = [];
@@ -219,6 +234,8 @@ function firstUnterminated(text: string, from: number): number {
   let markerWidth = 0;
   // Whether the line before was in a list, so that an item with any number continues it.
   let inList = false;
+  // #5211 — the column the content of the innermost open list item starts at, or -1: a line indented to it continues the item.
+  let listCol = -1;
   // A raw-text element opened in the middle of a line is inline HTML: Markdown goes on parsing after it, so only an end tag
   // that Markdown also reads as HTML (outside code, a fence and a backslash escape) closes it. -1 when none is open.
   let rawStart = -1;
@@ -353,6 +370,8 @@ function firstUnterminated(text: string, from: number): number {
       const content = line.slice(here.at);
       // A fence lives in the containers of the line that opened it, and ends with them.
       const within = fence === null ? null : contentInside(line, fenceContainers);
+      // #5211 — the fence ended because its containers did: marked reads the next line as markup, whatever its indent.
+      const fenceCut = fence !== null && within === null;
       if (within === null) fence = null;
       const wasOpen = fence !== null;
       const step = stepFence(within ?? content, fence);
@@ -367,7 +386,12 @@ function firstUnterminated(text: string, from: number): number {
       // A line right after a definition's line continues its paragraph, so its indent makes no code of it.
       const afterDefinition = inDefinition;
       inDefinition = false;
-      if (indent >= 4 && inner.trim() !== '' && prev !== 'other' && prev !== 'marker' && !afterDefinition) { prev = 'code'; lrd = 0; i = end + 1; continue; }
+      // #5211 — a list item: a line indented to its content continues it, and is code only four columns past that.
+      const lineCols = columnAfter((/^[ \t]*/.exec(line) as RegExpExecArray)[0]);
+      if (here.list.some((c) => !c.quote)) listCol = quotes === '' ? columnAfter(line.slice(0, here.at)) : -1;
+      else if (line.trim() !== '' && lineCols < listCol && prev !== 'other') listCol = -1;
+      const codeIndent = listCol > 0 && quotes === '' && here.list.length === 0 && lineCols >= listCol ? lineCols - listCol : indent;
+      if (codeIndent >= 4 && inner.trim() !== '' && prev !== 'other' && prev !== 'marker' && !afterDefinition && !(fenceCut && model === 'marked')) { prev = 'code'; lrd = 0; i = end + 1; continue; }
       if (lrd === 3) {
         // Inside a title that opened on an earlier line: still the definition, until the line that closes it (or a blank line, which ends the attempt).
         if (inner.trim() === '') { prev = prev === 'code' ? 'code' : 'blank'; lrd = 0; } else { prev = 'nonpara'; inDefinition = true; lrd = hasCloser(inner, titleCloser) ? 0 : 3; }
@@ -426,8 +450,9 @@ function firstUnterminated(text: string, from: number): number {
       continue;
     }
     if (text.startsWith('<!--', i)) {
-      if (text.startsWith('<!-->', i)) { i += 5; continue; }
-      if (text.startsWith('<!--->', i)) { i += 6; continue; }
+      // #5211 — at the head of a line these are a whole type 2 block, so the rest of their line is raw.
+      if (text.startsWith('<!-->', i)) { if (startsLine(i)) raw(lineEndAt(i)); i += 5; continue; }
+      if (text.startsWith('<!--->', i)) { if (startsLine(i)) raw(lineEndAt(i)); i += 6; continue; }
       const close = text.indexOf('-->', i + 4);
       if (close === -1 || close + 3 > blockLimit(i)) return i;
       if (startsLine(i)) raw(lineEndAt(close));
@@ -455,6 +480,8 @@ function firstUnterminated(text: string, from: number): number {
       i = first + 1;
       continue;
     }
+    // #5211 — marked takes a declaration only when a blank follows its name; any other `<!` and a name is text to it, so what follows is read.
+    if (model === 'marked' && /^<![A-Za-z]+(?![A-Za-z\s])/.test(text.slice(i, i + 64))) { i += 2; continue; }
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
@@ -491,11 +518,17 @@ function firstUnterminated(text: string, from: number): number {
     // An end tag takes attributes in a browser (a quote hides a `>`) but htmlparser2 ends it at the first `>`; where the two ends differ the
     // readers resume in different places, so the tag is left unterminated rather than guessed.
     if (isEnd && tagEnd !== text.indexOf('>', i) + 1) return i;
+    // #5211 — outside an HTML block, a tag CommonMark does not accept is text to Markdown, which reads what it holds: the scan goes on inside
+    // it. A raw-text element, a template and a block opener at the head of a line keep the browser's reading, which is the stricter one.
+    if (i >= rawUntil && !RAW_TEXT.has(name) && name !== 'template' && name !== 'plaintext' && !(startsLine(i) && opensBlock)
+      && !(isEnd ? CM_CLOSE_TAG : CM_OPEN_TAG).test(text.slice(i, tagEnd))
+      // Held back while no reader the tests can run shows the loss: linkedom does not model `template` (#5211, a parser waits on a ruling).
+      && !/<template/i.test(text.slice(i + 1, tagEnd))) { i += 1; continue; }
     // A block-level tag at the head of a line (type 6), or a complete tag alone on its line that does not interrupt a paragraph (type 7),
     // starts an HTML block that runs to the next blank line.
     if (startsLine(i)) {
       if (BLOCK6_NAMES.has(name)) raw(containerEnd(i, true));
-      else if (!TYPE1_NAMES.has(name) && !text.slice(i, tagEnd).includes('\n') && text.slice(tagEnd, lineEndAt(tagEnd)).trim() === '' && !interrupts()) {
+      else if ((!TYPE1_NAMES.has(name) || (isEnd && model === 'commonmark')) && !text.slice(i, tagEnd).includes('\n') && text.slice(tagEnd, lineEndAt(tagEnd)).trim() === '' && !interrupts()) {
         raw(containerEnd(i, true));
       }
     }
@@ -579,7 +612,8 @@ export function escapeUnterminatedHtml(text: string): string {
   if (!text.includes('<')) return text;
   let cur = text;
   for (let k = 0; ; k += 1) {
-    const at = firstUnterminated(cur, 0);
+    const ats = [firstUnterminated(cur, 0, 'commonmark'), firstUnterminated(cur, 0, 'marked')].filter((x) => x !== -1);
+    const at = ats.length === 0 ? -1 : Math.min(...ats);
     if (at === -1) return cur;
     // A text that keeps hiding another construct behind the one just escaped: close the question for every `<` it holds.
     if (k === MAX_RESTARTS) return cur.replace(/</g, '&lt;');
