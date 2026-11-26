@@ -21,7 +21,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { nodeMutations, updateNodePropertiesWith } from './resolvers.mutation.node.js';
 import { nodeQueries } from './resolvers.query.node.js';
 import type { MemorySchema } from '../../../lib/memorySchema.js';
-import type { NodeWhere } from '../../../lib/retrieval/nodeWhere.js';
+import { compileNodeWhere, NodeWhereError, type NodeWhere } from '../../../lib/retrieval/nodeWhere.js';
 import {
   ObjectStoreError,
   projectNodeToObject,
@@ -56,7 +56,11 @@ function mapObjectError(e: unknown): never {
 async function readMemorySchema(ctx: Context, memoryRef: string): Promise<MemorySchema | null> {
   try {
     const { id } = await resolveMemoryRef(ctx.db, memoryRef);
-    const accessible = await getAccessibleMemoryIds(ctx);
+    // #5202: the one named memory is a public target, exactly as node search passes it (resolvers.query.node.ts), so a userless
+    // caller (a pure App key, session-bound or not) who can read a PUBLIC knowledge memory's rows gets its schema applied as any
+    // reader does. Nothing else is named, so no other memory is admitted; a caller who cannot read it, and a ref that does not
+    // exist, still get null.
+    const accessible = await getAccessibleMemoryIds(ctx, undefined, { publicTargetIds: [id] });
     if (!accessible.includes(id)) return null; // no disclosure
     const row = await ctx.db.memory.findUnique({ where: { id }, select: { schema: true } });
     return (row?.schema as unknown as MemorySchema | null) ?? null;
@@ -163,6 +167,18 @@ export const objectQueries = {
       sortProperty = sortToPropertySort(sort, t, schema);
     } catch (e) {
       mapObjectError(e);
+    }
+    // #5202: the predicate the query actually runs is `match` AND `where` combined, so it is compiled here, with the same refusal and
+    // text findNodes gives it, BEFORE the undeclared-field check: an over-cap or malformed query that also names an undeclared field
+    // is BAD_USER_INPUT ("malformed input is refused as bad input first"), never FIELD_NOT_DECLARED. `firstUndeclaredField`'s own
+    // compile of `where` alone is then a no-op guard.
+    if (combinedWhere) {
+      try {
+        compileNodeWhere(combinedWhere, () => '$0');
+      } catch (e) {
+        if (e instanceof NodeWhereError) throw badInput(`findNodes filter.where: ${e.message}`);
+        throw e;
+      }
     }
     // #725 (cor:api:170:03): after the schema read, which is null for a memory the caller cannot read (so such a caller gets today's
     // answer, never this refusal) and after malformed input has been refused; before any row is read.
