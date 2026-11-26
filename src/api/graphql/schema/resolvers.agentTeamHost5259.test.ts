@@ -301,6 +301,15 @@ describe('updateAgentTeamHost: settings, not keys', () => {
     expect(await code(update({ hostId: 'mac1', label: 'x' }))).toBe('HOST_NOT_FOUND');
   });
 
+  it('an App key is refused before its input is judged: malformed input still answers AGENT_TEAM_HOST_NOT_PERMITTED, so it learns no input grammar', async () => {
+    await join({ hostId: 'mac1' });
+    const k = await mkKey(app.id, 'plain');
+    expect(await code(update({ hostId: 'not a token!', label: null, pollIntervalSeconds: 0 }, keyCtx(k.id)))).toBe('AGENT_TEAM_HOST_NOT_PERMITTED');
+    expect(await code(update({ hostId: 'mac1', pollIntervalSeconds: 0 }, keyCtx(k.id)))).toBe('AGENT_TEAM_HOST_NOT_PERMITTED');
+    // The same malformed input from a manager is judged on its grammar, so the order is what the pins above see.
+    expect(await code(update({ hostId: 'mac1', pollIntervalSeconds: 0 }))).toBe('BAD_AGENT_TEAM_HOST_ARGS');
+  });
+
   it('a held worker on its holder\'s instruction is admitted, with one manager-act record', async () => {
     await join({ hostId: 'mac1' });
     const boss = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Boss', slug: 'boss', heldByUserId: manager.id, heldAt: new Date() }, select: { id: true } });
