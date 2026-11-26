@@ -163,23 +163,24 @@ describe('#5265 item 2: a list closed by an HTML block keeps its code', () => {
   // CommonMark's own closing line: a type 7 block (`<span>`) does not close the item, so the code stays the item's (Bradley, LOCAL at 8dd599df:
   // a mutant using marked's line leaves it raw for commonmark.js and markdown-it).
   cases([['a type 7 line does not close it', '- a\n<span>\n\n    §script>', ['commonmark.js', 'markdown-it']]]);
-  it.each(['- a\n<div>\n\n    <script>', '> - a\n> <div>\n>\n>     <script>', '- a\nb\n<div>\n\n    <script>'])('%j stays as written', (body) => {
+  // The last is a type 1 line (`<script>`), which closes the item as a type 6 one does (main escapes the code's tag).
+  it.each(['- a\n<div>\n\n    <script>', '> - a\n> <div>\n>\n>     <script>', '- a\nb\n<div>\n\n    <script>', '- a\n<script></script>\n    <script>'])('%j stays as written', (body) => {
     expect(escapeUnterminatedHtml(body)).toBe(body);
     expect(losers(body)).toEqual([]);
   });
 });
 
 describe('#5265 item 4: a tab before a quote inside a list item', () => {
-  cases([
-    ['the quote continues the item', '> - a\n>\t> q\n>\n>     §script>', ['commonmark.js', 'markdown-it']],
-    ['marked strips the whole tab after a quote marker', '1.        \n>\t  > > <b y= §script>\n\n  >   > ', ['marked']],
-  ]);
+  // CommonMark's half only: marked's model of a tab after a quote marker is left to #5332, with the bogus-comment rule it exposes.
+  cases([['the quote continues the item', '> - a\n>\t> q\n>\n>     §script>', ['commonmark.js', 'markdown-it']]]);
 });
 
 describe('#5265 item 9: a line of mixed -, * and _ is no thematic break', () => {
   cases([
     ['-*- continues the item', '- a\n-*-\n\n    §script>', ALL],
     ['*-* too', '- a\n*-*\n\n    §script>', ALL],
+    // CommonMark's line alone: the item stays open past the type 7 line and the mixed one, so the tab's tag is the item's paragraph.
+    ['after a type 7 line', "- a\n<span>\n-*-\n\t§b x='", ['marked']],
   ]);
 });
 
@@ -205,22 +206,14 @@ describe('#5265 rebuild on items 2, 4 and 9: the bodies main keeps', () => {
     ['marked keeps an instruction line in the item', '- /\n<?>\n    §script>', ['marked']],
     ['and a CDATA line', '- b\n<![CDATA[]]>\n    §textarea>', ['marked']],
     ['an ordered item', '1. t\n<![CDATA[]]>\n    §script>', ['marked']],
-    // A `<!` or `</` with no letter after it is text to Markdown, which emits the raw-text element after it (a browser reading the raw
-    // string ends a bogus comment at the `>`): the hidden tag is escaped, the comment is not.
-    ['a raw-text element behind `<!`', '> x<!§script>', ALL],
-    ['behind `</`', '>>r</§script>\n</§script>', ['commonmark.js', 'markdown-it']],
-    ['on the next line', '>></§script><!\n    §script>', ['commonmark.js', 'markdown-it']],
-    ['a tab after a quote marker (item 4) reaching one', '   >\t §pre><!§script>', []],
   ]);
   it('a lesser tag behind `<!`, a later line past a blank, and an HTML block are left as main leaves them', () => {
     // [body, the readers that lose it, the same on main]: a line-head `<!<b>`, a raw-text element two lines on or past a blank, `<!` inside
-    // an HTML block (a browser's bogus comment is the only reading there), and a lesser tag.
+    // an HTML block, and a lesser tag. A raw-text element hidden behind a bare `<!` or `</` outside an HTML block is #5332.
     // Known losses that main has too (Xan, team chat #152402): the `</textarea>` two lines on is #5323 (escaping it would lose the anchor
     // in commonmark.js and markdown-it, which keep it on main), and the `<xmp>` behind `<div/` is #5324 (not the window's).
     for (const [body, lost] of [
       ['<!<b>\n-\n<!x>~~~', []], ['<!\n\n</textarea>\n~~~', ['marked']], ['<!\n-\n</textarea>\n~~~', ['marked']], ['<x>\n```<!<xmp>', []],
-      // The `</` site's mirror of the `<!` one inside an HTML block (Bradley, LOCAL at 8dd599df).
-      ['<x>\n```</<xmp>', []], ['<div>\n</<script>', []],
       ['-<!<pre>\n<div/<xmp>', ['commonmark.js', 'markdown-it']],
     ] as Array<[string, string[]]>) {
       expect(escapeUnterminatedHtml(body), body).toBe(body);

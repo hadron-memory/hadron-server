@@ -54,21 +54,6 @@ const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe
 const MAX_RESTARTS = 32;
 /** #5265 — the scans the last call of escapeUnterminatedHtml ran (one per model per escape), for a pin that bounds the work, not the wall clock. */
 let scansRun = 0;
-/** #5265 — a raw-text element's (or `plaintext`) start: it takes the rest of the page as text once a reader emits it. */
-const RAW_TEXT_START = /<\/?(?:script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext)(?=[\s/>]|$)/i;
-/**
- * #5265 — where a bogus comment (`<!` or `</` with no letter after it, at `at`, running to the `>` at `close`) hides a raw-text element from
- * a browser that Markdown reads as one (it reads the `<!` as text: `<!<script>` emits the `<script>`), or -1. Outside an HTML block only,
- * where the readers part, and on the comment's line or the next. The hidden tag is reported, not the comment: the line keeps its shape
- * (marked refuses a setext underline under a line like `<!<b>`), and the tag is no tag to anyone once escaped.
- */
-function bogusHiddenTag(text: string, at: number, close: number): number {
-  const body = text.slice(at + 2, close);
-  const raw = RAW_TEXT_START.exec(body);
-  if (raw === null || body.slice(0, raw.index).split('\n').length > 2) return -1;
-  return at + 2 + raw.index;
-}
-
 const isLetter = (c: string | undefined): boolean => c !== undefined && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
 const isBlank = (c: string): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
 const isAsciiPunct = (c: string | undefined): boolean => c !== undefined && /[!-/:-@[-`{-~]/.test(c);
@@ -240,7 +225,9 @@ function quoteColumns(line: string, k: number): { marker: number; content: numbe
   return { marker: 0, content: 0 };
 }
 
-const LIST_CLOSING_LINE_MARKED = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|(?:-[ \t]*){3,}$|(?:\*[ \t]*){3,}$|(?:_[ \t]*){3,}$|<(?:[a-z].*>|!--))/i;
+/** #5265 — marked's line: any HTML tag or comment closes the item, but no instruction, CDATA or declaration. The mixed `-*-` line is left as main
+ * reads it here: CommonMark's line decides those bodies (one escape serves both models). */
+const LIST_CLOSING_LINE_MARKED = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|(?:[-*_][ \t]*){3,}$|<(?:[a-z].*>|!--))/i;
 /** What a line of the text was, for the rules that depend on whether a paragraph is open. */
 type LineKind = 'blank' | 'code' | 'nonpara' | 'marker' | 'other';
 
@@ -435,11 +422,8 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       // An indented code block: a line of four spaces or a tab, after a blank line, the start of the text or another such line.
       const quotes = line.slice(0, line.length - inner.length);
       const from = columnAfter(quotes);
-      // A tab right after a quote marker gives its first column to the marker in CommonMark; marked strips the whole tab with the marker (#5265).
-      const tabAfterQuote = quotes.endsWith('>') && inner.startsWith('\t');
-      const indent = model === 'marked' && tabAfterQuote
-        ? columnAfter((/^[ \t]*/.exec(inner.slice(1)) as RegExpExecArray)[0])
-        : columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0], from) - from - (tabAfterQuote ? 1 : 0);
+      // A tab right after a quote marker gives its first column to the marker.
+      const indent = columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0], from) - from - (quotes.endsWith('>') && inner.startsWith('\t') ? 1 : 0);
       // A line right after a definition's line continues its paragraph, so its indent makes no code of it.
       const afterDefinition = inDefinition;
       prevDefinition = afterDefinition;
@@ -560,13 +544,6 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
-      // #5265 — `<!` with no letter after it starts no declaration in Markdown, which reads it as text and a tag before the `>` as a tag
-      // (`<!<script>` emits the `<script>` raw), where a browser reading the raw string ends a bogus comment at that `>`: the readers part, so
-      // it is left unterminated (escaped), and the tag after it is judged on the rescan.
-      if (i >= rawUntil && !isLetter(text[i + 2])) {
-        const hidden = bogusHiddenTag(text, i, close);
-        if (hidden !== -1) return hidden;
-      }
       // marked ends such a block at the declaration's first `>` and reads the rest of the line as text (#5211); CommonMark keeps it raw.
       if (startsLine(i) && isLetter(text[i + 2]) && model === 'commonmark') raw(lineEndAt(close));
       if (startsLine(i) && isLetter(text[i + 2]) && model === 'marked') markedBlockAt = close + 1;
@@ -578,11 +555,6 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       // `</` and anything but a letter or `>` is a bogus comment, which runs to the next `>`.
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > tagLimit(i, false)) return i;
-      // #5265 — Markdown reads it as text, and a tag before the `>` as a tag, as for `<!<script>` above.
-      if (i >= rawUntil) {
-        const hidden = bogusHiddenTag(text, i, close);
-        if (hidden !== -1) return hidden;
-      }
       i = close + 1;
       continue;
     }
