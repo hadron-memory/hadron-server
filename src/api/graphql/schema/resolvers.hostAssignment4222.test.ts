@@ -410,6 +410,12 @@ describe('a start uses the assignment (cor:agt:070:08 unchanged: with none, noth
     await hostLists(['hadron-server/kit', 'hadron-cli/kit']);
     await taskMatcherTick(db, new Date());
     expect(await db.hostOperation.count({ where: { workerId: kit.id, type: 'worker.start' } })).toBe(1);
+    // Positive control: the worker is still startable for this deepseek assignment, so the count of one above is not
+    // the matcher passing the worker over. A new assignment (after the first task ends) does issue a second start.
+    for (const t of await db.agentTask.findMany({ where: { assigneeWorkerId: kit.id } })) await M.cancelAgentTask({}, { taskRef: t.id }, ctx(manager.id));
+    await M.createAgentTask({}, { input: { appRef: app.id, title: 'Again', assignee: { worker: kit.id }, closeSessionWhenDone: false } }, ctx(manager.id));
+    const starts = await db.hostOperation.findMany({ where: { workerId: kit.id, type: 'worker.start' }, orderBy: { issuedAt: 'asc' } });
+    expect(starts.map((o) => [o.status, (o.args as { family?: string }).family])).toEqual([['failed', 'deepseek'], ['issued', 'deepseek']]);
   });
 
   it('SERVER: no assignment issues nothing and the task waits', async () => {
