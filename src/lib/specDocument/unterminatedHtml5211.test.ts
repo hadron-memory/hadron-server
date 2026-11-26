@@ -8,7 +8,7 @@ import { parseHTML } from 'linkedom';
 import MarkdownIt from 'markdown-it';
 import { marked } from 'marked';
 import { describe, expect, it } from 'vitest';
-import { escapeUnterminatedHtml } from './unterminatedHtml.js';
+import { escapeUnterminatedHtml, scansOfLastCallForTests } from './unterminatedHtml.js';
 
 const reader = new commonmark.Parser();
 const writer = new commonmark.HtmlRenderer();
@@ -173,14 +173,6 @@ describe('#5265 item 4: a tab before a quote inside a list item', () => {
   ]);
 });
 
-describe('#5265 item 6: marked starts a fence right after a line-head declaration', () => {
-  cases([
-    ['with a final newline', '§!DOCTYPE html>```\n', ['marked']],
-    ['without one', '§!DOCTYPE html>```', ['marked']],
-    ['a tilde fence', '§!DOCTYPE html>~~~', ['marked']],
-  ]);
-});
-
 describe('#5265 item 9: a line of mixed -, * and _ is no thematic break', () => {
   cases([
     ['-*- continues the item', '- a\n-*-\n\n    §script>', ALL],
@@ -188,14 +180,55 @@ describe('#5265 item 9: a line of mixed -, * and _ is no thematic break', () => 
   ]);
 });
 
-it('#5265 item 9: after a mixed line the paragraph is still open, so a lone tag starts no HTML block', () => {
+it('#5265 item 9 changes only the list close: outside a list a mixed line is still taken for a block, as on main', () => {
+  // The `<span>` line then starts an HTML block, and the `<pre x=` in it is escaped: an over-escape no reader loses on (row 9 is the list
+  // close). Reading the mixed line as paragraph text here too would reach main's setext gaps (`-*-`, `-`, `<x>`, `~~~<xmp`), which lose.
   const body = 'a\n-*-\n<span>\nuse `<pre x=` here';
-  expect(escapeUnterminatedHtml(body)).toBe(body);
-  expect(losers(body)).toEqual([]);
+  expect(escapeUnterminatedHtml(body)).toBe('a\n-*-\n<span>\nuse `&lt;pre x=` here');
+  expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+  for (const b of ['-*-\n-\n<x>\n~~~<xmp', '<!E><v>\n-\n  ~~~\n\n-*-\n<!X']) expect(losers(escapeUnterminatedHtml(b)), b).toEqual([]);
 });
 
 describe('#5265 item 7 is not changed (Victor #151094: a raw-string reader counts under option (b))', () => {
   it('an open tag in the raw block after `</b>` stays escaped', () => {
     expect(escapeUnterminatedHtml('</b>\n```\n<b x=\n```\nz')).toBe('</b>\n```\n&lt;b x=\n```\nz');
+  });
+});
+
+describe('#5265 rebuild on items 2, 4 and 9: the bodies main keeps', () => {
+  // Each was lost at 5d444777 without item 6 and is kept by main (alphaY, extended and original fuzz sets).
+  cases([
+    // marked closes a list item at fewer HTML lines than CommonMark (no instruction, CDATA or declaration), so the line stays the item's.
+    ['marked keeps an instruction line in the item', '- /\n<?>\n    §script>', ['marked']],
+    ['and a CDATA line', '- b\n<![CDATA[]]>\n    §textarea>', ['marked']],
+    ['an ordered item', '1. t\n<![CDATA[]]>\n    §script>', ['marked']],
+    // A `<!` or `</` with no letter after it is text to Markdown, which emits the raw-text element after it (a browser reading the raw
+    // string ends a bogus comment at the `>`): the hidden tag is escaped, the comment is not.
+    ['a raw-text element behind `<!`', '> x<!§script>', ALL],
+    ['behind `</`', '>>r</§script>\n</§script>', ['commonmark.js', 'markdown-it']],
+    ['on the next line', '>></§script><!\n    §script>', ['commonmark.js', 'markdown-it']],
+    ['a tab after a quote marker (item 4) reaching one', '   >\t §pre><!§script>', []],
+  ]);
+  it('a lesser tag behind `<!`, a later line past a blank, and an HTML block are left as main leaves them', () => {
+    // [body, the readers that lose it, the same on main]: a line-head `<!<b>`, a raw-text element two lines on or past a blank, `<!` inside
+    // an HTML block (a browser's bogus comment is the only reading there), and a lesser tag.
+    for (const [body, lost] of [
+      ['<!<b>\n-\n<!x>~~~', []], ['<!\n\n</textarea>\n~~~', ['marked']], ['<!\n-\n</textarea>\n~~~', ['marked']], ['<x>\n```<!<xmp>', []],
+      ['-<!<pre>\n<div/<xmp>', ['commonmark.js', 'markdown-it']],
+    ] as Array<[string, string[]]>) {
+      expect(escapeUnterminatedHtml(body), body).toBe(body);
+      expect(losers(body), body).toEqual(lost);
+    }
+  });
+});
+
+describe('#5265 one call is bounded in work', () => {
+  // The work, not the wall clock: each escape rescans the text once per model, and past MAX_RESTARTS (32) escapes every `<` is escaped.
+  it('160 KB with 40 open tags spread through it runs 66 scans', () => {
+    const unit = `${'word '.repeat(800)}<b x='\n\n`;
+    const body = Array(40).fill(unit).join('');
+    const out = escapeUnterminatedHtml(body);
+    expect(scansOfLastCallForTests()).toBe(66);
+    expect(out).toBe(body.replace(/</g, '&lt;'));
   });
 });
