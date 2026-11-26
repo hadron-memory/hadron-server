@@ -419,7 +419,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       else if (depth > listDepth && listCol > 0 && quoteColumns(line, listDepth + 1).marker - quoteColumns(line, listDepth).content < listCol) listCol = -1;
       else if (depth < listDepth) listCol = -1;
       // A line that starts another block closes the item; only a paragraph line may continue it lazily.
-      else if (inner.trim() !== '' && lineCols < listCol && (prev !== 'other' || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|(?:[-*_][ \t]*){3,}$)/.test(inner))) listCol = -1;
+      else if (depth === listDepth && inner.trim() !== '' && lineCols < listCol && (prev !== 'other' || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|(?:[-*_][ \t]*){3,}$)/.test(inner))) listCol = -1;
       // Inside a deeper quote the item's content is that quote's to measure from.
       const opensQuote = depth > prevDepth;
       prevDepth = depth;
