@@ -58,9 +58,10 @@ describe('#5211 item 2: a line indented to an open list item continues it', () =
     ['an ordered item', '1. a\n   > q\n\n     §script>', ALL],
     ['a nested quote', '- a\n  > > q\n\n    §script>', ALL],
     ['the second item', '- a\n- b\n  > q\n\n    §script>', ALL],
+    ['a quote in an item in a quote', '> - a\n>   > q\n>\n>     §script>', ALL],
   ]);
   it('four columns past the item content is code in every reader, and stays as written', () => {
-    for (const body of ['- a\n\n      <script>', '1. a\n\n       <script>', '- a\n\nb\n\n    <script>', '- a\n# H\n\n    <script>', '- a\n***\n\n    <script>', '- a\n> q\n\n    <script>', '> - a\n>\n>       <script>']) {
+    for (const body of ['- a\n\n      <script>', '1. a\n\n       <script>', '- a\n\nb\n\n    <script>', '- a\n# H\n\n    <script>', '- a\n***\n\n    <script>', '- a\n> q\n\n    <script>', '> - a\n>\n>       <script>', '- a\n  >     <script>', '- a\n  > q\n  >\n  >     <script>', '- a\n  > q\n\n      <script>', '> - a\n\n    <script>', '> - a\n> > q\n>\n>     <script>', '> - a\n>  > q\n>\n>     <script>', '> - a\n\nb\n\n>     <script>', '> - a\n\n>     <script>']) {
       expect(escapeUnterminatedHtml(body), body).toBe(body);
       expect(losers(body), body).toEqual([]);
     }
@@ -124,6 +125,15 @@ describe('#5211 a declaration at the head of a line ends at its first `>` in mar
   ]);
 });
 
+describe('#5211 marked differential (#5257 delta)', () => {
+  cases([
+    ['a declaration after an empty item is text to marked', '1. \n<!X<pre x=   §textarea>§b b   ', ['marked']],
+    ['and after a two-digit one', '10. \n<!X§textarea>> - \n***', ['marked']],
+    ['a line-head `<!-->` with a line after it is inline in marked', '> - <!--><!x>\t\n    §textarea><div>', ['marked']],
+    ['and so is what follows it', '  <!-->~~~`\n>   > # h<!X<b y= §script>', ['marked']],
+  ]);
+});
+
 describe('#5211 item 7: content four columns past a bare marker', () => {
   it('a line between four and markerWidth + 4 columns in is the item paragraph, so the code span stays', () => {
     const body = '-\n     x\n  <span>\n  use `<pre x=` here';
@@ -131,3 +141,12 @@ describe('#5211 item 7: content four columns past a bare marker', () => {
     expect(losers(body)).toEqual([]);
   });
 });
+
+it('#5211 stays linear on deep quotes inside list items', () => {
+  for (const unit of [`- a\n${'  > '.repeat(300)}q\n`, `${'> '.repeat(300)}- a\n${'> '.repeat(300)}  > q\n`]) {
+    const body = unit.repeat(Math.ceil(120_000 / unit.length));
+    const t0 = Date.now();
+    escapeUnterminatedHtml(body);
+    expect({ unit: unit.slice(0, 20), fast: Date.now() - t0 < 5000 }).toEqual({ unit: unit.slice(0, 20), fast: true });
+  }
+}, 120_000);

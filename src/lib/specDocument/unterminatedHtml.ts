@@ -195,6 +195,26 @@ function contentInside(line: string, list: readonly Container[]): string | null 
   return line.slice(at);
 }
 
+/**
+ * The columns of the `k`-th quote marker of `line` (1-based) and of the content after it (the one blank that belongs to the marker
+ * included), in one walk; Infinity for both when the line has fewer markers. `k = 0` is the line's own start.
+ */
+function quoteColumns(line: string, k: number): { marker: number; content: number } {
+  let at = 0;
+  let col = 0;
+  for (let q = 1; q <= k; q += 1) {
+    let p = at;
+    while (line[p] === ' ' || line[p] === '\t') p += 1;
+    if (line[p] !== '>') return { marker: Infinity, content: Infinity };
+    const marker = columnAfter(line.slice(at, p), col);
+    col = marker + 1;
+    at = p + 1;
+    if (line[at] === ' ' || line[at] === '\t') { col = columnAfter(line[at], col); at += 1; }
+    if (q === k) return { marker, content: col };
+  }
+  return { marker: 0, content: 0 };
+}
+
 /** What a line of the text was, for the rules that depend on whether a paragraph is open. */
 type LineKind = 'blank' | 'code' | 'nonpara' | 'marker' | 'other';
 
@@ -237,6 +257,8 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
   // #5211 — the column the content of the innermost open list item starts at, or -1: a line indented to it continues the item.
   let listCol = -1;
   let listDepth = 0;
+  // The quote depth of the line before: a line that opens a deeper quote starts a container, with no paragraph open in it.
+  let prevDepth = 0;
   // A raw-text element opened in the middle of a line is inline HTML: Markdown goes on parsing after it, so only an end tag
   // that Markdown also reads as HTML (outside code, a fence and a backslash escape) closes it. -1 when none is open.
   let rawStart = -1;
@@ -393,11 +415,16 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       const lineCols = columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0], from) - from;
       const listedHere = here.list.some((c) => !c.quote);
       if (listedHere) { listCol = columnAfter(line.slice(0, here.at)) - from; listDepth = depth; }
-      else if (depth !== listDepth) listCol = -1;
+      // A quote that opens inside the item continues it when its marker sits at the item's content; leaving the item's own quote ends it.
+      else if (depth > listDepth && listCol > 0 && quoteColumns(line, listDepth + 1).marker - quoteColumns(line, listDepth).content < listCol) listCol = -1;
+      else if (depth < listDepth) listCol = -1;
       // A line that starts another block closes the item; only a paragraph line may continue it lazily.
       else if (inner.trim() !== '' && lineCols < listCol && (prev !== 'other' || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|(?:[-*_][ \t]*){3,}$)/.test(inner))) listCol = -1;
-      const codeIndent = listCol > 0 && !listedHere && lineCols >= listCol ? lineCols - listCol : indent;
-      if (codeIndent >= 4 && inner.trim() !== '' && prev !== 'other' && prev !== 'marker' && !afterDefinition && !(fenceCut && model === 'marked')) { prev = 'code'; lrd = 0; i = end + 1; continue; }
+      // Inside a deeper quote the item's content is that quote's to measure from.
+      const opensQuote = depth > prevDepth;
+      prevDepth = depth;
+      const codeIndent = listCol > 0 && !listedHere && depth === listDepth && lineCols >= listCol ? lineCols - listCol : indent;
+      if (codeIndent >= 4 && inner.trim() !== '' && ((prev !== 'other' && prev !== 'marker') || opensQuote) && !afterDefinition && !(fenceCut && model === 'marked')) { prev = 'code'; lrd = 0; i = end + 1; continue; }
       if (lrd === 3) {
         // Inside a title that opened on an earlier line: still the definition, until the line that closes it (or a blank line, which ends the attempt).
         if (inner.trim() === '') { prev = prev === 'code' ? 'code' : 'blank'; lrd = 0; } else { prev = 'nonpara'; inDefinition = true; lrd = hasCloser(inner, titleCloser) ? 0 : 3; }
@@ -457,8 +484,14 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     }
     if (text.startsWith('<!--', i)) {
       // #5211 — at the head of a line these are a whole type 2 block, so the rest of their line is raw.
-      if (text.startsWith('<!-->', i)) { if (startsLine(i)) raw(lineEndAt(i)); i += 5; continue; }
-      if (text.startsWith('<!--->', i)) { if (startsLine(i)) raw(lineEndAt(i)); i += 6; continue; }
+      // marked takes such a line as a block only when a blank line or the end follows it; otherwise it is inline.
+      const wholeBlock = (): void => {
+        if (!startsLine(i)) return;
+        const e = lineEndAt(i);
+        if (model === 'commonmark' || e >= n || /^[ \t]*(?:\n|$)/.test(text.slice(e + 1))) raw(e);
+      };
+      if (text.startsWith('<!-->', i)) { wholeBlock(); i += 5; continue; }
+      if (text.startsWith('<!--->', i)) { wholeBlock(); i += 6; continue; }
       const close = text.indexOf('-->', i + 4);
       if (close === -1 || close + 3 > blockLimit(i)) return i;
       if (startsLine(i)) raw(lineEndAt(close));
@@ -488,7 +521,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     }
     // #5211 — marked takes a declaration only when a blank follows its name; any other `<!` and a name is text to it, so what follows is read.
     // At the head of a line that interrupts no paragraph it starts an HTML block in marked too, and is complete there.
-    if (model === 'marked' && /<![A-Za-z]+(?![A-Za-z\s])/y.test(text.slice(i, text.indexOf('\n', i) === -1 ? n : text.indexOf('\n', i) + 1)) && !(startsLine(i) && prevBefore !== 'other')) { i += 2; continue; }
+    if (model === 'marked' && /<![A-Za-z]+(?![A-Za-z\s])/y.test(text.slice(i, text.indexOf('\n', i) === -1 ? n : text.indexOf('\n', i) + 1)) && !(startsLine(i) && prevBefore !== 'other' && prevBefore !== 'marker')) { i += 2; continue; }
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
