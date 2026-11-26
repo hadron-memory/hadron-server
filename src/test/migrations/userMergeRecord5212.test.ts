@@ -51,6 +51,9 @@ async function refused(run: () => Promise<unknown>, message: RegExp) {
   await pg.query('SAVEPOINT before_call');
   await expect(run()).rejects.toThrow(message);
   await pg.query('ROLLBACK TO SAVEPOINT before_call');
+  // RELEASE it: a rolled-back savepoint stays open, and any row written after it carries the SUBtransaction id, so the function's
+  // xmin test would refuse a later consent before reaching the pair or consumed_at checks (the pins after it could not fail).
+  await pg.query('RELEASE SAVEPOINT before_call');
   expect((await pg.query('SELECT count(*)::int AS n FROM user_merges')).rows[0].n).toBe(0);
   expect((await pg.query('SELECT count(*)::int AS n FROM users WHERE deleted_at IS NOT NULL')).rows[0].n).toBe(0);
 }
@@ -78,6 +81,7 @@ describe('#5212 A2: each refusal writes nothing', () => {
       await pg.query('SAVEPOINT a');
       await expect(call()).rejects.toThrow(/duplicate key|unique/i);
       await pg.query('ROLLBACK TO SAVEPOINT a');
+      await pg.query('RELEASE SAVEPOINT a');
       await pg.query('DELETE FROM user_merges');
       await pg.query(`INSERT INTO user_merges (source_user_id, target_user_id) VALUES ($1, $2)`, [t, other]);
       await expect(call()).rejects.toThrow(/target was itself merged away/);
@@ -97,6 +101,20 @@ describe('#5212 A2: each refusal writes nothing', () => {
     await consent('old'); // outside any BEGIN: autocommit
     await inTx(async () => {
       await refused(() => call(s, t, 'old'), /no consent consumed by this transaction/);
+    });
+  });
+});
+
+describe('#5212 the consent must be consumed at the transaction\'s top level', () => {
+  it('a consent consumed under a savepoint is refused (fail closed: mergeUsers consumes at the top level, never in a subtransaction)', async () => {
+    await inTx(async () => {
+      await pg.query('SAVEPOINT sub');
+      await consent('h1'); // the row carries the subtransaction id, not the transaction's
+      await expect(call()).rejects.toThrow(/no consent consumed by this transaction/);
+      await pg.query('ROLLBACK TO SAVEPOINT sub');
+      await pg.query('RELEASE SAVEPOINT sub');
+      await consent('h2'); // the same consent at the top level is accepted
+      expect((await call(s, t, 'h2')).rows[0].ok).toBe(true);
     });
   });
 });
