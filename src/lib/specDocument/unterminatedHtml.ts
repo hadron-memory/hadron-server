@@ -492,7 +492,8 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
-      if (startsLine(i) && isLetter(text[i + 2])) raw(lineEndAt(close));
+      // marked ends such a block at the declaration's first `>` and reads the rest of the line as text (#5211); CommonMark keeps it raw.
+      if (startsLine(i) && isLetter(text[i + 2]) && model === 'commonmark') raw(lineEndAt(close));
       i = close + 1;
       continue;
     }

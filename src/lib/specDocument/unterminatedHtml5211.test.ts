@@ -68,6 +68,10 @@ describe('#5211 item 3: a tag Markdown does not accept is text to it, so what it
     ['an attribute name holding a tag', 'a <b b§textarea> c', ALL],
     ['at the head of a line', '<x a b§textarea>', ALL],
   ]);
+  cases([
+    ['a name that only starts with template is read', '<b y= §templatex<§xmp>', ALL],
+    ['and with a blank after it', 'a <b y= <templatex §xmp>', ALL],
+  ]);
   it('the hold-back names the template element only', () => {
     expect(escapeUnterminatedHtml('a <b y= <templates><textarea>')).toBe('a <b y= <templates>&lt;textarea>');
     expect(losers('a <b y= <templates><textarea>')).toEqual(['commonmark.js', 'markdown-it', 'marked']);
@@ -97,7 +101,7 @@ describe('#5211 item 6: a declaration whose name is followed by `<` is text to m
     ['on a second line', 'x\n<!X§xmp>', ['marked']],
   ]);
   it('a declaration with a blank after its name, or one that starts a block (marked reads it as HTML there), is complete', () => {
-    for (const body of ['<!DOCTYPE html>', 'a <!X y> b', '<!X<xmp>', '<!x<xmp>', '# h\n<!X<xmp>', 'a <!X\n<b>c</b>']) {
+    for (const body of ['<!DOCTYPE html>', 'a <!X y> b', '<!X<xmp>', '<!x<xmp>', '# h\n<!X<xmp>', 'a <!X\n<b>c</b>', `a <!${'X'.repeat(70)} <xmp> y>`]) {
       expect(escapeUnterminatedHtml(body), body).toBe(body);
       expect(losers(body), body).toEqual([]);
     }
