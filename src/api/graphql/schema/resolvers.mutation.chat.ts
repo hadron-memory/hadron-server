@@ -1051,7 +1051,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw chatNotFoundError(chatId);
+      if (!chatNode) throw chatNotFoundError();
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
@@ -1510,7 +1510,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw chatNotFoundError(chatId);
+      if (!chatNode) throw chatNotFoundError();
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
@@ -1823,7 +1823,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw chatNotFoundError(chatId);
+      if (!chatNode) throw chatNotFoundError();
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
@@ -1887,7 +1887,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw chatNotFoundError(chatId);
+      if (!chatNode) throw chatNotFoundError();
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
@@ -1941,7 +1941,7 @@ export const chatMutations = {
         }),
         chatId,
       );
-      if (!chatNode) throw chatNotFoundError(chatId);
+      if (!chatNode) throw chatNotFoundError();
       // #1717: a chat has no ACL of its own (cor:acl:030:01) — writing it is
       // writing its host memory, so it takes CURRENT write access there. The
       // lookup's author and memory-creator arms only narrow candidates; they
