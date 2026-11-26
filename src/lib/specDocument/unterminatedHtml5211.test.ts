@@ -167,7 +167,10 @@ describe('#5265 item 2: a list closed by an HTML block keeps its code', () => {
 });
 
 describe('#5265 item 4: a tab before a quote inside a list item', () => {
-  cases([['the quote continues the item', '> - a\n>\t> q\n>\n>     §script>', ['commonmark.js', 'markdown-it']]]);
+  cases([
+    ['the quote continues the item', '> - a\n>\t> q\n>\n>     §script>', ['commonmark.js', 'markdown-it']],
+    ['marked strips the whole tab after a quote marker', '1.        \n>\t  > > <b y= §script>\n\n  >   > ', ['marked']],
+  ]);
 });
 
 describe('#5265 item 6: marked starts a fence right after a line-head declaration', () => {
@@ -183,4 +186,16 @@ describe('#5265 item 9: a line of mixed -, * and _ is no thematic break', () => 
     ['-*- continues the item', '- a\n-*-\n\n    §script>', ALL],
     ['*-* too', '- a\n*-*\n\n    §script>', ALL],
   ]);
+});
+
+it('#5265 item 9: after a mixed line the paragraph is still open, so a lone tag starts no HTML block', () => {
+  const body = 'a\n-*-\n<span>\nuse `<pre x=` here';
+  expect(escapeUnterminatedHtml(body)).toBe(body);
+  expect(losers(body)).toEqual([]);
+});
+
+describe('#5265 item 7 is not changed (Victor #151094: a raw-string reader counts under option (b))', () => {
+  it('an open tag in the raw block after `</b>` stays escaped', () => {
+    expect(escapeUnterminatedHtml('</b>\n```\n<b x=\n```\nz')).toBe('</b>\n```\n&lt;b x=\n```\nz');
+  });
 });

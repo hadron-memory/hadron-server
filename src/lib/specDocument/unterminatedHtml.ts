@@ -89,6 +89,14 @@ const BLOCK_START = new RegExp(
   ].join('|')})|[ \\t\\r]*\\n)`,
   'gim',
 );
+/**
+ * #5211, #5265 — a line that starts another block, and so closes an open list item rather than continuing it lazily: a heading, a quote, a
+ * fence, a thematic break (one character repeated: `-*-` is paragraph text) or an HTML block of types 1 to 6.
+ */
+const LIST_CLOSING_LINE = new RegExp(
+  `^ {0,3}(?:#{1,6}(?:[ \\t]|$)|>|\`{3,}|~{3,}|(?:-[ \\t]*){3,}$|(?:\\*[ \\t]*){3,}$|(?:_[ \\t]*){3,}$|<(?:script|pre|style|textarea)(?:[\\s>]|$)|<!--|<\\?|<![A-Za-z]|<!\\[CDATA\\[|<\\/?(?:${BLOCK6})(?:[\\s/>]|$))`,
+  'i',
+);
 function paragraphEnd(text: string, i: number): number {
   const lineStart = text.lastIndexOf('\n', i - 1) + 1;
   const eol = text.indexOf('\n', i);
@@ -209,7 +217,8 @@ function quoteColumns(line: string, k: number): { marker: number; content: numbe
     const marker = columnAfter(line.slice(at, p), col);
     col = marker + 1;
     at = p + 1;
-    if (line[at] === ' ' || line[at] === '\t') { col = columnAfter(line[at], col); at += 1; }
+    // The marker's one blank: a space, or one column of a tab (the rest of the tab is the content's indent, so the walk stays on it).
+    if (line[at] === ' ') { col += 1; at += 1; } else if (line[at] === '\t') col += 1;
     if (q === k) return { marker, content: col };
   }
   return { marker: 0, content: 0 };
@@ -408,8 +417,11 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       // An indented code block: a line of four spaces or a tab, after a blank line, the start of the text or another such line.
       const quotes = line.slice(0, line.length - inner.length);
       const from = columnAfter(quotes);
-      // A tab right after a quote marker gives its first column to the marker.
-      const indent = columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0], from) - from - (quotes.endsWith('>') && inner.startsWith('\t') ? 1 : 0);
+      // A tab right after a quote marker gives its first column to the marker in CommonMark; marked strips the whole tab with the marker (#5265).
+      const tabAfterQuote = quotes.endsWith('>') && inner.startsWith('\t');
+      const indent = model === 'marked' && tabAfterQuote
+        ? columnAfter((/^[ \t]*/.exec(inner.slice(1)) as RegExpExecArray)[0])
+        : columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0], from) - from - (tabAfterQuote ? 1 : 0);
       // A line right after a definition's line continues its paragraph, so its indent makes no code of it.
       const afterDefinition = inDefinition;
       prevDefinition = afterDefinition;
@@ -424,7 +436,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       else if (depth > listDepth && listCol > 0 && quoteColumns(line, listDepth + 1).marker - quoteColumns(line, listDepth).content < listCol) listCol = -1;
       else if (depth < listDepth) listCol = -1;
       // A line that starts another block closes the item; only a paragraph line may continue it lazily.
-      else if (depth === listDepth && inner.trim() !== '' && lineCols < listCol && (prev !== 'other' || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|(?:[-*_][ \t]*){3,}$)/.test(inner))) listCol = -1;
+      else if (depth === listDepth && inner.trim() !== '' && lineCols < listCol && (prev !== 'other' || LIST_CLOSING_LINE.test(inner))) listCol = -1;
       // Inside a deeper quote the item's content is that quote's to measure from.
       const opensQuote = depth > prevDepth;
       prevDepth = depth;
@@ -448,7 +460,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
         titleCloser = label && label[0].length !== content.length ? titleOpens(content.slice(label[0].length)) : '';
         inDefinition = label !== null;
         lrd = label ? (label[0].length === content.length ? 1 : titleCloser ? 3 : 2) : 0;
-        prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:[-*_][ \t]*){3,}$|=+[ \t]*$)/.test(inner) || /^ {0,3}#{1,6}(?:[ \t]|$)/.test(content) ? 'nonpara' : /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]*$/.test(inner)
+        prev = inner.trim() === '' ? (prev === 'code' ? 'code' : 'blank') : label || /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:-[ \t]*){3,}$|(?:\*[ \t]*){3,}$|(?:_[ \t]*){3,}$|=+[ \t]*$)/.test(inner) || /^ {0,3}#{1,6}(?:[ \t]|$)/.test(content) ? 'nonpara' : /^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]*$/.test(inner)
           ? (prev === 'other' ? 'other' : 'marker')
           : prev === 'marker' && indent >= markerWidth + 4 ? 'marker' : 'other';
         if (prev === 'marker' && indent < 4) markerWidth = inner.trim().length + 1;
@@ -532,7 +544,11 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       if (close === -1 || close + 1 > blockLimit(i)) return i;
       // marked ends such a block at the declaration's first `>` and reads the rest of the line as text (#5211); CommonMark keeps it raw.
       if (startsLine(i) && isLetter(text[i + 2]) && model === 'commonmark') raw(lineEndAt(close));
-      if (startsLine(i) && isLetter(text[i + 2]) && model === 'marked') markedBlockAt = close + 1;
+      if (startsLine(i) && isLetter(text[i + 2]) && model === 'marked') {
+        // #5265 — marked starts the next block right after the `>`: a fence there swallows the rest of the document as code.
+        if (/^(?:`{3,}|~{3,})/.test(text.slice(close + 1, close + 4))) return i;
+        markedBlockAt = close + 1;
+      }
       i = close + 1;
       continue;
     }
