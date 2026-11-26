@@ -185,3 +185,32 @@ describe('write door target refusals', () => {
     });
   });
 });
+
+describe.each(['personal', 'private'] as const)('createNode, an App %s memory with a computable address', (memoryClass) => {
+  // The address is built from a handle and an App slug alone.
+  const urnFor = (handle: string) => `${handle}:ref77-club-${handle}-${memoryClass}`;
+
+  beforeAll(async () => {
+    const handle = `ref77-${memoryClass}`;
+    const ownerOfIt = (await db.user.create({ data: { id: generateId(), name: handle, handle, roles: ['READER'] } })).id;
+    // A real person with no such memory: the control address differs only in the handle.
+    await db.user.create({ data: { id: generateId(), name: `${handle}-none`, handle: `${handle}-none`, roles: ['READER'] } });
+    const club = await db.app.create({ data: { name: handle, urn: `ref77:club-${memoryClass}`, organizationId: orgId } });
+    await db.appMember.create({ data: { appId: club.id, userId: ownerOfIt, role: 'member' } });
+    await db.memory.create({ data: {
+      id: generateId(), name: handle, urn: urnFor(handle), class: memoryClass,
+      userId: ownerOfIt, ownerUserId: ownerOfIt, appId: club.id, userMemoryOfAgentId: agentId,
+    } });
+  });
+
+  it('gives a signed-out caller one answer', async () => {
+    const run = (handle: string) => {
+      const target = { ...miss, mem: `hrn:mem:${urnFor(handle)}` };
+      return answer('createNode', target, t => ({ input: { memoryRef: t.mem, loc: 'n', name: 'n', content: 'c' } }), signedOut());
+    };
+    const missing = await run(`ref77-${memoryClass}-none`);
+    const present = await run(`ref77-${memoryClass}`);
+    expect(present).toBe(missing);
+    expect(present).toContain('"code":"UNAUTHENTICATED"');
+  });
+});
