@@ -2517,17 +2517,26 @@ export async function nodeDoorTxContext(ctx: Context, tx: Prisma.TransactionClie
   return preview ? { ...fresh, installWritePreview: true } : fresh;
 }
 
-/** #2734: conceal an install-memory preflight denial without changing the
- * established refusal of ordinary-memory doors. This permission is provisional:
- * only the door's own fenced transaction makes its write decision.
+/**
+ * The pre-lock write check of the merge and history doors, answering by cor:api:140:03: `notFound` is the door's own
+ * missing-node answer. This permission is provisional: only the door's own fenced transaction makes its write decision.
  */
 async function nodeDoorWritePreflight(ctx: Context, memoryId: string, notFound: () => Error): Promise<void> {
-  const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { class: true, isInstallMemory: true } });
   const gate = () => requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, memoryId);
-  if (memory?.class === 'system' && memory.isInstallMemory) {
-    return concealUnreadableNodeDenial(ctx, memoryId, notFound, gate);
-  }
-  return gate();
+  return concealUnreadableNodeDenial(ctx, memoryId, notFound, gate);
+}
+
+/**
+ * cor:api:140:03 for the `mergeNodes` source, settled before the target is looked at. True when it answers as an
+ * unknown reference: the caller can neither write the node's memory nor read it (by the node gate, or by
+ * `canReadMemory`, which is all a merge that only reads its source asks), or may write it without reading it (#2206).
+ */
+async function isMergeSourceHidden(ctx: Context, nodeId: string): Promise<boolean> {
+  const node = await ctx.db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true, deletedAt: true } });
+  if (!node || node.deletedAt) return true;
+  if (await isWriteBeyondRead(ctx.db, ctx, node.memoryId)) return true;
+  if (!(await isMemoryHiddenForWrite({ ...ctx, installWritePreflight: true }, node.memoryId, 'node'))) return false;
+  return !(await canReadMemory(ctx.db, ctx, node.memoryId));
 }
 
 /** #2734: history edits are memory writes, with authority held through the
@@ -4557,27 +4566,25 @@ export const nodeMutations = {
       // Omitted/null `include` = merge every mergeable field.
       const fields = new Set<NodeMergeField>(input.include ?? ALL_NODE_MERGE_FIELDS);
 
+      const sourceNotFound = () => new GraphQLError('Source node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
+      const targetNotFound = () => new GraphQLError('Target node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       // Resolve both endpoints (ID or fully-qualified URN — same dispatch as
       // createEdge). A genuine miss maps to NODE_NOT_FOUND; a malformed
-      // relative URN propagates as UrnNotQualifiedError (spec 022).
+      // relative URN propagates as UrnNotQualifiedError (spec 022). The source
+      // is settled before the target is looked at.
       let sourceId: string;
       let targetId: string;
       try {
         ({ id: sourceId } = await resolveNodeRefForCaller(ctx, rawSource));
       } catch (e) {
-        if (e instanceof NodeNotFoundError)
-          throw new GraphQLError('Source node not found', {
-            extensions: { code: 'NODE_NOT_FOUND' },
-          });
+        if (e instanceof NodeNotFoundError) throw sourceNotFound();
         throw e;
       }
+      if (await isMergeSourceHidden(ctx, sourceId)) throw sourceNotFound();
       try {
         ({ id: targetId } = await resolveNodeRefForCaller(ctx, rawTarget));
       } catch (e) {
-        if (e instanceof NodeNotFoundError)
-          throw new GraphQLError('Target node not found', {
-            extensions: { code: 'NODE_NOT_FOUND' },
-          });
+        if (e instanceof NodeNotFoundError) throw targetNotFound();
         throw e;
       }
       if (sourceId === targetId) {
@@ -4590,24 +4597,12 @@ export const nodeMutations = {
         ctx.db.node.findUnique({ where: { id: sourceId } }),
         ctx.db.node.findUnique({ where: { id: targetId } }),
       ]);
-      if (!source || source.deletedAt)
-        throw new GraphQLError('Source node not found', {
-          extensions: { code: 'NODE_NOT_FOUND' },
-        });
-      if (!target || target.deletedAt)
-        throw new GraphQLError('Target node not found', {
-          extensions: { code: 'NODE_NOT_FOUND' },
-        });
+      if (!source || source.deletedAt) throw sourceNotFound();
+      if (!target || target.deletedAt) throw targetNotFound();
       // #2206 (B): a merge folds one node's content into the other and returns the result, so a node in a memory the
       // caller may write but not read answers exactly as a missing one, on either end, before any gate.
-      if (await isWriteBeyondRead(ctx.db, ctx, source.memoryId))
-        throw new GraphQLError('Source node not found', {
-          extensions: { code: 'NODE_NOT_FOUND' },
-        });
-      if (await isWriteBeyondRead(ctx.db, ctx, target.memoryId))
-        throw new GraphQLError('Target node not found', {
-          extensions: { code: 'NODE_NOT_FOUND' },
-        });
+      if (await isWriteBeyondRead(ctx.db, ctx, source.memoryId)) throw sourceNotFound();
+      if (await isWriteBeyondRead(ctx.db, ctx, target.memoryId)) throw targetNotFound();
 
       // Auth. The target is mutated → write access always. The source is
       // read to fold its fields; it's mutated only when we delete it or
@@ -4615,7 +4610,7 @@ export const nodeMutations = {
       // A source read-denial returns the same NODE_NOT_FOUND wording as a
       // genuine miss so it can't be used as a cross-memory existence oracle
       // (mirrors createEdge's target-denial posture).
-      await nodeDoorWritePreflight(ctx, target.memoryId, () => nodeNotFoundError(rawTarget));
+      await nodeDoorWritePreflight(ctx, target.memoryId, targetNotFound);
       // #1606 (cor:dmo:110:01/04) — a comment never merges, and a merge that
       // moves the source's incoming edges or deletes it would retarget or
       // strand the threads anchored to the source's identity. The comment path
@@ -4635,14 +4630,13 @@ export const nodeMutations = {
       const authedMemories = new Set<string>([target.memoryId]);
       const writeMemories = new Set<string>([target.memoryId]);
       if (source.memoryId !== target.memoryId) {
+        // The source is only read unless the merge deletes it or moves its edges.
         const touchesSource = deleteSource || fields.has('EDGES');
         if (touchesSource) {
           writeMemories.add(source.memoryId);
-          await nodeDoorWritePreflight(ctx, source.memoryId, () => nodeNotFoundError(rawSource));
+          await nodeDoorWritePreflight(ctx, source.memoryId, sourceNotFound);
         } else if (!(await canReadMemory(ctx.db, ctx, source.memoryId))) {
-          throw new GraphQLError('Source node not found', {
-            extensions: { code: 'NODE_NOT_FOUND' },
-          });
+          throw sourceNotFound();
         }
       }
       authedMemories.add(source.memoryId);
@@ -5593,7 +5587,7 @@ export const nodeMutations = {
         select: { memoryId: true, role: true, loc: true },
       });
       if (!node) throw notFound();
-      await nodeDoorWritePreflight(ctx, node.memoryId, () => nodeNotFoundError(nodeRef));
+      await nodeDoorWritePreflight(ctx, node.memoryId, notFound);
       // #1641 §3.2 — a question's history is its audit trail (as deleteNodeRevision).
       if (isQuestionFamilyRole(node.role)) throw questionContainedError("Clearing a question's history", [node.loc]);
       return withNodeHistoryWrite(ctx, nodeId, node.memoryId, notFound, async tx => {
