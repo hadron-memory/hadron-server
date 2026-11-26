@@ -14764,6 +14764,14 @@ export const typeDefs = `#graphql
     reaches the organization lookup. An empty string \`orgRef: ""\` also
     answers USE_TRANSFER_MEMORY_OWNERSHIP.
 
+    A \`personal\` or \`private\` memory that belongs to an App keeps its slug
+    (hrn:node:hadronmemory.com:specs:cor:dmo:060:20): any \`urn\` argument on one,
+    the current slug included, answers APP_MEMORY_SLUG_FIXED (extension
+    \`memoryClass\`) and nothing in the call is applied. This covers memories made
+    before the rule, attached memories and session memories that carry an App.
+    The refusal follows the access check, so a caller who may not manage the
+    memory never receives it. Its display name (\`name\`) can still be changed.
+
     Spec 033 FR-026: enabling \`vectorIndexEnabled\` on an \`isEncrypted\` memory
     requires \`acknowledgeVectorInversionRisk: true\` in the same call. Without
     the flag, an \`EncryptedVectorIndexNotAcknowledgedError\` is thrown carrying

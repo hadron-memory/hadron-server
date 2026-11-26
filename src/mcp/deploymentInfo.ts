@@ -287,7 +287,11 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `BatchThrough` now resolve a URN as well as an id. `NodeInput` (the retired `replaceSubtree` shape) keeps `memoryId` and
 // its edges keep `targetId`; `ResumeSessionInput.expectedWorkerId` stays (#5163). MCP tool inputs are unchanged. (0.42.0 is
 // #5081, entity refs gap 3, merged first.)
-export const HADRON_SERVER_VERSION = '0.43.0';
+//
+// 0.44.0 — NEW REFUSAL, #5184: `updateMemory` with a `urn` (slug) argument on a `personal` or `private` memory that
+// belongs to an App answers APP_MEMORY_SLUG_FIXED (extension `memoryClass`) and applies nothing. An organization-owned
+// one renamed before; a user-owned one answered BAD_USER_INPUT. `name` still changes. No SDL change. (0.43.0 is #5080, merged first.)
+export const HADRON_SERVER_VERSION = '0.44.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
