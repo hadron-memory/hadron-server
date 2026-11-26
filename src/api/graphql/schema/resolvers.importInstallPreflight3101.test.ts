@@ -90,7 +90,9 @@ describe('#3101 importNode into a live install memory', () => {
     const user = f[who];
     const error: any = await resolvers.Mutation.importNode({}, { input: { memoryRef: f.install.id, loc: 'clips:denied', url: 'https://example.com/x' } as never }, context(user.id)).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(Error);
-    expect(error.extensions?.code).toBe('FORBIDDEN');
+    // cor:api:140:03: the outsider cannot open this memory's record; the other two can.
+    if (who === 'outsider') expect(error.name).toBe('MemoryNotFoundError');
+    else expect(error.extensions?.code).toBe('FORBIDDEN');
     expect(fetchWebPage).not.toHaveBeenCalled();
     expect(await stored(f.install.id, 'clips:denied')).toBeNull();
     expect(await db.appRun.count()).toBe(0);
