@@ -61,6 +61,7 @@ const PINNED_DOORS = [
   'deleteMemorySubscription',
   'deleteOrganization',
   'deleteTeamRole',
+  'detachMemoryFromApp',
   'endAgentlessSession',
   'ensureAppMember',
   'extractParentNodeToMemory',
@@ -227,6 +228,17 @@ describe('#85 signed-out ref doors', () => {
       expect(JSON.parse(first.text).errors[0].extensions.code, `door ${i}`).toBe('UNAUTHENTICATED');
       for (const a of answers) expect(a, `door ${i}`).toEqual(first);
     }
+  });
+
+  it('#5185 detachMemoryFromApp: a signed-out caller gets one byte-identical UNAUTHENTICATED for a real, a missing and a malformed App ref and memory ref, before either resolves', async () => {
+    const q = (memoryRef: string, appRef: string) => `mutation { detachMemoryFromApp(memoryRef: "${memoryRef}", appRef: "${appRef}") }`;
+    const apps = [appId, orgId, orgUrn, deletedAppId, generateId(), 'hrn:app:no-such', '@@ not a ref @@'];
+    const memories = [generateId(), 'hrn:mem:no-such:memory', '@@ not a ref @@'];
+    const answers = await Promise.all(apps.flatMap((a) => memories.map((m) => ask(q(m, a)))));
+    const first = answers[0]!;
+    expect(first.status).toBe(200);
+    expect(JSON.parse(first.text).errors[0].extensions.code).toBe('UNAUTHENTICATED');
+    for (const a of answers) expect(a).toEqual(first);
   });
 
   it('writes nothing for a signed-out caller', async () => {
