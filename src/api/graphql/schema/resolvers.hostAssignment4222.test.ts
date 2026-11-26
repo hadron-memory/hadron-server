@@ -204,6 +204,24 @@ describe('assignHostWorker: whoever manages the App states what a host runs', ()
     expect(await db.hostWorkerAssignment.count()).toBe(1);
   });
 
+  it('#5249: any model-family token is stored, normalised like a session family', async () => {
+    expect(await assign({ family: 'deepseek' })).toMatchObject({ family: 'deepseek' });
+    expect(await assign({ hostId: 'orca2', workdir: 'kit-home', family: 'Gemini-2.5' })).toMatchObject({ family: 'gemini-2.5' });
+    expect(await assign({ hostId: 'orca3', workdir: 'kit-home', family: 'anthropic' })).toMatchObject({ family: 'claude' });
+    expect(await assign({ hostId: 'orca4', workdir: 'kit-home', family: 'openai' })).toMatchObject({ family: 'codex' });
+    expect((await db.hostWorkerAssignment.findMany({ orderBy: { hostId: 'asc' } })).map((r) => r.family)).toEqual(['deepseek', 'gemini-2.5', 'claude', 'codex']);
+    // the longest token the database takes, 64 characters
+    const long = 'x'.repeat(64);
+    expect(await assign({ hostId: 'orca5', workdir: 'kit-home', family: long })).toMatchObject({ family: long });
+  });
+
+  it('#5249 guard: a family that is not a token is BAD_LAUNCHER_PROFILE and nothing is stored', async () => {
+    for (const family of ['deep seek', 'a/b', '-x', 'x'.repeat(65), 'a;b', '$(id)', '..']) {
+      expect(await code(assign({ family })), family).toBe('BAD_LAUNCHER_PROFILE');
+    }
+    expect(await db.hostWorkerAssignment.count()).toBe(0);
+  });
+
   it('refuses a path, an option or a bad host id as BAD_HOST_ASSIGNMENT_ARGS, and a bad family or model as BAD_LAUNCHER_PROFILE', async () => {
     for (const bad of [
       { workdir: '/home/orca/x' }, { workdir: '../x' }, { workdir: '-rf' }, { workdir: 'a//b' }, { workdir: 'a/' }, { workdir: '' },
@@ -367,6 +385,15 @@ describe('a start uses the assignment (cor:agt:070:08 unchanged: with none, noth
     // #4230 (S1b): a start now carries the assignment's model too (S1a's "a record only" ended there).
     expect(op!.args).toMatchObject({ model: 'fable-5.2' });
     expect((await loadLaunchableFamilies(db, { appId: app.id }, new Date())).get(kit.id)).toEqual(['codex']);
+  });
+
+  it('#5249 SERVER: a start for a family with no built-in launcher carries it', async () => {
+    await assign({ workdir: 'hadron-cli/kit', family: 'deepseek' });
+    await setSource('SERVER');
+    await hostLists(['hadron-server/kit']);
+    const op = await task();
+    expect(op).toMatchObject({ hostId: 'orca1', issuedBy: 'platform' });
+    expect(op!.args).toMatchObject({ worktree: 'hadron-cli/kit', family: 'deepseek' });
   });
 
   it('SERVER: no assignment issues nothing and the task waits', async () => {
