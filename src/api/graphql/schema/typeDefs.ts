@@ -13045,7 +13045,7 @@ export const typeDefs = `#graphql
     (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), or a held worker on its holder's instruction; never an App key.
     A worker may be assigned to several hosts. The assignment is a record until the App's hostSetupSource is SERVER.
     Refused BAD_HOST_ASSIGNMENT_ARGS (a workdir or host id that is not its token shape: a path, an option, a command),
-    BAD_LAUNCHER_PROFILE (a family no host has a launcher for, or a model, effort or accountProfile that is not a
+    BAD_LAUNCHER_PROFILE (a family that is not a model-family token, or a model, effort or accountProfile that is not a
     profile token), HOST_ASSIGNMENT_NOT_PERMITTED, WORKER_NOT_FOUND, WORKER_RETIRED, and HOST_ASSIGNMENT_EXISTS when this worker is
     already assigned to that host and replace is not set. A refusal writes nothing.
     """
@@ -18747,7 +18747,7 @@ export const typeDefs = `#graphql
     worker: String!
     "The name the host knows the working directory by: a name token (letters, digits and . _ / @ + -, starting with a letter or digit, no .., // or trailing /), at most 256 characters."
     workdir: String!
-    "The model family it runs as there: one a host has a launcher for (claude, codex, glm or kimi)."
+    "The model family it runs as there: any family token (lowercase letters, digits, . _ or -, starting with a letter or digit, at most 64 characters; anthropic is claude and openai is codex). Whether the host can run it is the host's to report: a start it cannot run is reported failed."
     family: String!
     "The model, a profile token: letters, digits, . _ or -, starting with a letter or digit, at most 128 characters. Optional."
     model: String

@@ -390,7 +390,7 @@ describe('a start uses the assignment (cor:agt:070:08 unchanged: with none, noth
   it('#5249 SERVER: a start for a family with no built-in launcher carries it', async () => {
     await assign({ workdir: 'hadron-cli/kit', family: 'deepseek' });
     await setSource('SERVER');
-    await hostLists(['hadron-server/kit']);
+    await hostLists(['hadron-server/kit', 'hadron-cli/kit']);
     const op = await task();
     expect(op).toMatchObject({ hostId: 'orca1', issuedBy: 'platform' });
     expect(op!.args).toMatchObject({ worktree: 'hadron-cli/kit', family: 'deepseek' });
