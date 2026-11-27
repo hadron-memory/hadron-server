@@ -256,10 +256,11 @@ describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1
       userId: holger.id, organizationId: orgId, appId: app.id, userMemoryOfAgentId: agent.id,
     } });
     await db.memoryShare.create({ data: { memoryId: personal.id, granteeId: reader.id, grantorId: holger.id, role: 'writer' } });
-    // Refused by the class guard and concealed; without the guard this create would succeed.
+    // Refused by the class guard; without the guard this create would succeed. #5389: the share now grants read, so the
+    // refusal is the plain QUESTION_FORBIDDEN rather than the concealed missing-memory answer.
     expect(await codeOf(M.createQuestionLog(null,
       { memoryRef: personal.id, loc: 'questions', defaultDeciders: [holger.id] }, as(reader.id))))
-      .toMatch(/^MEMORY_NOT_FOUND/);
+      .toMatch(/^QUESTION_FORBIDDEN/);
     expect(await db.node.count({ where: { memoryId: personal.id, role: 'question.log' } })).toBe(0);
   });
 });
