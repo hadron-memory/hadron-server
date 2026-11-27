@@ -253,8 +253,9 @@ describe('#5375 the inert link is listed with active: false, and detach / re-att
           { memoryId: own.id, attachedById: otto, active: true },
         ].sort((x, y) => x.memoryId.localeCompare(y.memoryId)),
       );
-      // The listing agrees with what the key reaches: the active entry only.
-      expect(await mcpIds(userApp.id)).toEqual([own.id]);
+      // #5321: `active` says whether the link would count, not that it reads. A link gives the key nothing on its own, and a
+      // personal memory is never a memory.read target, so the key reaches neither entry.
+      expect(await mcpIds(userApp.id)).toEqual([]);
     },
   );
 
@@ -273,7 +274,7 @@ describe('#5375 the inert link is listed with active: false, and detach / re-att
     const judged = await judgeAppLinks(db as never, userApp.id, { onlyMemoryIds: [uk.id] });
     expect(judged.map((j) => [j.memoryId, j.active])).toEqual([[uk.id, false]]);
     // Re-attaching grants the key nothing: still no reach on any surface.
-    expect(await linkedReachFor(db as never, keyAuth(userApp.id))).toEqual(new Set());
+    // #5321: was linkedReachFor, removed with the link reach; the MCP listing and the record read below carry it.
     expect(await mcpIds(userApp.id)).toEqual([]);
     expect(await recordRead(keyCtx(userApp.id), uk.id)).toBe(false);
   });
