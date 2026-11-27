@@ -429,6 +429,20 @@ export async function managesPersonalAppOf(ctx: Context, appId: string): Promise
 }
 
 /**
+ * #5077 (F3a-2, Q4; cor:dmo:050:12): the answer a platform admin gets for cancelling a run of an App a person owns. The
+ * run's identity, status and owner stay; what it carried and did (its input, data, hops, logs, policy, snapshots, failure,
+ * pin and the nodes it named) is withheld, because a platform admin never reads a person's run. The nested field resolvers
+ * gate themselves (`servedPrompt` on `canReadAppRun`, which refuses a platform admin here).
+ */
+function withheldRunContent<T extends Record<string, unknown>>(run: T): T {
+  return {
+    ...run,
+    eventData: null, data: null, hops: null, derivedLog: null, spawn: null, policy: null, scopeSnapshot: null,
+    registerSnapshot: null, failure: null, automationPin: null, curNodeUrn: null, entryNodeId: null, entryNodeUrn: '',
+  };
+}
+
+/**
  * #5037: a caller with no standing over a schedule or webhook (not even an org READER) is answered exactly as for an id that
  * names nothing, so the door is not an existence oracle for another org's id (the run-door concealment convention, #1577).
  * A caller who can read it keeps the door's own FORBIDDEN. Only the FORBIDDEN code is folded: any other error propagates.
@@ -964,11 +978,23 @@ export const appRunMutations = {
     }
     const run = await ctx.db.appRun.findUnique({ where: { id } });
     if (!run) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
-    // #5037: a caller who cannot read the run is answered as for a run that does not exist.
-    if (!(await canReadAppRun(ctx, run))) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
-    // #5077 (F3a-1): nobody cancels a run of an App a person owns until F3a-2 adds the owner's and the platform admin's arms.
-    if (run.organizationId === null) throw authorizationDenied();
-    await requireOrgRole(ctx, run.organizationId, 'ADMIN');
+    // #5077 (F3a-2; cor:dmo:050:12): a run of an App a person owns is cancelled by whoever manages that App as themself
+    // (the owner, an owner-role member), who gets the full run back, and by a platform admin as themself (the kill switch,
+    // cor:agt:010:02), who gets the run with its content withheld (Q4), since a platform admin never reads a person's run.
+    // A caller who may read the run but not cancel it (the App's own key, a member's own run) is FORBIDDEN; anyone else is
+    // answered as for a run that does not exist.
+    let masked = false;
+    if (run.organizationId === null) {
+      if (!(await managesPersonalAppOf(ctx, run.appId))) {
+        if (isPlatformAdmin(ctx) && !isRefusedPrincipal(ctx)) masked = true;
+        else if (await canReadAppRun(ctx, run)) throw authorizationDenied();
+        else throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
+      }
+    } else {
+      // #5037: a caller who cannot read the run is answered as for a run that does not exist.
+      if (!(await canReadAppRun(ctx, run))) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
+      await requireOrgRole(ctx, run.organizationId, 'ADMIN');
+    }
     const cancelled = await ctx.db.appRun.updateMany({
       where: { id, status: { in: ['PENDING', 'RUNNING'] } },
       data: { status: 'CANCELLED', finishedAt: new Date(), failure: { code: 'CANCELLED' } },
@@ -980,7 +1006,8 @@ export const appRunMutations = {
         console.error(`[spawn] completion handling failed for cancelled ${id}:`, err),
       );
     }
-    return ctx.db.appRun.findUniqueOrThrow({ where: { id } });
+    const after = await ctx.db.appRun.findUniqueOrThrow({ where: { id } });
+    return masked ? withheldRunContent(after) : after;
   },
 
   /**
@@ -1500,9 +1527,14 @@ export const appRunQueries = {
     const appId = await resolveAppRefOrNotFound(ctx, appRef);
     const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null } });
     if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
-    // #5077 (decision d; cor:dmo:050:12): the platform-admin skip is for an organization's App only; a platform admin never
-    // reads a run of an App a person owns.
-    if (!isPlatformAdmin(ctx) || app.organizationId === null) {
+    // #5077 (F3a-2; cor:dmo:050:12): the latest run of an App a person owns is anyone's run, so only whoever manages that
+    // App as themself reads it (the owner, an owner-role member). Not a platform admin, an ordinary member, the impersonated
+    // owner or another person: each is answered as for a missing App.
+    if (app.organizationId === null) {
+      if (!(await managesPersonalAppOf(ctx, app.id))) {
+        throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+      }
+    } else if (!isPlatformAdmin(ctx)) {
       try {
         // Owner-or-org READER — App may be org-owned or user-owned (spec 047).
         await requireOwnerOrOrgRole(ctx, app, 'READER');
@@ -1511,9 +1543,6 @@ export const appRunQueries = {
         throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
       }
     }
-    // #5077 (F3a-1): the owner passes the gate above, but a run of an App a person owns is read by nobody until F3a-2
-    // (see mayReadAppRunWithoutOrgRole); before F3a-1 such an App had no run, so null is main's answer.
-    if (app.organizationId === null) return null;
     const [run] = await ctx.db.appRun.findMany({
       where: { appId },
       orderBy: { createdAt: 'desc' },

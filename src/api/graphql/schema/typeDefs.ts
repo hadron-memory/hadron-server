@@ -7905,7 +7905,10 @@ export const typeDefs = `#graphql
     id: ID!
     "Computed grammar-v2 URN hrn:apprun:<root>:<app>:<run-id> (#696). Null for the rare multi-segment App URN the flat shape cannot express."
     urn: String
-    organizationId: ID!
+    "The organization that owns the run's App, copied at mint; null when a person owns the App (#5077, hrn:node:hadronmemory.com:specs:cor:dmo:050:12). Exactly one of organizationId and ownerUserId is set."
+    organizationId: ID
+    "The person who owns the run's App, copied at mint; null when an organization owns it (#5077, hrn:node:hadronmemory.com:specs:cor:dmo:050:12)."
+    ownerUserId: ID
     appId: ID!
     agentId: ID
     "On-behalf-of user (cor:agt:010:01). Null = pure App service identity."
@@ -9360,6 +9363,8 @@ export const typeDefs = `#graphql
   aiconf (#3857) the org that owns it or
   its App or Agent (null for a server-owned config or a user-owned App or
   Agent) — both are the extra ids those resources' canonical routes require.
+  An app run of an App a person owns (#5077) has no organization: its
+  \`organizationId\` is null.
   """
   type UrnResolution {
     kind:           String!

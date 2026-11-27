@@ -87,9 +87,19 @@ async function subscriber(p: Person, handle: string) {
 const trigger = (p: Person, ctx: Context, extra: Record<string, unknown> = {}) =>
   M.triggerAppRun({}, { input: { appRef: p.app.id, entryNodeUrn: p.entryUrn, ...extra } }, ctx);
 const runTask = (p: Person, ctx: Context) => M.runTask({}, { nodeRef: p.entryUrn, appRef: p.app.id }, ctx);
-const importTask = (p: Person, ctx: Context) => M.importNode({}, { input: {
-  memoryRef: p.memory.id, loc: `clips:${generateId()}`, content: '# Imported', contentType: 'text/markdown', taskRef: p.entryId, appRef: p.app.id,
-} }, ctx);
+/** importNode(taskRef:) imports into a memory the CALLER may write (the App's memory for its owner, otherwise the
+ *  caller's own free-standing knowledge memory), so the refusal pinned is the run gate's, not the memory write gate's. */
+async function importTask(p: Person, ctx: Context) {
+  let memoryRef = p.memory.id;
+  const uid = (ctx as { userId?: string }).userId;
+  if (uid && uid !== p.user.id) {
+    const own = await db.memory.create({ data: { name: `clips ${uid}`, urn: `imp${generateId().slice(0, 8)}:clips`, class: 'knowledge', ownerUserId: uid } });
+    memoryRef = own.id;
+  }
+  return M.importNode({}, { input: {
+    memoryRef, loc: `clips:${generateId()}`, content: '# Imported', contentType: 'text/markdown', taskRef: p.entryId, appRef: p.app.id,
+  } }, ctx);
+}
 const code = (e: unknown) => (e as { extensions?: { code?: string } }).extensions?.code;
 const mint = (p: Person, extra: Partial<Parameters<typeof mintAppRun>[1]> = {}) => mintAppRun(db, {
   owner: { userId: p.user.id }, appId: p.app.id, agentId: p.agent.id, triggerKind: 'MANUAL', entryNodeUrn: p.entryUrn, publish: false, ...extra,
@@ -119,7 +129,7 @@ describe('#5077 acceptance 1: the door launches for the owner, an owner-role mem
     const id = await runTask(a, as(a.user.id));
     expect(await db.appRun.findUniqueOrThrow({ where: { id } })).toMatchObject({ organizationId: null, ownerUserId: a.user.id });
     const imported = await importTask(a, as(a.user.id));
-    expect(await db.appRun.findUniqueOrThrow({ where: { id: imported.runId } })).toMatchObject({ organizationId: null, ownerUserId: a.user.id });
+    expect(await db.appRun.findUniqueOrThrow({ where: { id: imported.jobId } })).toMatchObject({ organizationId: null, ownerUserId: a.user.id });
   });
 
   it('the App\'s own key launches a run with no user', async () => {
@@ -155,6 +165,19 @@ describe('#5077 acceptance 2: nobody else launches on a person\'s App (FORBIDDEN
       .callToolText('hadron_run_task', { urn: a.entryUrn, appRef: a.app.id });
     expect(text).not.toMatch(/^Run started/);
     expect(await db.appRun.count()).toBe(0);
+  });
+});
+
+describe('#5077 MCP passes the impersonation through to the run gates', () => {
+  it('the impersonated owner: hadron_run_task starts no run and hadron_get_run answers not found', async () => {
+    const a = await person('pd5077');
+    const run = await mint(a, { userId: a.user.id, createdBy: a.user.id });
+    const mcp = createTestableMcpServer({
+      userId: a.user.id, roles: ['READER'], clientId: `user:${a.user.id}`, impersonation: { actorUserId: generateId() },
+    } as unknown as AuthContext);
+    expect(await mcp.callToolText('hadron_run_task', { urn: a.entryUrn, appRef: a.app.id })).not.toMatch(/^Run started/);
+    expect(await db.appRun.count()).toBe(1);
+    expect(await mcp.callToolText('hadron_get_run', { ref: run.id })).toBe('Run not found.');
   });
 });
 
