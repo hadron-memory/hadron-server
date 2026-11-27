@@ -26,7 +26,9 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { formatGraphQLError } from '../api/graphql/formatError.js';
 import { canReadMemory, EXPLICIT_REF } from './access-control.js';
 import { resolveAgentRef } from '../lib/entityRef/agentRef.js';
-import { listAgentProcesses, listAgentTasks, type ListedNode } from '../lib/agentDefinitionLists.js';
+import { assertAgentTaskSearch, listAgentProcesses, listAgentTasks, type ListedNode } from '../lib/agentDefinitionLists.js';
+import { MAX_QUERY_CHARS } from '../lib/retrieval/tsquery.js';
+import { MAX_ATOM_LEN } from '../lib/urn.js';
 import { emitEntityUrnV2, safeNodeUrnV2 } from '../lib/urnEmit.js';
 import { currentActor } from '../lib/requestActor.js';
 
@@ -140,6 +142,9 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
     SHAPE_HADRON_AGENT_TASKS,
     async ({ agentRef: ref, phrase, limit }) => {
       try {
+        // #5360 B7: the argument check runs BEFORE the ref is resolved (and the gate read), so bad input is
+        // refused as [bad_user_input] even for an unknown Agent; listAgentTasks re-asserts it for its own callers.
+        assertAgentTaskSearch({ phrase, limit });
         const { id } = await resolveAgentRef(db, ref);
         const entries = await listAgentTasks(db, auth, id, ref, { phrase, limit });
         if (entries.length === 0) return textResult(`No tasks for Agent ${ref}.`);
@@ -158,15 +163,19 @@ export function registerAgentDefinitionTools(server: McpServer, deps: { db: Pris
 
   server.tool(
     'hadron_get_instructions',
-    "Get the role task to follow (Proposed cor:dmo:050:24): give a phrase describing your situation, an eventCode, or both, and get the best-fit task with its full body, or a clear 'No task matches this phrase.'. With an eventCode (it needs appRef), the App's action register answers first. Otherwise the phrase is matched against the abstracts of the Agent's tasks (hadron_agent_tasks), and only tasks scoring at or above the no-match floor (0.45 by default) count: the best is returned with its body, runners-up by name only. With no match you get no body; the nearest tasks are named for diagnosis only, and in an App the task the register maps instructions.no-match to is named as the fallback. agentRef may be omitted to use your own Agent (a bound worker's); a caller with no Agent of its own must name one. Without appRef the Agent is read as hadron_agent_tasks reads it; with appRef you must take part in the App and the Agent must be installed or cast there. Refusals: BAD_USER_INPUT, APP_NOT_FOUND, AGENT_NOT_FOUND (alike for unknown and unreadable). Nothing is recorded. The same answer as GraphQL agentInstructions.",
+    "Get the role task to follow (Proposed cor:dmo:050:24): give a phrase describing your situation, an eventCode, or both, and get the best-fit task with its full body, or a clear 'No task matches this phrase.'. With an eventCode (it needs appRef), the App's action register answers first. Otherwise the phrase is matched against the abstracts of the Agent's tasks (hadron_agent_tasks), and only tasks scoring at or above the no-match floor (0.45 by default) count: the best is returned with its body, runners-up by name only. With no match you get no body; the nearest tasks are named for diagnosis only, and in an App the task the register maps instructions.no-match to is named as the fallback. A register entry that maps but whose task is not in the Agent's list (a stale mapping) never matches by REGISTER: with no phrase the answer is NO_MATCH with the register still MAPPED, and with a phrase the search arm decides as usual — the mapping is still reported, the task never invented. agentRef may be omitted to use your own Agent (a bound worker's); a caller with no Agent of its own must name one. Without appRef the Agent is read as hadron_agent_tasks reads it; with appRef you must take part in the App and the Agent must be installed or cast there. Refusals: BAD_USER_INPUT, APP_NOT_FOUND, AGENT_NOT_FOUND (alike for unknown and unreadable). Nothing is recorded. The same answer as GraphQL agentInstructions.",
     SHAPE_HADRON_GET_INSTRUCTIONS,
     async ({ agentRef: ref, appRef, phrase, eventCode }) => {
       try {
         const answer = await Q.agentInstructions({}, { agentRef: ref ?? null, appRef: appRef ?? null, phrase: phrase ?? null, eventCode: eventCode ?? null }, contextOf(db, auth));
         const all = [...answer.candidates, ...answer.nearest, ...(answer.fallback ? [answer.fallback] : [])];
         const urns = await nodeUrns(db, all.map((e) => e.node));
-        // The asking Agent, for the Read through line: resolved after the resolver answered, so its refusals keep their order.
-        const agentId = !all.length ? null : ref ? (await resolveAgentRef(db, ref)).id : currentActor().agentId;
+        // The asking Agent, for the Read through line: resolved after the resolver answered, so its refusals keep
+        // their order. #5360 B4: the implicit branch (no agentRef) takes the actor's own Agent from the validated
+        // session binding, never anything the client asserts; a null answer (nothing served, or no actor Agent)
+        // means no Read through line. The annotation documents the shape; the guarantee itself is the end-to-end
+        // pin in server.agentInstructionsImplicit5360.test.ts.
+        const agentId: string | null = !all.length ? null : ref ? (await resolveAgentRef(db, ref)).id : currentActor().agentId;
         const child = agentId ? await systemMemoryUrn(db, agentId) : null;
         const render = (e: InstructionsEntry, extra: string[]) => entryLines(e.node, urns.get(e.node.id)!, extra, child);
         const lines: string[] = [];
@@ -307,8 +316,8 @@ const SHAPE_HADRON_AGENT_TASKS = { agentRef, phrase: z.string().optional().descr
 const SHAPE_HADRON_GET_INSTRUCTIONS = {
   agentRef: z.string().min(1).optional().describe('The Agent: its ID or fully-qualified URN (hrn:agent:<root>:<slug>). Omit it to use your own Agent (a bound worker\'s).'),
   appRef: z.string().min(1).optional().describe('The App to ask in: its ID or fully-qualified URN (hrn:app:<root>:<slug>). Needed for an eventCode and for the instructions.no-match fallback; omit it if your Agent is in no team App.'),
-  phrase: z.string().optional().describe('Your situation in a few words, 1 to 500 characters; matched against task abstracts.'),
-  eventCode: z.string().optional().describe('An event code (cor:agt:110:01) for the App\'s action register to answer first; needs appRef.'),
+  phrase: z.string().optional().describe(`Your situation in a few words, 1 to ${MAX_QUERY_CHARS} characters (the one bound every search surface shares); matched against task abstracts.`),
+  eventCode: z.string().optional().describe(`An event code (cor:agt:110:01) for the App's action register to answer first; trimmed, 1 to ${MAX_ATOM_LEN} characters (the register loc atom bound); needs appRef.`),
 };
 
 const SHAPE_HADRON_AGENT_PROCESSES = { agentRef };

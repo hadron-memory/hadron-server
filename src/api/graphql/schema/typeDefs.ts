@@ -11648,15 +11648,21 @@ export const typeDefs = `#graphql
     #2421, #5284: an optional phrase ranks only runnable effective-chain tasks
     with non-empty abstracts, by the vector similarity of the abstract (score),
     best first; with no embedding available, by keyword on the abstract, with
-    score null. limit defaults to 3 and may be at most 10; an empty phrase or a
-    limit outside 1 to 10 is BAD_USER_INPUT. Without a phrase the list is
-    unchanged and limit is ignored. matchedBy says which retrievers found a task.
+    score null. limit defaults to 3 and may be at most 10; an empty phrase, one
+    over 512 characters (the one bound every search surface shares, #5360), or a
+    limit outside 1 to 10 is BAD_USER_INPUT — judged on the arguments before the
+    Agent is read (#5360), so it wins over AGENT_NOT_FOUND. Without a phrase the
+    list is unchanged and limit is ignored. matchedBy says which retrievers
+    found a task.
     """
     agentTaskList(ref: ID!, phrase: String, limit: Int): [AgentListedTask!]!
     """
     #5284 (hrn:node:hadronmemory.com:specs:cor:dmo:050:24) - the role task to follow, with its body, or that no
     task fits. Give a phrase, an eventCode or both; eventCode needs appRef. With an eventCode, the App's register
-    answers first (register), and a mapped task is MATCHED by REGISTER. Otherwise the phrase ranks the Agent's
+    answers first (register), and a mapped task is MATCHED by REGISTER — but an entry that maps while its task is
+    not in the Agent's list (a stale mapping) never matches by REGISTER: it falls through, so with no phrase the
+    answer is NO_MATCH with the register still MAPPED and with a phrase the search arm decides as usual — the
+    mapping is still reported, the task never invented (#5360). Otherwise the phrase ranks the Agent's
     agentTaskList tasks on their abstracts, and the tasks scoring at or above the no-match floor (default 0.45,
     TASK_MATCH_MIN_SCORE) are MATCHED by SEARCH, best first, at most 3, with the body of the first only. With no
     embedding available nothing can reach the floor, so the answer is NO_MATCH with the keyword hits as nearest.
@@ -11664,7 +11670,9 @@ export const typeDefs = `#graphql
     omitted: your own Agent (a bound worker's, or a run's) is used, and a caller with none gets BAD_USER_INPUT.
     Without appRef the Agent is read as agentTaskList reads it; with appRef you must take part in the App and the
     Agent must be installed or cast there. Refused as APP_NOT_FOUND or AGENT_NOT_FOUND, alike for unknown and
-    unreadable. A phrase is 1 to 500 characters. Nothing is recorded or logged. The MCP tool
+    unreadable. A phrase is 1 to 512 characters after trimming (the one bound every search surface shares, #5360);
+    an eventCode is trimmed and 1 to 64 characters, the register loc atom bound (#5360) — both judged before
+    any read. Nothing is recorded or logged. The MCP tool
     hadron_get_instructions returns the same answer. Accepts IDs or URNs.
     """
     agentInstructions(agentRef: ID, appRef: ID, phrase: String, eventCode: String): AgentInstructions!
@@ -17963,10 +17971,12 @@ export const typeDefs = `#graphql
     HALT
   }
 
-  "#2022 — a stop signal's scope: one worker, a team (its head and the whole reporting tree under it), or the workers a host registration lists."
+  "#2022 — a stop signal's scope: one worker, a team (its head and the whole reporting tree under it), every worker of the App (#5325), or the workers a host registration lists."
   enum StopSignalScope {
     WORKER
     TEAM
+    "#5325 (hrn:node:hadronmemory.com:specs:cor:agt:090:02) — every live worker of the App, worked out each time it is checked: a worker cast after the signal is covered from its birth. It names no target."
+    APP
     HOST
   }
 
@@ -17980,7 +17990,7 @@ export const typeDefs = `#graphql
     id: ID!
     level: StopSignalLevel!
     scope: StopSignalScope!
-    "WORKER and TEAM: the target worker (a team by its head)."
+    "WORKER and TEAM: the target worker (a team by its head). APP and HOST: null."
     targetWorkerId: ID
     "HOST: the target host's id."
     targetHostId: String
@@ -18014,9 +18024,9 @@ export const typeDefs = `#graphql
     appRef: String!
     level: StopSignalLevel!
     scope: StopSignalScope!
-    "WORKER and TEAM: the target worker (a team by its head)."
+    "WORKER and TEAM: the target worker (a team by its head). APP: none (a worker named with APP is BAD_USER_INPUT). A host key never sets APP."
     worker: String
-    "HOST: the host's id. A host key may omit it: its own host is taken from its binding."
+    "HOST: the host's id. A host key may omit it: its own host is taken from its binding. APP: none (a host named with APP is BAD_USER_INPUT too)."
     host: String
     "When it ends on its own; later than now. Omitted: until lifted."
     until: DateTime
