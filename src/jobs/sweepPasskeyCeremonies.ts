@@ -32,16 +32,19 @@ export async function sweepPasskeyCeremonies(
   }
   let total = 0;
   for (let pass = 0; pass < maxPasses; pass++) {
+    // #5381: the batch is a MATERIALIZED CTE, scanned once whatever the plan, so a pass deletes at most batchSize rows. Postgres 12+
+    // may inline a CTE referenced once into the outer join, where a nested loop could rescan the LIMIT ... SKIP LOCKED per outer
+    // row (the #5348 defect); forced-plan EXPLAIN on main showed this one was not inlined, and MATERIALIZED makes that explicit.
     const rows = await db.$queryRaw<Array<{ id: string }>>`
       WITH cutoff AS MATERIALIZED (SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now),
-      candidates AS (
+      batch AS MATERIALIZED (
         SELECT c.id FROM passkey_ceremonies c CROSS JOIN cutoff
         WHERE c.expires_at < cutoff.now
           AND GREATEST(c.expires_at, c.consumed_at) < cutoff.now - make_interval(secs => ${retentionSeconds})
         ORDER BY c.expires_at, c.id LIMIT ${batchSize} FOR UPDATE OF c SKIP LOCKED
       )
-      DELETE FROM passkey_ceremonies c USING candidates, cutoff
-      WHERE c.id = candidates.id AND c.expires_at < cutoff.now
+      DELETE FROM passkey_ceremonies c USING batch, cutoff
+      WHERE c.id = batch.id AND c.expires_at < cutoff.now
         AND GREATEST(c.expires_at, c.consumed_at) < cutoff.now - make_interval(secs => ${retentionSeconds})
       RETURNING c.id`;
     total += rows.length;
