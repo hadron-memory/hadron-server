@@ -21,6 +21,7 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGrap
 
 let alice: { id: string };
 let agent: { id: string };
+let appId: string;
 const ctxFor = (userId: string): Context => ({ db, roles: ['READER'], userId });
 
 beforeEach(async () => {
@@ -51,12 +52,12 @@ beforeEach(async () => {
     });
   }
   // #4046: these turn tests start through a licensed App, never an App-less non-manager read.
-  await db.app.create({ data: { name: 'Turn fixture', urn: 'org-3514:chat-app', organizationId: org.id,
-    appAgents: { create: { agentId: agent.id } } } });
+  appId = (await db.app.create({ data: { name: 'Turn fixture', urn: 'org-3514:chat-app', organizationId: org.id,
+    appAgents: { create: { agentId: agent.id } } } })).id;
   await serveEveryAgent(db);
 });
 
-const startChat = () => resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'private' }, ctxFor(alice.id));
+const startChat = () => resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'private', appRef: appId }, ctxFor(alice.id));
 const respond = (chatId: string, toolResponse: Record<string, unknown>) =>
   resolvers.Mutation.processChatResponse({}, { chatId, toolResponse }, ctxFor(alice.id));
 

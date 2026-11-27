@@ -78,7 +78,8 @@ describe('#3160 E2E seed: the coordinator can start a chat', () => {
   it('an unnamed startChat on the seeded coordinator opens the seeded conversation (no AGENT_HAS_NO_CONVERSATIONS)', async () => {
     await seed();
     const coordinator = await db.agent.findFirstOrThrow({ where: { organizationId, name: 'coordinator' } });
-    const chat = await M.startChat(null, { agentRef: coordinator.id, scope: 'private' }, ctx({ roles: ['ADMIN'] }));
+    // #5394: the start names the team App (appRef), as a client without an App credential now must.
+    const chat = await M.startChat(null, { agentRef: coordinator.id, appRef: app.id, scope: 'private' }, ctx({ roles: ['ADMIN'] }));
     expect(chat.conversationName).toBe(E2E_CONVERSATION);
   });
 });
