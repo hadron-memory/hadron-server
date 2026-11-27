@@ -960,7 +960,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
         // first character is written as a character reference instead, which a browser decodes to the same character.
         // The line above is judged for both declarations of a line alike, so a declaration right after another one's `>` starts a block exactly when
         // that one did; a line above that is a link reference definition does not stop it (marked reads the definition as a block of its own).
-        if (i >= rawUntil && lineContainers.length === 0 && prevBefore !== 'other' && prevBefore !== 'marker' && !loneEqualsAbove(text, i)) {
+        if (i >= rawUntil && lineContainers.length === 0 && prevBefore !== 'other' && !loneEqualsAbove(text, i)) {
           const f = markedUnclosedFenceAfter(text, close + 1);
           if (f !== -1) return f;
         }

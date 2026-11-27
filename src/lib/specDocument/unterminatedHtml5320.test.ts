@@ -20,6 +20,7 @@ const RENDERERS: Record<string, (md: string) => string> = {
   'commonmark.js': (md) => writer.render(reader.parse(md)),
   'markdown-it': (md) => markdownIt.render(md),
   marked: (md) => marked.parse(md, { async: false }),
+  raw: (md) => md, // a reader that parses the string itself as HTML
 };
 const NAMES = Object.keys(RENDERERS);
 const RAW_SELECTOR = 'textarea,script,style,title,xmp,iframe,noembed,noframes,noscript,plaintext,template';
@@ -43,6 +44,7 @@ describe('#5320: a fence opener after a line-head declaration that nothing close
     ['<!DOCTYPE html>   ```\nx\n', '<!DOCTYPE html>   &#96;&#96;&#96;\nx\n'],
     ['[a]: b\n<!DOCTYPE html>```\n', '[a]: b\n<!DOCTYPE html>&#96;&#96;&#96;\n'],
     ['<!x><!DOCTYPE html>```\n', '<!x><!DOCTYPE html>&#96;&#96;&#96;\n'],
+    ['-\n<!DOCTYPE html>```\n', '-\n<!DOCTYPE html>&#96;&#96;&#96;\n'],
     ['p\n=\n<!DOCTYPE>```\n', 'p\n=\n<!DOCTYPE>&#96;&#96;&#96;\n'],
     ['x\n\n<!x y>~~~~ t\n- a\n', 'x\n\n<!x y>&#126;&#126;&#126;&#126; t\n- a\n'],
     ['<!DOCTYPE html>```\r\ntext\r\n', '<!DOCTYPE html>&#96;&#96;&#96;\r\ntext\r\n'],
@@ -78,16 +80,18 @@ describe('#5320: bytes that stay as written (the over-escape check)', () => {
     ['four spaces before the opener (indented code)', '<!DOCTYPE html>    ```\n'],
     ['marked closes a fence with its run followed by other fence characters', '<!DOCTYPE>~~~[a]: b\n~~~```\n'],
     ['the declaration sits inside a type 6 block (no new block starts there)', '<div>\n<!DOCTYPE html>```\n'],
-    ['the declaration sits after a bare list marker line', '-\n<!DOCTYPE html>```\n'],
     ['the declaration sits inside a type 1 block that is still open', '<pre>\n<!DOCTYPE html>```\n</pre>\n'],
     ['a line of a block quote (the quote ends at the blank line that follows)', '> <!DOCTYPE html>```\n'],
     ['a lone `=` line is paragraph text, so the declaration after it is no block start', '=\n<!DOCTYPE>```\n'],
     ['the first declaration continues a paragraph, so the one after its `>` starts no block either', 'p\n<!x><!DOCTYPE html>```\n'],
     ['a lone `=` line, then two declarations: neither starts a block', '=\n<!x><!DOCTYPE html>```\n'],
-    ['no declaration', '```\nx\n'],
+    ['no declaration', '```\nx\n```\n'],
     ['a tag, not a declaration', '<div>```\n'],
   ])('%s', (_name, body) => {
     expect(escapeUnterminatedHtml(body)).toBe(body);
+    // The reader this fix is about, and the raw string, keep the anchor as written (a body whose own fence is unbalanced can still lose it in CommonMark, as on main).
+    expect(losers(body)).not.toContain('marked');
+    expect(losers(body)).not.toContain('raw');
   });
 
   it('a shorter run does not close a longer opener (the closer needs at least as many characters)', () => {
