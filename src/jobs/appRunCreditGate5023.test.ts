@@ -268,16 +268,17 @@ describe('the helper', () => {
   });
 
   it('INSIDE a caller\'s transaction it writes nothing and counts the month\'s grant that is due (ruling 8a)', async () => {
-    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"organization":"500"}' });
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"500"}' });
     resetPeriodGrantStateForTests();
+    const uid = (await db.user.create({ data: { id: generateId(), githubId: 50_230_001, githubUsername: 'gate-u1', handle: 'gate-u1', roles: ['READER'] } })).id;
     const past = new Date(Date.now() - 3_600_000);
     await db.creditLedgerEntry.create({
-      data: { id: generateId(), organizationId: orgId, kind: 'grant', amountMicroCents: 100n, sourceType: 't', sourceId: 'old', createdAt: new Date(past.getTime() - 86_400_000), expiresAt: past },
+      data: { id: generateId(), ownerUserId: uid, kind: 'grant', amountMicroCents: 100n, sourceType: 't', sourceId: 'old', createdAt: new Date(past.getTime() - 86_400_000), expiresAt: past },
     });
     const before = await db.creditLedgerEntry.count();
     await db.$transaction(async (tx) => {
       // the grant due (500) is counted, the expired remainder (100) is subtracted: balance 500 > 0, so no refusal
-      await requireCreditHeadroom(tx as never, { organizationId: orgId });
+      await requireCreditHeadroom(tx as never, { userId: uid });
     });
     expect(await db.creditLedgerEntry.count()).toBe(before); // wrote neither the grant nor a settlement
   });
@@ -294,10 +295,11 @@ describe('the helper', () => {
   });
 
   it('outside a transaction it ensures the month\'s grant and settles an expired one before judging', async () => {
-    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"organization":"500"}' });
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"500"}' });
     resetPeriodGrantStateForTests();
-    await requireCreditHeadroom(db, { organizationId: orgId });
-    expect(await creditBalance(db, { organizationId: orgId })).toBe(500n);
+    const uid = (await db.user.create({ data: { id: generateId(), githubId: 50_230_002, githubUsername: 'gate-u2', handle: 'gate-u2', roles: ['READER'] } })).id;
+    await requireCreditHeadroom(db, { userId: uid });
+    expect(await creditBalance(db, { userId: uid })).toBe(500n);
   });
 });
 
