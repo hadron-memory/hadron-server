@@ -475,6 +475,33 @@ export async function appendHostEvent(
   });
 }
 
+// ── #5259: the hosts of a team App (hrn:node:hadronmemory.com:specs:cor:agt:070:01) ───────────────────────
+
+/** A host joined to the App, its settings changed, or its removal. */
+export const TEAM_HOST_EVENT_TYPES = ['host.joined', 'host.updated', 'host.removed'] as const;
+export type TeamHostEventType = (typeof TEAM_HOST_EVENT_TYPES)[number];
+
+/**
+ * Append a team-host event in the write's transaction. The host's token id only, and for a join whether it replaced a
+ * live key: never the label, which is free text (cor:agt:050:11), and never a key, raw or hashed.
+ */
+export async function appendTeamHostEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; type: TeamHostEventType; hostId: string; actorUserId: string | null; actorWorkerId?: string | null; replaced?: boolean; createdAt: Date },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: args.type,
+      actorUserId: args.actorUserId,
+      actorWorkerId: args.actorWorkerId ?? null,
+      actorAgentId: null,
+      payload: { hostId: args.hostId, ...(args.replaced === undefined ? {} : { replaced: args.replaced }) },
+      createdAt: args.createdAt,
+    },
+  });
+}
+
 // ── #1709: host operation outcomes ─────────────────────────────────────────
 
 /** A host operation's outcome (cor:agt:070:02: each outcome is also an event). */
@@ -803,6 +830,8 @@ export type ManagerAct =
   | 'worker.leave-alone' | 'app.sweep-mode'
   // #4222: the host-setup doors (which workers a host runs, and the App's switch for it).
   | 'host-setup.assign' | 'host-setup.unassign' | 'host-setup.source'
+  // #5259: a host's settings (joining and removing a host are person-only, so they record no instructed act).
+  | 'agent-team-host.update'
   // #4280 (S12b): linking a post-merge defect to the PR it escaped from.
   | 'review.defect-link';
 

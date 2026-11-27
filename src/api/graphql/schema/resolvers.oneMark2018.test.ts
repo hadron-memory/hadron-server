@@ -23,6 +23,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { maybeAdvanceOwnChannelRead } from '../../../lib/ownWorkerSessions.js';
 import { recordMentionsWorker } from '../../../lib/mentionsReadResolution.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -100,7 +101,11 @@ beforeEach(async () => {
   bareKey = await mkKey(app.id, 'bare');
   opOnlyKey = await mkKey(app.id, 'op-only');
   foreignKey = await mkKey(otherApp.id, 'foreign');
-  const grant = (k: { id: string }, scope: string, hostId?: string) => M.grantAppKeyScope({}, { id: k.id, scope, ...(hostId ? { hostId } : {}) }, ctx(manager.id));
+  // #5259: a host key is granted only for a host joined to the App.
+  const grant = async (k: { id: string }, scope: string, hostId?: string) => {
+    if (hostId) await joinHostForKey(db, k.id, hostId);
+    return M.grantAppKeyScope({}, { id: k.id, scope, ...(hostId ? { hostId } : {}) }, ctx(manager.id));
+  };
   await grant(hostKey, 'attention:deliver'); await grant(hostKey, 'host:operate', 'orca1');
   await grant(otherHostKey, 'attention:deliver'); await grant(otherHostKey, 'host:operate', 'orca2');
   await grant(bareKey, 'attention:deliver');
