@@ -4242,6 +4242,8 @@ model App {
   /// them). Set by whoever manages the App. Shape: prisma/host-assignment-invariants.sql.
   hostSetupSource         String                 @default("host") @map("host_setup_source")
   hostWorkerAssignments   HostWorkerAssignment[]
+  /// #5259 — the hosts joined to this App (one record per host and its settings).
+  agentTeamHosts          AgentTeamHost[]
   /// #2162 — the context resets of this App's workers.
   contextResets           ContextReset[]
   /// #2022 (S6, hrn:node:hadronmemory.com:specs:cor:agt:090) — the App's stop signals, live and ended.
@@ -8777,6 +8779,48 @@ model HostWorkerAssignment {
   @@index([appId, hostId])
   @@index([workerId])
   @@map("host_worker_assignments")
+}
+
+/// One host of a team App, and its settings: the platform's own record that a machine is a host of the App
+/// (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the host itself and its settings, Proposed). Before #5259 a host
+/// existed only as its registration, its key's `host:operate` scope and its assignments.
+///
+/// Relationships: belongs to an App and is deleted with it. `hostId` is the host's id within the App, the same plain
+/// value a registration, a scope and an assignment carry. `createdByUserId` and `removedByUserId` are plain ids that
+/// outlive the account. One row per (App, host), live or removed.
+///
+/// Behaviour:
+/// - Created by joining a machine as a host (`joinAgentTeamHost`), which also issues the host's key: whoever manages
+///   the App, as a person acting as themselves (hrn:node:hadronmemory.com:specs:cor:agt:070:07). Joining a removed
+///   host revives its row with its settings reset.
+/// - A null setting is the product default: `pollIntervalSeconds` (1 to 86400) is what the host's own configuration
+///   or the CLI says, `deliveryEnabled` is on. Changed by `updateAgentTeamHost`; stored for the host to read and apply, never consumed by the server.
+/// - Removing a host (`removeAgentTeamHost`, person-only) stamps `removedAt`, revokes its keys, ends its registration,
+///   removes its assignments and fails its open operations, in one transaction.
+/// - Holds no path, program, credential, account detail or anything tool-specific (hrn:node:hadronmemory.com:specs:cor:agt:070:03).
+/// - `createdByUserId` is null only on a row the #5259 backfill made for a host with no resolvable creator (no live
+///   scope granter and no assignment creator); every join sets it.
+/// - Shape: prisma/agent-team-host-invariants.sql.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:070:01. Rules: hrn:node:hadronmemory.com:specs:cor:agt:070:04,
+/// hrn:node:hadronmemory.com:specs:cor:agt:070:07. Background: #5209, #5259.
+model AgentTeamHost {
+  id                  String    @id
+  appId               String    @map("app_id")
+  hostId              String    @map("host_id")
+  label               String
+  pollIntervalSeconds Int?      @map("poll_interval_seconds")
+  deliveryEnabled     Boolean?  @map("delivery_enabled")
+  createdByUserId     String?   @map("created_by_user_id")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @default(now()) @map("updated_at")
+  removedAt           DateTime? @map("removed_at")
+  removedByUserId     String?   @map("removed_by_user_id")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, hostId], map: "agent_team_hosts_app_host_uniq")
+  @@map("agent_team_hosts")
 }
 
 /// One instruction the platform issued to one host of a team App, for one worker: for example start this

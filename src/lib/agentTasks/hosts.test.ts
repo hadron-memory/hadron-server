@@ -114,7 +114,7 @@ describe('cor:agt:070:01 — a host registers which workers it can launch, and a
 describe('lapse (cor:agt:070:01 open question: 3 poll intervals)', () => {
   it('live through 3 intervals inclusive; lapsed after, and its workers stop counting', async () => {
     await registerHost(db, ORCA1(), at('10:00'));
-    expect(isRegistrationLive({ refreshedAt: at('10:00'), pollIntervalSeconds: 60 }, at('10:03'))).toBe(true);
+    expect(isRegistrationLive({ refreshedAt: at('10:00'), pollIntervalSeconds: 60, lostAt: null }, at('10:03'))).toBe(true);
     expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:03'))).size).toBe(3);
     expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:03:00.001'))).size).toBe(0);
   });

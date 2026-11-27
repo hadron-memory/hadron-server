@@ -46,7 +46,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
-import { refusedAppUserMemoryPrincipal, heldAppUserMemoryClasses } from './appUserMemoryEligibility.js';
+import { refusedAppUserMemoryPrincipal, heldAppUserMemoryClasses, appAdmitsUserMemories } from './appUserMemoryEligibility.js';
 import { appUserMemorySlug, APP_USER_MEMORY_MAX_TAIL } from '../../../lib/appUserMemoryName.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 import { reclaimTombstonedMemory, SPEC_MINTED_PERMANENT } from '../../../lib/mintedSpecPermanence.js';
@@ -213,10 +213,10 @@ function conflictWithoutUrn(): GraphQLError {
  * question (QUESTION_CONTAINED) or a protected minted spec (SPEC_MINTED_PERMANENT) answers false with nothing removed: a
  * savepoint undoes any tombstone already removed. Any other error undoes the savepoint too, then rethrows.
  */
-async function reclaimAllOrKeep(tx: Prisma.TransactionClient, ids: string[]): Promise<boolean> {
+async function reclaimAllOrKeep(tx: Prisma.TransactionClient, ids: string[], userId: string): Promise<boolean> {
   await tx.$executeRaw`SAVEPOINT app_user_memory_reclaim`;
   try {
-    for (const id of [...ids].sort((x, y) => x.localeCompare(y))) await reclaimTombstonedMemory(tx, id);
+    for (const id of [...ids].sort((x, y) => x.localeCompare(y))) await reclaimTombstonedMemory(tx, id, [userId]);
   } catch (e) {
     await tx.$executeRaw`ROLLBACK TO SAVEPOINT app_user_memory_reclaim`;
     const held = e instanceof GraphQLError
@@ -390,7 +390,7 @@ export const appMemoryMutations = {
     const app = await loadAppAndAuthorize(ctx, appRef, klass);
     const agent = await resolveInstalledAgent(ctx, app.id, agentRef);
     // A user-owned App is A4's (#5186): its personal/private creation stays refused.
-    if (isUserOwned && !app.organizationUrn) {
+    if (isUserOwned && !appAdmitsUserMemories(app)) {
       throw new GraphQLError(
         'Personal/private App-scoped memories are not yet supported for a user-owned App.',
         { extensions: { code: 'BAD_USER_INPUT' } },
@@ -512,7 +512,7 @@ export const appMemoryMutations = {
                 if (ownTombstones.length !== blockers.length) continue;
                 // A tombstone the reclaim refuses to remove keeps its address: that candidate is taken and the next
                 // tail is tried, so a name collision never refuses (R2).
-                if (!(await reclaimAllOrKeep(tx, ownTombstones.map((b) => b.id)))) continue;
+                if (!(await reclaimAllOrKeep(tx, ownTombstones.map((b) => b.id), ctx.userId!))) continue;
               }
               return createRow(tx, {
                 urn, name: candidate, organizationId: null, ownerUserId: ctx.userId!, appUserMemory: true,

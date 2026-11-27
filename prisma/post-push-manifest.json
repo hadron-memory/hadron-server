@@ -196,6 +196,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_agent_team_hosts_shape",
+      "kind": "check-constraint",
+      "file": "agent-team-host-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_agent_ticker_templates_shape",
       "kind": "check-constraint",
       "file": "agent-ticker-template-invariants.sql",
