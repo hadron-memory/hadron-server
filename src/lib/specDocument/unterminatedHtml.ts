@@ -69,7 +69,7 @@ function bogusHiddenTag(text: string, at: number, close: number, ctx: () => Hidd
   if (raw === null) return -1;
   const before = body.slice(0, raw.index);
   // Before the first hidden start this pass escaped, the earlier, stricter test stands (#5332): a `<`, a backtick or a backslash before the tag
-  // rules it out. Behind one, what that element's raw text masked is read afresh, so a tag there that Markdown emits must be caught (Charles QA,
+  // rules it out. Behind one, what that element's raw text masked is read afresh, so a tag there that Markdown emits must be caught (#5388 QA,
   // #5388 at 722ea31f): only what Markdown could read another way rules it out there, a `<` that may start a construct holding the tag (a
   // comment, processing instruction or CDATA section with its closer somewhere after it, a declaration with a blank after its name, or a start
   // tag with a quoted value, the one place a tag holds a `<`; `</`, `<!<`, `<![` and a name followed by `<` are text), a backslash that escapes
@@ -93,7 +93,7 @@ function bogusHiddenTag(text: string, at: number, close: number, ctx: () => Hidd
   return at + 2 + raw.index;
 }
 
-/** #5388 (Charles QA) — the test of {@link bogusHiddenTag} behind an escaped hidden start: whether `before` holds what Markdown reads another way. */
+/** #5388 (QA) — the test of {@link bogusHiddenTag} behind an escaped hidden start: whether `before` holds what Markdown reads another way. */
 function maskedRuledOut(text: string, ctx: HiddenContext, at: number, close: number, before: string): boolean {
   // Whether `closer` occurs at or after `k`: the last one is looked up once per text, so each hidden tag costs no rescan.
   const after = (closer: string, k: number): boolean => {
@@ -107,7 +107,7 @@ function maskedRuledOut(text: string, ctx: HiddenContext, at: number, close: num
 }
 
 /**
- * #5369 — what the two checks below need of one text, built once per scan (Brooks LOCAL P1: each check used to rescan the text per hidden tag,
+ * #5369 — what the two checks below need of one text, built once per scan (#5388 LOCAL P1: each check used to rescan the text per hidden tag,
  * which made a 40 KB body cost seconds). Lines end at LF, CRLF and a bare CR, as in the readers.
  */
 interface HiddenContext {
@@ -187,7 +187,7 @@ function emittedEndTag(text: string, ctx: HiddenContext, at: number, from: numbe
   if (lo === index.at.length) return -1;
   const stop = index.next[lo];
   if (stop === -1 || index.fenced[stop] || index.upTo[lo] >= from) return -1;
-  // Charles QA F1: Markdown's raw text ends at this end tag, so a browser resumes right after it; a raw reader of the string must be in data
+  // #5388 QA F1: Markdown's raw text ends at this end tag, so a browser resumes right after it; a raw reader of the string must be in data
   // there too, or what follows is read two ways. It is when the end tag starts a token in data, or a token ends at its own `>`: a raw-text
   // element of its own name that the reader opened after the bogus comment, or a bogus comment that holds it. The reading is the
   // pass of {@link rawReader} from the start when that pass reads the bogus comment at `at` from data too; otherwise a walk from the comment's
@@ -208,7 +208,7 @@ interface RawReading { data: Set<number>; ends: Set<number>; joinAt: number; joi
 /** The walks of {@link rawReader} over one text: which walk first read each token start from data, and each walk (0 is from the start). */
 interface RawWalks { owner: Map<number, number>; walks: RawReading[] }
 /**
- * #5388 (Charles QA F1) — an HTML tokenizer's reading of `text` from `from` (in data), up to a token an earlier walk read: the offsets of the `<` that start a token
+ * #5388 (QA F1) — an HTML tokenizer's reading of `text` from `from` (in data), up to a token an earlier walk read: the offsets of the `<` that start a token
  * in data, and just past each token. Comments end at `-->` or `--!>`; `<!`, `<?` and `</`
  * before a non-letter are bogus comments to the next `>`; a tag ends at the first `>` outside a quoted value; `<` before anything else is text.
  */
@@ -235,7 +235,8 @@ function rawReader(text: string, from: number, walks: RawWalks): RawReading {
     const c = text[i + 1];
     let next: number;
     if (text.startsWith('<!--', i)) {
-      const m = /<!--->?|<!--[\s\S]*?--!?>/y;
+      // `<!-->` and `<!--->` end at once (handled here); any other comment, `<!---x` included, runs to `-->` or `--!>` (#5388 BLIND P2 at dabc70c5).
+      const m = /<!--[\s\S]*?--!?>/y;
       m.lastIndex = i;
       const r = text.startsWith('<!-->', i) ? i + 5 : text.startsWith('<!--->', i) ? i + 6 : (m.exec(text) ? m.lastIndex : -1);
       next = r;
@@ -266,7 +267,7 @@ function rawReader(text: string, from: number, walks: RawWalks): RawReading {
   return reading;
 }
 
-/** #5388 (Charles QA) — whether a backtick run of exactly `len` starts at or after `k` (the last start per length is found once per text). */
+/** #5388 (QA) — whether a backtick run of exactly `len` starts at or after `k` (the last start per length is found once per text). */
 function runAfter(text: string, ctx: HiddenContext, len: number, k: number): boolean {
   if (ctx.lastRun === undefined) {
     const last = new Map<number, number>();
@@ -277,9 +278,10 @@ function runAfter(text: string, ctx: HiddenContext, len: number, k: number): boo
 }
 
 /**
- * #5388 (Charles QA F2) — whether a line between `at` and `close` that continues the `<!`'s paragraph opens a comment or a CDATA section (up to
+ * #5388 (QA F2) — whether a line between `at` and `close` that continues the `<!`'s paragraph opens a comment or a CDATA section (up to
  * three spaces in) that runs past `close`: Markdown holds that block to its closer, and a reader that keeps CDATA (htmlparser2) or the comment
- * would too. A bare CR is not a line break here, as in the walk (a stated limit).
+ * would too. A bare CR is not a line break here, as in the walk: a stated limit (#5401), pinned in the #5369 tests; treating it as one here
+ * alone, while the walk does not, loses anchors main keeps (BLIND P2 at dabc70c5, measured).
  */
 /** Where each line-head `<!--` or `<![CDATA[` of the last text asked about starts, found once per text. */
 let commentLinesOf: { text: string; open: number[]; kind: string[] } | null = null;
@@ -426,7 +428,7 @@ function walkBlocks(text: string, s0: number, state: BlockState, at: number, ste
   return opened;
 }
 /** HTML blocks of types 1 to 5 (CommonMark): the line start that opens one, where its closer is searched from, the closer, and whether marked keeps the rest of the closer's line in the block. */
-// The `close` patterns are global for a positioned `exec`: their one user sets `lastIndex` before each call (Billie BLIND P3).
+// The `close` patterns are global for a positioned `exec`: their one user sets `lastIndex` before each call (#5388 BLIND P3).
 const TYPE15: ReadonlyArray<{ open: RegExp; from: number; close: RegExp; wholeLine: boolean }> = [
   { open: /^ {0,3}<(?:script|pre|style|textarea)(?:[ \t>]|$)/i, from: 1, close: /<\/(?:script|pre|style|textarea)>/gi, wholeLine: true },
   { open: /^ {0,3}<!--/, from: 2, close: /-->/g, wholeLine: true },
@@ -867,7 +869,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     if (c === '`' && i >= rawUntil) {
       let len = 1;
       while (text[i + len] === '`') len += 1;
-      // Charles QA (#5388 at 722ea31f): marked never opens a code span with a run right after an unescaped `~` (its text rule takes the run).
+      // #5388 QA (at 722ea31f): marked never opens a code span with a run right after an unescaped `~` (its text rule takes the run).
       if (model === 'marked' && text[i - 1] === '~' && /(?:^|[^\\])(?:\\\\)*$/.test(text.slice(Math.max(0, i - 65), i - 1))) { i += len; continue; }
       paraEnd = inlineBound(i);
       if ((noCloser.get(len) ?? -1) >= paraEnd) { i += len; continue; }
@@ -940,7 +942,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
-      // Charles QA F2 (#5388 at 722ea31f): `<!` and no letter is text to Markdown, so a later line that opens a comment block (type 2, which
+      // #5388 QA F2 (at 722ea31f): `<!` and no letter is text to Markdown, so a later line that opens a comment block (type 2, which
       // interrupts a paragraph) is read afresh there, while a browser reading the raw string has that `<!--` inside the bogus comment. When the
       // comment it opens does not end before the bogus comment's `>`, the two readings resume in different places: escape the `<!`.
       if (i >= rawUntil && !isLetter(text[i + 2]) && commentLineCrossed(text, i, close)) return i;

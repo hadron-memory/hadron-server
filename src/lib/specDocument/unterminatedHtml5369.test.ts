@@ -167,7 +167,7 @@ describe('#5369 (#5388 LOCAL P1): the work grows with the text, not with its cub
     // #5388 (QA F1): each `<!x` hides the next hidden start from the raw reader's first pass, so each is read by a walk of its own.
     ['declarations hiding the next hidden tag', (n: number) => 'x<!<style><!x'.repeat(n) + '</style>'.repeat(n)],
   ])('%s', (_label, body) => {
-    // Billie BLIND P3: four times the text must not take sixteen times as long (the fastest of three runs at n and at 4n; linear is about 4,
+    // #5388 BLIND P3: four times the text must not take sixteen times as long (the fastest of three runs at n and at 4n; linear is about 4,
     // the restarts of the fence shape about 6, quadratic about 16). Below 50 ms at 4n the ratio is noise, so only the absolute bound holds there.
     const time = (n: number): number => {
       const text = body(n);
@@ -182,13 +182,28 @@ describe('#5369 (#5388 LOCAL P1): the work grows with the text, not with its cub
   });
 });
 
+describe('#5369 (#5388 BLIND P2 at dabc70c5): a bare CR is not a line break to the F2 rule (stated limit, #5401)', () => {
+  // [body, the pass's output, readers that lose the anchor with that output]. The walk reads a bare CR as part of its line, so the F2 rule
+  // does too; reading it as a break in that rule alone lost anchors main keeps on two fuzzed bodies. The first loses where main keeps it.
+  it.each([
+    ['<!<style>\r<!\r<!--\\</style>', '<!&lt;style>\r<!\r<!--\\</style>', ALL],
+    ['<!\r<!--\\</style>', '<!\r<!--\\</style>', ALL],
+    ['<!<textarea><!\r<![CDATA[</textarea>', '<!<textarea><!\r<![CDATA[</textarea>', []],
+  ])('%j', (body, out, lose) => {
+    expect(escapeUnterminatedHtml(body)).toBe(out);
+    expect(losers(out)).toEqual(lose);
+  });
+});
+
 describe('#5369 (#5388 QA at 722ea31f): an escape never uncovers what a hidden tag had masked', () => {
-  // [body, the pass's output]: every reader keeps the anchor with the output. Charles's F1 kept it on main and lost it at 722ea31f in all three
+  // [body, the pass's output]: every reader keeps the anchor with the output. QA's F1 kept it on main and lost it at 722ea31f in all three
   // readers (the hidden `<textarea>`'s end tag sat in a comment the raw reader had opened, so the escaped `<script>` uncovered it); his F2 and
   // the nested shapes behind it lost it on main as written, where they stood alone, or once an outer hidden tag was escaped.
   it.each([
     // F1: an end tag counts only where a raw reader of the string is back in data (every `<` before it starts a simple tag).
     ['<!<script><!<textarea><!--</textarea>]:<xmp>--></script>', '<!&lt;script><!&lt;textarea><!--</textarea>]:<xmp>--></script>'],
+    // The same with `<!---`: a comment that only starts with three dashes still runs to its `-->` (BLIND P2 at dabc70c5).
+    ['<!<script><!<textarea><!---</textarea>]:<xmp>--></script>', '<!&lt;script><!&lt;textarea><!---</textarea>]:<xmp>--></script>'],
     // F2: a bare `<!` that runs over a line of its paragraph opening a comment or CDATA block that does not end before its `>`.
     ['<!<style>\n<!\n<!--\\</style>', '<!&lt;style>\n&lt;!\n&lt;!--\\</style>'],
     ['<!\n<!--\\</style>', '&lt;!\n&lt;!--\\</style>'],
