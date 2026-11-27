@@ -172,6 +172,19 @@ export function markupBpFor(price: Pick<AiModelPrice, 'markupBasisPoints'>): num
 
 // ── Usage recording (FR-001/003/004) ─────────────────────────────────────
 
+/**
+ * #5020 (cor:dmo:170:05, :07): unit types that are never debited to anyone, whatever key served them. Embedding is
+ * infrastructure the host pays for. One exported constant, so the debit gate and a pin read the same list.
+ */
+export const NEVER_DEBITED_TYPES: ReadonlySet<string> = new Set(['embedding']);
+
+/** The two billable-account columns a unit records: one set from the account, or both null when the work has no owner. */
+function billableColumns(account: OwnerRef | null): { organizationId: string | null; billableUserId: string | null } {
+  if (account == null) return { organizationId: null, billableUserId: null };
+  const cols = ownerColumns(account);
+  return { organizationId: cols.organizationId, billableUserId: cols.ownerUserId };
+}
+
 export interface LlmUsageParams {
   /** UsageEvent.type, e.g. 'app-run' | 'embedding'. */
   type: string;
@@ -189,8 +202,13 @@ export interface LlmUsageParams {
   appId?: string | null;
   /** On-behalf-of user (FR-001); null for pure-App service runs. */
   userId?: string | null;
-  /** Billable org (FR-001). Required for a debit to happen. */
-  organizationId?: string | null;
+  /**
+   * The billable account (#5020, cor:dmo:170:05): the owner of the work, an organization or a person; null when the work has
+   * no owner (a platform admin's test of the platform's own configuration). REQUIRED, so a new caller cannot leave it out
+   * silently (the caller guard, `meteringCallers5020.test.ts`, lists how each names it). Written to `organizationId` or
+   * `billableUserId`, and the debit goes to that owner's ledger.
+   */
+  billableAccount: OwnerRef | null;
   provider: string;
   model: string;
   tokensIn: number;
@@ -242,7 +260,9 @@ export async function recordLlmUsage(
       cost > 0n &&
       debitEnabled() &&
       params.keyOwnerType === 'HADRON_SERVER' &&
-      !!params.organizationId;
+      // cor:dmo:170:05: an embedding is never debited to anyone, whatever key served it.
+      !NEVER_DEBITED_TYPES.has(params.type) &&
+      params.billableAccount != null;
     const markupBasisPoints = charged ? markupBpFor(price) : null;
     // #1653 / DY-2: counts toward liveness only for a live, owned session.
     // The same door as every attributed request (#1660 review, Cloe P3):
@@ -262,7 +282,9 @@ export async function recordLlmUsage(
         createdAt: at,
         appId: params.appId ?? null,
         userId: params.userId ?? null,
-        organizationId: params.organizationId ?? null,
+        // #5020: exactly one of the two columns, or neither (chk_usage_event_one_billable). `ownerColumns` refuses an owner
+        // that names both or neither before the insert.
+        ...billableColumns(params.billableAccount),
         provider: params.provider,
         model: params.model,
         tokensIn: params.tokensIn,
@@ -287,7 +309,7 @@ export async function recordLlmUsage(
       : await db.usageEvent.create({ data });
     if (charged) {
       await debitCredits(db, {
-        owner: { organizationId: params.organizationId! },
+        owner: params.billableAccount!,
         amountMicroCents: applyMarkupBp(cost!, markupBasisPoints!),
         sourceType: 'usage-event',
         sourceId: event.id,
