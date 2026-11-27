@@ -201,6 +201,13 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
   }
   if(secret && (r.operation==='SET_PROTECTED' || (r.operation==='STORE' && r.protected_result===true))) {
    await endProtectionClients(tx,secret.id,protectionGrants,r.requester_id);
+   // #5335 (cor:sec:060:03): an option set while the secret was unprotected was any member's plain write. Turning protection on
+   // clears it, so a protected secret is armed only through SET_DELETE_AFTER_USE and its deletion authority. `secret` is the row
+   // read before this completion's writes; an already-protected secret (a STORE that keeps protection) keeps its option.
+   if(!secret.protected && secret.deleteAfterUse){
+    await tx.secret.update({where:{id:secret.id},data:{deleteAfterUse:false,updatedBy:r.requester_id}});
+    await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:'DELETE_AFTER_USE_OFF',actor});
+   }
   }
   await tx.$executeRaw`UPDATE secret_change_requests SET state='completed',ended_at=(${now.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${r.id}`;
   return null;

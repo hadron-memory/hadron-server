@@ -15,6 +15,7 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { insertSoftPasskey, softPasskey } from '../../../test/softPasskey.js';
 import { createGrantSigningRequestInTransaction } from '../../../lib/signing/grantRequests.js';
 import { openGrantProofCeremony, proveForGrantSigning, currentGrantSigningChallenge, completeGrantSigning } from '../../../lib/signing/grantCeremony.js';
+import { CeremonyRefused } from '../../../lib/signing/signingCeremony.js';
 import { openSecretProof, proveSecretChange, completeSecretChange } from '../../../lib/secrets/changeCeremony.js';
 import { secretSweepTick } from '../../../jobs/secretSweep.js';
 import { RUN_CLIENT_PREFIX } from '../../../lib/auth/runPrincipal.js';
@@ -114,11 +115,19 @@ describe('#5335 Ask 1: the protected auto-delete exception is refused at issuanc
   });
   it('the generic grant door is refused the same way at signing (the issuer rule), and the grant is never activated', async () => {
     await protect(false);
-    const grantId = await db.$transaction(tx => createPendingGrant(tx, { appId, requester: { userId: ownerId, workerId: null, sessionId: null },
+    const generic = () => db.$transaction(tx => createPendingGrant(tx, { appId, requester: { userId: ownerId, workerId: null, sessionId: null },
       holder: { kind: 'worker', id: workerId }, action: 'secret.reveal', values: { secret: secretId, 'auto-delete': 'delete' },
       maxUses: 1, expiresAt: null, reason: 'generic door', canReadMemory: async () => false }));
-    expect(await failure(sign(grantId))).not.toBe('OK');
+    const grantId = await generic();
+    // A signing refusal carries no code by design (CeremonyRefused); the issuer gate is the one refusal that records an observation.
+    await expect(sign(grantId)).rejects.toBeInstanceOf(CeremonyRefused);
+    expect((await db.grantSigningRequest.findFirstOrThrow({ where: { grantId } })).lastRefusedAt).not.toBeNull();
     expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).activatedAt).toBeNull();
+    // Control: the same grant on the armed secret signs, so the refusal above is the arming rule and nothing else.
+    await completeCeremony(await stagedId(setOption(true)));
+    const armed = await generic();
+    await sign(armed);
+    expect((await db.grant.findUniqueOrThrow({ where: { id: armed } })).activatedAt).not.toBeNull();
   });
   it('a stranger sees one refusal for a protected, an unprotected and a missing secret (no protection oracle)', async () => {
     const outsider = (await db.user.create({ data: { handle: `outsider-${generateId()}` } })).id;
@@ -282,5 +291,60 @@ describe('#5335 Ask 3: who sets the option', () => {
     await db.secret.update({ where: { id: secretId }, data: { metadata: { moved: true } } });
     expect(await failure(completeCeremony(id))).toBe('SECRET_CHANGE_REQUEST_STALE');
     expect((await db.secret.findUniqueOrThrow({ where: { id: secretId } }) as unknown as { deleteAfterUse: boolean }).deleteAfterUse).toBe(false);
+  });
+  it('on an unprotected secret, clearing records DELETE_AFTER_USE_OFF', async () => {
+    await setOption(true);
+    const cleared = await setOption(false) as unknown as { deleteAfterUse: boolean };
+    expect(cleared.deleteAfterUse).toBe(false);
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'DELETE_AFTER_USE_OFF' } })).toBe(1);
+  });
+  it('on an unprotected secret, the option rides along with a value change: both land, one event each, one answer', async () => {
+    const updated = await resolvers.Mutation.updateSecret({}, { ref: secretId, deleteAfterUse: true, value: 'dau-canary-2' } as never, ctx()) as unknown as { deleteAfterUse: boolean };
+    expect(updated.deleteAfterUse).toBe(true);
+    const kinds = (await db.secretEvent.findMany({ where: { secretId, kind: { in: ['DELETE_AFTER_USE_ON', 'VERSION'] } }, orderBy: { at: 'asc' } })).map(e => e.kind);
+    expect(kinds.sort()).toEqual(['DELETE_AFTER_USE_ON', 'VERSION']);
+    expect(await db.secretVersion.count({ where: { secretId } })).toBe(2);
+  });
+});
+
+describe('#5335 blind P2: an option set while unprotected does not survive protection', () => {
+  async function memberArms() {
+    const member = (await db.user.create({ data: { handle: `m-${generateId()}` } })).id;
+    await db.appMember.create({ data: { appId, userId: member, role: 'reader' } });
+    await setOption(true, ctx({ userId: member }));
+    expect((await db.secret.findUniqueOrThrow({ where: { id: secretId } }) as unknown as { deleteAfterUse: boolean }).deleteAfterUse).toBe(true);
+  }
+  const row = async () => await db.secret.findUniqueOrThrow({ where: { id: secretId } }) as unknown as { protected: boolean; deleteAfterUse: boolean };
+  it('SET_PROTECTED clears a member-set option and records DELETE_AFTER_USE_OFF; a mark is then refused', async () => {
+    await memberArms();
+    await completeCeremony(await stagedId(resolvers.Mutation.setSecretProtected({}, { ref: secretId, protected: true }, ctx())));
+    expect(await row()).toMatchObject({ protected: true, deleteAfterUse: false });
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'DELETE_AFTER_USE_OFF' } })).toBe(1);
+    expect(await failure(issue({ maxReads: 1 }))).toBe('SECRET_AUTO_DELETE_NOT_ALLOWED');
+  });
+  it('a STORE that turns protection on (updateSecret value + protected) clears it the same way', async () => {
+    await memberArms();
+    await completeCeremony(await stagedId(resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'dau-canary-2', protected: true } as never, ctx())));
+    expect(await row()).toMatchObject({ protected: true, deleteAfterUse: false });
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'DELETE_AFTER_USE_OFF' } })).toBe(1);
+  });
+  it('a legacy mark signed while a member had armed the unprotected secret deletes nothing once it is protected', async () => {
+    await memberArms();
+    const a = await legacyMarked('last-read');
+    await completeCeremony(await stagedId(resolvers.Mutation.setSecretProtected({}, { ref: secretId, protected: true }, ctx())));
+    await reveal(a.clientId).catch(() => undefined);
+    expect(await exists()).toBe(1);
+  });
+  it('a STORE that restates protection on an already-protected, armed secret keeps the option (consent given under protection stands)', async () => {
+    await protect(true);
+    await completeCeremony(await stagedId(resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'dau-canary-2', protected: true } as never, ctx())));
+    const [r] = await db.$queryRaw<Array<{ protected_result: boolean | null }>>`SELECT protected_result FROM secret_change_requests WHERE secret_id = ${secretId} AND operation = 'STORE'`;
+    expect(r.protected_result).toBe(true); // the completion runs the protection-on block, so only the was-unprotected test keeps the option
+    expect(await row()).toMatchObject({ protected: true, deleteAfterUse: true });
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'DELETE_AFTER_USE_OFF' } })).toBe(0);
+  });
+  it('the database refuses the option on a non-App row (chk_secret_delete_after_use_app_only)', async () => {
+    const own = await resolvers.Mutation.createSecret({}, { ownerType: 'user', name: 'mine', kind: 'generic', value: 'v' }, ctx());
+    await expect(db.$executeRaw`UPDATE secrets SET delete_after_use = true WHERE id = ${own.id}`).rejects.toThrow(/chk_secret_delete_after_use_app_only/);
   });
 });
