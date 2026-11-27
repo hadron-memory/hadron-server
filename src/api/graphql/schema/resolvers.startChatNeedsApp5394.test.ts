@@ -117,6 +117,21 @@ describe('#5394 no App identified: CHAT_APP_NOT_IDENTIFIED, loudly, before anyth
 });
 
 describe('#5394 the named App is the App: no search', () => {
+  it('a named App whose install has no live licence is refused like an unknown Agent; no other App is tried, nothing is written', async () => {
+    // A foreign org's App installs the Agent with no activated AgentOrgGrant: installed, not licensed. ann is its member,
+    // and appA (licensed, hers) stays available, which a search would have picked.
+    const foreign = await db.organization.create({ data: { name: 'Foreign', urn: 'foreign5394.test' } });
+    const unlicensed = (await db.app.create({ data: { name: 'Unlicensed', urn: `${foreign.urn}:app`, organizationId: foreign.id } })).id;
+    await db.appAgent.create({ data: { appId: unlicensed, agentId } });
+    await db.appMember.create({ data: { appId: unlicensed, userId: ann, role: 'member' } });
+    const before = await counts();
+    const r = await refusal(M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: unlicensed }, as(ann)));
+    const notHers = await refusal(M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: outsiderApp }, as(ann)));
+    expect(r.code).toBe('AGENT_NOT_FOUND');
+    expect(r).toEqual(notHers);
+    expect(await counts()).toEqual(before);
+  });
+
   it('appRef names the App whose personal home is used, never the first App a search finds', async () => {
     const started = await M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: appB }, as(ann));
     const row = await db.memory.findUniqueOrThrow({ where: { id: await homeOf(started.chatId) } });
