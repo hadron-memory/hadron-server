@@ -1159,7 +1159,9 @@ export const workerMutations = {
             // signal covers a worker born now, so the cast is ordered with it and tells the worker. With none, nothing changes;
             // a worker born in the instant one is set is covered at once by enforcement (computed live) and told at its first
             // bind, which reconciles coverage.
-            if (choice.kind === 'REPORTS_TO' || (await appStopSignalLive(tx, appId))) { stopFenced = true; await lockStopFence(tx, appId, 'exclusive'); }
+            // Assigned on every run of this callback (not only set to true), so a re-run of the transaction cannot keep a stale `true`.
+            stopFenced = choice.kind === 'REPORTS_TO' || (await appStopSignalLive(tx, appId));
+            if (stopFenced) await lockStopFence(tx, appId, 'exclusive');
           } });
         } catch (e) {
           // Order matters: a slug race is private and retried; a name

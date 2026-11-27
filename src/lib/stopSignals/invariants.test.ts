@@ -24,7 +24,19 @@ describe('stop-signal-invariants.sql (#2022)', () => {
     const carrier = readdirSync(dir).sort().reverse().find((d) => { try { return readFileSync(new URL(`${d}/migration.sql`, dir), 'utf8').includes(block.split('\n')[0]!); } catch { return false; } });
     expect(carrier).toBe('20261127110000_stop_signal_app_scope');
     expect(readFileSync(new URL(`${carrier}/migration.sql`, dir), 'utf8').endsWith(block)).toBe(true);
-    expect(readFileSync(new URL('../../../prisma/migrations/20261020030000_stop_signals/migration.sql', import.meta.url), 'utf8')).toContain(first);
+    // The rest of the file (every trigger function, the same-App and write-once guards, the indexes) is still EXACTLY what the original
+    // migration carries: the file and the original migration's tail differ only in the shape CHECK block (and the comment above it).
+    // So an edit to a trigger in the shared file that no migration carries fails here, not silently at `migrate deploy`.
+    const stripCheck = (text: string): string => {
+      const from = text.indexOf('-- cor:agt:090:01 \u2014 a level and a scope');
+      const upto = text.indexOf('\n);\n', text.indexOf('ADD CONSTRAINT chk_team_stop_signals_shape CHECK (', from)) + '\n);\n'.length;
+      expect(from).toBeGreaterThan(-1);
+      return text.slice(0, from) + text.slice(upto);
+    };
+    const original = readFileSync(new URL('../../../prisma/migrations/20261020030000_stop_signals/migration.sql', import.meta.url), 'utf8');
+    const originalFile = original.slice(original.indexOf(first));
+    expect(originalFile.length).toBeGreaterThan(1000);
+    expect(stripCheck(source)).toBe(stripCheck(originalFile));
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir stop-signal-invariants.sql');
   });
 

@@ -229,6 +229,7 @@ async function setSignal(input: SetTeamStopSignalInput, ctx: Context, instructio
   const scope = parseScope(input?.scope);
   const workerRef = trimmed(input?.worker);
   const hostRef = trimmed(input?.host);
+  // Shape of the target, by scope: WORKER/TEAM name a worker, HOST names a host, APP names neither (checked further down, after the host-key branch).
   if (scope === 'host' && workerRef) throw badInput('A host signal names a host, not a worker.');
   // #5325: an APP signal names no target. A host key's APP call is refused as a scope refusal (below), whatever it names, so
   // the refusal does not depend on the shape of the request; a person's APP call that names a target is malformed.

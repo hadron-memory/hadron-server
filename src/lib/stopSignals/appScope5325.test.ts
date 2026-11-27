@@ -20,6 +20,8 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { taskMatcherTick } from '../../jobs/taskMatcher.js';
 import { coveringSignals, lockStopFence } from './state.js';
 import { declareAllStopLanes } from '../../test/stopLanes.js';
+import { advisoryWaiterPresent, observeTransactionBackend } from '../../test/advisoryWaiter.js';
+import { sweepExpiredStopSignals } from './sweep.js';
 import { serveEveryAgent } from '../../test/servedBootPrompt.js';
 import { joinHostForKey } from '../../test/agentTeamHost.js';
 
@@ -166,8 +168,12 @@ describe('cor:agt:090:02 — the workers an APP signal covers, live (no roster, 
     expect((await coveringSignals(db, otherApp.id, null, new Date())).has(foreign.id)).toBe(false);
   });
 
-  it('C2: a signal set in another App covers nothing here', async () => {
-    await M.setTeamStopSignal({}, { input: { appRef: otherApp.id, level: 'PAUSE', scope: 'APP' } }, ctx(max.id)).catch(() => undefined);
+  it('C2: a signal set in another App is really set there and covers nothing here', async () => {
+    const stranger = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: otherApp.id, agentId, name: 'Zed', slug: 'zed2', heldByUserId: mia.id, heldAt: new Date() }, select: { id: true } });
+    await declareAllStopLanes(db, otherApp.id);
+    const there = await M.setTeamStopSignal({}, { input: { appRef: otherApp.id, level: 'PAUSE', scope: 'APP' } }, ctx(max.id));
+    expect(there).toMatchObject({ scope: 'APP', live: true }); // it was set (not a swallowed refusal)
+    expect([...(await coveringSignals(db, otherApp.id, null, new Date())).keys()]).toEqual([stranger.id]);
     expect(await covered()).toEqual([]);
     expect(await db.teamStopSignal.count({ where: { appId: app.id } })).toBe(0);
   });
@@ -193,20 +199,38 @@ describe('cor:agt:090:02 — the workers an APP signal covers, live (no roster, 
     expect(await notices(newbie)).toEqual(['pause:stop', 'pause:resume']);
   });
 
-  it('C6: while an APP signal stands, a cast with no reporting line takes the App\'s stop fence (it waits behind a held fence); with none it does not', async () => {
+  it('C6: while an APP signal stands, a cast with no reporting line takes the App\'s stop fence (it waits on it); with none it does not', async () => {
     const caster = await M.createAgent({}, { orgRef: org.id, name: 'Caster', personaRole: 'engineer' }, ctx(max.id));
     await serveEveryAgent(db);
     await createDbAppAgent(db, app.id, caster.id);
     const castHolding = async (name: string, expectWait: boolean) => {
-      let settled = false;
-      let cast: Promise<unknown> | undefined;
-      await db.$transaction(async (tx) => {
-        await lockStopFence(tx, app.id, 'exclusive');
-        cast = M.castWorker({}, { appRef: app.id, agentRef: caster.id, name }, ctx(max.id)).finally(() => { settled = true; });
-        await new Promise((r) => setTimeout(r, 900));
-        expect(settled).toBe(!expectWait);
-      });
-      await cast;
+      let release!: () => void; let ready!: () => void;
+      const held = new Promise<void>((r) => { release = r; });
+      const started = new Promise<void>((r) => { ready = r; });
+      const blocker = db.$transaction(async (tx) => { await lockStopFence(tx, app.id, 'exclusive'); ready(); await held; }, { timeout: 30_000 });
+      await started;
+      const observed = observeTransactionBackend(db);
+      let finished = false;
+      const casting = M.castWorker({}, { appRef: app.id, agentRef: caster.id, name }, { ...ctx(max.id), db: observed.db });
+      const result = casting.then(() => { finished = true; }, (e: unknown) => { finished = true; throw e; });
+      try {
+        const pid = await observed.backendFor(casting);
+        const deadline = Date.now() + 8000;
+        if (expectWait) {
+          // The cast's backend is observed waiting on the stop fence's advisory lock: no timing guess.
+          while (!(await advisoryWaiterPresent(db, { pid, key: { form: 'hashed-bigint', value: `stop-signals:${app.id}` } }))) {
+            if (finished) throw new Error('the cast finished without waiting on the stop fence');
+            if (Date.now() > deadline) throw new Error('the cast never waited on the stop fence');
+            await new Promise((r) => setTimeout(r, 25));
+          }
+        } else {
+          while (!finished) {
+            if (await advisoryWaiterPresent(db, { pid, key: { form: 'hashed-bigint', value: `stop-signals:${app.id}` } })) throw new Error('the cast waited on the unrelated stop fence');
+            if (Date.now() > deadline) throw new Error('the cast did not finish while the fence was held');
+            await new Promise((r) => setTimeout(r, 25));
+          }
+        }
+      } finally { release(); await blocker; await result; }
       expect(await db.worker.count({ where: { appId: app.id, name } })).toBe(1);
     };
     await castHolding('Free', false); // no APP signal: unrelated to the fence (castReporting2028 pins the same)
@@ -225,6 +249,36 @@ describe('cor:agt:090:02 — the workers an APP signal covers, live (no roster, 
     expect(await covered()).toEqual(ids(ada, liam, dan));
     await lift(keyCtx(orca1), halt.id);
     expect(await covered()).toEqual(ids(ada, liam, dan));
+  });
+});
+
+describe('cor:agt:090:03, :04, :05 — lanes, levels and expiry for an APP signal', () => {
+  it('F1: an APP signal is refused STOP_SIGNAL_UNAVAILABLE while any worker of the App is on a lane with no consumer, and nothing is written', async () => {
+    await db.stopConsumerDeclaration.deleteMany({ where: { appId: app.id, lane: 'unhosted' } }); // Liam is on no host: the unhosted lane
+    const e = await refusal(set(ctx(max.id), { level: 'PAUSE', scope: 'APP' }));
+    expect(e.extensions).toMatchObject({ code: 'STOP_SIGNAL_UNAVAILABLE', workers: 1, lanes: ['unhosted'] });
+    expect(await db.teamStopSignal.count({ where: { appId: app.id } })).toBe(0);
+    expect(await notices(liam)).toEqual([]);
+  });
+
+  it('F2: a HALT tells every worker to hand off (interrupt notice); lifting it tells each to resume', async () => {
+    const s = await set(ctx(max.id), { level: 'HALT', scope: 'APP' });
+    const rows = await db.agentTeamEvent.findMany({ where: { appId: app.id, type: 'stop.notice' }, select: { subjectWorkerId: true, payload: true } });
+    expect(rows.map((r) => r.subjectWorkerId).sort()).toEqual(ids(ada, liam, dan, kit));
+    for (const r of rows) expect(r.payload).toMatchObject({ level: 'halt', notice: 'stop', interrupt: true });
+    await lift(ctx(max.id), s.id);
+    for (const w of [ada, liam, dan, kit]) expect((await notices(w)).slice(-1)).toEqual(['halt:resume']);
+  });
+
+  it('F3: an until ends it by itself: past its until it covers nobody, and the sweep records the expiry and tells each worker to resume once', async () => {
+    const until = new Date(Date.now() + 3_600_000);
+    const s = await set(ctx(max.id), { level: 'PAUSE', scope: 'APP', until });
+    expect(await covered()).toEqual(ids(ada, liam, dan, kit));
+    const later = new Date(until.getTime() + 1000);
+    expect([...(await coveringSignals(db, app.id, null, later)).keys()]).toEqual([]); // in effect at its until, before any sweep
+    expect(await sweepExpiredStopSignals(db, later)).toEqual([s.id]);
+    for (const w of [ada, liam, dan, kit]) expect(await notices(w)).toEqual(['pause:stop', 'pause:resume']);
+    expect(await sweepExpiredStopSignals(db, later)).toEqual([]);
   });
 });
 
