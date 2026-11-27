@@ -41,6 +41,7 @@ import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { cappedLinkLevel, type LinkCapMemory } from '../lib/auth/agentMemoryLinkCap.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
+import { isForeignUserHolding, isUserHolding } from '../lib/auth/userHolding.js';
 import { mcpRequestSessionContext } from './requestSession.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../lib/auth/publicKnowledgeRead.js';
 import { userlessRunHoldsWriteGrant, type WriteDestination } from '../lib/appWriteGrant.js';
@@ -1073,6 +1074,7 @@ export async function canWriteToMemory(
     select: {
       class: true, userId: true, userMemoryOfAgentId: true, appId: true,
       ownerUserId: true, organizationId: true, installOfAgentId: true, isInstallMemory: true,
+      createdBy: true,
       workerOf: { select: { id: true } },
     },
   });
@@ -1213,7 +1215,8 @@ export async function canWriteToMemory(
   // getMemoryAccess unions across all the user's accessible Apps —
   // the access map answers the question "does the caller have RW on
   // this memory via *any* of their App memberships?"
-  if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
+  // hadron-internal#88: no role shortcut reaches another user's chat holding; it falls to the access map, which never holds it.
+  if (!isForeignUserHolding(memory, auth.userId) && (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER'))) return true;
 
   const access = await getMemoryAccess(db, auth);
   return access.get(memoryId) === 'READ_WRITE';
@@ -1360,6 +1363,9 @@ async function canReadMemoryRow(
   }
 
   if (readsOwnNoAppHolding(auth, memory)) return true;
+  // hadron-internal#88 (cor:cht:010:02): a per-user chat holding is its creator's alone, so no role bypass, App fold or
+  // organisation access map below admits anybody else. Judged by the same predicate as the record gate.
+  if (isUserHolding(memory)) return false;
 
   // Non-personal memory: ADMIN/OWNER bypass + access map check.
   // Per D-2026-05-21-003, when auth.appId is unset (multi-App OAuth caller
