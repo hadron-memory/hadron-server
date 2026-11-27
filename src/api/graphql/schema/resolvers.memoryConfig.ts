@@ -111,6 +111,8 @@ export type MemoryGateRow = {
   userId: string | null;
   organizationId: string | null;
   ownerUserId: string | null;
+  userMemoryOfAgentId: string | null;
+  createdBy: string | null;
 };
 
 /**
@@ -134,7 +136,7 @@ export async function canManageMemoryConfig(ctx: Context, memory: MemoryGateRow)
   }
 }
 
-export const MEMORY_GATE_SELECT = { id: true, class: true, userId: true, organizationId: true, ownerUserId: true } as const;
+export const MEMORY_GATE_SELECT = { id: true, class: true, userId: true, organizationId: true, ownerUserId: true, userMemoryOfAgentId: true, createdBy: true } as const;
 
 /**
  * #1334 — LOCK authority over a memory's locked rules: the existing

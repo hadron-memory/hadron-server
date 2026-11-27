@@ -26,6 +26,8 @@
  * Lock order (§7): authority anchors → the log row (ask, purge, deciders) →
  * the question row. Never a log lock taken while a question row is held.
  */
+import { isUserHolding, userHoldingCreatorMayRead } from '../../../lib/auth/userHolding.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { createHash } from 'crypto';
 import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { GraphQLError } from 'graphql';
@@ -325,9 +327,11 @@ function holdAppOwnerRow(ctx: Context, memoryId: string) {
 async function requireLogManage(ctx: Context, memoryId: string, concealRef?: string): Promise<void> {
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },
-    select: { class: true, userId: true, organizationId: true, ownerUserId: true, appId: true },
+    select: { class: true, userId: true, organizationId: true, ownerUserId: true, appId: true, userMemoryOfAgentId: true, createdBy: true },
   });
   const gate = async () => {
+    // hadron-internal#88: a chat holding's log is its creator's alone; no App-owner arm reaches it first.
+    if (isUserHolding(memory) && !userHoldingCreatorMayRead(ctx, memory)) throw authorizationDenied();
     if (await isOwnerRoleAppMember(ctx, memory)) return;
     await requireMemoryManageAccess(ctx, memory);
   };

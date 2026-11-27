@@ -28,7 +28,24 @@ const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 
 /** Shared projected rows. Person and run reads use RepeatableRead; run reads also hold live authority anchors through projection. */
 export async function withRosterAppRead<T>(ctx: Context, appRef: string, project: (readCtx: Context, app: TaskApp) => Promise<T>): Promise<T> {
-    if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, project, true);
+    if (isRunPrincipal(ctx) && !ctx.userId) {
+      // #5387: a run's roster-family read gets the person path's statement budget (#4476), set as the first statement of
+      // the body, after the run arm's authority anchors (as teamSnapshotTools.ts does, #5351). Before this the run arm ran
+      // in inRunTeamReadTx (Prisma's 20 s interactive timeout) with no statement bound, and a Prisma timeout does not
+      // cancel a running statement, so a blocked roster statement held its pooled connection until it returned. Neither
+      // cancel SQLSTATE (57014, 25P04) is a serialization failure, so inRunTeamReadTx's retry does not run the read again;
+      // the catch gives the person path's typed TEAM_READ_BUSY refusal. The task-URN lookup and readableTasks' run arms
+      // are not covered (PK-shaped reads, the gate's accepted residual).
+      try {
+        return await withReadableApp(ctx, appRef, async (readCtx, app) => {
+          await applyTeamReadStatementBudget(readCtx.db);
+          return project(readCtx, app);
+        }, true);
+      } catch (error) {
+        if (isPrismaBusyExhaustion(error)) throw new TeamReadBusyError(error);
+        throw error;
+      }
+    }
     // Admission, status and assignment projections share one read snapshot, including MCP callers.
     try {
       return await ctx.db.$transaction(async (tx) => {
