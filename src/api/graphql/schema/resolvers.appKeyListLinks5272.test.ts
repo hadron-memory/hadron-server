@@ -18,8 +18,10 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
 }));
 
-// The two resolvers under test, typed by what these pins call: a renamed or removed argument fails the compile here instead of
-// passing through an `any` (#5361 item 4). The resolver map itself is loosely typed, so one cast to this shape is the seam.
+// The two resolvers under test, reached through ONE explicit cast seam to a small typed shape: it gives these pins typed call
+// sites and results. It is NOT compared against the resolver map (the cast goes through `unknown`), so a renamed resolver
+// argument fails these pins at run time, not at compile time; the fixtures below are the compile-checked part
+// (`satisfies Prisma.*UncheckedCreateInput`). #5361 item 4; blind review F1.
 type MemoriesArgs = { limit?: number; offset?: number; filter?: { memoryClasses?: string[]; visibility?: string } };
 type MemoryPage = { items: Array<{ id: string }>; total: number };
 const M = resolvers.Mutation as unknown as {
@@ -144,7 +146,7 @@ describe('#5272 GraphQL memories for a pure App key lists what its links let it 
   it('a user with the App selected, a session-bound key and a deleted App get no link reach in the list', async () => {
     const outsider = (await db.user.create({ data: { id: generateId(), githubId: 5_272_009, githubUsername: 'x', handle: `x-${generateId().slice(-6)}` } })).id;
     expect((await list({ db, userId: outsider, appId: app.id, roles: [] } as Partial<Context> as Context)).ids).not.toContain(linked.id);
-    expect((await list({ ...keyCtx(app.id), sessionId: generateId() } as Context)).ids).not.toContain(linked.id);
+    expect((await list({ ...keyCtx(app.id), sessionId: generateId() } as Partial<Context> as Context)).ids).not.toContain(linked.id);
     await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
     expect(await list(keyCtx(app.id))).toEqual({ ids: [], total: 0 });
   });
@@ -174,6 +176,7 @@ describe('#5272 GraphQL memories for a pure App key lists what its links let it 
     expect(await db.appAgent.count({ where: { appId: bare.id } })).toBe(0);
     const out = await list(keyCtx(bare.id));
     expect(out).toEqual({ ids: [own.id], total: 1 });
+    // (the exact list above already implies these three; they name what the failure would look like)
     // not the other App's Agent memory, link or the unlinked memory: nothing but what its own link lets it read
     expect(out.ids).not.toContain(agentMemory.id);
     expect(out.ids).not.toContain(linked.id);
@@ -195,9 +198,9 @@ describe('#5272 GraphQL memories for a pure App key lists what its links let it 
     expect(out.ids).not.toContain(linked.id); // an ORGANIZATION memory is not PUBLIC
     expect(out.ids).not.toContain(unlinked.id);
     // without the filter the key's own list carries the linked one but not the unrelated PUBLIC one: the link is what makes it the key's
-    const own = (await list(keyCtx(app.id))).ids;
-    expect(own).toContain(publicLinked.id);
-    expect(own).not.toContain(publicOther.id);
+    const keyList = (await list(keyCtx(app.id))).ids;
+    expect(keyList).toContain(publicLinked.id);
+    expect(keyList).not.toContain(publicOther.id);
   });
 
   // #5361 item 3b: a positive parity check: every id the list returns is readable through `memory(ref:)` by the same key,
@@ -212,14 +215,22 @@ describe('#5272 GraphQL memories for a pure App key lists what its links let it 
     });
     await attach(asUser(otto), refused.id, userApp.id);
     expect((await list(keyCtx(userApp.id))).ids).not.toContain(refused.id);
-    for (const key of [app.id, userApp.id]) {
-      const { ids } = await list(keyCtx(key));
+    // the zero-install organization App of item 1 is part of the invariant too
+    const bare = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'ParityBareApp', urn: `${org.urn}:paritybare` } satisfies Prisma.AppUncheckedCreateInput });
+    await db.appMember.create({ data: { appId: bare.id, userId: alice, role: 'member' } });
+    await attach(asUser(alice), (await orgKnowledge('parity-bare-linked')).id, bare.id);
+    for (const keyApp of [app.id, userApp.id, bare.id]) {
+      const { ids } = await list(keyCtx(keyApp));
       expect(ids.length).toBeGreaterThan(0);
       for (const id of ids) {
-        const record = await Q.memory(null, { ref: id }, keyCtx(key));
-        expect(record, `memory(ref: ${id}) for the key of ${key}`).not.toBeNull();
+        const record = await Q.memory(null, { ref: id }, keyCtx(keyApp));
+        expect(record, `memory(ref: ${id}) for the key of ${keyApp}`).not.toBeNull();
         expect(record!.id).toBe(id);
       }
+    }
+    // and the marketplace slice of item 3a: whatever it lists for the key, the key can read
+    for (const id of (await list(keyCtx(app.id), { filter: { visibility: 'PUBLIC' } })).ids) {
+      expect(await Q.memory(null, { ref: id }, keyCtx(app.id)), `PUBLIC slice id ${id}`).not.toBeNull();
     }
   });
 });
