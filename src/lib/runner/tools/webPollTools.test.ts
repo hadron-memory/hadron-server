@@ -265,7 +265,8 @@ describe('#1564 — web_poll_start advertises only the secret scopes the store a
   });
 
   it('a removed scope is refused with an error naming exactly the accepted owners', async () => {
-    await expect(webPollStart.execute({} as never, {
+    // #5077: the tool reads its run's owner first (a person's run is refused before anything else), so it needs an org run.
+    await expect(webPollStart.execute({ run: { organizationId: 'org-1', ownerUserId: null } } as never, {
       url: 'https://api.example.test/v1/orders',
       conditions: [{ id: 'x', type: 'content_changed' }],
       intervalSeconds: 60,

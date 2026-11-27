@@ -191,7 +191,7 @@ describe('a run cannot exist on a personal App', () => {
   // If runs are ever modelled for a personal App this goes red, and that work must carry the run's principal into the
   // membership check (`installedSystemMemoryFolds`, called with no user for a run) and require a participant.
   it('is refused at the one mint door, so the membership check never sees a run', async () => {
-    await expect(mintAppRun(db, { appId, organizationId: orgId, triggerKind: 'MANUAL', entryNodeUrn: 'x' } as never))
+    await expect(mintAppRun(db, { appId, owner: { organizationId: orgId }, triggerKind: 'MANUAL', entryNodeUrn: 'x' } as never))
       .rejects.toSatisfy(error => error instanceof RunLaunchDeniedError && error.code === 'APP_NOT_FOUND');
     expect(await db.appRun.count({ where: { appId } })).toBe(0);
   });
