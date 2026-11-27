@@ -17,6 +17,7 @@
  * management contract in the table, so they answer false rather than inferring one.
  */
 
+import { isUserHolding, userHoldingCreatorMayRead } from '../auth/userHolding.js';
 import type { Asset, Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
 import { lockAppKeyManagerMemberships } from '../../api/graphql/schema/appKeyManagement.js';
@@ -43,6 +44,7 @@ export type PublicLinkMemory = {
   ownerUserId: string | null;
   appId: string | null;
   userMemoryOfAgentId: string | null;
+  createdBy: string | null;
   isInstallMemory: boolean;
   isEncrypted: boolean;
   deletedAt: Date | null;
@@ -50,7 +52,7 @@ export type PublicLinkMemory = {
 
 export const PUBLIC_LINK_MEMORY_SELECT = {
   id: true, class: true, userId: true, organizationId: true, ownerUserId: true, appId: true,
-  userMemoryOfAgentId: true, isInstallMemory: true, isEncrypted: true, deletedAt: true,
+  userMemoryOfAgentId: true, createdBy: true, isInstallMemory: true, isEncrypted: true, deletedAt: true,
 } as const;
 
 /** Is the caller's gate failure a plain "no"? Anything else (a DB fault) must propagate. */
@@ -125,6 +127,10 @@ async function canManageNonAppMemory(ctx: Context, memory: PublicLinkMemory): Pr
       );
     case 'knowledge':
     case 'group': {
+      // hadron-internal#88: a per-user chat holding's assets are published by its creator alone; an org admin or a platform role
+      // that cannot read it must not switch a public link on its bytes either.
+      // Deliberate defence in depth: the manage gate below already refuses it, so this also keeps `publicLinkAvailable` false.
+      if (isUserHolding(memory) && !userHoldingCreatorMayRead(ctx, memory)) return false;
       try {
         await requireMemoryManageAccess(ctx, memory, 'ADMIN');
         return true;
