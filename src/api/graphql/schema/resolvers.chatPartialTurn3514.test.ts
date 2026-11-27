@@ -35,11 +35,9 @@ beforeEach(async () => {
   const systemMemoryId = (agent as unknown as { systemMemoryId: string }).systemMemoryId;
   const nodes: Array<{ loc: string; data?: unknown; content?: string }> = [
     { loc: 'config', data: { agentExtractionSpec: [{ field: 'memory.region' }] } },
-    { loc: 'conversations' },
     { loc: 'conversations:intake', data: { stageOrder: ['scope', 'wrap'], isSetup: false } },
     { loc: 'conversations:intake:scope', data: { promptRef: 'prompts:intake:scope' } },
     { loc: 'conversations:intake:wrap', data: { promptRef: 'prompts:intake:scope' } },
-    { loc: 'prompts' },
     { loc: 'prompts:intake' },
     { loc: 'prompts:intake:scope', content: 'region={{region}}' },
   ];

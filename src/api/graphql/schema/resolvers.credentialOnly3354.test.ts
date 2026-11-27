@@ -32,10 +32,8 @@ async function seed() {
   });
   const team = await db.memory.create({ data: { name: 'team', urn: `${root}:team`, organizationId: org.id, appId: app.id, class: 'app' } });
   const nodes = [
-    { loc: 'conversations', name: 'conversations' },
     { loc: 'conversations:research', name: 'research', data: { stageOrder: ['scope'], isSetup: false } },
     { loc: 'conversations:research:scope', name: 'scope', data: { promptRef: 'prompts:research:scope' } },
-    { loc: 'prompts', name: 'prompts' },
     { loc: 'prompts:research', name: 'research' },
     { loc: 'prompts:research:scope', name: 'scope', content: 'Scope the research.' },
   ];

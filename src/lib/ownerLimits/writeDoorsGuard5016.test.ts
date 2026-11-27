@@ -125,6 +125,7 @@ const INSERTS: Record<string, InsertVerdict> = {
   [`${G}/resolvers.teamWork.ts#teamWorkMutations.recordTeamWork`]: { n: 1, kind: 'counts-not-refused', because: 'a worklog record; never refused' },
   'src/lib/contextReset/contextReset.ts#registerContextResetRecovery': { n: 1, kind: 'counts-not-refused', because: 'a context-reset checkpoint (a session handoff); never refused' },
   'src/lib/agentSkeleton.ts#seedAgentSkeleton': { n: 1, kind: 'counts-not-refused', because: 'an Agent\'s skeleton parents, part of creating the Agent (its own `agents` key is A7c)' },
+  'src/lib/chatbotAncestors.ts#createChatbotParents': { n: 1, kind: 'counts-not-refused', because: '#5390 the container parents of a conversation, stage or prompt write: the writing door counts them in its own headroom check (writeNodeCore, hadron_create_node, the sync net); the retrofit counts and never refuses' },
 };
 
 /**
@@ -278,6 +279,7 @@ const CONTENT_WRITES: Record<string, { n: number; checks: number; because: strin
   'src/integrations/github/syncGraphFromGithub.ts': { n: 3, checks: 1, because: 'each file is judged before its row is touched; over the ceiling it is skipped and reported' },
   'src/jobs/embedNodes.ts': { n: 3, checks: 0, because: 'embedding bookkeeping columns only' },
   'src/lib/agentSkeleton.ts': { n: 1, checks: 0, because: 'an Agent\'s skeleton parents, composed by the platform' },
+  'src/lib/chatbotAncestors.ts': { n: 1, checks: 0, because: '#5390 empty container parents composed by the platform, no caller content' },
   'src/lib/channels.ts': { n: 10, checks: 0, because: 'channel roots and their revival or deletion, composed by the platform' },
   'src/lib/chatRoot.ts': { n: 3, checks: 0, because: 'a chat\'s engine state, written by the platform' },
   'src/lib/comments/lifecycle.ts': { n: 2, checks: 0, because: 'comment thread deletion and restore: no content' },

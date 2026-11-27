@@ -29,7 +29,7 @@ const nodeAt = (memoryId: string, loc: string) => db.node.findFirst({ where: { m
 
 /** An Agent whose system memory starts EMPTY (no skeleton), so only the write path can make a parent. */
 async function bareAgent(name: string): Promise<{ id: string; memoryId: string; urn: string }> {
-  const m = await db.memory.create({ data: { id: generateId(), organizationId: orgId, urn: `${name}-sys`, name: `${name} System`, class: 'system', acceptsUploads: false } });
+  const m = await db.memory.create({ data: { id: generateId(), organizationId: orgId, urn: `org-5390:${name}-sys`, name: `${name} System`, class: 'system', acceptsUploads: false } });
   const a = await db.agent.create({ data: { organizationId: orgId, name, urn: `org-5390:${name}`, systemMemoryId: m.id, visibility: 'ORGANIZATION' } });
   return { id: a.id, memoryId: m.id, urn: m.urn };
 }
@@ -99,6 +99,8 @@ describe('#5390 GraphQL createNode', () => {
     const a = await db.agent.findFirstOrThrow({ where: { systemMemoryId: sys.id } });
     const { app } = await createDbAppWithKey(db, 'app-5390', orgId);
     const m = await db.memory.create({ data: { id: generateId(), organizationId: orgId, urn: 'inst-5390', name: 'inst', class: 'system', appId: app.id, installOfAgentId: a.id, isInstallMemory: true } });
+    // Even an Agent row that points at the install memory (never made by the product) is not a target.
+    await db.agent.create({ data: { organizationId: orgId, name: 'odd', urn: 'org-5390:odd', systemMemoryId: m.id, visibility: 'ORGANIZATION' } });
     await db.$transaction(async (tx) => {
       expect(await planChatbotParents(tx, m.id, 'prompts:a:b')).toEqual([]);
       expect((await planChatbotParents(tx, sys.id, 'prompts:a:b')).map((p) => p.loc)).toEqual(['prompts', 'prompts:a']);
@@ -107,8 +109,7 @@ describe('#5390 GraphQL createNode', () => {
 
   it('an encrypted system memory is skipped', async () => {
     await db.memory.update({ where: { id: sys.id }, data: { isEncrypted: true } });
-    await gqlCreate(sys.id, 'prompts:a:b').catch(() => undefined);
-    expect(await nodeAt(sys.id, 'prompts')).toBeNull();
+    await db.$transaction(async (tx) => { expect(await planChatbotParents(tx, sys.id, 'prompts:a:b')).toEqual([]); });
   });
 });
 

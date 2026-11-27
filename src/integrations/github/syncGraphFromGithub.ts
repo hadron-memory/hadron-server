@@ -3,6 +3,7 @@ import { acquireSyncRunLock } from './syncRunLock.js';
 import { committedSyncReport, failedSyncReport, type SyncReportEntry } from './syncReport.js';
 import { exceedsNodeContentLimit, resultingNodeContent } from '../../lib/nodeContentLimit.js';
 import { requireNodeHeadroom } from '../../lib/ownerLimits/nodes.js';
+import { planChatbotParents, createChatbotParents } from '../../lib/chatbotAncestors.js';
 import { OWNER_LIMIT_NO_NUMBER_MESSAGE, OwnerLimitReachedError } from '../../lib/ownerLimits/errors.js';
 import { GitCommandError } from './execGit.js';
 import { syncFailureText } from './syncErrorText.js';
@@ -1477,6 +1478,14 @@ const syncGraphFromGithubAsSystem = async (
         const embeddingToken = await stampEmbeddingObligation(tx, rowId, graph.id);
         if (embeddingToken) embeddingWakeNeeded = true;
 
+      }
+
+      // #5390 — a conversation, stage or prompt file written into an Agent's own system memory also gets the container
+      // parents its family lacks (never conversations:<name>). The parents carry no ownerRepo, so the cleanup below, which
+      // selects git-owned rows, never prunes them. They are live nodes this sync added: counted in its net.
+      for (const w of writtenNodes) {
+        const parents = await planChatbotParents(tx, graph.id, w.loc);
+        if (parents.length) liveNodesAdded += BigInt((await createChatbotParents(tx, graph.id, parents, null)).length);
       }
 
       // #2040 — derive include edges once every file of this sync is written, so

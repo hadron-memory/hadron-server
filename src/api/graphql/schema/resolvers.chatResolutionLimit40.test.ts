@@ -45,10 +45,8 @@ beforeEach(async () => {
   });
   await db.appMember.create({ data: { appId: app.id, userId: alice.id, role: 'member' } });
   const nodes: Array<{ loc: string; data?: unknown; content?: string }> = [
-    { loc: 'conversations' },
     { loc: 'conversations:intake', data: { stageOrder: ['scope'], isSetup: false } },
     { loc: 'conversations:intake:scope', data: { promptRef: 'prompts:intake:scope' } },
-    { loc: 'prompts' },
     { loc: 'prompts:intake' },
     // Template text is charged before it is parsed, so the prompt's own text reaches a lowered limit.
     { loc: 'prompts:intake:scope', content: `ask {{name}} ${'x'.repeat(20)}` },

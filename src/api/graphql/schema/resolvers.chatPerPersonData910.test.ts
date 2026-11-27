@@ -69,13 +69,11 @@ beforeEach(async () => {
   const nodes: Array<{ loc: string; data?: unknown; content?: string }> = [
     // `region` is declared memory-wide; `industry` is personal (unprefixed).
     { loc: 'config', data: { agentExtractionSpec: [{ field: 'memory.region' }] } },
-    { loc: 'conversations' },
     {
       loc: 'conversations:intake',
       data: { stageOrder: ['scope'], isSetup: false, extractionSpec: [{ field: 'industry' }] },
     },
     { loc: 'conversations:intake:scope', data: { promptRef: 'prompts:intake:scope' } },
-    { loc: 'prompts' },
     { loc: 'prompts:intake' },
     { loc: 'prompts:intake:scope', content: PROMPT },
   ];

@@ -49,10 +49,8 @@ beforeEach(async () => {
   systemMemoryId = agent.systemMemoryId;
   app = await db.app.create({ data: { id: generateId(), name: 'chat-app', urn: `${org.urn}:chat-app`, organizationId: org.id, appAgents: { create: { agentId: agent.id } } } });
   const nodes = [
-    { loc: 'conversations', name: 'conversations', nodeType: 'system' },
     { loc: 'conversations:research', name: 'research', nodeType: 'system', data: { stageOrder: ['scope'], isSetup: false } },
     { loc: 'conversations:research:scope', name: 'scope', nodeType: 'system', data: { promptRef: 'prompts:research:scope' } },
-    { loc: 'prompts', name: 'prompts', nodeType: 'system' },
     { loc: 'prompts:research', name: 'research', nodeType: 'system' },
     { loc: 'prompts:research:scope', name: 'scope', nodeType: 'system', content: 'Scope the research.' },
   ];

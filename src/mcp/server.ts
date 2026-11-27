@@ -127,6 +127,7 @@ import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { foreignEdgeMemoryIds } from '../lib/foreignEdgeMemories.js';
+import { planChatbotParents, createChatbotParents } from '../lib/chatbotAncestors.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
@@ -7132,7 +7133,10 @@ export function createMcpServerInstance(
           // #5015 (cor:acl:150:04) — every write that reaches here adds a live node (a live loc refused above): an insert,
           // or a tombstone revived. The memory row is held FOR SHARE (assertMemoryEncryptionStateForWrite), so the owner
           // read is the one at commit; the owner-limit key is this write's last lock (gate ruling 5).
-          await requireNodeHeadroom(tx, { memoryId, caller: ownerLimitCaller(auth) });
+          // #5390 — the container parents of a conversation, stage or prompt node, counted and created with it (see writeNodeCore).
+          const chatbotParents = await planChatbotParents(tx, memoryId, loc);
+          await requireNodeHeadroom(tx, { memoryId, amount: 1n + BigInt(chatbotParents.length), caller: ownerLimitCaller(auth) });
+          await createChatbotParents(tx, memoryId, chatbotParents, auth.clientId ?? null);
           const written = await tx.node.upsert({
             ...upsertArgs,
             create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },

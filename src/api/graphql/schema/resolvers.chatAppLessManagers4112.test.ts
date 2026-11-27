@@ -30,12 +30,10 @@ beforeEach(async () => {
   await db.agentOrgGrant.create({ data: { orgId: carrier.id, agentId, activatedAt: new Date() } });
   await db.appMember.create({ data: { appId, userId: consumerId, role: 'member' } });
   for (const row of [
-    { loc: 'conversations', data: {} },
     { loc: 'conversations:flow', data: { stageOrder: ['step'], isSetup: false } },
     { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
     { loc: 'conversations:next', data: { stageOrder: ['next'] } },
     { loc: 'conversations:next:next', data: { promptRef: 'prompts:step' } },
-    { loc: 'prompts', data: {} },
     { loc: 'prompts:step', content: 'PROTECTED MANAGER STAGE', data: {} },
     { loc: 'config', data: { privateConfig: 'PROTECTED CONFIG' } },
   ]) await db.node.create({ data: { memoryId: systemId, name: row.loc, nodeType: 'system', ...row } });
@@ -169,12 +167,10 @@ describe('#4120 admission pins', () => {
       const agent = await db.agent.create({ data: { name: 'Owned', urn: 'managers4120.owned', ownerUserId: ownerId, systemMemoryId: sys.id, visibility: 'PUBLIC' } });
       userAgentId = agent.id; userSystemId = sys.id;
       for (const row of [
-        { loc: 'conversations', data: {} },
         { loc: 'conversations:flow', data: { stageOrder: ['step'], isSetup: false } },
         { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
         { loc: 'conversations:next', data: { stageOrder: ['next'] } },
         { loc: 'conversations:next:next', data: { promptRef: 'prompts:step' } },
-        { loc: 'prompts', data: {} },
         { loc: 'prompts:step', content: 'OWNED STAGE', data: {} },
       ]) await db.node.create({ data: { memoryId: sys.id, name: row.loc, nodeType: 'system', ...row } });
       const source = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: sys.id, loc: 'conversations:flow:step' } } });

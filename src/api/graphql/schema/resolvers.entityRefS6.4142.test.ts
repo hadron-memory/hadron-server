@@ -513,10 +513,8 @@ describe('#4142 S6 chunk D — agent mutations', () => {
     // single stage, same shape as resolvers.agentChat.test.ts seeds — without
     // it the chat refuses AGENT_HAS_NO_CONVERSATIONS before anything else.
     const script: Array<{ loc: string; name: string; content?: string; data?: Record<string, unknown> }> = [
-      { loc: 'conversations', name: 'conversations' },
       { loc: 'conversations:research', name: 'research', data: { stageOrder: ['scope'], isSetup: false } },
       { loc: 'conversations:research:scope', name: 'scope', data: { promptRef: 'prompts:research:scope' } },
-      { loc: 'prompts', name: 'prompts' },
       { loc: 'prompts:research', name: 'research' },
       { loc: 'prompts:research:scope', name: 'scope', content: 'Scope the research.' },
     ];

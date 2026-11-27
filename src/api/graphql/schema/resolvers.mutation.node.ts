@@ -181,6 +181,7 @@ import { attachIncludePinWarnings, carryIncludePinWarnings, captureIncludePinWar
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 import { memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
+import { planChatbotParents, createChatbotParents } from '../../../lib/chatbotAncestors.js';
 import { ownerLimitCaller, requireNodeHeadroom, type NodeOwnerLimit } from '../../../lib/ownerLimits/nodes.js';
 import { assertNodeContentSize, resultingNodeContent, withEncryptedSizes, type NodeContentFields, type NodeSizeCeiling } from '../../../lib/nodeContentLimit.js';
 
@@ -1871,9 +1872,14 @@ async function writeNodeCoreRaw(
             // #5015 — a fresh insert or a revive adds a live node to the memory's owner. The owner is read under the
             // memory row lock `assertMemoryWriteStateStable` holds, and the owner-limit key is the LAST lock this write
             // takes (gate ruling 5): after it the write only touches the row it holds and the loc whose key it holds.
+            // #5390 — a fresh conversation, stage or prompt node also gets the container parents its family lacks, in this
+            // transaction, and the headroom check counts them with the node (cor:acl:150:04). Planned before the check so a
+            // refusal leaves nothing; created after it, under the child's ancestor locks (which are the parents' own keys).
+            const chatbotParents = !authoritative || reviving ? await planChatbotParents(tx, input.memoryId, input.loc) : [];
             if ((!authoritative || reviving) && opts.ownerLimit === 'refuse') {
-              await requireNodeHeadroom(tx, { memoryId: input.memoryId, caller: ownerLimitCaller(opts?.transaction?.requestContext ?? ctx) });
+              await requireNodeHeadroom(tx, { memoryId: input.memoryId, amount: 1n + BigInt(chatbotParents.length), caller: ownerLimitCaller(opts?.transaction?.requestContext ?? ctx) });
             }
+            await createChatbotParents(tx, input.memoryId, chatbotParents, createdBy);
             const upserted = await tx.node.upsert({
               ...upsertArgs,
               create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
