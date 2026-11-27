@@ -22,7 +22,8 @@ export const MAX_SECRETS_PER_APP = 500;
 export const MAX_SECRET_VERSIONS = 50;
 
 /** `PURGE` (#4003, S8): a superseded version deleted by retention or the kept-versions cap; one event per version. */
-export type SecretEventKind = 'STORE' | 'VERSION' | 'METADATA' | 'DELETE' | 'PROTECT' | 'UNPROTECT' | 'REVEAL' | 'PURGE';
+/** #5335: DELETE_AFTER_USE_ON / _OFF record the option `deleteAfterUse` being set or cleared (cor:sec:060:03). */
+export type SecretEventKind = 'STORE' | 'VERSION' | 'METADATA' | 'DELETE' | 'PROTECT' | 'UNPROTECT' | 'DELETE_AFTER_USE_ON' | 'DELETE_AFTER_USE_OFF' | 'REVEAL' | 'PURGE';
 
 /** Who acted, as plain ids (no foreign keys), the way the grant tables record it. */
 export interface SecretActor {

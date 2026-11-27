@@ -17,7 +17,8 @@ export const MAX_OPEN_SECRET_CHANGES_PER_REQUESTER = 2;
 export const MAX_OPEN_SECRET_CHANGES_PER_APP = 100;
 export const MAX_OPEN_SECRET_CHANGES_PER_REQUESTER_PER_APP = 20;
 export const SECRET_CHANGE_PATH = '/secret-changes';
-export type ChangeOperation = 'STORE' | 'DELETE' | 'SET_PROTECTED' | 'CLEAR_PROTECTED';
+/** #5335: SET_/CLEAR_DELETE_AFTER_USE set and clear a protected secret's `deleteAfterUse` (cor:sec:060:03, cor:sec:070:02). */
+export type ChangeOperation = 'STORE' | 'DELETE' | 'SET_PROTECTED' | 'CLEAR_PROTECTED' | 'SET_DELETE_AFTER_USE' | 'CLEAR_DELETE_AFTER_USE';
 export interface ChangeRequest {
  id: string; app_id: string; secret_id: string | null; secret_name: string; secret_kind: string;
  protected_result: boolean | null; write_version: boolean;

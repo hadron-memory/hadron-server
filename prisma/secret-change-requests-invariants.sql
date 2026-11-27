@@ -1,6 +1,6 @@
--- #3999 change-request objects: prisma/secret-change-requests-invariants.sql, copied verbatim into migration
--- 20261120180000_secret_change_requests and included by post-push.sql (#4717 item 4). Every statement is idempotent,
--- so the two apply in either order, twice.
+-- #3999 change-request objects: prisma/secret-change-requests-invariants.sql, included by post-push.sql and copied
+-- verbatim into the newest migration that carries it (today 20261127090000_secret_delete_after_use, #5335; first
+-- 20261120180000_secret_change_requests, #4717 item 4). Every statement is idempotent, so they apply in either order, twice.
 -- #3999: staged values are request-bound; terminal requests retain no ciphertext.
 CREATE TABLE IF NOT EXISTS secret_change_requests (
  id text PRIMARY KEY,
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS secret_change_requests (
 );
 ALTER TABLE secret_change_requests DROP CONSTRAINT IF EXISTS chk_secret_change_shape;
 ALTER TABLE secret_change_requests ADD CONSTRAINT chk_secret_change_shape CHECK (
- operation IN ('STORE','DELETE','SET_PROTECTED','CLEAR_PROTECTED') AND
+ operation IN ('STORE','DELETE','SET_PROTECTED','CLEAR_PROTECTED','SET_DELETE_AFTER_USE','CLEAR_DELETE_AFTER_USE') AND
  state IN ('open','completed','declined','expired','withdrawn','stale') AND
  ((staged_value_encrypted IS NOT NULL) = (operation = 'STORE' AND write_version AND state = 'open')) AND
  ((staged_value_encrypted IS NULL) OR (key_version IS NOT NULL AND size_bytes IS NOT NULL)) AND

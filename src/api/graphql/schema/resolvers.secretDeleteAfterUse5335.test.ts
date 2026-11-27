@@ -193,7 +193,7 @@ describe('#5335 Ask 3: who sets the option', () => {
   it('on an unprotected secret it is a plain updateSecret field, accepted, recorded, and changes nothing by itself (the mark governs)', async () => {
     const updated = await setOption(true) as unknown as { deleteAfterUse: boolean };
     expect(updated.deleteAfterUse).toBe(true);
-    expect(await db.secretEvent.count({ where: { secretId, kind: 'METADATA' } })).toBe(1);
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'DELETE_AFTER_USE_ON' } })).toBe(1);
     // An unmarked client never deletes, option or not.
     const keep = await issue({ autoDelete: false, maxReads: 1 }); await sign(keep.grantId);
     await reveal(keep.clientId); expect(await exists()).toBe(1);
@@ -203,7 +203,7 @@ describe('#5335 Ask 3: who sets the option', () => {
   });
   it('setting the option to the value it already has records nothing', async () => {
     await setOption(false);
-    expect(await db.secretEvent.count({ where: { secretId, kind: 'METADATA' } })).toBe(0);
+    expect(await db.secretEvent.count({ where: { secretId, kind: { in: ['DELETE_AFTER_USE_ON', 'DELETE_AFTER_USE_OFF'] } } })).toBe(0);
   });
   it('is refused on an org or user secret', async () => {
     const own = await resolvers.Mutation.createSecret({}, { ownerType: 'user', name: 'mine', kind: 'generic', value: 'v' }, ctx());
@@ -217,7 +217,7 @@ describe('#5335 Ask 3: who sets the option', () => {
     expect((await db.secret.findUniqueOrThrow({ where: { id: secretId } }) as unknown as { deleteAfterUse: boolean }).deleteAfterUse).toBe(false);
     await completeCeremony(id);
     expect((await db.secret.findUniqueOrThrow({ where: { id: secretId } }) as unknown as { deleteAfterUse: boolean }).deleteAfterUse).toBe(true);
-    expect(await db.secretEvent.count({ where: { secretId, kind: 'METADATA', actorUserId: ownerId } })).toBe(1);
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'DELETE_AFTER_USE_ON', actorUserId: ownerId } })).toBe(1);
     const clear = await stagedId(setOption(false));
     const [c] = await db.$queryRaw<Array<{ operation: string }>>`SELECT operation FROM secret_change_requests WHERE id=${clear}`;
     expect(c.operation).toBe('CLEAR_DELETE_AFTER_USE');
@@ -232,13 +232,49 @@ describe('#5335 Ask 3: who sets the option', () => {
     ['App key', () => ctx({ appKeyId: 'k' } as never)],
     ['impersonation', () => ctx({ impersonation: { adminUserId: 'adm', targetUserId: 'x' } } as never)],
     ['run', () => ctx({ clientId: `${RUN_CLIENT_PREFIX}r1` } as never)],
-  ])('a %s is refused SECRET_PROTECTED_NEEDS_PASSKEY on a protected secret, with nothing staged', async (_label, make) => {
+  ])('a %s is refused on a protected secret exactly as for a value change, with nothing staged', async (label, make) => {
+    // A worker session passes the shared visibility gate and reaches the staging person check (SECRET_PROTECTED_NEEDS_PASSKEY);
+    // an App key, an impersonation and a run are stopped earlier by updateSecret's shared visibility gate (NOT_FOUND), as they are
+    // for every other protected change. The option is pinned to the same answer as a value change, never a different one.
     await protect(false);
-    const p = runAsActor({ workerId: _label === 'worker session' ? workerId : null, agentId: null }, () => setOption(true, make()));
-    const e = await p.then(() => null, (err: { extensions?: Record<string, unknown> }) => err);
-    expect(e?.extensions?.code).toBe('SECRET_PROTECTED_NEEDS_PASSKEY');
-    expect(e?.extensions?.requestId).toBeUndefined();
+    const as = <T>(f: () => Promise<T>) => runAsActor({ workerId: label === 'worker session' ? workerId : null, agentId: null }, f);
+    const answer = (p: Promise<unknown>) => p.then(() => null, (err: { message: string; extensions?: Record<string, unknown> }) => err);
+    const option = await answer(as(() => setOption(true, make())));
+    const value = await answer(as(() => resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'v2' }, make())));
+    expect(option?.extensions?.code).toBe(label === 'worker session' ? 'SECRET_PROTECTED_NEEDS_PASSKEY' : 'NOT_FOUND');
+    expect([option?.message, option?.extensions]).toEqual([value?.message, value?.extensions]);
+    expect(option?.extensions?.requestId).toBeUndefined();
+    // Asking for the value the option already has is answered the same: the silent no-op is only for a caller staging would admit.
+    const already = await answer(as(() => setOption(false, make())));
+    expect([already?.message, already?.extensions]).toEqual([value?.message, value?.extensions]);
     expect(await db.secretChangeRequest.count({ where: { secretId, state: 'open' } })).toBe(0);
+  });
+  it('completion judges the deletion authority again: a manager demoted after staging SET_DELETE_AFTER_USE is refused', async () => {
+    const mgr = (await db.user.create({ data: { handle: `mgr-${generateId()}` } })).id;
+    await db.appMember.create({ data: { appId, userId: mgr, role: 'owner' } });
+    const mgrKey = softPasskey(); await insertSoftPasskey(db, mgr, mgrKey, { rpId: RP });
+    await protect(false);
+    const id = await stagedId(setOption(true, ctx({ userId: mgr })));
+    await db.appMember.update({ where: { appId_userId: { appId, userId: mgr } }, data: { role: 'reader' } });
+    let n = 1;
+    const sig = (c: string) => mgrKey.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(c, 'base64url'), origin: ORIGIN, rpId: RP, counter: n++ });
+    const nonce = generateId();
+    const open = await openSecretProof(db, { requestId: id, browserNonceHash: hash(nonce) });
+    const p = await proveSecretChange(db, { requestId: id, ceremonyId: open.ceremonyId, browserNonceHash: hash(nonce), credentialId: mgrKey.credentialId, assertion: sig(open.challenge) });
+    if (p.outcome !== 'change') throw new Error('proof did not open a change');
+    await expect(completeSecretChange(db, { requestId: id, ceremonyId: p.ceremonyId, browserNonceHash: hash(p.nonce), credentialId: mgrKey.credentialId, assertion: sig(p.challenge) })).rejects.toThrow();
+    expect((await db.secret.findUniqueOrThrow({ where: { id: secretId } }) as unknown as { deleteAfterUse: boolean }).deleteAfterUse).toBe(false);
+  });
+  it('on a protected secret, setting needs the deletion authority (creator or manager); a plain member may only clear', async () => {
+    const member = (await db.user.create({ data: { handle: `m-${generateId()}` } })).id;
+    await db.appMember.create({ data: { appId, userId: member, role: 'reader' } });
+    await protect(true);
+    expect(await failure(setOption(true, ctx({ userId: member })))).toBe('OK'); // already on: the silent no-op, nothing staged
+    expect(await db.secretChangeRequest.count({ where: { secretId, state: 'open' } })).toBe(0);
+    await stagedId(setOption(false, ctx({ userId: member })));
+    await db.secret.update({ where: { id: secretId }, data: { deleteAfterUse: false } });
+    expect(await failure(setOption(true, ctx({ userId: member })))).toBe('FORBIDDEN');
+    expect(await db.secretChangeRequest.count({ where: { secretId, state: 'open', operation: 'SET_DELETE_AFTER_USE' } })).toBe(0);
   });
   it('a stale request (the secret changed after staging) does not land', async () => {
     await protect(false);

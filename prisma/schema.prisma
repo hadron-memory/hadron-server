@@ -3886,6 +3886,11 @@ model Secret {
   /// Only meaningful for App rows (`chk_secret_protected_app_only`). A protected App secret changes only through the
   /// requester's passkey ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02).
   protected      Boolean  @default(false)
+  /// #5335: the owner's consent that a read client's auto-delete mark may delete this secret after its use
+  /// (hrn:node:hadronmemory.com:specs:cor:sec:060:03). Needed only on a protected secret: without it a mark is refused at
+  /// issuance there, and the sweep and the last read delete nothing. On a protected secret it changes only through the
+  /// requester's passkey ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02). App rows only (enforced by the resolver).
+  deleteAfterUse Boolean  @default(false) @map("delete_after_use")
   versions       SecretVersion[]
 
   // Hard delete by design (registry-row posture): a deleted secret makes

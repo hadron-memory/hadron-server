@@ -44,7 +44,8 @@ async function isProtectionFlagOnly(tx: Prisma.TransactionClient, r: ChangeReque
 
 /** The one line the proof page shows for a staged change. One case per branch; the bytes are the ceremony's contract (#4626 item 17, #5299 item 2). */
 function changeText(r: Pick<ChangeRequest, 'operation' | 'secret_id' | 'write_version' | 'protected_result'>, flagOnly: boolean): string {
- if (r.operation !== 'STORE') return ({ DELETE: 'Delete this secret', SET_PROTECTED: 'Turn protection on', CLEAR_PROTECTED: 'Turn protection off' } as const)[r.operation];
+ if (r.operation !== 'STORE') return ({ DELETE: 'Delete this secret', SET_PROTECTED: 'Turn protection on', CLEAR_PROTECTED: 'Turn protection off',
+  SET_DELETE_AFTER_USE: 'Allow deletion after use', CLEAR_DELETE_AFTER_USE: 'Stop deletion after use' } as const)[r.operation];
  const protection = r.protected_result === null ? '' : r.protected_result ? ' and turn protection on' : ' and turn protection off';
  if (r.secret_id === null) return 'Create a protected secret' + protection;
  if (r.write_version) return 'Store a new version' + protection;
@@ -160,7 +161,15 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
    await tx.$executeRaw`UPDATE secret_change_requests SET state='completed',ended_at=(${now.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${r.id}`;
    await deleteLockedAppSecret(tx,secret,actor);return null;
   }
-  if(r.operation==='STORE'){
+  if(r.operation==='SET_DELETE_AFTER_USE'||r.operation==='CLEAR_DELETE_AFTER_USE'){
+   // #5335 (cor:sec:060:03): setting the option consents to the secret's deletion, so it needs the deletion authority (its creator,
+   // still a member, or whoever manages the App), judged again here as DELETE is. Clearing it only withdraws that consent: any member.
+   if(!secret)throw refuse();
+   const on=r.operation==='SET_DELETE_AFTER_USE';
+   if(on && secret.createdBy!==ctx.userId && !(await appManager(ctx,r.app_id)))throw refuse();
+   await tx.secret.update({where:{id:secret.id},data:{deleteAfterUse:on,updatedBy:r.requester_id}});
+   await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:on?'DELETE_AFTER_USE_ON':'DELETE_AFTER_USE_OFF',actor});
+  }else if(r.operation==='STORE'){
    // #4717 items 1-2 (cor:sec:010:05): a create starts unprotected in the trail and ends protected, so it records PROTECT;
    // a protection change that leaves the metadata as it was records only the protection event, never a METADATA event.
    const before = secret ? { protected: secret.protected, metadata: secret.metadata } : null;

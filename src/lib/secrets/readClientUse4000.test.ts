@@ -359,6 +359,17 @@ describe('transactional secret.use (#4000)', () => {
       expect(await db.secret.count({ where: { id: client.secretId } })).toBe(1);
       expect(await db.secretEvent.count({ where: { secretId: client.secretId, kind: 'DELETE' } })).toBe(0);
     });
+    // #5335 (cor:sec:060:03 arming rule): on a PROTECTED secret the use path deletes only when the secret carries deleteAfterUse,
+    // judged at the use. Unarmed (a legacy mark, or the option cleared) the last use spends and keeps the secret.
+    it.each([false, true])('#5335: a protected secret at its last permitted use is deleted only when armed (deleteAfterUse=%s)', async (armed) => {
+      await mark(1);
+      const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
+      await db.secret.update({ where: { id: client.secretId }, data: { protected: true, deleteAfterUse: armed } });
+      await expect(prepare()).resolves.toMatchObject({ auth: { type: 'bearer', token: 'synthetic-canary' } });
+      expect((await db.grant.findUniqueOrThrow({ where: { id: grantId } })).useCount).toBe(1);
+      expect(await db.secret.count({ where: { id: client.secretId } })).toBe(armed ? 0 : 1);
+      expect(await db.secretEvent.count({ where: { secretId: client.secretId, kind: 'DELETE' } })).toBe(armed ? 1 : 0);
+    });
     it('keeps the secret before the last permitted use', async () => {
       await mark(2);
       const client = await db.secretReadClient.findUniqueOrThrow({ where: { id: clientId } });
