@@ -49,7 +49,6 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await createDbAgentOrgGrant(db, org.id, agent.id);
   for (const [loc, data, content] of [
-    ['conversations', null, null],
     ['conversations:main', { stageOrder: ['s1'] }, null],
     ['conversations:main:s1', {}, 'prompt main/s1'],
   ] as const) {
