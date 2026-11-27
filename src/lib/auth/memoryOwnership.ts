@@ -1,4 +1,5 @@
 import type { Prisma } from '../../generated/prisma/index.js';
+import { foreignUserHoldingFilter } from './userHolding.js';
 
 /**
  * Select a memory whose identity owner is somebody other than the viewer.
@@ -28,6 +29,8 @@ export function foreignIdentityScopedMemoryFilter(
           { ownerUserId: { not: viewer } },
         ],
       },
+      // hadron-internal#88: a per-user chat holding is its creator's alone, whatever the viewer's global role.
+      foreignUserHoldingFilter(viewerUserId),
     ],
   };
 }

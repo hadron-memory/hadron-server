@@ -19,6 +19,7 @@
  * filter, the `ownerUserId` early return of `canReadMemoryRow`): the attach is the only consent step, and this module is the
  * only judge, so a caller of it must not re-derive the rule.
  */
+import { USER_HOLDING_CLASSES } from './auth/userHolding.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { isRunPrincipal } from './auth/runPrincipal.js';
 
@@ -123,6 +124,15 @@ export async function linkedMemoryReach(
   if (opts.run && ids.size > 0) {
     const privateRows = await db.memory.findMany({ where: { id: { in: [...ids] }, class: 'private' }, select: { id: true } });
     for (const row of privateRows) ids.delete(row.id);
+  }
+  // hadron-internal#88 (cor:cht:010:02): a per-user chat holding is its creator's alone, so no App link reaches it, for a key
+  // or a run, whoever attached it.
+  if (ids.size > 0) {
+    const holdings = await db.memory.findMany({
+      where: { id: { in: [...ids] }, class: { in: [...USER_HOLDING_CLASSES] }, userMemoryOfAgentId: { not: null } },
+      select: { id: true },
+    });
+    for (const row of holdings) ids.delete(row.id);
   }
   return ids;
 }
