@@ -254,9 +254,11 @@ describe('the reach of a link, on both surfaces', () => {
 
   it('a user, an impersonation, a session-bound key, a refused binding and a run with a user id gain nothing from a link (both surfaces)', async () => {
     // alice's own user-owned knowledge memory: she reads it, bob does not, and she links it into the organization's App.
+    // #5345: the key does not read it either — a user-owned non-personal memory is inert for a key (the record gate refuses
+    // it), so every principal shape below, the key included, gains nothing; the linked ORG memory above is the positive path.
     const mine = await memory({ visibility: null, organizationId: null, ownerUserId: alice });
     await attach(asUser(alice), mine.id, orgApp.id);
-    expect(await reachFor(keyAuth(orgApp.id), mine.id)).toEqual({ mcp: true, graphql: true }); // the control: the key reads it
+    expect(await reachFor(keyAuth(orgApp.id), mine.id)).toEqual({ mcp: false, graphql: false });
     const shapes: Array<[string, AuthContext]> = [
       ['bob, App selected', { userId: bob, appId: orgApp.id, roles: [], clientId: `user:${bob}` } as AuthContext],
       ['bob, no selection', { userId: bob, roles: [], clientId: `user:${bob}` } as AuthContext],
