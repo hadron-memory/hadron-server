@@ -1,7 +1,7 @@
 /**
  * The record read gate for a per-user chat holding (hadron-internal#87, cor:cht:010:02): a knowledge-class memory created by
- * the startChat no-App path (userMemoryOfAgentId set, ownerUserId null) is read by its CREATOR alone. The shape is seeded
- * through the product's own write path, a real startChat by an Agent manager with no installed App.
+ * the startChat no-App path (userMemoryOfAgentId set, ownerUserId null) is read by its CREATOR alone. #5394 retired that
+ * path, so the shape is seeded from a real startChat under a seed App, reshaped to the row the retired path wrote.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -50,9 +50,17 @@ beforeEach(async () => {
     { loc: 'prompts:step', content: 'STAGE', data: {} },
   ]) await db.node.create({ data: { memoryId: systemId, name: row.loc, nodeType: 'system', ...row } });
   await serveEveryAgent(db);
-  // The real no-App path: the Agent's manager starts a chat, which provisions the per-user holding.
-  const started = await M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, as('creator'));
+  // #5394: before, the fixture seeded the holding through the real no-App path (the Agent's manager started a chat with
+  // no installed App). That route is retired, so a start with no App is refused, and the holding such a start left is
+  // made the way it left it: a real start under a seed App, then the home reshaped to the retired route's row (knowledge,
+  // no App, no owner column, ORGANIZATION), and the seed App removed.
+  await expect(M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, as('creator')))
+    .rejects.toMatchObject({ code: 'CHAT_APP_NOT_IDENTIFIED' });
+  const seedApp = await db.app.create({ data: { name: 'Seed app', urn: 'holding87.test:seed', organizationId: orgId, appAgents: { create: { agentId } } } });
+  const started = await M.startChat({}, { agentRef: agentId, appRef: seedApp.id, scope: 'private', conversationName: 'flow' }, as('creator'));
   holdingId = (await chatNodeByLocOrThrow(db, started.chatId)).memoryId;
+  await db.memory.update({ where: { id: holdingId }, data: { class: 'knowledge', userId: null, appId: null, visibility: 'ORGANIZATION' } });
+  await db.app.delete({ where: { id: seedApp.id } });
   const seeded = await db.memory.findUniqueOrThrow({ where: { id: holdingId } });
   // Guard the fixture's own shape, so these pins cannot go green on a different row.
   expect(seeded).toMatchObject({ class: 'knowledge', ownerUserId: null, appId: null, userMemoryOfAgentId: agentId, createdBy: u.creator });

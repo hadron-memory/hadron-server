@@ -34,6 +34,7 @@ let outsider: { id: string };
 let adminId: string;
 let agent: { id: string };
 let systemMemoryId: string;
+let appId: string;
 
 const ctxFor = (userId: string): Context => ({ db, roles: ['READER'], userId });
 
@@ -63,6 +64,7 @@ beforeEach(async () => {
       organizationId: org.id, appAgents: { create: { agentId: agent.id } },
     },
   });
+  appId = app.id;
   for (const u of [alice, bob]) {
     await db.appMember.create({ data: { appId: app.id, userId: u.id, role: 'member' } });
   }
@@ -95,7 +97,7 @@ beforeEach(async () => {
 });
 
 async function startShared(userId: string) {
-  return resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'shared' }, ctxFor(userId));
+  return resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'shared', appRef: appId }, ctxFor(userId));
 }
 async function extract(userId: string, chatId: string, data: Record<string, unknown>) {
   return resolvers.Mutation.processChatResponse(
@@ -337,7 +339,7 @@ describe('#910 — the default data node is always the compiled memory\'s own (C
       data: { id: generateId(), memoryId: team.id, loc: 'data', name: 'data', nodeType: 'info', data: { industry: 'TEAM-motto' } },
     });
     for (const [user, value] of [[alice, 'A-own'], [bob, 'B-own']] as const) {
-      const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, ctxFor(user.id));
+      const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: appId }, ctxFor(user.id));
       await extract(user.id, chat.chatId, { industry: value });
       const prompt = await promptFor(user.id, chat.chatId);
       expect(prompt).toContain(`industry=${value};`);
@@ -370,7 +372,7 @@ describe('#910 — the default data node is always the compiled memory\'s own (C
 
 describe('#910 — single-human hosts keep the flat bag', () => {
   it('a personal-memory chat still folds extraction flat and reads it back whole', async () => {
-    const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, ctxFor(alice.id));
+    const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: appId }, ctxFor(alice.id));
     await extract(alice.id, chat.chatId, { industry: 'A-construction', users: 'literal' });
     const { memoryId, data } = await dataNodeOf(chat.chatId);
     const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });

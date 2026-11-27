@@ -15,7 +15,6 @@ import {
   ensureCurrentNodeRevisionInTransaction,
   revisionStateHashRefreshMarker,
 } from '../../../lib/nodeRevisionSnapshot.js';
-import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { isDeepStrictEqual } from 'node:util';
 import { clientReportedChatModel } from '../../../lib/bootPrompt/chatModel.js';
 import { generateId } from '../../../lib/id.js';
@@ -56,7 +55,9 @@ import {
 } from '../../../lib/edge-conditions/index.js';
 import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
-import { AgentNotFoundError, UserNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AgentNotFoundError, AmbiguousLegacyUrnError, AppNotFoundError, UserNotFoundError } from '../../../lib/entityRef/errors.js';
+import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { UrnNotQualifiedError } from '../../../lib/urn.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { appKeyMayActFor, appKeySessionMatchesAgent, canChatWithAgent, chatAuthorityAnchors, chatCarrierApps } from './agentChatAccess.js';
 import { withAuthorizedMemoryTx, withAuthorizedTx } from './authorizedTx.js';
@@ -66,7 +67,7 @@ import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemor
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
-import { type MemoryVisibility, type Prisma } from '../../../generated/prisma/index.js';
+import { type Prisma } from '../../../generated/prisma/index.js';
 import {
   validateChatScopeInvariants,
   findOrCreateAppClassMemory,
@@ -203,6 +204,45 @@ export async function recordChatServedIfChanged(
   throw new Error('chat served-prompt record kept conflicting');
 }
 
+/** #5394: the shared start's participation refusal, one text for every App the caller cannot use, so it names none. */
+const SHARED_CHAT_NOT_MEMBER_MESSAGE = 'Cannot create a shared chat — you are not a member of this App, or it does not install this Agent.';
+
+/**
+ * #5394 (hrn:node:hadronmemory.com:specs:cor:cht:010:02; Holger 2026-11-27, decisions:2026-11-27-holger-rulings-to-victor-
+ * startchat-needs-app item 3): the App a start runs under is the one the call identifies, and nothing else. An App
+ * credential carries it (`ctx.appId`); otherwise the caller names it (`appRef`, the CLI's global `--app`). No App is ever
+ * searched for.
+ *
+ * Judged before the Agent is resolved or read, so it depends only on the request and the caller:
+ * - neither the credential nor the request names an App, or `appRef` names another App than the credential's:
+ *   CHAT_APP_NOT_IDENTIFIED;
+ * - `appRef` (with no App credential) is resolved only among the Apps the caller takes part in (`participantAppWhere`,
+ *   memberships included). Anything else (an App she is not in, one that does not exist, a malformed ref) is the start's
+ *   own participation refusal, one answer for all of them, so it is no App-existence oracle (gate amendment, Xan #154443).
+ * Install, licence and participation are then judged against this App alone, by the start itself.
+ */
+async function identifyChatApp(ctx: Context, appRef: string | null, chatScope: 'private' | 'shared', agentRef: string): Promise<string> {
+  const notIdentified = () => new ChatScopeError('CHAT_APP_NOT_IDENTIFIED',
+    'startChat needs to know which App supplies this chat: use an App credential, or name the App (appRef; the CLI\'s global --app).');
+  if (appRef == null) {
+    if (!ctx.appId) throw notIdentified();
+    return ctx.appId;
+  }
+  const participation = ctx.appId ? null : await participantAppWhere(ctx.db, ctx, { includeMemberships: true });
+  if (!ctx.appId && !participation) throw cannotUse();
+  try {
+    return (await resolveAppRef(ctx.db, appRef, { scope: ctx.appId ? { id: ctx.appId } : participation! })).id;
+  } catch (err) {
+    if (!(err instanceof AppNotFoundError || err instanceof UrnNotQualifiedError || err instanceof AmbiguousLegacyUrnError)) throw err;
+    throw ctx.appId ? notIdentified() : cannotUse();
+  }
+  function cannotUse(): Error {
+    return chatScope === 'shared'
+      ? new ChatScopeError('SHARED_CHAT_REQUIRES_APP_CONTEXT', SHARED_CHAT_NOT_MEMBER_MESSAGE)
+      : new AgentNotFoundError(agentRef);
+  }
+}
+
 export const chatMutations = {
     startChat: async (
       _: unknown,
@@ -214,6 +254,7 @@ export const chatMutations = {
         isTestRun,
         llmModel,
         aiConfigChoice,
+        appRef,
       }: {
         agentRef: string;
         userId?: string;
@@ -227,6 +268,8 @@ export const chatMutations = {
         llmModel?: string | null;
         // #3957 (cor:dmo:050:10): the chat's AI config choice, stored with it.
         aiConfigChoice?: string | null;
+        // #5394: the App that supplies the chatbot and keeps the chat, when the credential does not carry one.
+        appRef?: string | null;
       },
       ctx: Context,
     ) => {
@@ -241,6 +284,10 @@ export const chatMutations = {
       // Spec 017: default per FR-003. The GraphQL schema also defaults
       // scope to `private`; the resolver default is a defensive belt.
       const chatScope: 'private' | 'shared' = scope ?? 'private';
+
+      // #5394 (hrn:node:hadronmemory.com:specs:cor:cht:010:02): the App that supplies the chatbot and keeps the chat is the
+      // one the call identifies, never one found by searching; judged before the Agent is resolved or read.
+      const chatAppId = await identifyChatApp(ctx, appRef ?? null, chatScope, agentRef);
 
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       // #4142 (S6): userId stays a raw PK — a compare-and-set against the
@@ -260,7 +307,7 @@ export const chatMutations = {
         if (gateRow && ctx.userId && !ctx.impersonation && !isRunPrincipal(ctx)) {
           const knownInstall = await ctx.db.app.findFirst({where:{
             ownerUserId:ctx.userId,organizationId:null,deletedAt:null,uninstalledAt:null,
-            ...(ctx.appId ? {id:ctx.appId} : {}),appAgents:{some:{agentId:resolvedAgentId}},
+            id:chatAppId,appAgents:{some:{agentId:resolvedAgentId}},
           },select:{id:true,organizationId:true,ownerUserId:true}});
           if(knownInstall && !(await personalOrgAgentLicenseHolds(ctx.db,knownInstall,resolvedAgentId))) {
             throw bootPromptRefusal('BOOT_PROMPT_INSTALL_LICENSE_INACTIVE', { surface: 'chat', agentName: '' });
@@ -321,13 +368,11 @@ export const chatMutations = {
       // ── Target memory selection ──────────────────────────────────────
       // The chat (and its future messages + extracted data) get stored
       // in a user-scoped memory. Four auth paths:
-      //   0. (Spec 017) `scope: 'shared'` → app-class memory for the App
-      //      the caller is an AppMember of (and whose agentId matches).
-      //      JWT-user only in v1; App-key sessions stay private-only per
-      //      research.md Q-R2.
+      //   0. (Spec 017) `scope: 'shared'` → app-class memory of the identified App (#5394), which must install the
+      //      Agent; a signed-in caller must be its AppMember, a pure App key starts it for the user it may act for.
       //   1. App Key session with an active sessionId → use session.memoryId
-      //   2. JWT user → find-or-create a per-user memory for (agent, ctx.userId)
-      //   3. Legacy fallback → first writable memory attached to the agent
+      //   2. JWT user → find-or-create a per-user memory of the identified App for (agent, ctx.userId)
+      //   3. Anything else (a userless principal outside a session) → no home (#5394 removed the legacy fallback)
       /** #4046: eligible cold homes follow live participation, within the stamped start-route limits. */
       const coldAppWhere = async (client: Context['db'], principal: Context): Promise<Prisma.AppWhereInput | null> => {
         if (!principal.userId) return null;
@@ -347,63 +392,37 @@ export const chatMutations = {
       let sharedAppId: string | null = null;
       let ensureTarget: ((client: Context['db']) => Promise<string>) | null = null;
       if (chatScope === 'shared') {
-        // Spec 017 FR-006 + research.md Q-R2: shared chats require a
-        // JWT-user AppMember context. Two distinct rejection paths so
-        // SC-005 callers see an actionable message:
-        //   - MCP App-key session → shared chats not available in v1
-        //   - JWT user but not an AppMember → not a member of any App
-        //     that installs this Agent.
-        if (ctx.appId) {
-          throw new ChatScopeError(
-            'SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS',
-            'Shared chats are not available for MCP App-key sessions — start the chat from a signed-in user surface.',
-          );
-        }
-        if (!ctx.userId) {
+        // Spec 017 FR-006, #5394: a shared chat runs under the identified App (an App credential included, which retired
+        // SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS), which must install the Agent with a live licence, and is started by
+        // a person. A signed-in user must be an AppMember of that App. A pure App key starts it for the user it acts for,
+        // already admitted above by appKeyMayActFor (a live AppMember of this App, or a user it minted), so its own App
+        // is the authority there. No other App is searched for.
+        const sharedStarter = ctx.userId ?? actingUserId ?? null;
+        if (!sharedStarter) {
           throw new ChatScopeError(
             'SHARED_CHAT_REQUIRES_APP_CONTEXT',
-            'Cannot create a shared chat — sign in as a user that belongs to an App that installs this Agent.',
+            'Cannot create a shared chat without a person: sign in, or start it for a user of this App.',
           );
         }
-        // 023-app-shape Phase 2b: App↔Agent is N:M via AppAgent. Find an
-        // App that the user is an AppMember of AND that has this Agent
-        // installed. Pick the first live licensed App in a stable order: a
-        // retained install in one App must not hide another usable App.
-        const memberships = await ctx.db.appMember.findMany({
-          where: {
-            userId: ctx.userId,
-            app: {
-              ...appInstallationWhere(resolvedAgentId),
-              deletedAt: null,
-            },
-          },
-          select: {
-            app: { select: { id: true, urn: true, name: true, organizationId: true, ownerUserId: true } },
-          },
-          orderBy: { appId: 'asc' },
-        });
-        if (memberships.length === 0) {
-          throw new ChatScopeError(
-            'SHARED_CHAT_REQUIRES_APP_CONTEXT',
-            "Cannot create a shared chat — you are not a member of any App that installs this Agent.",
-          );
+        const sharedAppSelect = { id: true, urn: true, name: true, organizationId: true, ownerUserId: true } as const;
+        const installedHere = { id: chatAppId, ...appInstallationWhere(resolvedAgentId), deletedAt: null };
+        const candidate = ctx.userId
+          ? (await ctx.db.appMember.findFirst({
+            where: { userId: ctx.userId, appId: chatAppId, app: installedHere },
+            select: { app: { select: sharedAppSelect } },
+          }))?.app ?? null
+          : await ctx.db.app.findFirst({ where: installedHere, select: sharedAppSelect });
+        if (!candidate) {
+          throw new ChatScopeError('SHARED_CHAT_REQUIRES_APP_CONTEXT', SHARED_CHAT_NOT_MEMBER_MESSAGE);
         }
-        const licensedAppIds = await activeAppInstallLicenseIdsForAgent(
-          ctx.db, resolvedAgentId, memberships.map((membership) => membership.app.id),
-        );
-        let selectedApp: (typeof memberships)[number]['app'] | null = null;
-        for (const membership of memberships) {
-          if (licensedAppIds.has(membership.app.id)) {
-            selectedApp = membership.app;
-            break;
-          }
-        }
-        if (!selectedApp) {
+        const licensedAppIds = await activeAppInstallLicenseIdsForAgent(ctx.db, resolvedAgentId, [candidate.id]);
+        if (!licensedAppIds.has(candidate.id)) {
           throw new ChatScopeError(
             'SHARED_CHAT_REQUIRES_APP_CONTEXT',
             'Cannot create a shared chat — the Agent is no longer active in this App.',
           );
         }
+        const selectedApp = candidate;
         sharedAppId = selectedApp.id;
         // Idempotent: first shared chat under the (App, Agent) pair
         // provisions the app-class memory; subsequent calls reuse it.
@@ -426,7 +445,7 @@ export const chatMutations = {
             agentName: agent.name,
             organizationId: liveApp.organizationId,
             ownerUserId: liveApp.ownerUserId,
-            actingUserId: ctx.userId!,
+            actingUserId: sharedStarter,
             db: client,
             inTransaction: true,
           });
@@ -457,9 +476,11 @@ export const chatMutations = {
         // #5380 (cor:cht:010:02): createMemoryInApp stamps the Agent on a person's private memory too (#5183), and a
         // private memory is never a chat home (validateChatScopeInvariants refuses it at the first send), so the lookup
         // never selects one: with no other row it takes the no-home path below. Personal first, then any other stamped
-        // row (the no-App manager route's knowledge home; a corrupt system row is still found and refused below, #3301);
-        // oldest, then id, within each, so the pick never depends on row order.
-        const userHomeWhere = { userMemoryOfAgentId: resolvedAgentId, createdBy: ctx.userId, deletedAt: null };
+        // row (a corrupt system row is still found and refused below, #3301); oldest, then id, within each, so the pick
+        // never depends on row order.
+        // #5394: only a home of the identified App is reused. Another App's home, and the no-App knowledge home the
+        // retired manager route wrote (app_id null), are never picked.
+        const userHomeWhere = { userMemoryOfAgentId: resolvedAgentId, createdBy: ctx.userId, appId: chatAppId, deletedAt: null };
         const userHomeOrder = [{ createdAt: 'asc' as const }, { id: 'asc' as const }];
         const existing =
           await ctx.db.memory.findFirst({ where: { ...userHomeWhere, class: 'personal' }, select: { id: true }, orderBy: userHomeOrder }) ??
@@ -467,42 +488,23 @@ export const chatMutations = {
         if (existing) {
           targetMemoryId = existing.id;
         } else {
-          // Resolve the prospective App before any definition read or provisioning (#4046).
-          // App participants use a licensed App-bound personal home. If none
-          // qualifies, only an Agent manager's direct route can provision a
-          // standalone knowledge home; admission below decides that before writes.
-          // #4046 gate amendment: AppMember Apps and org CONTRIBUTOR+ Apps,
-          // using the shared participation predicate. Owner-only user Apps remain
-          // outside this start path (Vera #102893); membership still qualifies.
+          // Resolve the prospective home before any definition read or provisioning (#4046), against the identified App
+          // only (#5394): the caller must take part in it (#4046 gate amendment: AppMember, or org CONTRIBUTOR+, through
+          // the shared participation predicate; owner-only user Apps remain outside this start path, Vera #102893), and it
+          // must install the Agent with a live licence the caller may be served under. Otherwise the start is refused
+          // like an unknown Agent, as a caller with no such App always was; no other App is tried, and no App-less
+          // knowledge home is provisioned (the Agent manager's direct route is retired).
           const candidateWhere = await coldAppWhere(ctx.db, ctx);
-          const candidateApps = candidateWhere ? await ctx.db.app.findMany({
-            where: candidateWhere,
+          const app = candidateWhere ? await ctx.db.app.findFirst({
+            where: { AND: [candidateWhere, { id: chatAppId }] },
             select: { id: true, organizationId: true, ownerUserId: true },
-            orderBy: { id: 'asc' },
-          }) : [];
-          const licensedAppIds = await activeAppInstallLicenseIdsForAgent(
-            ctx.db, resolvedAgentId, candidateApps.map(app => app.id),
-          );
-          let matchingApp: (typeof candidateApps)[number] | undefined;
-          for (const app of candidateApps) {
-            if (licensedAppIds.has(app.id) && await personalOrgAgentServeAllowed(ctx.db, app, resolvedAgentId, ctx.userId)) {
-              matchingApp = app;
-              break;
-            }
-          }
-
-          const memoryClass: 'personal' | 'knowledge' = matchingApp
-            ? 'personal'
-            : 'knowledge';
-          // 035-visibility-enum-cleanup: personal memory → NULL visibility
-          // (class-driven privacy); the no-App knowledge holding memory →
-          // ORGANIZATION (owner-gating now rides on userMemoryOfAgentId in
-          // getAccessibleMemoryIds, not visibility=PRIVATE).
-          const visibility: MemoryVisibility | null = matchingApp
-            ? null
-            : 'ORGANIZATION';
-
-          prospectiveAppId = matchingApp?.id ?? null;
+          }) : null;
+          const usable = app
+            && (await activeAppInstallLicenseIdsForAgent(ctx.db, resolvedAgentId, [app.id])).has(app.id)
+            && await personalOrgAgentServeAllowed(ctx.db, app, resolvedAgentId, ctx.userId);
+          if (!app || !usable) throw new AgentNotFoundError(agentRef);
+          prospectiveAppId = app.id;
+          const homeUserId = ctx.userId;
           // #4039/#4046: writes remain deferred until admission and entry selection pass.
           ensureTarget = async (client) => {
             if (!agent.organizationId) {
@@ -527,48 +529,25 @@ export const chatMutations = {
               data: {
                 organizationId: agent.organizationId,
                 urn: memoryUrn,
-                name: `${agent.name} — ${ctx.userId}`,
-                // 005-agent-subscription: personal-class memory; userId
-                // owner-pivot is required by the bidirectional CHECK
-                // constraint (class IN (personal,private) ⇔ userId NOT NULL). Note:
-                // organizationId stays at agent.organizationId here for
-                // the legacy JWT-user path; the spec's FR-015 (use
-                // user's personal org) applies to the new App-keyed
-                // AgentSubscription auto-provisioning path.
-                userId: matchingApp ? ctx.userId : null,
-                class: memoryClass,
-                visibility,
+                name: `${agent.name} — ${homeUserId}`,
+                // 005-agent-subscription: personal-class memory; userId owner-pivot is required by the bidirectional
+                // CHECK constraint (class IN (personal,private) ⇔ userId NOT NULL). 035-visibility-enum-cleanup: a
+                // personal memory has NULL visibility (class-driven privacy).
+                userId: homeUserId,
+                class: 'personal',
+                visibility: null,
                 userMemoryOfAgentId: resolvedAgentId,
-                appId: matchingApp?.id,
-                createdBy: ctx.userId,
+                appId: app.id,
+                createdBy: homeUserId,
               },
             });
             return created.id;
           };
         }
       } else {
-        // Legacy: use the agent's first writable attached memory.
-        // #1349: one the Agent's tenant can WRITE on its own — a link is a
-        // limit, never a grant (cor:dmo:050:09) — and live on both ends. This
-        // branch has no user, so a personal or private memory is never the
-        // target (Colin on #2002), and an app-class one never is (Riana).
-        const tenant = {
-          organizationId: agent.organizationId, ownerUserId: agent.ownerUserId,
-          appId: ctx.appId ?? null, userId: ctx.userId ?? null,
-        };
-        // #3354: a userless principal's answer is always "no target" (below), so its
-        // writable-item lookup is skipped. Behavior-preserving: same refusal, no write.
-        if (!ctx.userId) {
-          targetMemoryId = null;
-        } else {
-          const writable = await ctx.db.agentMemoryItem.findMany({
-            where: { agentId: resolvedAgentId, deletedAt: null, role: 'read-write', memory: { deletedAt: null } },
-            orderBy: { createdAt: 'asc' },
-            select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
-          });
-          // #3292: an item never grants a userless principal, including an AppRun, a chat target (cor:dmo:050:09).
-          targetMemoryId = writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
-        }
+        // #5394: a userless principal outside a session has no chat home. (The legacy "first writable attached memory"
+        // fallback only ever answered null here since #3354, and with an App always identified it is gone.)
+        targetMemoryId = null;
       }
       const homeAppId = targetMemoryId
         ? (await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null

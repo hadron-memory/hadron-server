@@ -246,7 +246,7 @@ describe('resolveRegister', () => {
 
   it('mintAppRun snapshots the Agent-in-App register; AppRun.register evaluates its App principal', async () => {
     const run = await mintAppRun(db, {
-      organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false,
+      owner: { organizationId: org.id }, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false,
     });
     const snap = parseRunRegisterSnapshot(run.registerSnapshot);
     expect(snap).toMatchObject({ attendee: { agentId: agent.id, appId: app.id } });
@@ -264,7 +264,7 @@ describe('resolveRegister', () => {
       channel: expect.objectContaining({ hostMemoryId: null, hostMemoryUrn: null }),
     })]);
     // #2712 (R74): a run with no Agent has no attendee, and is now refused before it exists.
-    await expect(mintAppRun(db, { organizationId: org.id, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false }))
+    await expect(mintAppRun(db, { owner: { organizationId: org.id }, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false }))
       .rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_NOT_SET' } });
   });
 
@@ -292,7 +292,7 @@ describe('PR #1167 review — the oracles', () => {
     const asReader = await resolveRegister(db, { attendee: { workerId: worker.id }, actor: ctx(reader.id) });
     expect(asReader?.rows[0].channel).toMatchObject({ hostMemoryUrn: null, hostMemoryId: null });
     const rows = await R.register(
-      await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false }),
+      await mintAppRun(db, { owner: { organizationId: org.id }, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false }),
       {},
       ctx(reader.id),
     );

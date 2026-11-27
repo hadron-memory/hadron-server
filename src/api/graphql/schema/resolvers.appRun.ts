@@ -373,8 +373,13 @@ async function requireRunIdentityRelationship(ctx: Context, appId: string, userI
  */
 export async function mayReadAppRunWithoutOrgRole(
   ctx: Context,
-  run: { appId: string; userId: string | null; createdBy: string | null; triggerKind: string },
+  run: { appId: string; organizationId: string | null; userId: string | null; createdBy: string | null; triggerKind: string },
 ): Promise<boolean> {
+  // #5077 (F3a-1): nobody reads a run of an App a person owns until F3a-2 gives it its read gate, and every arm below
+  // (platform admin, App key, own run) would otherwise admit it; AppRun.organizationId is still ID! in the SDL. Checked
+  // first, before any arm (Byron SECOND P2-1, Belinda BLIND P2-1 on #5420).
+  if (run.organizationId === null) return false;
+  // #5077 (decision d; cor:dmo:050:12): the platform-admin arm reads an organization's run only, never a person's (above).
   if (isPlatformAdmin(ctx)) return true;
   if (!ctx.userId) return !!ctx.appId && ctx.appId === run.appId;
   if (ctx.impersonation) return false;
@@ -389,9 +394,12 @@ export async function mayReadAppRunWithoutOrgRole(
  */
 export async function canReadAppRun(
   ctx: Context,
-  run: { appId: string; organizationId: string; userId: string | null; createdBy: string | null; triggerKind: string },
+  run: { appId: string; organizationId: string | null; userId: string | null; createdBy: string | null; triggerKind: string },
 ): Promise<boolean> {
   if (await mayReadAppRunWithoutOrgRole(ctx, run)) return true;
+  // #5077 (F3a-1): a run of an App a person owns has no organization READER to fall back to; its owner's arm is F3a-2.
+  // Fails closed: never `requireOrgRole` with a null id.
+  if (run.organizationId === null) return false;
   try {
     await requireOrgRole(ctx, run.organizationId, 'READER');
     return true;
@@ -580,7 +588,8 @@ export async function mintManualRun(
     return await mintAppRun(ctx.db, {
       // #2737: a composed import publishes only after its outer transaction commits.
       publish: options.publish,
-      organizationId: app.organizationId,
+      // #5077 (F3a-1): the manual gate still refuses a person's App (F3a-2 opens it), so the owner here is the organization.
+      owner: { organizationId: app.organizationId },
       appId: app.id,
       // #3689: passed through as resolved (no `?? null` default). None reaches mint's one typed refusal,
       // BOOT_PROMPT_NOT_SET (cor:agt:040:07); a stored run always names its Agent (cor:agt:010:01 rev 45).
@@ -736,14 +745,14 @@ export const appRunMutations = {
           if (input.scopeRef?.trim()) await resolveScopeForTrigger(txCtx, app.id, input.scopeRef);
         },
         async (tx, txCtx) => {
-          const automationPin = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, txCtx, configSelection({ ...input, agentId }));
+          const automationPin = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, { organizationId: app.organizationId }, txCtx, configSelection({ ...input, agentId }));
           const entryNodeId = entryIdOf(automationPin);
           await admitWorkerTrigger(tx, txCtx, { appId: app.id, action: 'schedule.create', entryNodeId });
           return create(tx, automationPin, entryNodeId);
         },
       );
     }
-    const automationPin = await captureSetupConsent(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+    const automationPin = await captureSetupConsent(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, { organizationId: app.organizationId }, ctx, configSelection({ ...input, agentId }));
     return create(ctx.db, automationPin, entryIdOf(automationPin));
   },
 
@@ -835,7 +844,7 @@ export const appRunMutations = {
             // #2438 BLIND P2 (Andi): with no new entry supplied, capture by
             // the stamped id — after a rename the stored URN is stale, and
             // re-capturing it would break a working schedule's consent.
-            input.entryNodeUrn ?? existing.entryNodeId ?? existing.entryNodeUrn, existing.organizationId, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })).then(consent => ({
+            input.entryNodeUrn ?? existing.entryNodeId ?? existing.entryNodeUrn, { organizationId: existing.organizationId }, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })).then(consent => ({
             // #2438: a re-captured setup pin re-stamps the entry id with
             // it (the marker's absent entryId clears to null only when the
             // entry itself no longer resolves — the URN path takes over).
@@ -923,6 +932,8 @@ export const appRunMutations = {
     if (!run) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
     // #5037: a caller who cannot read the run is answered as for a run that does not exist.
     if (!(await canReadAppRun(ctx, run))) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
+    // #5077 (F3a-1): nobody cancels a run of an App a person owns until F3a-2 adds the owner's and the platform admin's arms.
+    if (run.organizationId === null) throw authorizationDenied();
     await requireOrgRole(ctx, run.organizationId, 'ADMIN');
     const cancelled = await ctx.db.appRun.updateMany({
       where: { id, status: { in: ['PENDING', 'RUNNING'] } },
@@ -998,7 +1009,7 @@ export const appRunMutations = {
         // #2438: stamp the entry's stable id from the setup pin's own
         // resolution (same as createAgentSchedule); null on the unadopted
         // marker — that row keeps the URN path.
-        const consent = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+        const consent = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, { organizationId: app.organizationId }, ctx, configSelection({ ...input, agentId }));
         // #3483: a worker-bound caller spends a live, signed `webhook.create` grant for this entry node here, the last lock.
         await admitWorkerTrigger(tx, ctx, {
           appId: app.id, action: 'webhook.create',
@@ -1260,7 +1271,7 @@ export const appRunQueries = {
     }
     if (input.cron != null) validatedCronNext(input.cron, timezone);
     const runAt = input.runAt != null ? validatedRunAt(input.runAt) : null;
-    const outcome = await captureSetupOutcome(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+    const outcome = await captureSetupOutcome(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, { organizationId: app.organizationId }, ctx, configSelection({ ...input, agentId }));
     // #3483 row 10: a worker-bound caller whose create would be refused for want of a grant is told so, with no hash. No
     // lock, no spend. Off (the default), or for a person, this reads nothing.
     if (!await workerTriggerWouldBeAdmitted(ctx, { appId: app.id, action: 'schedule.create', entryNodeId: outcome.adoptable ? outcome.pin.entryId : null })) {
@@ -1455,7 +1466,9 @@ export const appRunQueries = {
     const appId = await resolveAppRefOrNotFound(ctx, appRef);
     const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null } });
     if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
-    if (!isPlatformAdmin(ctx)) {
+    // #5077 (decision d; cor:dmo:050:12): the platform-admin skip is for an organization's App only; a platform admin never
+    // reads a run of an App a person owns.
+    if (!isPlatformAdmin(ctx) || app.organizationId === null) {
       try {
         // Owner-or-org READER — App may be org-owned or user-owned (spec 047).
         await requireOwnerOrOrgRole(ctx, app, 'READER');
@@ -1464,6 +1477,9 @@ export const appRunQueries = {
         throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
       }
     }
+    // #5077 (F3a-1): the owner passes the gate above, but a run of an App a person owns is read by nobody until F3a-2
+    // (see mayReadAppRunWithoutOrgRole); before F3a-1 such an App had no run, so null is main's answer.
+    if (app.organizationId === null) return null;
     const [run] = await ctx.db.appRun.findMany({
       where: { appId },
       orderBy: { createdAt: 'desc' },

@@ -88,7 +88,7 @@ function deps(overrides: Partial<RunExecutionDeps> = {}): RunExecutionDeps {
 
 async function mint(extra: Record<string, unknown> = {}) {
   return mintAppRun(db, {
-    organizationId: orgId,
+    owner: { organizationId: orgId },
     appId,
     agentId, // #2712: a run needs an Agent with a served boot prompt (R74)
     triggerKind: 'MANUAL',

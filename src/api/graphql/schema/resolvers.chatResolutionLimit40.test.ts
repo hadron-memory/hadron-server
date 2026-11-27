@@ -43,6 +43,7 @@ beforeEach(async () => {
       organizationId: org.id, appAgents: { create: { agentId: agent.id } },
     },
   });
+  chatAppId = app.id;
   await db.appMember.create({ data: { appId: app.id, userId: alice.id, role: 'member' } });
   const nodes: Array<{ loc: string; data?: unknown; content?: string }> = [
     { loc: 'conversations' },
@@ -67,7 +68,8 @@ beforeEach(async () => {
 });
 afterEach(() => setResolutionLimits(null));
 
-const start = () => resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'shared' }, ctxFor(alice.id));
+let chatAppId: string;
+const start = () => resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'shared', appRef: chatAppId }, ctxFor(alice.id));
 
 describe('#40 chat prompts', () => {
   it('control: under the limit the prompt compiles', async () => {
@@ -114,10 +116,10 @@ describe('#4046: transaction-local authorization keeps the original request reso
   it.each(['private', 'shared'] as const)('two %s starts in one request share the aggregate and the refused start writes no chat', async scope => {
     setResolutionLimits({ requestMaxBytes: 40 });
     const request = ctxFor(alice.id);
-    const first = await resolvers.Mutation.startChat({}, { agentRef: agent.id, scope }, request);
+    const first = await resolvers.Mutation.startChat({}, { agentRef: agent.id, scope, appRef: chatAppId }, request);
     expect(first.systemMessage).toContain('ask  ' + 'x'.repeat(20));
     const before = await chatRoots();
-    await expect(resolvers.Mutation.startChat({}, { agentRef: agent.id, scope }, request))
+    await expect(resolvers.Mutation.startChat({}, { agentRef: agent.id, scope, appRef: chatAppId }, request))
       .rejects.toMatchObject({ extensions: { code: CONTENT_RESOLUTION_LIMIT_EXCEEDED, limit: 'requestBytes' } });
     expect(await chatRoots()).toBe(before);
   });
@@ -125,7 +127,7 @@ describe('#4046: transaction-local authorization keeps the original request reso
   it('a start and a send in the same request share the aggregate', async () => {
     setResolutionLimits({ requestMaxBytes: 40 });
     const request = ctxFor(alice.id);
-    const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'shared' }, request);
+    const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'shared', appRef: chatAppId }, request);
     await expect(resolvers.Mutation.sendChatMessage({}, { chatId: chat.chatId, userMessage: 'hi' }, request))
       .rejects.toMatchObject({ extensions: { code: CONTENT_RESOLUTION_LIMIT_EXCEEDED, limit: 'requestBytes' } });
   });

@@ -27,6 +27,8 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   ['auth_codes', 'user_id', 'sign_in_id'],
   ['auth_handoff_codes', 'user_id', 'sign_in_id'],
   ['app_runs', 'user_id'],
+  // #5077: the runs of the Apps a person owns copy that owner; they move with their Apps (mergeOwnerNamespacedUrns).
+  ['app_runs', 'owner_user_id'],
   ['agent_schedules', 'user_id'],
   ['agent_webhooks', 'user_id'],
   ['assets', 'uploaded_by'],

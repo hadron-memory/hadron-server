@@ -16,6 +16,8 @@ import { redactUrl } from '../../webUrl.js';
 import { idListPage, listPageArgs, type ListPageArgs } from '../../listPage.js';
 import { cancelOrgWebPoll } from '../../webPolls.js';
 import type { RunToolDef } from './types.js';
+import { requireOwnerRefOf } from '../../owner.js';
+import { requireOrgTenantForTool } from './orgOnly.js';
 import { coerceHeaders } from './webTools.js';
 
 const CONTENT_KINDS = ['auto', 'html', 'json'] as const;
@@ -102,6 +104,8 @@ export const webPollStart: RunToolDef = {
   },
   cost: 1,
   execute: async (ctx, args) => {
+    // #5077: organization-only; a person's run is refused before any query or sidecar call.
+    const runOrgId = requireOrgTenantForTool(requireOwnerRefOf(ctx.run), 'web_poll_start');
     const url = typeof args.url === 'string' ? args.url : '';
     if (!url) throw new Error('web_poll_start: "url" is required.');
     const conditions = pollConditions(args.conditions);
@@ -138,7 +142,7 @@ export const webPollStart: RunToolDef = {
       conditions,
       intervalSeconds,
       ttlSeconds,
-      orgId: ctx.run.organizationId,
+      orgId: runOrgId,
       appId: ctx.run.appId,
       ...(contentKind ? { contentKind } : {}),
       ...(mode ? { mode } : {}),
@@ -162,7 +166,7 @@ export const webPollStart: RunToolDef = {
         data: {
           jobId: created.jobId,
           sourceRunId: ctx.run.id,
-          organizationId: ctx.run.organizationId,
+          organizationId: runOrgId,
           appId: ctx.run.appId,
           agentId: ctx.run.agentId,
           userId: ctx.run.userId,
@@ -202,9 +206,11 @@ export const webPollCancel: RunToolDef = {
   },
   cost: 1,
   execute: async (ctx, args) => {
+    // #5077: organization-only; a person's run is refused before any query or sidecar call.
+    const runOrgId = requireOrgTenantForTool(requireOwnerRefOf(ctx.run), 'web_poll_cancel');
     const jobId = typeof args.jobId === 'string' ? args.jobId : '';
     if (!jobId) throw new Error('web_poll_cancel: "jobId" is required.');
-    const result = await cancelOrgWebPoll(ctx.db, ctx.run.organizationId, jobId);
+    const result = await cancelOrgWebPoll(ctx.db, runOrgId, jobId);
     if (!result) throw new Error('web_poll_cancel: job not found in this organization.');
     if (result.alreadyCancelled) return { jobId, cancelled: true, alreadyCancelled: true };
     ctx.log(`web_poll_cancel ${JSON.stringify({ jobId })}`);
@@ -220,9 +226,11 @@ export const webPollList: RunToolDef = {
   inputSchema: { type: 'object', properties: { first: { type: 'integer', description: 'Default 20, clamp 1–100.' }, after: { type: 'string', description: 'Authenticated nextCursor from the previous page, never with offset.' }, offset: { type: 'integer', description: 'Offset alternative, never with after.' } } },
   cost: 0,
   execute: async (ctx, args) => {
-    const scope = `runWebPolls:${ctx.run.organizationId}`;
+    // #5077: organization-only; a person's run is refused before any query or sidecar call.
+    const runOrgId = requireOrgTenantForTool(requireOwnerRefOf(ctx.run), 'web_poll_list');
+    const scope = `runWebPolls:${runOrgId}`;
     const window = listPageArgs(args as ListPageArgs, scope);
-    const { jobs } = await listPolls(ctx.run.organizationId);
+    const { jobs } = await listPolls(runOrgId);
     const { items, ...page } = idListPage(jobs, window, row => row.jobId);
     return { jobs: items, ...page };
   },

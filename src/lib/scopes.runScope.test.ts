@@ -87,14 +87,14 @@ describe('the snapshot on the run', () => {
   it('is taken at mint, survives a later edit, and is inherited by a spawned child', async () => {
     const s = await M.createScope({}, { input: { name: 'lens', organizationRef: orgA.urn, memoryRefs: [memA2.urn, memA1.urn] } }, ctx(admin.id));
     const run = await mintAppRun(db, {
-      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id,
+      owner: { organizationId: orgA.id }, appId: app.id, agentId: agent.id, userId: admin.id,
       triggerKind: 'SCHEDULE', triggerId: scheduleId, entryNodeUrn: entry, scopeId: s.id, publish: false,
     });
     expect(run.scopeSnapshot).toMatchObject({ scopeId: s.id, name: 'lens', ownerType: 'ORGANIZATION', memoryIds: [memA2.id, memA1.id] });
 
     await M.updateScope({}, { ref: s.id, input: { memoryRefs: [memB.urn] } }, ctx(admin.id));
     const child = await mintAppRun(db, {
-      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id,
+      owner: { organizationId: orgA.id }, appId: app.id, agentId: agent.id, userId: admin.id,
       triggerKind: 'SPAWN', triggerId: run.id, parentRunId: run.id, entryNodeUrn: entry,
       scopeSnapshot: run.scopeSnapshot, publish: false,
     });
@@ -103,7 +103,7 @@ describe('the snapshot on the run', () => {
     // A trigger whose scope has been deleted mints no snapshot (⇒ app).
     await M.deleteScope({}, { ref: s.id }, ctx(admin.id));
     const later = await mintAppRun(db, {
-      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, scopeId: s.id, publish: false,
+      owner: { organizationId: orgA.id }, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, scopeId: s.id, publish: false,
     });
     expect(later.scopeSnapshot).toBeNull();
   });
@@ -111,7 +111,7 @@ describe('the snapshot on the run', () => {
   it('is data, never a grant: resolveRunScope re-intersects with CURRENT access and discloses the drop', async () => {
     const s = await M.createScope({}, { input: { name: 'lens', organizationRef: orgA.urn, memoryRefs: [memA1.urn, memB.urn] } }, ctx(admin.id));
     const run = await mintAppRun(db, {
-      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, scopeId: s.id, publish: false,
+      owner: { organizationId: orgA.id }, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, scopeId: s.id, publish: false,
     });
     const before = await resolveRunScope(ctx(admin.id), run);
     expect(before).toMatchObject({ kind: 'scope', source: 'trigger', label: 'lens', ownerUrn: orgA.urn, memoryIds: [memA1.id, memB.id], droppedCount: 0 });
@@ -126,7 +126,7 @@ describe('the snapshot on the run', () => {
 
   it('no snapshot ⇒ the App\'s attached memories, and AppRun.scope is null', async () => {
     const run = await mintAppRun(db, {
-      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false,
+      owner: { organizationId: orgA.id }, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false,
     });
     expect(run.scopeSnapshot).toBeNull();
     const r = await resolveRunScope(ctx(admin.id), run);
@@ -140,7 +140,7 @@ describe('hadron_spawn is scope-bearing (plan §3.3)', () => {
     const lens = await M.createScope({}, { input: { name: 'lens', organizationRef: orgA.urn, memoryRefs: [memA1.urn] } }, ctx(admin.id));
     const other = await M.createScope({}, { input: { name: 'other', organizationRef: orgA.urn, memoryRefs: [memA2.urn] } }, ctx(admin.id));
     const parent = await mintAppRun(db, {
-      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id,
+      owner: { organizationId: orgA.id }, appId: app.id, agentId: agent.id, userId: admin.id,
       triggerKind: 'SCHEDULE', triggerId: scheduleId, entryNodeUrn: entry, scopeId: lens.id, publish: false,
     });
     const toolCtx = (run: typeof parent) => ({ log: () => {}, db, run, principal: runContext(db, run) });
@@ -161,7 +161,7 @@ describe('hadron_spawn is scope-bearing (plan §3.3)', () => {
 
     // No override: the parent's own snapshot, on children and callbacks alike.
     const parent2 = await mintAppRun(db, {
-      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id,
+      owner: { organizationId: orgA.id }, appId: app.id, agentId: agent.id, userId: admin.id,
       triggerKind: 'SCHEDULE', triggerId: scheduleId, entryNodeUrn: entry, scopeId: lens.id, publish: false,
     });
     await hadronSpawn.execute(toolCtx(parent2), { items: ['x'], process_item: entry, callback: entry });
@@ -174,7 +174,7 @@ describe('hadron_spawn is scope-bearing (plan §3.3)', () => {
 
     // A scope_ref outside the App's context is refused, minting nothing.
     const parent3 = await mintAppRun(db, {
-      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false,
+      owner: { organizationId: orgA.id }, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false,
     });
     await expect(hadronSpawn.execute(toolCtx(parent3), { items: ['x'], process_item: entry, scope_ref: 'nope' })).rejects.toThrow(/No readable scope/);
     expect(await db.appRun.count({ where: { parentRunId: parent3.id } })).toBe(0);

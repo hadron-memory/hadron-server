@@ -1,7 +1,7 @@
 /**
  * hadron-internal#90 (Holger, 2026-11-27, decisions:2026-11-27-holger-rulings-to-victor-chat-memory-public-links): an organisation or
  * platform admin may switch a public link OFF on a file in a user's chat holding, never ON; the public hotlink is unchanged. The holding is
- * seeded through the product's own write path (a real startChat by an Agent manager with no installed App); the platform admins are real
+ * made by a real startChat under a seed App, reshaped to the row the retired no-App route wrote (#5394); the platform admins are real
  * user rows.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -60,8 +60,17 @@ beforeEach(async () => {
     { loc: 'prompts:step', content: 'STAGE', data: {} },
   ]) await db.node.create({ data: { memoryId: agent.systemMemoryId, name: row.loc, nodeType: 'system', ...row } });
   await serveEveryAgent(db);
-  const started = await M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, as('creator'));
+  // #5394: the holding used to come from a real no-App start (the Agent's manager started a chat with no installed App).
+  // That route is retired, so a start with no App is refused, and the holding such a start left is made the way it left
+  // it: a real start under a seed App, then the home reshaped to the retired route's row (knowledge, no App, no owner
+  // column, ORGANIZATION), and the seed App removed. Holdings of this shape exist until #5394's deletion runs.
+  await expect(M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, as('creator')))
+    .rejects.toMatchObject({ code: 'CHAT_APP_NOT_IDENTIFIED' });
+  const seedApp = await db.app.create({ data: { name: 'Seed app', urn: 'link90.test:seed', organizationId: orgId, appAgents: { create: { agentId } } } });
+  const started = await M.startChat({}, { agentRef: agentId, appRef: seedApp.id, scope: 'private', conversationName: 'flow' }, as('creator'));
   holdingId = (await chatNodeByLocOrThrow(db, started.chatId)).memoryId;
+  await db.memory.update({ where: { id: holdingId }, data: { class: 'knowledge', userId: null, appId: null, visibility: 'ORGANIZATION' } });
+  await db.app.delete({ where: { id: seedApp.id } });
   expect(await db.memory.findUniqueOrThrow({ where: { id: holdingId } })).toMatchObject({ class: 'knowledge', ownerUserId: null, appId: null, userMemoryOfAgentId: agentId, createdBy: u.creator });
   plainId = (await db.memory.create({ data: { id: generateId(), name: 'Plain90', urn: 'link90.test:plain', organizationId: orgId, class: 'knowledge', visibility: 'ORGANIZATION', createdBy: u.creator } })).id;
   appId = (await db.app.create({ data: { name: 'Link app', urn: 'link90.test:app', organizationId: orgId } })).id;

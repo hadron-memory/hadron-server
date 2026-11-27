@@ -85,7 +85,7 @@ afterEach(() => {
 
 const mint = async (entry = 'flow:a', over: Record<string, unknown> = {}) =>
   mintAppRun(db, {
-    organizationId: orgId, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: `${mem}::${entry}`, eventData: {},
+    owner: { organizationId: orgId }, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: `${mem}::${entry}`, eventData: {},
     consentPrincipal: await createDbRunConsentPrincipal(db, orgId, appId), ...over,
   } as never);
 const ownKeyConfig = () =>

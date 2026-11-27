@@ -229,7 +229,7 @@ describe('#3280 independent user ceiling on item-folded run reach', () => {
   });
 
   it('item-only user-backed flow loading is refused', async () => {
-    expect(await rejection(loadFlowNode(db, urn(f.read), f.org.id, backed.principal as Context))).toMatchObject({ message: expect.stringContaining('not readable') });
+    expect(await rejection(loadFlowNode(db, urn(f.read), { organizationId: f.org.id }, backed.principal as Context))).toMatchObject({ message: expect.stringContaining('not readable') });
   });
   it('item-only user-backed file write is refused before object storage', async () => {
     vi.mocked(putObject).mockClear();

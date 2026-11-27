@@ -45,6 +45,7 @@ import { emitAssetUrnV2 } from '../../urnEmit.js';
 import { resolveFlowMemory } from '../loadFlowNode.js';
 import { createRefusalToolError } from '../../ownerLimits/errors.js';
 import type { RunToolDef, RunToolContext } from './types.js';
+import { orgIdOf, requireOwnerRefOf } from '../../owner.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 
 /**
@@ -156,17 +157,19 @@ export const hadronStoreFile: RunToolDef = {
     // Flow guards + write auth BEFORE any side effect: an unauthorized or
     // misrouted call must not leave orphan bytes in the object store.
     const { memoryUrn, loc } = splitNodeUrn(urn);
-    const memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, urn);
+    const memory = await resolveFlowMemory(ctx.db, memoryUrn, requireOwnerRefOf(ctx.run), urn);
     if (!(await canWriteToMemory(ctx.db, principalAuth(ctx), memory.id))) {
       throw new Error(`Memory not writable for "${urn}" under the run principal.`);
     }
     // Memory-level storage policy, distinct from write authorization — the
     // same gate every attached-Asset creation path runs (PR-635 review).
     await assertMemoryAcceptsUploads(ctx.db, memory.id);
-    const org = await ctx.db.organization.findUniqueOrThrow({
-      where: { id: ctx.run.organizationId },
-      select: { urn: true },
-    });
+    // The organization's row must still exist (a throw here fails the call); #5077: a person's run has no organization row
+    // to check and skips it.
+    const runOrgId = orgIdOf(requireOwnerRefOf(ctx.run));
+    if (runOrgId !== null) {
+      await ctx.db.organization.findUniqueOrThrow({ where: { id: runOrgId }, select: { urn: true } });
+    }
 
     const assetId = generateId();
     const storageKey = buildStorageKey({

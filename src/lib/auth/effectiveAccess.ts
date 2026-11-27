@@ -185,28 +185,25 @@ async function memoryGrants(
         where: { memoryId_granteeId: { memoryId: memory.id, granteeId: subject.id } },
         select: { role: true },
       });
-      if (share) {
-        // An agent-scoped personal memory additionally requires the grantee
-        // to hold an active subscription to the scoping Agent before the
-        // share is honored (resolveMemoryAuthorization step 3c).
-        let licensed = true;
-        if (memory.userMemoryOfAgentId) {
-          const sub = await db.agentSubscription.findUnique({
-            where: {
-              userId_agentId: { userId: subject.id, agentId: memory.userMemoryOfAgentId },
-            },
-            select: { activatedAt: true, revokedAt: true, expiresAt: true },
-          });
-          licensed = !!sub && isActiveAgentSubscription(sub);
-        }
-        if (licensed) {
-          grants.push({
-            source: 'MEMORY_SHARE',
-            role: share.role,
-            via: memory.urn,
-            caps: share.role === 'writer' ? WRITE : READ,
-          });
-        }
+      // #5389: a share admits at its role, App personal memories included: no AgentSubscription licence (the old
+      // "step 3c"), in lockstep with granteeShareAccess and getAccessibleMemoryIds (cor:dmo:060:20 S6). On an
+      // org-set row the grantee must also be a live member of that org, the same mirror those two apply, so this
+      // never reports a read the gate refuses.
+      let admitted = !!share;
+      if (share && memory.organizationId !== null) {
+        const member = await db.orgMember.findFirst({
+          where: { organizationId: memory.organizationId, userId: subject.id, ...LIVE_ORG_MEMBERSHIP },
+          select: { userId: true },
+        });
+        admitted = !!member;
+      }
+      if (share && admitted) {
+        grants.push({
+          source: 'MEMORY_SHARE',
+          role: share.role,
+          via: memory.urn,
+          caps: share.role === 'writer' ? WRITE : READ,
+        });
       }
     }
     return grants;
