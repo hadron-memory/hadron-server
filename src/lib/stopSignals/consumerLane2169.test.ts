@@ -18,6 +18,7 @@ import { APP_KEY_PREFIX, hashAppKey } from '../../middleware/auth.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { coveringSignals } from './state.js';
 import { pendingStopNotices } from './delivery.js';
+import { joinHostForKey } from '../../test/agentTeamHost.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -71,7 +72,9 @@ beforeEach(async () => {
   orca1Key = await mkKey('orca1');
   orca2Key = await mkKey('orca2');
   plainKey = await mkKey('plain');
+  await joinHostForKey(db, orca1Key.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1Key.id, scope: 'host:operate', hostId: 'orca1' }, ctx(max.id));
+  await joinHostForKey(db, orca2Key.id, 'orca2');
   await M.grantAppKeyScope({}, { id: orca2Key.id, scope: 'host:operate', hostId: 'orca2' }, ctx(max.id));
   for (const k of [orca1Key, orca2Key, plainKey]) {
     await db.appKeyScope.create({ data: { id: generateId(), appKeyId: k.id, scope: 'attention:deliver', grantedByUserId: max.id } });
@@ -130,6 +133,7 @@ describe('A3.2 — a declared, served lane', () => {
 
   it('a signal that covers nobody is not refused: a HOST signal on a registration that lists no worker, with nothing declared', async () => {
     const orca3Key = await mkKey('orca3');
+    await joinHostForKey(db, orca3Key.id, 'orca3');
     await M.grantAppKeyScope({}, { id: orca3Key.id, scope: 'host:operate', hostId: 'orca3' }, ctx(max.id));
     await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 3', pollIntervalSeconds: 600, workers: [] } }, keyCtx(orca3Key));
     const s = await set(ctx(max.id), { level: 'PAUSE', scope: 'HOST', host: 'orca3' });

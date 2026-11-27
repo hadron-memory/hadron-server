@@ -11,6 +11,7 @@ import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
 import { sweepUnreportedHostOperations } from '../../../lib/hostOperations/settle.js';
 import { sweepContextResets } from '../../../lib/contextReset/contextReset.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -134,6 +135,7 @@ describe('#3273 ContextReset read', () => {
     const foreign = await db.app.create({ data: { organizationId: f.orgId, name: 'Foreign', urn: `reset-${generateId().toLowerCase()}.example:other` } });
     const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
     const key = await db.appKey.create({ data: { appId: foreign.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4) } });
+    await joinHostForKey(db, key.id, 'orca1');
     await M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate', hostId: 'orca1' }, ctx(f.manager.id));
     await same(s.resetId, { db, appId: foreign.id, appKeyId: key.id, roles: [] }, foreign.id);
     // Operation history is append-only and reset identity immutable. Insert a separate synthetic reset;

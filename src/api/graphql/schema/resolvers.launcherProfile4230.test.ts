@@ -19,6 +19,7 @@ import { loadLaunchableFamilies } from '../../../lib/agentTasks/hosts.js';
 import { resolvers, type Context } from './resolvers.js';
 import { ApolloServer } from '@apollo/server';
 import { typeDefs } from './typeDefs.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -95,7 +96,9 @@ beforeEach(async () => {
   orca1 = await mkKey(app.id, 'orca1');
   orca2 = await mkKey(app.id, 'orca2');
   plainKey = await mkKey(app.id, 'plain');
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
+  await joinHostForKey(db, orca2.id, 'orca2');
   await M.grantAppKeyScope({}, { id: orca2.id, scope: 'host:operate', hostId: 'orca2' }, ctx(manager.id));
 });
 

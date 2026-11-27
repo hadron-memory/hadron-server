@@ -14,6 +14,7 @@ import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -63,6 +64,7 @@ beforeEach(async () => {
   const mk = async (label: string, hostId: string) => {
     const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
     const k = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label }, select: { id: true } });
+    await joinHostForKey(db, k.id, hostId);
     await M.grantAppKeyScope({}, { id: k.id, scope: 'host:operate', hostId }, ctx(manager.id));
     await M.registerHost({}, { input: { appRef: app.id, label: label, pollIntervalSeconds: 60, workers: [{ worker: worker.id, family: 'claude' }] } }, hostCtx(k.id));
     return k;
