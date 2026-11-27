@@ -14,6 +14,12 @@
  *    the link (a user-owned App whose owner linked their own memory). In an organization's App, or for another person's memory shared with the attacher,
  *    the link grants nothing (Victor's reading of Holger's rulings, Proposed in the spec). A run never reads a `private`
  *    memory, linked or not (#1719 R5a).
+ *  - Any other USER-OWNED memory (`ownerUserId` set, #5345) is inert for the key: the GraphQL record gate refuses it — its
+ *    `ownerUserId` branch (`canReadMemoryRecord`) has no link arm, and cor:dmo:060:22 (D-2026-11-26) says attaching gives no
+ *    access, the interim key read of #5258/#5185 covering own personal/private only — and a list must equal the reads on every
+ *    surface (cor:api:120:03). The class is irrelevant (the tenant-owner axis, not `userId`); an organization-owned link is
+ *    unaffected. The row stays, inert like a lapsed one (nothing restores it but a transfer of the memory out of the user
+ *    tenant); detach works as before.
  *
  * A link deliberately bypasses the strict-owner folds (`admissibleFoldRows` rules 2 and 3, the `appDerivedMemoryIds` class
  * filter, the `ownerUserId` early return of `canReadMemoryRow`): the attach is the only consent step, and this module is the
@@ -46,8 +52,9 @@ export type JudgedLink = { memoryId: string; attachedBy: string; active: boolean
 
 /**
  * Judge the App's link rows (or those of `onlyMemoryIds`) at use. A row whose App is deleted or uninstalled, whose memory is
- * gone or `system`, whose attacher no longer reads the memory in their own right, or (personal/private) whose memory is not
- * the App owner's is inactive; it is still returned, so a listing can say so.
+ * gone or `system`, whose attacher no longer reads the memory in their own right, (personal/private) whose memory is not
+ * the App owner's, or (#5345) whose memory is user-owned of another class is inactive; it is still returned, so a listing
+ * can say so.
  */
 export async function judgeAppLinks(
   db: PrismaClient,
@@ -60,7 +67,7 @@ export async function judgeAppLinks(
     where: { appId, ...(opts.onlyMemoryIds ? { memoryId: { in: [...opts.onlyMemoryIds] } } : {}) },
     select: {
       memoryId: true, attachedBy: true,
-      memory: { select: { class: true, userId: true, deletedAt: true } },
+      memory: { select: { class: true, userId: true, ownerUserId: true, deletedAt: true } },
       attacher: { select: { roles: true, deletedAt: true } },
     },
   });
@@ -77,6 +84,12 @@ export async function judgeAppLinks(
       // attach of the owner's memory grants the key nothing.
       return app!.ownerUserId !== null && link.memory.userId === app!.ownerUserId && link.attachedBy === app!.ownerUserId;
     }
+    // #5345: a user-owned memory of any other class never reaches a key through a link. The record gate refuses it
+    // (`canReadMemoryRecord`'s ownerUserId branch has no link arm; cor:dmo:060:22 — attaching gives no access, the
+    // #5258/#5185 interim covering own personal/private only), and this judge must not admit what the record gate refuses
+    // (cor:api:120:03 — a list equals the reads on every surface). The tenant-owner axis, not `userId` and not the class;
+    // an organization-owned link is unaffected. The row stays, inert like a lapsed one.
+    if (link.memory.ownerUserId !== null) return false;
     return true;
   };
   const holds = ownRightReader;

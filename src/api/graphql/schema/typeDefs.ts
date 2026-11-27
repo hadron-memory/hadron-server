@@ -3687,6 +3687,8 @@ export const typeDefs = `#graphql
     #5185 — the memories linked to this App with 'attachMemoryToApp'. You see only entries whose memory you can read in your
     own right; others are absent and not counted. 'active' is whether the link counts right now (its attacher still reads the
     memory in their own right, the App is installed, and a personal or private memory is the App owner's and was linked by the owner).
+    #5345: a user-owned memory of any other class is never active for the App's key — the record gate refuses it, so the link
+    grants the key nothing (it stays listed, inert, until detached).
     """
     attachedMemories: [AppAttachedMemory!]!
     "The App's members. null means WITHHELD from this caller (#2089): an impersonated caller, or one who reaches a user-owned App only by an outer-object route. Never read null as an empty roster. The App's owning user, a current owner-role member of a user-owned App (ruling 0260, #3765), and callers of an org-owned App get the real list (a real empty list included)."
@@ -14937,7 +14939,10 @@ export const typeDefs = `#graphql
     through any App); when you lose read the link goes inert, and it works again if you regain it. A user, with or without the
     App selected, gains nothing from a link. For a 'personal' or 'private' memory the key reads it only when the memory's owner
     is the App's owner (a user-owned App whose owner linked their own memory); in an organization's App the link is inert for
-    the key. Any class except 'system', in any tenant. One memory may be linked into several Apps. A link you already hold is
+    the key. The same holds for a user-owned memory of any other class (#5345): a knowledge or group memory under a user root
+    never reaches the key through a link — attaching gives no access, and the record gate refuses it — so the link sits inert
+    (listed with 'active: false' in attachedMemories) until it is detached. Any class except 'system', in any tenant. One
+    memory may be linked into several Apps. A link you already hold is
     success and writes nothing. 'agentRef' is accepted and ignored (deployed clients keep working).
 
     Person only: a signed-in user acting as themselves, and a member of the App. Typed errors, judged in this order before any

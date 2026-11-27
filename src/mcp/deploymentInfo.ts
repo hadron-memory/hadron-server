@@ -316,7 +316,14 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // open now answers false (nothing was withdrawn); it still ends as expired with its staged value cleared, as before. It answered true.
 // A live request still answers true and ends withdrawn; an ended one, and another person's or unknown id, are unchanged. No SDL shape change.
 // (0.48.0 is #5314, merged first.)
-export const HADRON_SERVER_VERSION = '0.49.0';
+// 0.50.0 — BREAKING (behaviour, no SDL removal) (#5345): the reach of an App's links narrows to the record gate. A user-owned
+// memory of a class other than personal/private (`ownerUserId` set — for example a knowledge memory under a user root) that its
+// owner linked to an App no longer reaches the App's pure key or a userless run on ANY surface: `hadron_list_memories` and its
+// access map stop listing it (they did list it, while `memory(ref:)` and node reads refused it — the disagreement #5345 closes),
+// and the GraphQL `memories` list, `memory(ref:)` and node reads keep refusing it. The link row stays, inert (`active: false` in
+// App.attachedMemories), until detached. Own personal/private linked by the App's owner (the #5258/#5185 interim) and
+// organization-owned links are unchanged. (0.49.0 is #5338, merged first.)
+export const HADRON_SERVER_VERSION = '0.50.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
