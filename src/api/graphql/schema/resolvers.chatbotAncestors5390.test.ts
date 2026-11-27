@@ -165,6 +165,28 @@ describe('#5390 MCP writers', () => {
     expect(out).not.toMatch(/denied|refus|error/i);
     expect(await liveLocs(a.memoryId)).toEqual(['prompts', 'prompts:welcome']);
   });
+
+  it('a container another write is inserting without its key does not fail this write (LOCAL P3 at e7219623)', async () => {
+    const a = await bareAgent('race');
+    // hadron_create_parent_node at a root loc takes no key of its own, so its insert of `prompts` can be in flight while
+    // a prompt write (holding `prompts` as an ancestor key) decides that container is missing.
+    let commit!: () => void;
+    const gate = new Promise<void>((r) => { commit = r; });
+    let held!: () => void;
+    const holding = new Promise<void>((r) => { held = r; });
+    const section = db.$transaction(async (tx) => {
+      await tx.node.create({ data: { id: generateId(), memoryId: a.memoryId, loc: 'prompts', name: 'Prompts', nodeType: 'info' } });
+      held();
+      await gate;
+    }, { timeout: 20_000 });
+    await holding;
+    const write = create(a.memoryId, 'prompts:welcome:greet');
+    await new Promise((r) => setTimeout(r, 300));
+    commit();
+    await section;
+    await expect(write).resolves.toBeTruthy();
+    expect(await liveLocs(a.memoryId)).toEqual(['prompts', 'prompts:welcome', 'prompts:welcome:greet']);
+  });
 });
 
 describe('#5390 skeleton and retrofit', () => {

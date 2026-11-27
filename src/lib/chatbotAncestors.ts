@@ -91,14 +91,21 @@ export async function missingChatbotContainers(db: Db, memoryId: string, locs: r
 
 /** Create the parents {@link missingChatbotContainers} returned, as empty `info` nodes. */
 export async function createChatbotContainers(db: Db, memoryId: string, locs: readonly string[], createdBy: string | null): Promise<void> {
+  if (locs.length === 0) return;
+  const rows = [];
   for (const loc of locs) {
     // Only a root (`conversations`, `prompts`) or a `prompts:<name>` parent is ever created here.
     const parts = loc.split(':');
     const root = ROOTS.get(parts[0]!)!;
     const name = parts.length === 1 ? root.name : parts[1]!;
     const description = parts.length === 1 ? root.description : `Parent of the prompt templates of the stages of conversation ${parts[1]}.`;
-    await db.node.create({ data: { id: generateId(), memoryId, loc, name, description, nodeType: 'info', createdBy } });
+    rows.push({ id: generateId(), memoryId, loc, name, description, nodeType: 'info' as const, createdBy });
   }
+  // A writer that holds no key on the container's loc (hadron_create_parent_node at a root, or a plain create of the loc
+  // itself) can be inserting it right now. ON CONFLICT DO NOTHING waits for that insert and then keeps its row, instead
+  // of failing this write on the unique (loc, memory) key (LOCAL P3 at e7219623). The count taken before is then one
+  // high, which can only refuse early, never admit past the limit.
+  await db.node.createMany({ data: rows, skipDuplicates: true });
 }
 
 /**
