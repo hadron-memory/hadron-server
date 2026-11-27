@@ -177,8 +177,9 @@ describe('#5265 item 2 in a text with a bare CR: main\'s list close', () => {
 });
 
 describe('#5265 item 4: a tab before a quote inside a list item', () => {
-  // CommonMark's half only: marked's model of a tab after a quote marker is left to #5332, with the bogus-comment rule it exposes.
   cases([
+    // #5332: marked's model, with the bogus-comment rule it would otherwise expose.
+    ['marked strips the whole tab after a quote marker', '1.        \n>\t  > > <b y= §script>\n\n  >   > ', ['marked']],
     ['the quote continues the item', '> - a\n>\t> q\n>\n>     §script>', ['commonmark.js', 'markdown-it']],
     // The marker at column 3: the tab after it is a full tab's worth again.
     ['with the inner quote three columns in', '> - a\n   >\t> q\n>\n>     §script>', ['commonmark.js', 'markdown-it']],
@@ -222,14 +223,21 @@ describe('#5265 rebuild on items 2, 4 and 9: the bodies main keeps', () => {
     ['marked keeps an instruction line in the item', '- /\n<?>\n    §script>', ['marked']],
     ['and a CDATA line', '- b\n<![CDATA[]]>\n    §textarea>', ['marked']],
     ['an ordered item', '1. t\n<![CDATA[]]>\n    §script>', ['marked']],
+    // #5332: a `<!` or `</` with no letter after it is text to Markdown, which emits the raw-text element after it (a browser reading the raw
+    // string ends a bogus comment at the `>`): the hidden tag is escaped, the comment is not.
+    ['a raw-text element behind `<!`', '> x<!§script>', ALL],
+    ['behind `</`', '>>r</§script>\n</§script>', ['commonmark.js', 'markdown-it']],
+    ['on the next line', '>></§script><!\n    §script>', ['commonmark.js', 'markdown-it']],
   ]);
   it('a lesser tag behind `<!`, a later line past a blank, and an HTML block are left as main leaves them', () => {
     // [body, the readers that lose it, the same on main]: a line-head `<!<b>`, a raw-text element two lines on or past a blank, `<!` inside
-    // an HTML block, and a lesser tag. A raw-text element hidden behind a bare `<!` or `</` outside an HTML block is #5332.
+    // an HTML block (a browser's bogus comment is the only reading there), and a lesser tag.
     // Known losses that main has too (Xan, team chat #152402): the `</textarea>` two lines on is #5323 (escaping it would lose the anchor
     // in commonmark.js and markdown-it, which keep it on main), and the `<xmp>` behind `<div/` is #5324 (not the window's).
     for (const [body, lost] of [
       ['<!<b>\n-\n<!x>~~~', []], ['<!\n\n</textarea>\n~~~', ['marked']], ['<!\n-\n</textarea>\n~~~', ['marked']], ['<x>\n```<!<xmp>', []],
+      // The `</` site's mirror of the `<!` one inside an HTML block (Bradley, LOCAL at 8dd599df).
+      ['<x>\n```</<xmp>', []], ['<div>\n</<script>', []],
       ['-<!<pre>\n<div/<xmp>', ['commonmark.js', 'markdown-it']],
     ] as Array<[string, string[]]>) {
       expect(escapeUnterminatedHtml(body), body).toBe(body);
