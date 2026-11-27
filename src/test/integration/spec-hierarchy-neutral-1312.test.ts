@@ -119,20 +119,19 @@ beforeAll(async () => {
     data: { memoryId: sharedMemory.id, granteeId: grantee.id, grantorId: owner.id, role: 'writer' },
   });
 
-  // A creator-owned knowledge holding has a readable record but excludes
-  // this reader from its nodes. System records no longer have that audience
-  // split (#1807); retain the independent node-gate regression.
-  const holdingAgent = await db.agent.create({ data: { organizationId: org.id, urn: org.urn + ':holding-agent', name: 'Holding fixture' } });
+  // App-attached knowledge has a readable record but excludes this reader from its nodes (the org node set admits only
+  // unattached knowledge). System records no longer have that audience split (#1807), and a per-user chat holding is now
+  // creator-only at the record gate, so neither can stand in; retain the independent node-gate regression.
+  const shapeApp = await db.app.create({ data: { organizationId: org.id, urn: org.urn + ':shape-app', name: 'Shape fixture' } });
   const recordOnlyMemory = await db.memory.create({
     data: {
       id: generateId(),
       organizationId: org.id,
-      urn: `${org.urn}:record-only-holding`,
-      name: 'record-readable, nodes-unreadable holding',
+      urn: `${org.urn}:record-only-attached`,
+      name: 'record-readable, nodes-unreadable attached knowledge',
       class: 'knowledge',
       visibility: 'ORGANIZATION',
-      userMemoryOfAgentId: holdingAgent.id,
-      createdBy: owner.id,
+      appId: shapeApp.id,
       acceptsUploads: false,
     },
   });

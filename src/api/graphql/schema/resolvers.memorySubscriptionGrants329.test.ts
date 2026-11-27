@@ -212,6 +212,24 @@ describe('#329 memory — subscription grants (items 1–4)', () => {
     expect(res.role).toBe('ADMIN');
     expect(res.grants.map((g) => g.source).sort()).toEqual(['MEMORY_SUBSCRIPTION', 'ORG_ROLE']);
   });
+
+  it('mixed sources across casings: a WRITE subscription grant outranks the lowercase PUBLIC_VISIBILITY \'reader\' grant (#5328)', async () => {
+    // The two tests above compete the subscription against ORG_ROLE, whose
+    // labels share the uppercase tier vocabulary, so a label-based ranking
+    // would order them exactly as caps do. PUBLIC_VISIBILITY emits the
+    // lowercase 'reader' (and is pushed BEFORE the subscription grant), so a
+    // ranking that read labels instead of caps, or kept insertion order,
+    // would put it first and make res.role null (a capability-shaped source).
+    await db.memory.update({ where: { id: kb.id }, data: { visibility: 'PUBLIC' } });
+    await subscribe('CONTRIBUTOR');
+    const res = await call(contribB.id, `hrn:memory:${kb.urn}`, asAdmin());
+    expect(res.canRead).toBe(true);
+    expect(res.canWrite).toBe(true);
+    expect(res.canManage).toBe(false);
+    expect(res.role).toBe('CONTRIBUTOR');
+    expect(res.grants.map((g) => g.source)).toEqual(['MEMORY_SUBSCRIPTION', 'PUBLIC_VISIBILITY']);
+    expect(res.grants.find((g) => g.source === 'PUBLIC_VISIBILITY')?.role).toBe('reader');
+  });
 });
 
 describe('#329 memory — never over-reported (item 5; regression pins, green on main by design)', () => {
@@ -349,7 +367,10 @@ describe('#329 memory — never over-reported (item 5; regression pins, green on
       },
     });
     await subscribe('CONTRIBUTOR', mem.id);
-    const res = await call(contribB.id, `hrn:memory:${mem.urn}`, asAdmin());
+    // The holding's record is read by its creator alone (cor:cht:010:02): a platform admin cannot audit it, it answers as missing.
+    await expect(call(contribB.id, `hrn:memory:${mem.urn}`, asAdmin())).rejects.toThrow('Resource not found');
+    // The creator opens it; the live subscription of their org still reaches nothing.
+    const res = await call(readerB.id, `hrn:memory:${mem.urn}`, ctx({ userId: readerB.id, roles: ['READER'] }));
     expect(subGrants(res)).toHaveLength(0);
     expect(res.canRead).toBe(false);
     expect(res.canWrite).toBe(false);
@@ -488,10 +509,15 @@ describe('#329 parity with the enforced gates (item 6)', () => {
     // read-true/write-false parity fixture cannot be built. app is the only
     // class outside SUBSCRIPTION_EXCLUDED_CLASSES besides knowledge, and an
     // app-class row always carries an appId (chk_memory_class_app_id), which
-    // the read scope's `appId: null` excludes — so BOTH sides refuse. The
-    // fixture still pins the shape: if the write list (SUBSCRIPTION_WRITE_CLASSES,
-    // shared by gate and audit) or the read scope ever admitted this class on
-    // one side only, parity would break right here.
+    // the read scope's `appId: null` excludes — so BOTH sides refuse. What
+    // this fixture pins is that both answers stay false and equal for an
+    // app-class row. It does NOT catch write-list drift for `app` (#5328):
+    // the row never reaches a subscription arm — requireMemoryWriteAccess
+    // decides class 'app' in its own app branch first, and the audit's arm
+    // requires `appId === null` — so adding 'app' to SUBSCRIPTION_WRITE_CLASSES,
+    // or to the gate's subscription arm, survives this fixture. (That list is
+    // shared by gate and audit, so drift between them is ruled out by
+    // construction, not by this pin.)
     const app = await db.app.create({
       data: { id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:parclsapp`, name: 'parclsapp' },
     });
@@ -528,13 +554,32 @@ describe('#329 parity with the enforced gates (item 6)', () => {
       },
     });
     await subscribe('CONTRIBUTOR', mem.id);
-    await assertParity(contribB.id, mem.id, mem.urn);
+    // Only the creator can open the record (cor:cht:010:02), so nobody can audit a SUBSCRIBED member's access through
+    // effectiveAccess: a platform admin gets the missing answer. The enforced gates the audit mirrors still refuse that
+    // member both ways, which is what this case pinned.
+    await expect(call(contribB.id, `hrn:memory:${mem.urn}`, asAdmin())).rejects.toThrow('Resource not found');
+    expect((await getOrgReadableMemoryIds(db, contribB.id, mem.id)).includes(mem.id)).toBe(false);
+    await expect(requireMemoryWriteAccess(ctx({ userId: contribB.id, roles: ['READER'] }), mem.id))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
   });
 
   it('a stranger with no membership and no subscription', async () => {
     await assertParity(stranger.id, kb.id, kb.urn);
   });
 });
+
+/** The kb row in the shape computeEffectiveAccess takes. */
+async function kbRow() {
+  return db.memory.findUniqueOrThrow({
+    where: { id: kb.id },
+    select: {
+      id: true, urn: true, class: true, visibility: true, userId: true, appId: true,
+      userMemoryOfAgentId: true, organizationId: true, ownerUserId: true, isEncrypted: true,
+      workerOf: { select: { id: true, appId: true, heldByUserId: true, retiredAt: true } },
+    },
+  });
+}
+const subject = (id: string) => ({ id, roles: [] as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] });
 
 describe('#329 impersonation narrowing (restrictOrgId)', () => {
   // The resolver's impersonation scope gate confines a session to its shared
@@ -544,17 +589,6 @@ describe('#329 impersonation narrowing (restrictOrgId)', () => {
   // the unit the narrowing lives in (first-round review findings on #5309,
   // BLIND P3-3 / SEC10 F1: without the narrowing, a session would see the
   // target's other-org membership).
-  async function kbRow() {
-    return db.memory.findUniqueOrThrow({
-      where: { id: kb.id },
-      select: {
-        id: true, urn: true, class: true, visibility: true, userId: true, appId: true,
-        userMemoryOfAgentId: true, organizationId: true, ownerUserId: true, isEncrypted: true,
-        workerOf: { select: { id: true, appId: true, heldByUserId: true, retiredAt: true } },
-      },
-    });
-  }
-  const subject = (id: string) => ({ id, roles: [] as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] });
 
   it('restrictOrgId = the subscribing org keeps the subscription grant', async () => {
     await subscribe('CONTRIBUTOR');
@@ -577,6 +611,48 @@ describe('#329 impersonation narrowing (restrictOrgId)', () => {
     );
     expect(res.grants.filter((g) => (g.source as string) === 'MEMORY_SUBSCRIPTION')).toHaveLength(0);
     expect(res.canRead).toBe(false);
+  });
+});
+
+describe('#329 unresolvable subscribing-org URN is skipped, never a raw id (#5328)', () => {
+  // Unreachable through real data (the subscription's FK keeps the org row,
+  // and the URN lookup does not filter liveness), so the lookup is forced
+  // empty through a db wrapper: only `organization.findMany` — the bulk URN
+  // resolve of the subscription arm — answers no rows. The skip must drop
+  // the grant (under-report, the audit's safe direction); a raw-org-id
+  // fallback (`urnById.get(id) ?? id`) would emit a grant whose `via` is the
+  // org's internal id where a URN belongs.
+  function dbWithoutOrgUrns(): typeof db {
+    return new Proxy(db, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (prop !== 'organization') return typeof value === 'function' ? value.bind(target) : value;
+        return new Proxy(value as object, {
+          get(model, method) {
+            if (method === 'findMany') return async () => [];
+            const fn = Reflect.get(model, method);
+            return typeof fn === 'function' ? fn.bind(model) : fn;
+          },
+        });
+      },
+    });
+  }
+
+  it('drops the subscription grant when the subscribing org\'s URN cannot be resolved', async () => {
+    await subscribe('CONTRIBUTOR');
+    // Control: with the real lookup the same fixture DOES carry the grant.
+    const live = await computeEffectiveAccess(
+      db, subject(contribB.id), { kind: 'memory', memory: await kbRow() },
+    );
+    expect(live.grants.filter((g) => (g.source as string) === 'MEMORY_SUBSCRIPTION')).toHaveLength(1);
+
+    const res = await computeEffectiveAccess(
+      dbWithoutOrgUrns(), subject(contribB.id), { kind: 'memory', memory: await kbRow() },
+    );
+    expect(res.grants.filter((g) => (g.source as string) === 'MEMORY_SUBSCRIPTION')).toHaveLength(0);
+    expect(res.grants.some((g) => g.via === orgB.id)).toBe(false);
+    expect(res.canRead).toBe(false);
+    expect(res.canWrite).toBe(false);
   });
 });
 

@@ -482,9 +482,10 @@ describe('escapeUnterminatedHtml', () => {
     // Names that real pages use are untouched.
     for (const body of ['x <o:p> y', 'x <svg:rect/> y', 'x <my-element a="b"> y', 'x <h1>t</h1>', 'x <a b="c">d</a>']) expect([body, escapeUnterminatedHtml(body)]).toEqual([body, body]);
   });
-  it('an open template after a complete tag is escaped; a tag whose value holds `<template` is one complete tag', () => {
+  it('an open template after a complete tag is escaped; so is one in a value Markdown does not accept as a tag (#5289)', () => {
     expect(escapeUnterminatedHtml('<b y="1"> <template>')).toBe('<b y="1"> &lt;template>');
-    expect(escapeUnterminatedHtml('<b y= <template>')).toBe('<b y= <template>'); // one complete tag: the value is `<template`
+    // A browser reads one complete tag whose value is `<template`, but Markdown reads text and then a live `<template>` (#5289, through parse5).
+    expect(escapeUnterminatedHtml('<b y= <template>')).toBe('<b y= &lt;template>');
   });
   it('only a non-empty bullet or a list that starts at 1 ends a paragraph', () => {
     // An empty bullet, and an ordered list not starting at 1, cannot interrupt a paragraph, so the span runs on and the `<` is code.

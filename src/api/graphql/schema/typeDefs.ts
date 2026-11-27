@@ -1438,11 +1438,17 @@ export const typeDefs = `#graphql
     node: Node!
     "The name of the index edge that lists it; null for a task no index edge lists."
     trigger: String
-    "#2421 experimental symptom search: which retriever ranked this task; null on the unfiltered list."
+    "#2421 phrase search: which retriever found this task; null on the unfiltered list."
     matchedBy: AgentTaskMatchedBy
+    """
+    #5284 (hrn:node:hadronmemory.com:specs:cor:dmo:050:15): the vector similarity of the task's abstract to the
+    phrase (1 minus the cosine distance). Null on the unfiltered list, when no embedding is available (the keyword
+    fallback), and for a task found by keyword that has no abstract vector yet.
+    """
+    score: Float
   }
 
-  "#2421 experimental symptom search: membership in the hybrid ranking inputs."
+  "#2421 phrase search: which retrievers found the task."
   enum AgentTaskMatchedBy {
     "Ranked by the vector retriever."
     VECTOR
@@ -1450,6 +1456,41 @@ export const typeDefs = `#graphql
     KEYWORD
     "Ranked by both retrievers."
     BOTH
+  }
+
+  "#5284 (hrn:node:hadronmemory.com:specs:cor:dmo:050:24): whether a task fits."
+  enum AgentInstructionsState {
+    "A task fits: candidates holds it first and instructions holds its body."
+    MATCHED
+    "No task fits: no candidates and no body."
+    NO_MATCH
+  }
+
+  "#5284 (hrn:node:hadronmemory.com:specs:cor:dmo:050:24): which route answered a match."
+  enum AgentInstructionsRoute {
+    "The App's action register mapped the event code to the task."
+    REGISTER
+    "The task's abstract scored at or above the no-match floor against the phrase."
+    SEARCH
+  }
+
+  """
+  #5284 (hrn:node:hadronmemory.com:specs:cor:dmo:050:24): the role task to follow, with its body, or no task fits.
+  """
+  type AgentInstructions {
+    state: AgentInstructionsState!
+    "Which route answered; null on NO_MATCH."
+    route: AgentInstructionsRoute
+    "The register's answer when an eventCode was given; null otherwise."
+    register: TickAction
+    "MATCHED: the best-fit task first, then at most two runners-up (search only). NO_MATCH: empty."
+    candidates: [AgentListedTask!]!
+    "MATCHED: the content of candidates[0], exactly as its node.content resolves it for you. NO_MATCH: null."
+    instructions: String
+    "NO_MATCH with a phrase: up to 3 tasks under the floor, or unscored, best first, for diagnosis. Not instructions."
+    nearest: [AgentListedTask!]!
+    "NO_MATCH asked in an App: the task the App's register maps instructions.no-match to, when it maps one."
+    fallback: AgentListedTask
   }
 
   "#1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - how an Agent takes part in a process."
@@ -11229,6 +11270,9 @@ export const typeDefs = `#graphql
     (2) memories their member orgs own, (3) memories their member orgs
     subscribe to. Per-user agent memories (userMemoryOfAgentId) are excluded.
     App-key callers get the union of their installed Agents' memory items.
+    A pure App key's list also holds every memory its App's links let it read
+    (#5272, hrn:node:hadronmemory.com:specs:cor:api:120:03), judged at the call
+    by the same rule as its reads, so a lapsed link leaves the list.
 
     filter.visibility: PUBLIC selects the public marketplace slice instead
     (every PUBLIC memory — the old publicMemories). filter.memoryClasses
@@ -11571,13 +11615,29 @@ export const typeDefs = `#graphql
     listed task outside the chain's memories is returned only when its own
     memory is readable too. Refused as AGENT_NOT_FOUND otherwise. The MCP tool
     hadron_agent_tasks returns the same list. Accepts the Agent's ID or URN.
-    #2421 experiment: optional symptom ranks only runnable effective-chain tasks
-    with non-empty abstracts; summary vectors and abstract-only lexical matches
-    share hybrid ranking. At most 3 candidates (limit defaults to 3, larger
-    values clamp); empty symptom or non-positive limit is BAD_USER_INPUT.
-    Without symptom the list is unchanged. matchedBy identifies ranking inputs.
+    #2421, #5284: an optional phrase ranks only runnable effective-chain tasks
+    with non-empty abstracts, by the vector similarity of the abstract (score),
+    best first; with no embedding available, by keyword on the abstract, with
+    score null. limit defaults to 3 and may be at most 10; an empty phrase or a
+    limit outside 1 to 10 is BAD_USER_INPUT. Without a phrase the list is
+    unchanged and limit is ignored. matchedBy says which retrievers found a task.
     """
-    agentTaskList(ref: ID!, symptom: String, limit: Int): [AgentListedTask!]!
+    agentTaskList(ref: ID!, phrase: String, limit: Int): [AgentListedTask!]!
+    """
+    #5284 (hrn:node:hadronmemory.com:specs:cor:dmo:050:24) - the role task to follow, with its body, or that no
+    task fits. Give a phrase, an eventCode or both; eventCode needs appRef. With an eventCode, the App's register
+    answers first (register), and a mapped task is MATCHED by REGISTER. Otherwise the phrase ranks the Agent's
+    agentTaskList tasks on their abstracts, and the tasks scoring at or above the no-match floor (default 0.45,
+    TASK_MATCH_MIN_SCORE) are MATCHED by SEARCH, best first, at most 3, with the body of the first only. With no
+    embedding available nothing can reach the floor, so the answer is NO_MATCH with the keyword hits as nearest.
+    NO_MATCH asked in an App also names the register's instructions.no-match task as fallback. agentRef may be
+    omitted: your own Agent (a bound worker's, or a run's) is used, and a caller with none gets BAD_USER_INPUT.
+    Without appRef the Agent is read as agentTaskList reads it; with appRef you must take part in the App and the
+    Agent must be installed or cast there. Refused as APP_NOT_FOUND or AGENT_NOT_FOUND, alike for unknown and
+    unreadable. A phrase is 1 to 500 characters. Nothing is recorded or logged. The MCP tool
+    hadron_get_instructions returns the same answer. Accepts IDs or URNs.
+    """
+    agentInstructions(agentRef: ID, appRef: ID, phrase: String, eventCode: String): AgentInstructions!
     """
     #1892 (hrn:node:hadronmemory.com:specs:cor:dmo:050:16) - an Agent's processes: the ones its own
     processes index lists (STARTS, with the edge's trigger), then the ones with
@@ -15433,7 +15493,9 @@ export const typeDefs = `#graphql
     setSecretProtected(ref: ID!, protected: Boolean!): Secret!
     """
     Withdraw your own open change request and clear its staged value; the request then
-    reads withdrawn. Only the requester can withdraw, complete or decline a request, and
+    reads withdrawn, and the answer is true. The answer is false when nothing was withdrawn:
+    the request had already ended, or it expired while still open (it is then recorded as
+    expired, with its staged value cleared). Only the requester can withdraw, complete or decline a request, and
     anyone else is answered as for a request that does not exist. Declining is done on
     the ceremony page, with a passkey proof, and reads declined.
     hrn:node:hadronmemory.com:specs:cor:sec:070:02

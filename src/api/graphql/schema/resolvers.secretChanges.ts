@@ -30,9 +30,11 @@ export const secretChangeMutations = {
    const [r] = await tx.$queryRaw<ChangeRequest[]>`SELECT id,state,expires_at FROM secret_change_requests WHERE id=${id} AND requester_id=${userId} FOR UPDATE`;
    if(!r)throw absent();
    if(r.state!=='open')return false;
-   await tx.$executeRaw`UPDATE secret_change_requests SET state=CASE WHEN expires_at <= (clock_timestamp() AT TIME ZONE 'UTC') THEN 'expired' ELSE 'withdrawn' END,
-    ended_at=(clock_timestamp() AT TIME ZONE 'UTC') WHERE id=${id}`;
-   return true;
+   // #5334 (cor:sec:070:02, Decided): the expiry is judged on the database clock inside this lock. A request that expired while open
+   // is recorded as expired, and the answer is false: nothing was withdrawn. Only a live request answers true.
+   const [ended] = await tx.$queryRaw<Array<{ state: string }>>`UPDATE secret_change_requests SET state=CASE WHEN expires_at <= (clock_timestamp() AT TIME ZONE 'UTC') THEN 'expired' ELSE 'withdrawn' END,
+    ended_at=(clock_timestamp() AT TIME ZONE 'UTC') WHERE id=${id} RETURNING state`;
+   return ended?.state==='withdrawn';
   });
  },
 };
