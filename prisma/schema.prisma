@@ -2260,10 +2260,10 @@ model UsageEvent {
   keyOwnerType     String?   @map("key_owner_type")
   /// Provider cost snapshot in micro-cents (1e-8 USD), computed from the
   /// AiModelPrice row effective at event time. NULL = no price known (or the
-  /// event carries no tokens). Never recomputed — prices change (FR-003).
+  /// unit predates the column). Never recomputed — prices change (FR-003).
   costMicroCents   BigInt?   @map("cost_micro_cents")
   /// #5021 (hrn:node:hadronmemory.com:specs:cor:dmo:170:06): the AiModelPrice row that priced this unit. Null when
-  /// the unit is unpriced (no row in force, a host-priced provider, no tokens) and on every unit recorded before the
+  /// the unit is unpriced (no row in force or a host-priced provider; a unit with zero tokens still records the row in force, at cost 0) and on every unit recorded before the
   /// column: it is never filled in by matching effective dates. Price rows are never deleted (the relation restricts).
   priceRowId       String?   @map("price_row_id")
   /// #5021 (hrn:node:hadronmemory.com:specs:cor:dmo:170:06): the markup applied to this unit's charge, in basis

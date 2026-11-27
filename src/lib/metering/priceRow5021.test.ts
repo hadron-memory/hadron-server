@@ -157,6 +157,63 @@ describe('#5021 a unit records its run (gate ruling 9)', () => {
   });
 });
 
+describe('#5216 a unit survives what would drop it', () => {
+  async function runGone() {
+    const app = await db.app.create({ data: { name: 'Gone app', urn: `price.test:${generateId()}`, organizationId: orgId } });
+    const runId = (await db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId: app.id, agentId: await testRunAgentId(db, orgId, app.id), triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:example.com:synthetic:entry', costMicroCents: 0n } })).id;
+    await pg.query('DELETE FROM app_runs WHERE id = $1', [runId]);
+    return { runId, appId: app.id };
+  }
+
+  it('C1: a unit whose run row was hard-deleted is still recorded, with its cost and tokens and no run', async () => {
+    await mkPrice(new Date('2026-01-01T00:00:00Z'));
+    const { runId } = await runGone();
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId }, appRunId: runId });
+    expect(event).toBeTruthy();
+    const row = await unitRow(event!.id);
+    expect(row.app_run_id).toBeNull();
+    expect(BigInt(row.cost_micro_cents)).toBe(COST);
+    expect((await db.usageEvent.findUniqueOrThrow({ where: { id: event!.id } })).tokensIn).toBe(1000);
+  });
+
+  it('C2 (guard): a foreign-key violation on another key still drops the unit, with no retry', async () => {
+    await mkPrice(new Date('2026-01-01T00:00:00Z'));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId }, appId: generateId() });
+    spy.mockRestore();
+    expect(event).toBeNull();
+    expect((await pg.query('SELECT count(*)::int AS n FROM usage_events')).rows[0].n).toBe(0);
+  });
+
+  it('D1: an env markup past the column is not a dropped unit: it records markup 0, debits the cost, and warns once', async () => {
+    vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
+    vi.stubEnv('CREDIT_MARKUP_PERCENT', '1e10');
+    await mkPrice(new Date('2026-01-01T00:00:00Z'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
+    expect(warn.mock.calls.filter((c) => c[0] === 'credit_markup_percent_env_invalid')).toHaveLength(1);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('1e10');
+    warn.mockRestore();
+    expect(event).toBeTruthy();
+    expect((await unitRow(event!.id)).markup_basis_points).toBe(0);
+    const [debit] = await db.creditLedgerEntry.findMany({ where: { sourceId: event!.id } });
+    expect(debit.amountMicroCents).toBe(-COST);
+  });
+
+  it('D2: 21474836.47 is used as is; 21474836.48 falls back to 0', async () => {
+    vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
+    await mkPrice(new Date('2026-01-01T00:00:00Z'));
+    vi.stubEnv('CREDIT_MARKUP_PERCENT', '21474836.47');
+    const ok = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
+    expect((await unitRow(ok!.id)).markup_basis_points).toBe(2147483647);
+    vi.stubEnv('CREDIT_MARKUP_PERCENT', '21474836.48');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const bad = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
+    warn.mockRestore();
+    expect((await unitRow(bad!.id)).markup_basis_points).toBe(0);
+  });
+});
+
 describe('#5021 every process switches to a new row at its effective instant', () => {
   it('pin 6: a unit recorded 1 s after a new row takes effect is priced from it, by a process that cached the old row', async () => {
     const T = new Date(Date.now() + 120_000);
@@ -221,6 +278,7 @@ describe('#5021 price rows are kept', () => {
 
   it('pin 7: DELETE of a row nothing references is refused', async () => {
     expect(await code('DELETE FROM ai_model_prices WHERE id = $1', [priceId])).toBe('23514');
+    expect(lastMessage).toMatch(/never deleted/); // #5216: the UPDATE arm also refuses a DELETE with 23514; the message names the DELETE arm
     expect(await priceRow()).toBeTruthy();
   });
 
@@ -228,6 +286,7 @@ describe('#5021 price rows are kept', () => {
     const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId } });
     expect((await unitRow(event!.id)).price_row_id).toBe(priceId);
     expect(await code('DELETE FROM ai_model_prices WHERE id = $1', [priceId])).toBe('23514');
+    expect(lastMessage).toMatch(/never deleted/);
     expect(await priceRow()).toBeTruthy();
   });
 
