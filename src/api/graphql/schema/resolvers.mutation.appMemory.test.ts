@@ -300,7 +300,9 @@ describe('#1405 — createMemoryInApp inherits a user-owned App tenant', () => {
       expect((await getAppMemoryAccess(db, ownedApp.id, { callerUserId: owner.id })).get(mem.id)).toBe('READ_ONLY');
       expect(await canReadMemory(db, { userId: owner.id, roles: [] }, mem.id)).toBe(true);
       expect(await canReadMemory(db, { userId: outsiderUser.id, roles: ['ADMIN'] }, mem.id)).toBe(false);
-      expect(await canReadMemory(db, { appId: ownedApp.id, roles: [] }, mem.id)).toBe(false);
+      // #5398: a pure key of the App reads the App's own shared app-class memory (the user-owned App's exception to
+      // admissibleFoldRows rule 2), and nothing wider: a knowledge memory created in the same App stays unreadable to it.
+      expect(await canReadMemory(db, { appId: ownedApp.id, roles: [] }, mem.id)).toBe(memoryClass === 'app');
     },
   );
 

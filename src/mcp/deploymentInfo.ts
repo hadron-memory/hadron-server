@@ -336,12 +336,18 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // lifts it, a host key never does (STOP_SIGNAL_SCOPE_FORBIDDEN for every shape of the call). The MCP `hadron_stop_signal_set` scope enum
 // gains APP. The three older scopes behave as before. A lagging client that still validates against the old enum cannot send APP, and one
 // that lists signals may now read a scope it does not know. (0.51.0 is #5345, merged first.)
-// 0.53.0 — BREAKING (#5394 PR 1, cor:cht:010:02): `startChat` needs an identified App on both scopes: the App credential's App, or the new
+// 0.53.0 — WIDENING (behaviour, no SDL change) (#5398, cor:api:120:03 App-key line, Decided, Holger 2026-11-27 "Add an own-memory
+// read"): every pure App key READS its own App's shared app-class memories (app_id = the App, no per-user marker, no Worker on
+// it, the App's own tenant) and lists them, read only. For an organization's App the reads already held through the team-space
+// fold, and GraphQL `memories` now lists them too. For a user-owned App every surface is new (memory(ref:), memories, node(ref:),
+// findNodes, resolveUrn, hadron_list_memories, the MCP point reads). A user, a session-bound key, an impersonation and a run gain
+// nothing; per-user anonymous rows and Worker working memories stay refused. (0.52.0 is #5325, merged first.)
+// 0.54.0 — BREAKING (#5394 PR 1, cor:cht:010:02): `startChat` needs an identified App on both scopes: the App credential's App, or the new
 // `appRef` argument (SDL addition). A call that identifies neither, or whose `appRef` differs from the credential's App, is refused
 // CHAT_APP_NOT_IDENTIFIED before any Agent lookup; the App is never searched for, and SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is
 // retired. A previously working signed-in start that names no App is now refused, so a client keys on this version before sending
-// `appRef` (hadron-portal#2683, hadron-cli#3310). Whichever of this and #5416 merges second renumbers to 0.54.0.
-export const HADRON_SERVER_VERSION = '0.53.0';
+// `appRef` (hadron-portal#2683, hadron-cli#3310). (0.53.0 is #5416, merged first.)
+export const HADRON_SERVER_VERSION = '0.54.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
