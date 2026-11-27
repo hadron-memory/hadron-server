@@ -72,10 +72,51 @@ function bogusHiddenTag(text: string, at: number, close: number): number {
   // At the head of a line the tag may start an HTML block in one reader and continue a paragraph in another (markdown-it's lazy lines), so
   // escaping it can move what follows into another block: only when nothing after it holds a tag.
   if (/[\n\r][ \t]*$/.test(before) && text.includes('<', close + 1)) return -1;
+  if (inHtmlBlock(text, at + 2 + raw.index)) return -1;
   const name = raw[1].toLowerCase();
   if (name !== 'plaintext' && new RegExp(`</${name}(?=[\\s/>])`, 'i').test(text.slice(close + 1))) return -1;
   return at + 2 + raw.index;
 }
+
+/**
+ * #5369 — whether every reader has `at` inside an HTML block of type 6 that opened at column 0 of an earlier line (or its own) with no blank
+ * line since, where the browser reads the bogus comment and the tag it hides is inert. Lines end at LF, CRLF and a bare CR, as in the readers.
+ * The lines before are read for what could hold that opener line instead (a fence, an HTML block of types 1 to 5): any of those, even one
+ * that only looks like it, and the answer is no, which keeps the escape.
+ */
+function inHtmlBlock(text: string, at: number): boolean {
+  const lineAt = text.slice(0, at).search(/[^\r\n]*$/);
+  const lines = text.slice(0, lineAt).split(/\r\n|\r|\n/);
+  lines[lines.length - 1] = text.slice(lineAt, at);
+  let fence: RegExp | null = null;
+  let closer: RegExp | null = null;
+  let opened = false;
+  let afterText = false;
+  for (const line of lines) {
+    const before = afterText;
+    afterText = false;
+    if (fence !== null) { if (fence.test(line)) fence = null; opened = false; continue; }
+    if (closer !== null) { if (closer.test(line)) closer = null; opened = false; continue; }
+    if (line.trim() === '') { opened = false; continue; }
+    if (opened) continue;
+    // marked reads a paragraph line, then an opener line holding more than its tag, then a `-` or `=` line as one setext heading.
+    if (BLOCK6_LINE.test(line) && (!before || /^<\/?[A-Za-z0-9]+[ ]*\/?>[ \t]*$/.test(line))) { opened = true; continue; }
+    afterText = true;
+    const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (f) { fence = new RegExp(`^ {0,3}${f[1][0] === '`' ? '`' : '~'}{${f[1].length},}[ \\t]*$`); continue; }
+    const t = TYPE15_OPEN.find(([o]) => o.test(line));
+    if (t && !t[1].test(line)) closer = t[1];
+  }
+  return opened;
+}
+/** HTML blocks of types 1 to 5 (CommonMark), each with the closer that ends it; a line starting with one is read as opening it. */
+const TYPE15_OPEN: ReadonlyArray<readonly [RegExp, RegExp]> = [
+  [/^ {0,3}<(?:script|pre|style|textarea)(?:[\s>]|$)/i, /<\/(?:script|pre|style|textarea)>/i],
+  [/^ {0,3}<!--/, /-->/],
+  [/^ {0,3}<\?/, /\?>/],
+  [/^ {0,3}<![A-Za-z]/, />/],
+  [/^ {0,3}<!\[CDATA\[/, /\]\]>/],
+];
 
 const isLetter = (c: string | undefined): boolean => c !== undefined && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
 const isBlank = (c: string): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
@@ -103,6 +144,8 @@ const CM_CLOSE_TAG = /^<\/[A-Za-z][A-Za-z0-9-]*\s*>$/;
 /** CommonMark HTML block type 6 (spec 0.31): the tag names that start a block (the name may be an opening or a closing tag). */
 const BLOCK6 = 'address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul';
 const BLOCK6_NAMES: ReadonlySet<string> = new Set(BLOCK6.split('|'));
+/** #5369 — a line that opens an HTML block of type 6 at column 0 in every reader (marked needs a space, not a tab, after the name). */
+const BLOCK6_LINE = new RegExp(`^<\\/?(?:${BLOCK6})(?: |>|\\/>|$)`, 'i');
 /** HTML block type 1: the elements whose block runs to a literal end tag. */
 const TYPE1_NAMES: ReadonlySet<string> = new Set(['script', 'style', 'textarea', 'pre']);
 const BLOCK_START = new RegExp(
