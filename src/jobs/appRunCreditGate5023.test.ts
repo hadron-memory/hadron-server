@@ -272,6 +272,7 @@ describe('ruling 7 (Holger, option b): the 5 s positive-balance memo', () => {
 
   it('a zero or negative balance is never memoised: credit added afterwards admits at once, and a refusal is never replayed', async () => {
     expect(await refused()).toBe(true); // zero
+    expect(await refused()).toBe(true); // and again at once: a refusal is never memoised into an admission
     await grant(1000n, 'm3');
     expect(await refused()).toBe(false); // not a cached refusal
     await drain();
