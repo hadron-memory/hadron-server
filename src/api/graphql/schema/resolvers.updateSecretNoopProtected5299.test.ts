@@ -14,6 +14,8 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { MAX_OPEN_SECRET_CHANGES } from '../../../lib/secrets/changeRequests.js';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
 
 let userId: string, appId: string, secretId: string;
 const ctxOf = (extra: Partial<Context> = {}): Context => ({ db, userId, roles: [], ...extra } as unknown as Context);
@@ -188,6 +190,18 @@ describe('#5331 item 6: protected: true with metadata identical to the live row'
     const changing = await error(protectAgain(ctxOf({ userId: stranger }), { value: 'v2' }));
     expect(noop.extensions).toEqual(changing.extensions);
     expect(noop.message).toBe(changing.message);
+  });
+
+  it('on the wire, identical metadata is the no-op whether sent as a variable or as an inline literal (Rook P3-1: a literal is a null-prototype object)', async () => {
+    const server = new ApolloServer<Context>({ typeDefs, resolvers: resolvers as never, includeStacktraceInErrorResponses: false });
+    const viaVariable = await server.executeOperation({ query: 'mutation($r:ID!,$m:JSON){ updateSecret(ref:$r, protected:true, metadata:$m){ id protected } }', variables: { r: secretId, m: await live() } }, { contextValue: ctxOf() });
+    const viaLiteral = await server.executeOperation({ query: 'mutation($r:ID!){ updateSecret(ref:$r, protected:true, metadata:{owner:"ops", note:"kept"}){ id protected } }', variables: { r: secretId } }, { contextValue: ctxOf() });
+    for (const res of [viaVariable, viaLiteral]) {
+      if (res.body.kind !== 'single') throw new Error('single result expected');
+      expect(res.body.singleResult.errors).toBeUndefined();
+      expect(res.body.singleResult.data?.updateSecret).toEqual({ id: secretId, protected: true });
+    }
+    expect(await db.secretChangeRequest.count()).toBe(0);
   });
 
   it('identical metadata WITHOUT protected: true is outside this item and still stages, as built', async () => {
