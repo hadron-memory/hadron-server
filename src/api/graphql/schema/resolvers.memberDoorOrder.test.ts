@@ -6,8 +6,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
+import type { Prisma } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { APP_KEY_PREFIX, USER_API_KEY_PREFIX, hashAppKey, hashUserApiKey } from '../../../middleware/auth.js';
 import { closeServerIfStarted, createServerOnCleanDb } from '../../../test/startServerFixture.js';
@@ -44,17 +44,16 @@ beforeAll(async () => {
   server = createHttpServer(await createServerOnCleanDb());
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/graphql`;
-  await cleanDb(db);
   const owner = await person(1, 'owner');
   await person(2, 'stranger');
   target = await person(3, 'target');
   const org = await db.organization.create({ data: { id: generateId(), name: 'mdo', urn: 'mdo.test' } });
-  const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'X', urn: 'mdo.test:x' } as never });
+  const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'X', urn: 'mdo.test:x' } });
   const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label: 'k' } });
   bearer['App key'] = raw;
-  const add = async (slug: string, data: Record<string, unknown>) => {
-    const memory = await db.memory.create({ data: { id: generateId(), name: slug, urn: `mdo.test:${slug}`, createdBy: owner, ...data } as never });
+  const add = async (slug: string, data: Omit<Prisma.MemoryUncheckedCreateInput, 'id' | 'name' | 'urn' | 'createdBy'>) => {
+    const memory = await db.memory.create({ data: { id: generateId(), name: slug, urn: `mdo.test:${slug}`, createdBy: owner, ...data } });
     refs[`${slug} (id)`] = memory.id;
     refs[`${slug} (URN)`] = `hrn:mem:${memory.urn}`;
     return memory.id;
@@ -81,7 +80,7 @@ const DOORS: Array<[string, string, string]> = [
   ['updateMemoryShareRole', 'mutation($m: ID!, $u: ID!) { updateMemoryShareRole(memoryRef: $m, granteeRef: $u, role: writer) { __typename } }', 'UNAUTHENTICATED'],
   ['deleteMemoryShare', 'mutation($m: ID!, $u: String) { deleteMemoryShare(memoryRef: $m, granteeRef: $u) { __typename } }', 'UNAUTHENTICATED'],
 ];
-const audience = async () => JSON.stringify([await db.memoryMember.findMany({ orderBy: { userId: 'asc' } }), await db.memoryShare.findMany()]);
+const audience = async () => JSON.stringify([await db.memoryMember.findMany({ orderBy: [{ memoryId: 'asc' }, { userId: 'asc' }] }), await db.memoryShare.findMany({ orderBy: [{ memoryId: 'asc' }, { granteeId: 'asc' }] })]);
 
 describe.each(['anonymous', 'App key'])('a caller without a user: %s', (caller) => {
   it.each(DOORS)('%s gives one answer for every reference and writes nothing', async (_door, query, code) => {
@@ -95,7 +94,7 @@ describe.each(['anonymous', 'App key'])('a caller without a user: %s', (caller) 
       }
     }
     expect(await audience()).toBe(before);
-  });
+  }, 60_000);
 
   it.each(DOORS.slice(0, 2))('%s refuses the caller before it looks at a malformed reference', async (_door, query) => {
     expect((await call(caller, query, { m: 'not a ref', u: target })).code).toBe('UNAUTHENTICATED');
@@ -104,13 +103,18 @@ describe.each(['anonymous', 'App key'])('a caller without a user: %s', (caller) 
 
 describe('a signed-in caller is answered as before', () => {
   it.each(DOORS.slice(0, 2))('%s: a stranger is FORBIDDEN alike for every reference, and a malformed one is named', async (_door, query) => {
+    const before = await audience();
     const want = await call('stranger', query, { m: missing['missing (URN)'], u: target });
     expect(want.code).toBe('FORBIDDEN');
     for (const [name, m] of Object.entries({ ...refs, ...missing })) {
-      for (const u of [target, 'hrn:user:nobody-mdo']) expect({ name, body: (await call('stranger', query, { m, u })).body }).toEqual({ name, body: want.body });
+      for (const u of [target, 'hrn:user:nobody-mdo']) {
+        const got = await call('stranger', query, { m, u });
+        expect({ name, status: got.status, body: got.body }).toEqual({ name, status: want.status, body: want.body });
+      }
     }
     expect((await call('stranger', query, { m: 'not a ref', u: target })).code).toBe('URN_NOT_QUALIFIED');
-  });
+    expect(await audience()).toBe(before);
+  }, 60_000);
 
   it('the owner adds a member and changes their role', async () => {
     const roleOf = async () => (await db.memoryMember.findFirst({ where: { memoryId: groupId, userId: target } }))?.role;

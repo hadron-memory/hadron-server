@@ -3687,6 +3687,8 @@ export const typeDefs = `#graphql
     #5185 — the memories linked to this App with 'attachMemoryToApp'. You see only entries whose memory you can read in your
     own right; others are absent and not counted. 'active' is whether the link counts right now (its attacher still reads the
     memory in their own right, the App is installed, and a personal or private memory is the App owner's and was linked by the owner).
+    #5345: a user-owned memory of any other class is never active for the App's key — the record gate refuses it, so the link
+    grants the key nothing (it stays listed, inert, until detached).
     """
     attachedMemories: [AppAttachedMemory!]!
     "The App's members. null means WITHHELD from this caller (#2089): an impersonated caller, or one who reaches a user-owned App only by an outer-object route. Never read null as an empty roster. The App's owning user, a current owner-role member of a user-owned App (ruling 0260, #3765), and callers of an org-owned App get the real list (a real empty list included)."
@@ -11303,6 +11305,28 @@ export const typeDefs = `#graphql
     """
     memories(filter: MemoryFilter, orgRef: ID, limit: Int, offset: Int): MemoriesPage!
 
+    """
+    #5393: the attachable-memory picker's search, one page of the memories the caller could
+    attach to this App with attachMemoryToApp (hrn:node:hadronmemory.com:specs:cor:dmo:060:20).
+
+    Who may call: the callers attachMemoryToApp admits, refused the same way. No signed-in user:
+    UNAUTHENTICATED. An App key, worker session, impersonation or run: FORBIDDEN. An unknown or
+    deleted App, or a caller who is not a member of it: the same FORBIDDEN. A member of an
+    uninstalled App: APP_UNINSTALLED. A call past the caller checks takes one
+    FAN_OUT_READS rate admission before it reads anything.
+
+    Candidates: the memories the caller reads in their own right (the same judgment attach applies,
+    so never a memory reached only through an App), except deleted ones, class system, class app,
+    and any memory already linked to this App by anyone, including a link that is inactive.
+
+    query: case-insensitive "contains" on the name or the URN (a leading hrn:mem: is ignored for
+    the URN); omitted, empty or blank applies no text filter.
+
+    Paging per hrn:node:hadronmemory.com:specs:cor:api:120:02: name ascending, id tiebreak;
+    limit default 20, cap 200; limit: 0 returns only the total. Accepts the App's ID or URN.
+    """
+    attachableMemories(appRef: ID!, query: String, limit: Int, offset: Int): MemoriesPage!
+
     "#772 — the caller's placed dashboard widgets, ordered by position. Empty for a non-user (App-key) caller."
     dashboardWidgets: [DashboardWidget!]!
     """
@@ -11631,15 +11655,21 @@ export const typeDefs = `#graphql
     #2421, #5284: an optional phrase ranks only runnable effective-chain tasks
     with non-empty abstracts, by the vector similarity of the abstract (score),
     best first; with no embedding available, by keyword on the abstract, with
-    score null. limit defaults to 3 and may be at most 10; an empty phrase or a
-    limit outside 1 to 10 is BAD_USER_INPUT. Without a phrase the list is
-    unchanged and limit is ignored. matchedBy says which retrievers found a task.
+    score null. limit defaults to 3 and may be at most 10; an empty phrase, one
+    over 512 characters (the one bound every search surface shares, #5360), or a
+    limit outside 1 to 10 is BAD_USER_INPUT — judged on the arguments before the
+    Agent is read (#5360), so it wins over AGENT_NOT_FOUND. Without a phrase the
+    list is unchanged and limit is ignored. matchedBy says which retrievers
+    found a task.
     """
     agentTaskList(ref: ID!, phrase: String, limit: Int): [AgentListedTask!]!
     """
     #5284 (hrn:node:hadronmemory.com:specs:cor:dmo:050:24) - the role task to follow, with its body, or that no
     task fits. Give a phrase, an eventCode or both; eventCode needs appRef. With an eventCode, the App's register
-    answers first (register), and a mapped task is MATCHED by REGISTER. Otherwise the phrase ranks the Agent's
+    answers first (register), and a mapped task is MATCHED by REGISTER — but an entry that maps while its task is
+    not in the Agent's list (a stale mapping) never matches by REGISTER: it falls through, so with no phrase the
+    answer is NO_MATCH with the register still MAPPED and with a phrase the search arm decides as usual — the
+    mapping is still reported, the task never invented (#5360). Otherwise the phrase ranks the Agent's
     agentTaskList tasks on their abstracts, and the tasks scoring at or above the no-match floor (default 0.45,
     TASK_MATCH_MIN_SCORE) are MATCHED by SEARCH, best first, at most 3, with the body of the first only. With no
     embedding available nothing can reach the floor, so the answer is NO_MATCH with the keyword hits as nearest.
@@ -11647,7 +11677,9 @@ export const typeDefs = `#graphql
     omitted: your own Agent (a bound worker's, or a run's) is used, and a caller with none gets BAD_USER_INPUT.
     Without appRef the Agent is read as agentTaskList reads it; with appRef you must take part in the App and the
     Agent must be installed or cast there. Refused as APP_NOT_FOUND or AGENT_NOT_FOUND, alike for unknown and
-    unreadable. A phrase is 1 to 500 characters. Nothing is recorded or logged. The MCP tool
+    unreadable. A phrase is 1 to 512 characters after trimming (the one bound every search surface shares, #5360);
+    an eventCode is trimmed and 1 to 64 characters, the register loc atom bound (#5360) — both judged before
+    any read. Nothing is recorded or logged. The MCP tool
     hadron_get_instructions returns the same answer. Accepts IDs or URNs.
     """
     agentInstructions(agentRef: ID, appRef: ID, phrase: String, eventCode: String): AgentInstructions!
@@ -14955,8 +14987,11 @@ export const typeDefs = `#graphql
     through any App); when you lose read the link goes inert, and it works again if you regain it. A user, with or without the
     App selected, gains nothing from a link. For a 'personal' or 'private' memory the key reads it only when the memory's owner
     is the App's owner (a user-owned App whose owner linked their own memory); in an organization's App the link is inert for
-    the key. Any class except 'system', in any tenant. One memory may be linked into several Apps. A link you already hold is
-    success and writes nothing. 'agentRef' is accepted and ignored (deployed clients keep working).
+    the key. The same holds for a user-owned memory of any other class (#5345): a knowledge or group memory under a user root
+    never reaches the key through a link — attaching gives no access, and the record gate refuses it — so the link sits inert
+    (listed with 'active: false' in attachedMemories) until it is detached. You may attach any class except 'system', in
+    any tenant, and the attach succeeds even when the link stays inert. One memory may be linked into several Apps. A link
+    you already hold is success and writes nothing. 'agentRef' is accepted and ignored (deployed clients keep working).
 
     Person only: a signed-in user acting as themselves, and a member of the App. Typed errors, judged in this order before any
     write: UNAUTHENTICATED (no signed-in user); FORBIDDEN (an App key, run, worker session or impersonation; also an unknown or
@@ -17943,10 +17978,12 @@ export const typeDefs = `#graphql
     HALT
   }
 
-  "#2022 — a stop signal's scope: one worker, a team (its head and the whole reporting tree under it), or the workers a host registration lists."
+  "#2022 — a stop signal's scope: one worker, a team (its head and the whole reporting tree under it), every worker of the App (#5325), or the workers a host registration lists."
   enum StopSignalScope {
     WORKER
     TEAM
+    "#5325 (hrn:node:hadronmemory.com:specs:cor:agt:090:02) — every live worker of the App, worked out each time it is checked: a worker cast after the signal is covered from its birth. It names no target."
+    APP
     HOST
   }
 
@@ -17960,7 +17997,7 @@ export const typeDefs = `#graphql
     id: ID!
     level: StopSignalLevel!
     scope: StopSignalScope!
-    "WORKER and TEAM: the target worker (a team by its head)."
+    "WORKER and TEAM: the target worker (a team by its head). APP and HOST: null."
     targetWorkerId: ID
     "HOST: the target host's id."
     targetHostId: String
@@ -17994,9 +18031,9 @@ export const typeDefs = `#graphql
     appRef: String!
     level: StopSignalLevel!
     scope: StopSignalScope!
-    "WORKER and TEAM: the target worker (a team by its head)."
+    "WORKER and TEAM: the target worker (a team by its head). APP: none (a worker named with APP is BAD_USER_INPUT). A host key never sets APP."
     worker: String
-    "HOST: the host's id. A host key may omit it: its own host is taken from its binding."
+    "HOST: the host's id. A host key may omit it: its own host is taken from its binding. APP: none (a host named with APP is BAD_USER_INPUT too)."
     host: String
     "When it ends on its own; later than now. Omitted: until lifted."
     until: DateTime

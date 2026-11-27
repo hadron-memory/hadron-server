@@ -5,7 +5,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
  * the shape, the same-App target, the write-once end, the one open interval and the one open hold.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
@@ -13,8 +13,30 @@ import { generateId } from '../id.js';
 describe('stop-signal-invariants.sql (#2022)', () => {
   it('the migration carries a byte-identical copy, and post-push includes the file', () => {
     const source = readFileSync(new URL('../../../prisma/stop-signal-invariants.sql', import.meta.url), 'utf8');
-    const migration = readFileSync(new URL('../../../prisma/migrations/20261020030000_stop_signals/migration.sql', import.meta.url), 'utf8');
-    expect(migration.endsWith(`\n${source}`)).toBe(true);
+    // #5325 amends the shared file's shape CHECK, so a later migration carries that block: the newest migration that contains the
+    // CHECK's own first statement ends with the block verbatim (it carries the block only, never the file's trigger functions:
+    // re-creating them would drop the search_path a later migration gave them). The first migration carries the original file.
+    const dir = new URL('../../../prisma/migrations/', import.meta.url);
+    const first = source.split('\n')[0]!;
+    const start = source.indexOf('ALTER TABLE team_stop_signals DROP CONSTRAINT IF EXISTS chk_team_stop_signals_shape;');
+    const block = source.slice(start, source.indexOf('\n);\n', start) + '\n);\n'.length);
+    expect(block).toContain("'app'");
+    const carrier = readdirSync(dir).sort().reverse().find((d) => { try { return readFileSync(new URL(`${d}/migration.sql`, dir), 'utf8').includes(block.split('\n')[0]!); } catch { return false; } });
+    expect(carrier).toBe('20261127110000_stop_signal_app_scope');
+    expect(readFileSync(new URL(`${carrier}/migration.sql`, dir), 'utf8').endsWith(block)).toBe(true);
+    // The rest of the file (every trigger function, the same-App and write-once guards, the indexes) is still EXACTLY what the original
+    // migration carries: the file and the original migration's tail differ only in the shape CHECK block (and the comment above it).
+    // So an edit to a trigger in the shared file that no migration carries fails here, not silently at `migrate deploy`.
+    const stripCheck = (text: string): string => {
+      const from = text.indexOf('-- cor:agt:090:01 \u2014 a level and a scope');
+      const upto = text.indexOf('\n);\n', text.indexOf('ADD CONSTRAINT chk_team_stop_signals_shape CHECK (', from)) + '\n);\n'.length;
+      expect(from).toBeGreaterThan(-1);
+      return text.slice(0, from) + text.slice(upto);
+    };
+    const original = readFileSync(new URL('../../../prisma/migrations/20261020030000_stop_signals/migration.sql', import.meta.url), 'utf8');
+    const originalFile = original.slice(original.indexOf(first));
+    expect(originalFile.length).toBeGreaterThan(1000);
+    expect(stripCheck(source)).toBe(stripCheck(originalFile));
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir stop-signal-invariants.sql');
   });
 
@@ -47,6 +69,15 @@ describe('stop-signal-invariants.sql (#2022)', () => {
       const now = new Date();
       await bad(db.teamStopSignal.create({ data: { ...base(), setAt: now, until: now } }), /chk_team_stop_signals_shape/);
       await expect(db.teamStopSignal.create({ data: base() })).resolves.toBeTruthy();
+    });
+
+    it('#5325: an app signal names no target at all; a worker or team signal still names one', async () => {
+      const app = () => ({ ...base(), scope: 'app', targetWorkerId: null });
+      await expect(db.teamStopSignal.create({ data: app() })).resolves.toBeTruthy();
+      await bad(db.teamStopSignal.create({ data: { ...app(), targetWorkerId: workerId } }), /chk_team_stop_signals_shape/);
+      await bad(db.teamStopSignal.create({ data: { ...app(), targetHostRegistrationId: 'h' } }), /chk_team_stop_signals_shape|foreign key/i);
+      await bad(db.teamStopSignal.create({ data: { ...base(), scope: 'team', targetWorkerId: null } }), /chk_team_stop_signals_shape/);
+      await bad(db.teamStopSignal.create({ data: { ...base(), scope: 'worker', targetWorkerId: null } }), /chk_team_stop_signals_shape/);
     });
 
     it('the target belongs to the signal\'s App', async () => {

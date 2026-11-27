@@ -665,7 +665,7 @@ export const teamWorkMutations = {
     const root = (await locateWorklogRoot(ctx, appId)) ?? (await bootstrapWorklog(ctx, app));
     const memory = await ctx.db.memory.findUniqueOrThrow({
       where: { id: root.memoryId },
-      select: { id: true, class: true, userId: true, organizationId: true, ownerUserId: true },
+      select: { id: true, class: true, userId: true, organizationId: true, ownerUserId: true, userMemoryOfAgentId: true, createdBy: true },
     });
     // Re-asked on the memory itself: it is the subject of the schema edit, and
     // this is the exact bar updateMemory applies (kept so the two cannot drift

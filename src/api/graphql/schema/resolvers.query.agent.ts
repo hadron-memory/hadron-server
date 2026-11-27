@@ -13,7 +13,7 @@ import {
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
-import { listAgentProcesses, listAgentTasks, reverifyServed, type ListedNode } from '../../../lib/agentDefinitionLists.js';
+import { assertAgentTaskSearch, listAgentProcesses, listAgentTasks, reverifyServed, type ListedNode } from '../../../lib/agentDefinitionLists.js';
 import { readAgentRevisionList } from '../../../lib/agentRevisionSnapshot.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { loadAgentInstructions } from '../../../lib/taskMatch/instructions.js';
@@ -151,6 +151,9 @@ export const agentQueries = {
      * hadron_agent_tasks returns the same list (src/lib/agentDefinitionLists.ts).
      */
     agentTaskList: async (_: unknown, { ref, phrase, limit }: { ref: string; phrase?: string | null; limit?: number | null }, ctx: Context) => {
+      // #5360 B7: the argument check runs BEFORE the ref is resolved (and the gate read), so bad input is named
+      // BAD_USER_INPUT even for an unknown Agent. listAgentTasks re-asserts it for its direct callers.
+      assertAgentTaskSearch({ phrase, limit });
       const { id } = await resolveAgentRef(ctx.db, ref);
       return listedEntries(ctx, id, await listAgentTasks(ctx.db, ctx, id, ref, { phrase, limit }));
     },
