@@ -21,7 +21,7 @@ import type { WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
 import { loadAppModelGroups, loadAppWorkerCheckStatuses, maySeeWorkerInternals } from './resolvers.worker.js';
 import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/workerTerminal.js';
 import { groupComposition } from '../../../lib/agentTasks/composition.js';
-import { TEAM_READ_TX_BACKSTOP_MARGIN_MS, TEAM_READ_TX_MAX_WAIT_MS, TEAM_READ_TX_TIMEOUT_MS, TeamReadBusyError, isPrismaBusyExhaustion } from '../../../lib/agentTasks/teamReadBudget.js';
+import { applyTeamReadStatementBudget, TEAM_READ_TX_MAX_WAIT_MS, TEAM_READ_TX_TIMEOUT_MS, TeamReadBusyError, isPrismaBusyExhaustion } from '../../../lib/agentTasks/teamReadBudget.js';
 import { canSeeUserPersonalFieldsMany } from '../../../lib/auth/userVisibility.js';
 
 const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
@@ -61,9 +61,7 @@ export async function withRosterAppRead<T>(ctx: Context, appRef: string, project
         // bound falls to Prisma's interactive timer alone, and a statement that starts near the
         // expiry can still outrun it — worst case ~2x budget there. Fail-soft, by design (prod is
         // PG17, Hugo's probe at #118604).
-        await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS)}, true) AS statement_timeout,
-                           CASE WHEN current_setting('transaction_timeout', true) IS NOT NULL
-                                THEN set_config('transaction_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS)}, true) END AS transaction_timeout`;
+        await applyTeamReadStatementBudget(tx);
         const readCtx = withoutRequestCaches(ctx, tx);
         const { app } = await resolveParticipatedApp(readCtx, appRef);
         return project(readCtx, app);

@@ -4,6 +4,7 @@ import { faultRequestId, logInternalFault } from '../../internalFault.js';
 import { inRunTeamReadTx } from '../../../api/graphql/schema/resolvers.agentTask.js';
 import { isRunPrincipal } from '../../auth/runPrincipal.js';
 import { loadTeamRoster } from '../../agentTasks/roster.js';
+import { applyTeamReadStatementBudget } from '../../agentTasks/teamReadBudget.js';
 import { composeWorkerUrn } from '../../entityRef/workerRef.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import type { RunToolDef } from './types.js';
@@ -63,6 +64,11 @@ export const hadronTeamSnapshot: RunToolDef = {
     // Derive authority from the principal; cursor/app-like data never grants reach.
     try { const result = await inRunTeamReadTx(ctx.principal, ctx.run.appId, () => { throw absent(); }, async (c, app) => {
       const p = parse(args, app.id);
+      // #5351: the roster read's budget (#4476) on every statement after the gate. A Prisma transaction timeout does not
+      // cancel a running statement; this makes Postgres cancel it (57014, or the PG17 backstop's 25P04). The cancel fails
+      // the whole snapshot through the catch below (TEAM_SNAPSHOT_SOURCE_FAILED, nothing partial), and neither SQLSTATE is
+      // a serialization failure, so inRunTeamReadTx's retry does not run the cancelled read again.
+      await applyTeamReadStatementBudget(c.db);
       const acquiredAt = new Date().toISOString();
       const count = await c.db.worker.count({ where: { appId: app.id, retiredAt: null } });
       // loadTeamRoster derives from the shared platform predicates, but enumerates the current roster. Bound it first.
