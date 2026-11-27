@@ -362,7 +362,10 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // organizationId as non-null must key on this version. With PERSONAL_APP_RUNS_ENABLED=true the manual door (triggerAppRun,
 // runTask(appRef:), importNode(taskRef:)) launches on a person's App for its key or its owner / owner-role member, FORBIDDEN for
 // anyone else; the owner and an owner-role member read (appRun, latestAppRun, resolveUrn, hadron_get_run) and cancel that App's
-// runs; a platform admin cancels one with its content withheld. (0.55.0 is #5411, merged first; 0.56.0 is #5391, held ahead of this.)
+// runs; a platform admin cancels one with its content withheld. MCP `hadron_get_run` and `hadron_run_task` now pass the session's
+// impersonation to those gates, as GraphQL always did: an impersonated MCP session is bounded on an organization's run too (its
+// one organization, no own-run arm), where MCP used to judge it as the target user. (0.55.0 is #5411, merged first; 0.56.0 is
+// #5391, held ahead of this.)
 export const HADRON_SERVER_VERSION = '0.57.0';
 
 /**

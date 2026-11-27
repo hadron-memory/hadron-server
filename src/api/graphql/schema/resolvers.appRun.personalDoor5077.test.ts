@@ -5,10 +5,12 @@
  *
  * | Caller on a person's App                      | Launch | Read one run              | Cancel                       |
  * | owner, or an owner-role member, as themself   | yes    | yes                       | yes                          |
- * | the App's own key (no user)                   | yes    | yes (existing arm)        | no (decision c not built)    |
+ * | the App's own key (no user), or a run of this  | yes    | yes (existing arm)        | no (decision c not built)    |
+ * |   App with no user (it acts as the App's key)  |        |                           |                              |
  * | ordinary member; subscriber of the Agent      | no     | only their own run        | no                           |
  * | platform admin                                | no     | no                        | yes, no run content (Q4)     |
- * | impersonated session, run principal, other    | no     | no                        | no                           |
+ * | impersonated session, a run principal carrying | no     | no                        | no                           |
+ * |   a user id, anyone else                       |        |                           |                              |
  *
  * Red on main (69fcb0bd): the door answers "Manual runs are not supported for user-owned Apps yet." (BAD_USER_INPUT) to
  * everyone, every read of a person's run is null and every cancel refused; `AppRun.organizationId` is `ID!` and there is
@@ -25,7 +27,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../../lib/webFetch.js', () => ({ fetchWebPage: vi.fn(async () => ({ html: '<p>x</p>', finalUrl: 'https://example.test/' })) }));
 
-import { buildSchema, isNonNullType } from 'graphql';
+import { buildSchema, defaultFieldResolver, getNamedType, graphql, isLeafType, isNonNullType, type GraphQLFieldResolver, type GraphQLObjectType } from 'graphql';
 import { fetchWebPage } from '../../../lib/webFetch.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -181,7 +183,7 @@ describe('#5077 MCP passes the impersonation through to the run gates', () => {
     const mcp = createTestableMcpServer({
       userId: a.user.id, roles: ['READER'], clientId: `user:${a.user.id}`, impersonation: { actorUserId: generateId() },
     } as unknown as AuthContext);
-    expect(await mcp.callToolText('hadron_run_task', { urn: a.entryUrn, appRef: a.app.id })).not.toMatch(/^Run started/);
+    expect(await mcp.callToolText('hadron_run_task', { urn: a.entryUrn, appRef: a.app.id })).toBe('Could not start run: Forbidden');
     expect(await db.appRun.count()).toBe(1);
     expect(await mcp.callToolText('hadron_get_run', { ref: run.id })).toBe('Run not found.');
   });
@@ -343,6 +345,31 @@ describe('#5077 acceptance 5: cancelling a person\'s run', () => {
     }
   });
 
+  it('Q4 through the schema (Jill, #5441 blind): cancelAppRun as a platform admin selecting EVERY AppRun field answers without an error, content withheld', async () => {
+    const a = await person('pd5077');
+    const admin = { ...as((await userWith('adm5077', ['ADMIN'])).id), roles: ['ADMIN'] } as unknown as Context;
+    const run = await mint(a, { eventData: { secret: 'x' } });
+    await db.appRun.update({ where: { id: run.id }, data: { status: 'RUNNING', data: { out: 1 }, hops: [{ n: 1 }], curNodeUrn: a.entryUrn } as never });
+    const schema = buildSchema(typeDefs as string, { assumeValidSDL: true });
+    const fields = (schema.getType('AppRun') as GraphQLObjectType).getFields();
+    // Every field: a leaf by name, an object or list of objects by its __typename. No AppRun field takes a required argument.
+    const selection = Object.values(fields).map(f => isLeafType(getNamedType(f.type)) ? f.name : `${f.name} { __typename }`).join(' ');
+    const result = await graphql({
+      schema, source: `mutation($ref: ID!) { cancelAppRun(ref: $ref) { ${selection} } }`, variableValues: { ref: run.id }, contextValue: admin,
+      fieldResolver: (parent, args, context, info) => {
+        const own = (resolvers as unknown as Record<string, Record<string, unknown>>)[info.parentType.name]?.[info.fieldName];
+        return typeof own === 'function' ? (own as GraphQLFieldResolver<unknown, unknown>)(parent, args, context, info) : defaultFieldResolver(parent, args, context, info);
+      },
+    });
+    expect(result.errors).toBeUndefined();
+    const out = (result.data as { cancelAppRun: Record<string, unknown> }).cancelAppRun;
+    expect(out).toMatchObject({ id: run.id, status: 'CANCELLED', appId: a.app.id, ownerUserId: a.user.id, organizationId: null, entryNodeUrn: '' });
+    for (const f of ['eventData', 'data', 'hops', 'spawn', 'policy', 'curNodeUrn', 'failure', 'scope', 'app', 'entryNode', 'servedPrompt']) {
+      expect(out[f], f).toBeNull();
+    }
+    expect(out.register).toEqual([]);
+  });
+
   it('Q4 allowlist (Petra): every AppRun column is classified kept or withheld, never both, so a new column fails here', () => {
     const columns = Prisma.dmmf.datamodel.models.find(m => m.name === 'AppRun')!.fields.filter(f => f.kind !== 'object').map(f => f.name);
     const unclassified = columns.filter(c => !ADMIN_CANCEL_KEPT_RUN_FIELDS.has(c) && !ADMIN_CANCEL_WITHHELD_RUN_FIELDS.has(c));
@@ -395,6 +422,35 @@ describe('#5077 managesPersonalAppOf widens only a person\'s-App gate', () => {
     expect(await managesPersonalAppOf(as(admin.id), app.id)).toBe(false);
     const a = await person('pd5077');
     expect(await managesPersonalAppOf(as(a.user.id), a.app.id)).toBe(true);
+  });
+});
+
+describe('#5077 a run of a person\'s App with no user acts as the App\'s own key (Bindi P3-1, stated, Peter #155922)', () => {
+  it('a userless run principal of this App launches and reads like the key, and cannot cancel; of another App, nothing', async () => {
+    const a = await person('pd5077');
+    const b = await person('pe5077');
+    const runOf = (p: Person) => ({ db, appId: p.app.id, roles: [], clientId: `run:${generateId()}` }) as unknown as Context;
+    const launched = await trigger(a, runOf(a));
+    expect(launched).toMatchObject({ status: 'PENDING', organizationId: null, ownerUserId: a.user.id, userId: null });
+    expect(await Q.appRun({}, { ref: launched.id }, runOf(a))).toMatchObject({ id: launched.id });
+    expect(code(await M.cancelAppRun({}, { ref: launched.id }, runOf(a)).catch((e: unknown) => e))).toBe('FORBIDDEN');
+    expect(code(await trigger(a, runOf(b)).catch((e: unknown) => e))).toBe('FORBIDDEN');
+    expect(await Q.appRun({}, { ref: launched.id }, runOf(b))).toBeNull();
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: launched.id } })).status).toBe('PENDING');
+  });
+});
+
+describe('#5077 managesPersonalAppOf on a soft-deleted App (Bindi P3-2, Jill P3)', () => {
+  it('is false once the App is soft-deleted: the owner neither reads nor cancels its runs; a platform admin still cancels, masked', async () => {
+    const a = await person('pd5077');
+    const run = await mint(a);
+    expect(await managesPersonalAppOf(as(a.user.id), a.app.id)).toBe(true);
+    await db.app.update({ where: { id: a.app.id }, data: { deletedAt: new Date() } });
+    expect(await managesPersonalAppOf(as(a.user.id), a.app.id)).toBe(false);
+    expect(await Q.appRun({}, { ref: run.id }, as(a.user.id))).toBeNull();
+    expect(code(await M.cancelAppRun({}, { ref: run.id }, as(a.user.id)).catch((e: unknown) => e))).toBe('NOT_FOUND');
+    const admin = { ...as((await userWith('adm5077', ['ADMIN'])).id), roles: ['ADMIN'] } as unknown as Context;
+    expect(await M.cancelAppRun({}, { ref: run.id }, admin)).toMatchObject({ id: run.id, status: 'CANCELLED', entryNodeUrn: '' });
   });
 });
 
