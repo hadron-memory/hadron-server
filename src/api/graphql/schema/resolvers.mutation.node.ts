@@ -5424,14 +5424,13 @@ export const nodeMutations = {
           'objectType' in restoreFields ? (restoreFields.objectType as string | null) : current.objectType,
           'properties' in restoreFields ? restoreFields.properties : current.properties,
         );
-        // #5019 — a restore is checked like an update (the gate; exempting it is cor:dmo:060:19's Open Question).
-        // #5223: after the authoritative role-writer gate above — a size refusal counts stored fields, so a writer that
-        // gate refuses must not learn the over/under bit. Measured on the locked row's decrypted view (`logicalCurrent`)
-        // against the restored fields, both read inside this transaction. A thunk, like every #5223 door.
-        // Scope: two payload-dependent content refusals further down — assertNoMintedSpecUnmark (#1468) and
-        // assertIncludesWritable (#2040) — deliberately stay AFTER the ceiling (main's order; the merge door's shape
-        // too). #5223 orders the role-writer and authoring gates before the ceiling, not every content check.
-        assertNodeContentSize(() => resultingNodeContent(logicalRestoreFields, logicalCurrent));
+        // cor:dmo:060:19 (Decided: Holger, 2026-11-27, answer A) — a restore is deliberately NOT
+        // checked against NODE_CONTENT_MAX_BYTES, even when the ceiling was lowered after that
+        // version was written: a restore is byte-identical to the revision it came from and adds
+        // nothing new (cor:dmo:060:04), so history stays recoverable. Exempt from the ceiling only —
+        // the role-writer and schema gates above still run, and every OTHER write to the node
+        // (updateNode, search-and-replace, merge, …) is still checked; the same content sent as an
+        // ordinary update refuses NODE_CONTENT_TOO_LARGE.
         if (truncate) {
           // #617 truncate: collapse the history so the selected revision becomes
           // the new baseline. Delete every snapshot NEWER than the selected one

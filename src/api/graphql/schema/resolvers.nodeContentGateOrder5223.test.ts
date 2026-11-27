@@ -5,6 +5,10 @@
  * refuse must not learn the over/under bit. RED on main: every "gate's own refusal" case below
  * answers NODE_CONTENT_TOO_LARGE there. The refusals keep carrying only `maxBytes`, never the
  * measured size, and each refused case writes nothing.
+ *
+ * #5432 (cor:dmo:060:19, Holger answer A): the restore door no longer measures size at all — a
+ * restore is byte-identical to the revision it restores. Door 2 below stays as the pin of that
+ * door's locked-row role gate, which the exemption does not touch.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
@@ -84,10 +88,13 @@ describe('#5223 door 1 — mergeNodes: the role and authoring gates answer befor
   });
 });
 
-describe('#5223 door 2 — restoreNodeRevision: the locked row\'s role gate answers before the ceiling', () => {
+describe('#5223 door 2 — restoreNodeRevision: the locked row\'s role gate still answers (#5432: the ceiling itself is exempt)', () => {
   // The rulebook lands while the restore is blocked on the revision row lock, so only the
   // authoritative in-transaction gate can see it — the fast pre-transaction refusal passed.
-  it('a rule that appears under the revision lock refuses a demoted writer, not the size bit', async () => {
+  // #5432 (cor:dmo:060:19, Holger answer A) removed the size ceiling from this door — a restore
+  // is byte-identical to its revision — so what stays pinned here is the role gate itself:
+  // a demoted writer is refused whatever the stored size, and nothing is written.
+  it('a rule that appears under the revision lock refuses a demoted writer', async () => {
     cap('');
     const n = await node('n', { role: 'policy', content: a(2000) });
     await gql(UPDATE, { input: { ref: n.id, content: 'short' } });
