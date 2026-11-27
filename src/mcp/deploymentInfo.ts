@@ -361,7 +361,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // (1) Ruling 0083's App write grant (#2484) and #2883's per-automation read grant authorize nothing, and the migration deletes their rows and
 // event rows at deploy (no carry, no re-sign): a userless run that wrote or read through one is refused until the memory's owner signs the
 // replacement. (2) New grant action `memory.write` (ADDITIVE, through `createGrant` and the signing ceremony): an App's userless runs create
-// and update nodes in the memories it names (`memory`: an id or a list, no wildcard, no organization) under `prefix` (`*`, the whole of
+// and edit nodes in the memories it names (`memory`: an id or a list, no wildcard, no organization) under `prefix` (`*`, the whole of
 // every named memory, or one loc when `memory` names exactly one); signed by whoever manages every named memory, its targets judged by
 // 0083's rule at grant and at every write. (3) The six doors (`setAppMemoryWriteGrant`, `revokeAppMemoryWriteGrant`,
 // `appMemoryWriteGrants`, `setAutomationReadGrant`, `revokeAutomationReadGrant`, `automationReadGrants`) and the three MCP

@@ -155,7 +155,7 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
     reach: 'NO_WORKER', listParameters: ['memory'],
   },
   // #5404 (hrn:node:hadronmemory.com:specs:cor:acl:140:02, Holger 2026-11-27: "the grant should be called `memory.read` or `memory.write`";
-  // its approver, "Owner of each named memory"): let the App's userless runs create and update nodes in the memories it names, under
+  // its approver, "Owner of each named memory"): let the App's userless runs create and edit nodes in the memories it names, under
   // `prefix`. It replaces ruling 0083's unsigned App write grant, whose rows are deleted at deploy. `memory` is one memory id or a list,
   // never the wildcard, and never the organization (there is no org-wide write form); `prefix` is the wildcard (the whole of every named
   // memory) or one loc, allowed only when `memory` names exactly one. Signed by whoever manages every named memory (for a personal or
@@ -163,7 +163,7 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
   {
     name: 'memory.write', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'MEMORY_WRITE_APPROVER',
     parameters: [{ name: 'memory', type: 'memory-ref', refusesWildcard: true }, { name: 'prefix', type: 'loc-prefix', refusesWildcard: false }],
-    summaryTemplate: 'Let {app}, acting with no person behind it, create and update nodes in {memory} under {prefix}',
+    summaryTemplate: 'Let {app}, acting with no person behind it, create and edit nodes in {memory} under {prefix}',
     reach: 'NO_WORKER', listParameters: ['memory'],
   },
 ];

@@ -17,6 +17,9 @@
  *     golden `refEcho5168.codes.json`. A door absent from the golden is a new door and must not echo either.
  * Set `REF_ECHO_5168_RECORD=<path>` to write the observed codes instead of asserting them (how the golden was made, on
  * main 446acb581; the #5225 doors were added from a recording on main 6d8a0dc2c, every earlier code unchanged).
+ * #5404 retired the six per-automation read and App memory-write grant doors (`setAutomationReadGrant`, `revokeAutomationReadGrant`,
+ * `automationReadGrants`, `setAppMemoryWriteGrant`, `revokeAppMemoryWriteGrant`, `appMemoryWriteGrants`): their 45 rows moved to
+ * `DOOR_RETIRED`, the gated answer of a retired door, before any ref is read. No other row moved.
  */
 import { writeFileSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
