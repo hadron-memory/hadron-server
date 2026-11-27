@@ -95,7 +95,10 @@ describe('#5223 door 2 — restoreNodeRevision: the locked row\'s role gate answ
     cap(1000);
     await db.orgMember.updateMany({ where: { userId: u }, data: { role: 'CONTRIBUTOR' } });
     // A raw pg connection on the per-worker DATABASE_URL (never TEST_DATABASE_URL): the same
-    // database the server under test pools into.
+    // database the server under test pools into. Raw SQL is unavoidable here — the rulebook must
+    // commit while the restore waits on the revision row lock the holder's transaction holds, and
+    // Prisma cannot join another connection's transaction. Column lists are explicit so a new
+    // NOT NULL column fails loudly instead of silently changing what is inserted.
     const holder = new Client({ connectionString: process.env.DATABASE_URL });
     const observer = new Client({ connectionString: process.env.DATABASE_URL });
     await holder.connect();
@@ -103,11 +106,17 @@ describe('#5223 door 2 — restoreNodeRevision: the locked row\'s role gate answ
     try {
       await holder.query('BEGIN');
       await holder.query('SELECT id FROM node_revisions WHERE id = $1 FOR UPDATE', [rev.id]);
+      const holderPid = (await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
       const restore = gql(RESTORE, { ref: rev.id });
+      restore.catch(() => {}); // a failed poll below must not leave the rejection unhandled
       const deadline = Date.now() + 4000;
       for (;;) {
+        // Scoped to exactly this orchestration: a waiter counts only when the HOLDER
+        // is what blocks it (pg_blocking_pids), so any other connection waiting on
+        // some other node_revisions lock never satisfies this poll.
         const { rows } = await observer.query(
-          `SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%node_revisions%' AND pid <> pg_backend_pid()`);
+          'SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = $1 AND $2 = ANY(pg_blocking_pids(pid))',
+          ['Lock', holderPid]);
         if (rows[0].n > 0) break;
         if (Date.now() > deadline) throw new Error('the restore never blocked on the revision row lock');
         await new Promise((res) => setTimeout(res, 25));
@@ -140,6 +149,29 @@ describe('#5223 door 3a — searchReplaceInSpecNodes: authoring answers before t
     expect((await row(spec.id)).content).toContain('cat');
     expect(await db.nodeRevision.count({ where: { nodeId: spec.id } })).toBe(0);
   });
+
+  // The batch-ordering pin (Bob's P2): the apply must run EVERY row's authoring gate before ANY row's size
+  // check. Row A (visited first) is over-size after the replace and admitted by authoring; row B is refused by
+  // authoring. The whole-batch order answers AUTHORING_ATTESTATION_MISSING; a regression to an interleaved
+  // loop (each row's size checked inside the authoring loop) would answer row A's NODE_CONTENT_TOO_LARGE
+  // first, leaking the over/under bit to a writer the gate refuses. Ids are UUIDv7 (ms-time-sortable) and the
+  // snapshot orders by id, so a 2ms gap makes A sort before B deterministically.
+  it('two rows: row 1 over-size and admitted, row 2 refused by authoring — the batch answers authoring, never the size bit', async () => {
+    const draft = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'specs-draft-2', draftCorpus: true } as never, { db, roles: ['ADMIN'], userId: admin } as Context) as { id: string };
+    const task = await node('author-task', { isRunnable: true, content: 'instructions' }, draft.id);
+    await rules(draft.id, { role: 'spec', authorTaskId: task.id, authorTaskRequired: true });
+    const over = await node('a:01', { content: `cat ${a(990)}` }, draft.id);
+    await new Promise((res) => setTimeout(res, 2));
+    const refused = await node('b:01', { content: 'cat ok', role: 'spec' }, draft.id);
+    const input = { memoryRef: draft.id, nodeRefs: [over.id, refused.id], oldText: 'cat', newText: a(20), fields: ['content'] as Array<'content'>, dryRun: true };
+    const run = (extra: Record<string, unknown> = {}) => resolvers.Mutation.searchReplaceInSpecNodes(null, { input: { ...input, ...extra } } as never, { db, roles: ['ADMIN'], userId: admin } as Context);
+    const dry = await run() as { nodesChanged: number; plan: string };
+    expect(dry.nodesChanged).toBe(2);
+    await expect(run({ dryRun: false, expectedPlan: dry.plan })).rejects.toMatchObject({ extensions: { code: 'AUTHORING_ATTESTATION_MISSING' } });
+    expect((await row(over.id)).content).toBe(`cat ${a(990)}`);
+    expect((await row(refused.id)).content).toBe('cat ok');
+    expect(await db.nodeRevision.count({ where: { nodeId: { in: [over.id, refused.id] } } })).toBe(0);
+  });
 });
 
 describe('#5223 door 3b — searchReplaceInNodes: authoring answers before the ceiling, and a dry run previews', () => {
@@ -154,6 +186,21 @@ describe('#5223 door 3b — searchReplaceInNodes: authoring answers before the c
     expect(code(await gql(REPLACE, { input }))).toBe('AUTHORING_ATTESTATION_MISSING');
     expect((await row(n.id)).content).toBe(`cat ${a(990)}`);
     expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  });
+
+  // The batch-ordering pin (Bob's P2), same shape as door 3a's: explicit nodeRefs order IS the plan order
+  // (nodeById preserves it), so row A is visited first by the authoring loop. A regression to an interleaved
+  // loop would answer row A's NODE_CONTENT_TOO_LARGE before row B's authoring refusal.
+  it('two rows: row 1 over-size and admitted, row 2 refused by authoring — the batch answers authoring, never the size bit', async () => {
+    const task = await node('author-task', { isRunnable: true, content: 'instructions' });
+    await rules(mem, { role: 'guide', authorTaskId: task.id, authorTaskRequired: true });
+    const over = await node('over', { content: `cat ${a(990)}` }); // no role, no rule: authoring admits
+    const refused = await node('refused', { role: 'guide', content: 'cat ok' });
+    const input = { oldText: 'cat', newText: a(20), nodeRefs: [over.id, refused.id], fields: ['content'] };
+    expect(code(await gql(REPLACE, { input }))).toBe('AUTHORING_ATTESTATION_MISSING');
+    expect((await row(over.id)).content).toBe(`cat ${a(990)}`);
+    expect((await row(refused.id)).content).toBe('cat ok');
+    expect(await db.nodeRevision.count({ where: { nodeId: { in: [over.id, refused.id] } } })).toBe(0);
   });
 });
 

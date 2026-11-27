@@ -47,7 +47,7 @@ beforeEach(async () => {
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers } }));
   vi.stubEnv('NODE_CONTENT_MAX_BYTES', '1000');
 });
-afterEach(() => { vi.unstubAllEnvs(); void client.close(); });
+afterEach(async () => { vi.unstubAllEnvs(); await client.close(); });
 
 describe('#5223 door 5 — hadron_create_parent_node re-save: authoring before the ceiling', () => {
   it('a re-save the authoring gate refuses answers authoring, not the size bit, and writes nothing', async () => {

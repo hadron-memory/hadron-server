@@ -73,10 +73,12 @@ interface ChangedNode {
   storedContent: string | null;
   /**
    * #5223 — the decrypted row the ceiling is measured against (the snapshot's `pt`). The size check no longer runs in
-   * the snapshot (a dry run cannot run the authoring gate, so it must not answer the size bit at all); the apply
-   * pass measures from this, on a row the loop's `revisionStateMatches`-equivalent plan check proved current.
+   * the snapshot (a dry run cannot run the authoring gate, so it must not answer the size bit at all). On the apply
+   * this is fresh by construction: the rows are locked FOR UPDATE before `snapshot(tx, true)` re-runs, so the pass
+   * measures the very rows it writes. (The bulk `searchReplaceInNodes` door instead measures a pre-transaction basis
+   * its `revisionStateMatches` check proves current — see there.)
    */
-  sizeAgainst: NodeContentFields;
+  sizeBasis: NodeContentFields;
   isEncrypted: boolean;
   contentChanged: boolean;
   abstractChanged: boolean;
@@ -292,7 +294,7 @@ export async function searchReplaceInSpecNodes(
         changed: {},
         plaintext: { content: pt.content, abstract: pt.abstract },
         storedContent: pt.content,
-        sizeAgainst: pt,
+        sizeBasis: pt,
         isEncrypted: encryption.isEncrypted,
         contentChanged: false,
         abstractChanged: false,
@@ -403,22 +405,24 @@ export async function searchReplaceInSpecNodes(
     }
     // #5223 — passes, not one interleaved loop: every authoring gate runs for the WHOLE batch, then every size check,
     // then the writes. A size refusal counts stored fields, so a writer the authoring gate refuses (on this row or any
-    // other) must not learn the over/under bit. All three passes share one transaction: a later refusal still rolls
+    // other) must not learn the over/under bit — a batch whose row 1 is over-size and whose row 2 the gate refuses
+    // answers authoring, never the size bit. All three passes share one transaction: a later refusal still rolls
     // back an earlier write, exactly as the interleaved loop did.
-    const authoredStamps = new Map<ChangedNode, Awaited<ReturnType<typeof assertAuthoring>>>();
+    const authored: Array<{ node: ChangedNode; stamp: Awaited<ReturnType<typeof assertAuthoring>> }> = [];
     for (const node of current.changed) {
       // #1328 — a spec's role rule answers to the same claim as any other writer.
-      authoredStamps.set(node, await assertAuthoring(tx, memoryId, {
+      const stamp = await assertAuthoring(tx, memoryId, {
         priorRole: node.raw.role, priorRunnable: node.raw.isRunnable,
         role: node.raw.role, runnable: node.raw.isRunnable, mintHuman: true, authoredChange: node.authoredChange,
-      }, authoringFromRequest(ctx, input.authoredWith)));
+      }, authoringFromRequest(ctx, input.authoredWith));
+      authored.push({ node, stamp });
     }
-    for (const node of current.changed) {
-      // #5019 — the resulting node, before any write (moved out of the snapshot by #5223).
-      assertNodeContentSize(resultingNodeContent(node.changed, node.sizeAgainst));
+    for (const { node } of authored) {
+      // #5019 — the resulting node, before any write (moved out of the snapshot by #5223). A thunk, like every
+      // #5223 door: the ceiling costs nothing when none is set.
+      assertNodeContentSize(() => resultingNodeContent(node.changed, node.sizeBasis));
     }
-    for (const node of current.changed) {
-      const authoredStamp = authoredStamps.get(node)!;
+    for (const { node, stamp: authoredStamp } of authored) {
       await createNodeRevision(tx, buildNodeRevisionSnapshot(node.raw, editorFromAuth(ctx), {
         revLabel: input.reason,
         changes: Object.keys(node.changed),
