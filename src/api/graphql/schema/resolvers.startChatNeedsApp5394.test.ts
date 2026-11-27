@@ -155,19 +155,33 @@ describe('#5394 the named App is the App: no search', () => {
     await db.appMember.create({ data: { appId: appA, userId: adminId, role: 'member' } });
     const before = await counts();
     const r = await refusal(M.startChat({}, { agentRef: solo.id, conversationName: 'flow', appRef: appA }, adminCtx()));
-    expect(r.code).not.toBe('CHAT_APP_NOT_IDENTIFIED');
-    expect(r.message).toMatch(/not found/i);
+    expect(r.code).toBe('AGENT_NOT_FOUND');
     expect(await counts()).toEqual(before);
   });
 });
 
-describe('#5394 a named App the caller cannot use is not identified, and says nothing about it', () => {
-  it('an App she takes no part in reads exactly like an App that does not exist; nothing is written', async () => {
+// Gate amendment (Xan, team chat #154443, condition 3): a named App the caller cannot take part in, or that does not exist,
+// answers byte-identically with the participation refusal (no App-existence oracle), not CHAT_APP_NOT_IDENTIFIED.
+describe('#5394 a named App the caller cannot use answers the participation refusal, and says nothing about the App', () => {
+  it('private: an App she takes no part in reads exactly like an App that does not exist; nothing is written', async () => {
     const before = await counts();
     const foreign = await refusal(M.startChat({}, { agentRef: agentId, appRef: outsiderApp }, as(ann)));
     const missing = await refusal(M.startChat({}, { agentRef: agentId, appRef: `${orgUrn}:nothing` }, as(ann)));
+    const missingId = await refusal(M.startChat({}, { agentRef: agentId, appRef: '01a21c9fc8347fd79b5ed7a483b75c91' }, as(ann)));
     const malformed = await refusal(M.startChat({}, { agentRef: agentId, appRef: 'not a ref' }, as(ann)));
-    expect(foreign.code).toBe('CHAT_APP_NOT_IDENTIFIED');
+    expect(foreign).toEqual({ code: 'AGENT_NOT_FOUND', message: 'AGENT_NOT_FOUND: nothing found for the given ref.' });
+    expect(missing).toEqual(foreign);
+    expect(missingId).toEqual(foreign);
+    expect(malformed).toEqual(foreign);
+    expect(await counts()).toEqual(before);
+  });
+
+  it('shared: the same, with the shared participation refusal', async () => {
+    const before = await counts();
+    const foreign = await refusal(M.startChat({}, { agentRef: agentId, scope: 'shared', appRef: outsiderApp }, as(ann)));
+    const missing = await refusal(M.startChat({}, { agentRef: agentId, scope: 'shared', appRef: `${orgUrn}:nothing` }, as(ann)));
+    const malformed = await refusal(M.startChat({}, { agentRef: agentId, scope: 'shared', appRef: 'not a ref' }, as(ann)));
+    expect(foreign.code).toBe('SHARED_CHAT_REQUIRES_APP_CONTEXT');
     expect(missing).toEqual(foreign);
     expect(malformed).toEqual(foreign);
     expect(await counts()).toEqual(before);

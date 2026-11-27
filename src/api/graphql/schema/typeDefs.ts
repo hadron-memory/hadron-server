@@ -15706,9 +15706,22 @@ export const typeDefs = `#graphql
     # ── Chat API ──────────────────────────────────────────────────────
     """
     Start an AGENT CHAT (creates chat nodes, loads conversation, returns
-    compiled prompt). When called by a JWT user, the agent chat is created in
-    that user's personal memory for the agent (provisioned lazily if
-    needed).
+    compiled prompt). When called by a signed-in user, a private agent chat is
+    created in that user's personal memory for the agent in the identified App
+    (provisioned lazily if needed).
+
+    #5394 (hrn:node:hadronmemory.com:specs:cor:cht:010:02): the App that supplies
+    the chatbot and keeps the chat is the one the call identifies: an App
+    credential's own App, or otherwise appRef (an ID or URN, as agentRef; the
+    CLI's global --app). No App is ever searched for. With neither, or with an
+    appRef that names another App than the credential's, the call is refused
+    CHAT_APP_NOT_IDENTIFIED before the Agent is resolved, so it says nothing
+    about the Agent. An appRef the caller takes no part in, or that names no
+    App, is refused exactly like an App the caller cannot use (the unknown-Agent
+    refusal for a private chat, SHARED_CHAT_REQUIRES_APP_CONTEXT for a shared
+    one), so it says nothing about the App either. Install, licence and
+    participation are judged against that App alone, and an existing home is
+    reused only if it belongs to it.
 
     #1034: an **agent chat** — deliberately not "chat session", which is
     reserved for the human's own conversation and names no row in this schema,
@@ -15723,12 +15736,12 @@ export const typeDefs = `#graphql
     evaluated refuses with ENTRY_CONDITION_FAILED (extensions reason, messageId
     and detail), and nothing is created. A named start never checks a condition.
     """
-    # 017: scope defaults to private (FR-003). A shared request
-    # requires a JWT user with an AppMember row in some App that
-    # installs this Agent (FR-006 + research.md Q-R2). Otherwise:
-    #   - MCP App-key session → SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS
-    #   - JWT user without a qualifying AppMember row, or no auth →
-    #     SHARED_CHAT_REQUIRES_APP_CONTEXT
+    # 017: scope defaults to private (FR-003). #5394: a shared request
+    # runs under the identified App, an App credential's included, and is
+    # started by a person (the signed-in user, or the user an App key acts
+    # for) who is an AppMember of that App, which installs this Agent with a
+    # live licence (FR-006). Otherwise SHARED_CHAT_REQUIRES_APP_CONTEXT.
+    # (SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is retired.)
     #
     # 019: isTestRun suppresses the AgentSubscription auto-provision
     # side-effect for chats started by the spec-019 Tester. Default
@@ -15751,7 +15764,7 @@ export const typeDefs = `#graphql
     # session, and chats only with its session's Agent. Anything else reads as an unknown user
     # or Agent. A signed-in user acts as themselves. The
     # subscription is provisioned in the transaction that creates the chat.
-    startChat(agentRef: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it." aiConfigChoice: String): ChatStartResult!
+    startChat(agentRef: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it." aiConfigChoice: String, "#5394 (hrn:node:hadronmemory.com:specs:cor:cht:010:02): the App this chat runs under (ID or URN), for a caller whose credential carries no App; the CLI's global --app. Naming another App than the credential's is refused CHAT_APP_NOT_IDENTIFIED." appRef: ID): ChatStartResult!
     """
     Process a user message (saves message, builds context, returns next prompt).
     #3501: CHAT_STATE_INVALID refuses unusable conversational state before the turn writes or builds a model prompt.
