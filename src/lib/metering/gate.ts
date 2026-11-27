@@ -12,6 +12,7 @@ import type { OwnerRef } from '../owner.js';
 import { debitEnabled, creditBalance } from './index.js';
 import { databaseNow, settleAndMeasure } from './settleExpiredGrants.js';
 import { ensurePeriodGrant, periodGrantDue } from './periodGrant.js';
+import { ownerId, ownerType } from '../owner.js';
 
 /** The one refusal. Its text names no amount and no owner (cor:acl:050:05): the same words for every owner and every door. */
 export const CREDITS_EXHAUSTED_MESSAGE = 'The account has no AI credit left for work on the platform\'s own AI provider.';
@@ -34,6 +35,36 @@ export function creditGateActive(): boolean {
   return debitEnabled() && creditGateEnabled();
 }
 
+
+/**
+ * Gate ruling 7 (Holger, 2026-11-27: option b): reading the sum of a 100,000-entry ledger costs about 16 ms, so the gate keeps a
+ * per-process MEMO of "this owner had a positive balance a moment ago". It is not a stored balance under
+ * hrn:node:hadronmemory.com:specs:cor:dmo:170:08 (Holger ruled so): it is never written anywhere, it answers no read (every
+ * ledger read still sums the entries), and it only shortcuts an admission for {@link CREDIT_GATE_MEMO_TTL_MS}. It is
+ * positive-only: a zero or negative balance is never memoised, so every refusal reads the ledger, and a burst can overshoot
+ * a positive balance by at most the window, which the ledger already allows ("the balance may go negative"). It is neither
+ * read nor written inside a caller's transaction, where the gate computes every time.
+ */
+export const CREDIT_GATE_MEMO_TTL_MS = 5_000;
+/** The most owners the memo keeps: past it the expired ones go, then all, so it cannot grow without bound. */
+const MEMO_MAX = 10_000;
+const positiveUntil = new Map<string, number>();
+const memoKey = (owner: OwnerRef): string => `${ownerType(owner)}:${ownerId(owner)}`;
+
+function memoRemember(owner: OwnerRef): void {
+  const now = Date.now();
+  if (positiveUntil.size >= MEMO_MAX) {
+    for (const [k, until] of positiveUntil) if (until <= now) positiveUntil.delete(k);
+    if (positiveUntil.size >= MEMO_MAX) positiveUntil.clear();
+  }
+  positiveUntil.set(memoKey(owner), now + CREDIT_GATE_MEMO_TTL_MS);
+}
+
+/** Tests only: forget every memo. */
+export function resetCreditGateMemoForTests(): void {
+  positiveUntil.clear();
+}
+
 /** Whether `db` is an interactive transaction client (it carries no `$transaction`): the gate then writes nothing. */
 const inTransaction = (db: PrismaClient): boolean => typeof (db as { $transaction?: unknown }).$transaction !== 'function';
 
@@ -50,6 +81,14 @@ const inTransaction = (db: PrismaClient): boolean => typeof (db as { $transactio
 export async function requireCreditHeadroom(db: PrismaClient, owner: OwnerRef | null): Promise<void> {
   if (owner == null) return;
   const tx = inTransaction(db);
+  // The memo is consulted only outside a caller's transaction, and only for an unexpired positive entry.
+  if (!tx) {
+    const until = positiveUntil.get(memoKey(owner));
+    if (until !== undefined) {
+      if (until > Date.now()) return;
+      positiveUntil.delete(memoKey(owner));
+    }
+  }
   const now = await databaseNow(db);
   if (!tx) await ensurePeriodGrant(db, owner, now);
   const balance = tx
@@ -62,7 +101,11 @@ export async function requireCreditHeadroom(db: PrismaClient, owner: OwnerRef | 
         },
         { isolationLevel: 'RepeatableRead' },
       );
-  if (balance <= 0n) throw new CreditsExhaustedError();
+  if (balance <= 0n) {
+    positiveUntil.delete(memoKey(owner)); // a zero or negative balance is never memoised
+    throw new CreditsExhaustedError();
+  }
+  if (!tx) memoRemember(owner);
 }
 
 /**

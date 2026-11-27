@@ -17,7 +17,7 @@ import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import { encryptToken } from '../lib/tokenCrypto.js';
 import { clearPriceCache, grantCredits, creditBalance } from '../lib/metering/index.js';
 import { reloadOwnerDefaultMonthlyGrantForTests, resetPeriodGrantStateForTests } from '../lib/metering/periodGrant.js';
-import { CREDITS_EXHAUSTED_MESSAGE, requireCreditHeadroom } from '../lib/metering/gate.js';
+import { CREDITS_EXHAUSTED_MESSAGE, CREDIT_GATE_MEMO_TTL_MS, requireCreditHeadroom, resetCreditGateMemoForTests } from '../lib/metering/gate.js';
 import { plainRunFailure } from '../lib/automation/plainReason.js';
 import { generateWebhookSecret, mintWebhookPlatformToken, mountWebhookRoutes } from '../api/webhooks.js';
 import { schedulerTick } from './scheduler.js';
@@ -47,6 +47,7 @@ beforeEach(async () => {
   await cleanDb(db);
   clearPriceCache();
   resetPeriodGrantStateForTests();
+  resetCreditGateMemoForTests();
   reloadOwnerDefaultMonthlyGrantForTests({});
   orgId = (await db.organization.create({ data: { id: generateId(), name: ORG_URN, urn: ORG_URN } })).id;
   appId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'gate-app', urn: `${ORG_URN}::gate-app` } })).id;
@@ -78,6 +79,7 @@ beforeEach(async () => {
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
+  clockSkewMs = 0;
 });
 
 const mint = async (entry = 'flow:a', over: Record<string, unknown> = {}) =>
@@ -90,8 +92,16 @@ const ownKeyConfig = () =>
 const denial = async (p: Promise<unknown>) => { try { await p; return null; } catch (e) { return e as RunLaunchDeniedError; } };
 const counters = () => db.quotaCounter.count({ where: { action: 'run.execute' } });
 
-function runDeps(): { deps: RunExecutionDeps; llm: ReturnType<typeof vi.fn> } {
-  const llm = vi.fn(async () => ({ text: 'ok', tokensIn: 100, tokensOut: 50, provider: 'anthropic', model: 'test' }));
+/** The process clock as the gate's memo reads it: a test moves it forward instead of waiting. */
+let clockSkewMs = 0;
+function runDeps(opts: { skewAfterFirstCallMs?: number } = {}): { deps: RunExecutionDeps; llm: ReturnType<typeof vi.fn> } {
+  const real = Date.now.bind(Date);
+  vi.spyOn(Date, 'now').mockImplementation(() => real() + clockSkewMs);
+  const llm = vi.fn(async () => {
+    // the hop took longer than the memo's window: the next hop is judged against the ledger again
+    if (opts.skewAfterFirstCallMs) clockSkewMs += opts.skewAfterFirstCallMs;
+    return { text: 'ok', tokensIn: 100, tokensOut: 50, provider: 'anthropic', model: 'test' };
+  });
   return {
     llm,
     deps: {
@@ -119,6 +129,7 @@ describe('pin 1 and 2: the launch', () => {
     expect((await mint()).status).toBe('PENDING');
     await db.creditLedgerEntry.create({ data: { id: generateId(), organizationId: orgId, kind: 'adjustment', amountMicroCents: -5n, sourceType: 't', sourceId: 'neg' } });
     expect(await creditBalance(db, { organizationId: orgId })).toBe(-4n);
+    resetCreditGateMemoForTests(); // the launch above memoised a positive balance; this one judges the new one
     expect((await denial(mint()))!.code).toBe('CREDITS_EXHAUSTED');
   });
 
@@ -161,7 +172,7 @@ describe('pin 9 and 10: each model hop; never a script hop', () => {
     switchesOn();
     await grantCredits(db, { owner: { organizationId: orgId }, amountMicroCents: 1n, sourceType: 't', sourceId: 'one' });
     const run = await mint('flow:a');
-    const { deps, llm } = runDeps();
+    const { deps, llm } = runDeps({ skewAfterFirstCallMs: CREDIT_GATE_MEMO_TTL_MS + 1 });
     expect(await executeAppRun(db, run.id, deps)).toBe('failed');
     expect(llm).toHaveBeenCalledTimes(1); // hop 1 ran; hop 2 was refused before its model call
     const f = await failureOf(run.id);
@@ -227,6 +238,72 @@ describe('the helper', () => {
     resetPeriodGrantStateForTests();
     await requireCreditHeadroom(db, { organizationId: orgId });
     expect(await creditBalance(db, { organizationId: orgId })).toBe(500n);
+  });
+});
+
+describe('ruling 7 (Holger, option b): the 5 s positive-balance memo', () => {
+  const grant = (n: bigint, id: string) => grantCredits(db, { owner: { organizationId: orgId }, amountMicroCents: n, sourceType: 't', sourceId: id });
+  const drain = () => db.creditLedgerEntry.create({ data: { id: generateId(), organizationId: orgId, kind: 'adjustment', amountMicroCents: -10_000n, sourceType: 't', sourceId: generateId() } });
+  const owner = () => ({ organizationId: orgId });
+  const refused = async () => { try { await requireCreditHeadroom(db, owner()); return false; } catch { return true; } };
+  let skew = 0;
+  beforeEach(() => {
+    skew = 0;
+    const real = Date.now.bind(Date);
+    vi.spyOn(Date, 'now').mockImplementation(() => real() + skew);
+    switchesOn();
+  });
+
+  it('a positive balance is admitted from the memo inside the window even after the ledger went negative', async () => {
+    await grant(1000n, 'm1');
+    expect(await refused()).toBe(false); // reads the ledger, memoises
+    await drain();
+    expect(await creditBalance(db, owner())).toBeLessThan(0n); // the ledger is the truth, and every read still sums it
+    expect(await refused()).toBe(false); // admitted from the memo
+  });
+
+  it('after the window the gate reads the ledger again and refuses', async () => {
+    await grant(1000n, 'm2');
+    expect(await refused()).toBe(false);
+    await drain();
+    skew = CREDIT_GATE_MEMO_TTL_MS + 1;
+    expect(await refused()).toBe(true);
+  });
+
+  it('a zero or negative balance is never memoised: credit added afterwards admits at once, and a refusal is never replayed', async () => {
+    expect(await refused()).toBe(true); // zero
+    await grant(1000n, 'm3');
+    expect(await refused()).toBe(false); // not a cached refusal
+    await drain();
+    skew = CREDIT_GATE_MEMO_TTL_MS + 1;
+    expect(await refused()).toBe(true);
+    await grant(50_000n, 'm3b');
+    expect(await refused()).toBe(false);
+  });
+
+  it('the memo is neither read nor written inside a caller\'s transaction', async () => {
+    await grant(1000n, 'm4');
+    expect(await refused()).toBe(false); // memoised outside
+    await drain();
+    // inside a transaction the gate computes: it refuses although the memo holds a positive entry
+    await expect(db.$transaction(async (tx) => requireCreditHeadroom(tx as never, owner()))).rejects.toMatchObject({ code: 'CREDITS_EXHAUSTED' });
+    // and a positive balance judged inside a transaction seeds nothing
+    resetCreditGateMemoForTests();
+    await grant(50_000n, 'm4b');
+    await db.$transaction(async (tx) => requireCreditHeadroom(tx as never, owner()));
+    await drain();
+    await drain();
+    await drain();
+    await drain();
+    await drain();
+    expect(await refused()).toBe(true); // nothing was memoised by the transaction's call
+  });
+
+  it('the memo is per owner: one owner\'s positive balance admits nobody else', async () => {
+    const other = (await db.organization.create({ data: { id: generateId(), name: 'cg-other', urn: 'cg-other' } })).id;
+    await grant(1000n, 'm5');
+    expect(await refused()).toBe(false);
+    await expect(requireCreditHeadroom(db, { organizationId: other })).rejects.toMatchObject({ code: 'CREDITS_EXHAUSTED' });
   });
 });
 
