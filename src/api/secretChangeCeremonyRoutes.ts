@@ -34,7 +34,7 @@ const assert=async opt=>{
  return{ceremonyId:opt.ceremonyId,credentialId:b64(c.rawId),authenticatorData:b64(c.response.authenticatorData),clientDataJson:b64(c.response.clientDataJSON),signature:b64(c.response.signature)};
 };
 const endedText=state=>({completed:'This change was already completed.',withdrawn:'This request was withdrawn. Open a new request if you still need the change.',expired:'This request expired. Open a new change request.',stale:'The secret changed. Open a new change request.',declined:'This request was declined. Open a new request if you still need the change.'})[state]||'This request is no longer available. Open a new change request.';
-const completionText=s=>({DELETE:'The secret was deleted.',SET_PROTECTED:'Protection is now on.',CLEAR_PROTECTED:'Protection is now off.'})[s.operation]||'Completed: '+s.change+'.';
+const completionText=s=>({DELETE:'The secret was deleted.',SET_PROTECTED:'Protection is now on.',CLEAR_PROTECTED:'Protection is now off.',SET_DELETE_AFTER_USE:'The secret may now be deleted after use.',CLEAR_DELETE_AFTER_USE:'The secret is no longer deleted after use.'})[s.operation]||'Completed: '+s.change+'.';
 start.onclick=async()=>{
  start.disabled=true;status.textContent='';
  try{
