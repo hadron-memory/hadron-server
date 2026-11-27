@@ -406,10 +406,12 @@ async function memoryGrants(
         for (const sub of subs) {
           const via = urnById.get(sub.organizationId);
           if (via == null) {
-            // The org row exists (the subscription's FK keeps it live), so an
-            // unresolvable URN cannot happen in practice — and if it somehow
-            // does, SKIP the grant rather than emit a raw id where a URN
-            // belongs: under-report is the audit's safe direction.
+            // The org row exists (the subscription's FK guarantees the row is
+            // there; whether the org is LIVE is decided earlier, by
+            // LIVE_ORG_MEMBERSHIP's relation filter on the membership join),
+            // so an unresolvable URN cannot happen in practice — and if it
+            // somehow does, SKIP the grant rather than emit a raw id where a
+            // URN belongs: under-report is the audit's safe direction.
             continue;
           }
           const write =
