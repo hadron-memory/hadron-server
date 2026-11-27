@@ -4,7 +4,10 @@
  *
  * Order: the register first (with an event code, asked in an App: cor:agt:110:03), then the scored search of the
  * Agent's task list on abstracts (cor:dmo:050:15, {@link matchAgentTasks}), where only tasks at or above the floor
- * ({@link taskMatchMinScore}) count, best first, at most three. A task the search could not score (the keyword
+ * ({@link taskMatchMinScore}) count, best first, at most three. A register entry that maps while its task is not
+ * in the asking Agent's list (a stale mapping) falls through the same way: the answer is NO_MATCH with the
+ * register still MAPPED — the mapping is reported, the task is never invented (#5360 B3). A task the search could
+ * not score (the keyword
  * fallback when no embedding is available) can never be shown to reach the floor, so it is never a match: the answer
  * is NO_MATCH with those tasks as `nearest` (Victor's FIT on #5284, R4). On NO_MATCH asked in an App, the register's
  * `instructions.no-match` entry may name a fallback task (R6, cor:agt:110:01).
@@ -28,11 +31,16 @@ import { resolveActionAnswer, type ActionAnswer } from '../actionRegister/answer
 import { openAgentTasks, type AgentTaskEntry } from '../agentDefinitionLists.js';
 import { resolveAgentRef } from '../entityRef/agentRef.js';
 import { currentActor } from '../requestActor.js';
+import { MAX_QUERY_CHARS } from '../retrieval/tsquery.js';
+import { MAX_ATOM_LEN } from '../urn.js';
 import { emitEntityUrnV2 } from '../urnEmit.js';
 import { taskMatchMinScore } from './floor.js';
 
-/** The longest phrase the call takes, after trimming. */
-export const INSTRUCTIONS_PHRASE_MAX = 500;
+/**
+ * #5360 B2: the longest phrase the call takes, after trimming — the ONE bound every search surface shares
+ * (`MAX_QUERY_CHARS`, the number `agentTaskList` and `findNodes` already refuse at; Holger's "512 for both",
+ * 2026-11-27). The old private 500 cap is gone: one number, one refusal.
+ */
 /** The most candidates (best plus runners-up) and nearest tasks one answer names. */
 export const INSTRUCTIONS_LIST_MAX = 3;
 /** R6 (cor:agt:110:01, reserved): the register code that names the task for a phrase no task matches. */
@@ -63,12 +71,17 @@ const badInput = (message: string, argumentName?: string) =>
   new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT', ...(argumentName ? { argumentName } : {}) } });
 
 export async function loadAgentInstructions<S>(ctx: Context, args: InstructionsArgs, surface: InstructionsSurface<S>): Promise<AgentInstructionsAnswer<S>> {
-  // 1. Input, judged before any read.
+  // 1. Input, judged before any read. #5360 B2: the phrase bound is the shared MAX_QUERY_CHARS (512). #5360 B1:
+  // the event code is trimmed and bounded by the register loc atom bound — a code longer than an atom can be is
+  // refused here, never carried into a register read.
   const phrase = args.phrase == null ? null : args.phrase.trim();
-  const eventCode = args.eventCode ?? null;
+  const eventCode = args.eventCode == null ? null : args.eventCode.trim();
   if (phrase == null && eventCode == null) throw badInput('Give a phrase, an eventCode or both.');
-  if (phrase != null && (phrase.length < 1 || phrase.length > INSTRUCTIONS_PHRASE_MAX)) {
-    throw badInput(`phrase must be 1 to ${INSTRUCTIONS_PHRASE_MAX} characters after trimming.`, 'phrase');
+  if (phrase != null && (phrase.length < 1 || phrase.length > MAX_QUERY_CHARS)) {
+    throw badInput(`phrase must be 1 to ${MAX_QUERY_CHARS} characters after trimming.`, 'phrase');
+  }
+  if (eventCode != null && (eventCode.length < 1 || eventCode.length > MAX_ATOM_LEN)) {
+    throw badInput(`eventCode must be 1 to ${MAX_ATOM_LEN} characters after trimming (the register loc atom bound, cor:agt:110:01).`, 'eventCode');
   }
   if (eventCode != null && !args.appRef) throw badInput('eventCode needs appRef: a register is read only in an App.', 'eventCode');
 

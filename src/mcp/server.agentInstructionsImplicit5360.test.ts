@@ -101,3 +101,13 @@ describe('#5360 B4: hadron_get_instructions with no agentRef, over the real tran
     expect(text).toContain('[BAD_USER_INPUT]');
   });
 });
+
+describe('#5360 B7 over MCP: hadron_agent_tasks validates before it reads', () => {
+  it('an over-long phrase is the 512 input refusal even for an unknown Agent (the check runs before the ref resolution)', async () => {
+    const text = await mcpCall('hadron_agent_tasks', { agentRef: generateId(), phrase: 'x'.repeat(513) }, workerSessionId);
+    expect(text, text).toContain('at most 512 characters'); // the input refusal's own text
+    // The tool renders a refusal's raw message, and the not-found message carries its code — its absence is
+    // the proof the input check ran BEFORE the ref was resolved.
+    expect(text).not.toContain('AGENT_NOT_FOUND');
+  });
+});
