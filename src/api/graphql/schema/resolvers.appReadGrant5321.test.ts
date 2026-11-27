@@ -27,7 +27,7 @@ const M = resolvers.Mutation as any;
 
 let org: { id: string; urn: string };
 let otherOrg: { id: string; urn: string };
-let alice: string; // owns a user-owned knowledge memory: its manager, the giver
+let alice: string; // OWNER of her own organization's knowledge memory: its manager, the giver
 let bob: string; // org reader and App member, manages nothing
 let admin: string; // ADMIN of the org: manages its knowledge
 let app: { id: string; urn: string };
@@ -47,10 +47,15 @@ async function reachFor(auth: AuthContext, memoryId: string) {
 const NONE = { mcp: false, graphql: false };
 const BOTH = { mcp: true, graphql: true };
 
-/** alice's user-owned knowledge memory: she manages it, and nobody else reads it. */
+/**
+ * alice's knowledge memory: she manages it, and nobody else reads it. It lives in an organization alice alone belongs to (as
+ * OWNER), not her user tenant: a user-owned memory is no grant target since #5345 (`memoryReadTargetRefusal`, `user-owned`).
+ */
 async function alicesMemory() {
+  const own = await db.organization.create({ data: { id: generateId(), name: `alice-${generateId().slice(-8)}`, urn: `alice-${generateId().slice(-8)}` } });
+  await db.orgMember.create({ data: { organizationId: own.id, userId: alice, role: 'OWNER' } });
   return db.memory.create({
-    data: { id: generateId(), name: 'a', urn: `alice-${generateId().slice(-8)}:kb`, class: 'knowledge', visibility: null, ownerUserId: alice } as never,
+    data: { id: generateId(), name: 'a', urn: `${own.urn}:kb`, class: 'knowledge', visibility: 'ORGANIZATION', organizationId: own.id } as never,
   });
 }
 async function orgKnowledge(orgId: string, orgUrn: string, extra: Record<string, unknown> = {}) {
@@ -263,6 +268,20 @@ describe('memory.read: the App reads through its grant', () => {
     for (const x of [gone, pers, priv]) {
       expect(await reachFor(runAuth(app.id), x.id)).toEqual(NONE);
       expect(await reachFor(keyAuth(app.id, keyId), x.id)).toEqual(NONE);
+    }
+  });
+
+  it('never reaches a user-owned knowledge memory (#5345), so no surface serves what memory(ref:) refuses', async () => {
+    // alice's own (user-tenant) knowledge memory: she owns and reads it, and an ACTIVE grant she gave names it.
+    const mine = await db.memory.create({
+      data: { id: generateId(), name: 'u', urn: `alice-${generateId().slice(-8)}:uk`, class: 'knowledge', visibility: null, ownerUserId: alice } as never,
+    });
+    await activeGrant(app.id, 'memory.read', { memory: mine.id });
+    await grantScope(keyId);
+    for (const auth of [runAuth(app.id), keyAuth(app.id, keyId)]) {
+      expect(await reachFor(auth, mine.id)).toEqual(NONE);
+      const record = await (resolvers.Query as any).memory(null, { ref: mine.id }, { db, ...auth }).then((m: unknown) => m != null, () => false);
+      expect(record).toBe(false);
     }
   });
 });

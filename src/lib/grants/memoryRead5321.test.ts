@@ -21,12 +21,12 @@ import type { AuthContext } from '../../middleware/auth.js';
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
 let w: World;
-let manager: string; // manages the user-owned memory `kb` (its owner); an org READER
+let manager: string; // manages `kb` (OWNER of its own organization); a READER of the App's organization
 let reader: string; // reads `kb` through a share, manages nothing
 let admin: string; // ADMIN of the App's organization
-let kb: { id: string }; // a user-owned knowledge memory of `manager`
+let kb: { id: string }; // a knowledge memory `manager` manages, in an organization of their own
 let kb2: { id: string }; // another one of `manager`
-let theirs: { id: string }; // a user-owned knowledge memory of `reader`
+let theirs: { id: string }; // a knowledge memory `reader` manages, in an organization of their own
 
 const ctxOf = (userId: string, roles: string[] = []): Context => ({ db, userId, roles } as unknown as Context);
 const create = (values: unknown, over: Record<string, unknown> = {}) => db.$transaction((tx) => createPendingGrant(tx, {
@@ -37,8 +37,12 @@ const code = (p: Promise<unknown>) => p.then(() => 'OK', (e) => e instanceof Gra
 const signer = (userId: string, values: unknown, roles: string[] = []) =>
   requireActionIssuer(ctxOf(userId, roles), 'memory.read', w.appId, values).then(() => 'OK', (e: any) => e?.extensions?.code ?? String(e));
 
+/** A knowledge memory `owner` manages and nobody else reads: in an organization `owner` alone belongs to, as OWNER (a
+ * user-owned memory is no grant target since #5345, `user-owned`). */
 async function userKb(owner: string) {
-  return db.memory.create({ data: { id: generateId(), name: 'kb', urn: `u-${generateId().slice(-8)}:kb`, class: 'knowledge', visibility: null, ownerUserId: owner } as never });
+  const own = await db.organization.create({ data: { id: generateId(), name: `u-${generateId().slice(-8)}`, urn: `u-${generateId().slice(-8)}` } });
+  await db.orgMember.create({ data: { organizationId: own.id, userId: owner, role: 'OWNER' } });
+  return db.memory.create({ data: { id: generateId(), name: 'kb', urn: `${own.urn}:kb`, class: 'knowledge', visibility: 'ORGANIZATION', organizationId: own.id } as never });
 }
 async function orgMemory(data: Record<string, unknown>) {
   return db.memory.create({ data: { id: generateId(), name: 'm', urn: `${w.orgUrn}:m-${generateId().slice(-8)}`, class: 'knowledge', visibility: 'ORGANIZATION', organizationId: w.orgId, ...data } as never });
@@ -109,6 +113,19 @@ describe('creation admits the two forms (cor:acl:140:02)', () => {
     }
   });
 
+  it('a user-owned knowledge or group memory is never a target (#5345: the record gate refuses it to a principal with no user)', async () => {
+    const { memoryReadTargetRefusal } = await import('./readGrant.js');
+    const row = { id: generateId(), appId: null, organizationId: null, userId: null, deletedAt: null, isEncrypted: false,
+      isInstallMemory: false, workerOf: [], userMemoryOfAgentId: null };
+    for (const cls of ['knowledge', 'group']) {
+      expect(await memoryReadTargetRefusal(db as never, w.appId, { ...row, class: cls, ownerUserId: manager })).toBe('user-owned');
+      expect(await memoryReadTargetRefusal(db as never, w.appId, { ...row, class: cls, ownerUserId: null, organizationId: w.orgId })).toBeNull(); // the control
+    }
+    // At creation (the same refusal as any other target) and at read: a grant written around the door reaches nothing.
+    const personsOwn = await db.memory.create({ data: { id: generateId(), name: 'po', urn: `p-${generateId().slice(-8)}:kb`, class: 'knowledge', visibility: null, ownerUserId: manager } as never });
+    expect(await code(create({ memory: personsOwn.id }))).toBe('GRANT_VALUES_INVALID');
+  });
+
   it('only the grant\'s own App holds it: a worker, an agent, a person and another App are refused', async () => {
     for (const holder of [{ kind: 'worker', id: w.workerId }, { kind: 'agent', id: w.agentId }, { kind: 'user', id: manager }, { kind: 'app', id: w.app2Id }]) {
       expect({ holder, code: await code(create({ memory: kb.id }, { holder })) }).toEqual({ holder, code: 'GRANT_HOLDER_NOT_ALLOWED' });
@@ -141,7 +158,10 @@ describe('who signs (MEMORY_READ_APPROVER)', () => {
     expect(await signer(reader, { memory: kb.id })).toBe('FORBIDDEN');
     expect(await signer(admin, { memory: kb.id })).toBe('FORBIDDEN');
     const platform = (await db.user.create({ data: { handle: `pa-${generateId().slice(-6)}`, roles: ['ADMIN'] } })).id;
-    expect(await signer(platform, { memory: [theirs.id] }, ['ADMIN'])).not.toBe('OK');
+    // A platform admin does not manage a person's user-owned memory (since #5345 no grant target either: `user-owned`). For an
+    // organization's memory the shared `requireMemoryManageAccess` decides, as for #2883.
+    const personsOwn = await db.memory.create({ data: { id: generateId(), name: 'po', urn: `p-${generateId().slice(-8)}:kb`, class: 'knowledge', visibility: null, ownerUserId: reader } as never });
+    expect(await signer(platform, { memory: [personsOwn.id] }, ['ADMIN'])).not.toBe('OK');
   });
 
   it('form (b): one memory the signer does not manage refuses the whole list (one grant per manager)', async () => {

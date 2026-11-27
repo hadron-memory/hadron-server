@@ -47,7 +47,7 @@ export interface ReadGrantTarget {
 
 export type ReadGrantTargetRefusal =
   | 'deleted' | 'strict-owner' | 'encrypted' | 'install-memory' | 'system-not-installed' | 'worker-memory' | 'session-memory'
-  | 'other-app-team-space' | 'own-app' | 'user-holding';
+  | 'other-app-team-space' | 'own-app' | 'user-holding' | 'user-owned';
 
 type Db = Pick<PrismaClient, 'agent' | 'appAgent' | 'app' | 'agentImport' | 'organization' | 'agentOrgGrant'>;
 
@@ -59,8 +59,10 @@ type Db = Pick<PrismaClient, 'agent' | 'appAgent' | 'app' | 'agentImport' | 'org
  *  - system: only the system memory of a live Agent installed in this App now (the #2883 rule).
  *  - app: a Worker's or a session memory never; another App's team space never (the #2883 narrowing); this App's own memories
  *    `own-app` (it reads them already, so a grant would name nothing new).
- *  - group and knowledge: admitted, except a per-user chat holding (hadron-internal#88); the giver's own read (judged at every
- *    use) is what bounds them.
+ *  - group and knowledge: admitted, except a per-user chat holding (hadron-internal#88) and (#5345) a USER-OWNED one
+ *    (`ownerUserId` set): GraphQL's record gate (`canReadMemoryRecord`'s ownerUserId branch) refuses such a memory to a
+ *    principal with no user, so a grant that admitted it would let MCP and node reads serve what `memory(ref:)` and the list
+ *    refuse (cor:api:120:03), the drift #5345 removed for links. The giver's own read (judged at every use) bounds the rest.
  */
 export async function memoryReadTargetRefusal(db: Db, appId: string, memory: ReadGrantTarget): Promise<ReadGrantTargetRefusal | null> {
   if (memory.deletedAt) return 'deleted';
@@ -83,6 +85,7 @@ export async function memoryReadTargetRefusal(db: Db, appId: string, memory: Rea
   // hadron-internal#88 (cor:cht:010:02): a per-user chat holding is its creator's alone; no grant held by an App serves it, whoever
   // gives it (as automationReadGrant.ts's #2883 judge). Refused at creation and again at every read.
   if (isUserHolding(memory)) return 'user-holding';
+  if (memory.ownerUserId !== null) return 'user-owned';
   if (memory.appId === appId) return 'own-app';
   return null;
 }

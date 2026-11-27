@@ -8,7 +8,8 @@
  * and installed, the memory is live and not `system`, and the ATTACHER can read the memory NOW in their own right
  * (`holdsContentReadIndependently`, #1349, registered by the GraphQL helpers; with none registered every link is inactive, failing
  * closed). For `personal` and `private` a link is active only when the memory's owner is the App's owner and made the link.
- * `isPureAppKeyShape` and `readsInOwnRight` are shared with the grant judge.
+ * Since #5345 a link to any other USER-OWNED memory (`ownerUserId` set) is inactive too; with #5321 that changes only what
+ * `active` shows, since no link reads. `isPureAppKeyShape` and `readsInOwnRight` are shared with the grant judge.
  */
 import type { PrismaClient } from '../generated/prisma/index.js';
 
@@ -47,8 +48,9 @@ export type JudgedLink = { memoryId: string; attachedBy: string; active: boolean
 
 /**
  * Judge the App's link rows (or those of `onlyMemoryIds`) at use. A row whose App is deleted or uninstalled, whose memory is
- * gone or `system`, whose attacher no longer reads the memory in their own right, or (personal/private) whose memory is not
- * the App owner's is inactive; it is still returned, so a listing can say so.
+ * gone or `system`, whose attacher no longer reads the memory in their own right, (personal/private) whose memory is not
+ * the App owner's, or (#5345) whose memory is user-owned of another class is inactive; it is still returned, so a listing
+ * can say so.
  */
 export async function judgeAppLinks(
   db: PrismaClient,
@@ -61,7 +63,7 @@ export async function judgeAppLinks(
     where: { appId, ...(opts.onlyMemoryIds ? { memoryId: { in: [...opts.onlyMemoryIds] } } : {}) },
     select: {
       memoryId: true, attachedBy: true,
-      memory: { select: { class: true, userId: true, deletedAt: true } },
+      memory: { select: { class: true, userId: true, ownerUserId: true, deletedAt: true } },
       attacher: { select: { roles: true, deletedAt: true } },
     },
   });
@@ -78,6 +80,13 @@ export async function judgeAppLinks(
       // attach of the owner's memory grants the key nothing.
       return app!.ownerUserId !== null && link.memory.userId === app!.ownerUserId && link.attachedBy === app!.ownerUserId;
     }
+    // #5345: a user-owned memory of any other class never reaches a key through a link (cor:dmo:060:22 — attaching gives
+    // no access, the #5258/#5185 interim covering own personal/private only; cor:api:120:03 — a list equals the reads on
+    // every surface). The refusal keys on the tenant-owner axis, not `userId` and not the class. On main the record gate
+    // refused a knowledge/group row (no link arm in its `ownerUserId` branch), but node reads and `findNodes` read the
+    // accessible set, whose link arm is this judge, so they returned its nodes; an app-class row reached every read. This
+    // refusal removes all of those reads. An organization-owned link is unaffected. The row stays, inert like a lapsed one.
+    if (link.memory.ownerUserId !== null) return false;
     return true;
   };
   const holds = ownRightReader;

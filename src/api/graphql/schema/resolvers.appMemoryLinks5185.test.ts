@@ -278,8 +278,13 @@ describe('the reach of a link, on both surfaces', () => {
   });
 
   it('a user, an impersonation, a session-bound key, a refused binding and a run with a user id gain nothing from a link or a grant (both surfaces)', async () => {
-    // alice's own user-owned knowledge memory: she reads it, bob does not, and she links it into the organization's App and grants it.
-    const mine = await memory({ visibility: null, organizationId: null, ownerUserId: alice });
+    // A knowledge memory of an organization alice alone belongs to (as OWNER): she reads it, bob does not, and she links it into
+    // the organization's App and grants it. (#5345: a user-owned memory is no grant target, `user-owned`, so not her user tenant.)
+    const own = await db.organization.create({ data: { id: generateId(), name: `al-${generateId().slice(-8)}`, urn: `al-${generateId().slice(-8)}` } });
+    await db.orgMember.create({ data: { organizationId: own.id, userId: alice, role: 'OWNER' } });
+    const mine = await db.memory.create({
+      data: { id: generateId(), name: 'mine', urn: `${own.urn}:mine`, class: 'knowledge', visibility: 'ORGANIZATION', organizationId: own.id } as never,
+    });
     await attach(asUser(alice), mine.id, orgApp.id);
     await grantRead(orgApp.id, mine.id, alice);
     const key = await scopedKey(orgApp.id);
