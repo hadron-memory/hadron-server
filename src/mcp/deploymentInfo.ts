@@ -357,7 +357,16 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // pure key holding the new App-key scope `grant:read` (ADDITIVE: the closed scope list gains it; a client that validates scopes against the
 // old list cannot give it). A person, an impersonation, a session-bound key and a run carrying a user id gain nothing. #5398's own-memory
 // read (0.53.0) is neither an attachment nor a grant and is unchanged. (0.53.0 is #5398 and 0.54.0 is #5394, both merged first.)
-export const HADRON_SERVER_VERSION = '0.55.0';
+// 0.59.0 — ADDITIVE (#5452, cor:api:090:02, cor:api:090:05): an explicit way to read `system` nodes. New optional
+// `NodeFilter.includeSystemNodes: Boolean` on `findNodes`, the same argument on `Query.memoryLocSegments`, and the same parameter on
+// MCP `hadron_find_nodes` (and on `hadron_list_nodes`, where it is accepted and changes nothing: that tree never hid system nodes).
+// `true` lifts `system`, and only `system`, from the default node-type exclusion; `chat-message`, comments, the memory-class SYSTEM
+// default, access, soft-deleted rows and inheritance are untouched, and an explicit `nodeType` / `nodeTypes` decides alone. No default
+// changes: `false`, `null` and omitted are the answers of 0.55.0. `appNodes` / `appNodesPage` refuse either boolean with BAD_USER_INPUT
+// (a new refusal on a new field only). A client keys on this version before sending the field: an older server refuses an unknown
+// input field over GraphQL and silently drops an unknown MCP argument (hadron-portal#2695, hadron-cli#3328). (0.56.0, 0.57.0 and
+// 0.58.0 are claimed by the open #5391, #5441 and #5447.)
+export const HADRON_SERVER_VERSION = '0.59.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

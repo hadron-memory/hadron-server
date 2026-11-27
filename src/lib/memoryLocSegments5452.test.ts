@@ -124,19 +124,52 @@ describe('#5452 the with-system partial index: lockstep and predicate', () => {
     expect((segments as unknown as { SEGMENT_WITH_SYSTEM_INDEX?: string }).SEGMENT_WITH_SYSTEM_INDEX).toBe(WITH_SYSTEM_INDEX);
   });
 
-  it('the database built from post-push.sql holds the index, valid, with that predicate and key', async () => {
-    const [row] = await db.$queryRaw<Array<{ def: string | null; valid: boolean | null }>>`
-      SELECT pg_get_indexdef(c.oid) AS def, i.indisvalid AS valid
+  it('the database built from post-push.sql holds the index, valid: the first partial index with system rows let in', async () => {
+    const rows = await db.$queryRaw<Array<{ name: string; def: string; valid: boolean }>>`
+      SELECT c.relname AS name, pg_get_indexdef(c.oid) AS def, i.indisvalid AS valid
       FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
-      WHERE c.relname = ${WITH_SYSTEM_INDEX} AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema())`;
-    expect(row, `${WITH_SYSTEM_INDEX} exists`).toBeDefined();
-    expect(row.valid).toBe(true);
-    expect(row.def).toContain(`(memory_id, (replace(loc, ':'::text, chr(1))) COLLATE "C")`);
-    expect(row.def).toContain(`'chat-message'::text`);
-    expect(row.def).toContain(`'comment'::text`);
-    expect(row.def).not.toContain(`'system'`);
-    expect(row.def).toContain('deleted_at IS NULL');
+      WHERE c.relname IN (${WITH_SYSTEM_INDEX}, ${SEGMENT_ELIGIBLE_INDEX})
+        AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema())`;
+    const withSystem = rows.find((r) => r.name === WITH_SYSTEM_INDEX);
+    const eligible = rows.find((r) => r.name === SEGMENT_ELIGIBLE_INDEX);
+    expect(withSystem, `${WITH_SYSTEM_INDEX} exists`).toBeDefined();
+    expect(eligible, `${SEGMENT_ELIGIBLE_INDEX} exists`).toBeDefined();
+    expect(withSystem!.valid).toBe(true);
+    // Compared through the catalog's own rendering, so the pin does not depend on how a server version prints
+    // an expression: the two definitions differ in the name and in the one excluded type, and in nothing else.
+    expect(eligible!.def).toContain(`'system'::text, `);
+    expect(withSystem!.def).toBe(eligible!.def.replace(SEGMENT_ELIGIBLE_INDEX, WITH_SYSTEM_INDEX).replace(`'system'::text, `, ''));
+    expect(withSystem!.def).toContain(`ARRAY['chat-message'::text, 'comment'::text]`);
+    expect(withSystem!.def).not.toContain(`'system'`);
   });
+
+  it('the migration file, sent as ONE simple query the way migrate deploy sends it, builds the same valid index', async () => {
+    const def = async (pg: Client) => (await pg.query(
+      `SELECT pg_get_indexdef(c.oid) AS def, i.indisvalid AS valid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+       WHERE c.relname = $1 AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema())`, [WITH_SYSTEM_INDEX])).rows[0];
+    const pg = new Client({ connectionString: process.env.DATABASE_URL });
+    await pg.connect();
+    try {
+      const before = await def(pg);
+      expect(before?.valid).toBe(true);
+      await pg.query(`DROP INDEX ${WITH_SYSTEM_INDEX}`);
+      expect(await def(pg)).toBeUndefined();
+      try {
+        // No parameters, so node-postgres uses the simple protocol: the whole file is one message. A second
+        // statement in the file would make it an implicit transaction and CONCURRENTLY would fail (SQLSTATE 25001).
+        await pg.query(read(MIGRATION));
+        expect(await def(pg)).toEqual(before);
+        // Re-running is a no-op (IF NOT EXISTS), as a retried deploy needs.
+        await pg.query(read(MIGRATION));
+        expect(await def(pg)).toEqual(before);
+      } finally {
+        // Whatever happened above, later files in this worker get the index post-push.sql gives them.
+        await pg.query(statementOf(read('post-push.sql'), false));
+      }
+    } finally {
+      await pg.end();
+    }
+  }, 60_000);
 });
 
 /** server_version_num of PostgreSQL 16.0, the first release with EXPLAIN (GENERIC_PLAN). */
@@ -235,7 +268,6 @@ describe('#5452 the flagged walk reads the with-system index and never the messa
       for (const s of scans) {
         expect(s['Node Type']).toBe('Index Scan');
         expect(s['Index Name']).toBe(WITH_SYSTEM_INDEX);
-        expect(s['Index Name']).not.toBe(SEGMENT_ELIGIBLE_INDEX);
       }
     },
   );
