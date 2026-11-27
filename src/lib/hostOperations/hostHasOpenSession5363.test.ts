@@ -3,6 +3,12 @@
  * session a registration-join query). It now asks for the candidates that could match, still judged by `sessionRunsOn` (gate decision Q4, the
  * one predicate). A differential pin: the old full scan, kept here as the oracle, and the new path agree on every case below; plus the cost
  * claim (the number of queries no longer grows with the App's unrelated open sessions) and a `force` control.
+ *
+ * Why the filter is a SUPERSET (blind F1): `sessionRunsOn` returns `session.launchHostId === hostId` for a host-launched session and reads NO
+ * registration for it (agentlessEnd.ts, its first line), so a session launched elsewhere can never match, whatever is registered where; and a
+ * hand-started one matches only when the worker's sole LIVE registration is this host, so the worker has a registration here with
+ * `lost_at IS NULL` (live = not lost AND within the lapse window; a stale one stays a candidate and the predicate applies the window). The cases
+ * below include the host-launched sessions whose registrations point the other way.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Prisma } from '../../generated/prisma/index.js';
@@ -53,7 +59,9 @@ async function worker(): Promise<string> {
 /** A registration of `hostId` listing `workerIds`; fresh by default, `ageSeconds` old, or lost. */
 async function register(hostId: string, workerIds: string[], over: { ageSeconds?: number; lost?: boolean } = {}) {
   // One registration per (App, host): later calls list more workers on it (its freshness is set by the first).
-  const reg = await db.hostRegistration.findUnique({ where: { appId_hostId: { appId, hostId } } }) ?? await db.hostRegistration.create({ data: {
+  const existing = await db.hostRegistration.findUnique({ where: { appId_hostId: { appId, hostId } } });
+  if (existing && (over.ageSeconds !== undefined || over.lost)) throw new Error('register(): ageSeconds / lost apply only to the first call for a host');
+  const reg = existing ?? await db.hostRegistration.create({ data: {
     appId, hostId, label: hostId, pollIntervalSeconds: POLL,
     refreshedAt: new Date(Date.now() - (over.ageSeconds ?? 0) * 1000), ...(over.lost ? { lostAt: new Date() } : {}),
   } });
@@ -76,7 +84,7 @@ beforeEach(async () => {
   n = 0;
   const org = await db.organization.create({ data: { name: 'Open', urn: `open5363-${Math.floor(Math.random() * 1e6)}.example` } });
   holderId = (await db.user.create({ data: { email: `${generateId()}@s7.test` } })).id;
-  agentId = (await db.agent.create({ data: { organizationId: org.id, name: 'A', urn: `${org.urn}:agent` } as never })).id;
+  agentId = (await db.agent.create({ data: { organizationId: org.id, name: 'A', urn: `${org.urn}:agent` } })).id;
   appId = (await db.app.create({ data: { organizationId: org.id, name: 'App', urn: `${org.urn}:app` } })).id;
 });
 
@@ -100,6 +108,14 @@ describe('#5363 the old full scan and the narrowed path agree (differential)', (
       const a = await worker(), b = await worker(), c = await worker();
       await register(OTHER, [a]); await handStarted(a); await handStarted(b); await launched(c, OTHER);
       const d = await worker(); await register(HOST, [d]); await handStarted(d); }],
+    ['a session launched ELSEWHERE whose worker is registered ONLY HERE (the registration is not read for a host-launched session)', false, async () => {
+      const w = await worker(); await register(HOST, [w]); await launched(w, OTHER); }],
+    ['a session launched HERE whose worker is registered only ELSEWHERE', true, async () => {
+      const w = await worker(); await register(OTHER, [w]); await launched(w, HOST); }],
+    ['a session launched HERE whose registration here is LOST and whose worker is live sole on another host', true, async () => {
+      const w = await worker(); await register(HOST, [w], { lost: true }); await register(OTHER, [w]); await launched(w, HOST); }],
+    ['a session launched ELSEWHERE whose registration here is LOST and whose worker is live sole on that other host', false, async () => {
+      const w = await worker(); await register(HOST, [w], { lost: true }); await register(OTHER, [w]); await launched(w, OTHER); }],
     ['two candidate workers here: the first is not sole (registered elsewhere too), the second is sole here', true, async () => {
       const a = await worker(), b = await worker();
       await register(HOST, [a, b]); await register(OTHER, [a]); await handStarted(a); await handStarted(b); }],
@@ -114,6 +130,16 @@ describe('#5363 the old full scan and the narrowed path agree (differential)', (
     });
   }
 
+  it('another App\'s registration of the same host id, and its open session, do not count here', async () => {
+    const org = await db.organization.findFirstOrThrow();
+    const other = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
+    const w = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: other.id, agentId, name: 'Elsewhere', slug: 'elsewhere', heldByUserId: holderId, heldAt: new Date() }, select: { id: true } })).id;
+    const reg = await db.hostRegistration.create({ data: { appId: other.id, hostId: HOST, label: HOST, pollIntervalSeconds: POLL, refreshedAt: new Date() } });
+    await db.hostRegistrationWorker.create({ data: { registrationId: reg.id, workerId: w, family: 'claude' } });
+    await db.session.create({ data: { id: generateId(), appId: other.id, agentId, workerId: w, userId: holderId, tool: 'vitest' } });
+    expect(await both()).toEqual({ old: false, fresh: false });
+  });
+
   it('the answer is per host: the same state read for the other host', async () => {
     const w = await worker(); await register(OTHER, [w]); await handStarted(w);
     expect(await both(OTHER)).toEqual({ old: true, fresh: true });
@@ -121,6 +147,7 @@ describe('#5363 the old full scan and the narrowed path agree (differential)', (
   });
 });
 
+// The exact numbers below ARE the contract (how often the one predicate is asked under the exclusive anchor), not an incidental count.
 describe('#5363 the cost no longer grows with the App\'s unrelated open sessions', () => {
   const judged = vi.mocked(sessionRunsOn);
   const at = () => ({ appId, hostId: HOST, now: now(), checkIns: CHECK_INS });
