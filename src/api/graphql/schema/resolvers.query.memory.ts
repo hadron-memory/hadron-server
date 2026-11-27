@@ -28,6 +28,7 @@ import {
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { linkedReachFor } from '../../../lib/appMemoryLinks.js';
 import { activeAgentInstallLicenseIds, isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 import { findInstallMemory, resolveInstallTarget } from './installMemory.js';
 import { listableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
@@ -518,7 +519,6 @@ export const memoryQueries = {
           memoryItems:{where:{deletedAt:null,memory:{deletedAt:null}},include:{memory:{include:MEMORY_INCLUDE}}},
         }});
         const installedRows = installedAgents.map(agent=>({agent}));
-        if (!installedRows.length) return empty;
         // #758 — the twin of the #676 blocker-2 fix, which landed only in the
         // MCP `getAppMemoryAccess`. spec 047: a USER-owned memory is strictly
         // owner-only, so one owned by someone other than this App's owner must
@@ -548,6 +548,21 @@ export const memoryQueries = {
             // audience even if an agent carries one as a memory item.
             if (!(await canReadMemoryRecord(ctx, item.memory))) continue;
             memoryMap.set(item.memory.id, item.memory);
+          }
+        }
+        // #5272 (hrn:node:hadronmemory.com:specs:cor:api:120:03, App-key line): plus every memory the App's links let this
+        // key read, judged at this call by the reads' own judge (`linkedReachFor`, #5185), so a lapsed link leaves the list
+        // when it stops being readable, and an App with no installed Agent still lists its links (as MCP's
+        // `hadron_list_memories` does). The judge decides the reach, so the Agent-item exclusions above are not re-applied;
+        // the filters the caller chose and the record gate are, as for an Agent item. Empty for any caller but a pure App key.
+        const linkedIds = [...(await linkedReachFor(ctx.db, ctx))].filter((id) => !memoryMap.has(id));
+        if (linkedIds.length > 0) {
+          const linkedRows = await ctx.db.memory.findMany({ where: { id: { in: linkedIds }, deletedAt: null }, include: MEMORY_INCLUDE });
+          for (const memory of linkedRows) {
+            if (classSet ? !classSet.has(memory.class) : memory.class === 'system') continue;
+            if (f.visibility && memory.visibility !== f.visibility) continue;
+            if (!(await canReadMemoryRecord(ctx, memory))) continue;
+            memoryMap.set(memory.id, memory);
           }
         }
         const all = Array.from(memoryMap.values()).sort(

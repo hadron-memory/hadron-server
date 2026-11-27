@@ -11270,6 +11270,9 @@ export const typeDefs = `#graphql
     (2) memories their member orgs own, (3) memories their member orgs
     subscribe to. Per-user agent memories (userMemoryOfAgentId) are excluded.
     App-key callers get the union of their installed Agents' memory items.
+    A pure App key's list also holds every memory its App's links let it read
+    (#5272, hrn:node:hadronmemory.com:specs:cor:api:120:03), judged at the call
+    by the same rule as its reads, so a lapsed link leaves the list.
 
     filter.visibility: PUBLIC selects the public marketplace slice instead
     (every PUBLIC memory — the old publicMemories). filter.memoryClasses
