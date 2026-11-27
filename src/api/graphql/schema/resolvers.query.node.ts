@@ -1067,6 +1067,8 @@ export const nodeQueries = {
             select: { organizationId: true },
           });
           if (!run) return null;
+          // #5077 (F3a-1): a run of an App a person owns resolves to nothing until F3a-2 gives it the run read gate.
+          if (run.organizationId === null) return null;
           // Same READER-of-the-org gate the appRun(ref:) query enforces.
           if (!(await isOrgMember(run.organizationId))) return null;
           return {

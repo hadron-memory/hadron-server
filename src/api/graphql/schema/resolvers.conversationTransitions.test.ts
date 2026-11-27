@@ -21,6 +21,7 @@ let orgA: { id: string; urn: string };
 let adminUser: { id: string };
 let agent: { id: string; organizationId: string | null };
 let systemMemory: { id: string };
+let appId: string;
 
 function adminCtx(overrides: Partial<Context> = {}): Context {
   return { db, roles: ['ADMIN'], userId: adminUser.id, ...overrides };
@@ -53,6 +54,9 @@ beforeEach(async () => {
   systemMemory = await db.memory.findUniqueOrThrow({
     where: { id: created.systemMemoryId! },
   });
+  // #5394: startChat runs under an identified App; an App of the org installs the Agent and each start names it.
+  appId = (await db.app.create({ data: { name: 'sage-app', urn: 'test-org:sage-app', organizationId: orgA.id } })).id;
+  await db.appAgent.create({ data: { appId, agentId: created.id } });
   // #2712: chats are served the Agent's boot prompt; an Agent without one is refused.
   await serveEveryAgent(db);
 });
@@ -126,7 +130,7 @@ describe('Hierarchical extractionSpec', () => {
 
     const result = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: appId },
       userCtx(adminUser.id),
     );
 
@@ -180,7 +184,7 @@ describe('Hierarchical extractionSpec', () => {
 
     const result = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: appId },
       userCtx(adminUser.id),
     );
 
@@ -207,7 +211,7 @@ describe('onTrack in processChatResponse', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: appId },
       userCtx(adminUser.id),
     );
 
@@ -236,7 +240,7 @@ describe('onTrack in processChatResponse', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: appId },
       userCtx(adminUser.id),
     );
 
@@ -285,7 +289,7 @@ describe('Goal stack and route history', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: appId },
       userCtx(adminUser.id),
     );
 
@@ -321,7 +325,7 @@ describe('Goal stack and route history', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: appId },
       userCtx(adminUser.id),
     );
 
@@ -388,7 +392,7 @@ describe('Edge evaluation in processChatResponse', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, conversationName: 'onboarding' },
+      { agentRef: agent.id, appRef: appId, conversationName: 'onboarding' },
       userCtx(adminUser.id),
     );
 
@@ -455,7 +459,7 @@ describe('Edge evaluation in processChatResponse', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, conversationName: 'main' },
+      { agentRef: agent.id, appRef: appId, conversationName: 'main' },
       userCtx(adminUser.id),
     );
 
@@ -523,7 +527,7 @@ describe('Edge evaluation in processChatResponse', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, conversationName: 'main' },
+      { agentRef: agent.id, appRef: appId, conversationName: 'main' },
       userCtx(adminUser.id),
     );
 
@@ -586,7 +590,7 @@ describe('Edge evaluation in processChatResponse', () => {
     };
 
     // present: nothing missing -> [] -> falsy -> no handoff, still on main:check
-    const present = await resolvers.Mutation.startChat({}, { agentRef: agent.id, conversationName: 'main' }, userCtx(adminUser.id));
+    const present = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: appId, conversationName: 'main' }, userCtx(adminUser.id));
     const stayed = await resolvers.Mutation.processChatResponse(
       {},
       { chatId: present.chatId, toolResponse: { message: 'done', next_stage: null, goal_reached: true, onTrack: true, data: { confidence: 0.9 } } },
@@ -597,7 +601,7 @@ describe('Edge evaluation in processChatResponse', () => {
     expect(await engineState(present.chatId)).toMatchObject({ conversationName: 'main', stageName: 'check' });
 
     // absent: ["confidence"] -> truthy -> hands off to profile (reachability control: the edge IS routable)
-    const absent = await resolvers.Mutation.startChat({}, { agentRef: agent.id, conversationName: 'main' }, userCtx(adminUser.id));
+    const absent = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: appId, conversationName: 'main' }, userCtx(adminUser.id));
     const moved = await resolvers.Mutation.processChatResponse(
       {},
       { chatId: absent.chatId, toolResponse: { message: 'done', next_stage: null, goal_reached: true, onTrack: true } },
@@ -655,7 +659,7 @@ describe('Edge evaluation in processChatResponse', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, conversationName: 'thread' },
+      { agentRef: agent.id, appRef: appId, conversationName: 'thread' },
       userCtx(adminUser.id),
     );
 
@@ -712,7 +716,7 @@ describe('Edge evaluation in processChatResponse', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, conversationName: 'thread' },
+      { agentRef: agent.id, appRef: appId, conversationName: 'thread' },
       userCtx(adminUser.id),
     );
 
@@ -770,7 +774,7 @@ describe('Edge evaluation in processChatResponse', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, conversationName: 'gate' },
+      { agentRef: agent.id, appRef: appId, conversationName: 'gate' },
       userCtx(adminUser.id),
     );
 
@@ -846,7 +850,7 @@ describe('Edge evaluation in processChatResponse', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, conversationName: 'gate' },
+      { agentRef: agent.id, appRef: appId, conversationName: 'gate' },
       userCtx(adminUser.id),
     );
 
@@ -898,7 +902,7 @@ describe('Edge evaluation in processChatResponse', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, conversationName: 'flow' },
+      { agentRef: agent.id, appRef: appId, conversationName: 'flow' },
       userCtx(adminUser.id),
     );
 
@@ -939,7 +943,7 @@ describe('Goal descriptions on conversations', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: appId },
       userCtx(adminUser.id),
     );
 
@@ -963,7 +967,7 @@ describe('Goal descriptions on conversations', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: appId },
       userCtx(adminUser.id),
     );
 
@@ -1009,7 +1013,7 @@ describe('Fallback re-routing', () => {
     // is the only non-setup conversation. Let's force fallback by specifying it.)
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, conversationName: 'fallback' },
+      { agentRef: agent.id, appRef: appId, conversationName: 'fallback' },
       userCtx(adminUser.id),
     );
     expect(chat.conversationName).toBe('fallback');
@@ -1050,7 +1054,7 @@ describe('Fallback re-routing', () => {
 
     const chat = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, conversationName: 'fallback' },
+      { agentRef: agent.id, appRef: appId, conversationName: 'fallback' },
       userCtx(adminUser.id),
     );
 

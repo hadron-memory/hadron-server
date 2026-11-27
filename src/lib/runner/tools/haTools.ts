@@ -26,6 +26,8 @@ import {
   MAX_HA_RUN_TOOL_NAME_LENGTH,
 } from '../../homeAssistant.js';
 import type { RunToolDef } from './types.js';
+import { type OwnerRef, orgIdOf, requireOwnerRefOf } from '../../owner.js';
+import { orgOnlyToolsMessage, orgOnlyToolsRefused } from './orgOnly.js';
 
 /** Cap on the serialized result handed to the LLM — core's own ceiling on
  *  top of the tool's per-op bounding (a 500-entity states payload is
@@ -47,10 +49,13 @@ export function isHaRunToolName(name: string): boolean {
  *  are dropped (same as unregistered — resolution fails loud on the name). */
 async function loadInstances(
   db: PrismaClient,
-  organizationId: string,
+  /** #5077: the run's owner. Registries are an organization's: a person's run has none (no query). */
+  tenant: OwnerRef,
   slugs: string[],
 ): Promise<Map<string, HomeAssistantInstance>> {
   if (slugs.length === 0) return new Map();
+  const organizationId = orgIdOf(tenant);
+  if (organizationId === null) return new Map();
   const rows = await db.homeAssistantInstance.findMany({
     where: { organizationId, slug: { in: [...new Set(slugs)] }, enabled: true },
   });
@@ -66,13 +71,13 @@ async function loadInstances(
  */
 export async function unknownHaToolNames(
   db: PrismaClient,
-  organizationId: string,
+  tenant: OwnerRef,
   names: string[],
 ): Promise<string[]> {
   const parsed = names.map((name) => ({ name, parts: parseHaRunToolName(name) }));
   const instances = await loadInstances(
     db,
-    organizationId,
+    tenant,
     parsed.flatMap((p) => (p.parts ? [p.parts.slug] : [])),
   );
   return parsed
@@ -99,7 +104,11 @@ export async function materializeHaRunTools(
     if (!parts) throw new Error(`Malformed Home Assistant tool name "${name}".`);
     return { name, ...parts };
   });
-  const instances = await loadInstances(db, run.organizationId, parsed.map((p) => p.slug));
+  // #5077: the handler's own refusal for a person's run (node load refuses first; this catches any other route).
+  const tenant = requireOwnerRefOf(run);
+  const refused = orgOnlyToolsRefused(tenant, names);
+  if (refused.length > 0) throw new Error(orgOnlyToolsMessage(refused));
+  const instances = await loadInstances(db, tenant, parsed.map((p) => p.slug));
 
   return parsed.map(({ name, slug, op }) => {
     const instance = instances.get(slug);

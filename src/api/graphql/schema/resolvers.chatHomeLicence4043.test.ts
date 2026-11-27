@@ -74,9 +74,10 @@ async function publishPin() {
   return rev.revisionLoc as string;
 }
 
-async function start(scope: 'private' | 'shared' = 'private', pinned = false) {
+async function start(scope: 'private' | 'shared' = 'private', pinned = false, appRef: string = appId) {
   const pin = pinned ? await publishPin() : null;
-  const started = await M.startChat({}, { agentRef: agentId, scope, conversationName: 'flow' }, ctx());
+  // #5394: a JWT caller names the App the chat runs under.
+  const started = await M.startChat({}, { agentRef: agentId, scope, conversationName: 'flow', appRef }, ctx());
   expect(started.systemMessage).toContain('LICENSED STAGE');
   // The pin is what makes loadChatScript read the definition eagerly; without it that call makes no read, so a
   // licence gate moved after it would go unnoticed. Establish the pin (or its absence) instead of assuming it.
@@ -271,16 +272,21 @@ describe('#4043 controls', () => {
     }
   });
 
+  // #5394: this pinned that the cold search skipped a retained unlicensed install for a licensed App. No App is searched
+  // now: the named licensed App is the home, and naming the unlicensed one is refused like an unknown Agent.
   it('private start selects a licensed App rather than the earlier retained unlicensed install', async () => {
     await foreignHome();
     await loseLicence('revoked');
+    const revokedAppId = appId;
+    await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: revokedAppId }, ctx()))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     const org = await db.organization.create({ data: { name: 'Licensed', urn: 'licensed4043.test' } });
     await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'CONTRIBUTOR' } });
     const live = await db.app.create({ data: { organizationId: org.id, name: 'Live', urn: `${org.urn}:app` } });
     await db.appAgent.create({ data: { appId: live.id, agentId } });
     await db.appMember.create({ data: { appId: live.id, userId, role: 'member' } });
     await db.agentOrgGrant.create({ data: { orgId: org.id, agentId, activatedAt: new Date() } });
-    const started = await start();
+    const started = await start('private', false, live.id);
     const root = await chatNodeByLocOrThrow(db, started.chatId);
     expect((await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } })).appId).toBe(live.id);
   });

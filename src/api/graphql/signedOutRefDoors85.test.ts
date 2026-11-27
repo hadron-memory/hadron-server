@@ -121,6 +121,8 @@ const PINNED_DOORS = [
   'setTeamStopSignal',
   'setWorkerAvailability',
   'setWorkerLeaveAlone',
+  // #5394: startChat's appRef makes it a ref door; a signed-out start was already refused (requireRole READER).
+  'startChat',
   'startConnection',
   'startImpersonation',
   'startSession',

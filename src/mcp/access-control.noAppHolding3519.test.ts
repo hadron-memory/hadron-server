@@ -3,7 +3,8 @@
  * `startChat` creates for a user with no App installing the chatbot is read by the user it serves, on MCP as on
  * GraphQL. MCP refused that user (no creator arm in `canReadMemoryRow`). The build adds ONE arm there; this file pins it.
  *
- * H is created by the real `startChat`. Rows built by hand are labelled SYNTHETIC: each asserts that this MCP arm
+ * H was created by the real `startChat`; #5394 retired that route, so H is now written by hand in the shape it wrote
+ * (and the real start is pinned to refuse). Other rows built by hand are labelled SYNTHETIC: each asserts that this MCP arm
  * grants nothing for that shape, not that the shape is unreachable. GraphQL is asserted only for the legal H shapes
  * it already serves on the checked base. Writes and the access map are pinned unchanged.
  */
@@ -58,20 +59,29 @@ async function fixture() {
   }
   await serveAgentBootPrompt(db, agent.id, 'Hi.');
 
-  // H: the REAL startChat, no App installs the Agent.
+  // H: the no-App knowledge holding. #5394: the real startChat used to create it (the Agent manager's direct route, run
+  // under temporary ADMIN); that route is retired, so a start with no App identified now refuses CHAT_APP_NOT_IDENTIFIED
+  // and writes nothing (pinned below), and H is written by hand in the exact shape the retired route wrote. Holdings of
+  // this shape still exist, so the MCP read arm this file pins still matters.
   const startAs = async (u: { id: string }) => {
-    // #4046: create the real standalone holding under lawful manager reach, then
-    // restore the original membership before any MCP/GraphQL holding-access assertion.
     const key = { organizationId_userId: { organizationId: orgO.id, userId: u.id } };
     const prior = await db.orgMember.findUnique({ where: key });
     await db.orgMember.upsert({ where: key,
       create: { organizationId: orgO.id, userId: u.id, role: 'ADMIN' }, update: { role: 'ADMIN' } });
     try {
-      await resolvers.Mutation.startChat({}, { agentRef: agent.id }, { db, userId: u.id, roles: ['READER'] } as never);
+      const err = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, { db, userId: u.id, roles: ['READER'] } as never)
+        .then(() => null, (e: { extensions?: { code?: string } }) => e);
+      expect(err?.extensions?.code).toBe('CHAT_APP_NOT_IDENTIFIED');
+      expect(await db.memory.count({ where: { userMemoryOfAgentId: agent.id, createdBy: u.id } })).toBe(0);
     } finally {
       if (prior) await db.orgMember.update({ where: key, data: { role: prior.role } });
       else await db.orgMember.delete({ where: key });
     }
+    const opaque = generateId().toLowerCase();
+    await db.memory.create({ data: {
+      organizationId: orgO.id, urn: `${orgO.urn}:${opaque}`, name: `${agent.name} — ${u.id}`, userId: null,
+      class: 'knowledge', visibility: 'ORGANIZATION', userMemoryOfAgentId: agent.id, createdBy: u.id,
+    } as never });
     const h = await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agent.id, createdBy: u.id } });
     await db.node.create({ data: { memoryId: h.id, loc: LOC, name: `needle3519 ${h.id}`, content: `secret ${h.id}`, nodeType: 'record' } });
     return h;

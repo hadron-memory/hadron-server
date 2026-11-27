@@ -103,7 +103,7 @@ function deps(opts: { noConfig?: boolean } = { noConfig: true }) {
 
 const mint = async (eventData: Record<string, unknown> = {}) =>
   mintAppRun(db, {
-    organizationId: orgId, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData,
+    owner: { organizationId: orgId }, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData,
     consentPrincipal: await createDbRunConsentPrincipal(db, orgId, appId),
   });
 

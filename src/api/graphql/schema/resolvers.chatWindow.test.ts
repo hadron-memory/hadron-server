@@ -283,6 +283,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
   let adminUser: { id: string };
   let agent: { id: string; systemMemoryId?: string | null };
 
+  let chatAppId: string;
   const adminCtx = (): Context => ({ db, roles: ['ADMIN'], userId: adminUser.id }) as Context;
 
   beforeEach(async () => {
@@ -302,7 +303,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
       adminCtx(),
     );
     agent = created;
-    await db.app.create({
+    chatAppId = (await db.app.create({
       data: {
         id: generateId(),
         name: 'research-app',
@@ -310,7 +311,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
         organizationId: orgA.id,
         appAgents: { create: { agentId: agent.id } },
       },
-    });
+    })).id;
     const systemMemory = await db.memory.findUniqueOrThrow({
       where: { id: created.systemMemoryId! },
     });
@@ -366,7 +367,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
 
   /** Drive `turns` real turns; return the contents the last call handed the model. */
   async function driveTurns(turns: number): Promise<string[]> {
-    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, adminCtx());
+    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: chatAppId }, adminCtx());
     let last: { messageHistory: Array<{ role: string; content: string }> } | undefined;
     for (let n = 1; n <= turns; n++) {
       last = (await resolvers.Mutation.sendChatMessage(
@@ -382,7 +383,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
     await db.agent.update({ where: { id: agent.id }, data: { personaRole: 'researcher' } });
     await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, a {{worker.role}}.');
 
-    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, adminCtx());
+    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: chatAppId }, adminCtx());
     expect(start.systemMessage).toBe('You are research-agent, a researcher.\n\nScope the research.');
 
     const turn = await resolvers.Mutation.sendChatMessage(
@@ -416,7 +417,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
   }, DRIVE_60_TIMEOUT_MS);
 
   it('#3496: a real chatbot turn leaves the counter keys outside record-root data', async () => {
-    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, adminCtx());
+    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: chatAppId }, adminCtx());
     const root = await chatNodeByLocOrThrow(db, start.chatId);
     expect(root.nodeType).toBe('record');
     expect(root.data).not.toHaveProperty('messageCount');
@@ -444,7 +445,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
    * pre-#919 shape this tiebreak exists for.
    */
   it('inverts the whole tiebreak for the model too (legacy colliding seq)', async () => {
-    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, adminCtx());
+    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: chatAppId }, adminCtx());
     const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
 
     const t = (ms: number) => new Date(Date.parse('2026-01-01T00:00:00.000Z') + ms);
@@ -488,7 +489,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
    * Seeds MODEL_HISTORY_LIMIT + 10 of them so the window cannot carry both.
    */
   it('null-seq legacy rows cannot crowd the current turn out of the model window', async () => {
-    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, adminCtx());
+    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: chatAppId }, adminCtx());
     const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
 
     for (let n = 1; n <= 60; n++) {

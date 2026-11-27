@@ -8,7 +8,8 @@
  *   - (c) a personal memory only: unchanged;
  *   - (d) the private memory is untouched: no chat root is written there (red, inside (a) and (b));
  *   - controls: another person's memory and a deleted one are not picked; a stamped knowledge home (the no-App manager
- *     route's) is found again, not provisioned a second time; a personal memory wins over it.
+ *     route's) is found again, not provisioned a second time; a personal memory wins over it. #5394 retired that route:
+ *     the knowledge-home controls now pin that no such home is provisioned, and that one left from before is never reused.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -51,7 +52,7 @@ const seedFlow = async (memoryId: string) => {
   ]) await db.node.create({ data: { memoryId, name: row.loc, nodeType: 'system', ...row } });
 };
 
-const start = (userId: string) => M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, as(userId));
+const start = (userId: string) => M.startChat({}, { agentRef: agentId, appRef: appId, conversationName: 'flow' }, as(userId));
 const homeOf = async (chatId: string) => (await chatNodeByLocOrThrow(db, chatId)).memoryId as string;
 const startAndSend = async (userId: string) => {
   const started = await start(userId);
@@ -108,30 +109,41 @@ describe('#5380 controls', () => {
   });
 
   it('a stamped knowledge home (the no-App manager route) is found again, not provisioned a second time', async () => {
-    // An Agent no App installs: its manager's first start provisions a knowledge home stamped with the Agent.
-    const solo = await M.createAgent({}, { orgRef: orgId, name: 'Solo agent', visibility: 'ORGANIZATION' }, { db, userId: adminId, roles: ['ADMIN'] });
-    await seedFlow(solo.systemMemoryId);
-    await serveEveryAgent(db);
-    const startSolo = () => M.startChat({}, { agentRef: solo.id, conversationName: 'flow' }, { db, userId: adminId, roles: ['ADMIN'] } as Context);
-    const first = await homeOf((await startSolo()).chatId);
-    const row = await db.memory.findUniqueOrThrow({ where: { id: first } });
-    expect({ class: row.class, userMemoryOfAgentId: row.userMemoryOfAgentId }).toEqual({ class: 'knowledge', userMemoryOfAgentId: solo.id });
-    const memories = await db.memory.count();
-    expect(await homeOf((await startSolo()).chatId)).toBe(first);
-    expect(await db.memory.count()).toBe(memories);
-  });
-  it('a personal memory wins over a stamped knowledge home, whichever is older', async () => {
+    // #5394: before, an Agent no App installs had its manager's first start provision a knowledge home stamped with the
+    // Agent, found again on the second start. That route is retired: with no App named the start is
+    // CHAT_APP_NOT_IDENTIFIED, and under an App that does not install the Agent it is refused like an unknown Agent; a
+    // second try provisions nothing either.
     const solo = await M.createAgent({}, { orgRef: orgId, name: 'Solo agent', visibility: 'ORGANIZATION' }, { db, userId: adminId, roles: ['ADMIN'] });
     await seedFlow(solo.systemMemoryId);
     await serveEveryAgent(db);
     const adminCtx = { db, userId: adminId, roles: ['ADMIN'] } as Context;
-    const startSolo = () => M.startChat({}, { agentRef: solo.id, conversationName: 'flow' }, adminCtx);
-    const knowledge = await homeOf((await startSolo()).chatId);
-    // The Agent is installed in the App later and its manager makes a personal memory there.
+    const memories = await db.memory.count();
+    await expect(M.startChat({}, { agentRef: solo.id, conversationName: 'flow' }, adminCtx)).rejects.toMatchObject({ code: 'CHAT_APP_NOT_IDENTIFIED' });
+    for (let i = 0; i < 2; i++) {
+      await expect(M.startChat({}, { agentRef: solo.id, appRef: appId, conversationName: 'flow' }, adminCtx))
+        .rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    }
+    expect(await db.memory.count()).toBe(memories);
+    expect(await db.memory.count({ where: { userMemoryOfAgentId: solo.id } })).toBe(0);
+  });
+  it('a personal memory wins over a stamped knowledge home, whichever is older', async () => {
+    // #5394: before, the stamped knowledge home was reused until a personal memory existed, which then won. Now a home
+    // with no App (the retired route's) is never reused: the start under the App provisions the App's personal home even
+    // with the older knowledge home present, and an existing personal memory still wins.
+    const solo = await M.createAgent({}, { orgRef: orgId, name: 'Solo agent', visibility: 'ORGANIZATION' }, { db, userId: adminId, roles: ['ADMIN'] });
+    await seedFlow(solo.systemMemoryId);
+    await serveEveryAgent(db);
+    const adminCtx = { db, userId: adminId, roles: ['ADMIN'] } as Context;
+    const startSolo = () => M.startChat({}, { agentRef: solo.id, appRef: appId, conversationName: 'flow' }, adminCtx);
+    // The older knowledge home, made the way the retired route left it (no App, no owner column, ORGANIZATION).
     await db.appAgent.create({ data: { appId, agentId: solo.id } });
     await db.appMember.create({ data: { appId, userId: adminId, role: 'member' } });
-    const personal = (await M.createMemoryInApp({}, { appRef: appId, agentRef: solo.id, memoryClass: 'personal' }, adminCtx)).id as string;
-    expect(personal).not.toBe(knowledge);
-    expect(await homeOf((await startSolo()).chatId)).toBe(personal);
+    const knowledge = await homeOf((await startSolo()).chatId);
+    await db.memory.update({ where: { id: knowledge }, data: { class: 'knowledge', userId: null, appId: null, visibility: 'ORGANIZATION' } });
+    const fresh = await homeOf((await startSolo()).chatId);
+    expect(fresh).not.toBe(knowledge);
+    expect(await db.memory.findUniqueOrThrow({ where: { id: fresh }, select: { class: true, appId: true, userId: true } }))
+      .toEqual({ class: 'personal', appId, userId: adminId });
+    expect(await homeOf((await startSolo()).chatId)).toBe(fresh);
   });
 });

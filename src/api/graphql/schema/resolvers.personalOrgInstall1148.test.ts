@@ -133,12 +133,12 @@ it('the real chat entry refuses an owner whose retained personal install lost me
  await serveAgentBootPrompt(db,agentId,'Synthetic served content.');
  await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
  const before=await db.node.count();
- await expect(mutation.startChat({}, {agentRef: agentId,scope:'private'},context())).rejects.toMatchObject({extensions:{code:'BOOT_PROMPT_INSTALL_LICENSE_INACTIVE'}});
+ await expect(mutation.startChat({}, {agentRef: agentId,scope:'private',appRef:appId},context())).rejects.toMatchObject({extensions:{code:'BOOT_PROMPT_INSTALL_LICENSE_INACTIVE'}});
  expect(await db.node.count()).toBe(before);
 });
 it('a foreign outsider without an App participation still gets the concealed chat refusal',async()=>{
  await db.appMember.deleteMany({where:{appId,userId:outsiderId}});
- await expect(mutation.startChat({}, {agentRef: agentId,scope:'private'},context(outsiderId))).rejects.toMatchObject({code:'AGENT_NOT_FOUND'});
+ await expect(mutation.startChat({}, {agentRef: agentId,scope:'private',appRef:appId},context(outsiderId))).rejects.toMatchObject({code:'AGENT_NOT_FOUND'});
 });
 it('a scoped chat cannot use an owned install in another App as a refusal oracle',async()=>{
  await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
@@ -220,7 +220,7 @@ it('retained-install chat refusal does not disclose an unreadable Agent current 
  await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
  await db.agent.update({where:{id:agentId},data:{name:'UNREADABLE CURRENT NAME'}});
  try {
-  await mutation.startChat({}, {agentRef: agentId,scope:'private'},context());
+  await mutation.startChat({}, {agentRef: agentId,scope:'private',appRef:appId},context());
   throw new Error('expected refusal');
  } catch(error) {
   expect(error).toMatchObject({extensions:{code:'BOOT_PROMPT_INSTALL_LICENSE_INACTIVE'}});
@@ -240,7 +240,7 @@ for(const state of ['deleted','personal'] as const) it(`retained chat ${state} v
  if(state==='personal') await db.orgMember.update({where:{organizationId_userId:{organizationId:orgId,userId:ownerId}},data:{deletedAt:new Date()}});
  await db.agent.update({where:{id:agentId},data:{name:'UNREADABLE RENAMED AGENT',...(state==='deleted'?{deletedAt:new Date()}:{visibility:'PERSONAL'})}});
  try {
-  await mutation.startChat({}, {agentRef: agentId,scope:'private'},context());
+  await mutation.startChat({}, {agentRef: agentId,scope:'private',appRef:appId},context());
   throw new Error('expected refusal');
  } catch(error) {
   if(state==='deleted') expect(error).toMatchObject({code:'AGENT_NOT_FOUND'});

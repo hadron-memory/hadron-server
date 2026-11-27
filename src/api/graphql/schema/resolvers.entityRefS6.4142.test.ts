@@ -493,6 +493,7 @@ describe('#4142 S6 chunk C — org mutations', () => {
 
 describe('#4142 S6 chunk D — agent mutations', () => {
   let agent: { id: string; urn: string };
+  let chatAppId: string;
 
   beforeEach(async () => {
     const systemMemory = await db.memory.create({
@@ -530,19 +531,20 @@ describe('#4142 S6 chunk D — agent mutations', () => {
     }
     // The App that hosts the caller's per-person memory (the JWT-user start
     // path resolves it via the agent link).
-    await db.app.create({
+    // #5394: the start names it (appRef).
+    chatAppId = (await db.app.create({
       data: {
         id: generateId(), organizationId: org.id, urn: `${org.urn}:s6-chat-app`, name: 's6-chat-app',
         appAgents: { create: { agentId: agent.id } },
       },
-    });
+    })).id;
   });
 
   it('startChat accepts agentRef as PK and as URN', async () => {
     // The chat's nodes are provisioned in the agent's system memory, so the
     // caller needs more than a read: the org ADMIN qualifies.
     for (const ref of [agent.id, agent.urn]) {
-      const a = await ask(adminCtx(), `mutation($ref: ID!) { startChat(agentRef: $ref) { chatId } }`, { ref });
+      const a = await ask(adminCtx(), `mutation($ref: ID!, $app: ID) { startChat(agentRef: $ref, appRef: $app) { chatId } }`, { ref, app: chatAppId });
       expect(a.error).toBeNull();
       expect((a.data as { chatId: string }).chatId).toBeTruthy();
     }

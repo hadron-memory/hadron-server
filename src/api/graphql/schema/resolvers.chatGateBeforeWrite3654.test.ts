@@ -73,7 +73,7 @@ const snapshot = async (chatId: string) => {
 describe('#3654 a refused sendChatMessage turn persists nothing', () => {
   it('an unserveable boot prompt refuses and leaves no message, count bump or record', async () => {
     const node = await compiled('v1');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'first' }, ctx());
     const before = await snapshot(start.chatId);
     await db.node.update({ where: { id: node }, data: { deletedAt: new Date() } });
@@ -83,7 +83,7 @@ describe('#3654 a refused sendChatMessage turn persists nothing', () => {
 
   it('a soft-deleted Agent refuses AGENT_NOT_FOUND and leaves no message behind', async () => {
     await compiled('v1');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'first' }, ctx());
     const before = await snapshot(start.chatId);
     await db.agent.update({ where: { id: agent.id }, data: { deletedAt: new Date() } });
@@ -95,7 +95,7 @@ describe('#3654 a refused sendChatMessage turn persists nothing', () => {
     const node = await compiled('v1');
     await db.node.create({ data: { id: generateId(), memoryId: systemMemoryId, loc: 'conversations:fallback', name: 'fallback', nodeType: 'system', data: { isFallback: true, stageOrder: ['hold'] } } });
     await db.node.updateMany({ where: { memoryId: systemMemoryId, loc: 'conversations:research' }, data: { data: { stageOrder: ['scope'], isSetup: false, goalSignals: ['research'] } } });
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     const chat = await chatNodeByLocOrThrow(db, start.chatId);
     // A chat parked in the fallback conversation with no stage: only the re-route would give this turn one.
     await setStage(chat, 'fallback', '');
@@ -107,7 +107,7 @@ describe('#3654 a refused sendChatMessage turn persists nothing', () => {
 
   it('a stage that appears between the early read and the chat lock is gated inside the write transaction (nothing persists)', async () => {
     const node = await compiled('v1');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     const chat = await chatNodeByLocOrThrow(db, start.chatId);
     // Parked with no stage: the early gate does not apply to this turn.
     await setStage(chat, 'research', '');
@@ -130,7 +130,7 @@ describe('#3654 a refused sendChatMessage turn persists nothing', () => {
 
   it('the happy path still writes the turn', async () => {
     await compiled('v1');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     const before = await snapshot(start.chatId);
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'ok' }, ctx());
     const after = await snapshot(start.chatId);

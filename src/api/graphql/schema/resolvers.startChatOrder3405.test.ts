@@ -28,6 +28,7 @@ const M = resolvers.Mutation as any;
 let admin: { id: string };
 let agentId: string;
 let systemMemoryId: string;
+let appId: string;
 const ctx = (): Context => ({ db, roles: ['ADMIN'], userId: admin.id }) as Context;
 
 type Seed = { loc: string; data?: Record<string, unknown> | null; content?: string | null };
@@ -41,6 +42,9 @@ beforeEach(async () => {
   const created = await M.createAgent({}, { orgRef: org.id, name: 'order-agent', visibility: 'ORGANIZATION' }, ctx());
   agentId = created.id;
   systemMemoryId = created.systemMemoryId!;
+  // #5394: startChat runs under an identified App; one App of the org installs the Agent and the caller names it.
+  appId = (await db.app.create({ data: { name: 'order-app', urn: 'org-3405:order-app', organizationId: org.id } })).id;
+  await db.appAgent.create({ data: { appId, agentId } });
   await serveEveryAgent(db);
 });
 
@@ -75,7 +79,7 @@ async function seed(path: Path, seeds: Seed[]) {
   await db.agent.update({ where: { id: agentId }, data: { publishedRevisionLoc: 'revisions:rev-3405' } });
 }
 
-const start = (args: Record<string, unknown> = {}) => M.startChat(null, { agentRef: agentId, ...args }, ctx());
+const start = (args: Record<string, unknown> = {}) => M.startChat(null, { agentRef: agentId, appRef: appId, ...args }, ctx());
 const opened = async (args: Record<string, unknown> = {}) => (await start(args)).conversationName as string;
 async function refusal(args: Record<string, unknown> = {}) {
   const err = await start(args).then(() => null, (e: unknown) => e);

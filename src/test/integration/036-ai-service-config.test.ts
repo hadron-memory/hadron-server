@@ -1559,7 +1559,7 @@ describe('#1482 — an org-less personal Agent never falls back to the host conf
     // Every AppRun has an organization today (NOT NULL; mintAppRun requires the
     // App's org), so this context can't be minted yet. Pinned so the day
     // user-owned Apps get runs, the rule already holds on the run path.
-    const run = { appId: personalApp.id, agentId: personalAgent.id, organizationId: null, eventData: null } as unknown as AppRun;
+    const run = { appId: personalApp.id, agentId: personalAgent.id, organizationId: null, ownerUserId: owner.id, eventData: null } as unknown as AppRun;
     await expect(makeProdRunDeps(db).resolveConfig(run)).rejects.toBeInstanceOf(NoAiConfigAvailableError);
   });
 
@@ -1573,7 +1573,7 @@ describe('#1482 — an org-less personal Agent never falls back to the host conf
     // This config-path control now carries real adopted execution identity.
     const flow = await db.memory.create({ data: { name: 'Run config control', urn: 'acme-036:run-config-control', class: 'app', organizationId: org.id, appId: orgApp.id } });
     await db.node.create({ data: { memoryId: flow.id, loc: 'entry', name: 'Entry', content: 'Host fallback', isRunnable: true } });
-    const automationPin = await captureSetupConsent(db, orgApp.id, null, 'hrn:node:acme-036:run-config-control:entry', org.id, { appId: orgApp.id, organizationId: org.id }, { agentId: personalAgent.id });
+    const automationPin = await captureSetupConsent(db, orgApp.id, null, 'hrn:node:acme-036:run-config-control:entry', { organizationId: org.id }, { appId: orgApp.id, organizationId: org.id }, { agentId: personalAgent.id });
     const run = { appId: orgApp.id, agentId: personalAgent.id, organizationId: org.id, eventData: null, automationPin } as unknown as AppRun;
     expect((await makeProdRunDeps(db).resolveConfig(run)).ownerType).toBe('HADRON_SERVER');
     // An org Agent with no org config still falls back to the host, as before.
@@ -1643,7 +1643,7 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
   it('P3 on the run path: the same answers through makeProdRunDeps(db).resolveConfig', async () => {
     await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org-5075' });
     await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-5075' });
-    const run = { appId: personApp.id, agentId: orgAgent.id, organizationId: null, eventData: null } as unknown as AppRun;
+    const run = { appId: personApp.id, agentId: orgAgent.id, organizationId: null, ownerUserId: owner.id, eventData: null } as unknown as AppRun;
     await expect(makeProdRunDeps(db).resolveConfig(run)).rejects.toBeInstanceOf(NoAiConfigAvailableError);
   });
 
@@ -1654,7 +1654,7 @@ describe('#5075 — a person\'s App never borrows an organization\'s or the plat
     expect((await resolveAiConfigs(db, { appId: personApp.id, agentId: orgAgent.id })).map((r) => `${r.ownerType}:${r.config.name}`)).toEqual(['AGENT:default']);
     const picked = await resolvers.Query.resolveAiServiceConfigs({}, { appRef: personApp.id, agentRef: orgAgent.id }, ctxFor(owner.id));
     expect(picked.map((c: { name: string; ownerType: string }) => `${c.ownerType}:${c.name}`)).toEqual(['AGENT:default']);
-    const run = { appId: personApp.id, agentId: orgAgent.id, organizationId: null, eventData: null } as unknown as AppRun;
+    const run = { appId: personApp.id, agentId: orgAgent.id, organizationId: null, ownerUserId: owner.id, eventData: null } as unknown as AppRun;
     // The walk answered the Agent's configuration: the run then stops at the automation pin's identity check
     // (this fixture adopts no automation), never at NoAiConfigAvailableError.
     const reached = await makeProdRunDeps(db).resolveConfig(run).catch((e: unknown) => e);

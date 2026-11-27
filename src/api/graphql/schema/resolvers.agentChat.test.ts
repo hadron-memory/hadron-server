@@ -23,6 +23,7 @@ let adminUser: { id: string };
 let otherUser: { id: string };
 let agent: { id: string; organizationId: string | null };
 let systemMemory: { id: string };
+let researchApp: { id: string };
 
 function adminCtx(overrides: Partial<Context> = {}): Context {
   return { db, roles: ['ADMIN'], userId: adminUser.id, ...overrides };
@@ -66,7 +67,7 @@ beforeEach(async () => {
   // The JWT-user startChat path resolves the App via App.agent_id matching the
   // chat agent inside the user's accessible orgs. Seed an App linking this
   // agent so personal-memory provisioning lands with class='personal'.
-  await db.app.create({
+  researchApp = await db.app.create({
     data: {
       id: generateId(),
       name: 'research-app',
@@ -287,7 +288,7 @@ describe('startChat (JWT user)', () => {
   it('auto-provisions a user memory and picks the non-setup conversation', async () => {
     const result = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     expect(result.chatId).toMatch(/^chats:/);
@@ -332,7 +333,7 @@ describe('startChat (JWT user)', () => {
 
     const result = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, isTestRun: true },
+      { agentRef: agent.id, appRef: researchApp.id, isTestRun: true },
       userCtx(otherUser.id),
     );
     // The chat itself is still created — only the cross-cutting
@@ -347,7 +348,7 @@ describe('startChat (JWT user)', () => {
 
   // Control case: the default (isTestRun unset / false) still provisions.
   it('isTestRun=false (default) DOES auto-provision an AgentSubscription', async () => {
-    await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(otherUser.id));
+    await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(otherUser.id));
     const sub = await db.agentSubscription.findUnique({
       where: { userId_agentId: { userId: otherUser.id, agentId: agent.id } },
     });
@@ -355,8 +356,8 @@ describe('startChat (JWT user)', () => {
   });
 
   it('reuses the existing user memory on a second startChat', async () => {
-    const r1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
-    const r2 = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
+    const r1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
+    const r2 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     expect(r1.chatId).not.toBe(r2.chatId);
 
     const mems = await db.memory.findMany({
@@ -366,8 +367,8 @@ describe('startChat (JWT user)', () => {
   });
 
   it('gives two users separate memories on the same agent', async () => {
-    await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
-    await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(otherUser.id));
+    await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
+    await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(otherUser.id));
 
     const mems = await db.memory.findMany({
       where: { userMemoryOfAgentId: agent.id, deletedAt: null },
@@ -386,7 +387,7 @@ describe('startChat (JWT user)', () => {
     });
     const result = await resolvers.Mutation.startChat(
       {},
-      { agentRef: stored.urn },
+      { agentRef: stored.urn, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     expect(result.chatId).toMatch(/^chats:/);
@@ -404,7 +405,7 @@ describe('startChat (JWT user)', () => {
     });
     const result = await resolvers.Mutation.startChat(
       {},
-      { agentRef: `urn:agent:${stored.urn}` },
+      { agentRef: `urn:agent:${stored.urn}`, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     expect(result.chatId).toMatch(/^chats:/);
@@ -417,7 +418,7 @@ describe('startChat (JWT user)', () => {
       data: { id: generateId(), name: 'naked-agent', urn: `${orgA.urn}:naked-agent`, organizationId: orgA.id },
     });
     await expect(
-      resolvers.Mutation.startChat({}, { agentRef: naked.id }, userCtx(adminUser.id)),
+      resolvers.Mutation.startChat({}, { agentRef: naked.id, appRef: researchApp.id }, userCtx(adminUser.id)),
     ).rejects.toThrow(/system memory/);
   });
 });
@@ -429,10 +430,10 @@ describe('startChat (JWT user)', () => {
 describe('myChats', () => {
   it('returns the current user\'s chats only', async () => {
     // User 1 creates 2 chats
-    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
-    const c2 = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
+    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
+    const c2 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     // User 2 creates 1 chat
-    const c3 = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(otherUser.id));
+    const c3 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(otherUser.id));
 
     const adminChats = await resolvers.Query.myChats(
       {},
@@ -462,7 +463,7 @@ describe('myChats', () => {
 
   // 007-entity-id-or-urn: myChats accepts agentRef as ID or URN.
   it('accepts a URN as agentRef input', async () => {
-    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
+    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     const stored = await db.agent.findUniqueOrThrow({
       where: { id: agent.id },
       select: { urn: true },
@@ -476,7 +477,7 @@ describe('myChats', () => {
   });
 
   it('accepts a prefixed URN (urn:agent:...) as agentRef input', async () => {
-    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
+    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     const stored = await db.agent.findUniqueOrThrow({
       where: { id: agent.id },
       select: { urn: true },
@@ -505,7 +506,7 @@ describe('myChats', () => {
     // code too and prove nothing.
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     let last: { summarizationNeeded?: unknown } | null = null;
@@ -524,7 +525,7 @@ describe('myChats', () => {
   it('derives the title from the first user message', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
@@ -544,7 +545,7 @@ describe('myChats', () => {
   it('prefers an explicit user-set title over the first message', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
@@ -567,10 +568,10 @@ describe('myChats', () => {
   });
 
   it('sorts newest first by lastMessageAt', async () => {
-    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
+    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     // Small delay so timestamps differ
     await new Promise((r) => setTimeout(r, 5));
-    const c2 = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
+    const c2 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     await new Promise((r) => setTimeout(r, 5));
     await resolvers.Mutation.sendChatMessage(
       {},
@@ -596,7 +597,7 @@ describe('chatHistory', () => {
   it('returns messages in order with correct role attribution', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
@@ -628,7 +629,7 @@ describe('chatHistory', () => {
   it('refuses access to another user\'s chat', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     // #829: a caller with NO entitlement to this chat now gets not-found
@@ -699,11 +700,22 @@ describe('chatHistory', () => {
       });
     }
 
-    const start = await resolvers.Mutation.startChat(
-      {},
-      { agentRef: noAppAgent.id },
-      userCtx(adminUser.id),
-    );
+    // #5394: before, startChat for an Agent no App of the caller installs provisioned a no-App knowledge home. That
+    // route is retired: with no App identified the start is CHAT_APP_NOT_IDENTIFIED, and under an App that does not
+    // install the Agent it is refused like an unknown Agent, with nothing provisioned.
+    await expect(resolvers.Mutation.startChat({}, { agentRef: noAppAgent.id }, userCtx(adminUser.id)))
+      .rejects.toMatchObject({ code: 'CHAT_APP_NOT_IDENTIFIED' });
+    await expect(resolvers.Mutation.startChat({}, { agentRef: noAppAgent.id, appRef: researchApp.id }, userCtx(adminUser.id)))
+      .rejects.toMatchObject({ name: 'AgentNotFoundError' });
+    expect(await db.memory.count({ where: { userMemoryOfAgentId: noAppAgent.id } })).toBe(0);
+    // #5394: the read half still holds for a knowledge home written before the route was retired. Make one the way the
+    // retired route left it (class knowledge, no App, no owner column, ORGANIZATION), from a chat started under the App.
+    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
+    const legacyHome = (await chatNodeByLocOrThrow(db, start.chatId)).memoryId;
+    await db.memory.update({
+      where: { id: legacyHome },
+      data: { class: 'knowledge', userId: null, appId: null, visibility: 'ORGANIZATION', userMemoryOfAgentId: noAppAgent.id },
+    });
 
     // Verify the holding memory is class='knowledge' — this is the case
     // the original Forbidden bug missed.
@@ -755,7 +767,7 @@ describe('chatHistory', () => {
   it('role detection does not depend on agent-name substrings (Invariant #14)', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
 
@@ -836,7 +848,7 @@ describe('chat ownership mutations', () => {
   it('updateChatTitle refuses a non-owner', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     // #829: a caller with NO entitlement to this chat now gets not-found
@@ -857,7 +869,7 @@ describe('chat ownership mutations', () => {
   it('deleteChat soft-deletes the chat and its messages', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
@@ -891,7 +903,7 @@ describe('chat ownership mutations', () => {
   it('deleteChat refuses a non-owner', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     // #829: a caller with NO entitlement to this chat now gets not-found
@@ -968,7 +980,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     });
 
     const start = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     // #1835: readable knowledge is a retrieval context, not a bare-loc
     // namespace. No foreign partial is borrowed before a local target exists.
@@ -979,7 +991,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await db.node.create({ data: { memoryId: chatRoot.memoryId, loc: 'y-secret', name: 'Local Y', content: 'LOCAL Y' } });
     await db.node.create({ data: { memoryId: chatRoot.memoryId, loc: 'global-note', name: 'Local global', content: 'LOCAL GLOBAL' } });
     const startedAgain = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     expect(startedAgain.systemMessage).toBe(`${B}${N} | LOCAL Y | LOCAL GLOBAL | ${N} | ${N} | ${N}`);
     const sent = await resolvers.Mutation.sendChatMessage(
@@ -992,7 +1004,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     const app = await db.app.findFirstOrThrow({ where: { urn: `${orgA.urn}:research-app` } });
     await db.appMember.create({ data: { appId: app.id, userId: adminUser.id, role: 'member' } });
     const start = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     expect(start.systemMessage).toContain('Scope the research.');
     await db.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: agent.id } } });
@@ -1018,12 +1030,18 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     const [inactive, active] = [original, second].sort((a, b) => a.id.localeCompare(b.id));
     await db.app.update({ where: { id: inactive.id }, data: { uninstalledAt: new Date() } });
 
+    // #5394: before, the shared start searched the caller's member Apps and skipped the retained inactive install to
+    // pick the licensed one. No App is searched for now: the start runs under the App it names. Naming the licensed App
+    // lands there; naming the inactive one is refused, and the other App is never tried in its place.
     const start = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: active.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     const chat = await chatNodeByLocOrThrow(db, start.chatId);
     const memory = await db.memory.findUniqueOrThrow({ where: { id: chat.memoryId } });
     expect(memory.appId).toBe(active.id);
+    await expect(resolvers.Mutation.startChat(
+      {}, { agentRef: agent.id, appRef: inactive.id, scope: 'shared' }, userCtx(adminUser.id),
+    )).rejects.toMatchObject({ code: 'SHARED_CHAT_REQUIRES_APP_CONTEXT' });
   });
 
   it('does not restore a cross-org Agent after its App grant is revoked', async () => {
@@ -1041,7 +1059,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
       data: { orgId: orgB.id, agentId: agent.id, activatedAt: new Date() },
     });
     const start = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: appB.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     expect(start.systemMessage).toContain('Scope the research.');
     await db.agentOrgGrant.update({
@@ -1055,7 +1073,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     expect(sent.systemMessage).toBe('');
     expect(sent.tools).toBeNull();
     await expect(resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: appB.id, scope: 'shared' }, userCtx(adminUser.id),
     )).rejects.toThrow(/no longer active/);
   });
 
@@ -1063,12 +1081,12 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     const r1 = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, scope: 'shared' },
+      { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' },
       userCtx(adminUser.id),
     );
     const r2 = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, scope: 'shared' },
+      { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' },
       userCtx(adminUser.id),
     );
     expect(r1.chatId).not.toBe(r2.chatId);
@@ -1099,26 +1117,32 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await expect(
       resolvers.Mutation.startChat(
         {},
-        { agentRef: agent.id, scope: 'shared' },
+        { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' },
         userCtx(adminUser.id),
       ),
     ).rejects.toThrow(/SHARED_CHAT_REQUIRES_APP_CONTEXT|not a member/);
   });
 
-  it("rejects scope='shared' from an MCP App-key session with a distinct error code", async () => {
-    // research.md Q-R2: App-key sessions are private-only in v1. The
-    // rejection message must distinguish this from the no-AppMember case
-    // so SC-005 callers see something actionable.
+  it("an MCP App-key session's shared start runs under its own App (#5394; was refused with a distinct code)", async () => {
     const app = await db.app.findFirstOrThrow({
       where: { urn: `${orgA.urn}:research-app` },
     });
+    // #5394: before, an App-key session's shared start was refused SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS. That code
+    // is retired: the session's own App is the identified App, so the start runs under it like any other, and the
+    // person must be a member of it.
     await expect(
       resolvers.Mutation.startChat(
         {},
         { agentRef: agent.id, scope: 'shared' },
         userCtx(adminUser.id, { appId: app.id }),
       ),
-    ).rejects.toThrow(/SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS|App-key/);
+    ).rejects.toMatchObject({ code: 'SHARED_CHAT_REQUIRES_APP_CONTEXT' });
+    await db.appMember.create({ data: { appId: app.id, userId: adminUser.id, role: 'member' } });
+    const start = await resolvers.Mutation.startChat(
+      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id, { appId: app.id }),
+    );
+    const home = await db.memory.findUniqueOrThrow({ where: { id: (await chatNodeByLocOrThrow(db, start.chatId)).memoryId } });
+    expect(home).toMatchObject({ class: 'app', appId: app.id });
   });
 
   // -------------------------------------------------------------------------
@@ -1138,7 +1162,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, scope: 'shared' },
+      { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' },
       userCtx(adminUser.id),
     );
 
@@ -1156,7 +1180,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, scope: 'shared' },
+      { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' },
       userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
@@ -1206,7 +1230,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, scope: 'shared' },
+      { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' },
       userCtx(adminUser.id),
     );
 
@@ -1253,7 +1277,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id, scope: 'shared' },
+      { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' },
       userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
@@ -1332,7 +1356,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
     const start = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(adminUser.id),
     );
 
     await Promise.all([
@@ -1360,7 +1384,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
     const start = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
       {}, { chatId: start.chatId, userMessage: 'opening' }, userCtx(adminUser.id),
@@ -1400,7 +1424,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     // pre-fix the rename sails past and reverts it.
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     const start = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
       {}, { chatId: start.chatId, userMessage: 'opening' }, userCtx(adminUser.id),
@@ -1448,7 +1472,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
   it('#919 — mixed sequential turns number 1..N with no gaps or repeats', async () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     const start = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     for (const turn of ['first', 'second']) {
       await resolvers.Mutation.sendChatMessage(
@@ -1470,7 +1494,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
   it('#919 — a summary is named and ordered from the committed count', async () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     const start = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
       {}, { chatId: start.chatId, userMessage: 'hello' }, userCtx(adminUser.id),
@@ -1493,18 +1517,18 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
 
     // adminUser: one private, one shared
     const adminPriv = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'private' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'private' }, userCtx(adminUser.id),
     );
     const adminShared = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(adminUser.id),
     );
 
     // otherUser: one private, one shared
     const otherPriv = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'private' }, userCtx(otherUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'private' }, userCtx(otherUser.id),
     );
     const otherShared = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(otherUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(otherUser.id),
     );
 
     // adminUser sees: own private + both shared (both are in app-class memory).
@@ -1538,7 +1562,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
     const shared = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     // adminUser posts a message
     await resolvers.Mutation.sendChatMessage(
@@ -1567,7 +1591,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
       data: { id: generateId(), githubId: 880231, githubUsername: `stranger-${Date.now()}` },
     });
     const shared = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
       {}, { chatId: shared.chatId, userMessage: 'secret family chat' }, userCtx(adminUser.id),
@@ -1597,7 +1621,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     // AppMember rows and filtered them out before the real gate ran.
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     const shared = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
       {}, { chatId: shared.chatId, userMessage: 'team-visible' }, userCtx(adminUser.id),
@@ -1612,7 +1636,7 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
     await makeAppMember(`${orgA.urn}:research-app`, adminUser.id);
     await makeAppMember(`${orgA.urn}:research-app`, otherUser.id);
     const shared = await resolvers.Mutation.startChat(
-      {}, { agentRef: agent.id, scope: 'shared' }, userCtx(adminUser.id),
+      {}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(adminUser.id),
     );
     await expect(resolvers.Mutation.deleteChat({}, { chatId: shared.chatId }, userCtx(otherUser.id))).resolves.toBe(true);
   });
@@ -1622,7 +1646,7 @@ describe('spec 017 — chat scope (US1 private path)', () => {
   it('startChat creates a chat with data.scope="private" in a personal-class memory', async () => {
     const result = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
 
@@ -1645,7 +1669,7 @@ describe('spec 017 — chat scope (US1 private path)', () => {
     // Start a real private chat first (so memory + chat-root are real).
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     const memory = await db.memory.findFirst({
@@ -1680,7 +1704,7 @@ describe('spec 017 — chat scope (US1 private path)', () => {
     // passes for the duration of the migration window — FR-017/T036).
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id },
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     const memory = await db.memory.findFirst({
@@ -1723,7 +1747,7 @@ describe('#1717 — chat-by-loc writes', () => {
   }
   /** A shared chat started by `author`, and its app-class host memory. */
   async function sharedChat(authorId: string) {
-    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'shared' }, userCtx(authorId));
+    const start = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id, scope: 'shared' }, userCtx(authorId));
     const root = await chatNodeByLocOrThrow(db, start.chatId);
     return { chatId: start.chatId, root, memoryId: root.memoryId };
   }
@@ -1974,13 +1998,13 @@ it('3501: encrypted startChat stores ciphertext root and state at birth, with no
   const { generateDataKey } = await import('../../../lib/crypto.js');
   const { sessionKeyCache } = await import('../../../lib/sessionKeyCache.js');
   const { decryptNodeFields } = await import('../../../lib/nodeCrypto.js');
-  await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
+  await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
   const memory = await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agent.id, createdBy: adminUser.id } });
   const key = generateDataKey();
   await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
   sessionKeyCache.set(generateId(), memory.id, key);
   try {
-    const result = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
+    const result = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     const root = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: memory.id, loc: result.chatId } } });
     const engine = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } });
     expect(root.data).toHaveProperty('__enc'); expect(engine.state).toHaveProperty('__enc');
@@ -1996,7 +2020,7 @@ it('3501: encrypted startChat stores ciphertext root and state at birth, with no
 describe('3583: a keyless turn on an encrypted chat', () => {
   async function encryptedKeylessChat() {
     const { sessionKeyCache } = await import('../../../lib/sessionKeyCache.js');
-    const started = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, userCtx(adminUser.id));
+    const started = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     await resolvers.Mutation.sendChatMessage({}, { chatId: started.chatId, userMessage: 'before' }, userCtx(adminUser.id));
     const memory = await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agent.id, createdBy: adminUser.id } });
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });

@@ -1,7 +1,7 @@
 /**
  * The node-side read gates for a per-user chat holding (hadron-internal#88, cor:cht:010:02, ruling 0226 and Holger's 2026-11-27 decision "User only", which supersedes ruling 0232 Q1): the
  * holding's nodes are read by its creator alone, whatever the caller's global role, on GraphQL and on MCP alike. Seeded through
- * the product's own write path (a real startChat by an Agent manager with no installed App); the platform admins are REAL
+ * a real startChat under a seed App, reshaped to the row the retired no-App route wrote (#5394); the platform admins are REAL
  * user rows, since a context-only role gives a false null.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -58,9 +58,18 @@ beforeEach(async () => {
     { loc: 'prompts:step', content: 'STAGE', data: {} },
   ]) await db.node.create({ data: { memoryId: agent.systemMemoryId, name: row.loc, nodeType: 'system', ...row } });
   await serveEveryAgent(db);
-  const started = await M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, gql('creator'));
+  // #5394: before, the holding came from a real no-App start (the Agent's manager started a chat with no installed App).
+  // That route is retired, so a start with no App is refused, and the holding such a start left is made the way it left
+  // it: a real start under a seed App, then the home reshaped to the retired route's row (knowledge, no App, no owner
+  // column, ORGANIZATION), and the seed App removed. Holdings of this shape exist until #5394's deletion runs.
+  await expect(M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, gql('creator')))
+    .rejects.toMatchObject({ code: 'CHAT_APP_NOT_IDENTIFIED' });
+  const seedApp = await db.app.create({ data: { name: 'Seed app', urn: 'holding88.test:seed', organizationId: orgId, appAgents: { create: { agentId } } } });
+  const started = await M.startChat({}, { agentRef: agentId, appRef: seedApp.id, scope: 'private', conversationName: 'flow' }, gql('creator'));
   const root = await chatNodeByLocOrThrow(db, started.chatId);
   holdingId = root.memoryId;
+  await db.memory.update({ where: { id: holdingId }, data: { class: 'knowledge', userId: null, appId: null, visibility: 'ORGANIZATION' } });
+  await db.app.delete({ where: { id: seedApp.id } });
   nodeId = root.id;
   nodeLoc = root.loc;
   await db.node.update({ where: { id: nodeId }, data: { name: `${NEEDLE} private chat`, content: `${NEEDLE} secret content` } });

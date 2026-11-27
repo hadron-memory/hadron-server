@@ -78,7 +78,7 @@ async function parkInFallback(chatId: string, data: Record<string, unknown>) {
 describe('#3557 R1 reads the state row, not the stripped root', () => {
   it('a new chat carries no names in its root data, only in the row', async () => {
     await compiled('v1');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     const chat = await chatNodeByLocOrThrow(db, start.chatId);
     expect(chat.data).not.toHaveProperty('conversationName');
     expect(chat.data).not.toHaveProperty('stageName');
@@ -86,7 +86,7 @@ describe('#3557 R1 reads the state row, not the stripped root', () => {
   });
   it('plaintext stripped root: the fallback re-route still happens (row says fallback)', async () => {
     await compiled('v1');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     await parkInFallback(start.chatId, {});
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'please research this topic' }, ctx());
     expect(await stateOf(start.chatId)).toMatchObject({ conversationName: 'research', stageName: 'scope' });
@@ -94,7 +94,7 @@ describe('#3557 R1 reads the state row, not the stripped root', () => {
   });
   it('D1 row/data disagreement: the row (not fallback) wins over a stale root copy, so there is no re-route', async () => {
     await compiled('v1');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     const chat = await parkInFallback(start.chatId, { conversationName: 'fallback', stageName: 'hold' });
     await db.node.create({ data: { id: generateId(), memoryId: systemMemoryId, loc: 'conversations:alt', name: 'alt', nodeType: 'system', data: { stageOrder: ['a'] } } });
     await db.chatRootEngineState.update({ where: { chatRootNodeId: chat.id }, data: { state: { conversationName: 'alt', stageName: 'a' } } });
@@ -104,7 +104,7 @@ describe('#3557 R1 reads the state row, not the stripped root', () => {
   });
   it('a root with NO row falls back to its own data', async () => {
     await compiled('v1');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     const chat = await parkInFallback(start.chatId, { conversationName: 'fallback', stageName: 'hold' });
     await db.chatRootEngineState.delete({ where: { chatRootNodeId: chat.id } });
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'please research this topic' }, ctx());
@@ -112,7 +112,7 @@ describe('#3557 R1 reads the state row, not the stripped root', () => {
   });
   it('early refusal before the user message: row stage, stripped root', async () => {
     const node = await compiled('v1');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     const before = await snapshot(start.chatId);
     await db.node.update({ where: { id: node }, data: { deletedAt: new Date() } });
     expect(await code(M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'refused' }, ctx()))).toBe('BOOT_PROMPT_TARGET_DELETED');
@@ -120,7 +120,7 @@ describe('#3557 R1 reads the state row, not the stripped root', () => {
   });
   it('encrypted stripped root: the row is decrypted with the session key and routes the fallback re-route', async () => {
     await compiled('v1');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     const chat = await parkInFallback(start.chatId, {});
     const info = { id: chat.memoryId, isEncrypted: true }, key = generateDataKey();
     sessionKeyCache.set(generateId(), chat.memoryId, key);

@@ -67,13 +67,13 @@ const chatNodes = () => db.node.count({ where: { loc: { startsWith: 'chats:' } }
 describe('#2047 chat', () => {
   it('no pointer: startChat is refused with the typed refusal and creates no chat', async () => {
     const chats = await chatNodes();
-    expect(await code(M.startChat({}, { agentRef: agent.id }, ctx()))).toBe('BOOT_PROMPT_NOT_SET');
+    expect(await code(M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx()))).toBe('BOOT_PROMPT_NOT_SET');
     expect(await chatNodes()).toBe(chats);
   });
 
   it('serves the approved compiled text with the Agent-bound variables, records once, and never reads the retired prompt', async () => {
     await compiled('You are {{agent.name}}.');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     expect(start.systemMessage).toContain('You are chat-agent.');
     expect(start.systemMessage).not.toContain('LEGACY');
     const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
@@ -91,7 +91,7 @@ describe('#2047 chat', () => {
 
   it('records again when the served revision changes, and only then', async () => {
     const node = await compiled('v1 {{agent.name}}');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     await recompileApproved(node, 'v2 {{agent.name}}');
     const turn = await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'hi' }, ctx());
     expect(turn.systemMessage).toContain('v2 chat-agent');
@@ -103,18 +103,29 @@ describe('#2047 chat', () => {
 
   it('an unserveable prompt on a later turn refuses sendChatMessage with the same code', async () => {
     const node = await compiled('v1');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     await db.node.update({ where: { id: node }, data: { deletedAt: new Date() } });
     expect(await code(M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'hi' }, ctx()))).toBe('BOOT_PROMPT_TARGET_DELETED');
   });
 
   it('a chat held in a memory no App owns is served and recorded under no App; only a platform admin reads that record', async () => {
+    // #5394: before, the start itself ran with no App (the Agent manager's no-App route) and recorded its serve under no
+    // App. That start is retired: with no App identified it is CHAT_APP_NOT_IDENTIFIED and creates no chat. The App-less
+    // chat is now a retained pre-#5394 row (an App-less knowledge home that route wrote, holding a chat), and its serve is
+    // recorded under no App through the same recorder; the record and its read gate are what stays pinned.
     await db.appAgent.deleteMany({ where: { agentId: agent.id } });
     await db.app.deleteMany({});
     await compiled('Solo {{agent.name}}');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
-    expect(start.systemMessage).toContain('Solo chat-agent');
-    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
+    expect(await code(M.startChat({}, { agentRef: agent.id }, ctx()))).toBe('CHAT_APP_NOT_IDENTIFIED');
+    expect(await chatNodes()).toBe(0);
+    const home = await db.memory.create({ data: {
+      id: generateId(), organizationId: org.id, urn: `${org.urn}:solo-home`, name: 'solo home', class: 'knowledge',
+      visibility: 'ORGANIZATION', userMemoryOfAgentId: agent.id, createdBy: user.id,
+    } });
+    const chatNode = await db.node.create({ data: { id: generateId(), memoryId: home.id, loc: 'chats:solo', name: 'solo', nodeType: 'record' } });
+    const solo = await serveChatPrompt(db, agent, null, null, ctx());
+    expect(solo.text).toContain('Solo chat-agent');
+    await recordChatServedIfChanged(db, chatNode.id, agent.id, null, solo);
     const recs = await db.servedPrompt.findMany({ where: { chatId: chatNode.id } });
     expect(recs).toHaveLength(1);
     expect(recs[0]!.appId).toBeNull();
@@ -126,7 +137,7 @@ describe('#2047 chat', () => {
 
   it('overlapping turns that resolved DIFFERENT revisions both reach the audit history (a lost ordinal race is retried, not dropped)', async () => {
     const node = await compiled('v1 {{agent.name}}');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
     await recompileApproved(node, 'v2 {{agent.name}}');
     const s2 = await serveChatPrompt(db, agent, app.id, null, {db,userId:user.id,roles:['ADMIN']});
@@ -144,7 +155,7 @@ describe('#1772 step 3: served chat leaves legacy {{name}} / {{role}} tokens as 
   it('renders {{name}} and {{role}} literally', async () => {
     await db.agent.update({ where: { id: agent.id }, data: { personaRole: 'helper' } });
     await compiled('You are {{name}}, the {{role}}.');
-    const start = await M.startChat({}, { agentRef: agent.id }, ctx());
+    const start = await M.startChat({}, { agentRef: agent.id, appRef: app.id }, ctx());
     expect(start.systemMessage).toContain('You are {{name}}, the {{role}}.');
   });
 });

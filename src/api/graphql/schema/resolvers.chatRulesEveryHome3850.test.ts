@@ -60,7 +60,7 @@ beforeEach(async () => {
   await serveEveryAgent(db);
 });
 
-const startShared = (userId: string) => M.startChat({}, { agentRef: agentId, scope: 'shared', conversationName: 'intake' }, as(userId));
+const startShared = (userId: string) => M.startChat({}, { agentRef: agentId, scope: 'shared', conversationName: 'intake', appRef: appId }, as(userId));
 const complete = (ctx: Context, chatId: string, data?: Record<string, unknown>) =>
   M.processChatResponse({}, { chatId, toolResponse: { message: 'ok', goal_reached: true, ...(data ? { data } : {}), onTrack: true } }, ctx);
 const uninstall = () => db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });

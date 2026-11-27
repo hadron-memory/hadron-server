@@ -24,6 +24,7 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
 let adminUser: { id: string };
 let agent: { id: string };
 let systemMemory: { id: string };
+let appId: string;
 
 const adminCtx = (): Context => ({ db, roles: ['ADMIN'], userId: adminUser.id });
 const userCtx = (): Context => ({ db, roles: ['READER'], userId: adminUser.id });
@@ -36,6 +37,8 @@ beforeEach(async () => {
   const created = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'scribe', visibility: 'PERSONAL' }, adminCtx());
   agent = created;
   systemMemory = await db.memory.findUniqueOrThrow({ where: { id: created.systemMemoryId! } });
+  // #5394: a start names its App; this one installs the Agent and the user takes part in it.
+  appId = (await db.app.create({ data: { id: generateId(), name: 'pin-app', urn: 'pin-org:pin-app', organizationId: org.id, appAgents: { create: { agentId: created.id } }, members: { create: { userId: adminUser.id, role: 'member' } } } })).id;
   await serveEveryAgent(db);
 });
 
@@ -95,7 +98,7 @@ async function seedScript(extra: Seed[] = []) {
 }
 
 const startMain = () =>
-  resolvers.Mutation.startChat({}, { agentRef: agent.id, conversationName: 'main' }, userCtx());
+  resolvers.Mutation.startChat({}, { agentRef: agent.id, conversationName: 'main', appRef: appId }, userCtx());
 const finishStage = (chatId: string) =>
   resolvers.Mutation.processChatResponse(
     {}, { chatId, toolResponse: { message: 'done', next_stage: null, goal_reached: true, onTrack: true } }, userCtx(),

@@ -62,7 +62,7 @@ async function fixture(kind: Kind, name = nameOf(kind)) {
       return db.appRun.findFirstOrThrow({ where: { triggerId: trigger.id }, orderBy: { createdAt: 'desc' } });
     }
     const w = await db.agentWebhook.findUniqueOrThrow({ where: { id: trigger.id } });
-    return mintAppRun(db, { organizationId: w.organizationId, appId: w.appId, agentId: w.agentId, userId: w.userId, triggerKind: 'WEBHOOK', triggerId: w.id, entryNodeUrn: w.entryNodeUrn, entryNodeId: w.entryNodeId } as never);
+    return mintAppRun(db, { owner: { organizationId: w.organizationId }, appId: w.appId, agentId: w.agentId, userId: w.userId, triggerKind: 'WEBHOOK', triggerId: w.id, entryNodeUrn: w.entryNodeUrn, entryNodeId: w.entryNodeId } as never);
   };
   const llm = vi.fn(async () => ({ text: 'ok', tokensIn: 1, tokensOut: 1, provider: 'test', model: 'test' }));
   const deps: RunExecutionDeps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: {} }) as never), llm, writeOutput: vi.fn(async () => null) };
