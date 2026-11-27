@@ -53,10 +53,8 @@ beforeEach(async () => {
   const agent = await M.createAgent({}, { orgRef: orgId, name: 'Holding88 agent', visibility: 'ORGANIZATION' }, gql('creator'));
   agentId = agent.id;
   for (const row of [
-    { loc: 'conversations', data: {} },
     { loc: 'conversations:flow', data: { stageOrder: ['step'], isSetup: false } },
     { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
-    { loc: 'prompts', data: {} },
     { loc: 'prompts:step', content: 'STAGE', data: {} },
   ]) await db.node.create({ data: { memoryId: agent.systemMemoryId, name: row.loc, nodeType: 'system', ...row } });
   await serveEveryAgent(db);
@@ -169,6 +167,8 @@ describe('a per-user chat holding is read on the node side by its creator alone 
   });
 
   it('an App link to the holding reaches nothing for a key or a run; a link to an ordinary memory still does', async () => {
+    // #5321 (cor:dmo:060:22, cor:acl:140:02): an attachment gives no access, so a link alone reaches neither memory; the App reads
+    // outside its own memories only through a memory.read grant, and no grant reaches the holding.
     await db.appMemoryLink.createMany({ data: [
       { appId, memoryId: holdingId, attachedBy: u.creator },
       { appId, memoryId: plainId, attachedBy: u.creator },
@@ -176,11 +176,24 @@ describe('a per-user chat holding is read on the node side by its creator alone 
     const key = { db, appId, appKeyId: generateId(), roles: [] } as unknown as Context;
     const run = { db, ...runAuthContext({ id: generateId(), appId, userId: null, organizationId: orgId }) } as unknown as Context;
     for (const [label, c] of [['key', key], ['run', run]] as const) {
-      expect(await canReadMemory(db, c as never, plainId), `${label} plain via MCP`).toBe(true);
-      expect(await getAccessibleMemoryIds(c, plainId), `${label} plain via GraphQL`).toEqual([plainId]);
+      expect(await canReadMemory(db, c as never, plainId), `${label} plain via MCP`).toBe(false); // #5321: was true (link reach)
+      expect(await getAccessibleMemoryIds(c, plainId), `${label} plain via GraphQL`).toEqual([]); // #5321: was [plainId]
       expect(await canReadMemory(db, c as never, holdingId), `${label} holding via MCP`).toBe(false);
       expect(await getAccessibleMemoryIds(c, holdingId), `${label} holding via GraphQL`).toEqual([]);
     }
+    // An ACTIVE memory.read grant given by the creator (who reads both in their own right) opens the plain memory to the App's
+    // run, and never the holding.
+    const { upsertPlatformActions } = await import('../../../lib/grants/actions.js');
+    const { DB_NOW, raw, insertGrantUnguarded } = await import('../../../lib/grants/grantFixtures3668.js');
+    await upsertPlatformActions(db);
+    await insertGrantUnguarded({ appId, userId: u.creator } as never, {
+      user_id: null, grantee_app_id: appId, issuer_user_id: u.creator, action: 'memory.read', action_values: { memory: [plainId, holdingId] },
+      activated_at: raw(DB_NOW), verification_kind: 'PASSKEY', verified_by: u.creator,
+    } as never);
+    expect(await canReadMemory(db, run as never, plainId), 'run plain via grant, MCP').toBe(true);
+    expect(await getAccessibleMemoryIds(run, plainId), 'run plain via grant, GraphQL').toEqual([plainId]);
+    expect(await canReadMemory(db, run as never, holdingId), 'run holding via grant, MCP').toBe(false);
+    expect(await getAccessibleMemoryIds(run, holdingId), 'run holding via grant, GraphQL').toEqual([]);
   });
 
   it('an App-bound personal home is unchanged: the creator reads it, a platform admin does not', async () => {

@@ -2311,7 +2311,7 @@ export const typeDefs = `#graphql
     key: String!
     "The limit in force, a base-10 integer string: the owner's own limit, else the deployment default for that kind of owner. Null means unlimited."
     limit: String
-    "How much the owner holds now, a base-10 integer string, counted when asked for. A total only."
+    "How much the owner holds now, a base-10 integer string, counted when asked for. A total only. For nodes (hadron-server issue 5434): the nodes a person writes in their personal memory made under an Agent count for that person, not for the Agent's organization."
     used: String!
   }
 
@@ -4283,7 +4283,7 @@ export const typeDefs = `#graphql
     hostUsesPage(limit: Int, offset: Int): HostKeyUsePage!
   }
 
-  "#1749 — a scope an App key holds. A closed list: attention:deliver, and (#1709) host:operate."
+  "#1749 — a scope an App key holds. A closed list: attention:deliver, (#1709) host:operate, and (#5321) grant:read, which lets a pure key read through the memory.read grants its App holds (hrn:node:hadronmemory.com:specs:cor:acl:140:02)."
   type AppKeyScope {
     scope: String!
     grantedAt: DateTime!

@@ -45,7 +45,7 @@ function conv(name: string, opts: { seq?: number | null; condition?: unknown; fl
 }
 
 async function seed(seeds: Seed[], path: 'live' | 'snapshot' = 'live') {
-  const all: Seed[] = [{ loc: 'conversations', data: null }, ...seeds];
+  const all: Seed[] = [...seeds];
   if (path === 'live') {
     for (const s of all) {
       await db.node.create({ data: {

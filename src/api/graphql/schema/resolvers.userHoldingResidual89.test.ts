@@ -53,10 +53,8 @@ beforeEach(async () => {
   const agent = await M.createAgent({}, { orgRef: orgId, name: 'Holding89 agent', visibility: 'ORGANIZATION' }, gql('creator'));
   agentId = agent.id;
   for (const row of [
-    { loc: 'conversations', data: {} },
     { loc: 'conversations:flow', data: { stageOrder: ['step'], isSetup: false } },
     { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
-    { loc: 'prompts', data: {} },
     { loc: 'prompts:step', content: 'STAGE', data: {} },
   ]) await db.node.create({ data: { memoryId: agent.systemMemoryId, name: row.loc, nodeType: 'system', ...row } });
   await serveEveryAgent(db);

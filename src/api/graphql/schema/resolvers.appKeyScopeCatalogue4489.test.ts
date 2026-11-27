@@ -21,6 +21,7 @@ describe('appKeyScopeCatalogue (#4489)', () => {
     expect(Object.fromEntries(rows.map((r: any) => [r.scope, r.requiresHostId]))).toEqual({
       'attention:deliver': false,
       'host:operate': true,
+      'grant:read': false, // #5321: the closed list gained grant:read, which takes no host
     });
   });
 

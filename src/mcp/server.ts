@@ -128,6 +128,7 @@ import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { foreignEdgeMemoryIds } from '../lib/foreignEdgeMemories.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
+import { createChatbotContainers, missingChatbotContainers } from '../lib/chatbotAncestors.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
 import { governedAmong, governedRemovalError, lockGovernedRowsIn, lockRemovalRows } from '../lib/governedRemoval.js';
@@ -4691,7 +4692,10 @@ export function createMcpServerInstance(
           // #5015 (cor:acl:150:04) — only a fresh insert adds a live node here: the upsert leaves a tombstone deleted and
           // a live section is an update. The memory row is held FOR SHARE just above, so the owner read is the one at
           // commit; the owner-limit key is this write's last lock (gate ruling 5).
-          if (!prior) await requireNodeHeadroom(tx, { memoryId, caller: ownerLimitCaller(auth) });
+          // #5390 — a fresh conversation-family section (`prompts:<name>`) also gets its missing container parents, counted with it.
+          const containers = prior ? [] : await missingChatbotContainers(tx, memoryId, [loc]);
+          if (!prior) await requireNodeHeadroom(tx, { memoryId, amount: 1n + BigInt(containers.length), caller: ownerLimitCaller(auth) });
+          await createChatbotContainers(tx, memoryId, containers, auth.clientId ?? null);
           const row = await tx.node.upsert({
             ...upsertArgs,
             update: { ...upsertArgs.update, ...(sectionChanged ? (sectionStamp ?? clearNodeAuthorship()) : {}), revisionContentHash: revisionStateHashRefreshMarker() },
@@ -7134,7 +7138,11 @@ export function createMcpServerInstance(
           // #5015 (cor:acl:150:04) — every write that reaches here adds a live node (a live loc refused above): an insert,
           // or a tombstone revived. The memory row is held FOR SHARE (assertMemoryEncryptionStateForWrite), so the owner
           // read is the one at commit; the owner-limit key is this write's last lock (gate ruling 5).
-          await requireNodeHeadroom(tx, { memoryId, caller: ownerLimitCaller(auth) });
+          // #5390 — parity with writeNodeCore: a conversation, stage or prompt node also gets its missing container parents,
+          // under the ancestor keys held above, counted with it (cor:acl:150:04).
+          const containers = await missingChatbotContainers(tx, memoryId, [loc]);
+          await requireNodeHeadroom(tx, { memoryId, amount: 1n + BigInt(containers.length), caller: ownerLimitCaller(auth) });
+          await createChatbotContainers(tx, memoryId, containers, auth.clientId ?? null);
           const written = await tx.node.upsert({
             ...upsertArgs,
             create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },

@@ -9,9 +9,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS app_key_scopes_live_uniq
 
 -- A closed list; a revocation names who and when, or neither. #1709 (T6) adds host:operate, which is bound to exactly
 -- one host (cor:agt:070:04): its host id is required, a token of the host-registration shape, and no other scope has one.
+-- #5321 adds grant:read (cor:acl:140:02): a pure key reads through its App's memory.read grants only while it holds it.
 ALTER TABLE app_key_scopes DROP CONSTRAINT IF EXISTS chk_app_key_scopes_shape;
 ALTER TABLE app_key_scopes ADD CONSTRAINT chk_app_key_scopes_shape CHECK (
-  scope IN ('attention:deliver', 'host:operate')
+  scope IN ('attention:deliver', 'host:operate', 'grant:read')
   AND ((revoked_at IS NULL) = (revoked_by_user_id IS NULL))
   AND ((scope = 'host:operate') = (host_id IS NOT NULL))
   AND (host_id IS NULL OR host_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')
