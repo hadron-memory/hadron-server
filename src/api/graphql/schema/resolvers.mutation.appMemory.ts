@@ -34,6 +34,8 @@ import { resolveAppInstallation, listAppInstallations } from '../../../lib/appIn
 import { GraphQLError } from 'graphql';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { admitOperationRate } from '../../../lib/rateLimit/index.js';
+import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import { generateId } from '../../../lib/id.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { Prisma, type EmbeddingSource } from '../../../generated/prisma/index.js';
@@ -54,7 +56,7 @@ import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
-import { type Context, holdsContentReadIndependently, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug } from './resolvers.helpers.js';
+import { type Context, holdsContentReadIndependently, memoryIdsHeldIndependently, clampListTake, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
 type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
@@ -229,11 +231,12 @@ async function reclaimAllOrKeep(tx: Prisma.TransactionClient, ids: string[], use
 }
 
 /** A P2002 whose violated unique is the memory URN (Prisma reports the column list, or the index name, in meta.target). */
-function isUrnUniqueViolation(err: unknown): boolean {
+export function isUrnUniqueViolation(err: unknown): boolean {
   if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') return false;
   const target = err.meta?.target;
   const names = Array.isArray(target) ? target.map(String) : [String(target ?? '')];
-  return names.some((n) => n === 'urn' || n.includes('urn'));
+  // Exactly the memories.urn unique: the column list or its index name. A substring match would also take another constraint (e.g. a legacy_urn one).
+  return names.some((n) => n === 'urn' || n === 'memories_urn_key');
 }
 
 type UrnBlocker = { id: string; userId: string | null; appId: string | null; class: string; deletedAt: Date | null };
@@ -747,6 +750,64 @@ export const appMemoryMutations = {
     );
   },
 };
+
+/** Classes the attachable-memory picker never offers: `system` (refused by attach) and `app` (R3, Decided; cor:dmo:060:22). */
+const UNATTACHABLE_CLASSES = ['system', 'app'] as const;
+
+/**
+ * #5393 (hrn:node:hadronmemory.com:specs:cor:dmo:060:22; envelope hrn:node:hadronmemory.com:specs:cor:api:120:02): the
+ * attachable-memory picker's search door, `attachableMemories(appRef, query, limit, offset)`. One page of the memories the
+ * caller could attach to the App with `attachMemoryToApp`.
+ *
+ * Judged in `attachMemoryToApp`'s own order with its own predicates, so the door has no gate of its own to drift:
+ *   person only (UNAUTHENTICATED / one FORBIDDEN for an App key, worker session, impersonation or run; these read nothing)
+ *   -> one FAN_OUT_READS admission (the #1793 findNodes pattern; a refused call reads nothing) -> `resolveAttachApp`
+ *   (unknown, deleted or not a member: one FORBIDDEN; uninstalled: APP_UNINSTALLED).
+ * Candidates are `memoryIdsHeldIndependently`, the enumeration `holdsContentReadIndependently` judges one row of, minus deleted
+ * rows, classes `system` and `app`, and every memory with ANY link row for this App (any attacher, active or inactive: a
+ * surface never offers a memory as attachable while its attachment exists). `query` is a case-insensitive contains over the
+ * name or the URN (a leading `hrn:mem:` is ignored for the URN, which is stored without it); blank means no text filter.
+ * Ordered by name then id; limit default 20, cap 200, 0 = count only.
+ */
+export async function attachableMemoriesPage(
+  ctx: Context,
+  { appRef, query, limit, offset }: { appRef: string; query?: string | null; limit?: number | null; offset?: number | null },
+) {
+  // The principal checks read nothing, so they precede the admission (findNodes' order: side-effect-free checks first).
+  if (!ctx.userId) {
+    throw new GraphQLError('Listing attachable memories requires a signed-in user.', { extensions: { code: 'UNAUTHENTICATED' } });
+  }
+  if (ctx.appKeyId || ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx)) {
+    throw authorizationDenied();
+  }
+  await admitOperationRate(ctx, ctx.db, 'FAN_OUT_READS', ctx.limiterIdentity ?? transportRateIdentity(ctx));
+  const app = await resolveAttachApp(ctx, appRef);
+  const take = clampListTake(limit);
+  const skip = Math.max(0, offset ?? 0);
+  const ids = await memoryIdsHeldIndependently(ctx);
+  // Prisma's `contains` puts the value between `%` unescaped, so the LIKE metacharacters are escaped here: the query is
+  // matched literally, never as a pattern.
+  const literal = (text: string) => text.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const raw = query?.trim() ?? '';
+  const needle = literal(raw);
+  const urnNeedle = literal(raw.replace(/^hrn:mem:/i, ''));
+  const where: Prisma.MemoryWhereInput = {
+    id: { in: ids },
+    deletedAt: null,
+    class: { notIn: [...UNATTACHABLE_CLASSES] },
+    appLinks: { none: { appId: app.id } },
+    ...(raw
+      ? { OR: [{ name: { contains: needle, mode: 'insensitive' } }, { urn: { contains: urnNeedle, mode: 'insensitive' } }] }
+      : {}),
+  };
+  const [total, items] = await Promise.all([
+    ctx.db.memory.count({ where }),
+    take === 0
+      ? Promise.resolve([])
+      : ctx.db.memory.findMany({ where, include: MEMORY_INCLUDE, orderBy: [{ name: 'asc' }, { id: 'asc' }], skip, take }),
+  ]);
+  return { items, total };
+}
 
 /** The attach target: unknown or deleted App, or a caller who is not a member, are ONE refusal; an uninstalled App then answers APP_UNINSTALLED. */
 async function resolveAttachApp(ctx: Context, appRef: string) {
