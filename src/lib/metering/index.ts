@@ -22,6 +22,9 @@ import type { AiConfigOwnerType } from '../aiConfig.js';
 import { generateId } from '../id.js';
 import { PRICE_CACHE_TTL_MS, priceCache } from './priceCache.js';
 import { ownerColumns, ownerWhere, sameOwner, type OwnedRow, type OwnerRef } from '../owner.js';
+import { appendForLiveOwner, LedgerOwnerDeletedError } from './ledgerOwner.js';
+
+export { LedgerOwnerDeletedError } from './ledgerOwner.js';
 
 /** Ledger entry kinds (string column, validated here — no enum by design). */
 export const LEDGER_KINDS = ['grant', 'debit', 'adjustment'] as const;
@@ -308,13 +311,20 @@ export async function recordLlmUsage(
         })
       : await db.usageEvent.create({ data });
     if (charged) {
-      await debitCredits(db, {
-        owner: params.billableAccount!,
-        amountMicroCents: applyMarkupBp(cost!, markupBasisPoints!),
-        sourceType: 'usage-event',
-        sourceId: event.id,
-        createdBy: params.createdBy ?? null,
-      });
+      try {
+        await debitCredits(db, {
+          owner: params.billableAccount!,
+          amountMicroCents: applyMarkupBp(cost!, markupBasisPoints!),
+          sourceType: 'usage-event',
+          sourceId: event.id,
+          createdBy: params.createdBy ?? null,
+        });
+      } catch (err) {
+        // #5352 (hrn:node:hadronmemory.com:specs:cor:dmo:170:08): the owner was deleted, so the debit is refused and writes
+        // nothing; the usage that caused it stays recorded as usage (the event above), and the event is returned.
+        if (!(err instanceof LedgerOwnerDeletedError)) throw err;
+        console.warn('metering.debit_refused_owner_deleted', { usageEventId: event.id });
+      }
     }
     return event;
   } catch (err) {
@@ -453,7 +463,10 @@ function isSameLedgerEntry(
 async function insertOrReplay(db: PrismaClient, params: LedgerInsert) {
   const { owner, ...rest } = params;
   try {
-    return await db.creditLedgerEntry.create({ data: { id: generateId(), ...ownerColumns(owner), ...rest } });
+    // #5352: the owner is judged under its row lock in the insert's own transaction; a deleted owner writes nothing and
+    // throws LedgerOwnerDeletedError. A unique violation rolls that transaction back and is judged below, on `db`.
+    return await appendForLiveOwner(db, owner, (tx) =>
+      tx.creditLedgerEntry.create({ data: { id: generateId(), ...ownerColumns(owner), ...rest } }));
   } catch (err) {
     if ((err as { code?: string }).code !== 'P2002') throw err;
     const existing = await db.creditLedgerEntry.findFirstOrThrow({
@@ -582,7 +595,8 @@ export async function debitCredits(db: PrismaClient, params: DebitCreditsParams)
   if (params.amountMicroCents <= 0n) {
     throw new InvalidLedgerAmountError('debitCredits requires a positive amountMicroCents.');
   }
-  return db.creditLedgerEntry.create({
+  // #5352: refused (LedgerOwnerDeletedError, nothing written) when the owner is deleted; see ./ledgerOwner.ts.
+  return appendForLiveOwner(db, params.owner, (tx) => tx.creditLedgerEntry.create({
     data: {
       id: generateId(),
       ...ownerColumns(params.owner),
@@ -593,7 +607,7 @@ export async function debitCredits(db: PrismaClient, params: DebitCreditsParams)
       note: params.note ?? null,
       createdBy: params.createdBy ?? null,
     },
-  });
+  }));
 }
 
 /** An account's balance = SUM over its append-only ledger (an organization's or a person's); 0n for an empty ledger. */

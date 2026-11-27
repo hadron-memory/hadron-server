@@ -20,7 +20,7 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { repointMergedLedgerOwners } from '../../../lib/metering/repointMergedOwners.js';
 import { ownerWhere, type OwnerRef } from '../../../lib/owner.js';
-import { OrganizationNotFoundError } from '../../../lib/entityRef/errors.js';
+import { OrganizationNotFoundError, UserNotFoundError } from '../../../lib/entityRef/errors.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { generateId } from '../../../lib/id.js';
 import {
@@ -31,6 +31,7 @@ import {
   HOST_PRICED_PROVIDERS,
   IdempotencyConflictError,
   InvalidLedgerAmountError,
+  LedgerOwnerDeletedError,
   isServerWrittenSourceType,
   LEDGER_SOURCE_CONFLICT_MESSAGE,
   PRICE_CACHE_TTL_MS,
@@ -133,8 +134,14 @@ async function resolveLedgerOwner(
   return { userId };
 }
 
-/** Map the ledger library's typed refusals; anything else propagates. */
-function ledgerRefusal(err: unknown): never {
+/**
+ * Map the ledger library's typed refusals; anything else propagates. #5352: an owner deleted between resolution and the append
+ * (LedgerOwnerDeletedError, nothing written) answers the not-found error resolution gives a deleted owner, for the same ref.
+ */
+function ledgerRefusal(err: unknown, refs: { orgRef?: string | null; userRef?: string | null }): never {
+  if (err instanceof LedgerOwnerDeletedError) {
+    throw refs.orgRef != null ? new OrganizationNotFoundError(refs.orgRef) : new UserNotFoundError(refs.userRef as string);
+  }
   if (err instanceof InvalidLedgerAmountError) throw badInput(err.message);
   // Mismatched replay of an existing (sourceType, sourceId): a typed,
   // NON-retryable error. The caller (a payment service) must stop redelivering
@@ -517,7 +524,7 @@ export const meteringMutations = {
       });
       return projectLedgerEntry(entry);
     } catch (err) {
-      ledgerRefusal(err);
+      ledgerRefusal(err, input);
     }
   },
 
@@ -564,7 +571,7 @@ export const meteringMutations = {
       });
       return projectLedgerEntry(entry);
     } catch (err) {
-      ledgerRefusal(err);
+      ledgerRefusal(err, input);
     }
   },
 };

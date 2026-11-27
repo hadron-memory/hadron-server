@@ -10,6 +10,7 @@
  *  - B1: the organization delete takes no lock that FOR KEY SHARE (or the FK check) waits for, so an append during an open
  *    delete commits naming the organization after the delete has run its clear.
  *  - B2: the append waits for the person delete's FOR UPDATE (the FK check), then writes an entry naming the deleted person.
+ *  - B3: the grantCredits mutation resolves the organization while the delete is open, then writes naming it.
  *  - C1-C3: an append holding the owner row commits while the delete waits; the delete's clear runs (SERIALIZABLE: on a
  *    snapshot from before the append's commit; the organization delete: before the append commits at all) and misses it.
  *
@@ -27,6 +28,7 @@ import { deleteUserAccount } from '../../controller/operations/deleteUser.js';
 import { softDeleteOrganizationCore } from '../../controller/operations/softDeleteOrganization.js';
 import { adjustCredits, clearPriceCache, debitCredits, grantCredits, recordLlmUsage } from './index.js';
 import { writeSettlements } from './settleExpiredGrants.js';
+import { repointMergedLedgerOwners } from './repointMergedOwners.js';
 
 vi.mock('../slackClient.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../slackClient.js')>()),
@@ -108,20 +110,15 @@ describe('A: an append for an owner already deleted is refused and writes nothin
     expect(await db.creditLedgerEntry.count()).toBe(0);
   });
 
-  it('A5 the grantCredits mutation answers a race-deleted owner as it answers a deleted one (not found)', async () => {
-    await softDeleteOrg(org);
-    // The resolver resolves first; a deleted organization is already "not found" there. The refusal the library raises
-    // inside the race (pinned in B1) maps to the same error; here the resolver path, for the shape of the answer.
-    await expect(M.grantCredits({}, { input: { orgRef: org, amountMicroCents: '10', sourceType: 't5352', sourceId: generateId() } }, ctx(admin, ['ADMIN'])))
-      .rejects.toThrow();
-    expect(await db.creditLedgerEntry.count()).toBe(0);
-  });
-
   it('A6 a merged-away person is not "deleted": the append is written and the repoint carries it to the survivor (#5014)', async () => {
     await mergeUsers(db, { sourceUserId: p, targetUserId: q, actorUserId: admin });
     expect((await db.user.findUniqueOrThrow({ where: { id: p } })).deletedAt).not.toBeNull();
-    await expect(grant({ userId: p })).resolves.toMatchObject({ ownerUserId: p });
-    expect(await naming({ ownerUserId: p })).toBe(1);
+    const written = await grant({ userId: p });
+    expect(written).toMatchObject({ ownerUserId: p });
+    // ...and the repoint carries it to the survivor (Xenophon, team chat #154422: pin it moving).
+    expect(await repointMergedLedgerOwners(db, { survivor: q })).toBe(1);
+    expect((await db.creditLedgerEntry.findUniqueOrThrow({ where: { id: written.id } })).ownerUserId).toBe(q);
+    expect(await naming({ ownerUserId: p })).toBe(0);
   });
 
   it('A7 a live owner is unaffected', async () => {
@@ -174,6 +171,26 @@ describe('B: an append that waits for an open deletion sees it and is refused', 
     const r = await append;
     expect(await naming({ ownerUserId: p })).toBe(0);
     expect(r.ok ? null : (r.error as Error).name).toBe('LedgerOwnerDeletedError');
+  });
+
+  it('B3 the grantCredits mutation in the race answers what it answers for an organization already deleted (not found)', async () => {
+    const other = (await db.organization.create({ data: { id: generateId(), name: 'l5352-other', urn: 'l5352-other' } })).id;
+    await softDeleteOrg(other);
+    const mutate = (ref: string) =>
+      settled(M.grantCredits({}, { input: { orgRef: ref, amountMicroCents: '10', sourceType: 't5352', sourceId: generateId() } }, ctx(admin, ['ADMIN'])));
+    const sequential = await mutate(other);
+    expect(sequential.ok).toBe(false);
+    const del = holdOpen(async (tx) => { await softDeleteOrganizationCore(tx, org, null); });
+    const pid = await del.pid;
+    const raced = mutate(org); // resolution reads the organization live: the delete has not committed
+    await waitForLockWaitersBlockedBy(db, pid, 1, 3_000).catch(() => undefined);
+    del.release();
+    await del.done;
+    const r = await raced;
+    expect(await db.creditLedgerEntry.count()).toBe(0);
+    expect(r.ok).toBe(false);
+    const shape = (e: unknown) => ({ name: (e as Error).name, message: (e as Error).message.replace(org, 'REF').replace(other, 'REF') });
+    expect(r.ok ? null : shape(r.error)).toEqual(sequential.ok ? null : shape(sequential.error));
   });
 });
 

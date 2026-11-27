@@ -32,6 +32,12 @@ export async function softDeleteOrganizationCore(
   /** #5009: collects the limit rows removed here; the CALLER logs them after its commit. */
   limitChanges?: OwnerLimitChange[],
 ): Promise<ChatToolTeardown[]> {
+  // #5352 (hrn:node:hadronmemory.com:specs:cor:dmo:170:08): the lock a credit ledger append's FOR KEY SHARE waits for, so an
+  // append that reaches the organization while this deletion is open sees it deleted and writes nothing (lib/metering/ledgerOwner.ts).
+  // The anchor's FOR SHARE (withAuthorizedTx) and the non-key soft delete below conflict with neither. Under READ COMMITTED
+  // the clear below sees an append that committed while this waited; a SERIALIZABLE caller (deleteUser) takes this lock and
+  // checks its snapshot first (assertLedgerSnapshotFresh), and the lock here is then a re-lock.
+  await db.$queryRaw`SELECT id FROM organizations WHERE id = ${orgId} FOR UPDATE`;
   await db.organization.updateMany({
     where: { id: orgId, deletedAt: null },
     data: { deletedAt: new Date(), ...(deletedBy != null ? { deletedBy } : {}) },
