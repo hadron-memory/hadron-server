@@ -190,9 +190,14 @@ describe('#3519 the no-App holding is read by its user over MCP', () => {
   });
 
   describe('platform bypass and positive control', () => {
-    it('6 the platform ADMIN who is not the creator still reads H (unchanged, ruling 0232 Q1)', async () => {
+    // Holger, 2026-11-27 (decisions:2026-11-27-holger-ruling-to-victor-0232-q1): the holding is its user's alone, platform roles
+    // included. This supersedes ruling 0232 Q1, which had let the platform bypass reach it; Q2 and the exclusions stand.
+    it('6 the platform ADMIN who is not the creator does not read H (2026-11-27 decision, superseding 0232 Q1)', async () => {
       const auth = f.ctx(f.platformAdmin, { roles: ['ADMIN'] });
-      expect(await canReadMemory(db, auth, f.hOut.id)).toBe(true);
+      expect(await canReadMemory(db, auth, f.hOut.id)).toBe(false);
+      expect(await canReadMemory(db, f.ctx(f.platformAdmin, { roles: ['OWNER'] }), f.hOut.id)).toBe(false);
+      // The creator still reads it.
+      expect(await canReadMemory(db, f.ctx(f.creatorOut), f.hOut.id)).toBe(true);
     });
     it('12 the owner reads their own personal memory (unchanged)', async () => {
       expect(await canReadMemory(db, f.ctx(f.creatorOut), f.personal.id)).toBe(true);
