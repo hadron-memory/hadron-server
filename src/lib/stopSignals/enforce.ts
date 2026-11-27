@@ -20,7 +20,7 @@ import { stopNames } from './names.js';
 
 export const BLOCKERS_MAX = 20;
 const LEVEL_ENUM: Record<StopLevel, string> = { 'pause-dispatch': 'PAUSE_DISPATCH', pause: 'PAUSE', halt: 'HALT' };
-const SCOPE_ENUM: Record<StopScope, string> = { worker: 'WORKER', team: 'TEAM', host: 'HOST' };
+const SCOPE_ENUM: Record<StopScope, string> = { worker: 'WORKER', team: 'TEAM', app: 'APP', host: 'HOST' };
 
 /** Refuse making `workerId` an assignee while a live stop signal covers it. */
 export async function refuseStoppedAssignee(tx: Prisma.TransactionClient, appId: string, workerId: string, now: Date, taskId?: string): Promise<void> {

@@ -14982,9 +14982,9 @@ export const typeDefs = `#graphql
     is the App's owner (a user-owned App whose owner linked their own memory); in an organization's App the link is inert for
     the key. The same holds for a user-owned memory of any other class (#5345): a knowledge or group memory under a user root
     never reaches the key through a link — attaching gives no access, and the record gate refuses it — so the link sits inert
-    (listed with 'active: false' in attachedMemories) until it is detached. Any class except 'system', in any tenant. One
-    memory may be linked into several Apps. A link you already hold is
-    success and writes nothing. 'agentRef' is accepted and ignored (deployed clients keep working).
+    (listed with 'active: false' in attachedMemories) until it is detached. You may attach any class except 'system', in
+    any tenant, and the attach succeeds even when the link stays inert. One memory may be linked into several Apps. A link
+    you already hold is success and writes nothing. 'agentRef' is accepted and ignored (deployed clients keep working).
 
     Person only: a signed-in user acting as themselves, and a member of the App. Typed errors, judged in this order before any
     write: UNAUTHENTICATED (no signed-in user); FORBIDDEN (an App key, run, worker session or impersonation; also an unknown or
@@ -17984,10 +17984,12 @@ export const typeDefs = `#graphql
     HALT
   }
 
-  "#2022 — a stop signal's scope: one worker, a team (its head and the whole reporting tree under it), or the workers a host registration lists."
+  "#2022 — a stop signal's scope: one worker, a team (its head and the whole reporting tree under it), every worker of the App (#5325), or the workers a host registration lists."
   enum StopSignalScope {
     WORKER
     TEAM
+    "#5325 (hrn:node:hadronmemory.com:specs:cor:agt:090:02) — every live worker of the App, worked out each time it is checked: a worker cast after the signal is covered from its birth. It names no target."
+    APP
     HOST
   }
 
@@ -18001,7 +18003,7 @@ export const typeDefs = `#graphql
     id: ID!
     level: StopSignalLevel!
     scope: StopSignalScope!
-    "WORKER and TEAM: the target worker (a team by its head)."
+    "WORKER and TEAM: the target worker (a team by its head). APP and HOST: null."
     targetWorkerId: ID
     "HOST: the target host's id."
     targetHostId: String
@@ -18035,9 +18037,9 @@ export const typeDefs = `#graphql
     appRef: String!
     level: StopSignalLevel!
     scope: StopSignalScope!
-    "WORKER and TEAM: the target worker (a team by its head)."
+    "WORKER and TEAM: the target worker (a team by its head). APP: none (a worker named with APP is BAD_USER_INPUT). A host key never sets APP."
     worker: String
-    "HOST: the host's id. A host key may omit it: its own host is taken from its binding."
+    "HOST: the host's id. A host key may omit it: its own host is taken from its binding. APP: none (a host named with APP is BAD_USER_INPUT too)."
     host: String
     "When it ends on its own; later than now. Omitted: until lifted."
     until: DateTime

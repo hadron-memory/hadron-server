@@ -331,7 +331,12 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // cor:dmo:060:22 (Decided D-2026-11-26: attaching gives no access; the #5258/#5185 interim covers own personal/private only);
 // the grant (#5321) is the path to that access. Own personal/private linked by the App's owner and organization-owned links are
 // unchanged. (0.50.0 is #5267, merged first.)
-export const HADRON_SERVER_VERSION = '0.51.0';
+// 0.52.0 — ADDITIVE, #5325 (cor:agt:090:01, :02): `StopSignalScope` gains `APP`, a stop signal that covers every live worker of the App,
+// one cast after it was set included (worked out at each check, no stored roster) and naming no target; whoever manages the App sets and
+// lifts it, a host key never does (STOP_SIGNAL_SCOPE_FORBIDDEN for every shape of the call). The MCP `hadron_stop_signal_set` scope enum
+// gains APP. The three older scopes behave as before. A lagging client that still validates against the old enum cannot send APP, and one
+// that lists signals may now read a scope it does not know. (0.51.0 is #5345, merged first.)
+export const HADRON_SERVER_VERSION = '0.52.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
