@@ -110,6 +110,13 @@ describe('#5390 GraphQL createNode (the portal\'s Conversation Editor and wizard
     expect(await missingChatbotContainers(db, a.memoryId, ['prompts:a:b'])).toEqual(['prompts', 'prompts:a']);
   });
 
+  it('an encrypted Agent system memory gains nothing (its parents would need the session key)', async () => {
+    const a = await bareAgent('enc');
+    expect(await missingChatbotContainers(db, a.memoryId, ['prompts:a:b'])).toEqual(['prompts', 'prompts:a']);
+    await db.memory.update({ where: { id: a.memoryId }, data: { isEncrypted: true } });
+    expect(await missingChatbotContainers(db, a.memoryId, ['prompts:a:b'])).toEqual([]);
+  });
+
   it('option B: a derived Agent creates no parent its base already provides', async () => {
     const base = await bareAgent('base');
     await db.node.create({ data: { id: generateId(), memoryId: base.memoryId, loc: 'prompts', name: 'Prompts' } });
