@@ -83,6 +83,14 @@ describe('#5021 a unit records its price row', () => {
     expect([row.price_row_id, row.cost_micro_cents]).toEqual([null, null]);
   });
 
+  it('pin 1d (#5216 item 3): a zero-token unit records the row in force, at cost 0', async () => {
+    const row = await mkPrice(new Date('2026-01-01T00:00:00Z'));
+    const event = await recordLlmUsage(db, { ...BASE, tokensIn: 0, tokensOut: 0, billableAccount: { organizationId: orgId } });
+    const unit = await unitRow(event!.id);
+    expect(unit.price_row_id).toBe(row.id);
+    expect(BigInt(unit.cost_micro_cents)).toBe(0n);
+  });
+
   it('pin 1c: an openai-compatible unit carries no price row even when a row exists for it', async () => {
     await db.aiModelPrice.create({ data: { id: generateId(), provider: 'openai-compatible', model: BASE.model, tier: 1, inputMicroCentsPerMTok: IN_RATE, outputMicroCentsPerMTok: OUT_RATE, effectiveAt: new Date('2026-01-01T00:00:00Z') } });
     const event = await recordLlmUsage(db, { ...BASE, provider: 'openai-compatible', billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
