@@ -69,6 +69,17 @@ export function isLive(s: Pick<StopSignal, 'endedAt' | 'until'>, now: Date): boo
 export const liveSql = (now: Date) => Prisma.sql`s.ended_at IS NULL AND (s.until IS NULL OR s.until > ${toNaiveUtc(now)}::timestamp)`;
 
 /**
+ * #5325: does the App hold an unended APP-scope signal? An APP signal covers every worker, so a worker born while one stands is
+ * covered from its birth (enforcement is live either way) and must be told: the one case a cast with no reporting line is
+ * related to the stop fence. An expired-but-unrecorded signal counts (conservative: the cast then takes the fence and reconciles).
+ */
+export async function appStopSignalLive(db: Db, appId: string): Promise<boolean> {
+  const rows = await db.$queryRaw<{ one: number }[]>(Prisma.sql`
+    SELECT 1 AS one FROM team_stop_signals s WHERE s.app_id = ${appId} AND s.scope = 'app' AND s.ended_at IS NULL LIMIT 1`);
+  return rows.length > 0;
+}
+
+/**
  * The App's stop fence (see the file header for its place in the lock order). `$executeRaw`: the lock functions
  * return void, which `$queryRaw` cannot deserialize.
  */

@@ -193,20 +193,25 @@ describe('cor:agt:090:02 — the workers an APP signal covers, live (no roster, 
     expect(await notices(newbie)).toEqual(['pause:stop', 'pause:resume']);
   });
 
-  it('C6: a cast with no reporting line takes the App\'s stop fence, so it is ordered with a signal being set (it waits behind a held fence)', async () => {
+  it('C6: while an APP signal stands, a cast with no reporting line takes the App\'s stop fence (it waits behind a held fence); with none it does not', async () => {
     const caster = await M.createAgent({}, { orgRef: org.id, name: 'Caster', personaRole: 'engineer' }, ctx(max.id));
     await serveEveryAgent(db);
     await createDbAppAgent(db, app.id, caster.id);
-    let settled = false;
-    let cast: Promise<unknown> | undefined;
-    await db.$transaction(async (tx) => {
-      await lockStopFence(tx, app.id, 'exclusive');
-      cast = M.castWorker({}, { appRef: app.id, agentRef: caster.id, name: 'Waiter' }, ctx(max.id)).finally(() => { settled = true; });
-      await new Promise((r) => setTimeout(r, 700));
-      expect(settled).toBe(false); // queued on the fence: a cast no longer slips past a signal being set
-    });
-    await cast;
-    expect(await db.worker.count({ where: { appId: app.id, name: 'Waiter' } })).toBe(1);
+    const castHolding = async (name: string, expectWait: boolean) => {
+      let settled = false;
+      let cast: Promise<unknown> | undefined;
+      await db.$transaction(async (tx) => {
+        await lockStopFence(tx, app.id, 'exclusive');
+        cast = M.castWorker({}, { appRef: app.id, agentRef: caster.id, name }, ctx(max.id)).finally(() => { settled = true; });
+        await new Promise((r) => setTimeout(r, 900));
+        expect(settled).toBe(!expectWait);
+      });
+      await cast;
+      expect(await db.worker.count({ where: { appId: app.id, name } })).toBe(1);
+    };
+    await castHolding('Free', false); // no APP signal: unrelated to the fence (castReporting2028 pins the same)
+    await set(ctx(max.id), { level: 'PAUSE', scope: 'APP' });
+    await castHolding('Waiter', true); // an APP signal stands: ordered with it
   });
 
   it('C5: every live signal applies: lifting the APP signal leaves a team pause and a host halt where they were', async () => {
