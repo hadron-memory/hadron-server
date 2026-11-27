@@ -131,7 +131,8 @@ describe('#5332: the acceptance set keeps every reader main keeps', () => {
     ['<!</xmp><![CDATA[x<!<plaintext><!T>--<div></ <template><b', '<!</xmp>&lt;![CDATA[x<!&lt;plaintext><!T>--<div></ <template>&lt;b', ALL, ALL],
     ['<ba</ <noembed><pre><div/<template>', '&lt;ba</ &lt;noembed><pre><div/&lt;template>', [], ALL],
     ['--><!<plaintext>a<pre><x*-*- <template># h', '--><!&lt;plaintext>a<pre><x*-*- &lt;template># h', [], ALL],
-    ['- - -<![\n<noscript><noscript><![\n    <!--<![CDATA[]]>\r\n`', '- - -<![\n<noscript>&lt;noscript><![\n    <!--<![CDATA[]]>\r\n`', ALL, ALL],
+    // #5388 (QA): the line-head `<noscript>` has more on its line, so no reader opens a block there and it is escaped too; losses unchanged.
+    ['- - -<![\n<noscript><noscript><![\n    <!--<![CDATA[]]>\r\n`', '- - -<![\n&lt;noscript>&lt;noscript><![\n    <!--<![CDATA[]]>\r\n`', ALL, ALL],
     ['<!--<!<noembed><![CDATA[]]>\n<!DOCTYPE html><h1></<<template>>\n', '&lt;!--<!&lt;noembed><![CDATA[]]>\n<!DOCTYPE html><h1></<<template>>\n', ['marked'], ALL],
     ['<title></ <noembed><div/> - \n  </div><a<![<![CDATA[x<noembed>', '&lt;title></ &lt;noembed><div/> - \n  </div>&lt;a<![<![CDATA[x<noembed>', ['marked'], ALL],
   ] as Array<[string, string, string[], string[]]>)('%j', (body, out, lose, mainLose) => {

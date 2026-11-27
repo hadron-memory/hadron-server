@@ -8,6 +8,7 @@ import { deleteSecretsForOwner } from '../../lib/secrets.js';
 import { assertOwnerLimitSnapshotFresh, deleteOwnerLimits, logOwnerLimitChanges, type OwnerLimitChange } from '../../lib/ownerLimits/changes.js';
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { softDeleteOrganizationCore } from './softDeleteOrganization.js';
+import { assertLedgerSnapshotFresh } from '../../lib/metering/ledgerOwner.js';
 import { dispatchChatToolTeardown, type ChatToolTeardown } from '../../lib/chatToolTeardown.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../lib/auth/revokeOrgInvitations.js';
 import { AuthoritySnapshotStale, lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
@@ -229,6 +230,9 @@ async function runDeletionTxn(
         WHERE id = ${targetUserId} AND deleted_at IS NULL FOR UPDATE
       `;
       if (locked.length === 0) throw new Error('User not found');
+      // #5352 (hrn:node:hadronmemory.com:specs:cor:dmo:170:08): this SERIALIZABLE snapshot predates the lock, so a ledger append that
+      // committed meanwhile would be missed by the clear below; with the row held no new entry can name the person. Stale: retried.
+      await assertLedgerSnapshotFresh(tx, db, { userId: targetUserId });
       await assertUserGrantSnapshotFresh(tx, db, targetUserId);
       await assertOwnerLimitSnapshotFresh(tx, db, [{ userId: targetUserId }, ...membershipScope.map((organizationId) => ({ organizationId }))]);
       for (const orgId of membershipScope) {
@@ -303,6 +307,10 @@ async function runDeletionTxn(
       const chatTeardowns: ChatToolTeardown[] = [];
       const limitChanges: OwnerLimitChange[] = [];
       for (const orgId of soleMemberOrgIds) {
+        // #5352: the organization row FOR UPDATE (the lock softDeleteOrganizationCore takes) BEFORE the snapshot check, for the
+        // reason given at the person's check above.
+        await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${orgId} FOR UPDATE`;
+        await assertLedgerSnapshotFresh(tx, db, { organizationId: orgId });
         chatTeardowns.push(...(await softDeleteOrganizationCore(tx, orgId, actorUserId, undefined, limitChanges)));
       }
       // Soft-delete every remaining live membership row (the platform-wide
