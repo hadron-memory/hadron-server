@@ -62,6 +62,9 @@ describe('#5324 a raw-text start behind a line-head `<div/` is escaped', () => {
       '<div>\n<div/<xmp>', '<div/`<xmp>`', '<div/\\<xmp>', '    <div/<xmp>', '<div/<xmp>\n\n</xmp>',
       // The fuzz body a whole-line reclassification over-escaped (the inline comment rule is stricter than the readers here).
       '<div/<!--1.x<pre><!x></script>`',
+      // The new test applies only where main read the line as a block and judged nothing in it (one per guard): not in the middle of a line,
+      // not after a name that opens no block, not inside an HTML block in a container, and not after a name a blank follows (a real block).
+      'x<div/<xmp>\n    </xmp>', '<span/<xmp>\n    </xmp>', '> <div>\n> <div/<xmp>', '- <div>\n  <div/<xmp>', 'a\n<div <xmp>', 'a\n</div <xmp>',
     ]) {
       expect(losers(body), body).toEqual([]);
       expect(escapeUnterminatedHtml(body), body).toBe(body);

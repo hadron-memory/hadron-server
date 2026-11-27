@@ -127,7 +127,8 @@ describe('#5332: the acceptance set keeps every reader main keeps', () => {
     ['</<noembed><pre></<template>', '</&lt;noembed><pre></<template>', ['commonmark.js', 'markdown-it'], ALL],
     ['<!<iframE><h1></<template>', '<!&lt;iframE><h1></<template>', ALL, ALL],
     ['</<noscript><div></<template>', '</&lt;noscript><div></<template>', ALL, ALL],
-    ['<b&lt;\t<![<iframe>`<div>\n<div/<noscript><?>', '<b&lt;\t<![&lt;iframe>`<div>\n<div/<noscript><?>', ALL, ALL],
+    // #5324: the `<noscript>` behind the line-head `<div/` is escaped too, and no reader loses the anchor (main's output loses it in all).
+    ['<b&lt;\t<![<iframe>`<div>\n<div/<noscript><?>', '<b&lt;\t<![&lt;iframe>`<div>\n<div/&lt;noscript><?>', [], ALL],
     ['<!</xmp><![CDATA[x<!<plaintext><!T>--<div></ <template><b', '<!</xmp>&lt;![CDATA[x<!&lt;plaintext><!T>--<div></ <template>&lt;b', ALL, ALL],
     ['<ba</ <noembed><pre><div/<template>', '&lt;ba</ &lt;noembed><pre><div/&lt;template>', [], ALL],
     ['--><!<plaintext>a<pre><x*-*- <template># h', '--><!&lt;plaintext>a<pre><x*-*- &lt;template># h', [], ALL],
