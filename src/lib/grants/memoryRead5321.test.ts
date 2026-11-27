@@ -99,6 +99,16 @@ describe('creation admits the two forms (cor:acl:140:02)', () => {
     expect(await db.grant.count({ where: { action: 'memory.read' } })).toBe(0);
   });
 
+  it('a per-user chat holding is never a target, for any class it takes (hadron-internal#88, cor:cht:010:02)', async () => {
+    const { memoryReadTargetRefusal } = await import('./readGrant.js');
+    const row = { id: generateId(), appId: null, organizationId: w.orgId, ownerUserId: null, userId: null, deletedAt: null, isEncrypted: false,
+      isInstallMemory: false, workerOf: [] };
+    for (const cls of ['knowledge', 'group']) {
+      expect(await memoryReadTargetRefusal(db as never, w.appId, { ...row, class: cls, userMemoryOfAgentId: generateId() })).toBe('user-holding');
+      expect(await memoryReadTargetRefusal(db as never, w.appId, { ...row, class: cls, userMemoryOfAgentId: null })).toBeNull(); // the control
+    }
+  });
+
   it('only the grant\'s own App holds it: a worker, an agent, a person and another App are refused', async () => {
     for (const holder of [{ kind: 'worker', id: w.workerId }, { kind: 'agent', id: w.agentId }, { kind: 'user', id: manager }, { kind: 'app', id: w.app2Id }]) {
       expect({ holder, code: await code(create({ memory: kb.id }, { holder })) }).toEqual({ holder, code: 'GRANT_HOLDER_NOT_ALLOWED' });

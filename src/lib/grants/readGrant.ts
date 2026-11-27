@@ -28,6 +28,7 @@ import { isAgentInstalled } from '../appAgent.js';
 import { grantLiveSql } from './live.js';
 import { keyHoldsScope } from '../appKeyScopes/scopes.js';
 import { LIVE_ORG_MEMBERSHIP } from '../auth/liveOrgMembership.js';
+import { isUserHolding } from '../auth/userHolding.js';
 
 export const MEMORY_READ_ACTION = 'memory.read';
 /** The App key scope a pure key needs before a `memory.read` grant held by its App reaches it. */
@@ -46,7 +47,7 @@ export interface ReadGrantTarget {
 
 export type ReadGrantTargetRefusal =
   | 'deleted' | 'strict-owner' | 'encrypted' | 'install-memory' | 'system-not-installed' | 'worker-memory' | 'session-memory'
-  | 'other-app-team-space' | 'own-app';
+  | 'other-app-team-space' | 'own-app' | 'user-holding';
 
 type Db = Pick<PrismaClient, 'agent' | 'appAgent' | 'app' | 'agentImport' | 'organization' | 'agentOrgGrant'>;
 
@@ -58,7 +59,8 @@ type Db = Pick<PrismaClient, 'agent' | 'appAgent' | 'app' | 'agentImport' | 'org
  *  - system: only the system memory of a live Agent installed in this App now (the #2883 rule).
  *  - app: a Worker's or a session memory never; another App's team space never (the #2883 narrowing); this App's own memories
  *    `own-app` (it reads them already, so a grant would name nothing new).
- *  - group and knowledge: admitted; the giver's own read (judged at every use) is what bounds them.
+ *  - group and knowledge: admitted, except a per-user chat holding (hadron-internal#88); the giver's own read (judged at every
+ *    use) is what bounds them.
  */
 export async function memoryReadTargetRefusal(db: Db, appId: string, memory: ReadGrantTarget): Promise<ReadGrantTargetRefusal | null> {
   if (memory.deletedAt) return 'deleted';
@@ -78,6 +80,9 @@ export async function memoryReadTargetRefusal(db: Db, appId: string, memory: Rea
     if (memory.userMemoryOfAgentId !== null) return 'session-memory';
     return memory.appId === appId ? 'own-app' : 'other-app-team-space';
   }
+  // hadron-internal#88 (cor:cht:010:02): a per-user chat holding is its creator's alone; no grant held by an App serves it, whoever
+  // gives it (as automationReadGrant.ts's #2883 judge). Refused at creation and again at every read.
+  if (isUserHolding(memory)) return 'user-holding';
   if (memory.appId === appId) return 'own-app';
   return null;
 }
