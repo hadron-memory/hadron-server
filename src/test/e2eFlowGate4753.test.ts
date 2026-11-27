@@ -30,7 +30,8 @@ beforeEach(async () => {
 const seed = (env: Record<string, string | undefined>) =>
   seedE2eScriptFlowIfEnabled(db, { org, organizationId, appId, agentId, grantedBy: adminId, id }, env);
 const flowsMemories = () => db.memory.count({ where: { organizationId, urn: `${org}:flows` } });
-const grants = () => db.appMemoryWriteGrant.count({ where: { appId } });
+// #5404: the fixture's write grant is a signed `memory.write` grant held by the App.
+const grants = () => db.grant.count({ where: { granteeAppId: appId, action: 'memory.write' } });
 
 describe('#4753 the flow fixtures follow the run-worker switch, exactly', () => {
   it('the switch is on only when the container variable is exactly "false" (stack.sh: E2E_RUN_WORKER=true)', () => {

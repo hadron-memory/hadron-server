@@ -29,6 +29,7 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromG
 
 import { mintAppRun, executeAppRun, RunLaunchDeniedError, type RunExecutionDeps } from './appRuns.js';
 import { makeProdRunDeps } from './appRunDeps.js';
+import { activeMemoryWriteGrant } from '../test/appGrants5404.js';
 
 const ORG_URN = 'credit-gate-org';
 const mem = `${ORG_URN}::flowmem`;
@@ -61,9 +62,9 @@ beforeEach(async () => {
   await db.agentMemoryItem.create({ data: { agentId, memoryId, role: 'read-write' } });
   const grantor = await createDbRunConsentPrincipal(db, orgId, appId);
   await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: grantor.userId } }, data: { role: 'ADMIN' } });
-  await db.appMemoryWriteGrant.createMany({ data: ['tasks', 'runs', 'flow'].map((prefix) => ({
-    appId, memoryId, prefix, grantedBy: grantor.userId, registerNodeUrn: 'hrn:node:example.com:fixture:authority',
-  })) });
+  // #5404: the App's write authority is a signed `memory.write` grant per prefix (ruling 0083's unsigned rows are retired),
+  // signed by the org ADMIN, who manages the memory.
+  for (const prefix of ['tasks', 'runs', 'flow']) await activeMemoryWriteGrant(appId, memoryId, { issuerUserId: grantor.userId, prefix });
   // a two-hop flow (a -> b) and a flow whose second hop is a script (a -> s)
   const a = await makeNode('flow:a', { content: 'Say hello.' });
   const b = await makeNode('flow:b', { content: 'Say goodbye.' });

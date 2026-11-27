@@ -15,6 +15,7 @@
  *  - template save carries none; dry run and real apply agree; a warning never
  *    changes the mutation's success.
  */
+import { activeMemoryReadGrant, activeMemoryWriteGrant, revokeGrantRow } from '../../../test/appGrants5404.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
@@ -368,12 +369,15 @@ describe('#1327 — containment shortcuts are each load-bearing', () => {
 const WARN = (role: string, field: 'authorTask' | 'validationTask', taskUrn: string | null, taskState: string | null) =>
   ({ code: 'TASK_LESS_VISIBLE', role, field, taskUrn, taskState });
 
-describe('#1327 — a live App write or automation read grant on the target is an audience not provable here', () => {
+// #5404: the App grants are the signed `memory.write` (was ruling 0083's App write grant) and `memory.read` (was #2883's
+// automation read grant) grants; the warning counts every live one naming the target, or a `memory.read` naming its organization.
+describe('#1327 — a live memory.write or memory.read grant on the target is an audience not provable here', () => {
   const mkApp = (urn: string) => db.app.create({ data: { name: urn, urn, organizationId: org.id } as never });
-  const writeGrant = (appId: string, memoryId: string, revokedAt: Date | null = null) =>
-    db.appMemoryWriteGrant.create({ data: { appId, memoryId, prefix: 'notes', grantedBy: admin, revokedAt, revokedBy: revokedAt ? admin : null } });
-  const autoGrant = (appId: string, memoryId: string, revokedAt: Date | null = null) =>
-    db.appAutomationReadGrant.create({ data: { appId, memoryId, triggerKind: 'SCHEDULE', triggerId: generateId(), grantedBy: admin, revokedAt, revokedBy: revokedAt ? admin : null } });
+  const ended = async (id: string, revoked: boolean) => { if (revoked) await revokeGrantRow(id, admin); };
+  const writeGrant = async (appId: string, memoryId: string, revokedAt: Date | null = null) =>
+    ended(await activeMemoryWriteGrant(appId, memoryId, { issuerUserId: admin, prefix: 'notes' }), revokedAt !== null);
+  const autoGrant = async (appId: string, memoryId: string, revokedAt: Date | null = null) =>
+    ended(await activeMemoryReadGrant(appId, memoryId, { issuerUserId: admin }), revokedAt !== null);
 
   it('org knowledge target: a live write grant warns; the same save without it, or with the grant revoked, does not', async () => {
     const app = await mkApp('acme.com:wg');
@@ -387,7 +391,7 @@ describe('#1327 — a live App write or automation read grant on the target is a
     expect(warned(live, 'createNodeRoleRule')).toEqual([WARN('live', 'authorTask', tKb2.urn, 'OK')]);
   });
 
-  it('org knowledge target: a live automation read grant warns; a revoked one does not', async () => {
+  it('org knowledge target: a live memory.read grant warns; a revoked one does not', async () => {
     const app = await mkApp('acme.com:ag');
     await autoGrant(app.id, kb.id, new Date());
     const revoked = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'rev', authorTaskRef: tKb2.urn } });
@@ -404,6 +408,16 @@ describe('#1327 — a live App write or automation read grant on the target is a
     await writeGrant(app.id, mine.id);
     const r = await gql(as(owner), CREATE, { m: mine.id, i: { role: 'live', authorTaskRef: tMine2.urn } });
     expect(warned(r, 'createNodeRoleRule').map((x) => x.code)).toEqual(['TASK_LESS_VISIBLE']);
+  });
+
+  it('#5404: a memory.read grant naming the target\'s organization (form (a)) warns; one naming another organization does not', async () => {
+    const app = await mkApp('acme.com:wf');
+    await autoGrant(app.id, otherOrg.id);
+    const other = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'oth', authorTaskRef: tKb2.urn } });
+    expect(warned(other, 'createNodeRoleRule')).toEqual([]);
+    await autoGrant(app.id, org.id);
+    const live = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'live', authorTaskRef: tKb2.urn } });
+    expect(warned(live, 'createNodeRoleRule').map((x) => x.code)).toEqual(['TASK_LESS_VISIBLE']);
   });
 
   it('a grant on ANOTHER memory changes nothing', async () => {
@@ -554,9 +568,12 @@ describe('#1327 — UNREADABLE, BROKEN and NONE run no audience comparison (read
     vi.spyOn(db.agentMemoryItem, 'count'),
     vi.spyOn(db.memoryShare, 'findMany'),
     vi.spyOn(db.memoryMember, 'findMany'),
-    vi.spyOn(db.appMemoryWriteGrant, 'count'),
-    vi.spyOn(db.appAutomationReadGrant, 'count'),
   ];
+  // #5404: the grant read is one raw query on `grants` (was two counts on the retired tables): count only those calls.
+  let rawSpy: ReturnType<typeof vi.spyOn> | null = null;
+  const grantReads = () => (rawSpy?.mock.calls ?? []).filter((c: unknown[]) =>
+    Array.isArray(c[0]) && (c[0] as string[]).join('').includes('FROM grants g') && (c[0] as string[]).join('').includes('action IN')).length;
+  const trapGrants = () => { rawSpy = vi.spyOn(db, '$queryRaw'); };
   const seed = async (data: Record<string, unknown>) => {
     const created = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'spec' } });
     const id = created.data!.createNodeRoleRule.rule.id;
@@ -566,33 +583,37 @@ describe('#1327 — UNREADABLE, BROKEN and NONE run no audience comparison (read
 
   it('UNREADABLE: warns from the projection and reads no audience', async () => {
     const id = await seed({ authorTaskId: tForeign.id, authorTaskRequired: true });
-    const spies = traps();
+    const spies = traps(); trapGrants();
     const r = await gql(as(admin), UPDATE, { r: id, i: { enabled: false } });
     expect(warned(r, 'updateNodeRoleRule')).toEqual([WARN('spec', 'authorTask', null, 'UNREADABLE')]);
     for (const s of spies) expect(s).not.toHaveBeenCalled();
+    expect(grantReads()).toBe(0);
   });
 
   it('BROKEN: warns from the projection and reads no audience', async () => {
     const id = await seed({ authorTaskId: null, authorTaskRequired: true });
-    const spies = traps();
+    const spies = traps(); trapGrants();
     const r = await gql(as(admin), UPDATE, { r: id, i: { enabled: false } });
     expect(warned(r, 'updateNodeRoleRule')).toEqual([WARN('spec', 'authorTask', null, 'BROKEN')]);
     for (const s of spies) expect(s).not.toHaveBeenCalled();
+    expect(grantReads()).toBe(0);
   });
 
   it('NONE: no warning and no audience read', async () => {
     const id = await seed({});
-    const spies = traps();
+    const spies = traps(); trapGrants();
     const r = await gql(as(admin), UPDATE, { r: id, i: { enabled: false } });
     expect(warned(r, 'updateNodeRoleRule')).toEqual([]);
     for (const s of spies) expect(s).not.toHaveBeenCalled();
+    expect(grantReads()).toBe(0);
   });
 
   it('control: an OK task in another memory does read the audience', async () => {
     const id = await seed({ authorTaskId: tKb2.id, authorTaskRequired: true });
-    const spies = traps();
+    const spies = traps(); trapGrants();
     await gql(as(admin), UPDATE, { r: id, i: { enabled: false } });
     expect(spies.some((s) => s.mock.calls.length > 0)).toBe(true);
+    expect(grantReads()).toBeGreaterThan(0);
   });
 });
 

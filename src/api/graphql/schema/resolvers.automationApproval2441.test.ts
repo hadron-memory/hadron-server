@@ -4,6 +4,7 @@
  * Red first: every case below fails on main, where only previewAutomation and
  * reAdoptAutomation exist.
  */
+import { activeMemoryReadGrant } from '../../../test/appGrants5404.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -442,7 +443,9 @@ describe('user-owned Apps (CHECKED contract: covered, nullable organization, str
     spy.mockRestore();
   });
 
-  it('#2883: a legacy row whose entry is gone still shows its live read grants (the stale-entry answer is not a null readGrants)', async () => {
+  // #5404 (cor:acl:140:02): the per-automation read grant is retired; `readGrants` stays in the SDL, deprecated, and is always
+  // empty. What an App's runs read outside their memories is its signed `memory.read` grants, which an approval does not list.
+  it('#5404 (was #2883): a legacy row whose entry is gone answers the stale-entry shape with an empty readGrants, never null', async () => {
     const f = await fixture();
     const legacy = await db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, name: 'Legacy', cron: '* * * * *', entryNodeUrn: 'hrn:node:adopt.test:flow:gone' } });
     const target = await db.memory.create({ data: { name: 'KnowStale', urn: 'adopt.test:knowstale', class: 'knowledge', organizationId: f.org.id } });
@@ -450,10 +453,10 @@ describe('user-owned Apps (CHECKED contract: covered, nullable organization, str
     const d = await Q.automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef: legacy.id }, f.ctx);
     expect(d.state).toBe('UNADOPTED');
     expect(d.hash).toBe('');
-    expect(d.readGrants.map((g: any) => [g.memoryUrn, g.prefix])).toEqual([['hrn:mem:adopt.test:knowstale', 'tasks']]);
+    expect(d.readGrants).toEqual([]);
   });
 
-  it('#2883 (0081 A): the approval shows the trigger\'s LIVE read grants (memory and prefix), never a revoked one; a manual run shows none', async () => {
+  it('#5404 (was #2883 0081 A): readGrants is empty for every trigger kind, whatever old rows or signed memory.read grants exist', async () => {
     const f = await fixture();
     const target = await db.memory.create({ data: { name: 'Know', urn: 'adopt.test:know', class: 'knowledge', organizationId: f.org.id } });
     const foreignOrg = await db.organization.create({ data: { name: 'Foreign', urn: 'foreign.test' } });
@@ -462,9 +465,7 @@ describe('user-owned Apps (CHECKED contract: covered, nullable organization, str
     await db.appAutomationReadGrant.create({ data: { ...base, memoryId: target.id, prefix: 'tasks' } });
     await db.appAutomationReadGrant.create({ data: { ...base, memoryId: target.id, prefix: 'old', revokedAt: new Date(), revokedBy: f.user.id } });
     await db.appAutomationReadGrant.create({ data: { ...base, memoryId: hidden.id, prefix: null } });
-    const d = await detail(f, 'SCHEDULE');
-    expect(d.readGrants.map((g: any) => [g.memoryUrn, g.prefix])).toEqual([['hrn:mem:adopt.test:know', 'tasks'], [null, null]]);
-    expect((await detail(f, 'WEBHOOK')).readGrants).toEqual([]);
-    expect((await detail(f, 'MANUAL')).readGrants).toEqual([]);
+    await activeMemoryReadGrant(f.app.id, target.id, { issuerUserId: f.user.id });
+    for (const kind of ['SCHEDULE', 'WEBHOOK', 'MANUAL'] as const) expect((await detail(f, kind)).readGrants).toEqual([]);
   });
 });
