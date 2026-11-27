@@ -98,11 +98,14 @@ async function withTableHeld<T>(table: 'workers' | 'agent_tasks', act: () => Pro
 }
 
 async function expectCancelledAtBudget(table: 'workers' | 'agent_tasks') {
-  const t0 = Date.now();
-  const outcome: { resolved?: unknown; thrown?: any } = await withTableHeld(table, () => callSnapshot().then(
-    (v) => ({ resolved: v }), (e) => ({ thrown: e }),
-  ));
-  const elapsed = Date.now() - t0 - 300;
+  // Timed around the snapshot call alone: withTableHeld then waits for the holder to let go.
+  let elapsed = -1;
+  const outcome: { resolved?: unknown; thrown?: any } = await withTableHeld(table, async () => {
+    const t0 = Date.now();
+    const settled = await callSnapshot().then((v) => ({ resolved: v }), (e) => ({ thrown: e }));
+    elapsed = Date.now() - t0;
+    return settled;
+  });
   // On main the snapshot waits for the holder (~9 s) and then answers in full.
   expect(outcome.resolved, `the snapshot completed after ${elapsed} ms; the blocked statement was never cancelled`).toBeUndefined();
   expect(elapsed, `refused after ${elapsed} ms; the statement must be cancelled at the ${BUDGET_MS} ms budget, once`).toBeLessThan(REFUSED_BY);
@@ -110,6 +113,13 @@ async function expectCancelledAtBudget(table: 'workers' | 'agent_tasks') {
   expect(outcome.thrown.extensions).toMatchObject({ code: 'TEAM_SNAPSHOT_SOURCE_FAILED' });
   expect(outcome.thrown.message).toBe('The required team snapshot source could not be read. Fail the report and save nothing.');
   expect(outcome.thrown.message).not.toContain('canceling statement');
+  // The statement cap fired, not only the PG17 backstop: the runaway statement starts right after the bound is set, so
+  // its own 57014 (non-fatal, the pooled connection kept) lands before the backstop's FATAL 25P04 a margin later.
+  const cause = outcome.thrown.cause as unknown;
+  const sqlstate = cause instanceof Prisma.PrismaClientKnownRequestError
+    ? String((cause.meta as { code?: unknown } | undefined)?.code)
+    : (cause as Error | undefined)?.message.match(/PostgresError \{ code: "(\w+)"/)?.[1];
+  expect(sqlstate, `cause: ${String(cause)}`).toBe('57014');
 }
 
 describe('#5351 red: the run team-snapshot read is cancelled at the roster budget', () => {
