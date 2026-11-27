@@ -126,6 +126,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   delete process.env.CORE_EVENTS_TOKEN;
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
@@ -193,7 +194,6 @@ describe('POST /internal/webfetch-events', () => {
     expect(await db.appRun.count()).toBe(runsBefore);
     expect(await db.webFetchEventReceipt.count()).toBe(0);
     expect(await db.creditLedgerEntry.count()).toBe(0); // the gate wrote nothing inside the ingress's transaction
-    vi.unstubAllEnvs();
   });
 
   it('dedupes the same (jobId, snapshotHash, kind) without minting another run', async () => {

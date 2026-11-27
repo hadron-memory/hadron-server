@@ -36,6 +36,7 @@ import { emitNodeUrnV2 } from '../lib/urnEmit.js';
 import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/aiConfig.js';
 import { recordLlmUsage } from '../lib/metering/index.js';
 import { CreditsExhaustedError, gateCredit } from '../lib/metering/gate.js';
+import { billableAccountOfRun } from '../lib/metering/billableAccount.js';
 // Spec 049 Phase 3b — the trigger's scope snapshot on the run.
 import { parseRunScopeSnapshot, snapshotScopeForTrigger } from '../lib/scopes.js';
 import { snapshotRegisterForRun } from '../lib/resolveRegister.js';
@@ -645,7 +646,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // own key is gated; the billable account of a run is the owner of the App it runs in (cor:dmo:170:05), which is the run's
   // organization. It is the run's own refusal, mapped by every door like QUOTA_EXCEEDED.
   try {
-    await gateCredit(db, runKeyOwnerType, { organizationId: args.organizationId });
+    await gateCredit(db, runKeyOwnerType, billableAccountOfRun({ organizationId: args.organizationId }));
   } catch (err) {
     if (err instanceof CreditsExhaustedError) throw new RunLaunchDeniedError(err.message, 'CREDITS_EXHAUSTED');
     throw err;
@@ -1052,7 +1053,7 @@ async function executeAppRunInner(
       // A script hop makes no model call and is not checked. The refusal is stored as DENIED_CREDITS.
       if (!spec.script && resolved !== null) {
         try {
-          await gateCredit(db, resolved.ownerType, { organizationId: run.organizationId });
+          await gateCredit(db, resolved.ownerType, billableAccountOfRun(run));
         } catch (err) {
           if (err instanceof CreditsExhaustedError) return fail('ACTIVATION_DENIED', err.message, 'DENIED_CREDITS');
           throw err;
@@ -1123,7 +1124,7 @@ async function executeAppRunInner(
           // #5020 (cor:dmo:170:05): the owner of the work is the owner of the App the run is in, which is the run's own
           // organization (checked at the mint, `launchAppRun`). Never the Agent's owner: an Agent another organization owns
           // bills the App's organization (spec S3). F3a (a person's App) passes the run's owner here.
-          billableAccount: { organizationId: run.organizationId },
+          billableAccount: billableAccountOfRun(run),
           provider,
           model,
           tokensIn,

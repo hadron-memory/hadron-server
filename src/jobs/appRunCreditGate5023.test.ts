@@ -17,7 +17,8 @@ import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import { encryptToken } from '../lib/tokenCrypto.js';
 import { clearPriceCache, grantCredits, creditBalance } from '../lib/metering/index.js';
 import { reloadOwnerDefaultMonthlyGrantForTests, resetPeriodGrantStateForTests } from '../lib/metering/periodGrant.js';
-import { CREDITS_EXHAUSTED_MESSAGE, CREDIT_GATE_MEMO_TTL_MS, requireCreditHeadroom, resetCreditGateMemoForTests } from '../lib/metering/gate.js';
+import { CREDITS_EXHAUSTED_MESSAGE, CREDIT_GATE_MEMO_MAX, CREDIT_GATE_MEMO_TTL_MS, memoRememberForTests, requireCreditHeadroom, resetCreditGateMemoForTests } from '../lib/metering/gate.js';
+import { resolvers } from '../api/graphql/schema/resolvers.js';
 import { plainRunFailure } from '../lib/automation/plainReason.js';
 import { generateWebhookSecret, mintWebhookPlatformToken, mountWebhookRoutes } from '../api/webhooks.js';
 import { schedulerTick } from './scheduler.js';
@@ -193,6 +194,43 @@ describe('pin 9 and 10: each model hop; never a script hop', () => {
     expect(await executeAppRun(db, run.id, deps)).toBe('completed');
     expect(llm).toHaveBeenCalledTimes(1);
     expect(await db.node.findFirst({ where: { memoryId, loc: 'tasks:from-script' } })).not.toBeNull();
+  });
+});
+
+describe('blind review F12 and F13: the refusal order, and the GraphQL launch door', () => {
+  it('ruling 1a: an owner at zero whose Agent has no servable boot prompt gets CREDITS_EXHAUSTED; with an own key it gets the boot-prompt refusal', async () => {
+    switchesOn();
+    await db.agent.update({ where: { id: agentId }, data: { bootPromptNodeId: null, bootPromptUrn: null } });
+    expect((await denial(mint()))!.code).toBe('CREDITS_EXHAUSTED');
+    await ownKeyConfig();
+    const e = (await denial(mint())) as unknown as { code?: string; extensions?: { code?: string } } | null;
+    expect(e?.code ?? e?.extensions?.code).toBe('BOOT_PROMPT_NOT_SET');
+  });
+
+  it('triggerAppRun answers extensions.code CREDITS_EXHAUSTED and writes no run', async () => {
+    switchesOn();
+    const admin = await db.user.create({ data: { id: generateId(), handle: 'cg-admin', githubId: 502310, roles: ['ADMIN'] } });
+    await expect(
+      resolvers.Mutation.triggerAppRun({}, { input: { appRef: appId, entryNodeUrn: `${mem}::flow:a` } }, { db, roles: ['ADMIN'], userId: admin.id, clientId: `user:${admin.id}` } as never),
+    ).rejects.toMatchObject({ extensions: { code: 'CREDITS_EXHAUSTED' } });
+    expect(await db.appRun.count()).toBe(0);
+  });
+});
+
+describe('blind review F2: what the gate checks is what the hop debits', () => {
+  it('the launch gate, the hop gate and the hop\'s usage record all name the run\'s account through billableAccountOfRun', () => {
+    const src = readFileSync(join(__dirname, 'appRuns.ts'), 'utf8');
+    expect((src.match(/billableAccountOfRun\(/g) ?? []).length).toBe(3);
+  });
+});
+
+describe('blind review F14: the memo is bounded', () => {
+  it('past the bound the memo is cleared and never grows beyond it', () => {
+    resetCreditGateMemoForTests();
+    let size = 0;
+    for (let i = 0; i <= CREDIT_GATE_MEMO_MAX + 5; i++) size = memoRememberForTests({ organizationId: `bound-${i}` });
+    expect(size).toBeLessThanOrEqual(CREDIT_GATE_MEMO_MAX);
+    expect(size).toBeGreaterThan(0); // the newest owner is held
   });
 });
 

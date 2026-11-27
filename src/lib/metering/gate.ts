@@ -60,6 +60,15 @@ function memoRemember(owner: OwnerRef): void {
   positiveUntil.set(memoKey(owner), now + CREDIT_GATE_MEMO_TTL_MS);
 }
 
+/** The memo's size bound, exported for the test of the bound. */
+export const CREDIT_GATE_MEMO_MAX = MEMO_MAX;
+
+/** Tests only: memoise a positive balance for `owner` as a computed read would, and report how many owners the memo holds. */
+export function memoRememberForTests(owner: OwnerRef): number {
+  memoRemember(owner);
+  return positiveUntil.size;
+}
+
 /** Tests only: forget every memo. */
 export function resetCreditGateMemoForTests(): void {
   positiveUntil.clear();

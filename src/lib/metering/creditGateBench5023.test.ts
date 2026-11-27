@@ -68,6 +68,7 @@ describe('#5023 gate measurement: requireCreditHeadroom over 100,000 entries', (
       await requireCreditHeadroom(db, { organizationId: orgId });
       coverMs.push(performance.now() - t);
     }
+    await db.$executeRawUnsafe('DROP INDEX IF EXISTS bench_cover_org');
     const cover = ` with_covering_index_p50=${pct(coverMs, 0.5).toFixed(2)}ms p95=${pct(coverMs, 0.95).toFixed(2)}ms p99=${pct(coverMs, 0.99).toFixed(2)}ms`;
     const line = `gate_bench entries=${ENTRIES} calls=${CALLS} p50=${pct(ms, 0.5).toFixed(2)}ms p95=${pct(ms, 0.95).toFixed(2)}ms p99=${pct(ms, 0.99).toFixed(2)}ms max=${Math.max(...ms).toFixed(2)}ms${parts}${cover}`;
     console.log(line);
