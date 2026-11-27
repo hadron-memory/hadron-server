@@ -316,17 +316,22 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // open now answers false (nothing was withdrawn); it still ends as expired with its staged value cleared, as before. It answered true.
 // A live request still answers true and ends withdrawn; an ended one, and another person's or unknown id, are unchanged. No SDL shape change.
 // (0.48.0 is #5314, merged first.)
-// 0.50.0 — BREAKING (behaviour, no SDL removal) (#5345): the reach of an App's links narrows to the record gate. A user-owned
+// 0.50.0 — ADMISSION COST, #5267: `App.viewerAppUserMemoryClasses` (#5218) is priced at 24 per App by GraphQL admission (it was a leaf, 1),
+// the statements it issues for a member App with three unlicensed installed Agents (a known under-estimate beyond three, tracked in #5362; see admissionComplexity.ts). A list that selects it for many Apps costs more and can
+// now be refused QUERY_TOO_COMPLEX where it was admitted; a single-App selection is unaffected in practice. Answers and the SDL are unchanged.
+// (0.48.0 is #5314, merged first; 0.49.0 is #5334, merged first (the order is Peter's, #153292), so 0.50.0 leaves no gap.)
+// 0.51.0 — BREAKING (behaviour, no SDL removal) (#5345): the reach of an App's links narrows to the record gate. A user-owned
 // memory of a class other than personal/private (`ownerUserId` set) that its owner linked to an App no longer reaches the App's
 // pure key or a userless run on ANY surface; the link row stays, inert (`active: false` in App.attachedMemories), until detached.
-// What main did differed by class. A knowledge/group memory (for example under a user root) WAS listed by `hadron_list_memories`
-// and its access map while `memory(ref:)` and node reads refused it — the disagreement #5345 closes (the list refuses too). An
-// app-class memory (a user-owned App's own, linked into itself included) reached EVERY read on main — the record gate's app arm
-// reads the same link judge — so `memory(ref:)`, the GraphQL `memories` list and node reads lose it as well: wider than "the
-// read gate is unchanged", still cor:dmo:060:22 (Decided D-2026-11-26: attaching gives no access; the #5258/#5185 interim covers
-// own personal/private only). Own personal/private linked by the App's owner and organization-owned links are unchanged.
-// (0.49.0 is #5338, merged first.)
-export const HADRON_SERVER_VERSION = '0.50.0';
+// What main did differed by class. A knowledge/group memory (for example under a user root) was listed by `hadron_list_memories`
+// and its access map, and its NODES were readable through GraphQL `node(ref:)` and returned by `findNodes`, while only
+// `memory(ref:)` and the GraphQL `memories` list refused it. Those callers now lose node content reads and search hits, not only
+// a listing. An app-class memory (a user-owned App's own, linked into itself included) reached every read on main (the record
+// gate's app arm reads the same link judge), so `memory(ref:)` and the `memories` list lose it as well. Both are
+// cor:dmo:060:22 (Decided D-2026-11-26: attaching gives no access; the #5258/#5185 interim covers own personal/private only);
+// the grant (#5321) is the path to that access. Own personal/private linked by the App's owner and organization-owned links are
+// unchanged. (0.50.0 is #5267, merged first.)
+export const HADRON_SERVER_VERSION = '0.51.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

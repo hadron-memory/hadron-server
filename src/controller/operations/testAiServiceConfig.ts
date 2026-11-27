@@ -65,6 +65,9 @@ import {
 import { chatToolChoiceFor, RESPOND_ONCE_INSTRUCTION, sdkToolChoiceFor } from '../../lib/llm/chatToolChoice.js';
 import { respondToolDefinition } from '../../api/graphql/schema/resolvers.helpers.js';
 import { recordLlmUsage } from '../../lib/metering/index.js';
+import { billableAccountFor } from '../../lib/metering/billableAccount.js';
+import { CreditsExhaustedError, gateCredit } from '../../lib/metering/gate.js';
+import type { OwnerRef } from '../../lib/owner.js';
 import { decryptToken, encryptToken } from '../../lib/tokenCrypto.js';
 import { defaultQuotaLimit, reserveQuota, settleReservation } from '../../jobs/appRuns.js';
 import { forbiddenError } from '../../lib/refusals.js';
@@ -391,12 +394,12 @@ function probeTarget(config: { provider: string; endpoint?: string | null }, bed
 }
 
 /**
- * The org a test's usage is attributed to: the config's own, else its owning
- * App's or Agent's, else the caller's active org IF the request carries one.
- * A platform admin's GraphQL request usually doesn't, and then a
- * HADRON_SERVER test is simply the platform's own usage (no org to charge).
+ * The organization a test's TOKEN QUOTA is reserved from: the config's own, else its owning App's or Agent's, else the
+ * caller's active org IF the request carries one. #5020 split this from the billable account (ruling 2: this slice changes
+ * attribution only, and quota scopes are slice F1's): a platform admin's test of the platform's own config still reserves
+ * from the caller's active organization, though that organization is no longer billed for it.
  */
-async function billableOrgOf(ctx: Context, row: AiServiceConfig): Promise<string | null> {
+async function quotaOrgOf(ctx: Context, row: AiServiceConfig): Promise<string | null> {
   if (row.organizationId) return row.organizationId;
   if (row.appId) {
     const app = await ctx.db.app.findUnique({ where: { id: row.appId }, select: { organizationId: true } });
@@ -407,6 +410,16 @@ async function billableOrgOf(ctx: Context, row: AiServiceConfig): Promise<string
     if (agent?.organizationId) return agent.organizationId;
   }
   return ctx.organizationId ?? null;
+}
+
+/**
+ * #5020 (cor:dmo:170:05): who a test is billed to, the owner of the config: its own organization, else the owner of its
+ * App, else of its Agent (`billableAccountFor`, which a person's App or Agent resolves to that person), else nobody, as for
+ * the platform's own config. Never the caller's active organization.
+ */
+async function billableAccountOfConfig(ctx: Context, row: AiServiceConfig): Promise<OwnerRef | null> {
+  if (row.organizationId) return { organizationId: row.organizationId };
+  return billableAccountFor(ctx.db, { appId: row.appId, agentId: row.agentId });
 }
 
 export interface AiConfigTestDeps {
@@ -606,7 +619,8 @@ export async function testAiServiceConfig(
   // An override key is the caller's own; a platform credential, stored or the
   // process's, is the platform's.
   const keyOwnerType: AiConfigOwnerType | null = overrideKey ? null : keySource === 'PLATFORM' ? 'HADRON_SERVER' : owner.ownerType;
-  const organizationId = await billableOrgOf(ctx, row);
+  const quotaOrganizationId = await quotaOrgOf(ctx, row);
+  const billableAccount = await billableAccountOfConfig(ctx, row);
 
   // Local refusals first (#1385 review, Codex): a config that can't even be
   // built (a malformed Bedrock key, say) never reaches a provider, so it
@@ -629,7 +643,24 @@ export async function testAiServiceConfig(
   // reservation covers prompt margin PLUS the probe's capped output (#1413,
   // QA #2596: base + cap, so a realistic prompt and the full capped reply
   // settle inside what was reserved).
-  const quotaScope = keyOwnerType === 'HADRON_SERVER' && organizationId ? organizationId : null;
+  // #5023 (gate ruling 5, cor:acl:050:05): the credit check before the reservation and before either leg. A test that runs on
+  // the platform's own key has a billable account only if the config's owner is one; the platform's own config has none (A13),
+  // and work with no billable account is never gated, so this refuses nothing today. It is kept so the check stays uniform
+  // if a test ever names a billable account.
+  try {
+    await gateCredit(ctx.db, keyOwnerType, billableAccount);
+  } catch (err) {
+    if (!(err instanceof CreditsExhaustedError)) throw err;
+    return {
+      ...base,
+      ok: false,
+      latencyMs: 0,
+      reply: null,
+      error: { code: 'CREDITS_EXHAUSTED', message: err.message, transient: true },
+    };
+  }
+
+  const quotaScope = keyOwnerType === 'HADRON_SERVER' && quotaOrganizationId ? quotaOrganizationId : null;
   const reserveTokens = AI_CONFIG_TEST_TOKEN_RESERVE + probeMaxTokens;
   const reservation = quotaScope
     ? await reserveQuota(ctx.db, 'org', quotaScope, 'llm.tokens', defaultQuotaLimit('org', 'llm.tokens'), reserveTokens)
@@ -729,7 +760,7 @@ export async function testAiServiceConfig(
     await recordLlmUsage(ctx.db, {
       type: 'ai-config-test-chat',
       userId: ctx.userId,
-      organizationId,
+      billableAccount,
       provider,
       model,
       tokensIn: spentIn,
@@ -779,7 +810,7 @@ export async function testAiServiceConfig(
   await recordLlmUsage(ctx.db, {
     type: 'ai-config-test',
     userId: ctx.userId,
-    organizationId,
+    billableAccount,
     provider,
     model,
     tokensIn,

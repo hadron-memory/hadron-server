@@ -844,6 +844,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_secret_delete_after_use_app_only",
+      "kind": "check-constraint",
+      "file": "secret-versions-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_secret_owner_type",
       "kind": "check-constraint",
       "file": "secret-versions-invariants.sql",
@@ -979,6 +985,12 @@
       "name": "chk_tickers_shape",
       "kind": "check-constraint",
       "file": "ticker-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_usage_event_one_billable",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {

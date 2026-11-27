@@ -15,6 +15,9 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   ['memories', 'user_id'],
   ['sessions', 'user_id'],
   ['usage_events', 'user_id'],
+  // #5020 (section 13 item 14, cor:dmo:170:08's merge edge): the units billed to the merged-away person are billed to the survivor.
+  // Re-pointing who a unit is billed to changes no cost (cor:dmo:170:06: a cost is never recomputed).
+  ['usage_events', 'billable_user_id'],
   ['org_member_invitations', 'recipient_user_id'],
   ['user_invitation_activations', 'user_id'],
   ['exchange_connections', 'user_id'],

@@ -5634,7 +5634,7 @@ export const typeDefs = `#graphql
   }
 
   type AiServiceConfigTestError {
-    "NO_API_KEY | KEY_UNREADABLE (the stored key cannot be decrypted here; re-enter it) | CONFIG_INVALID (the config cannot be built at all, e.g. a malformed Bedrock key; no call made) | QUOTA_EXCEEDED (a platform-funded test with the org's daily token allowance used up; no call made) | LLM_CALL_FAILED (the provider call failed or timed out; see transient)"
+    "NO_API_KEY | KEY_UNREADABLE (the stored key cannot be decrypted here; re-enter it) | CONFIG_INVALID (the config cannot be built at all, e.g. a malformed Bedrock key; no call made) | QUOTA_EXCEEDED (a platform-funded test with the org's daily token allowance used up; no call made) | CREDITS_EXHAUSTED (a test on the platform's own key whose billable account has no AI credit left; no call made) | LLM_CALL_FAILED (the provider call failed or timed out; see transient)"
     code: String!
     "Provider error text, scrubbed of the key and truncated."
     message: String!
@@ -6938,7 +6938,7 @@ export const typeDefs = `#graphql
     id: ID!
     """The effective state, with expiry judged on the server clock: open, completed, declined (the requester declined on the ceremony page), expired, withdrawn (the requester withdrew it) or stale (the secret changed first)."""
     state: String!
-    """The requested operation: STORE, DELETE, SET_PROTECTED or CLEAR_PROTECTED. STORE is staged by createSecret and updateSecret (a create, a new value version, a metadata edit or a protection change); DELETE by deleteSecret; the protection pair by setSecretProtected."""
+    """The requested operation: STORE, DELETE, SET_PROTECTED, CLEAR_PROTECTED, SET_DELETE_AFTER_USE or CLEAR_DELETE_AFTER_USE. STORE is staged by createSecret and updateSecret (a create, a new value version, a metadata edit or a protection change); DELETE by deleteSecret; the protection pair by setSecretProtected; the deleteAfterUse pair by updateSecret(deleteAfterUse:) on a protected secret."""
     operation: String!
     """Creation time."""
     createdAt: DateTime!
@@ -6974,7 +6974,7 @@ export const typeDefs = `#graphql
     "USE requires a signed HTTPS origin and path prefix and an auth header name."
     bindingPrefix: String
     bindingHeader: String
-    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refusals, in the order they are judged: holderKind APP in REVEAL mode (GRANT_HOLDER_NOT_ALLOWED); an unreadable startsAt or expiresAt (BAD_USER_INPUT); a marked request without a window or a read budget (SECRET_AUTO_DELETE_NEEDS_LIMIT); a caller who is neither an App manager nor the writer of the secret's current version (SECRET_AUTO_DELETE_NOT_ALLOWED, where an unmarked request would get FORBIDDEN or SECRET_READ_CLIENT_SUPERSEDED)."
+    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refusals, in the order they are judged: holderKind APP in REVEAL mode (GRANT_HOLDER_NOT_ALLOWED); an unreadable startsAt or expiresAt (BAD_USER_INPUT); a marked request without a window or a read budget (SECRET_AUTO_DELETE_NEEDS_LIMIT); a caller who is neither an App manager nor the writer of the secret's current version (SECRET_AUTO_DELETE_NOT_ALLOWED, where an unmarked request would get FORBIDDEN or SECRET_READ_CLIENT_SUPERSEDED); then a protected secret without deleteAfterUse (SECRET_AUTO_DELETE_NOT_ALLOWED, hrn:node:hadronmemory.com:specs:cor:sec:060:03)."
     autoDelete: Boolean! = false
     startsAt: DateTime
     expiresAt: DateTime
@@ -7044,6 +7044,8 @@ export const typeDefs = `#graphql
     updatedBy: String
     "Whether changes need a person's change request. App secrets only; always false for org and user secrets."
     protected: Boolean!
+    "Whether a read client's auto-delete mark may delete this secret after its use (hrn:node:hadronmemory.com:specs:cor:sec:060:03). Needed only on a protected secret: without it a mark is refused there, and none deletes it. Turning protection on (updateSecret(protected: true) or setSecretProtected) clears it, so a protected secret is armed only through the passkey ceremony. App secrets only; always false for org and user secrets."
+    deleteAfterUse: Boolean!
     "The newest version's number. App secrets only; null for org and user secrets (they have no versions)."
     currentVersion: Int
     "An App secret's kept versions, newest first: numbers, sizes and authorship, never a value. Paged (hrn:node:hadronmemory.com:specs:cor:api:120:04): default 20, cap 200, limit 0 counts only. Empty for org and user secrets."
@@ -7077,7 +7079,7 @@ export const typeDefs = `#graphql
     secretId: ID!
     secretName: String!
     versionNo: Int
-    "STORE | VERSION | METADATA | DELETE | PROTECT | UNPROTECT | REVEAL | PURGE (a superseded version removed by retention or the kept-versions cap)."
+    "STORE | VERSION | METADATA | DELETE | PROTECT | UNPROTECT | DELETE_AFTER_USE_ON | DELETE_AFTER_USE_OFF | REVEAL | PURGE (a superseded version removed by retention or the kept-versions cap)."
     kind: String!
     outcome: String!
     actorUserId: String
@@ -7884,7 +7886,7 @@ export const typeDefs = `#graphql
   enum AppRunTriggerKind { SCHEDULE WEBHOOK MANUAL INTEGRATION SPAWN }
 
   type AppRunFailureReason {
-    "Stable category: NOT_ADOPTED, MEMORY_UNREADABLE, CHANGED, OVER_BUDGET, POLICY_DENIED, NO_AI_CONFIG, TIMED_OUT, CANCELLED or OTHER."
+    "Stable category: NOT_ADOPTED, MEMORY_UNREADABLE, CHANGED, OVER_BUDGET, POLICY_DENIED, NO_AI_CONFIG, TIMED_OUT, CANCELLED, OUT_OF_CREDIT or OTHER."
     kind: String!
     "What happened, in plain words."
     summary: String!
@@ -11270,7 +11272,11 @@ export const typeDefs = `#graphql
     Default scope: the caller's union — (1) their OWN personal/private
     memories (always; they are user-owned and show in every org context),
     (2) memories their member orgs own, (3) memories their member orgs
-    subscribe to. Per-user agent memories (userMemoryOfAgentId) are excluded.
+    subscribe to, (4) their OWN per-user Agent memories (#5026,
+    hrn:node:hadronmemory.com:specs:cor:api:120:03: listed to their owner like
+    any other user-owned memory, and to nobody else, not even through
+    filter.sharedWithMe, which still omits them: a share grant on a per-user
+    memory surfaces nothing in either list).
     App-key callers get the union of their installed Agents' memory items.
     A pure App key's list also holds every memory its App's links let it read
     (#5272, hrn:node:hadronmemory.com:specs:cor:api:120:03), judged at the call
@@ -12822,9 +12828,9 @@ export const typeDefs = `#graphql
     "The owner limits of an organization or a person, one row per measure (hadron-server issue 5009). Give exactly one ref. An organization's: its ADMIN or OWNER. A person's: that person in their own session. A platform admin reads any."
     ownerLimits(orgRef: String, userRef: ID): [OwnerLimitUsage!]!
     """
-    One organization's AI spend for [from, to), grouped one way (#5008, hrn:node:hadronmemory.com:specs:cor:dmo:170:04). Org-ADMIN, the gate of creditBalance, answered before the range is read. from is inclusive and to exclusive; both are ISO 8601 dates or date-times, a value with no offset is UTC and a date alone is midnight UTC. The range is at most 366 days. At most 500 rows are returned, largest charge first; truncated says more groups exist and totalGroups is the exact number of groups. Only token-bearing units of the organization count, soft-deleted ones are left out.
+    One organization's or one person's AI spend for [from, to), grouped one way (#5008, hrn:node:hadronmemory.com:specs:cor:dmo:170:04). Give exactly one of orgRef and userRef, else BAD_USER_INPUT, answered before anything is read. An organization's: its ADMIN or OWNER, the gate of creditBalance, answered before the range is read. A person's (#5020, hrn:node:hadronmemory.com:specs:cor:dmo:170:05): that person in their own session, or a platform admin; an App key and an impersonated session are refused, and so is anyone else, with the same FORBIDDEN whether or not the user exists. A person's figures are the units billed to them as the owner of the work, never the units of an organization's App done for them, and never the token counts a client reports itself (those are not spend). from is inclusive and to exclusive; both are ISO 8601 dates or date-times, a value with no offset is UTC and a date alone is midnight UTC. The range is at most 366 days. At most 500 rows are returned, largest charge first; truncated says more groups exist and totalGroups is the exact number of groups. Only token-bearing units of that account count, soft-deleted ones are left out.
     """
-    aiSpend(orgRef: String!, from: String!, to: String!, groupBy: AiSpendGroup!): AiSpendSummary!
+    aiSpend(orgRef: String, userRef: ID, from: String!, to: String!, groupBy: AiSpendGroup!): AiSpendSummary!
   }
 
   """
@@ -14456,6 +14462,11 @@ export const typeDefs = `#graphql
     Open a session — and, when \`input.workerRef\` is given, a WORKER SESSION:
     the binding that makes the work attributable to that named teammate.
 
+    Refusals worth knowing (#5266, none quotes your value): a \`parentSessionId\` or \`prevSessionId\` that names no
+    session you may read answers SESSION_NOT_FOUND, the same for a session that does not exist and for one you may not read,
+    before anything is written; an \`id\` that is already taken answers SESSION_ID_TAKEN, whoever owns the existing row,
+    your own repeat included (a repeat is not a resume: resume through the claim and \`--session\` paths).
+
     The binding is held server-side and is independent of the caller's CHAT
     SESSION (the human's Desktop window, Claude Code session or IDE chat).
     **Ending your chat session does not end a worker session** (#1034): a chat
@@ -15444,13 +15455,14 @@ export const typeDefs = `#graphql
     SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl, no
     secret exists yet, and the requester's own passkey ceremony at that URL makes
     it (hrn:node:hadronmemory.com:specs:cor:sec:070:02). A staged request lasts
-    one hour; at most 5 are open per secret name and at most 2 per requester
-    (SECRET_CHANGE_REQUEST_LIMIT, SECRET_CHANGE_REQUESTER_LIMIT). Across the App at
-    most 100 are open (SECRET_CHANGE_APP_LIMIT) and one requester holds at most 20
-    (SECRET_CHANGE_REQUESTER_LIMIT). A staged create counts open protected creates
-    toward the App's 500-secret limit and is refused SECRET_LIMIT_REACHED at staging
-    when there is no room; completion rejudges it. Those numbers are engineering
-    bounds, not ruled values (hrn:node:hadronmemory.com:specs:cor:sec:070:02).
+    one hour. Open staged requests are capped by scope (#5356): at most 5 per
+    secret name (SECRET_CHANGE_REQUEST_LIMIT); at most 2 per requester for one
+    secret name and at most 20 per requester across the App, both refused with
+    SECRET_CHANGE_REQUESTER_LIMIT; and at most 100 across the App
+    (SECRET_CHANGE_APP_LIMIT). These four caps are engineering bounds, not ruled
+    values (hrn:node:hadronmemory.com:specs:cor:sec:070:02). A staged create counts
+    open protected creates toward the App's 500-secret limit and is refused
+    SECRET_LIMIT_REACHED at staging when there is no room; completion rejudges it.
     """
     createSecret(
       ownerType: String!
@@ -15473,7 +15485,13 @@ export const typeDefs = `#graphql
     SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl instead
     of a Secret, and nothing changes until the requester completes the passkey
     ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The expiry and the two
-    caps are as for createSecret.
+    caps are as for createSecret. One exception: protected: true on a secret
+    that is already protected, with no value and with metadata omitted or
+    identical to the stored metadata, asks for no change and answers the
+    Secret unchanged, staging nothing, to a person who passes the staging
+    checks (hrn:node:hadronmemory.com:specs:cor:sec:070:01). A worker session,
+    an App key, an impersonation and a run keep SECRET_PROTECTED_NEEDS_PASSKEY,
+    as for a real change.
     Legacy webfetch-auth rows (written before metadata.type was derived from
     the value) recover differently per owner kind, because only org and user
     rows are re-validated against their own decrypted stored value. There, any
@@ -15483,8 +15501,18 @@ export const typeDefs = `#graphql
     while a metadata-only edit of such a row is refused (the stored type is
     unavailable) until a value rewrite restores it. This holds for protected
     and unprotected App rows alike; it is not part of the passkey rules above.
+    deleteAfterUse (App secrets only; refused on org and user secrets) is the
+    consent that lets a read client's auto-delete mark delete a PROTECTED secret
+    (hrn:node:hadronmemory.com:specs:cor:sec:060:03). On an unprotected secret it is
+    a plain field any member may set, and changes nothing by itself; turning protection
+    on (here or through setSecretProtected) clears it, so a protected secret is armed only
+    through the ceremony below. On a protected
+    secret it must be passed alone and is staged as SET_DELETE_AFTER_USE or
+    CLEAR_DELETE_AFTER_USE through the requester's ceremony, as above; setting it
+    needs the secret's creator or whoever manages the App. Asking for the value it
+    already has returns the Secret and changes nothing.
     """
-    updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean): Secret!
+    updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean, deleteAfterUse: Boolean): Secret!
     """
     Turn protection on or off for an App secret, through your own passkey ceremony
     (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The payload is a Secret only when
@@ -17195,7 +17223,7 @@ export const typeDefs = `#graphql
     \`instruction\` (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0098; hrn:node:hadronmemory.com:specs:cor:dmo:050:05;
     hrn:node:hadronmemory.com:specs:cor:acl:010:01). ${RUN_REFUSAL_3340} A worker session that is refused cannot tell a missing key from an existing one.
     An admitted instructed revoke records one team event (never the key id); a key already revoked records none.
-    AppKey has no URN; the id is raw ID-only.
+    AppKey has no URN; the id is raw ID-only. An unknown key id answers APP_KEY_NOT_FOUND to a person (#5266); it never quotes the id.
     """
     revokeAppKey(id: ID!, instruction: ActInstructionInput): Boolean!
     """
