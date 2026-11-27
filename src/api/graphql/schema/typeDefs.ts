@@ -2063,16 +2063,22 @@ export const typeDefs = `#graphql
     transcriptPath: String
     """
     #3822 (hrn:node:hadronmemory.com:specs:cor:agt:020:03) — the worker the caller expects to recover, e.g. the
-    worker a CLI worktree was last bound to. Narrows the resume to that worker: its claim or live session binds
-    even when another worker's waits too, and a CHOOSE lists only its candidates. When nothing of that worker's
-    waits but a claim or live session of another worker of the caller's does, the call refuses RESUME_REFUSED
-    with extensions reason WORKER_MISMATCH, picked (true when \`session\` chose that other worker's item),
-    expectedWorkerId, expectedWorkerName (null unless the caller may read that worker), foundWorkerId,
-    foundWorkerName and foundSource (CLAIM or LIVE_SESSION), before any write: no claim is consumed and no
-    session is started, ended or touched. With nothing of the caller's waiting the answer stays
-    NOTHING_TO_RESUME. Omitted or null: unchanged. Blank or not an id (a URN or a name): BAD_USER_INPUT, before any read. That id-only refusal is built behaviour (#3822), not a rule of hrn:node:hadronmemory.com:specs:cor:agt:020:03, which says only that the caller may name the worker it expects and that a blank one is refused; the field is a known gap against hrn:node:hadronmemory.com:specs:cor:api:140:01, deferred to hadron-server#5163.
+    worker a CLI worktree was last bound to. #5163: a worker reference, its id or its fully qualified worker URN,
+    resolved through the shared worker resolver (hrn:node:hadronmemory.com:specs:cor:api:140:00,
+    hrn:node:hadronmemory.com:specs:cor:api:140:01); it replaces expectedWorkerId, which is gone with no alias.
+    Narrows the resume to that worker: its claim or live session binds even when another worker's waits too, and a
+    CHOOSE lists only its candidates. When nothing of that worker's waits but a claim or live session of another
+    worker of the caller's does, the call refuses RESUME_REFUSED with extensions reason WORKER_MISMATCH, picked
+    (true when \`session\` chose that other worker's item), expectedWorkerId, expectedWorkerName (null unless the
+    caller may read that worker), foundWorkerId, foundWorkerName and foundSource (CLAIM or LIVE_SESSION), before any
+    write: no claim is consumed and no session is started, ended or touched. expectedWorkerId is the id the caller
+    sent; for a URN it is the resolved id when the caller may read the worker and null otherwise. A URN naming no
+    worker and one naming a worker the caller may not read get the same answer (no existence oracle). With nothing
+    of the caller's waiting the answer stays NOTHING_TO_RESUME. Omitted or null: unchanged. Blank: BAD_USER_INPUT,
+    before any read (hrn:node:hadronmemory.com:specs:cor:agt:020:03). Neither an id nor a fully qualified worker
+    URN (a name, a relative URN, another type): URN_NOT_QUALIFIED, before any read.
     """
-    expectedWorkerId: ID
+    expectedWorkerRef: ID
   }
 
   type UsageEvent {
