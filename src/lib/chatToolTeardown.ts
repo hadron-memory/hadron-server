@@ -179,27 +179,33 @@ export function dispatchChatToolTeardown(teardowns: readonly ChatToolTeardown[])
 /**
  * Queue the live connections of an owner that is ALREADY deleted (a live row whose App, or whose organization, is soft-deleted;
  * for Slack, whose default App or organization is), through the same intent. Only those: a live owner's row is never reached.
- * Bounded per call; `FOR UPDATE SKIP LOCKED` so two instances do not fight over a row. Returns how many rows it queued.
+ * Bounded per call: at most `limit` rows of each kind; `FOR UPDATE SKIP LOCKED` so two instances do not fight over a row. Returns
+ * how many rows it queued. #5381: each batch is a MATERIALIZED CTE, run once. As an `id IN (subquery)` a nested-loop plan rescanned
+ * the LIMIT ... SKIP LOCKED subquery per outer row, each rescan skipping the rows just soft-deleted and taking the next, so one call
+ * could queue far more than `limit` rows. The reconcile's bound lives only here (hrn:node:hadronmemory.com:specs:cor:int:030:03
+ * states none). The owner predicate is judged once, under the lock, in the batch; the outer UPDATE repeats only the liveness check.
  */
 export async function reconcileOrphanedChatToolConnections(db: PrismaClient, limit = RECONCILE_BATCH): Promise<number> {
   const telegram = await db.$queryRaw<IntentRow[]>(recordIntents('telegram', Prisma.sql`
-    UPDATE telegram_connections SET deleted_at = ${NOW_UTC}, deleted_by = 'system:reconcile'
-    WHERE deleted_at IS NULL AND id IN (
+    WITH batch AS MATERIALIZED (
       SELECT c.id FROM telegram_connections c
       WHERE c.deleted_at IS NULL
         AND (EXISTS (SELECT 1 FROM apps a WHERE a.id = c.app_id AND a.deleted_at IS NOT NULL)
           OR EXISTS (SELECT 1 FROM organizations o WHERE o.id = c.organization_id AND o.deleted_at IS NOT NULL))
       ORDER BY c.id LIMIT ${limit} FOR UPDATE SKIP LOCKED)
-    RETURNING id, provider, tool_connection_id`));
+    UPDATE telegram_connections t SET deleted_at = ${NOW_UTC}, deleted_by = 'system:reconcile'
+    FROM batch WHERE t.id = batch.id AND t.deleted_at IS NULL
+    RETURNING t.id, t.provider, t.tool_connection_id`));
   const slack = await db.$queryRaw<IntentRow[]>(recordIntents('slack', Prisma.sql`
-    UPDATE slack_connections SET deleted_at = ${NOW_UTC}, deleted_by = 'system:reconcile'
-    WHERE deleted_at IS NULL AND id IN (
+    WITH batch AS MATERIALIZED (
       SELECT c.id FROM slack_connections c
       WHERE c.deleted_at IS NULL
         AND (EXISTS (SELECT 1 FROM apps a WHERE a.id = c.default_app_id AND a.deleted_at IS NOT NULL)
           OR EXISTS (SELECT 1 FROM organizations o WHERE o.id = c.organization_id AND o.deleted_at IS NOT NULL))
       ORDER BY c.id LIMIT ${limit} FOR UPDATE SKIP LOCKED)
-    RETURNING id, provider, tool_connection_id`));
+    UPDATE slack_connections t SET deleted_at = ${NOW_UTC}, deleted_by = 'system:reconcile'
+    FROM batch WHERE t.id = batch.id AND t.deleted_at IS NULL
+    RETURNING t.id, t.provider, t.tool_connection_id`));
   return telegram.length + slack.length;
 }
 
