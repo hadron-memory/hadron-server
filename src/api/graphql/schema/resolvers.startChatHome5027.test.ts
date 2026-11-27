@@ -94,12 +94,14 @@ const listed = async (userId: string, chatLoc: string) =>
 
 const HOSTS = [
   { klass: 'app', label: 'shared', make: sharedHome },
-  { klass: 'group', label: 'shared', make: () => groupHome() },
   { klass: 'personal', label: 'private', make: () => appUserMemory('personal') },
   { klass: 'private', label: 'private', make: () => appUserMemory('private') },
 ] as const;
 
 describe('#5027 (a) a chat started with memoryRef lives in the named memory', () => {
+  // An App-scoped group row is readable to none of its MemoryMembers today (#653 parity), so a group home that must carry
+  // the chat's App cannot pass the read gate. Xan (#153780): the way out is a ruling for Holger; this pin stays unwritten.
+  it.todo('group: awaits the group-host ruling (chat #153776/#153780)');
   for (const host of HOSTS) {
     it(`${host.klass}: the chat and its next message are in that memory; it reads back the class, the URN and scope ${host.label}`, async () => {
       const memoryId = await host.make();
@@ -124,10 +126,10 @@ describe('#5027 (a) a chat started with memoryRef lives in the named memory', ()
 });
 
 describe('#5027 (b) memoryRef with a contradicting scope', () => {
-  it('is BAD_USER_INPUT and writes nothing, in both directions', async () => {
+  it('is BAD_USER_INPUT and writes nothing, in both directions (a personal and an app home)', async () => {
     const personal = await appUserMemory('personal');
-    const group = await groupHome();
-    for (const [memoryRef, scope] of [[personal, 'shared'], [group, 'private']] as const) {
+    const shared = await sharedHome();
+    for (const [memoryRef, scope] of [[personal, 'shared'], [shared, 'private']] as const) {
       const before = await footprint();
       const err = await refusal(start(as(ann), { memoryRef, scope }));
       expect(err.extensions?.code).toBe('BAD_USER_INPUT');
