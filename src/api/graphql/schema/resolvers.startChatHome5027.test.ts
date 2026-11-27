@@ -224,6 +224,74 @@ describe('#5027 (d) CHAT_HOME_INVALID: one refusal, byte-identical, nothing prov
   });
 });
 
+describe('#5027 (d) part 2: each step of the home gate refuses on its own', () => {
+  // Each case passes every step of the gate but one, so dropping that one step admits the home. The answer is still the
+  // one CHAT_HOME_INVALID, and nothing is written.
+  it('read-only share, a knowledge memory in this App, a home with no App, another App of this Agent, a deleted home', async () => {
+    const reference = await refusal(start(as(ann), { memoryRef: `${orgUrn}:no-such-memory` }));
+    // Write step: bob's personal memory, shared with ann as a reader (#778): readable to her, not writable.
+    const bobsPersonal = await appUserMemory('personal', bob);
+    await db.memoryShare.create({ data: { memoryId: bobsPersonal, granteeId: ann, grantorId: bob, role: 'reader' } });
+    // Class step: a knowledge memory in this App, for a caller whose roles pass the read and write steps.
+    const appKnowledge = await db.memory.create({ data: {
+      id: generateId(), class: 'knowledge', visibility: 'ORGANIZATION', name: 'App notes', urn: `${orgUrn}:app-notes`, organizationId: orgId, appId, createdBy: ann,
+    } });
+    // App step: ann's own free-standing personal memory (no App).
+    const freeStanding = await db.memory.create({ data: {
+      id: generateId(), class: 'personal', name: 'Own notes', urn: `ann5027:own-notes`, userId: ann, ownerUserId: ann, createdBy: ann,
+    } });
+    // App-scope step: a second App that also installs this Agent; an App key of the first App names ann's memory there.
+    const app2 = (await db.app.create({ data: { name: 'Tutor two', urn: `${orgUrn}:tutor-two`, organizationId: orgId } })).id;
+    await db.appAgent.create({ data: { appId: app2, agentId } });
+    await db.appMember.create({ data: { appId: app2, userId: ann, role: 'member' } });
+    const inApp2 = (await M.createMemoryInApp({}, { appRef: app2, agentRef: agentId, memoryClass: 'personal' }, as(ann))).id as string;
+    // Deleted step: ann's own personal memory in this App, soft-deleted.
+    const deleted = await appUserMemory('personal');
+    await db.memory.update({ where: { id: deleted }, data: { deletedAt: new Date() } });
+    const cases: Array<[string, () => Promise<unknown>]> = [
+      ['read-only share', () => start(as(ann), { memoryRef: bobsPersonal })],
+      ['knowledge in this App', () => start(as(ann, { roles: ['ADMIN'] }), { memoryRef: appKnowledge.id })],
+      ['no App', () => start(as(ann), { memoryRef: freeStanding.id })],
+      ['another App of this Agent', () => start(as(ann, { appKeyId: 'k', appId }), { memoryRef: inApp2 })],
+      ['deleted', () => start(as(ann), { memoryRef: deleted })],
+    ];
+    for (const [name, run] of cases) {
+      const before = await footprint();
+      expect(await refusal(run()), name).toEqual(reference);
+      expect(await footprint(), `${name}: nothing written`).toEqual(before);
+    }
+  });
+});
+
+describe('#5027 (d) part 3: a home lost after the first judgement', () => {
+  // The authorized transaction's own memory gate refuses a home deleted in the window (plain Forbidden, a caller who
+  // could use the memory a moment earlier), before startChat's in-transaction re-judgement; nothing is written either way.
+  it('a home deleted between the first judgement and the transaction is refused, writing nothing', async () => {
+    const home = await appUserMemory('personal');
+    // The home is soft-deleted the moment startChat opens its transaction: after the first judgement, before the second.
+    let deleted = false;
+    const racing = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (...args: unknown[]) => {
+            if (!deleted) {
+              deleted = true;
+              await db.memory.update({ where: { id: home }, data: { deletedAt: new Date() } });
+            }
+            return (target.$transaction as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as typeof db;
+    const before = await footprint();
+    await refusal(start(as(ann, { db: racing }), { memoryRef: home }));
+    expect(deleted).toBe(true);
+    expect(await footprint()).toEqual(before);
+  });
+});
+
 describe('#5027 (e) only the person creates a missing personal or private home', () => {
   // READER on each so the start passes startChat's role check and reaches the home rule: the hybrid App-key shape carries
   // the user's roles, and a real run principal (runAuthContext, roles: []) is refused earlier still, creating nothing.
