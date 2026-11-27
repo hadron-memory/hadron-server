@@ -307,7 +307,7 @@ describe('#1215 — a personal row whose two owner columns disagree', () => {
       where: { id: f.divergentPersonal },
       select: {
         id: true, class: true, userId: true, ownerUserId: true,
-        organizationId: true, appId: true, userMemoryOfAgentId: true,
+        organizationId: true, appId: true, userMemoryOfAgentId: true, createdBy: true,
       },
     });
 
@@ -349,7 +349,7 @@ describe('#1215 — a personal row whose two owner columns disagree', () => {
       where: { id: f.divergentPersonal },
       select: {
         id: true, class: true, userId: true, ownerUserId: true,
-        organizationId: true, appId: true, userMemoryOfAgentId: true,
+        organizationId: true, appId: true, userMemoryOfAgentId: true, createdBy: true,
       },
     });
 
