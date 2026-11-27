@@ -114,24 +114,28 @@ describe('#4717 item 4: the change-request objects apply by either path, in eith
   const read = (p: string) => readFileSync(new URL(`../../../prisma/${p}`, import.meta.url), 'utf8');
   // #5392 item 5 (Brooks BLIND P3-7/F8): find the newest carrier the way resolvers.appSecrets3997.test.ts does, instead of a
   // name updated by hand whenever the carrier moves (#5335 had to repoint this pin at its own migration; a hand-pointed name
-  // keeps testing the OLD migration's file after the source moves, silently).
+  // keeps testing the OLD migration's file after the source moves, silently). Called INSIDE the tests (#5406 blind F6), so a
+  // missing carrier fails the test, not the collection of the file.
   const carrierMigration = () => {
     const invariants = read('secret-change-requests-invariants.sql');
     const first = invariants.split('\n')[0]!;
     const migrations = new URL('../../../prisma/migrations/', import.meta.url);
+    // A candidate dir whose migration.sql is unreadable or lacks the header line is not the carrier; if NO candidate
+    // matches, the loud throw below fires rather than a silent pass.
     const dir = readdirSync(migrations).sort().reverse()
       .find((d) => { try { return readFileSync(new URL(`${d}/migration.sql`, migrations), 'utf8').includes(first); } catch { return false; } });
     if (!dir) throw new Error('no migration carries secret-change-requests-invariants.sql');
     return `migrations/${dir}/migration.sql`;
   };
-  const MIGRATION = carrierMigration();
   it('the migration and post-push share one source for these objects', () => {
+    const MIGRATION = carrierMigration();
     const invariants = read('secret-change-requests-invariants.sql');
     expect(read(MIGRATION)).toContain(invariants);
     expect(read('post-push.sql')).toContain('\\ir secret-change-requests-invariants.sql');
     expect(read('post-push.sql')).not.toContain('CREATE TABLE IF NOT EXISTS secret_change_requests');
   });
   it('the migration and the shared file apply twice each, in both orders, over a post-push database', async () => {
+    const MIGRATION = carrierMigration();
     // The test database was built by post-push.sql, so every order starts from "post-push applied".
     const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
     await client.connect();
