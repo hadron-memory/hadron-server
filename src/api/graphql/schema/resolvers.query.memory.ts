@@ -34,6 +34,7 @@ import { findInstallMemory, resolveInstallTarget } from './installMemory.js';
 import { listableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
+import { attachableMemoriesPage } from './resolvers.mutation.appMemory.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
 function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
@@ -309,6 +310,13 @@ export const memoryQueries = {
       if (!(await canReadMemoryRecord(ctx, memory))) return null;
       return memory;
     },
+
+    /** #5393 (cor:dmo:060:22): the attachable-memory picker's search door; judged in `attachableMemoriesPage`. */
+    attachableMemories: (
+      _: unknown,
+      args: { appRef: string; query?: string | null; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => attachableMemoriesPage(ctx, args),
 
     // #473 — the uniform paginated memory list. Replaces myMemories (the
     // caller's union), publicMemories (filter.visibility: PUBLIC), and
