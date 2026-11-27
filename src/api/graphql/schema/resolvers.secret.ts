@@ -447,8 +447,9 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
       // given only to a caller who passes the very checks staging would make (`requireStagingPerson`); every other caller keeps the refusal it had.
       // #5331 item 6 (spec FIT 7209702827, cor:sec:070:01's Proposed edge): metadata identical to the live row's asks for no change either, so
       // it is the same no-op under the same conditions. Judged on the normalized metadata against the row locked above (the proof's
-      // flag-only test uses the same equality); any difference, or a value, stages as before.
-      const metadataUnchanged = args.metadata === undefined || isDeepStrictEqual(metadata, secret.metadata);
+      // flag-only test uses the same equality); any difference, or a value, stages as before. The JSON round trip drops the null prototype
+      // graphql-js gives an inline object literal (isDeepStrictEqual compares prototypes; Rook P3-1 on #5372); key order stays irrelevant.
+      const metadataUnchanged = args.metadata === undefined || isDeepStrictEqual(JSON.parse(JSON.stringify(metadata)), secret.metadata);
       if (secret.protected && requestedProtected === true && metadataUnchanged && args.value === undefined) {
         await requireStagingPerson(tx, ctx);
         return secret;
