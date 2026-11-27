@@ -14389,6 +14389,11 @@ export const typeDefs = `#graphql
     Open a session — and, when \`input.workerRef\` is given, a WORKER SESSION:
     the binding that makes the work attributable to that named teammate.
 
+    Refusals worth knowing (#5266, none quotes your value): a \`parentSessionId\` or \`prevSessionId\` that names no
+    session you may read answers SESSION_NOT_FOUND, the same for a session that does not exist and for one you may not read,
+    before anything is written; an \`id\` that is already taken answers SESSION_ID_TAKEN, whoever owns the existing row,
+    your own repeat included (a repeat is not a resume: resume through the claim and \`--session\` paths).
+
     The binding is held server-side and is independent of the caller's CHAT
     SESSION (the human's Desktop window, Claude Code session or IDE chat).
     **Ending your chat session does not end a worker session** (#1034): a chat
@@ -14400,11 +14405,6 @@ export const typeDefs = `#graphql
     only its holder can bind it again. A client that ties its lifetime to a
     conversation must call endSession itself; nothing
     about closing a window reaches this server.
-
-    Refusals worth knowing (#5266, none quotes your value): a \`parentSessionId\` or \`prevSessionId\` that names no
-    session you may read answers SESSION_NOT_FOUND, the same for a session that does not exist and for one you may not read,
-    before anything is written; an \`id\` that is already taken answers SESSION_ID_TAKEN, whoever owns the existing row,
-    your own repeat included (a repeat is not a resume: resume through the claim and \`--session\` paths).
     """
     startSession(input: SessionInput!): Session!
     """
