@@ -106,12 +106,31 @@ describe('#5369 (P2b): only an end tag every reader emits raw closes the hidden 
     ['in a tilde fence (no backtick run to pair)', 'x<!§script>\n~~~\n</script>\n~~~'],
     ['in a code span', 'x<!§script> `</script>`'],
     ['after a backslash', 'x<!§script> \\</script>'],
+    // #5388 BLIND P2-2: a link destination, a link title and a reference definition hold it as text.
+    ['in a link destination', 'x<!§script> [a](</script>)'],
+    ['in a link title', 'x<!§script> [a](x "</script>")'],
+    ['in a reference definition', 'x<!§script>\n\n[r]: </script>'],
+    // #5388 BLIND P2-3: four columns past stacked list and quote markers make the line code.
+    ['indented code after a list and a quote marker', 'x<!§script>\n\n- >     </script>'],
+    ['indented code after two list markers', 'x<!§script>\n\n- -     </script>'],
   ])('%s: %j', (_label, marked_) => {
     const body = marked_.replace(/§/g, '<');
     const out = escapeUnterminatedHtml(body);
     expect(out).toBe(marked_.replace(/§/g, '&lt;'));
     expect(losers(body)).toEqual(ALL);
     expect(losers(out)).toEqual([]);
+  });
+
+  // #5388 BLIND P2-1: a line end before the `>` is not a tag Markdown accepts (the `>` line opens a quote), so it is not counted. Already
+  // escaped at 03b8073f, where the rule for a tag that crosses into a quote line escaped the end tag itself and the rescan then the hidden one.
+  it.each([
+    ['a line end before its `>`', 'x<!§script>\n§/script\n>'],
+    ['a CRLF before its `>`', 'x<!§script>\r\n§/script\r\n>'],
+  ])('an end tag that crosses a line does not close it, %s: %j', (_label, marked_) => {
+    const body = marked_.replace(/§/g, '<');
+    expect(escapeUnterminatedHtml(body)).toBe(marked_.replace(/§/g, '&lt;'));
+    expect(losers(body)).toEqual(ALL);
+    expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
   });
 
   it.each([
@@ -121,5 +140,33 @@ describe('#5369 (P2b): only an end tag every reader emits raw closes the hidden 
   ])('an end tag emitted raw still closes it: %j', (body) => {
     expect(escapeUnterminatedHtml(body)).toBe(body);
     expect(losers(body)).toEqual([]);
+  });
+});
+
+describe('#5369 (#5388 LOCAL P3): a type 1 to 5 block counts only when it opens at column 0 after no paragraph line', () => {
+  // Each line that looks like an opener sits where some reader holds it as text (after a paragraph line, or as a list item's content).
+  it.each([
+    ['after a paragraph line ending in a bare CR', '\\\r<!x<!§style>', ['marked']],
+    ['after a type 1 opener line', '§script>\n<!x<!§style>', ALL],
+    ['in a list item', '* \n<!x* \n</§title>', ['marked']],
+  ] as Array<[string, string, string[]]>)('%s: %j', (_label, marked_, lose) => {
+    const body = marked_.replace(/§/g, '<');
+    const out = escapeUnterminatedHtml(body);
+    expect(out).toBe(marked_.replace(/§/g, '&lt;'));
+    expect(losers(body)).toEqual(lose);
+    expect(losers(out)).toEqual([]);
+  });
+});
+
+describe('#5369 (#5388 LOCAL P1): the work grows with the text, not with its cube', () => {
+  // At the frozen head a 40 KB body of this shape took 18 s (main 16 ms): each hidden tag rescanned the text for every later end tag.
+  it.each([
+    ['backtick runs between hidden tags and end tags', (n: number) => 'x<!<style> `'.repeat(n) + '</style>'.repeat(n)],
+    ['end tags in indented code', (n: number) => 'x<!<style> `'.repeat(n) + '\n    </style>'.repeat(n)],
+    ['fences between hidden tags', (n: number) => 'x<!<style>\n```\n'.repeat(n) + '</style>\n'.repeat(n)],
+  ])('%s', (_label, body) => {
+    const started = performance.now();
+    escapeUnterminatedHtml(body(4000));
+    expect(performance.now() - started).toBeLessThan(5000);
   });
 });

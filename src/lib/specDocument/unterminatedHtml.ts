@@ -63,7 +63,7 @@ const RAW_TEXT_START = /<(script|style|textarea|title|xmp|iframe|noembed|noframe
  * before it in the comment that Markdown could read another way (a `<`, a backtick, a backslash), on the comment's line or the next, and
  * not closed later by its own end tag (Markdown's raw text then ends where a browser's reading resumes anyway).
  */
-function bogusHiddenTag(text: string, at: number, close: number): number {
+function bogusHiddenTag(text: string, at: number, close: number, ctx: () => HiddenContext): number {
   const body = text.slice(at + 2, close + 1);
   const raw = RAW_TEXT_START.exec(body);
   if (raw === null) return -1;
@@ -72,97 +72,199 @@ function bogusHiddenTag(text: string, at: number, close: number): number {
   // At the head of a line the tag may start an HTML block in one reader and continue a paragraph in another (markdown-it's lazy lines), so
   // escaping it can move what follows into another block: only when nothing after it holds a tag.
   if (/[\n\r][ \t]*$/.test(before) && text.includes('<', close + 1)) return -1;
-  if (inHtmlBlock(text, at + 2 + raw.index)) return -1;
+  if (inHtmlBlock(text, ctx(), at + 2 + raw.index)) return -1;
   const name = raw[1].toLowerCase();
-  if (name !== 'plaintext' && emittedEndTag(text, close + 1, name)) return -1;
+  if (name !== 'plaintext' && emittedEndTag(text, ctx(), close + 1, name)) return -1;
   return at + 2 + raw.index;
 }
 
 /**
- * #5369 (#5370 BLIND P2b) — whether an end tag of `name` after `from` closes the hidden element: one every reader emits raw. Only a tag
- * Markdown accepts (`</name>`, blanks before the `>`), with no fence-like line anywhere before it, no backtick run between `from` and it that
- * a run of the same length after it could close into a code span, no indent before it on its line that could make the line code (four
- * columns, also after quote and list markers), and no backslash right before it. Anything else is not counted, which keeps the escape.
+ * #5369 — what the two checks below need of one text, built once per scan (Brooks LOCAL P1: each check used to rescan the text per hidden tag,
+ * which made a 40 KB body cost seconds). Lines end at LF, CRLF and a bare CR, as in the readers.
  */
-function emittedEndTag(text: string, from: number, name: string): boolean {
-  const re = new RegExp(`</${name}[ \\t\\r\\n]*>`, 'gi');
-  re.lastIndex = from;
-  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
-    if (/(?:^|[\r\n])[ \t>*+\-\d.)]*(?:`{3,}|~{3,})/.test(text.slice(0, m.index))) return false;
-    // A backtick run before it that a run of the same length after it could close: a code span may hold it.
-    const after = text.slice(m.index);
-    for (const run of text.slice(from, m.index).match(/`+/g) ?? []) {
-      if (new RegExp(`(?<!\`)${run}(?!\`)`).test(after)) return false;
+interface HiddenContext {
+  /** The offsets after which an end tag has a fence-like line or a link destination, title or reference definition before it. */
+  readonly codeFrom: number;
+  /** Per raw-text name, the end tags of that name (see {@link endTagIndex}). */
+  readonly endTags: Map<string, EndTagIndex>;
+  /** Where each line starts. */
+  readonly lineStarts: number[];
+  /** The walk of {@link inHtmlBlock}: where each step starts, and the walk's state before it. */
+  readonly steps: number[];
+  readonly states: BlockState[];
+}
+/**
+ * The end tags of one name, in order. `decisive` is where the search of {@link emittedEndTag} stops; `upTo` the furthest backtick run start
+ * between the search's start and that stop which a run of its length after the end tag could close (-1 for none).
+ */
+interface EndTagIndex { readonly at: number[]; readonly next: number[]; readonly fenced: boolean[]; readonly upTo: number[] }
+interface BlockState { readonly fence: RegExp | null; readonly opened: boolean; readonly afterText: boolean }
+
+function hiddenContext(text: string): HiddenContext {
+  // The earliest end of a fence-like line (its first three markers) and of a `](` or `]:`: an end tag at or after either is held as code or link text by some reader.
+  const fence = /(?:^|[\r\n])[ \t>*+\-\d.)]*(?:`{3}|~{3})/.exec(text);
+  const link = /\][ \t\r\n]*[(:]/.exec(text);
+  const codeFrom = Math.min(fence === null ? Infinity : fence.index + fence[0].length, link === null ? Infinity : link.index + link[0].length);
+  const steps: number[] = [];
+  const states: BlockState[] = [];
+  walkBlocks(text, 0, { fence: null, opened: false, afterText: false }, Infinity, (s, state) => { steps.push(s); states.push(state); });
+  const lineStarts = [0];
+  for (const m of text.matchAll(LINE_END)) lineStarts.push(m.index + m[0].length);
+  return { codeFrom, endTags: new Map(), lineStarts, steps, states };
+}
+
+/** The offset just past the next line end at or after `k` (-1 for none), and that line end (the text's length for none). */
+const LINE_END = /\r\n|\r|\n/g;
+function lineEndFrom(text: string, k: number): { end: number; next: number } {
+  LINE_END.lastIndex = k;
+  const m = LINE_END.exec(text);
+  return m === null ? { end: text.length, next: -1 } : { end: m.index, next: m.index + m[0].length };
+}
+
+/**
+ * #5369 (#5370 BLIND P2b) — whether an end tag of `name` after `from` closes the hidden element: one every reader emits raw. Only a tag
+ * Markdown accepts (`</name>`, spaces or tabs before the `>`), with no fence-like line, link destination, link title or reference definition
+ * anywhere before it, no backtick run between `from` and it that a run of the same length after it could close into a code span, no indent
+ * before it on its line that could make the line code (a tab or four spaces among the line's leading blanks and quote and list markers,
+ * stacked or not), and no backslash right before it. Anything else is not counted, which keeps the escape. The first end tag that is not
+ * held in code or behind a backslash decides; one before it held in a code span keeps the escape as well.
+ */
+function emittedEndTag(text: string, ctx: HiddenContext, from: number, name: string): boolean {
+  let index = ctx.endTags.get(name);
+  if (index === undefined) { index = endTagIndex(text, ctx, name); ctx.endTags.set(name, index); }
+  let lo = 0;
+  let hi = index.at.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (index.at[mid] < from) lo = mid + 1; else hi = mid; }
+  if (lo === index.at.length) return false;
+  const stop = index.next[lo];
+  return stop !== -1 && !index.fenced[stop] && index.upTo[lo] < from;
+}
+
+function endTagIndex(text: string, ctx: HiddenContext, name: string): EndTagIndex {
+  const at: number[] = [];
+  const re = new RegExp(`</${name}[ \\t]*>`, 'gi');
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) at.push(m.index);
+  // Backtick runs, in order; for each length, where the last run of that length starts.
+  const runs: Array<[number, number]> = [];
+  const lastOf = new Map<number, number>();
+  for (const m of text.matchAll(/`+/g)) { runs.push([m.index, m[0].length]); lastOf.set(m[0].length, m.index); }
+  // For each end tag, the latest run before it whose length has a run after it (a max-heap of the latest run start per length, entries
+  // dropped once stale or once no run of their length follows).
+  const latest = new Map<number, number>();
+  const heap: Array<[number, number]> = [];
+  const push = (e: [number, number]): void => {
+    heap.push(e);
+    for (let i = heap.length - 1; i > 0;) { const p = (i - 1) >> 1; if (heap[p][0] >= heap[i][0]) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; }
+  };
+  const pop = (): void => {
+    const last = heap.pop() as [number, number];
+    if (heap.length === 0) return;
+    heap[0] = last;
+    for (let i = 0; ;) {
+      const l = 2 * i + 1;
+      const r = l + 1;
+      let top = i;
+      if (l < heap.length && heap[l][0] > heap[top][0]) top = l;
+      if (r < heap.length && heap[r][0] > heap[top][0]) top = r;
+      if (top === i) break;
+      [heap[top], heap[i]] = [heap[i], heap[top]];
+      i = top;
     }
-    const lineHead = text.slice(Math.max(text.lastIndexOf('\n', m.index - 1), text.lastIndexOf('\r', m.index - 1)) + 1, m.index);
-    // Indented code (also inside a quote or after a list marker), or a backslash that makes the `<` text.
-    if (!/^(?: {0,3}>)*[ \t]*(?:(?:[-+*]|\d{1,9}[.)])[ \t]*)?(?:\t| {4})/.test(lineHead) && !/^[ \t>]*\t/.test(lineHead) && text[m.index - 1] !== '\\') return true;
+  };
+  const open: number[] = [];
+  let r = 0;
+  for (const pos of at) {
+    for (; r < runs.length && runs[r][0] < pos; r += 1) { latest.set(runs[r][1], runs[r][0]); push([runs[r][0], runs[r][1]]); }
+    while (heap.length > 0 && (latest.get(heap[0][1]) !== heap[0][0] || (lastOf.get(heap[0][1]) as number) < pos)) pop();
+    open.push(heap.length === 0 ? -1 : heap[0][0]);
   }
-  return false;
+  const indented = new Map<number, boolean>();
+  const fenced = at.map((pos) => pos >= ctx.codeFrom);
+  let line = 0;
+  const decisive = at.map((pos, i) => {
+    if (fenced[i]) return true;
+    for (; line + 1 < ctx.lineStarts.length && ctx.lineStarts[line + 1] <= pos; line += 1);
+    const start = ctx.lineStarts[line];
+    let code = indented.get(start);
+    if (code === undefined) {
+      // The line's leading blanks and quote and list markers (the end tag's `<` ends them): a tab or four spaces among them may make it code.
+      code = /\t| {4}/.test((/^[ \t>*+\-\d.)]*/.exec(text.slice(start, pos)) as RegExpExecArray)[0]);
+      indented.set(start, code);
+    }
+    return !code && text[pos - 1] !== '\\';
+  });
+  const next = new Array<number>(at.length);
+  const upTo = new Array<number>(at.length);
+  for (let i = at.length - 1; i >= 0; i -= 1) {
+    const tail = decisive[i] || i === at.length - 1;
+    next[i] = decisive[i] ? i : i === at.length - 1 ? -1 : next[i + 1];
+    upTo[i] = tail ? open[i] : Math.max(open[i], upTo[i + 1]);
+  }
+  return { at, next, fenced, upTo };
 }
 
 /**
  * #5369 — whether every reader has `at` (a raw-text start a bogus comment hides) inside an HTML block, where Markdown passes the bogus comment
  * through and the browser reads it, so the tag it hides is inert. Only blocks that open at column 0 count, so that no list item or quote can
  * hold the line instead: a type 6 block up to the next blank line, and a type 1 to 5 block up to where both readers end it (CommonMark ends
- * one of types 1 and 2 with the line that holds its closer, marked ends types 3 to 5 right after the closer). Lines end at LF, CRLF and a
- * bare CR, as in the readers. The lines before are read for what could hold the opener line instead (a fence, a block of types 1 to 5 that
- * is still open): any of those, even one that only looks like it, and the answer is no, which keeps the escape. After a paragraph line an
- * opener counts only as a tag alone on its line: marked reads a paragraph line, an opener line holding more and a `-` line as one heading.
+ * one of types 1 and 2 with the line that holds its closer, marked ends types 3 to 5 right after the closer). The lines before are read for
+ * what could hold the opener line instead (a fence, a block of types 1 to 5 that is still open): any of those, even one that only looks like
+ * it, and the answer is no, which keeps the escape. After a paragraph line an opener counts only as a tag alone on its line: marked reads a
+ * paragraph line, an opener line holding more and a `-` line as one heading. The walk is the context's, resumed at the step holding `at`.
  */
-function inHtmlBlock(text: string, at: number): boolean {
-  const lineEnd = (k: number): number => {
-    const m = /\r\n|\r|\n/.exec(text.slice(k));
-    return m === null ? text.length : k + m.index;
-  };
-  const nextLine = (k: number): number => {
-    const m = /\r\n|\r|\n/.exec(text.slice(k));
-    return m === null ? -1 : k + m.index + m[0].length;
-  };
-  let fence: RegExp | null = null;
-  let opened = false;
-  let afterText = false;
-  for (let s = 0; s !== -1 && s <= at; ) {
-    const e = lineEnd(s);
+function inHtmlBlock(text: string, ctx: HiddenContext, at: number): boolean {
+  let lo = 0;
+  let hi = ctx.steps.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (ctx.steps[mid] <= at) lo = mid; else hi = mid - 1; }
+  return walkBlocks(text, ctx.steps[lo], ctx.states[lo], at, () => undefined);
+}
+
+/** The walk of {@link inHtmlBlock} from line start `s` in `state`, up to `at` (each step reported before it is taken). */
+function walkBlocks(text: string, s0: number, state: BlockState, at: number, step: (s: number, state: BlockState) => void): boolean {
+  let { fence, opened, afterText } = state;
+  for (let s = s0; s !== -1 && s <= at;) {
+    step(s, { fence, opened, afterText });
+    const { end: e, next } = lineEndFrom(text, s);
     const line = text.slice(s, Math.min(e, at));
     const before = afterText;
     afterText = false;
-    if (fence !== null) { if (fence.test(line)) fence = null; s = nextLine(s); continue; }
-    if (line.trim() === '') { opened = false; s = nextLine(s); continue; }
-    if (opened) { s = nextLine(s); continue; }
-    if (BLOCK6_LINE.test(line) && (!before || /^<\/?[A-Za-z0-9]+ *\/?>$/.test(line))) { opened = true; s = nextLine(s); continue; }
+    if (fence !== null) { if (fence.test(line)) fence = null; s = next; continue; }
+    if (line.trim() === '') { opened = false; s = next; continue; }
+    if (opened) { s = next; continue; }
+    if (BLOCK6_LINE.test(line) && (!before || /^<\/?[A-Za-z0-9]+ *\/?>$/.test(line))) { opened = true; s = next; continue; }
     const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (f) { fence = new RegExp(`^ {0,3}${f[1][0] === '`' ? '`' : '~'}{${f[1].length},}[ \\t]*$`); s = nextLine(s); continue; }
+    if (f) { fence = new RegExp(`^ {0,3}${f[1][0] === '`' ? '`' : '~'}{${f[1].length},}[ \\t]*$`); s = next; continue; }
     const t = TYPE15.find((x) => x.open.test(text.slice(s, e)));
     if (t) {
       // CommonMark and markdown-it test the closer on the opener's line from its `<` (`<?>` closes at once); marked searches after the opener.
       const find = (from: number): [number, number] => {
-        const c = text.slice(from).search(t.close);
-        if (c === -1) return [text.length, text.length];
-        return [from + c, from + c + (text.slice(from + c).match(t.close) as RegExpMatchArray)[0].length];
+        t.close.lastIndex = from;
+        const c = t.close.exec(text);
+        return c === null ? [text.length, text.length] : [c.index, c.index + c[0].length];
       };
       const [, cmEnd] = find(s);
       const [mAt, mEnd] = find(s + t.from);
       // Where every reader keeps the block raw: CommonMark to the end of the closer's line; marked to its closer, or that line's end for types 1 and 2.
-      const rawTo = Math.min(lineEnd(cmEnd), t.wholeLine ? lineEnd(mEnd) : mAt);
+      const rawTo = Math.min(lineEndFrom(text, cmEnd).end, t.wholeLine ? lineEndFrom(text, mEnd).end : mAt);
       if (!before && line[0] === '<' && at < rawTo) return true;
       const closeEnd = Math.max(cmEnd, mEnd);
-      afterText = !t.wholeLine && text.slice(mEnd, lineEnd(closeEnd)).trim() !== '';
-      s = nextLine(closeEnd);
+      const closeLine = lineEndFrom(text, closeEnd);
+      afterText = !t.wholeLine && text.slice(mEnd, closeLine.end).trim() !== '';
+      s = closeLine.next;
       continue;
     }
     afterText = true;
-    s = nextLine(s);
+    s = next;
   }
   return opened;
 }
 /** HTML blocks of types 1 to 5 (CommonMark): the line start that opens one, where its closer is searched from, the closer, and whether marked keeps the rest of the closer's line in the block. */
 const TYPE15: ReadonlyArray<{ open: RegExp; from: number; close: RegExp; wholeLine: boolean }> = [
-  { open: /^ {0,3}<(?:script|pre|style|textarea)(?:[ \t>]|$)/i, from: 1, close: /<\/(?:script|pre|style|textarea)>/i, wholeLine: true },
-  { open: /^ {0,3}<!--/, from: 2, close: /-->/, wholeLine: true },
-  { open: /^ {0,3}<\?/, from: 2, close: /\?>/, wholeLine: false },
-  { open: /^ {0,3}<![A-Za-z]/, from: 2, close: />/, wholeLine: false },
-  { open: /^ {0,3}<!\[CDATA\[/, from: 9, close: /\]\]>/, wholeLine: false },
+  { open: /^ {0,3}<(?:script|pre|style|textarea)(?:[ \t>]|$)/i, from: 1, close: /<\/(?:script|pre|style|textarea)>/gi, wholeLine: true },
+  { open: /^ {0,3}<!--/, from: 2, close: /-->/g, wholeLine: true },
+  { open: /^ {0,3}<\?/, from: 2, close: /\?>/g, wholeLine: false },
+  { open: /^ {0,3}<![A-Za-z]/, from: 2, close: />/g, wholeLine: false },
+  { open: /^ {0,3}<!\[CDATA\[/, from: 9, close: /\]\]>/g, wholeLine: false },
 ];
 
 const isLetter = (c: string | undefined): boolean => c !== undefined && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
@@ -361,6 +463,8 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
   // #5265 — a bare CR ends a line for the readers but not for this walk, which then misreads the code line it sits in once the item-2 rule
   // has closed the list: a text holding one keeps main's list close.
   const bareCr = /\r(?!\n)/.test(text);
+  let blocks: HiddenContext | undefined;
+  const hiddenCtx = (): HiddenContext => (blocks ??= hiddenContext(text));
   const n = text.length;
   let fence: OpenFence | null = null;
   let fenceContainers: Container[] = [];
@@ -667,7 +771,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
       if (i >= rawUntil && !isLetter(text[i + 2])) {
-        const hidden = bogusHiddenTag(text, i, close);
+        const hidden = bogusHiddenTag(text, i, close, hiddenCtx);
         if (hidden !== -1) return hidden;
       }
       // marked ends such a block at the declaration's first `>` and reads the rest of the line as text (#5211); CommonMark keeps it raw.
@@ -682,7 +786,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > tagLimit(i, false)) return i;
       if (i >= rawUntil) {
-        const hidden = bogusHiddenTag(text, i, close);
+        const hidden = bogusHiddenTag(text, i, close, hiddenCtx);
         if (hidden !== -1) return hidden;
       }
       i = close + 1;
