@@ -33,7 +33,7 @@ afterEach(() => { vi.unstubAllEnvs(); });
 describe('#5023 hadron_spawn at a zero balance', () => {
   it('every item is refused CREDITS_EXHAUSTED: the fan-out throws, naming the code, and mints no child', async () => {
     // the parent launches while the gate is off, as a run that started with credit would have
-    const parent = await mintAppRun(db, { organizationId: orgId, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: 'spawn-cg-org::m::flow:digest', eventData: { topic: 'x' } });
+    const parent = await mintAppRun(db, { owner: { organizationId: orgId }, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: 'spawn-cg-org::m::flow:digest', eventData: { topic: 'x' } });
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     vi.stubEnv('BILLING_CREDIT_GATE_ENABLED', 'true');
     const ctx = { log: vi.fn(), db, run: parent, principal: runContext(db, parent) };

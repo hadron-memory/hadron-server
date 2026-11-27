@@ -54,7 +54,7 @@ function deps(overrides: Partial<RunExecutionDeps> = {}): RunExecutionDeps {
 
 async function mintParent(eventData: Record<string, unknown> = { topic: 'digest' }): Promise<AppRun> {
   return mintAppRun(db, {
-    organizationId: orgId, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData,
+    owner: { organizationId: orgId }, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData,
   });
 }
 
@@ -149,7 +149,7 @@ describe('hadron_spawn — dispatch (D-SP-1/-3/-5)', () => {
   it('the depth cap stops fork bombs (D-SP-7): a grandchild-lineage run cannot spawn', async () => {
     const grandparent = await mintParent();
     const parent = await mintAppRun(db, {
-      organizationId: orgId, appId, agentId, triggerKind: 'SPAWN', triggerId: grandparent.id,
+      owner: { organizationId: orgId }, appId, agentId, triggerKind: 'SPAWN', triggerId: grandparent.id,
       parentRunId: grandparent.id, entryNodeUrn: CHILD_ENTRY,
     });
     // Lineage depth 1 → allowed.
@@ -287,7 +287,7 @@ describe('hadron_child_runs (D-SP-6)', () => {
     });
     await db.appAgent.create({ data: { appId: otherApp.id, agentId } });
     const foreign = await mintAppRun(db, {
-      organizationId: orgId, appId: otherApp.id, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY,
+      owner: { organizationId: orgId }, appId: otherApp.id, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY,
     });
     await expect(
       hadronChildRuns.execute(toolCtx(foreign as AppRun), { parentRunId: parent.id }),

@@ -27,6 +27,7 @@ import { mintAppRun, RunLaunchDeniedError, consumeActionTicket } from '../jobs/a
 import { assertUrlAllowed } from '../lib/webFetch.js';
 import { respondInternalFault } from '../lib/internalFault.js';
 import { bootPromptRefusalCode } from '../lib/bootPrompt/refusal.js';
+import { requireOwnerRefOf } from '../lib/owner.js';
 
 const HPT_DEFAULT_TTL = process.env.WEBHOOK_TOKEN_TTL ?? '90d';
 const CALLBACK_TIMEOUT_MS = 10_000;
@@ -129,7 +130,7 @@ async function handleWebhook(db: PrismaClient, req: Request, res: Response): Pro
 
   try {
     const run = await mintAppRun(db, {
-      organizationId: webhook.organizationId,
+      owner: { organizationId: webhook.organizationId }, // #5077: a webhook is an organization's until F3b
       appId: webhook.appId,
       agentId: webhook.agentId,
       userId: webhook.userId,
@@ -205,7 +206,7 @@ export async function dispatchRunCallback(db: PrismaClient, run: AppRun): Promis
     return;
   }
 
-  const ticket = await consumeActionTicket(db, run.organizationId, run.appId, 'comm.outbound', run.id);
+  const ticket = await consumeActionTicket(db, requireOwnerRefOf(run), run.appId, 'comm.outbound', run.id);
   if (!ticket) {
     console.warn(`[webhook] run ${run.id}: callback skipped — no comm.outbound ticket`);
     await record('skipped:no-ticket');

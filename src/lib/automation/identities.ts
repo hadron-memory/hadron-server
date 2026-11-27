@@ -1,6 +1,8 @@
 /** Non-secret execution identities included in automation consent (#1719). */
 import type { PrismaClient, AiServiceConfig, McpServer, HomeAssistantInstance } from '../../generated/prisma/index.js';
-import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../aiConfig.js';
+import { NoAiConfigAvailableError } from '../aiConfig.js';
+import { resolveRunAiConfig } from '../runner/runAiConfig.js';
+import { type OwnerRef, orgIdOf } from '../owner.js';
 import { parseMcpRunToolName } from '../mcpServers.js';
 import { parseHaRunToolName } from '../homeAssistant.js';
 
@@ -20,15 +22,18 @@ export function configSelection(row: ExecutionSelection & { eventData?: unknown 
 }
 /** Credential columns and updatedAt are deliberately excluded: a credential
  * rotation changes neither destination nor admitted operations. */
-export async function executionIdentities(db: PrismaClient, appId: string, organizationId: string,
+/** #5077: `tenant` is the run's owner; a person's run has no MCP or Home Assistant registry, so every slug records as not registered. */
+export async function executionIdentities(db: PrismaClient, appId: string, tenant: OwnerRef,
   tools: string[], selection: ExecutionSelection): Promise<ExecutionIdentities> {
   let ai: ExecutionIdentities['ai'] = null;
-  try { ai = aiIdentity((await resolveAiConfigWithFallback(db, selection.aiConfigName, { appId, organizationId, agentId: selection.agentId ?? undefined })).config); }
+  // #5077: the one run wrapper, so a preview never shows the identity of a configuration the run would be refused.
+  try { ai = aiIdentity((await resolveRunAiConfig(db, selection.aiConfigName, { appId, tenant, agentId: selection.agentId ?? undefined })).config); }
   catch (e) { if (!(e instanceof NoAiConfigAvailableError)) throw e; }
+  const organizationId = orgIdOf(tenant);
   const mcpSlugs = [...new Set(tools.flatMap(name => { const part = parseMcpRunToolName(name); return part ? [part.slug] : []; }))];
   const haSlugs = [...new Set(tools.flatMap(name => { const part = parseHaRunToolName(name); return part ? [part.slug] : []; }))];
-  const servers = mcpSlugs.length ? await db.mcpServer.findMany({ where: { organizationId, slug: { in: mcpSlugs }, enabled: true }, select: { slug: true, id: true, url: true, toolAllowlist: true } }) : [];
-  const instances = haSlugs.length ? await db.homeAssistantInstance.findMany({ where: { organizationId, slug: { in: haSlugs }, enabled: true }, select: { slug: true, id: true, url: true, opAllowlist: true } }) : [];
+  const servers = mcpSlugs.length && organizationId !== null ? await db.mcpServer.findMany({ where: { organizationId, slug: { in: mcpSlugs }, enabled: true }, select: { slug: true, id: true, url: true, toolAllowlist: true } }) : [];
+  const instances = haSlugs.length && organizationId !== null ? await db.homeAssistantInstance.findMany({ where: { organizationId, slug: { in: haSlugs }, enabled: true }, select: { slug: true, id: true, url: true, opAllowlist: true } }) : [];
   return { tools: [...new Set(tools)].sort(), ai,
     mcp: Object.fromEntries(mcpSlugs.sort().map(slug => [slug, servers.find(row => row.slug === slug) ? mcpIdentity(servers.find(row => row.slug === slug)!) : null])),
     ha: Object.fromEntries(haSlugs.sort().map(slug => [slug, instances.find(row => row.slug === slug) ? haIdentity(instances.find(row => row.slug === slug)!) : null])),

@@ -342,7 +342,12 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // fold, and GraphQL `memories` now lists them too. For a user-owned App every surface is new (memory(ref:), memories, node(ref:),
 // findNodes, resolveUrn, hadron_list_memories, the MCP point reads). A user, a session-bound key, an impersonation and a run gain
 // nothing; per-user anonymous rows and Worker working memories stay refused. (0.52.0 is #5325, merged first.)
-// 0.54.0 — BREAKING (behaviour, no SDL removal) (#5321, cor:acl:140:02, cor:agt:010:01, cor:dmo:060:22, cor:acl:010:04): an App that acts
+// 0.54.0 — BREAKING (#5394 PR 1, cor:cht:010:02): `startChat` needs an identified App on both scopes: the App credential's App, or the new
+// `appRef` argument (SDL addition). A call that identifies neither, or whose `appRef` differs from the credential's App, is refused
+// CHAT_APP_NOT_IDENTIFIED before any Agent lookup; the App is never searched for, and SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is
+// retired. A previously working signed-in start that names no App is now refused, so a client keys on this version before sending
+// `appRef` (hadron-portal#2683, hadron-cli#3310). (0.53.0 is #5416, merged first.)
+// 0.55.0 — BREAKING (behaviour, no SDL removal) (#5321, cor:acl:140:02, cor:agt:010:01, cor:dmo:060:22, cor:acl:010:04): an App that acts
 // with no person behind it (a pure App key, or a userless run) now reads a memory outside its own App ONLY through a signed `memory.read`
 // grant the App holds. Attaching a memory (#5258's `app_memory_links`) no longer gives any read on any surface: the link is the App's scope
 // list, and `AppAttachedMemory.active` still shows whether it would count. Upgrade: on deploy every existing attachment stops giving reads,
@@ -351,8 +356,8 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // ORGANIZATION-visibility unencrypted knowledge memories no App scopes, to userless runs only; (b) named memories, to userless runs and to a
 // pure key holding the new App-key scope `grant:read` (ADDITIVE: the closed scope list gains it; a client that validates scopes against the
 // old list cannot give it). A person, an impersonation, a session-bound key and a run carrying a user id gain nothing. #5398's own-memory
-// read (0.53.0) is neither an attachment nor a grant and is unchanged. (0.53.0 is #5398, merged first.)
-export const HADRON_SERVER_VERSION = '0.54.0';
+// read (0.53.0) is neither an attachment nor a grant and is unchanged. (0.53.0 is #5398 and 0.54.0 is #5394, both merged first.)
+export const HADRON_SERVER_VERSION = '0.55.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

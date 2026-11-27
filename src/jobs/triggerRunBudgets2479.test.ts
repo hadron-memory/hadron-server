@@ -46,7 +46,7 @@ it.each(['SCHEDULE', 'WEBHOOK', 'MANUAL'] as const)('persists and seeds narrowed
       ? await M.createAgentSchedule({}, { input: { ...f.input, ...requested } }, f.ctx)
       : (await M.createAgentWebhook({}, { input: { ...f.input, ...requested } }, f.ctx)).webhook;
     expect(made).toMatchObject(requested);
-    run = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: made.id, entryNodeUrn: f.input.entryNodeUrn });
+    run = await mintAppRun(db, { appId: f.app.id, owner: { organizationId: f.org.id }, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: made.id, entryNodeUrn: f.input.entryNodeUrn });
   }
   amounts(run);
   amounts(await db.appRun.findUniqueOrThrow({ where: { id: run.id } }));
@@ -156,7 +156,7 @@ it.each(['SCHEDULE', 'WEBHOOK', 'MANUAL'] as const)('accepts the exact platform-
       ? await M.createAgentSchedule({}, { input: { ...f.input, ...ceiling } }, f.ctx)
       : (await M.createAgentWebhook({}, { input: { ...f.input, ...ceiling } }, f.ctx)).webhook;
     expect(made).toMatchObject(ceiling);
-    amounts(await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: made.id, entryNodeUrn: f.input.entryNodeUrn }), 100000, 50);
+    amounts(await mintAppRun(db, { appId: f.app.id, owner: { organizationId: f.org.id }, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: made.id, entryNodeUrn: f.input.entryNodeUrn }), 100000, 50);
   }
 });
 
@@ -170,7 +170,7 @@ it.each(['SCHEDULE', 'WEBHOOK'] as const)('refuses a missing, deleted or foreign
   const foreign = await db.app.create({ data: { name: 'Foreign', urn: 'budget.test:foreign', organizationId: f.org.id } });
   for (const [triggerId, appId] of [[made.id, f.app.id], ['missing-trigger', f.app.id], [null, f.app.id], [made.id, foreign.id]] as const) {
     if (appId === foreign.id) await (model as any).update({ where: { id: made.id }, data: { deletedAt: null } });
-    await expect(mintAppRun(db, { appId, organizationId: f.org.id, triggerKind: kind, triggerId, entryNodeUrn: f.input.entryNodeUrn }))
+    await expect(mintAppRun(db, { appId, owner: { organizationId: f.org.id }, triggerKind: kind, triggerId, entryNodeUrn: f.input.entryNodeUrn }))
       .rejects.toMatchObject({ code: 'TRIGGER_DISABLED' });
   }
   expect(await db.appRun.count()).toBe(0);
@@ -184,7 +184,7 @@ it('keeps omitted historical limits but refuses supplied above-current-default v
   await expect(M.updateAgentSchedule({}, { id: s.id, input: { budgetTokens: 500, budgetActions: 3 } }, f.ctx)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   const same = await M.updateAgentSchedule({}, { id: s.id, input: { name: 'renamed' } }, f.ctx);
   expect(same).toMatchObject(requested);
-  amounts(await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'SCHEDULE', triggerId: s.id, entryNodeUrn: f.input.entryNodeUrn }), 200, 2);
+  amounts(await mintAppRun(db, { appId: f.app.id, owner: { organizationId: f.org.id }, agentId: f.agent.id, userId: f.user.id, triggerKind: 'SCHEDULE', triggerId: s.id, entryNodeUrn: f.input.entryNodeUrn }), 200, 2);
 });
 
 it.each(['SCHEDULE', 'WEBHOOK'] as const)('updates the %s budget projection without changing the consent hash or adopted state', async kind => {
@@ -200,7 +200,7 @@ it.each(['SCHEDULE', 'WEBHOOK'] as const)('updates the %s budget projection with
   const after = await Q.automationApproval({}, ref, f.ctx);
   expect(after.hash).toBe(before.hash); expect(after.state).toBe('ADOPTED');
   expect(after.summary.limits).not.toEqual(before.summary.limits);
-  amounts(await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: s.id, entryNodeUrn: f.input.entryNodeUrn }), 200, 2);
+  amounts(await mintAppRun(db, { appId: f.app.id, owner: { organizationId: f.org.id }, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: s.id, entryNodeUrn: f.input.entryNodeUrn }), 200, 2);
 });
 
 

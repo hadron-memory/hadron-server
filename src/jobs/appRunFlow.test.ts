@@ -174,7 +174,7 @@ function flowDeps(confidence: number): {
 
 async function mintFlow() {
   return mintAppRun(db, {
-    organizationId: orgId,
+    owner: { organizationId: orgId },
     appId,
     agentId,
     triggerKind: 'MANUAL',
