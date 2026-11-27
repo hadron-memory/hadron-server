@@ -5,7 +5,8 @@
  * per call site, in `writeDoorsGuard5016.test.ts`.
  */
 import type { Prisma } from '../../generated/prisma/index.js';
-import { ownerRefOf, type OwnerRef } from '../owner.js';
+import type { OwnerRef } from '../owner.js';
+import { countsForOwnerOf } from './countsFor.js';
 import { requireOwnerHeadroom } from './gate.js';
 
 /**
@@ -25,13 +26,15 @@ export function ownerLimitCaller(ctx: { userId?: string | null; impersonation?: 
 }
 
 /**
- * The owner of a memory, read on the transaction. The caller must already hold the memory row (FOR SHARE or FOR UPDATE):
- * `transferMemoryOwnership` takes it FOR UPDATE, so the owner read here is the one that holds the memory when the write
- * commits (finding `node-write-owner-transfer-race`).
+ * The owner a memory's nodes COUNT FOR, read on the transaction (#5434): a user's personal memory under an Agent counts for that user,
+ * every other memory for its stored owner (`countsFor.ts`, the same rule as the count). The caller must already hold the memory row
+ * (FOR SHARE or FOR UPDATE): `transferMemoryOwnership` takes it FOR UPDATE, so the owner read here is the one that holds the memory when
+ * the write commits (finding `node-write-owner-transfer-race`). The per-Agent shape is a row property that no door changes (a transfer
+ * of an Agent-scoped memory is refused), so reading it under the same lock is as safe as reading the stored owner.
  */
 export async function memoryOwnerInTx(tx: Pick<Prisma.TransactionClient, 'memory'>, memoryId: string): Promise<OwnerRef | null> {
-  const row = await tx.memory.findUnique({ where: { id: memoryId }, select: { organizationId: true, ownerUserId: true } });
-  return ownerRefOf(row);
+  const row = await tx.memory.findUnique({ where: { id: memoryId }, select: { organizationId: true, ownerUserId: true, userId: true, userMemoryOfAgentId: true } });
+  return row ? countsForOwnerOf(row) : null;
 }
 
 /**

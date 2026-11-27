@@ -2311,7 +2311,7 @@ export const typeDefs = `#graphql
     key: String!
     "The limit in force, a base-10 integer string: the owner's own limit, else the deployment default for that kind of owner. Null means unlimited."
     limit: String
-    "How much the owner holds now, a base-10 integer string, counted when asked for. A total only."
+    "How much the owner holds now, a base-10 integer string, counted when asked for. A total only. For nodes (hadron-server issue 5434): the nodes a person writes in their personal memory made under an Agent count for that person, not for the Agent's organization."
     used: String!
   }
 
