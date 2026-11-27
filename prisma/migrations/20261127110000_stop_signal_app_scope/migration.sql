@@ -5,7 +5,7 @@
 -- gave them (the migration replay would then differ from push + post-push). The block below is the shared file's own, verbatim
 -- (src/lib/stopSignals/invariants.test.ts pins that). Re-adding the CHECK scans team_stop_signals once under SHARE ROW
 -- EXCLUSIVE, a table that holds a handful of rows per App. No row can fail it (every existing row is worker, team or host), so
--- there is no preflight and no HDPRF refusal. The previous image never writes an `app` row, so it runs unchanged against it.
+-- there is no preflight and nothing here refuses on data. The previous image never writes an `app` row, so it runs unchanged against it.
 
 ALTER TABLE team_stop_signals DROP CONSTRAINT IF EXISTS chk_team_stop_signals_shape;
 ALTER TABLE team_stop_signals ADD CONSTRAINT chk_team_stop_signals_shape CHECK (
