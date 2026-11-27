@@ -375,8 +375,12 @@ export async function mayReadAppRunWithoutOrgRole(
   ctx: Context,
   run: { appId: string; organizationId: string | null; userId: string | null; createdBy: string | null; triggerKind: string },
 ): Promise<boolean> {
-  // #5077 (decision d; cor:dmo:050:12): the platform-admin arm reads an organization's run only, never a person's.
-  if (isPlatformAdmin(ctx)) return run.organizationId !== null;
+  // #5077 (F3a-1): nobody reads a run of an App a person owns until F3a-2 gives it its read gate, and every arm below
+  // (platform admin, App key, own run) would otherwise admit it; AppRun.organizationId is still ID! in the SDL. Checked
+  // first, before any arm (Byron SECOND P2-1, Belinda BLIND P2-1 on #5420).
+  if (run.organizationId === null) return false;
+  // #5077 (decision d; cor:dmo:050:12): the platform-admin arm reads an organization's run only, never a person's (above).
+  if (isPlatformAdmin(ctx)) return true;
   if (!ctx.userId) return !!ctx.appId && ctx.appId === run.appId;
   if (ctx.impersonation) return false;
   const own = run.userId === ctx.userId || (run.triggerKind === 'MANUAL' && run.createdBy === ctx.userId);
@@ -1473,6 +1477,9 @@ export const appRunQueries = {
         throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
       }
     }
+    // #5077 (F3a-1): the owner passes the gate above, but a run of an App a person owns is read by nobody until F3a-2
+    // (see mayReadAppRunWithoutOrgRole); before F3a-1 such an App had no run, so null is main's answer.
+    if (app.organizationId === null) return null;
     const [run] = await ctx.db.appRun.findMany({
       where: { appId },
       orderBy: { createdAt: 'desc' },

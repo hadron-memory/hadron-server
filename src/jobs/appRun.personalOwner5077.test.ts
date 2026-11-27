@@ -44,6 +44,8 @@ import { hasAppRelationship } from '../lib/auth/appRelationship.js';
 import { mergeUsers } from '../test/mergeConsent.js';
 import { deleteUserAccount } from '../controller/operations/deleteUser.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { createTestableMcpServer } from '../mcp/server.js';
+import type { AuthContext } from '../middleware/auth.js';
 import type { AppRun, PrismaClient } from '../generated/prisma/index.js';
 import type { RunToolContext, RunToolDef } from '../lib/runner/tools/types.js';
 
@@ -459,6 +461,24 @@ describe('#5077 F3a-1 interim: reads and cancel of a person\'s run fail closed u
     const admin = { db, userId: (await db.user.create({ data: { handle: 'adm5077' } })).id, roles: ['ADMIN'] } as unknown as Context;
     expect(await resolvers.Query.appRun({}, { ref: run.id }, admin)).toBeNull();
     await expect(resolvers.Query.latestAppRun({}, { appRef: a.app.id }, admin)).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
+  });
+
+  it('nobody else reads one either: the owner (a run on their behalf, one they started), the App key and MCP get nothing', async () => {
+    // Byron SECOND P2-1 / Belinda BLIND P2-1 on #5420: main's own-run arm and App-key arm would admit a person's run, and the
+    // owner passes latestAppRun's App gate; AppRun.organizationId is ID! until F3a-2. The null check precedes every arm.
+    const a = await person('pa5077');
+    const owner = { db, userId: a.user.id, roles: [] } as unknown as Context;
+    const onBehalf = await mintFor(a, { userId: a.user.id });
+    const started = await mintFor(a, { createdBy: a.user.id });
+    expect(await hasAppRelationship(db, a.app.id, a.user.id)).toBe(true); // the own arm's precondition holds
+    expect(await resolvers.Query.appRun({}, { ref: onBehalf.id }, owner)).toBeNull();
+    expect(await resolvers.Query.appRun({}, { ref: started.id }, owner)).toBeNull();
+    expect(await resolvers.Query.latestAppRun({}, { appRef: a.app.id }, owner)).toBeNull();
+    const appKey = { db, appId: a.app.id, roles: [] } as unknown as Context;
+    expect(await resolvers.Query.appRun({}, { ref: started.id }, appKey)).toBeNull();
+    const text = await createTestableMcpServer({ userId: a.user.id, roles: ['READER'], clientId: `user:${a.user.id}` } as AuthContext)
+      .callToolText('hadron_get_run', { ref: onBehalf.id });
+    expect(text).toBe('Run not found.');
   });
 
   it('nobody cancels a person\'s run in F3a-1, the owner included (the owner\'s arm is F3a-2)', async () => {
