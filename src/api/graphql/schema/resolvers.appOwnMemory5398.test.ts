@@ -23,6 +23,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { generateDataKey } from '../../../lib/crypto.js';
 import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { ownAppMemoryIds } from '../../../lib/appOwnMemory.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -180,6 +181,39 @@ describe('#5398 controls (green on main, stay green)', () => {
     await refusedLikeMissing(keyAuth(orgApp.id), foreignOwned as Mem);
   }, 30_000);
 
+  it('the arm\'s own predicate leaves out an org-owned app row carrying the App\'s id but another organization', async () => {
+    // Direct pin on the predicate: on main the team-space fold (getAppTeamSpaceAccess) already admits such a row for the key,
+    // since it does not compare organizations. That is pre-existing and outside this change; this arm adds nothing to it.
+    const elsewhere = await db.organization.create({ data: { id: generateId(), name: 'else5398', urn: `else5398-${generateId().slice(-6)}` } });
+    const stray = await db.memory.create({
+      data: { id: generateId(), name: 'stray', urn: `${elsewhere.urn}:stray`, class: 'app', appId: orgApp.id, organizationId: elsewhere.id, visibility: null } as never,
+    });
+    expect(await ownAppMemoryIds(db as never, keyAuth(orgApp.id), [stray.id])).toEqual(new Set());
+    const own = await appMemory(orgApp, 'own');
+    expect(await ownAppMemoryIds(db as never, keyAuth(orgApp.id))).toEqual(new Set([own.id]));
+  }, 30_000);
+
+  it('a user-owned App: an app row carrying its id but owned by another person is refused like a missing one', async () => {
+    const theirs = await db.memory.create({
+      data: {
+        id: generateId(), name: 'theirs', urn: `${otto.handle}:theirs`, class: 'app', appId: userApp.id, visibility: null,
+        organizationId: null, ownerUserId: stranger.id,
+      } as never,
+    });
+    await db.node.create({ data: { id: generateId(), memoryId: theirs.id, loc: LOC, name: `${TOKEN} theirs`, content: 'secret theirs' } });
+    await refusedLikeMissing(keyAuth(userApp.id), theirs as Mem);
+  }, 30_000);
+
+  it('another class carrying the App\'s id (an App knowledge memory) is not in the arm', async () => {
+    await refusedLikeMissing(keyAuth(orgApp.id), await appMemory(orgApp, 'know', { class: 'knowledge' }));
+  }, 30_000);
+
+  it('a soft-deleted own memory is refused like a missing one', async () => {
+    const gone = await appMemory(userApp, 'gone');
+    await db.memory.update({ where: { id: gone.id }, data: { deletedAt: new Date() } });
+    await refusedLikeMissing(keyAuth(userApp.id), gone);
+  }, 30_000);
+
   it('the key cannot write its own App\'s memory', async () => {
     for (const app of [userApp, orgApp]) {
       const own = await appMemory(app, `w${app.id.slice(-4)}`);
@@ -229,21 +263,24 @@ describe('#5398 controls (green on main, stay green)', () => {
     expect(await recordRead(keyAuth(userApp.id), own.id)).toBeNull();
   }, 30_000);
 
-  it('an encrypted own memory follows existing key behaviour: no content without a cached key', async () => {
-    // An org App, where the key reaches the memory on main already: the record and the reach do not change, and content
-    // needs a cached session key exactly as before (no new path decrypts for a key).
+  it.each([
+    ['an org-owned App (reach unchanged from main)', () => orgApp],
+    ['a user-owned App (the new reach)', () => userApp],
+  ] as const)('%s: an encrypted own memory follows existing key behaviour, no content without a cached key', async (_n, which) => {
+    // No new path decrypts for a key: the record is readable, the content needs a cached session key exactly as before.
+    const app = which();
     const key = generateDataKey();
-    const enc = await db.memory.create({
-      data: { id: generateId(), name: 'enc', urn: `${org.urn}:enc`, class: 'app', appId: orgApp.id, organizationId: org.id, visibility: null, isEncrypted: true } as never,
-    });
+    const enc = await appMemory(app, 'enc', { isEncrypted: true });
+    await db.node.deleteMany({ where: { memoryId: enc.id } });
     await db.node.create({
       data: { id: generateId(), memoryId: enc.id, loc: LOC, name: 'enc', ...encryptNodeFieldsWithKey({ content: 'secret enc' }, key) } as never,
     });
-    const auth = keyAuth(orgApp.id);
-    const uncached = await Q.node({}, { ref: nodeUrn(enc as Mem) }, ctxOf(auth)).then(
+    const auth = keyAuth(app.id);
+    expect(await recordRead(auth, enc.id)).toBe(enc.id);
+    const uncached = await Q.node({}, { ref: nodeUrn(enc) }, ctxOf(auth)).then(
       (n: { content?: string } | null) => n?.content ?? null, (e: { extensions?: { code?: string }; name?: string }) => e.extensions?.code ?? e.name);
     expect(uncached).not.toBe('secret enc');
     sessionKeyCache.set('s5398', enc.id, key);
-    expect((await Q.node({}, { ref: nodeUrn(enc as Mem) }, ctxOf(auth)))?.content).toBe('secret enc');
+    expect((await Q.node({}, { ref: nodeUrn(enc) }, ctxOf(auth)))?.content).toBe('secret enc');
   }, 30_000);
 });

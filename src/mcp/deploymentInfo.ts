@@ -331,7 +331,13 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // cor:dmo:060:22 (Decided D-2026-11-26: attaching gives no access; the #5258/#5185 interim covers own personal/private only);
 // the grant (#5321) is the path to that access. Own personal/private linked by the App's owner and organization-owned links are
 // unchanged. (0.50.0 is #5267, merged first.)
-export const HADRON_SERVER_VERSION = '0.51.0';
+// 0.52.0 — WIDENING (behaviour, no SDL change) (#5398, cor:api:120:03 App-key line, Decided, Holger 2026-11-27 "Add an own-memory
+// read"): every pure App key READS its own App's shared app-class memories (app_id = the App, no per-user marker, no Worker on
+// it, the App's own tenant) and lists them, read only. For an organization's App the reads already held through the team-space
+// fold, and GraphQL `memories` now lists them too. For a user-owned App every surface is new (memory(ref:), memories, node(ref:),
+// findNodes, resolveUrn, hadron_list_memories, the MCP point reads). A user, a session-bound key, an impersonation and a run gain
+// nothing; per-user anonymous rows and Worker working memories stay refused. (0.51.0 is #5345, merged first.)
+export const HADRON_SERVER_VERSION = '0.52.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
