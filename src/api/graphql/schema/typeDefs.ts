@@ -14974,9 +14974,9 @@ export const typeDefs = `#graphql
     is the App's owner (a user-owned App whose owner linked their own memory); in an organization's App the link is inert for
     the key. The same holds for a user-owned memory of any other class (#5345): a knowledge or group memory under a user root
     never reaches the key through a link — attaching gives no access, and the record gate refuses it — so the link sits inert
-    (listed with 'active: false' in attachedMemories) until it is detached. Any class except 'system', in any tenant. One
-    memory may be linked into several Apps. A link you already hold is
-    success and writes nothing. 'agentRef' is accepted and ignored (deployed clients keep working).
+    (listed with 'active: false' in attachedMemories) until it is detached. You may attach any class except 'system', in
+    any tenant, and the attach succeeds even when the link stays inert. One memory may be linked into several Apps. A link
+    you already hold is success and writes nothing. 'agentRef' is accepted and ignored (deployed clients keep working).
 
     Person only: a signed-in user acting as themselves, and a member of the App. Typed errors, judged in this order before any
     write: UNAUTHENTICATED (no signed-in user); FORBIDDEN (an App key, run, worker session or impersonation; also an unknown or
