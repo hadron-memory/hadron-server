@@ -953,7 +953,16 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       }
       // marked ends such a block at the declaration's first `>` and reads the rest of the line as text (#5211); CommonMark keeps it raw.
       if (startsLine(i) && isLetter(text[i + 2]) && model === 'commonmark') raw(lineEndAt(close));
-      if (startsLine(i) && isLetter(text[i + 2]) && model === 'marked') markedBlockAt = close + 1;
+      if (startsLine(i) && isLetter(text[i + 2]) && model === 'marked') {
+        markedBlockAt = close + 1;
+        // #5320 — marked starts the next block right after the `>`: a fence opener there that nothing closes takes the anchor with it. The
+        // declaration stays as written (escaping it turns the line into paragraph text and moves later lines' readings, #5291); the opener's
+        // first character is written as a character reference instead, which a browser decodes to the same character.
+        if (i >= rawUntil && lineContainers.length === 0 && lineFirst === i && prevBefore !== 'other' && prevBefore !== 'marker' && !prevDefinition && !loneEqualsAbove(text, i)) {
+          const f = markedUnclosedFenceAfter(text, close + 1);
+          if (f !== -1) return f;
+        }
+      }
       i = close + 1;
       continue;
     }
@@ -1092,6 +1101,45 @@ export function escapeUnterminatedHtml(text: string): string {
   try { return escapeLoop(text); } finally { lineEndsOf = null; commentLinesOf = null; }
 }
 
+/**
+ * #5320 — where the first character of a fence opener is, when the rest of the line at `from` (just past a declaration's `>`) opens a fenced
+ * code block in marked (up to three spaces, then three or more backticks with none in the info string, or three or more tildes) and no
+ * line after it closes the fence; -1 otherwise. A closer is the same character, at least as many, up to three spaces and then only blanks.
+ */
+function markedUnclosedFenceAfter(text: string, from: number): number {
+  const nl = text.indexOf('\n', from);
+  const rest = text.slice(from, nl === -1 ? text.length : nl).replace(/\r$/, '');
+  const m = /^( {0,3})(`{3,}(?=[^`]*$)|~{3,})/.exec(rest);
+  if (m === null) return -1;
+  const mark = m[2]!;
+  const closer = new RegExp(`^ {0,3}${mark[0] === '`' ? '`' : '~'}{${mark.length},}[ \\t]*$`);
+  for (let s = nl === -1 ? text.length : nl + 1; s < text.length;) {
+    const e = text.indexOf('\n', s);
+    const line = text.slice(s, e === -1 ? text.length : e).replace(/\r$/, '');
+    if (closer.test(line)) return -1;
+    if (e === -1) break;
+    s = e + 1;
+  }
+  return from + m[1]!.length;
+}
+
+/**
+ * #5320 — whether the line above the one at `at` is `=` signs alone with no paragraph line above them: then it is paragraph text, not a setext
+ * underline (the scan files every such line as a heading), and the declaration after it continues that paragraph, which starts no block in marked.
+ */
+function loneEqualsAbove(text: string, at: number): boolean {
+  const end = text.lastIndexOf('\n', at - 1);
+  if (end <= 0) return false;
+  const start = text.lastIndexOf('\n', end - 1) + 1;
+  if (!/^ {0,3}=+[ \t]*\r?$/.test(text.slice(start, end))) return false;
+  if (start === 0) return true;
+  const above = text.slice(text.lastIndexOf('\n', start - 2) + 1, start - 1);
+  return above.trim() === '';
+}
+
+/** The one-character escape for `c`: `<` as `&lt;`; a fence character (#5320) as its numeric reference. */
+const ESCAPES: Readonly<Record<string, string>> = { '<': '&lt;', '`': '&#96;', '~': '&#126;' };
+
 function escapeLoop(text: string): string {
   let cur = text;
   for (let k = 0; ; k += 1) {
@@ -1100,7 +1148,7 @@ function escapeLoop(text: string): string {
     if (at === -1) return cur;
     // A text that keeps hiding another construct behind the one just escaped: close the question for every `<` it holds.
     if (k === MAX_RESTARTS) return cur.replace(/</g, '&lt;');
-    cur = `${cur.slice(0, at)}&lt;${cur.slice(at + 1)}`;
+    cur = `${cur.slice(0, at)}${ESCAPES[cur[at]!] ?? '&lt;'}${cur.slice(at + 1)}`;
   }
 }
 
