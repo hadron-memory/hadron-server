@@ -11268,7 +11268,11 @@ export const typeDefs = `#graphql
     Default scope: the caller's union — (1) their OWN personal/private
     memories (always; they are user-owned and show in every org context),
     (2) memories their member orgs own, (3) memories their member orgs
-    subscribe to. Per-user agent memories (userMemoryOfAgentId) are excluded.
+    subscribe to, (4) their OWN per-user Agent memories (#5026,
+    hrn:node:hadronmemory.com:specs:cor:api:120:03: listed to their owner like
+    any other user-owned memory, and to nobody else, not even through
+    filter.sharedWithMe, which still omits them: a share grant on a per-user
+    memory surfaces nothing in either list).
     App-key callers get the union of their installed Agents' memory items.
     A pure App key's list also holds every memory its App's links let it read
     (#5272, hrn:node:hadronmemory.com:specs:cor:api:120:03), judged at the call
