@@ -17,6 +17,7 @@ import { reloadOwnerDefaultLimitsForTests } from '../../../lib/ownerLimits/defau
 import { lockOwnerLimitKeys } from '../../../lib/ownerLimits/gate.js';
 import { countOwnerNodesOnDemand, OWNER_LIMIT_KEYS } from '../../../lib/ownerLimits/keys.js';
 import { memoryOwnerInTx, sameMemoryOwner } from '../../../lib/ownerLimits/nodes.js';
+import { countsForOwnerOf, isPerUserAgentMemory } from '../../../lib/ownerLimits/countsFor.js';
 import type { OwnerRef } from '../../../lib/owner.js';
 import { formatGraphQLError } from '../formatError.js';
 import { typeDefs } from './typeDefs.js';
@@ -37,6 +38,8 @@ async function gql(query: string, ctx: Partial<Context>, variables?: Record<stri
 }
 const CREATE = `mutation($input: CreateNodeInput!) { createNode(input: $input) { id loc } }`;
 const MOVE = `mutation($src: ID!, $to: ID!) { moveNode(sourceRef: $src, targetMemoryRef: $to) { id } }`;
+const TRANSFER = `mutation($ref: ID!, $org: ID) { transferMemoryOwnership(memoryRef: $ref, orgRef: $org, targetClass: knowledge) { memoryId } }`;
+const CLONE_MEMORY = `mutation($ref: ID!, $urn: String!) { cloneMemory(ref: $ref, targetUrn: $urn) { id } }`;
 const EXTRACT = `mutation($ref: ID!, $urn: String!, $move: Boolean) { extractParentNodeToMemory(parentRef: $ref, targetUrn: $urn, move: $move) { id } }`;
 const LIMITS = `query($orgRef: String, $userRef: ID) { ownerLimits(orgRef: $orgRef, userRef: $userRef) { key limit used } }`;
 const ctxOf = (userId: string): Partial<Context> => ({ userId, roles: ['READER'] as never });
@@ -260,5 +263,55 @@ describe('#5434 pin 4: the user\'s limit key is the one taken, last, for a write
     }
     expect((await Promise.all(racers)).sort()).toEqual(['OWNER_LIMIT_REACHED', 'ok']);
     expect(await used(owner)).toBe(await countOwnerNodesOnDemand(db, owner));
+  });
+});
+
+describe('#5434 pin 5: the row-level rule and the SQL count are one rule', () => {
+  it('for every memory shape, the owner countsForOwnerOf names is the owner whose count includes the node, and nobody else\'s', async () => {
+    const shapes: Array<[string, Record<string, unknown>]> = [
+      ['organization knowledge', { name: 's1', urn: `${orgUrn}:s1`, class: 'knowledge', organizationId: orgId, visibility: 'ORGANIZATION' }],
+      ['a person\'s own free-standing memory', { name: 's2', urn: `c5434-u:s2`, class: 'knowledge', ownerUserId: u }],
+      ['a person\'s own personal memory', { name: 's3', urn: `c5434-u:s3`, class: 'personal', userId: u, ownerUserId: u }],
+      ['per-Agent personal, organization Agent', { name: 's4', urn: `${orgUrn}:s4`, class: 'personal', userId: v, organizationId: orgId, userMemoryOfAgentId: agentId }],
+      ['per-Agent private, organization Agent', { name: 's5', urn: `${orgUrn}:s5`, class: 'private', userId: v, organizationId: orgId, userMemoryOfAgentId: agentId2 }],
+      ['per-Agent personal, person-owned Agent', { name: 's6', urn: `c5434-x:s6`, class: 'personal', userId: v, ownerUserId: x, userMemoryOfAgentId: userAgentId }],
+    ];
+    const owners: OwnerRef[] = [{ organizationId: orgId }, { userId: u }, { userId: v }, { userId: x }];
+    for (const [label, data] of shapes) {
+      const id = await mem(data);
+      await node(id, 'only');
+      const row = await db.memory.findUniqueOrThrow({ where: { id }, select: { organizationId: true, ownerUserId: true, userId: true, userMemoryOfAgentId: true } });
+      const expected = countsForOwnerOf(row)!;
+      for (const owner of owners) {
+        const before = await countOwnerNodesOnDemand(db, owner);
+        await db.node.update({ where: { loc_memoryId: { loc: 'only', memoryId: id } }, data: { deletedAt: new Date() } });
+        const after = await countOwnerNodesOnDemand(db, owner);
+        await db.node.update({ where: { loc_memoryId: { loc: 'only', memoryId: id } }, data: { deletedAt: null } });
+        const counts = before - after === 1n;
+        const same = ('userId' in owner && 'userId' in expected && owner.userId === expected.userId)
+          || ('organizationId' in owner && 'organizationId' in expected && owner.organizationId === expected.organizationId);
+        expect(counts, `${label}: ${JSON.stringify(owner)}`).toBe(same);
+      }
+      expect(isPerUserAgentMemory(row), label).toBe(label.startsWith('per-Agent'));
+    }
+  });
+});
+
+describe('#5434 pin 6: the doors that name an owner themselves cannot reach a per-Agent memory\'s nodes through another owner', () => {
+  it('a per-Agent memory cannot be transferred to another organization the owner administers (the receiving owner is never asked for its nodes)', async () => {
+    await nodes(pm, ['a']);
+    const org2 = (await db.organization.create({ data: { id: generateId(), name: 'c5434-2', urn: 'c5434-org2' } })).id;
+    await db.orgMember.create({ data: { organizationId: org2, userId: u, role: 'OWNER' } });
+    const r = await gql(TRANSFER, ctxOf(u), { ref: pm, org: org2 });
+    expect(`${code(r)}: ${r.errors?.[0]?.message}`).toMatch(/Agent/i);
+    expect((await db.memory.findUniqueOrThrow({ where: { id: pm } })).organizationId).toBe(orgId);
+  });
+
+  it('a clone of a per-Agent memory is an ordinary memory of the target organization: its nodes count for the organization and are refused at its limit', async () => {
+    await nodes(pm, ['a', 'b']);
+    await nodes(mO, ['a']);
+    await cap({ organizationId: orgId });
+    const r = await gql(CLONE_MEMORY, ctxOf(u), { ref: pm, urn: `hrn:mem:${orgUrn}:cloned` });
+    expect(code(r)).toBe('OWNER_LIMIT_REACHED');
   });
 });
