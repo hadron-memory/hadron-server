@@ -43,12 +43,11 @@ beforeEach(async () => {
   const ids: Record<string, string> = {};
   for (const [loc, data, content] of [
     ['config', { agentExtractionSpec: [{ field: 'memory.region' }] }, null],
-    ['conversations', {}, null],
     ['conversations:intake', { stageOrder: ['scope'], isSetup: false, extractionSpec: [{ field: 'industry' }] }, null],
     ['conversations:intake:scope', { promptRef: 'prompts:intake:scope' }, null],
     ['conversations:done', { stageOrder: ['end'], isSetup: false }, null],
     ['conversations:done:end', { promptRef: 'prompts:intake:scope' }, null],
-    ['prompts', {}, null], ['prompts:intake', {}, null], ['prompts:intake:scope', {}, 'RULES STAGE'],
+    ['prompts:intake', {}, null], ['prompts:intake:scope', {}, 'RULES STAGE'],
   ] as const) {
     ids[loc] = (await db.node.create({ data: { memoryId: systemId, loc, name: loc.split(':').pop()!, nodeType: 'system', data: data as never, content } })).id;
   }

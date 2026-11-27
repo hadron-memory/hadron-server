@@ -135,6 +135,7 @@ import {
   lockLocForWrite,
   lockNodeForDelete,
 } from '../../../lib/nodeSubtreeLock.js';
+import { createChatbotContainers, missingChatbotContainers } from '../../../lib/chatbotAncestors.js';
 import {
   mergeNodeFields,
   ALL_NODE_MERGE_FIELDS,
@@ -1873,9 +1874,16 @@ async function writeNodeCoreRaw(
             // #5015 — a fresh insert or a revive adds a live node to the memory's owner. The owner is read under the
             // memory row lock `assertMemoryWriteStateStable` holds, and the owner-limit key is the LAST lock this write
             // takes (gate ruling 5): after it the write only touches the row it holds and the loc whose key it holds.
+            // #5390 — a conversation, stage or prompt node that this write adds also gets its missing container parents
+            // (`conversations`, `prompts`, `prompts:<name>`), under the ancestor keys held above. They are live nodes, so
+            // the owner-limit check counts them with this one (cor:acl:150:04, FIT pin (a)).
+            const containers = !authoritative || reviving ? await missingChatbotContainers(tx, input.memoryId, [input.loc]) : [];
             if ((!authoritative || reviving) && opts.ownerLimit === 'refuse') {
-              await requireNodeHeadroom(tx, { memoryId: input.memoryId, caller: ownerLimitCaller(opts?.transaction?.requestContext ?? ctx) });
+              await requireNodeHeadroom(tx, {
+                memoryId: input.memoryId, amount: 1n + BigInt(containers.length), caller: ownerLimitCaller(opts?.transaction?.requestContext ?? ctx),
+              });
             }
+            await createChatbotContainers(tx, input.memoryId, containers, createdBy ?? null);
             const upserted = await tx.node.upsert({
               ...upsertArgs,
               create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
