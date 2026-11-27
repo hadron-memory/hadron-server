@@ -110,8 +110,8 @@ for (const [tool, kind, action] of tools) {
     const result = await call(tool, args(), false);
     expect(result.isError).not.toBe(true);
     const after = await snapshot();
-    const rows = kind === 'read' ? after.readGrants : after.teamGrants;
-    const events = kind === 'read' ? after.readEvents : after.teamEvents;
+    const rows = after.teamGrants;
+    const events = after.teamEvents;
     if (action === 'set') {
       expect(rows).toHaveLength(2);
       expect(rows.find(r => r.triggerId === newTriggerId)).toMatchObject({ grantedBy: managerId, revokedAt: null });
@@ -123,7 +123,7 @@ for (const [tool, kind, action] of tools) {
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ action: 'REVOKE', actorUserId: managerId });
     } else {
-      expect(JSON.stringify(result.content)).toContain(kind === 'read' ? readGrantId : teamGrantId);
+      expect(JSON.stringify(result.content)).toContain(teamGrantId);
       expect(after).toEqual(before);
     }
     expect(after.instructionEvents).toEqual(before.instructionEvents);
