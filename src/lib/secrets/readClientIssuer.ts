@@ -50,6 +50,7 @@ export async function requireSecretReadClientIssuer(ctx: Context, secretId: stri
     throw error;
   }
   if (autoDelete) {
+    // ctx.db is the caller's transaction, as in judgeSecretReadClientIssuer: issueSecretReadClient passes it under the secret row lock.
     const secret = await ctx.db.secret.findUnique({ where: { id: secretId }, select: { protected: true, deleteAfterUse: true } });
     if (!secret || (secret.protected && !secret.deleteAfterUse)) throw autoDeleteNotAllowed();
   }

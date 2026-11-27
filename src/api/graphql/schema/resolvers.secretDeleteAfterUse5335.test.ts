@@ -18,6 +18,7 @@ import { openGrantProofCeremony, proveForGrantSigning, currentGrantSigningChalle
 import { CeremonyRefused } from '../../../lib/signing/signingCeremony.js';
 import { openSecretProof, proveSecretChange, completeSecretChange } from '../../../lib/secrets/changeCeremony.js';
 import { secretSweepTick } from '../../../jobs/secretSweep.js';
+import { changeSnapshot } from '../../../lib/secrets/changeRequests.js';
 import { RUN_CLIENT_PREFIX } from '../../../lib/auth/runPrincipal.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -384,5 +385,63 @@ describe('#5335 blind P2: an option set while unprotected does not survive prote
   it('the database refuses the option on a non-App row (chk_secret_delete_after_use_app_only)', async () => {
     const own = await resolvers.Mutation.createSecret({}, { ownerType: 'user', name: 'mine', kind: 'generic', value: 'v' }, ctx());
     await expect(db.$executeRaw`UPDATE secrets SET delete_after_use = true WHERE id = ${own.id}`).rejects.toThrow(/chk_secret_delete_after_use_app_only/);
+  });
+});
+
+describe('#5335 blind at c2e758a2 (Brooks): re-arm, completion membership, and the previous image', () => {
+  it('P2-1, by design (cor:sec:060:03 edge: a protected secret with a signed mark is armed by setting the option): a mark that fell due while unarmed deletes at the first sweep after SET_DELETE_AFTER_USE, not before', async () => {
+    const a = await legacyMarked('window-end');
+    await protect(false);
+    await expired(a.grantId);
+    await secretSweepTick(db);
+    expect(await exists()).toBe(1); // due but unarmed: the sweep skips it
+    await completeCeremony(await stagedId(setOption(true)));
+    expect(await exists()).toBe(1); // arming itself deletes nothing
+    await secretSweepTick(db);
+    expect(await exists()).toBe(0);
+  }, 30_000);
+  it('P2-2: a creator who left the App after staging SET_DELETE_AFTER_USE is refused at completion (still a member)', async () => {
+    const creator = (await db.user.create({ data: { handle: `cr-${generateId()}` } })).id;
+    await db.appMember.create({ data: { appId, userId: creator, role: 'reader' } });
+    const crKey = softPasskey(); await insertSoftPasskey(db, creator, crKey, { rpId: RP });
+    await db.secret.update({ where: { id: secretId }, data: { createdBy: creator } });
+    await protect(false);
+    const id = await stagedId(setOption(true, ctx({ userId: creator }))); // the creator's own authority, not a manager's
+    await db.appMember.delete({ where: { appId_userId: { appId, userId: creator } } });
+    let n = 1;
+    const sig = (c: string) => crKey.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(c, 'base64url'), origin: ORIGIN, rpId: RP, counter: n++ });
+    const nonce = generateId();
+    await expect((async () => {
+      const open = await openSecretProof(db, { requestId: id, browserNonceHash: hash(nonce) });
+      const p = await proveSecretChange(db, { requestId: id, ceremonyId: open.ceremonyId, browserNonceHash: hash(nonce), credentialId: crKey.credentialId, assertion: sig(open.challenge) });
+      if (p.outcome !== 'change') throw new Error('proof did not open a change');
+      await completeSecretChange(db, { requestId: id, ceremonyId: p.ceremonyId, browserNonceHash: hash(p.nonce), credentialId: crKey.credentialId, assertion: sig(p.challenge) });
+    })()).rejects.toThrow();
+    expect((await db.secret.findUniqueOrThrow({ where: { id: secretId } }) as unknown as { deleteAfterUse: boolean }).deleteAfterUse).toBe(false);
+  });
+  it('P3-8: protected: false beside the option on an unprotected secret keeps the manager gate; a manager gets the plain write', async () => {
+    const member = (await db.user.create({ data: { handle: `m-${generateId()}` } })).id;
+    await db.appMember.create({ data: { appId, userId: member, role: 'reader' } });
+    const both = (c: Context) => resolvers.Mutation.updateSecret({}, { ref: secretId, protected: false, deleteAfterUse: true } as never, c);
+    expect(await failure(both(ctx({ userId: member })))).toBe('FORBIDDEN');
+    expect(await db.secretEvent.count({ where: { secretId, kind: 'DELETE_AFTER_USE_ON' } })).toBe(0);
+    await both(ctx());
+    expect(await db.secret.findUniqueOrThrow({ where: { id: secretId } })).toMatchObject({ protected: false, deleteAfterUse: true });
+    expect(await db.secretChangeRequest.count({ where: { secretId } })).toBe(0);
+  });
+  it('P2-3: a deleteAfterUse request carries a snapshot the previous image never computes (it ends stale there); a STORE keeps the plain one', async () => {
+    await protect(false);
+    const plain = async () => {
+      const secret = await db.secret.findUniqueOrThrow({ where: { id: secretId } });
+      const v = await db.secretVersion.findFirst({ where: { secretId }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
+      return changeSnapshot(secret, v?.versionNo ?? 0);
+    };
+    const set = await stagedId(setOption(true));
+    const staged = await db.secretChangeRequest.findUniqueOrThrow({ where: { id: set } });
+    expect(staged.snapshot).not.toBe(await plain());
+    await completeCeremony(set); // and this image still completes it
+    expect((await db.secret.findUniqueOrThrow({ where: { id: secretId } }) as unknown as { deleteAfterUse: boolean }).deleteAfterUse).toBe(true);
+    const store = await stagedId(resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'dau-canary-3' } as never, ctx()));
+    expect((await db.secretChangeRequest.findUniqueOrThrow({ where: { id: store } })).snapshot).toBe(await plain());
   });
 });

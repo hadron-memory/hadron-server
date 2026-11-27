@@ -34,6 +34,18 @@ export function needsPasskey(extra: Record<string, unknown> = {}): GraphQLError 
 export function changeSnapshot(secret: { id: string; updatedAt: Date; protected: boolean; metadata: unknown; changeRevision: number }, versionNo: number): string {
  return createHash('sha256').update(JSON.stringify([secret.id, secret.changeRevision, secret.updatedAt.toISOString(), secret.protected, secret.metadata, versionNo])).digest('hex');
 }
+/**
+ * #5335 (blind P2-3 at c2e758a2): the snapshot a request is staged and completed against. The two deleteAfterUse operations take a
+ * snapshot no earlier image computes, so an image that predates them (a rollback target, or the old slot of a blue/green deploy,
+ * conventions:expand-contract-migrations) ends such a request `stale` at its own snapshot check instead of reaching its
+ * protection branch, which would write `protected: false`. Every other operation keeps the plain snapshot, so requests staged
+ * before this deploy still complete.
+ */
+export function changeSnapshotFor(operation: ChangeOperation, secret: Parameters<typeof changeSnapshot>[0], versionNo: number): string {
+ const plain = changeSnapshot(secret, versionNo);
+ return operation === 'SET_DELETE_AFTER_USE' || operation === 'CLEAR_DELETE_AFTER_USE'
+  ? createHash('sha256').update(JSON.stringify(['delete-after-use', plain])).digest('hex') : plain;
+}
 /** The one mint of a change request's ceremony link (#5103): the error extension and `SecretChangeRequest.ceremonyUrl` both call it. No token: the id is the address. */
 export function secretChangeCeremonyUrl(id: string): string {
  return `${getProjectBaseUrl()}${SECRET_CHANGE_PATH}/${id}`;

@@ -63,7 +63,7 @@ import {
   recordSecretEvent,
   secretActorOf,
 } from '../../../lib/secrets/appSecrets.js';
-import { stageSecretChange, requireStagingPerson, changeSnapshot, needsPasskey, deliverStaged } from '../../../lib/secrets/changeRequests.js';
+import { stageSecretChange, requireStagingPerson, changeSnapshot, changeSnapshotFor, needsPasskey, deliverStaged } from '../../../lib/secrets/changeRequests.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/create.js';
 import { requireSecretReadClientIssuer } from '../../../lib/secrets/readClientIssuer.js';
@@ -507,8 +507,9 @@ async function updateDeleteAfterUse(tx: Prisma.TransactionClient, ctx: Context, 
     if (secret.deleteAfterUse === on) return secret;
     if (on && secret.createdBy !== userId && !(await appManager({ ...ctx, db: tx } as Context, secret.ownerId))) throw forbiddenError();
     const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
+    const operation = on ? 'SET_DELETE_AFTER_USE' : 'CLEAR_DELETE_AFTER_USE';
     return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
-      metadata: secret.metadata, operation: on ? 'SET_DELETE_AFTER_USE' : 'CLEAR_DELETE_AFTER_USE', snapshot: changeSnapshot(secret, latest?.versionNo ?? 0) });
+      metadata: secret.metadata, operation, snapshot: changeSnapshotFor(operation, secret, latest?.versionNo ?? 0) });
   }
   if (secret.deleteAfterUse !== on) {
     await tx.secret.update({ where: { id: secret.id }, data: { deleteAfterUse: on, updatedBy: ctx.userId ?? null } });

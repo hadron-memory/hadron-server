@@ -14,7 +14,7 @@ import { appAnchors, appManager, requireAppMember, loadLiveApp } from './access.
 import { addAppSecretVersion, assertAppSecretRoom, lockSecretRow, recordSecretEvent } from './appSecrets.js';
 import { decryptBytesAad } from '../tokenCrypto.js';
 import { unwrapAppKey, stagedValueAad } from './appKeys.js';
-import { changeSnapshot, type ChangeRequest } from './changeRequests.js';
+import { changeSnapshotFor, type ChangeRequest } from './changeRequests.js';
 import { signingSurfacePolicy } from '../signing/surface.js';
 import { emitEntityUrnV2 } from '../urnEmit.js';
 import { requirePersonOnlyAct } from '../auth/personAsThemselves.js';
@@ -147,7 +147,7 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
   if(r.expires_at<=now)return end('expired','SECRET_CHANGE_REQUEST_EXPIRED');
   let secret=r.secret_id?await tx.secret.findUnique({where:{id:r.secret_id}}):null;
   const newest=secret?await tx.secretVersion.findFirst({where:{secretId:secret.id},orderBy:{versionNo:'desc'},select:{versionNo:true}}):null;
-  if(r.secret_id ? !secret || changeSnapshot(secret,newest?.versionNo??0)!==r.snapshot :
+  if(r.secret_id ? !secret || changeSnapshotFor(r.operation,secret,newest?.versionNo??0)!==r.snapshot :
    await tx.secret.findUnique({where:{ownerType_ownerId_name:{ownerType:'app',ownerId:r.app_id,name:r.secret_name}}})) return end('stale','SECRET_CHANGE_REQUEST_STALE');
   if(!cred || (cred.window_outcome===null && cred.window_ends_at!==null && cred.window_ends_at>now))throw new GraphQLError('This passkey is still in its cooling-off period.',{extensions:{code:'PASSKEY_COOLING_OFF'}});
   const decided=await decideCeremonyAssertion(tx,{ceremonyId:a.ceremonyId,browserNonceHash:a.browserNonceHash,purpose:'SECRET_CHANGE',verified:verified.snapshot});
