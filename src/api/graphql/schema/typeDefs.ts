@@ -10774,10 +10774,10 @@ export const typeDefs = `#graphql
     ONE call instead of resolving each ref first. The split on a bad ref is by
     KIND, not by luck: a ref whose SHAPE is wrong errors the call — unqualified
     / relative (UrnNotQualifiedError) or a URN of the wrong entity type, e.g.
-    'hrn:mem:...' (BAD_USER_INPUT), which names the failing entry by its
-    0-based index in 'refs' — the message ends '(the ref at index N)' and the
-    error carries 'extensions.index' (an integer; first occurrence, first
-    failing in the order sent) — while a well-formed ref that names nothing
+    'hrn:mem:...' (BAD_USER_INPUT), which names the FIRST wrong-type entry by
+    its 0-based index in 'refs' — the message ends '(the ref at index N)' and
+    the error carries 'extensions.index' (an integer; first occurrence in the
+    order sent) — while a well-formed ref that names nothing
     the caller may read comes back in 'unavailable'. A caller mistake stays
     loud instead of hiding among denials. Per-node access is applied
     independently AFTER resolution: denied or missing refs come back in

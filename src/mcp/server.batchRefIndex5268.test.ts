@@ -13,7 +13,12 @@
  *     for a duplicated wrong-type ref, first failing ref in caller order.
  *   - The index is decided in a synchronous pre-pass before any resolution
  *     (#5268 spec-FIT condition): a resolvable URN — or a PK, which skips URN
- *     parsing — around the bad ref changes nothing.
+ *     parsing — around the bad ref changes nothing. MIXED shape input too: a
+ *     wrong-type ref is named even when an unqualified ref precedes it. That
+ *     is a deliberate precedence change on THIS surface (before #5268 the
+ *     split loop reached the unqualified ref first and answered the
+ *     no-position 'neither a node id' refusal), made to match nodeBatch,
+ *     where the wrong-type screen always won the Promise.all race.
  *   - No echo: the refusal names the URN KIND and the position, not the value.
  *   - The quiet path is untouched (cor:api:040:03): denied/not-found refs keep
  *     reporting through the Unavailable list, with no position anywhere.
@@ -100,6 +105,23 @@ describe('hadron_get_nodes — wrong-type refusal names the failing ref by posit
     const out = await batchRead({ refs: [nodeUrn('one'), bad, nodeUrn('one'), bad] });
 
     expect(out.trimEnd()).toMatch(/\(the ref at index 1\)$/);
+  });
+
+  it('mixed shape: the wrong-type ref is named even when an unqualified ref precedes it', async () => {
+    await addNode('one');
+
+    // 'relative-loc' is unqualified and sits first. Pre-#5268 the split loop
+    // reached it before the wrong-type ref and answered the no-position
+    // 'neither a node id nor a fully-qualified node URN' refusal; the
+    // pre-pass now names the wrong-type ref at index 1, matching nodeBatch.
+    // The spec-FIT left unqualified refs out of #5268, so an unqualified-only
+    // batch keeps the old refusal (pinned in server.batchRead.test.ts).
+    const out = await batchRead({ refs: ['relative-loc', wrongType()] });
+
+    expect(out).toContain('Expected node URN');
+    expect(out).not.toContain('neither a node id');
+    expect(out.trimEnd()).toMatch(/\(the ref at index 1\)$/);
+    expect(out).not.toContain('relative-loc');
   });
 
   it('a resolvable URN or a PK around the bad ref changes nothing — the index is pre-resolution (#5268 FIT)', async () => {

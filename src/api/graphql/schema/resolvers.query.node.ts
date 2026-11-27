@@ -2560,11 +2560,17 @@ export const nodeQueries = {
         }
         // #5268 — a wrong-type URN (`hrn:mem:…`, `hrn:app:…`) is a coercion
         // bug, not a miss, and the refusal names the failing ref by its
-        // POSITION: the 0-based index in the caller's `refs` as sent (first
-        // occurrence, first failing in caller order). The screen runs as a
-        // synchronous PRE-PASS over the raw list, before any resolution
-        // (#5268 spec-FIT condition), so the index can never depend on which
-        // rejection `Promise.all` below surfaces first. The position is not
+        // POSITION: the 0-based index in the caller's `refs` as sent, of the
+        // FIRST wrong-type ref in caller order (first occurrence). The screen
+        // runs as a synchronous PRE-PASS over the raw list, before any
+        // resolution (#5268 spec-FIT condition), so the index can never
+        // depend on which rejection `Promise.all` below surfaces first. An
+        // unqualified ref is NOT screened here (the spec-FIT left it out);
+        // since the screen covers the whole list first, a wrong-type ref is
+        // named even when an unqualified ref precedes it — the same
+        // precedence this resolver had before #5268, when the screen's
+        // rejection (thrown before any await) beat the per-ref
+        // UrnNotQualifiedError out of `Promise.all`. The position is not
         // caller-typed, so the no-echo rule of #5168 / cor:api:140:01 holds;
         // the shared parser reports only the URN KIND, never the value.
         // Without this screen, resolveNodeRef reports a wrong-type prefix

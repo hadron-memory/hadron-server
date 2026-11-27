@@ -15,7 +15,11 @@
  *   - The index is computed in a synchronous pre-pass BEFORE any resolution
  *     (the #5268 spec-FIT condition): a resolvable URN preceding the bad ref,
  *     or following it, changes nothing about which index is named — never the
- *     `Promise.all` rejection order.
+ *     `Promise.all` rejection order. The pre-pass also decides MIXED shape
+ *     input: a wrong-type ref is named even when an unqualified ref precedes
+ *     it (the spec-FIT left unqualified refs out, so they carry no index;
+ *     this is the precedence the surface already had before #5268, now
+ *     deterministic instead of a rejection race).
  *   - No echo: the refusal names no caller-typed text (the typeErr carries the
  *     URN KIND, not the value; the index is a number).
  *   - The quiet path is untouched (cor:api:040:03): a well-formed ref that
@@ -90,6 +94,24 @@ describe('nodeBatch — wrong-type refusal names the failing ref by position (#5
 
     expect(err.extensions.index).toBe(1);
     expect(err.message).toMatch(/\(the ref at index 1\)$/);
+  });
+
+  it('mixed shape: the wrong-type ref is named even when an unqualified ref precedes it', async () => {
+    await createDbNode(db, { loc: 'a', memoryId: graph.id, content: 'A body' });
+
+    // 'relative-loc' is unqualified — UrnNotQualifiedError once resolution
+    // reaches it — and sits BEFORE the wrong-type ref. The pre-pass screens
+    // the whole list before any resolution, so index 1 is named: the same
+    // precedence this resolver had before #5268 (the screen's rejection beat
+    // the unqualified rejection out of Promise.all), now deterministic and
+    // pinned rather than a microtask race. MCP hadron_get_nodes matches.
+    const err = await shapeRefusal(['relative-loc', 'hrn:app:bg-org:some-app']);
+
+    expect(err.extensions.code).toBe('BAD_USER_INPUT');
+    expect(err.extensions.index).toBe(1);
+    expect(err.message).toMatch(/Expected node URN/);
+    expect(err.message).toMatch(/\(the ref at index 1\)$/);
+    expect(err.message).not.toContain('relative-loc');
   });
 
   it('a resolvable URN before or after the bad ref changes nothing — the index is pre-resolution (#5268 FIT)', async () => {

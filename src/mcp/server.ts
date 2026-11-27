@@ -5577,7 +5577,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_get_nodes',
-    "Batch read — return the full per-node projection (meta + edges + contentScope body, identical to hadron_get_node) for MANY nodes in one call. Two mutually-exclusive forms: (1) `refs` — an explicit list of node references, returned in input order; (2) `memoryUrn` + `locPrefix` — every readable node whose loc starts with the prefix in one memory, returned in loc order. Each `refs` entry is a node's primary key OR its fully-qualified URN, so a caller holding either form reads in ONE call. Optional `contentScope` ('content' default | 'abstract' | 'all') applies to every node, so abstract-only triage is cheap. Per-node authorization: unreadable or non-existent refs are reported in a separate Unavailable list (denied and not-found are indistinguishable) and never fail the batch. A ref whose SHAPE is wrong (relative/unqualified, or a URN of another entity kind) is a loud error instead — a caller mistake never hides among denials; the wrong-kind refusal names the failing entry by its 0-based position in `refs`, ending '(the ref at index N)'. Bounded by hard caps — exceeding the node-count cap is a loud error; exceeding the response-size cap returns a partial result flagged `truncated` (never a silent short read). Spec cor:api:040.",
+    "Batch read — return the full per-node projection (meta + edges + contentScope body, identical to hadron_get_node) for MANY nodes in one call. Two mutually-exclusive forms: (1) `refs` — an explicit list of node references, returned in input order; (2) `memoryUrn` + `locPrefix` — every readable node whose loc starts with the prefix in one memory, returned in loc order. Each `refs` entry is a node's primary key OR its fully-qualified URN, so a caller holding either form reads in ONE call. Optional `contentScope` ('content' default | 'abstract' | 'all') applies to every node, so abstract-only triage is cheap. Per-node authorization: unreadable or non-existent refs are reported in a separate Unavailable list (denied and not-found are indistinguishable) and never fail the batch. A ref whose SHAPE is wrong (relative/unqualified, or a URN of another entity kind) is a loud error instead — a caller mistake never hides among denials; that refusal names the FIRST wrong-type entry by its 0-based position in `refs`, ending '(the ref at index N)' (the wrong-type screen covers the whole list before the per-ref qualification split, so a wrong-type entry is named even when an unqualified entry precedes it; an unqualified-only batch keeps its own no-position refusal). Bounded by hard caps — exceeding the node-count cap is a loud error; exceeding the response-size cap returns a partial result flagged `truncated` (never a silent short read). Spec cor:api:040.",
     SHAPE_HADRON_GET_NODES,
     async ({ refs, memoryUrn, locPrefix, contentScope, raw }) => {
       // Defensive contentScope validation — parity with hadron_get_node (covers
@@ -5659,18 +5659,24 @@ export function createMcpServerInstance(
         }
         // #5268 — a wrong-type URN (`hrn:mem:…`, `hrn:app:…`) is a coercion
         // bug, not a miss, and the refusal names the failing ref by its
-        // POSITION: the 0-based index in the caller's `refs` as sent (first
-        // occurrence, first failing in caller order). The screen runs as a
-        // synchronous PRE-PASS over the raw list, before the dedup and the
-        // PK/URN split below lose the caller's positions (#5268 spec-FIT
-        // condition). The position is not caller-typed, so the no-echo rule
-        // of #5168 / cor:api:140:01 holds; the shared parser reports only the
-        // URN KIND, never the value. MCP text results carry no extensions,
-        // so the position lives in the message alone.
+        // POSITION: the 0-based index in the caller's `refs` as sent, of the
+        // FIRST wrong-type ref in caller order (first occurrence). The screen
+        // runs as a synchronous PRE-PASS over the raw list, before the dedup
+        // and the PK/URN split below lose the caller's positions (#5268
+        // spec-FIT condition); an unqualified ref is NOT screened here (the
+        // spec-FIT left it out), and because the screen covers the whole list
+        // before the split loop's qualification check, a wrong-type ref is
+        // named even when an unqualified ref precedes it — the same
+        // precedence nodeBatch(refs:) has, where this screen's rejection
+        // always beat the per-ref UrnNotQualifiedError. The position is not
+        // caller-typed, so the no-echo rule of #5168 / cor:api:140:01 holds;
+        // the shared parser reports only the URN KIND, never the value. MCP
+        // text results carry no extensions, so the position lives in the
+        // message alone.
         for (let i = 0; i < refs!.length; i++) {
-          const raw = refs![i];
-          if (isId(raw)) continue;
-          const typeErr = validateUrnType(parseUrnInput(raw), 'node');
+          const ref = refs![i];
+          if (isId(ref)) continue;
+          const typeErr = validateUrnType(parseUrnInput(ref), 'node');
           if (typeErr) {
             return textResult(`hadron_get_nodes: ${typeErr} (the ref at index ${i})`);
           }
