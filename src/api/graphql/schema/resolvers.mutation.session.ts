@@ -720,14 +720,17 @@ export async function answerStartSessionWriteFaults<T>(work: Promise<T>): Promis
   try {
     return await work;
   } catch (e) {
-    const err = e as { code?: string; meta?: { modelName?: unknown; target?: unknown; field_name?: unknown } } | null;
+    const err = e as { code?: string; meta?: { modelName?: unknown; target?: unknown; constraint?: unknown; field_name?: unknown } } | null;
     const target = Array.isArray(err?.meta?.target) ? (err!.meta!.target as unknown[]).join(',') : String(err?.meta?.target ?? '');
     // Only the SESSION table's own id: the same transaction writes other tables, and a unique violation on any of those (their `id`
     // column is the same bare name) is not a taken session id and must not be answered as one (a retry could never succeed).
     if (err?.code === 'P2002' && err.meta?.modelName === 'Session' && (/^id$/.test(target) || /sessions_pkey/.test(target))) {
       throw new GraphQLError('A session with this id already exists.', { extensions: { code: 'SESSION_ID_TAKEN' } });
     }
-    if (err?.code === 'P2003' && /parent_session_id|prev_session_id|parentSessionId|prevSessionId/.test(String(err.meta?.field_name ?? ''))) {
+    // Prisma 6.19's P2003 meta carries `{ modelName, constraint }` (probed on the real write: sessions_parent_session_id_fkey /
+    // sessions_prev_session_id_fkey); `field_name` is read as the older shape.
+    const fk = String(err?.meta?.constraint ?? err?.meta?.field_name ?? '');
+    if (err?.code === 'P2003' && /parent_session_id|prev_session_id|parentSessionId|prevSessionId/.test(fk)) {
       throw notFoundError('SESSION_NOT_FOUND', 'Session not found');
     }
     throw e;

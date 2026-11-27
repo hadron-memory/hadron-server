@@ -75,11 +75,25 @@ describe('#5266 the startSession write-fault mapping, on synthetic Prisma-shaped
       expect(await run(e)).toBe(e);
     }
   });
-  it('P2003 on the parent or previous link is SESSION_NOT_FOUND, on an unrelated foreign key it passes through', async () => {
-    expect((await run(fault('P2003', { field_name: 'sessions_parent_session_id_fkey (index)' }))).extensions.code).toBe('SESSION_NOT_FOUND');
-    expect((await run(fault('P2003', { field_name: 'sessions_prev_session_id_fkey (index)' }))).extensions.code).toBe('SESSION_NOT_FOUND');
-    const other = fault('P2003', { field_name: 'sessions_app_id_fkey (index)' });
-    expect(await run(other)).toBe(other);
+  it('P2003 on the parent or previous link is SESSION_NOT_FOUND (the real meta shape: modelName + constraint), on an unrelated foreign key it passes through', async () => {
+    for (const constraint of ['sessions_parent_session_id_fkey', 'sessions_prev_session_id_fkey']) {
+      expect((await run(fault('P2003', { modelName: 'Session', constraint }))).extensions.code, constraint).toBe('SESSION_NOT_FOUND');
+    }
+    expect((await run(fault('P2003', { field_name: 'sessions_parent_session_id_fkey (index)' }))).extensions.code).toBe('SESSION_NOT_FOUND'); // the older shape
+    for (const meta of [{ modelName: 'Session', constraint: 'sessions_user_id_fkey' }, { modelName: 'Session', constraint: 'sessions_app_id_fkey' }]) {
+      const other = fault('P2003', meta);
+      expect(await run(other)).toBe(other);
+    }
+  });
+  it('the meta shapes above are what the database really raises: a parent or previous id hard-deleted before the write', async () => {
+    const real = (data: Record<string, unknown>) => answerStartSessionWriteFaults(db.session.create({ data: { id: generateId(), type: 'DEVELOPER', userId, ...data } as never })).then(() => 'ok', (err) => err);
+    expect((await real({ parentSessionId: generateId() })).extensions.code).toBe('SESSION_NOT_FOUND');
+    expect((await real({ prevSessionId: generateId() })).extensions.code).toBe('SESSION_NOT_FOUND');
+    const e = await real({ userId: generateId() }); // a different foreign key of the same insert: not a session link
+    expect(e.extensions?.code).toBeUndefined();
+    const taken = generateId();
+    await db.session.create({ data: { id: taken, type: 'DEVELOPER', userId } as never });
+    expect((await real({ id: taken })).extensions.code).toBe('SESSION_ID_TAKEN');
   });
   it('a plain Error and a success pass through untouched', async () => {
     const plain = new Error('boom');
