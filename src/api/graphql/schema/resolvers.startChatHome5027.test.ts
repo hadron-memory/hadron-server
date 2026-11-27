@@ -263,6 +263,35 @@ describe('#5027 (d) part 2: each step of the home gate refuses on its own', () =
   });
 });
 
+describe('#5027 (d) part 2b: the class and caller-App steps, each with every other step passing', () => {
+  // Found by mutating each step (the class step and the caller-App step survived part 2): there a platform ADMIN's App
+  // knowledge memory is refused by the in-transaction read step, and the App key's other-App memory by the write step.
+  // These two cases pass read, write, App and licence, in both judgements, so only the named step refuses.
+  it('a knowledge memory in this App that the caller owns (reads and writes it) is refused by the class step', async () => {
+    const reference = await refusal(start(as(ann), { memoryRef: `${orgUrn}:no-such-memory` }));
+    const ownKnowledge = await db.memory.create({ data: {
+      id: generateId(), class: 'knowledge', name: 'Own App notes', urn: `${orgUrn}:own-app-notes`, appId,
+      ownerUserId: ann, createdBy: ann,
+    } });
+    const before = await footprint();
+    expect(await refusal(start(as(ann), { memoryRef: ownKnowledge.id }))).toEqual(reference);
+    expect(await footprint(), 'nothing written').toEqual(before);
+  });
+
+  it('an App key naming a memory of another App of this Agent, which it may read and write as ADMIN, is refused by the caller-App step', async () => {
+    const reference = await refusal(start(as(ann), { memoryRef: `${orgUrn}:no-such-memory` }));
+    const app2 = (await db.app.create({ data: { name: 'Tutor three', urn: `${orgUrn}:tutor-three`, organizationId: orgId } })).id;
+    await db.appAgent.create({ data: { appId: app2, agentId } });
+    const shared2 = await db.memory.create({ data: {
+      id: generateId(), class: 'app', name: 'Tutor three shared', urn: `${orgUrn}:tutor-three-shared`, organizationId: orgId, appId: app2,
+      sharedMemoryOfAgentId: agentId, createdBy: ann,
+    } });
+    const before = await footprint();
+    expect(await refusal(start(as(ann, { appKeyId: 'k', appId, roles: ['ADMIN'] }), { memoryRef: shared2.id }))).toEqual(reference);
+    expect(await footprint(), 'nothing written').toEqual(before);
+  });
+});
+
 describe('#5027 (d) part 3: a home lost after the first judgement', () => {
   // The authorized transaction's own memory gate refuses a home deleted in the window (plain Forbidden, a caller who
   // could use the memory a moment earlier), before startChat's in-transaction re-judgement; nothing is written either way.
@@ -322,6 +351,18 @@ describe('#5027 (f) a signed-in person with no memory of the default class', () 
     const again = await start(as(ann));
     expect((await chatNodeByLocOrThrow(db, again.chatId)).memoryId).toBe(home.id);
     expect(await db.memory.count({ where: { appId, userId: ann, class: 'private' } })).toBe(1);
+  });
+
+  // Found by mutating the AppMember step of the create (it survived): an org CONTRIBUTOR who is no AppMember still
+  // reaches the create through the App's participation set, and only that step refuses. createMemoryInApp's rule is the
+  // App's members, so they get the one refusal and nothing is created.
+  it('an org CONTRIBUTOR who is not a member of the App gets CHAT_HOME_INVALID, and nothing is created', async () => {
+    await M.updateAgent({}, { ref: agentId, defaultChatHome: 'PRIVATE' }, as(ann));
+    await db.orgMember.create({ data: { organizationId: orgId, userId: carol, role: 'CONTRIBUTOR' } });
+    const before = await footprint();
+    const err = await refusal(start(as(carol)));
+    expect(err.extensions?.code).toBe('CHAT_HOME_INVALID');
+    expect(await footprint()).toEqual(before);
   });
 });
 
@@ -407,6 +448,21 @@ describe('#5027 Ask 6: the chat records its Agent; the home\'s readers are its a
   // forbids once app_id is set), and every chat home carries an App. So a grantee of a personal chat home gets the
   // not-found of a chat that does not exist, writes nothing and lists nothing. Whether such a share should grant
   // anything is a separate question, filed apart from #5027.
+  // Found by mutating chatLoc's owner arm (it survived: the creator arms admit every chat the owner starts). A chat in
+  // the owner's home whose root and memory another principal wrote (an import, a support restore) is still the owner's
+  // to read and list: R3, the owner reads their memory.
+  it('(iii-b) the owner reads and lists a chat in their own private home that rows written by someone else hold', async () => {
+    const priv = await appUserMemory('private');
+    const started = await start(as(ann), { memoryRef: priv });
+    await turn(as(ann), started.chatId, 'from ann');
+    const root = await chatNodeByLocOrThrow(db, started.chatId);
+    await db.node.updateMany({ where: { memoryId: priv }, data: { createdBy: bob } });
+    await db.memory.update({ where: { id: priv }, data: { createdBy: bob } });
+    expect((await history(as(ann), started.chatId)).length).toBeGreaterThan(0);
+    expect(await listed(ann, started.chatId), 'listed for the owner').toBeDefined();
+    expect(root.memoryId).toBe(priv);
+  });
+
   it('(iv) a share grantee of an App personal home is refused as for a missing chat: the chat follows the memory gate (R4, option B)', async () => {
     const personal = await appUserMemory('personal');
     await db.memoryShare.create({ data: { memoryId: personal, granteeId: bob, grantorId: ann, role: 'writer' } });
