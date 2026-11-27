@@ -17,10 +17,10 @@
  *     (read by its creator alone, #3519).
  *
  * Red on main (f2d09486): (a), (d) and the USER `ownedByMe` pin fail because the
- * list carries `userMemoryOfAgentId: null` on every arm. (b) passes on main; it
- * exists to fail if the clause is simply deleted from the top of the JWT union,
- * which would list HOLDING (class knowledge, org-owned) through the org arm to
- * every member of its org.
+ * list carries `userMemoryOfAgentId: null` on every arm. (b) passes on main. It
+ * guards the per-arm exclusion: if a shared arm (the org arm above all) loses
+ * its `userMemoryOfAgentId: null` clause, HOLDING (class knowledge, org-owned)
+ * lists to every member of its org, and (b) goes red.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -116,25 +116,24 @@ describe('#5026 memories() lists the owner\'s per-user Agent memories', () => {
   });
 
   it('(b) nobody else gets them: list and total equal the page without the rows', async () => {
-    const callers: Array<[string, Context]> = [
-      ['another member of the org', ctxOf(member)],
-      ['another member, orgRef', ctxOf(member, {})],
-      ['a platform admin with no relation', ctxOf(admin, { roles: ['ADMIN'] } as Partial<Context>)],
+    const callers: Array<[string, Context, Record<string, unknown>]> = [
+      ['another member of the org', ctxOf(member), {}],
+      ['another member, orgRef', ctxOf(member), { orgRef: orgId }],
+      ['a platform admin with no relation', ctxOf(admin, { roles: ['ADMIN'] } as Partial<Context>), {}],
       ['an impersonated session of the owner', ctxOf(owner, {
         impersonation: { orgId, sessionId: generateId(), actorUserId: admin, expiresAt: new Date(Date.now() + 60_000) },
-      } as unknown as Partial<Context>)],
-      ['a share grantee, default list', ctxOf(grantee)],
-      ['an App key of the memory\'s App', appKeyCtx(appId)],
+      } as unknown as Partial<Context>), {}],
+      ['a share grantee, default list', ctxOf(grantee), {}],
+      ['an App key of the memory\'s App', appKeyCtx(appId), {}],
     ];
-    const argsFor = (label: string) => (label.endsWith('orgRef') ? { orgRef: orgId } : {});
     const before = new Map<string, Page>();
-    for (const [label, ctx] of callers) before.set(label, await list(ctx, argsFor(label)));
+    for (const [label, ctx, args] of callers) before.set(label, await list(ctx, args));
 
     const m = await seedPerUser();
     await db.memoryShare.create({ data: { memoryId: m.org, granteeId: grantee, grantorId: owner, role: 'reader' } });
 
-    for (const [label, ctx] of callers) {
-      const after = await list(ctx, argsFor(label));
+    for (const [label, ctx, args] of callers) {
+      const after = await list(ctx, args);
       const was = before.get(label)!;
       expect({ label, ids: ids(after), total: after.total }).toEqual({ label, ids: ids(was), total: was.total });
       for (const id of [m.org, m.user, m.holding]) expect(ids(after)).not.toContain(id);
@@ -194,7 +193,7 @@ describe('#5026 memories() lists the owner\'s per-user Agent memories', () => {
       expect((await Q.memory({}, { ref: id }, ctxOf(owner)))?.id).toBe(id);
     }
     for (const id of [m.org, m.user]) {
-      await expect(Q.memory({}, { ref: id }, ctxOf(member)).then((r: unknown) => r ?? null, () => null)).resolves.toBeNull();
+      await expect(Q.memory({}, { ref: id }, ctxOf(member))).resolves.toBeNull();
     }
   });
 

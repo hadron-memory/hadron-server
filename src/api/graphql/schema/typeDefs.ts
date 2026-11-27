@@ -11224,8 +11224,9 @@ export const typeDefs = `#graphql
     (2) memories their member orgs own, (3) memories their member orgs
     subscribe to, (4) their OWN per-user Agent memories (#5026,
     hrn:node:hadronmemory.com:specs:cor:api:120:03: listed to their owner like
-    any other user-owned memory, and to nobody else; another member reaches a
-    shared one only through filter.sharedWithMe, which still omits them).
+    any other user-owned memory, and to nobody else, not even through
+    filter.sharedWithMe, which still omits them: a share grant on a per-user
+    memory surfaces nothing in either list).
     App-key callers get the union of their installed Agents' memory items.
 
     filter.visibility: PUBLIC selects the public marketplace slice instead
