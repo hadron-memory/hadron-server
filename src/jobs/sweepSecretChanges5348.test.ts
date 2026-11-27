@@ -11,6 +11,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import {
   drainExpiredSecretChanges,
+  sweepExpiredSecretChanges,
   SECRET_CHANGE_SWEEP_STATEMENT_TIMEOUT_MS,
   SECRET_CHANGE_SWEEP_TX_MAX_WAIT_MS,
   SECRET_CHANGE_SWEEP_TX_TIMEOUT_MS,
@@ -36,15 +37,20 @@ async function slowRows(seconds: number) {
   await db.$executeRawUnsafe(`CREATE TRIGGER test_slow_row_5348 BEFORE UPDATE ON secret_change_requests FOR EACH ROW EXECUTE FUNCTION test_slow_row_5348()`);
 }
 
+const dropSlowRows = async () => {
+  await db.$executeRawUnsafe('DROP TRIGGER IF EXISTS test_slow_row_5348 ON secret_change_requests');
+  await db.$executeRawUnsafe('DROP FUNCTION IF EXISTS test_slow_row_5348()');
+};
+
+// Each vitest fork runs against its own database clone (src/test/perWorkerDb.ts), so the trigger never reaches another file;
+// it is dropped before each test as well, in case an earlier run of this file died before its afterEach.
 beforeEach(async () => {
+  await dropSlowRows();
   await cleanDb(db);
   userId = (await db.user.create({ data: { email: `${generateId()}@sweep5348.test` } })).id;
   appId = (await db.app.create({ data: { ownerUserId: userId, name: 'sweep drain 5348', urn: `${generateId().toLowerCase()}:drain5348` } })).id;
 });
-afterEach(async () => {
-  await db.$executeRawUnsafe('DROP TRIGGER IF EXISTS test_slow_row_5348 ON secret_change_requests');
-  await db.$executeRawUnsafe('DROP FUNCTION IF EXISTS test_slow_row_5348()');
-});
+afterEach(dropSlowRows);
 
 describe('#5348 the expiry drain makes progress when a batch is slower than the 5 s default', () => {
   it('R1: the production bounds are explicit (statement 25 s inside a 30 s transaction, 10 s to start)', async () => {
@@ -65,8 +71,9 @@ describe('#5348 the expiry drain makes progress when a batch is slower than the 
 
   it('R3: a batch that overruns its bound is retried smaller in the same run, and the run clears everything', async () => {
     await seed(300, 'shrink');
-    await slowRows(0.02); // 20 ms a row against a 1 s bound: limits 500, 250, 125 and 62 overrun, 31 rows (0.62 s) fit
-    expect(await drainExpiredSecretChanges(db, { statementTimeoutMs: 1_000 })).toBe(300);
+    await slowRows(0.02); // 20 ms a row against a 1 s bound: limits 500, 250, 125 and 62 overrun, 31 rows (0.62 s) fit:
+    // 4 overruns + 10 batches of up to 31 = 14 slots, inside the 20 given (bounds explicit, not the production constants)
+    expect(await drainExpiredSecretChanges(db, { statementTimeoutMs: 1_000, batchSize: 500, maxBatches: 20 })).toBe(300);
     expect(await count('expired', 'shrink')).toBe(300);
     expect(await count('open', 'shrink')).toBe(0);
   });
@@ -76,7 +83,7 @@ describe('#5348 the expiry drain makes progress when a batch is slower than the 
     await slowRows(0.02);
     // 7 slots against a 250 ms bound: limits 500, 250, 125, 62, 31 (all 40 or 31 rows) and 15 (0.3 s) overrun; 7 rows (0.14 s)
     // commit in the last slot, and the run ends there with the rest left for the next run.
-    expect(await drainExpiredSecretChanges(db, { statementTimeoutMs: 250, maxBatches: 7 })).toBe(7);
+    expect(await drainExpiredSecretChanges(db, { statementTimeoutMs: 250, batchSize: 500, maxBatches: 7 })).toBe(7);
     // the oldest seven (largest g: earliest expires_at) are the ones cleared
     const cleared = await db.secretChangeRequest.findMany({ where: { state: 'expired', id: { startsWith: 'keep' } }, select: { id: true } });
     expect(cleared.map(r => Number(r.id.slice(4))).sort((a, b) => a - b)).toEqual([34, 35, 36, 37, 38, 39, 40]);
@@ -116,4 +123,19 @@ describe('#5348 the expiry drain makes progress when a batch is slower than the 
     expect(await drainExpiredSecretChanges(expiring as never)).toBe(3);
     expect(sizes).toEqual([250]);
   });
+
+  it('R8: a batch updates at most its limit whatever join the planner picks (a rescanned LIMIT ... SKIP LOCKED subquery slid past it)', async () => {
+    await seed(300, 'bound');
+    // A nested loop rescans the inner side per outer row; each rescan skipped the rows this statement had just updated and took
+    // the next ones, so a LIMIT 1 batch on a table without statistics updated all 300 (seen with the planner's own choice).
+    const forced = await db.$transaction(async tx => {
+      await tx.$executeRawUnsafe('SET LOCAL enable_hashjoin = off');
+      await tx.$executeRawUnsafe('SET LOCAL enable_mergejoin = off');
+      return sweepExpiredSecretChanges(tx, 1);
+    });
+    expect(forced).toBe(1);
+    expect(await db.$transaction(tx => sweepExpiredSecretChanges(tx, 2))).toBe(2);
+    expect(await count('open', 'bound')).toBe(297);
+  });
 });
+
