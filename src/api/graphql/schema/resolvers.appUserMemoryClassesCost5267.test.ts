@@ -29,8 +29,12 @@ let logged: import('../../../generated/prisma/index.js').PrismaClient;
  * after it, each awaited until its own event has arrived. Prisma emits query events asynchronously, so under load a statement
  * that belongs to one run can arrive after its call has returned and be counted in the NEXT run's window (seen: an
  * `agent_org_grants` read and an `org_members` read crossing from one pair into the next). A barrier is ordered with the work
- * around it (events arrive in the order the engine logs them), so none crosses: 0 deviations in 3600 repeated pairs under load,
- * where 4 in 1200 (no fix) and 3 in 3600 (ping filter alone) had been seen.
+ * around it, so none crosses. THE ASSUMPTION, named: query events arrive in the order the engine logs them, across the client's
+ * pooled connections too (so an event for a statement sent before the closing barrier has arrived when the barrier's own has). It
+ * is not proven; it was checked locally by repeated pairs under CPU load (six busy loops): 0 deviations in 3600 pairs with barriers
+ * AND the ping filter, where 4 in 1200 (no fix), 3 in 3600 (ping filter alone) and 22 in 3600 (barriers alone: 27 `SELECT 1` seen)
+ * had been seen, so each of the two is needed. Every CI run re-checks it: the shape pin below measures 90 pairs. If the assumption
+ * ever fails, the symptom is a per-App variance in that pin, never a silent pass.
  *
  * And the one statement the count must not see: under CPU load a bare `SELECT 1` shows up on this client now and then (seen +1
  * in 4 of 1200 repeated runs; the failing CI run read 12 where 14 is the shape's cost). It is not a query the app or the field
@@ -46,11 +50,14 @@ const isPoolPing = (query: string): boolean => query.trim() === 'SELECT 1';
 
 async function barrier(): Promise<number> {
   const text = `SELECT ${900_000 + ++barrierSeq} AS barrier`;
+  // The text is a constant plus a counter, never input: $queryRawUnsafe only because a template tag cannot name a literal.
   await logged.$queryRawUnsafe(text);
-  const deadline = Date.now() + 10_000;
+  // The event of a query that has already completed arrives within milliseconds; the deadline only turns a lost event into a clear
+  // failure instead of a hang, and is wide for a loaded runner.
+  const deadline = Date.now() + 30_000;
   while (!events.includes(text)) {
-    if (Date.now() > deadline) throw new Error(`the query event of ${text} never arrived`);
-    await new Promise((r) => setTimeout(r, 2));
+    if (Date.now() > deadline) throw new Error(`the query event of ${text} never arrived (the barrier's ordering assumption, see the header)`);
+    await new Promise((r) => setTimeout(r, 5));
   }
   return events.indexOf(text);
 }
@@ -141,9 +148,11 @@ describe('#5267 the weight is what the field costs', () => {
 
   it('each shape stays within the constant, and the constant is the worst shape (C)', async () => {
     const per = { A: [] as number[], B: [] as number[], C: [] as number[] };
-    for (const shape of ['A', 'B', 'C'] as const) for (const id of apps[shape]) per[shape].push(await fieldStatements(id));
+    // THREE passes over the 30 Apps (90 with/without pairs): every CI run of this file is a small soak of the barrier's ordering
+    // assumption (see the header), and a per-App variance has three chances to show.
+    for (let pass = 0; pass < 3; pass++) for (const shape of ['A', 'B', 'C'] as const) for (const id of apps[shape]) per[shape].push(await fieldStatements(id));
     const worst = (s: 'A' | 'B' | 'C') => Math.max(...per[s]);
-    // Every App of a shape costs the same: the count has no per-App variance, so the max over 10 samples is the shape's cost.
+    // Every App of a shape costs the same: the count has no per-App variance, so the max over the 30 samples is the shape's cost.
     for (const s of ['A', 'B', 'C'] as const) expect(new Set(per[s]).size, `shape ${s} statements per App: ${per[s]}`).toBe(1);
     // The doc comment's figures are pinned too, so it cannot drift from what the field issues.
     expect([worst('A'), worst('B'), worst('C')]).toEqual([7, 14, 24]);
