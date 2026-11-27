@@ -33,6 +33,17 @@ describe('#5022 boot', () => {
     expect(out).not.toContain(MARKER);
   }, 70_000);
 
+  it('a non-zero organization amount refuses boot without echoing it (cor:dmo:170:12)', async () => {
+    const { code, out } = await boot(`{"user":"5","organization":"${MARKER}"}`);
+    expect(out).not.toContain('BOOTED');
+    const real = await boot('{"user":"5","organization":"777"}');
+    expect(real.out).not.toContain('BOOTED');
+    expect(real.code).not.toBe(0);
+    expect(real.out).toContain('OWNER_DEFAULT_MONTHLY_GRANT must be');
+    expect(real.out).not.toContain('777');
+    expect(code).not.toBe(0);
+  }, 140_000);
+
   it('a valid value boots', async () => {
     const { code, out } = await boot('{"user":"5","organization":"0"}');
     expect(out).toContain('BOOTED');

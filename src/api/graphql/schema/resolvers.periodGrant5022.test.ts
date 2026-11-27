@@ -95,7 +95,7 @@ describe('G1: a person\'s first read of the month', () => {
   });
 
   it('a refused read writes nothing (the grant follows the gate)', async () => {
-    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"1234","organization":"777"}' });
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"1234","organization":"0"}' });
     expect((await gql(BALANCE, ctxOf(p), { orgRef: orgId })).errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
     expect((await gql(BALANCE, ctxOf(orgAdmin), { userRef: p })).errors).toBeDefined();
     expect(await grants()).toHaveLength(0);
@@ -113,7 +113,7 @@ describe('G11: a soft-deleted owner never receives the grant (issue section 8; s
   });
 
   it('the library writes no grant and owes none for a soft-deleted organization', async () => {
-    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"organization":"777"}' });
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"777"}' });
     await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
     const now = new Date();
     expect(await periodGrantDue(db, { organizationId: orgId }, now)).toBe(0n);
@@ -140,15 +140,12 @@ describe('G6: an impersonated read writes nothing', () => {
     impersonation: { sessionId: generateId(), actorUserId: admin, orgId, expiresAt: new Date(Date.now() + 60_000) },
   }) as Partial<Context>;
 
-  it('no row for an organization with a non-zero amount, and the figure the next writing read would answer (ruling 9a)', async () => {
-    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"organization":"777"}' });
+  it('an organization is owed nothing, and an impersonated read adds nothing to its figure (cor:dmo:170:12)', async () => {
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"777"}' });
     const res = await gql(BALANCE, impersonating(), { orgRef: orgId });
     expect(res.errors).toBeUndefined();
     expect(await grants()).toHaveLength(0);
-    expect(balanceOf(res)).toBe('777');
-    expect(balanceOf(await gql(BALANCE, ctxOf(orgAdmin), { orgRef: orgId }))).toBe('777');
-    expect(await grants()).toHaveLength(1);
-    expect(balanceOf(await gql(BALANCE, impersonating(), { orgRef: orgId }))).toBe('777');
+    expect(balanceOf(res)).toBe('0');
   });
 });
 
@@ -175,11 +172,9 @@ describe('G11: a failed write never fails the read', () => {
 });
 
 describe('G12: an organization ADMIN\'s read', () => {
-  it('writes one grant on the organization\'s ledger', async () => {
-    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"organization":"777"}' });
-    expect(balanceOf(await gql(BALANCE, ctxOf(orgAdmin), { orgRef: orgId }))).toBe('777');
-    const rows = await grants();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ organizationId: orgId, ownerUserId: null, amountMicroCents: 777n });
+  it('writes no grant on the organization\'s ledger, with a user grant configured (cor:dmo:170:12)', async () => {
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"777"}' });
+    expect(balanceOf(await gql(BALANCE, ctxOf(orgAdmin), { orgRef: orgId }))).toBe('0');
+    expect(await grants()).toHaveLength(0);
   });
 });
