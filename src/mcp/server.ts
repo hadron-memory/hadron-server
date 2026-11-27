@@ -1,4 +1,5 @@
 import { assertMoveWithinSizeLimit, mapMoveExpiry, SubtreeMoveTimedOutError, SubtreeMoveTooLargeError } from '../lib/moveSizeLimit.js';
+import { ownNoAppHoldingWhere } from '../lib/memory/ownNoAppHolding.js';
 import { respondSessionSuperseded } from '../lib/sessionSuperseded.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/github/syncNotAttempted.js';
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
@@ -3435,9 +3436,14 @@ export function createMcpServerInstance(
       if (auth.userId) {
         const owned = await db.memory.findMany({
           where: {
-            userId: auth.userId,
-            class: { in: ['personal', 'private'] },
             deletedAt: null,
+            OR: [
+              { userId: auth.userId, class: { in: ['personal', 'private'] } },
+              // #5355: the creator's no-App chat holding (startChat's knowledge downgrade), the SAME predicate
+              // `memories()` lists. Each row still passes the per-row canReadMemory gate below, so the list can
+              // never exceed the node-read gate (no App key, impersonation, run principal or bound session).
+              ownNoAppHoldingWhere(auth.userId),
+            ],
           },
           select: { id: true },
         });

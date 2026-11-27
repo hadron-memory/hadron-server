@@ -1,5 +1,6 @@
 import { listAppInstallations } from '../../../lib/appInstallations.js';
 // memoryQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
+import { ownNoAppHoldingWhere } from '../../../lib/memory/ownNoAppHolding.js';
 import { graphViewDisabled } from '../../../lib/graphView.js';
 import { GraphQLError } from 'graphql';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
@@ -711,7 +712,7 @@ export const memoryQueries = {
                   // gate admits (`getAccessibleMemoryIds`, the `createdBy` holding clause) and MCP's
                   // `readsOwnNoAppHolding`, narrowed to `appId: null` like the latter. `createdBy` is compared
                   // with the user id only: an anonymous session memory stores an App id there and is class `app`.
-                  { class: 'knowledge' as any, appId: null, userMemoryOfAgentId: { not: null }, createdBy: ctx.userId },
+                  ownNoAppHoldingWhere(ctx.userId) as any,
                 ]),
           ],
         });
