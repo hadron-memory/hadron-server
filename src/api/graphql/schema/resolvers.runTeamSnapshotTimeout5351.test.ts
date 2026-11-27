@@ -83,18 +83,30 @@ async function callSnapshot() {
   return snapshotTool().execute({ db, run, principal: runContext(db, run), log: vi.fn() } as any, { ...WINDOW });
 }
 
-/** Another session holds ACCESS EXCLUSIVE on `table` for SLEEP_S while the snapshot runs. */
-async function withTableHeld<T>(table: 'workers' | 'agent_tasks', act: () => Promise<T>): Promise<T> {
+/**
+ * Another session holds ACCESS EXCLUSIVE on `table` for `ms` (default SLEEP_S) while `act` runs. `act` starts only once
+ * the holder's LOCK statement has returned, so the lock is held when the read starts (no sleep-based handshake). A holder
+ * that fails before locking fails the test with its own error; once `act` has run, its outcome is what the test sees, and
+ * a later holder failure is reported only when `act` succeeded.
+ */
+async function withTableHeld<T>(table: 'workers' | 'agent_tasks', act: () => Promise<T>, ms = SLEEP_S * 1000): Promise<T> {
+  let locked!: () => void;
+  const lockHeld = new Promise<void>((r) => { locked = r; });
   const holder = db.$transaction(async (tx) => {
     await tx.$executeRawUnsafe(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`);
-    await new Promise((r) => setTimeout(r, SLEEP_S * 1000));
+    locked();
+    await new Promise((r) => setTimeout(r, ms));
   }, { timeout: HOLDER_TX_TIMEOUT_MS });
+  await Promise.race([lockHeld, holder]); // a holder that fails before locking rejects here
+  let result: T;
   try {
-    await new Promise((r) => setTimeout(r, 300)); // the lock lands before the read starts
-    return await act();
-  } finally {
-    await holder;
+    result = await act();
+  } catch (e) {
+    await holder.catch(() => {}); // let the holder release; act's own error is the one reported
+    throw e;
   }
+  await holder;
+  return result;
 }
 
 async function expectCancelledAtBudget(table: 'workers' | 'agent_tasks') {
@@ -143,25 +155,11 @@ describe('#5351 red: the run team-snapshot read is cancelled at the roster budge
   }, 30_000);
 
   it('the bound is the roster budget, not tighter: a statement blocked for less than the budget completes', async () => {
-    const out = await withTableHeldFor('workers', BUDGET_MS - 2_000, () => callSnapshot()) as { roster: unknown[]; complete: boolean };
+    const out = await withTableHeld('workers', () => callSnapshot(), BUDGET_MS - 2_000) as { roster: unknown[]; complete: boolean };
     expect(out.complete).toBe(true);
     expect(out.roster).toHaveLength(1);
   }, 30_000);
 });
-
-/** Like withTableHeld, but for `ms` instead of SLEEP_S. */
-async function withTableHeldFor<T>(table: 'workers', ms: number, act: () => Promise<T>): Promise<T> {
-  const holder = db.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`);
-    await new Promise((r) => setTimeout(r, ms));
-  }, { timeout: HOLDER_TX_TIMEOUT_MS });
-  try {
-    await new Promise((r) => setTimeout(r, 300));
-    return await act();
-  } finally {
-    await holder;
-  }
-}
 
 describe('#5351: a normal snapshot is unchanged', () => {
   it('answers the roster and tasks in full', async () => {
