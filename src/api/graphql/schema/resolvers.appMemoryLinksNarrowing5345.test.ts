@@ -2,10 +2,12 @@
  * #5345: a user-owned non-personal memory (`ownerUserId` set, class not personal/private) linked to an App reaches NO surface
  * of its pure App key (cor:dmo:060:22 D-2026-11-26: attaching gives no access, the #5258/#5185 interim key read covering own
  * personal/private only; cor:api:120:03: a list equals the reads on every surface). On main the two non-personal class
- * families differed: for knowledge/group the record gate's ownerUserId branch has no link arm, so GraphQL refused while the
- * ONE judge and MCP admitted (Babaya's #5343 measurement: judged=true, mcp=true, record=false — the first two are red on main
- * and flip with the narrowing, the record read stays green); for class app that branch fell through to the accessible set,
- * whose link arm is the same judge, so EVERY surface admitted it (each assertion in that test is red on main on its own).
+ * families differed: for knowledge/group the record gate's ownerUserId branch has no link arm, so memory(ref:) and the
+ * memories list refused while the ONE judge and MCP admitted (Babaya's #5343 measurement: judged=true, mcp=true,
+ * record=false), and node reads (node(ref:), findNodes) admitted too, because they read the accessible set whose link arm
+ * is the judge (Joran's LOCAL delta at bfc5ab7a). The judge, MCP and node-read pins are red on main and flip with the
+ * narrowing; the record read stays green. For class app that branch fell through to the accessible set as well, so EVERY
+ * surface admitted it (each assertion in that test is red on main on its own).
  * Every control here was green on main and must stay green.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
