@@ -258,11 +258,11 @@ describe('5. the retired doors answer DOOR_RETIRED (Q2, until a CLI release carr
     vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
     const mcp = createTestableMcpServer({ userId: f.mgr.id, roles: [], clientId: 'cli' } as never);
     const answers = [
-      await mcp.callToolText('hadron_set_automation_read_grant', { appRef: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, memoryRef: f.dest.id }),
+      await mcp.callToolText('hadron_set_automation_read_grant', { app: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, memory: f.dest.id }),
       await mcp.callToolText('hadron_revoke_automation_read_grant', { id: 'x' }),
-      await mcp.callToolText('hadron_list_automation_read_grants', { appRef: f.app.id }),
+      await mcp.callToolText('hadron_list_automation_read_grants', { app: f.app.id }),
     ];
-    for (const a of answers) expect(a).toMatch(/door_retired|retired/i);
+    for (const a of answers) expect(a.startsWith('[door_retired] '), a).toBe(true);
     expect(await db.appAutomationReadGrant.count()).toBe(0);
     vi.unstubAllEnvs();
   });

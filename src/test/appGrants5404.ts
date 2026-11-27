@@ -47,11 +47,8 @@ export function activeMemoryReadGrant(appId: string, memory: string | string[], 
   return insertActive(opts.db ?? defaultDb, appId, 'memory.read', { memory }, opts.issuerUserId);
 }
 
-/** Revoke a grant (a terminal row state, written around the guard like the insert). */
+/** Revoke a grant through the guarded row update (the grant guards admit a revoke; no trigger is disabled, so a lock test sees the
+ * real locks). */
 export async function revokeGrantRow(grantId: string, revokedBy: string, client: PrismaClient = defaultDb): Promise<void> {
-  await client.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe('ALTER TABLE grants DISABLE TRIGGER USER');
-    await tx.$executeRawUnsafe(`UPDATE grants SET revoked_at = ${DB_NOW}, revoked_by = $2, updated_at = ${DB_NOW} WHERE id = $1`, grantId, revokedBy);
-    await tx.$executeRawUnsafe('ALTER TABLE grants ENABLE TRIGGER USER');
-  });
+  await client.$executeRawUnsafe(`UPDATE grants SET revoked_at = ${DB_NOW}, revoked_by = $2, updated_at = ${DB_NOW} WHERE id = $1`, grantId, revokedBy);
 }

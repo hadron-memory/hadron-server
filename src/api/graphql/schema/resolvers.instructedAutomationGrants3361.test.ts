@@ -42,11 +42,9 @@ const snapshot = async () => ({
 });
 
 const revokes: Record<string, (instruction?: unknown, c?: Context) => Promise<any>> = {
-  read: (instruction = live, c = bound()) => M.revokeAutomationReadGrant({}, { id: f.readGrant.id, instruction }, c),
   team: (instruction = live, c = bound()) => M.revokeAutomationTeamSnapshotGrant({}, { id: f.teamGrant.id, instruction }, c),
 };
 const lists: Record<string, (instruction?: unknown, c?: Context) => Promise<any>> = {
-  readList: (instruction = live, c = bound()) => Q.automationReadGrants({}, { appRef: f.app.id, instruction }, c),
   teamList: (instruction = live, c = bound()) => Q.automationTeamSnapshotGrants({}, { appRef: f.app.id, instruction }, c),
 };
 const doors = { ...revokes, ...lists };
@@ -96,6 +94,29 @@ beforeEach(async () => {
   const readGrant = await db.appAutomationReadGrant.create({ data: { appId: app.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, memoryId: mem.id, grantedBy: holder.id } });
   const teamGrant = await db.appAutomationTeamSnapshotGrant.create({ data: { appId: app.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, grantedBy: holder.id } });
   f = { holder, other, org, app, agent, worker, target, session, key, mem, writeGrant, schedule, readGrant, teamGrant };
+});
+
+/**
+ * #5404 (Holger, 2026-11-27, "Retire all"): the per-automation read-grant doors are retired. Their instructed-worker admission,
+ * concealment, fencing and audit cases are gone with them; in their place, every call (instructed or direct, any principal, any
+ * argument) answers DOOR_RETIRED before any check and records nothing. The team snapshot doors below are unchanged.
+ */
+describe('#5404 the retired read-grant doors refuse before any instruction admission', () => {
+  const retiredDoors: Record<string, (instruction: unknown, c: Context) => Promise<any>> = {
+    revokeAutomationReadGrant: (instruction, c) => M.revokeAutomationReadGrant({}, { id: f.readGrant.id, instruction }, c),
+    automationReadGrants: (instruction, c) => Q.automationReadGrants({}, { appRef: f.app.id, instruction }, c),
+    automationReadGrantsByMemory: (instruction, c) => Q.automationReadGrants({}, { memoryRef: f.mem.id, instruction }, c),
+  };
+  for (const [door, call] of Object.entries(retiredDoors)) it(`${door}: DOOR_RETIRED for an instructed worker, a direct person, a key, a run and an impersonation; nothing recorded`, async () => {
+    const before = await snapshot();
+    for (const [claim, c] of [
+      [live, bound()], [null, ctx()], [live, { db, appId: f.app.id, roles: [] } as Context], [live, bound({ clientId: 'run:test', appId: f.app.id })],
+      [live, bound({ impersonation: { sessionId: generateId(), actorUserId: f.other.id, orgId: f.org.id, expiresAt: new Date('2099-01-01') } } as any)],
+    ] as Array<[unknown, Context]>) {
+      expect((await answer(call(claim, c))).code).toBe('DOOR_RETIRED');
+    }
+    expect(await snapshot()).toEqual(before);
+  });
 });
 
 describe('#3361 instructed automation grants', () => {
@@ -151,8 +172,7 @@ describe('#3361 instructed automation grants', () => {
       const before = await snapshot();
       const worker = await answer(call(live, bound()));
       const person = await answer(call(null, ctx()));
-      if (door !== 'readList') expect(worker).toEqual(person);
-      else expect(person.code).toBe('RESOLVED'); // legacy person list filters to empty, worker has no admitted holder right
+      expect(worker).toEqual(person);
       expect(worker.code).not.toBe('RESOLVED');
       expect(await snapshot()).toEqual(before);
     });
@@ -167,30 +187,13 @@ describe('#3361 instructed automation grants', () => {
     await db.appAutomationTeamSnapshotGrant.updateMany({ data: { revokedAt: new Date(), revokedBy: f.holder.id } });
     const out = await call(); expect(Array.isArray(out) ? out : out.items).toEqual([]); expect(await instructionEvents()).toHaveLength(1);
   });
-  it('memory-only instructed list is bound to worker App; direct target manager keeps other-App reach', async () => {
-    await db.appMember.deleteMany({ where: { appId: f.app.id, userId: f.holder.id } });
-    await db.orgMember.update({ where: { organizationId_userId: { organizationId: f.org.id, userId: f.holder.id } }, data: { role: 'ADMIN' } });
-    const app = await db.app.create({ data: { organizationId: f.org.id, name: 'Other', urn: 'cred3311.test:other' } });
-    const grant = await db.appAutomationReadGrant.create({ data: { appId: app.id, triggerKind: 'SCHEDULE', triggerId: generateId(), memoryId: f.mem.id, grantedBy: f.holder.id } });
-    const out = await Q.automationReadGrants({}, { memoryRef: f.mem.id, instruction: live }, bound());
-    expect(out.map((r: any) => r.id)).toEqual([f.readGrant.id]);
-    expect((await Q.automationReadGrants({}, { memoryRef: f.mem.id }, ctx())).map((r: any) => r.id)).toContain(grant.id);
-    const before = await snapshot();
-    expect((await answer(Q.automationReadGrants({}, { appRef: app.id, instruction: live }, bound()))).code).toBe('FORBIDDEN');
-    expect((await answer(M.revokeAutomationReadGrant({}, { id: grant.id, instruction: live }, bound()))).code).toBe('FORBIDDEN');
-    expect(await snapshot()).toEqual(before);
-    await M.revokeAutomationReadGrant({}, { id: grant.id }, ctx());
-    expect((await db.appAutomationReadGrant.findUniqueOrThrow({ where: { id: grant.id } })).revokedBy).toBe(f.holder.id);
-  });
 
   const surfaces = [
-    ['read', 'revokeAutomationReadGrant', 'hadron_revoke_automation_read_grant', true],
     ['team', 'revokeAutomationTeamSnapshotGrant', 'hadron_revoke_automation_team_snapshot_grant', true],
-    ['readList', 'automationReadGrants', 'hadron_list_automation_read_grants', false],
     ['teamList', 'automationTeamSnapshotGrants', 'hadron_list_automation_team_snapshot_grants', false],
   ] as const;
   for (const [name, field, tool, revoke] of surfaces) for (const surface of ['graphql', 'mcp']) it(`${surface} ${name} shares instruction admission and zero-effects refusal`, async () => {
-    const id = name === 'read' ? f.readGrant.id : f.teamGrant.id;
+    const id = f.teamGrant.id;
     async function invoke(instruction: unknown) {
       if (surface === 'graphql') {
         const selector = revoke ? 'id' : 'appRef'; const scalar = revoke || name === 'teamList' ? 'ID!' : 'String';
@@ -244,45 +247,21 @@ describe('#3361 instructed automation grants', () => {
     else ref = (await M.createTeamChatMessage({}, { appRef: f.app.id, body: 'fixture instruction' }, ctx())).urn;
     await call({ kind, ref }); expect(await instructionEvents()).toHaveLength(1);
   });
-  it('a target-only manager keeps memory revoke/list; has no snapshot authority', async () => {
+  // #5404: the memory revoke/list half of this case is retired with the read-grant doors; the snapshot half stands.
+  it('a target-only manager has no snapshot authority', async () => {
     await db.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'member' } });
     await db.memory.update({ where: { id: f.mem.id }, data: { organizationId: null, ownerUserId: f.holder.id } });
-    expect((await lists.readList!()).map((r: any) => r.id)).toEqual([f.readGrant.id]);
-    await revokes.read!();
     const before = await snapshot();
     for (const call of [lists.teamList!, revokes.team!]) expect((await answer(call())).code).toBe('FORBIDDEN');
     expect(await snapshot()).toEqual(before);
   });
-  for (const name of ['read', 'team']) it(`${name} grant revoke rolls back if instruction event fails`, async () => {
+  for (const name of ['team']) it(`${name} grant revoke rolls back if instruction event fails`, async () => {
     const before = await snapshot();
     const c = bound({ db: db.$extends({ query: { agentTeamEvent: { create: async () => { throw Error('injected event fault'); } } } }) as any });
     await expect(revokes[name]!(live, c)).rejects.toThrow('injected event fault'); expect(await snapshot()).toEqual(before);
   });
 
-  it('a direct person retains filtered list but anchored revoke refuses an uninstalled App', async () => {
-    await db.app.update({ where: { id: f.app.id }, data: { uninstalledAt: new Date() } });
-    expect((await lists.readList!(null, ctx())).map((r: any) => r.id)).toEqual([f.readGrant.id]);
-    const before = await snapshot();
-    expect((await answer(revokes.read!(null, ctx()))).code).toBe('FORBIDDEN');
-    expect(await snapshot()).toEqual(before);
-    expect(await instructionEvents()).toHaveLength(0);
-  });
 
-  it('a direct-person memory-only list explicitly refuses a supplied claim, while no claim keeps its reach', async () => {
-    const before = await snapshot();
-    expect((await answer(Q.automationReadGrants({}, { memoryRef: f.mem.id, instruction: live }, ctx()))).code).toBe('FORBIDDEN');
-    expect((await Q.automationReadGrants({}, { memoryRef: f.mem.id }, ctx())).map((r: any) => r.id)).toEqual([f.readGrant.id]);
-    expect(await snapshot()).toEqual(before);
-  });
-  it('a direct-person claim with an explicit App is validated without an instruction event', async () => {
-    const task = await db.agentTask.create({ data: { appId: f.app.id, title: 'instruction', ownerUserId: f.holder.id } });
-    const instruction = { kind: 'TASK', ref: `hrn:agenttask:${f.app.urn}:${task.handle}` };
-    expect((await Q.automationReadGrants({}, { appRef: f.app.id, memoryRef: f.mem.id, instruction }, ctx())).map((r: any) => r.id)).toEqual([f.readGrant.id]);
-    expect(await instructionEvents()).toHaveLength(0);
-    const before = await snapshot();
-    expect((await answer(Q.automationReadGrants({}, { appRef: f.app.id, instruction: { kind: 'TASK', ref: 'hrn:agenttask:cred3311.test:team:AT999' } }, ctx()))).code).toBe('FORBIDDEN');
-    expect(await snapshot()).toEqual(before);
-  });
 
   for (const [, , tool, revoke] of surfaces) for (const principal of ['app-key', 'refused-binding']) it(`MCP ${tool} forwards ${principal} without granting or recording`, async () => {
     const auth = {
@@ -310,10 +289,6 @@ describe('#3361 instructed automation grants', () => {
     try { await waitForLockWaitersOfType(db, 'advisory', 1); } finally { unlock(); await blocker; }
     expect((await pending).code).toBe('FORBIDDEN'); expect(await snapshot()).toEqual(before);
   });
-  it('a deleted memory target refuses an instructed revoke without an event', async () => {
-    await db.memory.update({ where: { id: f.mem.id }, data: { deletedAt: new Date() } }); const before = await snapshot();
-    expect((await answer(revokes.read!())).code).toBe('FORBIDDEN'); expect(await snapshot()).toEqual(before);
-  });
 
   for (const [name, call] of Object.entries(doors)) for (const via of ['app-owner', 'org-admin']) it(`${name} fences deciding ${via} membership through recording`, async () => {
     if (via === 'org-admin') {
@@ -334,48 +309,7 @@ describe('#3361 instructed automation grants', () => {
     await call(live, c);
     expect(blocked).toBe(true);
   });
-  for (const name of ['read', 'readList']) it(`${name} fences a target-only manager membership through recording`, async () => {
-    const otherOrg = await db.organization.create({ data: { name: 'Other', urn: 'cred3361.other' } });
-    await db.app.update({ where: { id: f.app.id }, data: { organizationId: otherOrg.id } });
-    await db.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'member' } });
-    await db.orgMember.update({ where: { organizationId_userId: { organizationId: f.org.id, userId: f.holder.id } }, data: { role: 'ADMIN' } });
-    await db.memory.update({ where: { id: f.mem.id }, data: { visibility: 'PUBLIC' } });
-    let blocked = false;
-    const c = bound({ db: db.$extends({ query: { agentTeamEvent: { create: async ({ args, query }: any) => {
-      try { await db.$transaction(async tx => {
-        await tx.$executeRawUnsafe("SET LOCAL lock_timeout='100ms'");
-        await tx.orgMember.update({ where: { organizationId_userId: { organizationId: f.org.id, userId: f.holder.id } }, data: { role: 'CONTRIBUTOR' } });
-      }); } catch (e: any) { if (/lock timeout/.test(e.message)) blocked = true; else throw e; }
-      return query(args);
-    } } } }) as any });
-    await doors[name]!(live, c); expect(blocked).toBe(true);
-  });
 
-  for (const surface of ['graphql', 'mcp']) it(`${surface} direct-person memory-only claim combination is explicit and has no effects`, async () => {
-    const before = await snapshot();
-    if (surface === 'graphql') {
-      const query = 'query($memory:String!,$instruction:ActInstructionInput){automationReadGrants(memoryRef:$memory,instruction:$instruction){id}}';
-      const rejected = await server.executeOperation({ query, variables: { memory: f.mem.id, instruction: live } }, { contextValue: ctx() });
-      if (rejected.body.kind !== 'single') throw Error('incremental');
-      expect(rejected.body.singleResult.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
-      const control = await server.executeOperation({ query, variables: { memory: f.mem.id } }, { contextValue: ctx() });
-      if (control.body.kind !== 'single') throw Error('incremental');
-      expect(control.body.singleResult.errors).toBeUndefined();
-      expect((control.body.singleResult.data as any).automationReadGrants).toEqual([{ id: f.readGrant.id }]);
-    } else {
-      const mcp = new McpServer({ name: '3361-person', version: '1' });
-      registerAutomationReadGrantTools(mcp, { db, auth: { userId: f.holder.id, roles: ['READER'], appId: f.app.id } as any });
-      const client = new Client({ name: '3361-person', version: '1' }); const [a, b] = InMemoryTransport.createLinkedPair();
-      await mcp.connect(b); await client.connect(a);
-      try {
-        const rejected = await client.callTool({ name: 'hadron_list_automation_read_grants', arguments: { memory: f.mem.id, instruction: live } });
-        expect(rejected.isError).toBe(true); expect(JSON.stringify(rejected)).toContain('[forbidden]');
-        const control = await client.callTool({ name: 'hadron_list_automation_read_grants', arguments: { memory: f.mem.id } });
-        expect(control.isError).not.toBe(true); expect(JSON.stringify(control)).toContain(f.readGrant.id);
-      } finally { await client.close(); await mcp.close(); }
-    }
-    expect(await snapshot()).toEqual(before);
-  });
 
   for (const [name, call] of Object.entries(doors)) for (const principal of ['key', 'run', 'impersonation', 'binding']) it(`${name} refuses ${principal} before entity lookup`, async () => {
     const noLookup = db.$extends({ query: { $allModels: { $allOperations: async () => { throw Error('unexpected entity lookup'); } } } });
@@ -385,94 +319,11 @@ describe('#3361 instructed automation grants', () => {
     expect((await answer(call(live, bound({ ...extra, db: noLookup as any })))).code).toBe('FORBIDDEN');
   });
 
-  it('instructed memory-only unknown and foreign-existing refs are indistinguishable for an App manager', async () => {
-    const org = await db.organization.create({ data: { name: 'Foreign', urn: 'cred3361.foreign' } });
-    const foreign = await db.memory.create({ data: { name: 'Foreign', urn: 'cred3361.foreign:memory', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id } as any });
-    const refs = [`hrn:mem:${foreign.urn}`, 'hrn:mem:cred3361.foreign:absent'];
-    const answers = [];
-    for (const memoryRef of refs) {
-      answers.push(await Q.automationReadGrants({}, { memoryRef, instruction: live }, bound()));
-    }
-    expect(answers).toEqual([[], []]);
-    const events = await instructionEvents(); expect(events).toHaveLength(2);
-    expect(events[0].payload).toEqual(events[1].payload);
-    expect(events.every(e => e.appId === f.app.id)).toBe(true);
-  });
-  it('person LIVE_CHAT claims do not turn an unknown App into an existence oracle', async () => {
-    const org = await db.organization.create({ data: { name: 'Foreign', urn: 'cred3361.foreign' } });
-    const foreign = await db.app.create({ data: { name: 'Foreign', urn: 'cred3361.foreign:app', organizationId: org.id } });
-    const refs = [`hrn:app:${foreign.urn}`, 'hrn:app:cred3361.foreign:absent'];
-    for (const instruction of [null, live]) {
-      const answers = [];
-      for (const appRef of refs) answers.push(await Q.automationReadGrants({}, { appRef, instruction }, ctx()));
-      expect(answers).toEqual([[], []]);
-    }
-    expect(await instructionEvents()).toHaveLength(0);
-  });
-  it('invalid person claims and non-manager worker memory refs refuse uniformly without events', async () => {
-    const org = await db.organization.create({ data: { name: 'Foreign', urn: 'cred3361.foreign' } });
-    const foreign = await db.app.create({ data: { name: 'Foreign', urn: 'cred3361.foreign:app', organizationId: org.id } });
-    const memory = await db.memory.create({ data: { name: 'Foreign', urn: 'cred3361.foreign:memory', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id } as any });
-    const task = await db.agentTask.create({ data: { appId: f.app.id, title: 'instruction', ownerUserId: f.holder.id } });
-    for (const instruction of [{ kind: 'LIVE_CHAT', ref: 'invalid prose' }, { kind: 'TASK', ref: `hrn:agenttask:${f.app.urn}:${task.handle}` }]) {
-      const answers = [];
-      for (const appRef of [`hrn:app:${foreign.urn}`, 'hrn:app:cred3361.foreign:absent']) answers.push(await answer(Q.automationReadGrants({}, { appRef, instruction }, ctx())));
-      expect(answers[0]).toEqual(answers[1]); expect(answers[0].code).toBe('FORBIDDEN');
-    }
-    await db.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'member' } });
-    const before = await snapshot(); const answers = [];
-    for (const memoryRef of [`hrn:mem:${memory.urn}`, 'hrn:mem:cred3361.foreign:absent']) answers.push(await answer(Q.automationReadGrants({}, { memoryRef, instruction: live }, bound())));
-    expect(answers[0]).toEqual(answers[1]); expect(answers[0].code).toBe('FORBIDDEN'); expect(await snapshot()).toEqual(before);
-  });
 
-  for (const surface of ['graphql', 'mcp']) it(`${surface} conceals unknown and foreign-existing memory/App references`, async () => {
-    const org = await db.organization.create({ data: { name: 'Foreign', urn: 'cred3361.foreign' } });
-    const app = await db.app.create({ data: { name: 'Foreign', urn: 'cred3361.foreign:app', organizationId: org.id } });
-    const memory = await db.memory.create({ data: { name: 'Foreign', urn: 'cred3361.foreign:memory', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id } as any });
-    for (const worker of [true, false]) {
-      const refs = worker ? [`hrn:mem:${memory.urn}`, 'hrn:mem:cred3361.foreign:absent'] : [`hrn:app:${app.urn}`, 'hrn:app:cred3361.foreign:absent'];
-      const answers = [];
-      for (const ref of refs) {
-        if (surface === 'graphql') {
-          const selector = worker ? 'memoryRef' : 'appRef';
-          const r = await server.executeOperation({ query: `query($ref:String!,$claim:ActInstructionInput){automationReadGrants(${selector}:$ref,instruction:$claim){id}}`, variables: { ref, claim: live } }, { contextValue: worker ? bound() : ctx() });
-          if (r.body.kind !== 'single') throw Error('incremental');
-          expect(r.body.singleResult.errors).toBeUndefined(); answers.push(r.body.singleResult.data);
-        } else {
-          const mcp = new McpServer({ name: '3361-oracle', version: '1' });
-          registerAutomationReadGrantTools(mcp, { db, auth: { userId: f.holder.id, roles: ['READER'], appId: f.app.id, ...(worker ? { sessionId: f.session.id } : {}) } as any });
-          const client = new Client({ name: '3361-oracle', version: '1' }); const [a, b] = InMemoryTransport.createLinkedPair();
-          await mcp.connect(b); await client.connect(a);
-          try {
-            const r = await client.callTool({ name: 'hadron_list_automation_read_grants', arguments: { ...(worker ? { memory: ref } : { app: ref }), instruction: live } });
-            expect(r.isError).not.toBe(true); answers.push(r.content);
-          } finally { await client.close(); await mcp.close(); }
-        }
-      }
-      expect(answers[0]).toEqual(answers[1]);
-      const events = await instructionEvents(); expect(events).toHaveLength(2);
-      expect(events[0].payload).toEqual(events[1].payload);
-    }
-  });
 
 });
 
 describe('#3385 admission interleaves', () => {
-  it('target-only manager gets identical unknown/foreign refusals without losing the named-target control', async () => {
-    await db.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'member' } });
-    await db.memory.update({ where: { id: f.mem.id }, data: { organizationId: null, ownerUserId: f.holder.id } });
-    const foreignOrg = await db.organization.create({ data: { name: 'Foreign', urn: 'pins3385.foreign' } });
-    const foreign = await db.memory.create({ data: { name: 'Foreign', urn: 'pins3385.foreign:memory', class: 'knowledge', organizationId: foreignOrg.id } });
-    const before = await snapshot();
-    const answers = [];
-    for (const memoryRef of [`hrn:mem:${foreign.urn}`, 'hrn:mem:pins3385.foreign:unknown']) {
-      answers.push(await answer(Q.automationReadGrants({}, { memoryRef, instruction: live }, bound())));
-      expect(await snapshot()).toEqual(before);
-    }
-    expect(answers[0].code).toBe('FORBIDDEN'); expect(answers[1]).toEqual(answers[0]);
-    expect((await Q.automationReadGrants({}, { memoryRef: f.mem.id, instruction: live }, bound())).map((r: any) => r.id)).toEqual([f.readGrant.id]);
-    expect(await instructionEvents()).toHaveLength(1);
-  });
 
   for (const [name, call] of Object.entries(doors)) {
     if (!isList(name)) it(`${name}: a session gaining a worker between admissions refuses without effects`, async () => {
@@ -518,26 +369,6 @@ describe('#3385 admission interleaves', () => {
     });
   }
 
-  for (const name of ['read', 'readList']) it(`${name}: target org drift before anchors refuses even when holder manages both orgs`, async () => {
-    const next = await db.organization.create({ data: { name: 'Next', urn: 'pins3385.next' } });
-    await db.orgMember.create({ data: { organizationId: next.id, userId: f.holder.id, role: 'ADMIN' } });
-    await db.orgMember.update({ where: { organizationId_userId: { organizationId: f.org.id, userId: f.holder.id } }, data: { role: 'ADMIN' } });
-    // Separate App's org so its org-admin route cannot mask the target-only predicate.
-    const appOrg = await db.organization.create({ data: { name: 'App', urn: 'pins3385.app' } });
-    await db.app.update({ where: { id: f.app.id }, data: { organizationId: appOrg.id } });
-    await db.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'member' } });
-    await db.memory.update({ where: { id: f.mem.id }, data: { visibility: 'PUBLIC' } });
-    let moved = 0;
-    const c = bound({ db: atGrantBoundary(async () => {
-      moved++;
-      await db.memory.update({ where: { id: f.mem.id }, data: { organizationId: next.id } });
-    }) });
-    const before = await snapshot();
-    expect((await answer(doors[name]!(live, c))).code).toBe('FORBIDDEN');
-    expect(moved).toBe(1); expect(await snapshot()).toEqual(before);
-    await db.memory.update({ where: { id: f.mem.id }, data: { organizationId: f.org.id } });
-    await doors[name]!(live, bound()); expect(await instructionEvents()).toHaveLength(1);
-  });
 });
 
 // App owner-role membership remains authority across the App-owner move. The
@@ -555,19 +386,5 @@ describe('#3385 owner drift controls', () => {
     expect(moved).toBe(1); expect(await snapshot()).toEqual(before);
     await db.app.update({ where: { id: f.app.id }, data: { ownerUserId: f.holder.id } });
     await call(live, bound()); expect(await instructionEvents()).toHaveLength(1);
-  });
-  for (const name of ['read', 'readList']) it(`${name}: target owner transfer before anchors refuses without effects`, async () => {
-    await db.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'member' } });
-    await db.memory.update({ where: { id: f.mem.id }, data: { organizationId: null, ownerUserId: f.holder.id } });
-    let moved = 0;
-    const c = bound({ db: atGrantBoundary(async () => {
-      moved++;
-      await db.memory.update({ where: { id: f.mem.id }, data: { ownerUserId: f.other.id } });
-    }) });
-    const before = await snapshot();
-    expect((await answer(doors[name]!(live, c))).code).toBe('FORBIDDEN');
-    expect(moved).toBe(1); expect(await snapshot()).toEqual(before);
-    await db.memory.update({ where: { id: f.mem.id }, data: { ownerUserId: f.holder.id } });
-    await doors[name]!(live, bound()); expect(await instructionEvents()).toHaveLength(1);
   });
 });
