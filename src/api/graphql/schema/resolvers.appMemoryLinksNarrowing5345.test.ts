@@ -1,10 +1,12 @@
 /**
  * #5345: a user-owned non-personal memory (`ownerUserId` set, class not personal/private) linked to an App reaches NO surface
- * of its pure App key. The record gate refuses it (`canReadMemoryRecord`'s ownerUserId branch has no link arm), so the ONE
- * judge refuses it too (cor:api:120:03: a list equals the reads on every surface; cor:dmo:060:22 D-2026-11-26: attaching gives
- * no access, and the #5258/#5185 interim key read covers own personal/private only). What was measured on main (by Babaya on
- * #5343): judged=true, mcp=true, record=false — the first two are red on main and flip with the narrowing; the record read and
- * every control here were green on main and must stay green.
+ * of its pure App key (cor:dmo:060:22 D-2026-11-26: attaching gives no access, the #5258/#5185 interim key read covering own
+ * personal/private only; cor:api:120:03: a list equals the reads on every surface). On main the two non-personal class
+ * families differed: for knowledge/group the record gate's ownerUserId branch has no link arm, so GraphQL refused while the
+ * ONE judge and MCP admitted (Babaya's #5343 measurement: judged=true, mcp=true, record=false — the first two are red on main
+ * and flip with the narrowing, the record read stays green); for class app that branch fell through to the accessible set,
+ * whose link arm is the same judge, so EVERY surface admitted it (each assertion in that test is red on main on its own).
+ * Every control here was green on main and must stay green.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -86,18 +88,26 @@ describe('#5345 a user-owned non-personal linked memory reaches no surface of th
     expect(await listIds(keyCtx(userApp.id))).toEqual([]);
   });
 
-  it('the same narrowing holds for a group-class and an app-class user-owned memory (the judge keys on the owner axis, not the class)', async () => {
+  it('the same narrowing holds for a group-class user-owned memory (the judge keys on the owner axis, not the class)', async () => {
     const grp = await userOwned('group');
     await attach(asUser(otto), grp.id, userApp.id);
     expect(await linkedReachFor(db as never, keyAuth(userApp.id))).toEqual(new Set());
-    // An app-class user-owned row (another user-owned App's own memory) reached the key on main through the fold the record
-    // gate's app branch also reads — both flip together, so the surfaces still agree.
+  });
+
+  it('an app-class user-owned memory loses every surface, node reads included (all red on main)', async () => {
+    // Another user-owned App's own app-class memory, linked into this App by the owner. On main the record gate's ownerUserId
+    // branch fell through to the accessible set for class 'app', and that set's link arm is the ONE judge — so the judge, MCP
+    // and GraphQL (memory(ref:), the list, node reads) all admitted it. The narrowing refuses it at the judge, so every
+    // surface refuses together (cor:api:120:03); this is the part of #5345 that is wider than "the read gate is unchanged".
     const otherApp = await db.app.create({ data: { id: generateId(), ownerUserId: otto, name: 'Other', urn: `otto-${generateId().slice(-6)}:other` } as never });
     const team = await userOwned('app', { appId: otherApp.id });
+    const doc = await db.node.create({ data: { id: generateId(), memoryId: team.id, loc: 'teamdoc', name: 'T', content: 'app-class body' } });
     await attach(asUser(otto), team.id, userApp.id);
+    expect(await linkedReachFor(db as never, keyAuth(userApp.id))).toEqual(new Set());
     expect(await canReadMemory(db as never, keyAuth(userApp.id), team.id)).toBe(false);
     expect(await recordRead(keyCtx(userApp.id), team.id)).toBe(false);
     expect(await listIds(keyCtx(userApp.id))).toEqual([]);
+    expect(await Q.node({}, { ref: doc.id }, keyCtx(userApp.id))).toBeNull();
   });
 
   it('control: a personal memory its owner linked still lists on BOTH surfaces and memory(ref:) answers it', async () => {

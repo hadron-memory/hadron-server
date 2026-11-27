@@ -317,12 +317,15 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // A live request still answers true and ends withdrawn; an ended one, and another person's or unknown id, are unchanged. No SDL shape change.
 // (0.48.0 is #5314, merged first.)
 // 0.50.0 — BREAKING (behaviour, no SDL removal) (#5345): the reach of an App's links narrows to the record gate. A user-owned
-// memory of a class other than personal/private (`ownerUserId` set — for example a knowledge memory under a user root) that its
-// owner linked to an App no longer reaches the App's pure key or a userless run on ANY surface: `hadron_list_memories` and its
-// access map stop listing it (they did list it, while `memory(ref:)` and node reads refused it — the disagreement #5345 closes),
-// and the GraphQL `memories` list, `memory(ref:)` and node reads keep refusing it. The link row stays, inert (`active: false` in
-// App.attachedMemories), until detached. Own personal/private linked by the App's owner (the #5258/#5185 interim) and
-// organization-owned links are unchanged. (0.49.0 is #5338, merged first.)
+// memory of a class other than personal/private (`ownerUserId` set) that its owner linked to an App no longer reaches the App's
+// pure key or a userless run on ANY surface; the link row stays, inert (`active: false` in App.attachedMemories), until detached.
+// What main did differed by class. A knowledge/group memory (for example under a user root) WAS listed by `hadron_list_memories`
+// and its access map while `memory(ref:)` and node reads refused it — the disagreement #5345 closes (the list refuses too). An
+// app-class memory (a user-owned App's own, linked into itself included) reached EVERY read on main — the record gate's app arm
+// reads the same link judge — so `memory(ref:)`, the GraphQL `memories` list and node reads lose it as well: wider than "the
+// read gate is unchanged", still cor:dmo:060:22 (Decided D-2026-11-26: attaching gives no access; the #5258/#5185 interim covers
+// own personal/private only). Own personal/private linked by the App's owner and organization-owned links are unchanged.
+// (0.49.0 is #5338, merged first.)
 export const HADRON_SERVER_VERSION = '0.50.0';
 
 /**
