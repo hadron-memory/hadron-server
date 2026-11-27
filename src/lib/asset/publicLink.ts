@@ -18,6 +18,8 @@
  */
 
 import { isUserHolding, userHoldingCreatorMayRead } from '../auth/userHolding.js';
+import { isRunPrincipal } from '../auth/runPrincipal.js';
+import { LIVE_ORG_MEMBERSHIP } from '../auth/liveOrgMembership.js';
 import type { Asset, Prisma } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
 import { lockAppKeyManagerMemberships } from '../../api/graphql/schema/appKeyManagement.js';
@@ -150,6 +152,29 @@ async function canManageNonAppMemory(ctx: Context, memory: PublicLinkMemory): Pr
   }
 }
 
+/**
+ * hadron-internal#90 (Holger, 2026-11-27, decisions:2026-11-27-holger-rulings-to-victor-chat-memory-public-links): an org or platform
+ * admin may switch a public link OFF on a file in a user's chat holding, never ON. This answers only "may this caller revoke?":
+ * a platform ADMIN or OWNER, or a live ADMIN or OWNER of the memory's organisation. Never an impersonated session, a run principal
+ * or a caller with no user. The ON direction stays the creator's alone (the refusal of the door above), and nothing here reads
+ * the asset or the memory for the caller.
+ */
+async function mayRevokeHoldingLink(ctx: Context, memory: PublicLinkMemory): Promise<boolean> {
+  if (!isUserHolding(memory) || !ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return false;
+  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
+  if (!memory.organizationId) return false;
+  const member = await ctx.db.orgMember.findFirst({
+    where: { organizationId: memory.organizationId, userId: ctx.userId, role: { in: ['ADMIN', 'OWNER'] }, ...LIVE_ORG_MEMBERSHIP },
+    select: { userId: true },
+  });
+  return member !== null;
+}
+
+/** The success shape of an admin's revoke: nothing that names or describes the file or its memory (the Asset type's non-null fields get neutral values). */
+function redactedRevokeResult(asset: Asset): Asset {
+  return { ...asset, filename: '', mimeType: 'application/octet-stream', sizeBytes: 0, description: null, uploadedBy: null, scanSignature: null };
+}
+
 /** Lock the rows the manager decision reads, so a revocation queued behind us is seen or waits. */
 async function lockDecidingMemberships(txCtx: Context, memory: PublicLinkMemory): Promise<void> {
   const tx = txCtx.db;
@@ -197,7 +222,16 @@ export async function setAssetPublicLink(
     { userId: ctx.userId, appId: ctx.appId, roles: ctx.roles, organizationId: ctx.organizationId },
     seen.memoryId!,
   );
-  const first = await assetPublicLinkAdmission(ctx, observed, instruction);
+  // #90: a holding's link may be switched OFF (never ON) by an organisation or platform admin; that act needs no read of the asset or
+  // the memory, and its result is redacted. Every other caller keeps the refusal of the admission above.
+  let viaRevoke = false;
+  const admit = async (c: Context, m: PublicLinkMemory, expected?: ActAdmission): Promise<ActAdmission | null> => {
+    const own = await assetPublicLinkAdmission(c, m, instruction, expected);
+    if (own) { viaRevoke = false; return own; }
+    if (!enabled && await mayRevokeHoldingLink(c, m)) { viaRevoke = true; return { kind: 'person', userId: c.userId! }; }
+    return null;
+  };
+  const first = await admit(ctx, observed);
   if (!(await readsMemory(ctx.db)) && !first) throw notFound();
 
   // #3322: who acts, decided once on the transaction and judged again on the locked rows. A refused call
@@ -217,7 +251,7 @@ export async function setAssetPublicLink(
       const memory = await txCtx.db.memory.findUnique({ where: { id: seen.memoryId! }, select: PUBLIC_LINK_MEMORY_SELECT });
       if (!memory) throw notFound();
       await lockDecidingMemberships(txCtx, memory);
-      admission = await assetPublicLinkAdmission(txCtx, memory, instruction, first ?? undefined);
+      admission = await admit(txCtx, memory, first ?? undefined);
       if (!admission) throw await denied(txCtx);
     },
     async (tx, txCtx) => {
@@ -266,5 +300,5 @@ export async function setAssetPublicLink(
     userId: ctx.userId,
     reason: enabled ? 'public link on' : 'public link off',
   });
-  return result;
+  return viaRevoke ? redactedRevokeResult(result) : result;
 }
