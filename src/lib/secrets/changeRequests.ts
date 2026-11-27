@@ -103,13 +103,17 @@ export const SECRET_CHANGE_SWEEP_MAX_BATCHES = 20;
 
 /**
  * Clear ONE batch of expired ciphertext; expiry remains enforced independently at every use. The row trigger nulls the ciphertext.
- * The outer UPDATE repeats the predicate as a backstop (the subquery's row locks already hold the rows).
+ * The UPDATE repeats the predicate as a backstop (the batch's row locks already hold the rows).
+ * #5348: the batch is a MATERIALIZED CTE, run once. As an `id IN (subquery)` a nested-loop plan rescanned the LIMIT ... SKIP LOCKED
+ * subquery per outer row, each rescan skipping the rows this statement had just updated and taking the next ones, so one batch
+ * could update the whole backlog (a LIMIT 1 batch cleared 300 rows on a table without statistics), past every row and time bound.
  */
 export async function sweepExpiredSecretChanges(tx: Prisma.TransactionClient, limit: number = SECRET_CHANGE_SWEEP_BATCH): Promise<number> {
- return tx.$executeRaw`UPDATE secret_change_requests SET state='expired',ended_at=(clock_timestamp() AT TIME ZONE 'UTC')
+ return tx.$executeRaw`WITH batch AS MATERIALIZED (SELECT id FROM secret_change_requests
  WHERE state='open' AND expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')
- AND id IN (SELECT id FROM secret_change_requests WHERE state='open' AND expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')
- ORDER BY expires_at, id LIMIT ${limit}::int FOR UPDATE SKIP LOCKED)`;
+ ORDER BY expires_at, id LIMIT ${limit}::int FOR UPDATE SKIP LOCKED)
+ UPDATE secret_change_requests s SET state='expired',ended_at=(clock_timestamp() AT TIME ZONE 'UTC')
+ FROM batch WHERE s.id = batch.id AND s.state='open' AND s.expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')`;
 }
 
 /**
