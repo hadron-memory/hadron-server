@@ -85,6 +85,7 @@ export async function liveRegistrationsFor(
     WHERE r.app_id = ${appId}
       AND ${ASSIGNMENT_IN_EFFECT}
       ${hostId ? Prisma.sql`AND r.host_id = ${hostId}` : Prisma.empty}
+      AND r.lost_at IS NULL
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * COALESCE(s.host_lapse_check_ins, ${HOST_LAPSE_CHECK_INS_DEFAULT})) >= ${toNaiveUtc(now)}::timestamp
     ORDER BY r.host_id`;
   return rows.flatMap(({ model, effort, accountProfile, server, ...r }) => {

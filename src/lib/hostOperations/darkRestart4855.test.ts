@@ -27,6 +27,7 @@ import { renderGrantSummary } from '../grants/summary.js';
 import { PLATFORM_ACTIONS } from '../grants/actions.js';
 import { setStopSignal } from '../stopSignals/lifecycle.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
+import { joinHostForKey } from '../../test/agentTeamHost.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -58,6 +59,7 @@ beforeEach(async () => {
   w = await seedTriggerWorld();
   const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   orca1 = await db.appKey.create({ data: { id: generateId(), appId: w.appId, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label: 'orca1' }, select: { id: true } });
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, w.person);
   kit = (await db.worker.create({
     data: { ...WORKER_SIGNATURE_DEFAULTS, appId: w.appId, agentId: w.agentId, name: 'Kit', slug: 'kit', heldByUserId: w.user2Id, heldAt: new Date() }, select: { id: true },
