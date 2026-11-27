@@ -342,7 +342,16 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // fold, and GraphQL `memories` now lists them too. For a user-owned App every surface is new (memory(ref:), memories, node(ref:),
 // findNodes, resolveUrn, hadron_list_memories, the MCP point reads). A user, a session-bound key, an impersonation and a run gain
 // nothing; per-user anonymous rows and Worker working memories stay refused. (0.52.0 is #5325, merged first.)
-export const HADRON_SERVER_VERSION = '0.53.0';
+// 0.55.0 — BREAKING (behaviour) + ADDITIVE, #5027 (cor:acl:030:01, R1-R4, Holger 2026-11-27): a chat lives in a memory the caller
+// names. ADDITIVE: `startChat(memoryRef:)` (an id or URN of an app, group, personal or private memory of the Agent's App that the caller
+// can read and write as themselves); `Agent.defaultChatHome` (APP_SHARED, PERSONAL or PRIVATE, set through `updateAgent` by whoever
+// manages the Agent) decides when memoryRef is omitted; `Chat.homeMemoryClass` and `Chat.homeMemoryUrn` (the `hrn:mem:` form, as
+// `Memory.urn`) on every chat read. `Chat.scope` is kept and deprecated, now a label derived from the home's class. BREAKING: a home
+// that fails any step, including a caller with no AppMember row in the home's App (a group MemoryMember outside the App), is refused
+// with the one `CHAT_HOME_INVALID` and writes nothing; only the person themselves creates a missing personal or private default home
+// (an App key, a run or a worker session is refused). A start with neither memoryRef nor a default behaves as before.
+// (0.54.0 is #5411, frozen first.)
+export const HADRON_SERVER_VERSION = '0.55.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
