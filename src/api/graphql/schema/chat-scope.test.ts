@@ -471,11 +471,12 @@ describe('ChatScopeError', () => {
   // ChatScopeError ships to the client as `INTERNAL_SERVER_ERROR` and
   // the three sub-codes collapse into one unidentifiable failure.
   it('exposes the code as extensions.code (so clients can branch on it)', () => {
+    // #5394 retired SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS; CHAT_APP_NOT_IDENTIFIED replaces it.
     const e = new ChatScopeError(
-      'SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS',
-      'nope from MCP App-key',
+      'CHAT_APP_NOT_IDENTIFIED',
+      'name the App',
     );
-    expect(e.extensions?.code).toBe('SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS');
+    expect(e.extensions?.code).toBe('CHAT_APP_NOT_IDENTIFIED');
   });
 });
 

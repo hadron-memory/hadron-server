@@ -2252,12 +2252,12 @@
   "mutation.exportNodeToGoogleDoc(folderId) bare": "URN_NOT_QUALIFIED",
   "mutation.exportNodeToGoogleDoc(folderId) padded": "URN_NOT_QUALIFIED",
   "mutation.exportNodeToGoogleDoc(folderId) well-formed": "URN_NOT_QUALIFIED",
-  "mutation.startChat(agentRef) bare": "URN_NOT_QUALIFIED",
-  "mutation.startChat(agentRef) padded": "URN_NOT_QUALIFIED",
-  "mutation.startChat(agentRef) well-formed": "URN_NOT_QUALIFIED",
-  "mutation.startChat(userId) bare": "URN_NOT_QUALIFIED",
-  "mutation.startChat(userId) padded": "URN_NOT_QUALIFIED",
-  "mutation.startChat(userId) well-formed": "URN_NOT_QUALIFIED",
+  "mutation.startChat(agentRef) bare": "CHAT_APP_NOT_IDENTIFIED",
+  "mutation.startChat(agentRef) padded": "CHAT_APP_NOT_IDENTIFIED",
+  "mutation.startChat(agentRef) well-formed": "CHAT_APP_NOT_IDENTIFIED",
+  "mutation.startChat(userId) bare": "CHAT_APP_NOT_IDENTIFIED",
+  "mutation.startChat(userId) padded": "CHAT_APP_NOT_IDENTIFIED",
+  "mutation.startChat(userId) well-formed": "CHAT_APP_NOT_IDENTIFIED",
   "mutation.sendChatMessage(chatId) bare": "CHAT_NOT_FOUND",
   "mutation.sendChatMessage(chatId) padded": "CHAT_NOT_FOUND",
   "mutation.sendChatMessage(chatId) well-formed": "CHAT_NOT_FOUND",
@@ -2716,5 +2716,8 @@
   "mutation.linkMemoryToUser(externalUserId) well-formed": "FORBIDDEN",
   "mutation.encryptMemory(memoryRef) bare": "URN_NOT_QUALIFIED",
   "mutation.encryptMemory(memoryRef) padded": "URN_NOT_QUALIFIED",
-  "mutation.encryptMemory(memoryRef) well-formed": "MEMORY_NOT_FOUND"
+  "mutation.encryptMemory(memoryRef) well-formed": "MEMORY_NOT_FOUND",
+  "mutation.startChat(appRef) bare": "AGENT_NOT_FOUND",
+  "mutation.startChat(appRef) padded": "AGENT_NOT_FOUND",
+  "mutation.startChat(appRef) well-formed": "AGENT_NOT_FOUND"
 }

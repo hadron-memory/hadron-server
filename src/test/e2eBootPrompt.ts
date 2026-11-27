@@ -99,7 +99,8 @@ export async function seedE2eStockAgents(db: PrismaClient, o: {
       idFor: part => o.id(`${o.org}:${role}:boot-${part}`) });
   }
   // #3160: one ordinary top-level conversation (cor:cht:020:01 step 1: neither setup nor fallback) with one stage, in the
-  // shared system memory, so an unnamed `startChat` on the coordinator opens it instead of AGENT_HAS_NO_CONVERSATIONS.
+  // shared system memory, so an unnamed `startChat` on the coordinator (under the team App, named by appRef or carried by
+  // an App credential, #5394) opens it instead of AGENT_HAS_NO_CONVERSATIONS.
   // The root `conversations` node, the conversation (data.stageOrder) and its one stage carrying the prompt.
   const conv = async (loc: string, data: object | null, content: string | null) => {
     await db.node.create({ data: { id: o.id(`${o.org}:${loc}`), memoryId: o.systemMemoryId, loc, name: loc.split(':').pop()!,

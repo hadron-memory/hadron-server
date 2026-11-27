@@ -65,8 +65,9 @@ beforeEach(async () => {
 });
 afterEach(() => sessionKeyCache.clear());
 
+// #5394: a start runs under an identified App. A signed-in caller names it (appRef); an App credential carries its own.
 const start = (ctx: Context, args: Record<string, unknown> = {}) =>
-  M.startChat({}, { agentRef: agentId, conversationName: 'flow', ...args }, ctx);
+  M.startChat({}, { agentRef: agentId, conversationName: 'flow', ...(ctx.appId ? {} : { appRef: appId }), ...args }, ctx);
 const refusal = async (p: Promise<unknown>) => {
   const err: any = await p.then(() => null, (e: unknown) => e);
   expect(err, 'the start must be refused').not.toBeNull();
@@ -698,5 +699,47 @@ describe('#5027 review fixes on #5391', () => {
     } as any));
     const copied = await db.chatRootCounter.findUniqueOrThrow({ where: { chatRootNodeId: copy.nodeIdMap.get(root.id)! } });
     expect(copied.agentId).toBe(agentId);
+  });
+});
+
+// #5394 x #5027 (the main merge after #5407): a start runs under the one App the call identifies, so the chat's home is
+// a memory of THAT App. ann is a member of two Apps that both install the Agent, and holds a personal memory in each.
+describe('#5027 x #5394: the home is a memory of the identified App', () => {
+  const twoApps = async () => {
+    const app2 = (await db.app.create({ data: { name: 'Tutor four', urn: `${orgUrn}:tutor-four`, organizationId: orgId } })).id;
+    await db.appAgent.create({ data: { appId: app2, agentId } });
+    await db.appAgent.create({ data: { appId: app2, agentId: otherAgentId } });
+    await db.appMember.create({ data: { appId: app2, userId: ann, role: 'member' } });
+    await serveEveryAgent(db);
+    const own1 = await appUserMemory('personal');
+    const own2 = (await M.createMemoryInApp({}, { appRef: app2, agentRef: otherAgentId, memoryClass: 'personal' }, as(ann))).id as string;
+    return { app2, own1, own2 };
+  };
+
+  it('memoryRef naming a usable memory of another App than the named one is CHAT_HOME_INVALID and writes nothing', async () => {
+    const { app2, own2 } = await twoApps();
+    const reference = await refusal(start(as(ann), { memoryRef: `${orgUrn}:no-such-memory` }));
+    const before = await footprint();
+    expect(await refusal(start(as(ann), { memoryRef: own2 })), 'app named, home in app2').toEqual(reference);
+    expect(await footprint(), 'nothing written').toEqual(before);
+    // The same memory is a home when its App is the one named.
+    expect((await chatNodeByLocOrThrow(db, (await start(as(ann), { memoryRef: own2, appRef: app2 })).chatId)).memoryId).toBe(own2);
+  });
+
+  it('a PERSONAL default takes the caller\'s memory of the named App, never another App\'s', async () => {
+    const { app2, own1, own2 } = await twoApps();
+    await M.updateAgent({}, { ref: agentId, defaultChatHome: 'PERSONAL' }, as(ann));
+    expect((await chatNodeByLocOrThrow(db, (await start(as(ann), { appRef: app2 })).chatId)).memoryId).toBe(own2);
+    expect((await chatNodeByLocOrThrow(db, (await start(as(ann), { appRef: appId })).chatId)).memoryId).toBe(own1);
+  });
+
+  it('a signed-in start that names no App is CHAT_APP_NOT_IDENTIFIED before the home is judged, writing nothing', async () => {
+    const own = await appUserMemory('personal');
+    const before = await footprint();
+    for (const memoryRef of [own, generateId()]) {
+      const err = await refusal(M.startChat({}, { agentRef: agentId, conversationName: 'flow', memoryRef }, as(ann)));
+      expect(err.extensions?.code).toBe('CHAT_APP_NOT_IDENTIFIED');
+    }
+    expect(await footprint(), 'nothing written').toEqual(before);
   });
 });

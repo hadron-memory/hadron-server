@@ -342,7 +342,12 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // fold, and GraphQL `memories` now lists them too. For a user-owned App every surface is new (memory(ref:), memories, node(ref:),
 // findNodes, resolveUrn, hadron_list_memories, the MCP point reads). A user, a session-bound key, an impersonation and a run gain
 // nothing; per-user anonymous rows and Worker working memories stay refused. (0.52.0 is #5325, merged first.)
-// 0.55.0 — BREAKING (behaviour) + ADDITIVE, #5027 (cor:acl:030:01, R1-R4, Holger 2026-11-27): a chat lives in a memory the caller
+// 0.54.0 — BREAKING (#5394 PR 1, cor:cht:010:02): `startChat` needs an identified App on both scopes: the App credential's App, or the new
+// `appRef` argument (SDL addition). A call that identifies neither, or whose `appRef` differs from the credential's App, is refused
+// CHAT_APP_NOT_IDENTIFIED before any Agent lookup; the App is never searched for, and SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is
+// retired. A previously working signed-in start that names no App is now refused, so a client keys on this version before sending
+// `appRef` (hadron-portal#2683, hadron-cli#3310). (0.53.0 is #5416, merged first.)
+// 0.56.0 — BREAKING (behaviour) + ADDITIVE, #5027 (cor:acl:030:01, R1-R4, Holger 2026-11-27): a chat lives in a memory the caller
 // names. ADDITIVE: `startChat(memoryRef:)` (an id or URN of an app, group, personal or private memory of the Agent's App that the caller
 // can read and write as themselves); `Agent.defaultChatHome` (APP_SHARED, PERSONAL or PRIVATE, set through `updateAgent` by whoever
 // manages the Agent) decides when memoryRef is omitted; `Chat.homeMemoryClass` and `Chat.homeMemoryUrn` (the `hrn:mem:` form, as
@@ -350,8 +355,8 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // that fails any step, including a caller with no AppMember row in the home's App (a group MemoryMember outside the App), is refused
 // with the one `CHAT_HOME_INVALID` and writes nothing; only the person themselves creates a missing personal or private default home
 // (an App key, a run or a worker session is refused). A start with neither memoryRef nor a default behaves as before.
-// (0.54.0 is #5411, frozen first.)
-export const HADRON_SERVER_VERSION = '0.55.0';
+// (0.54.0 is #5407, merged first; 0.55.0 is #5411, renumbering ahead of this.)
+export const HADRON_SERVER_VERSION = '0.56.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

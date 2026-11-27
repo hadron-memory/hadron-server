@@ -571,7 +571,9 @@ export function validateChatScopeInvariants(args: {
 /** Discriminator for chat-scope errors so callers can distinguish them. */
 export type ChatScopeErrorCode =
   | 'SHARED_CHAT_REQUIRES_APP_CONTEXT'
-  | 'SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS'
+  // #5394 (cor:cht:010:02): startChat names no App (no App credential and no appRef), or names another App than the
+  // credential's. Replaces SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS, which a shared chat under an App credential retired.
+  | 'CHAT_APP_NOT_IDENTIFIED'
   | 'CHAT_MEMORY_OUT_OF_SCOPE'
   // #3097: expected refusal states of `startChat`'s conversation selection.
   | 'AGENT_HAS_NO_CONVERSATIONS'
