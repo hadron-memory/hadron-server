@@ -65,7 +65,7 @@ describe('#5333 ended-request retention', () => {
       VALUES ('p3store',${appId},'s','generic','{}'::jsonb,'STORE',${userId},'open','snap','CIPHERTEXT',1,7,true,(clock_timestamp() AT TIME ZONE 'UTC') - interval '90 days',(clock_timestamp() AT TIME ZONE 'UTC') - interval '89 days')`;
     expect(await drainEndedSecretChanges(roomy as never)).toBe(0);
     expect(await count('p3')).toBe(4);
-    const [row] = await db.$queryRaw<Array<{ c: string }>>`SELECT convert_from(staged_value_encrypted,'UTF8') AS c FROM secret_change_requests WHERE id='p3store'`;
+    const [row] = await db.$queryRaw<Array<{ c: string }>>`SELECT staged_value_encrypted AS c FROM secret_change_requests WHERE id='p3store'`;
     expect(row.c).toBe('CIPHERTEXT');
   });
 
@@ -114,9 +114,10 @@ describe('#5333 ended-request retention', () => {
     expect(await count('p5b')).toBe(1);
   });
 
-  it('P6: the schema refuses an ended row holding a value, and the run never changes a surviving row', async () => {
-    await expect(db.$executeRaw`INSERT INTO secret_change_requests (id,app_id,secret_name,secret_kind,metadata,operation,requester_id,state,snapshot,staged_value_encrypted,key_version,size_bytes,write_version,expires_at,ended_at)
-      VALUES ('p6bad',${appId},'s','generic','{}'::jsonb,'STORE',${userId},'completed','snap','CIPHERTEXT',1,7,true,(clock_timestamp() AT TIME ZONE 'UTC'),(clock_timestamp() AT TIME ZONE 'UTC'))`).rejects.toThrow();
+  it('P6: an ended row can never hold a value (the schema clears it), and the run never changes a surviving row', async () => {
+    await db.$executeRaw`INSERT INTO secret_change_requests (id,app_id,secret_name,secret_kind,metadata,operation,requester_id,state,snapshot,staged_value_encrypted,key_version,size_bytes,write_version,expires_at,ended_at)
+      VALUES ('p6bad',${appId},'s','generic','{}'::jsonb,'STORE',${userId},'completed','snap','CIPHERTEXT',1,7,true,(clock_timestamp() AT TIME ZONE 'UTC'),(clock_timestamp() AT TIME ZONE 'UTC'))`;
+    expect((await db.$queryRaw<Array<{ c: string | null }>>`SELECT staged_value_encrypted AS c FROM secret_change_requests WHERE id='p6bad'`)[0].c).toBeNull();
     await seed(2, 'completed', OLD, 'p6old');
     await seed(2, 'completed', YOUNG, 'p6new');
     await seed(2, 'open', '0 days', 'p6open');
