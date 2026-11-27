@@ -112,7 +112,7 @@ describe('G11: a soft-deleted owner never receives the grant (issue section 8; s
     expect(await grants()).toHaveLength(0);
   });
 
-  it('the library writes no grant and owes none for a soft-deleted organization', async () => {
+  it('the library owes a soft-deleted organization nothing (an organization is owed nothing at all, cor:dmo:170:12)', async () => {
     reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"777"}' });
     await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
     const now = new Date();
@@ -140,7 +140,24 @@ describe('G6: an impersonated read writes nothing', () => {
     impersonation: { sessionId: generateId(), actorUserId: admin, orgId, expiresAt: new Date(Date.now() + 60_000) },
   }) as Partial<Context>;
 
-  it('an organization is owed nothing, and an impersonated read adds nothing to its figure (cor:dmo:170:12)', async () => {
+  const impersonatingUser = () => ({
+    ...ctxOf(p),
+    impersonation: { sessionId: generateId(), actorUserId: admin, orgId, expiresAt: new Date(Date.now() + 60_000) },
+  }) as Partial<Context>;
+
+  // The impersonated "grant due" figure (ruling 9a) was reachable only through an organization's balance: the shared person-record
+  // gate refuses an impersonated session on a person's balance outright. With organizations owed nothing (cor:dmo:170:12) the
+  // only way left to see a due grant under impersonation is closed, and this pin keeps it closed: a refused read writes nothing.
+  it('an impersonated read of a person is refused and writes nothing, so no grant is ever due through impersonation', async () => {
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"777"}' });
+    const res = await gql(BALANCE, impersonatingUser(), { userRef: p });
+    expect(res.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+    expect(await grants()).toHaveLength(0);
+    expect(balanceOf(await gql(BALANCE, ctxOf(p), { userRef: p }))).toBe('777');
+    expect(await grants()).toHaveLength(1);
+  });
+
+  it('an organization is owed nothing: an impersonated read adds nothing to its figure (cor:dmo:170:12)', async () => {
     reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"777"}' });
     const res = await gql(BALANCE, impersonating(), { orgRef: orgId });
     expect(res.errors).toBeUndefined();

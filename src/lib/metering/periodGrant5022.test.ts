@@ -173,7 +173,7 @@ describe('G8: a malformed setting refuses, in one fixed sentence that echoes not
     });
   }
 
-  it('accepts the 64-bit maximum, zero, and both owner types', () => {
+  it('accepts the 64-bit maximum, zero, and an organization amount of "0" only', () => {
     expect(parseOwnerDefaultMonthlyGrant('{"user":"9223372036854775807","organization":"0"}'))
       .toEqual({ user: 9223372036854775807n });
     expect(parseOwnerDefaultMonthlyGrant('{"organization":"0"}')).toEqual({ user: 0n });
