@@ -29,17 +29,32 @@ export interface SecretIssuance {
   asWriter: boolean;
 }
 
-/** S6 preserves S3's issuer set; only the marked request's refusal code differs. */
+const autoDeleteNotAllowed = () => new GraphQLError('You may not set an auto-delete mark for this secret.', { extensions: { code: 'SECRET_AUTO_DELETE_NOT_ALLOWED' } });
+
+/**
+ * S6 preserves S3's issuer set; only the marked request's refusal code differs. #5335 (cor:sec:060:03 arming rule; the
+ * cor:sec:070:01 auto-delete exception refused): a mark on a PROTECTED secret also needs the secret's `deleteAfterUse`, else
+ * the same SECRET_AUTO_DELETE_NOT_ALLOWED. Judged only AFTER the issuer rule passed, so a caller who may not issue gets the one
+ * refusal whether the secret is protected, unprotected or missing, and learns nothing of its protection. Both doors run this:
+ * `issueSecretReadClient` (under the secret row lock) and the generic grant door's issuer rule at signing.
+ */
 export async function requireSecretReadClientIssuer(ctx: Context, secretId: string, autoDelete = false): Promise<SecretIssuance> {
+  let issuance: SecretIssuance;
   try {
     const userId = await requirePersonOnlyAct(ctx, 'secret.issue-read-client', authorizationDenied);
-    return await judgeSecretReadClientIssuer(ctx, userId, secretId);
+    issuance = await judgeSecretReadClientIssuer(ctx, userId, secretId);
   } catch (error) {
     if (autoDelete && error instanceof GraphQLError && ['FORBIDDEN', SECRET_READ_CLIENT_SUPERSEDED].includes(String(error.extensions?.code))) {
-      throw new GraphQLError('You may not set an auto-delete mark for this secret.', { extensions: { code: 'SECRET_AUTO_DELETE_NOT_ALLOWED' } });
+      throw autoDeleteNotAllowed();
     }
     throw error;
   }
+  if (autoDelete) {
+    // ctx.db is the caller's transaction, as in judgeSecretReadClientIssuer: issueSecretReadClient passes it under the secret row lock.
+    const secret = await ctx.db.secret.findUnique({ where: { id: secretId }, select: { protected: true, deleteAfterUse: true } });
+    if (!secret || (secret.protected && !secret.deleteAfterUse)) throw autoDeleteNotAllowed();
+  }
+  return issuance;
 }
 
 /**
