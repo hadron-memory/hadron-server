@@ -261,6 +261,24 @@ async function resolveIndexSources(
 }
 
 /**
+ * #5360 B7 — validate a ranked-list search before ANY read, the Agent ref's resolution included: an invalid
+ * limit or an over-long phrase is BAD_USER_INPUT even for an unknown or unreadable Agent, so a caller's bad
+ * input is named as such instead of losing to the gate's AGENT_NOT_FOUND, and no agent row is read to refuse
+ * a malformed request. Semantics unchanged from the old post-read check: limit is judged only with a phrase
+ * (without one it is ignored, the legacy list), and the phrase bound is the shared 512 (#5360 B2). Called by
+ * the GraphQL resolver and the MCP tool before they resolve the ref, and again at the top of
+ * {@link listAgentTasks} for every direct caller.
+ */
+export function assertAgentTaskSearch(search: AgentTaskSearch): void {
+  if (search.phrase == null) return;
+  const phrase = search.phrase.trim();
+  if (!phrase || (search.limit != null && (!Number.isInteger(search.limit) || search.limit < 1 || search.limit > RANKED_TASK_LIST_MAX))) {
+    throw new GraphQLError(`phrase must be non-empty and limit must be an integer from 1 to ${RANKED_TASK_LIST_MAX}.`, { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  assertQueryLength(phrase);
+}
+
+/**
  * An Agent's tasks (cor:dmo:050:15): its effective runnable nodes and every
  * chain index's listed tasks, each once, with a trigger where an index edge
  * gives one. Ordered by loc, then memory id, for a stable list.
@@ -269,13 +287,12 @@ async function resolveIndexSources(
  * {@link RANKED_TASK_LIST_MAX}); omission preserves the original list.
  */
 export async function listAgentTasks(db: Db, auth: AuthContext, agentId: string, ref: string, search: AgentTaskSearch = {}): Promise<AgentTaskEntry[]> {
+  assertAgentTaskSearch(search);
   const tasks = await openAgentTasks(db, auth, agentId, ref);
   if (search.phrase == null) return tasks.entries; // byte-identical legacy list
-  const phrase = search.phrase.trim();
-  if (!phrase || (search.limit != null && (!Number.isInteger(search.limit) || search.limit < 1 || search.limit > RANKED_TASK_LIST_MAX))) {
-    throw new GraphQLError(`phrase must be non-empty and limit must be an integer from 1 to ${RANKED_TASK_LIST_MAX}.`, { extensions: { code: 'BAD_USER_INPUT' } });
-  }
-  return (await tasks.rank(phrase)).ranked.slice(0, search.limit ?? 3);
+  // The ranker judges the same TRIMMED phrase the validation above refused at (#5408, Baylor's F3: noted as
+  // equivalence — the validation trims first, and this trim is what keeps the two arms on one string).
+  return (await tasks.rank(search.phrase.trim())).ranked.slice(0, search.limit ?? 3);
 }
 
 /**
