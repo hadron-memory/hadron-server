@@ -147,7 +147,7 @@ describe('#5333 ended-request retention', () => {
     const sql: string[] = [];
     let n = 0;
     const execute = vi.fn((s: TemplateStringsArray) => { sql.push(s.join('?')); return ++n === 1 ? Promise.reject(new Error('secret-detail')) : Promise.resolve(0); });
-    const loop = startSecretChangeSweepLoop({ $transaction: async (f: Function) => f({ $executeRaw: execute }) } as never);
+    const loop = startSecretChangeSweepLoop({ $transaction: async (f: Function) => f({ $queryRaw: vi.fn().mockResolvedValue([]), $executeRaw: execute }) } as never);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(execute).toHaveBeenCalledTimes(2);
     expect(sql[0]).toMatch(/UPDATE secret_change_requests/);
