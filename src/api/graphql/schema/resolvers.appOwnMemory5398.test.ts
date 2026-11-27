@@ -263,6 +263,16 @@ describe('#5398 controls (green on main, stay green)', () => {
     expect(await recordRead(keyAuth(userApp.id), own.id)).toBeNull();
   }, 30_000);
 
+  it('an org-owned App whose organization is soft-deleted: the arm admits nothing of it', async () => {
+    // Pins the organization clause of the App-liveness check on the arm's own predicate (Bianca's SEC10 P3, mutant M11):
+    // nothing else in the predicate refuses a deleted organization's rows, the tenant equality included.
+    const own = await appMemory(orgApp, 'own');
+    expect(await ownAppMemoryIds(db as never, keyAuth(orgApp.id))).toEqual(new Set([own.id]));
+    await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
+    expect(await ownAppMemoryIds(db as never, keyAuth(orgApp.id))).toEqual(new Set());
+    expect(await ownAppMemoryIds(db as never, keyAuth(orgApp.id), [own.id])).toEqual(new Set());
+  }, 30_000);
+
   it.each([
     ['an org-owned App (reach unchanged from main)', () => orgApp],
     ['a user-owned App (the new reach)', () => userApp],
