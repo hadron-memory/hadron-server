@@ -336,7 +336,12 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // lifts it, a host key never does (STOP_SIGNAL_SCOPE_FORBIDDEN for every shape of the call). The MCP `hadron_stop_signal_set` scope enum
 // gains APP. The three older scopes behave as before. A lagging client that still validates against the old enum cannot send APP, and one
 // that lists signals may now read a scope it does not know. (0.51.0 is #5345, merged first.)
-export const HADRON_SERVER_VERSION = '0.52.0';
+// 0.53.0 — BREAKING (#5394 PR 1, cor:cht:010:02): `startChat` needs an identified App on both scopes: the App credential's App, or the new
+// `appRef` argument (SDL addition). A call that identifies neither, or whose `appRef` differs from the credential's App, is refused
+// CHAT_APP_NOT_IDENTIFIED before any Agent lookup; the App is never searched for, and SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is
+// retired. A previously working signed-in start that names no App is now refused, so a client keys on this version before sending
+// `appRef` (hadron-portal#2683, hadron-cli#3310). Whichever of this and #5416 merges second renumbers to 0.54.0.
+export const HADRON_SERVER_VERSION = '0.53.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
