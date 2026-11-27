@@ -21,6 +21,7 @@ import { generateDataKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { RUN_CLIENT_PREFIX } from '../../../lib/auth/runPrincipal.js';
 import { resolvers, type Context } from './resolvers.js';
+import { canReadMemory as mcpCanRead, canWriteToMemory as mcpCanWrite } from '../../../mcp/access-control.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -463,7 +464,62 @@ describe('#5027 Ask 6: the chat records its Agent; the home\'s readers are its a
       const r = await refusal(M.createNode({}, { input: { memoryRef, loc: 'notes:two', name: 'two', content: 'x' } }, as(carol)));
       return JSON.parse(JSON.stringify(r).split(memoryRef).join('<ref>'));
     };
-    expect(await write(group)).toEqual(await write(missingMemory));
+    // createNode answers a memory the caller may not write with its write refusal, whatever the memory: the App-scoped
+    // group answers exactly as an org group carol is not a member of does today.
+    const orgGroup = (await db.memory.create({ data: {
+      id: generateId(), class: 'group', visibility: 'GROUP', name: 'Org group', urn: `${orgUrn}:org-group`, organizationId: orgId, createdBy: ann,
+    } })).id;
+    await db.memoryMember.create({ data: { memoryId: orgGroup, userId: ann, role: 'owner' } });
+    expect(await write(group)).toEqual(await write(orgGroup));
     expect(await db.node.count({ where: { memoryId: group, loc: 'notes:two' } })).toBe(0);
+  });
+
+  // The gate's conditions (Xan's re-gate of 2026-11-27): the new arm admits MemoryMembers only. An org ADMIN who is not
+  // a member gets nothing through it; a platform admin's answer is whatever it was before #5027 (the R2 admin audit is
+  // a separate issue), identical for an App-scoped group and an org group; an org group with no App is unchanged.
+  const groupOf = async (inApp: boolean, members: Array<[string, 'reader' | 'writer' | 'owner']>) => {
+    const g = await db.memory.create({ data: {
+      id: generateId(), class: 'group', visibility: 'GROUP', name: inApp ? 'App group' : 'Org group',
+      urn: `${orgUrn}:${inApp ? 'app' : 'org'}-group-${generateId().slice(0, 6)}`, organizationId: orgId, createdBy: bob, ...(inApp ? { appId } : {}),
+    } });
+    for (const [userId, role] of members) await db.memoryMember.create({ data: { memoryId: g.id, userId, role } });
+    await db.node.create({ data: { memoryId: g.id, loc: 'notes:seed', name: 'seed', content: 'seeded' } });
+    return g.id;
+  };
+  const answers = async (ctx: Context, memoryId: string) => ({
+    record: !!(await Q.memory({}, { ref: memoryId }, ctx).catch(() => null)),
+    node: (await Q.node({}, { ref: 'notes:seed', memoryRef: memoryId }, ctx).catch(() => null))?.content ?? null,
+    write: await M.createNode({}, { input: { memoryRef: memoryId, loc: `notes:w${generateId().slice(0, 6)}`, name: 'w', content: 'w' } }, ctx).then(() => true, () => false),
+    mcpRead: await mcpCanRead(db, { userId: ctx.userId!, roles: ctx.roles ?? [] } as any, memoryId),
+    mcpWrite: await mcpCanWrite(db, { userId: ctx.userId!, roles: ctx.roles ?? [] } as any, memoryId),
+  });
+  const NOTHING = { record: false, node: null, write: false, mcpRead: false, mcpWrite: false };
+  const EVERYTHING = { record: true, node: 'seeded', write: true, mcpRead: true, mcpWrite: true };
+
+  it('(vii) the new arm, on GraphQL and MCP alike: a member writer reads and writes, a member reader only reads', async () => {
+    const g = await groupOf(true, [[bob, 'writer'], [carol, 'reader']]);
+    await withCarolInApp();
+    expect(await answers(as(bob), g)).toEqual(EVERYTHING);
+    expect(await answers(as(carol), g)).toEqual({ record: true, node: 'seeded', write: false, mcpRead: true, mcpWrite: false });
+  });
+
+  it('(vii) an org ADMIN who is not a member gets nothing through it, on GraphQL and MCP; nor does an App member', async () => {
+    const g = await groupOf(true, [[bob, 'owner']]);
+    await withCarolInApp();
+    expect(await answers(as(ann), g), 'org ADMIN, App member, not in the group').toEqual(NOTHING);
+    expect(await answers(as(carol), g), 'App member, not in the group').toEqual(NOTHING);
+  });
+
+  it('(vii) a platform admin answers the same for an App-scoped group as for an org group, as before #5027', async () => {
+    const inApp = await groupOf(true, [[bob, 'owner']]);
+    const inOrg = await groupOf(false, [[bob, 'owner']]);
+    const admin = as(carol, { roles: ['ADMIN'] });
+    expect(await answers(admin, inApp)).toEqual(await answers(admin, inOrg));
+  });
+
+  it('(vii) control: an org group with no App is unchanged: its members in, an org ADMIN outside it refused', async () => {
+    const g = await groupOf(false, [[bob, 'writer']]);
+    expect(await answers(as(bob), g)).toEqual(EVERYTHING);
+    expect(await answers(as(ann), g)).toEqual(NOTHING);
   });
 });
