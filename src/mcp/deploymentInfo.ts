@@ -347,7 +347,13 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // CHAT_APP_NOT_IDENTIFIED before any Agent lookup; the App is never searched for, and SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is
 // retired. A previously working signed-in start that names no App is now refused, so a client keys on this version before sending
 // `appRef` (hadron-portal#2683, hadron-cli#3310). (0.53.0 is #5416, merged first.)
-export const HADRON_SERVER_VERSION = '0.54.0';
+// 0.57.0 — BREAKING (output nullability) + ADDITIVE (#5077 F3a-2, cor:dmo:050:12): `AppRun.organizationId` is now `ID` (null for a
+// run of an App a person owns) and `AppRun.ownerUserId: ID` is new (exactly one of the two is set). A client that reads
+// organizationId as non-null must key on this version. With PERSONAL_APP_RUNS_ENABLED=true the manual door (triggerAppRun,
+// runTask(appRef:), importNode(taskRef:)) launches on a person's App for its key or its owner / owner-role member, FORBIDDEN for
+// anyone else; the owner and an owner-role member read (appRun, latestAppRun, resolveUrn, hadron_get_run) and cancel that App's
+// runs; a platform admin cancels one with its content withheld. (0.55.0 is #5411 and 0.56.0 #5391, held ahead of this.)
+export const HADRON_SERVER_VERSION = '0.57.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
