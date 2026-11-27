@@ -71,7 +71,7 @@ async function person(handle: string): Promise<Person> {
 const as = (userId: string, extra: Record<string, unknown> = {}) => ({ db, userId, roles: [], clientId: `user:${userId}`, ...extra }) as unknown as Context;
 const appKey = (p: Person) => ({ db, appId: p.app.id, roles: [], clientId: `app:${p.app.id}` }) as unknown as Context;
 async function userWith(handle: string, roles: string[] = []) {
-  return db.user.create({ data: { handle, roles } });
+  return db.user.create({ data: { handle, roles: roles as never } });
 }
 async function member(p: Person, handle: string, role: string) {
   const u = await userWith(handle);
