@@ -3,7 +3,7 @@
  * a pure App key READS its own App's shared `app`-class memories, and so lists them.
  *
  * This module is the ONE predicate for that arm. Its callers are the three places the App's reach is assembled, the same
- * three that take #5185's `linkedReachFor`:
+ * three that take #5321's `grantReadReachFor` (which replaced #5185's link reach):
  *  - `getPrincipalAppMemoryAccess` (src/mcp/access-control.ts): the MCP access map (`hadron_list_memories`), and through
  *    `appDerivedMemoryIds` the GraphQL accessible set behind `memory(ref:)`, `node(ref:)`, `findNodes`/search and
  *    `resolveUrn`;
@@ -24,8 +24,8 @@
  * the reads, only to the list; for a user-owned App it is the read that rule 2 of `admissibleFoldRows` (no strict-owner row
  * for a credential-only principal) withheld.
  *
- * READ only: every caller folds it as READ_ONLY, and no write gate consults it. It is not an attachment, so #5345's narrowing
- * of linked reach does not touch it. An encrypted memory changes nothing: its content still needs a cached session key.
+ * READ only: every caller folds it as READ_ONLY, and no write gate consults it. It is neither an attachment nor a grant, so
+ * #5321's removal of link reads does not touch it (and a read grant never names the App's own memories). An encrypted memory changes nothing: its content still needs a cached session key.
  */
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { isPureAppKeyShape } from './appMemoryLinks.js';

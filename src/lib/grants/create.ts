@@ -47,6 +47,7 @@ import { generateId } from '../id.js';
 import { autoDeleteLimitRefusal } from '../secrets/autoDelete.js';
 import { isModelReadableKind } from '../secrets.js';
 import { grantTermsBytes, GrantTermsError, type GrantHolderKind } from './terms.js';
+import { MEMORY_READ_ACTION, READ_GRANT_TARGET_SELECT, memoryReadTargetRefusal } from './readGrant.js';
 
 export type GrantCreateCode =
   | 'GRANT_REQUESTER_NOT_WORKER'
@@ -126,12 +127,21 @@ function valueMatchesType(type: string, value: unknown): boolean {
     const oneWorker = (v: unknown) => typeof v === 'string' && NODE_ID_RE.test(v);
     return Array.isArray(value) ? value.length > 0 && value.every(oneWorker) : oneWorker(value);
   }
+  // #5321: memories are named by their stored ids, one or a non-empty list, never the wildcard; a single value may instead be the
+  // grant's App's own organization id (form (a), judged below with the rows).
+  if (type === 'memory-ref') {
+    const one = (v: unknown) => typeof v === 'string' && NODE_ID_RE.test(v);
+    return Array.isArray(value) ? value.length > 0 && value.every(one) : one(value);
+  }
   if (type === 'https-prefix') return isSecretUsePrefix(value);
   if (type === 'header-name') return isSecretUseHeaderName(value);
   if (type !== 'node-ref') return false;
   const one = (v: unknown) => v === '*' || (typeof v === 'string' && NODE_ID_RE.test(v));
   return Array.isArray(value) ? value.every(one) : one(value);
 }
+
+/** #5321: the read-grant action, held only by the grant's own App (cor:acl:140:02). */
+const APP_READ_ACTIONS: ReadonlySet<string> = new Set([MEMORY_READ_ACTION]);
 
 /** The one action a person may hold (#3998). */
 const SECRET_REVEAL_ACTION = 'secret.reveal';
@@ -184,6 +194,9 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
 
   // The holder. A worker session: itself or its role agent. A manager (no `me`): any live worker of this App, or an agent installed
   // and licensed in it (#3711, cor:acl:140:05; ruling 0253 item 4). Anything else, and anything outside this App, is the one refusal.
+  // #5321 (cor:acl:140:02): a read grant is held by the grant's own App and nothing else; the read judge (readGrant.ts) reads only
+  // App-held rows, so a worker-, agent- or person-held one would be signed and allow nothing. Refused here, not left to fail at use.
+  if (APP_READ_ACTIONS.has(args.action) && holder.kind !== 'app') throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
   if (holder.kind === 'worker') {
     // A use grant is consumed only by a run of its agent or App (readClientReveal prepareSecretUse); a worker holder could never consume it,
     // so signing one would mint a live read client nothing can read. Refused here, not left to fail at use.
@@ -200,7 +213,7 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     // Held by the agent in this App: installed, licensed and not deleted here, judged on the locked state.
     const agents = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM agents WHERE id = ${holder.id} AND deleted_at IS NULL FOR SHARE`;
     if (agents.length === 0 || !(await isAgentInstalledAndLicensed(tx, appId, holder.id))) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
-  } else if (holder.kind === 'app' && args.action === 'secret.use' && !me && holder.id === appId) {
+  } else if (holder.kind === 'app' && (args.action === 'secret.use' || APP_READ_ACTIONS.has(args.action)) && !me && holder.id === appId) {
     // Only this App's run may consume an App-held use grant; keep the holder alive until insertion.
     const apps = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM apps WHERE id = ${holder.id} AND deleted_at IS NULL FOR SHARE`;
     if (apps.length === 0) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
@@ -289,6 +302,27 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
         if (isStoreFault(e)) throw e; // #4775: a database outage is not an invalid binding
         throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'Invalid secret use binding');
       }
+    }
+  }
+
+  // #5321 (cor:acl:140:02, two forms): a memory-ref value is either (a) the grant's App's OWN organization id, as a single value (anyone
+  // may create it; an ADMIN or OWNER of that organization signs it), or (b) one or more memory ids, each a memory the requester can read
+  // and that a read grant may name (memoryReadTargetRefusal, judged again at every read), none repeated. A missing, deleted, unreadable
+  // or inadmissible target, another organization, and a repeat are the same refusal as a malformed id, so this is no existence oracle.
+  // A read grant is held by the App only (the holder rule above refuses every other kind).
+  for (const p of declared) {
+    if (p.type !== 'memory-ref') continue;
+    const v = (values as Record<string, unknown>)[p.name];
+    const refuse = () => new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    if (!Array.isArray(v)) {
+      const app = await tx.app.findFirst({ where: { id: appId, deletedAt: null }, select: { organizationId: true } });
+      if (app?.organizationId != null && v === app.organizationId) continue; // form (a)
+    }
+    const ids = (Array.isArray(v) ? v : [v]) as string[];
+    if (new Set(ids).size !== ids.length) throw refuse();
+    for (const id of ids) {
+      const memory = await tx.memory.findFirst({ where: { id, deletedAt: null }, select: READ_GRANT_TARGET_SELECT });
+      if (!memory || !(await args.canReadMemory(id)) || (await memoryReadTargetRefusal(tx as never, appId, memory)) !== null) throw refuse();
     }
   }
 

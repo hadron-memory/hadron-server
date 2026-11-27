@@ -23,7 +23,7 @@ export interface ActionParameter { name: string; type: string; refusesWildcard: 
  *  - `NO_WORKER`: a person-held grant, which reaches no agent or worker, even one the person drives (cor:acl:140:06 R5, Decided).
  */
 /** #4162: the parameter types whose value is a reference to something with an id; only these can name a subject, take a list or be covered. */
-export const REFERENCE_PARAMETER_TYPES: ReadonlySet<string> = new Set(['node-ref', 'secret-ref', 'worker-ref']);
+export const REFERENCE_PARAMETER_TYPES: ReadonlySet<string> = new Set(['node-ref', 'secret-ref', 'worker-ref', 'memory-ref']);
 
 export type GrantReach = 'WORKER' | 'WORKER_OR_ROLE_AGENT' | 'NO_WORKER';
 
@@ -33,7 +33,7 @@ export type GrantReach = 'WORKER' | 'WORKER_OR_ROLE_AGENT' | 'NO_WORKER';
  * definition that names a key the registry does not provide is a compile error, and re-checked at validation because the
  * registry is code and definitions may arrive from anywhere a list can.
  */
-export const ISSUER_RULE_KEYS = ['APP_SCHEDULE_ADMIN', 'APP_WEBHOOK_ADMIN', 'APP_MANAGER', 'SECRET_READ_CLIENT'] as const;
+export const ISSUER_RULE_KEYS = ['APP_SCHEDULE_ADMIN', 'APP_WEBHOOK_ADMIN', 'APP_MANAGER', 'SECRET_READ_CLIENT', 'MEMORY_READ_APPROVER'] as const;
 export type IssuerRuleKey = (typeof ISSUER_RULE_KEYS)[number];
 
 export interface ActionDefinition {
@@ -137,6 +137,22 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
     ],
     summaryTemplate: 'Use the secret {secret} of {app} at {binding-prefix} with header {binding-header}, and {auto-delete}',
     reach: 'NO_WORKER',
+  },
+  // #5321 (hrn:node:hadronmemory.com:specs:cor:acl:140:02, D-2026-11-26-003; Holger 2026-11-27, both answers): read memories outside the
+  // App, read only, as the App acting with no person behind it (its userless runs, and a pure key holding the grant:read scope). The one
+  // `memory` parameter takes either form Holger ruled ("The grant may be for all org memories (org ADMIN and OWNER approve, create/issue
+  // anyone) or the grant names one or more memories. Then owner of that memory approves."):
+  //  (a) the App's OWN organization's id, a single value: its ORGANIZATION knowledge, reaching userless runs only, never a key
+  //      (cor:acl:010:04); signed by an ADMIN or OWNER of that organization;
+  //  (b) one or more memory ids (a single id or a list, never the wildcard): signed by whoever manages every named memory, so a grant
+  //      naming memories of different managers cannot be signed by one person (one grant per manager).
+  // Judged at every read, the giver's own read included (src/lib/grants/readGrant.ts). There is no `knowledge.read` (Holger: "is to
+  // unspecific"). The optional branch and one-automation parameters and `memory.write` come in S2 (#5404).
+  {
+    name: 'memory.read', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'MEMORY_READ_APPROVER',
+    parameters: [{ name: 'memory', type: 'memory-ref', refusesWildcard: true }],
+    summaryTemplate: 'Let {app}, acting with no person behind it, read {memory}, read only',
+    reach: 'NO_WORKER', listParameters: ['memory'],
   },
 ];
 

@@ -28,7 +28,7 @@ import {
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
-import { linkedReachFor } from '../../../lib/appMemoryLinks.js';
+import { grantReadReachFor } from '../../../lib/grants/readGrant.js';
 import { ownAppMemoryIds } from '../../../lib/appOwnMemory.js';
 import { activeAgentInstallLicenseIds, isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 import { findInstallMemory, resolveInstallTarget } from './installMemory.js';
@@ -562,12 +562,12 @@ export const memoryQueries = {
             memoryMap.set(item.memory.id, item.memory);
           }
         }
-        // #5272 (hrn:node:hadronmemory.com:specs:cor:api:120:03, App-key line): plus every memory the App's links let this
-        // key read, judged at this call by the reads' own judge (`linkedReachFor`, #5185), so a lapsed link leaves the list
-        // when it stops being readable, and an App with no installed Agent still lists its links (as MCP's
-        // `hadron_list_memories` does). The judge decides the reach, so the Agent-item exclusions above are not re-applied;
-        // the filters the caller chose and the record gate are, as for an Agent item. Empty for any caller but a pure App key.
-        const linkedIds = [...(await linkedReachFor(ctx.db, ctx))].filter((id) => !memoryMap.has(id));
+        // #5272 (hrn:node:hadronmemory.com:specs:cor:api:120:03, App-key line), #5321: plus every memory the App's read grants let
+        // this key read, judged at this call by the reads' own judge (`grantReadReachFor`), so a revoked or lapsed grant leaves the
+        // list when it stops allowing, and an App with no installed Agent still lists them (as MCP's `hadron_list_memories` does).
+        // An attachment adds nothing (cor:dmo:060:22). The judge decides the reach, so the Agent-item exclusions above are not
+        // re-applied; the filters the caller chose and the record gate are, as for an Agent item. Empty for any caller but a pure key.
+        const linkedIds = [...(await grantReadReachFor(ctx.db, ctx))].filter((id) => !memoryMap.has(id));
         if (linkedIds.length > 0) {
           const linkedRows = await ctx.db.memory.findMany({ where: { id: { in: linkedIds }, deletedAt: null }, include: MEMORY_INCLUDE });
           for (const memory of linkedRows) {
