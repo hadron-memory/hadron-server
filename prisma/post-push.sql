@@ -215,7 +215,7 @@ ALTER TABLE apps
   ADD CONSTRAINT chk_app_owner_xor
   CHECK ((organization_id IS NULL) <> (owner_user_id IS NULL));
 -- #5077 (Billing F3a): a run states exactly one owner, copied from its App. Synced with
--- the 20261127120000 migration.
+-- the 20261127160000 and 20261127160200 migrations.
 ALTER TABLE app_runs
   DROP CONSTRAINT IF EXISTS chk_app_run_owner_xor;
 ALTER TABLE app_runs
