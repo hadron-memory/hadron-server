@@ -441,14 +441,22 @@ export function tombstoneReclaimableBy(
  * Locks the memory row `FOR UPDATE` (the delete's own strength, so the guard's
  * `FOR SHARE` re-enters) and re-checks it is still a tombstone: a row revived
  * since the caller's unlocked read is left alone. Returns whether it deleted.
+ *
+ * `reclaimers` are the users this door acts for (hadron-internal#75; the rule of
+ * tombstoneReclaimableBy, judged on the locked row): a personal or private
+ * tombstone (one with a `userId`) is removed only when its user is among them,
+ * otherwise it is left alone and the call answers false, as for a live holder.
+ * A tombstone with no `userId` is the door's own gate's to judge.
  */
 export async function reclaimTombstonedMemory(
   tx: Prisma.TransactionClient,
   memoryId: string,
+  reclaimers: ReadonlyArray<string | null | undefined>,
 ): Promise<boolean> {
-  const [row] = await tx.$queryRaw<Array<{ deleted_at: Date | null }>>`
-    SELECT deleted_at FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+  const [row] = await tx.$queryRaw<Array<{ deleted_at: Date | null; user_id: string | null }>>`
+    SELECT deleted_at, user_id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
   if (!row || row.deleted_at === null) return false;
+  if (row.user_id !== null && !reclaimers.includes(row.user_id)) return false;
   await assertNoMintedCorpusRemoval(tx, memoryId, 'reclaim the address of the deleted corpus holding', {
     includeTombstones: true,
   });

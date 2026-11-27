@@ -35,6 +35,24 @@ export const secretChangeChallenge = (r: ChangeRequest) => hash(JSON.stringify([
 export const secretDeclineChallenge = (r: ChangeRequest) => hash(JSON.stringify(['hadron-secret-change-decline:v1', r.id, r.requester_id,
  r.app_id, r.secret_name, r.operation, r.snapshot, r.expires_at.toISOString()]));
 
+/** Is this staged STORE a protection-flag-only change (#4626 item 17): an existing secret, no staged value, a protection change, metadata equal to the live row's. */
+async function isProtectionFlagOnly(tx: Prisma.TransactionClient, r: ChangeRequest): Promise<boolean> {
+ if (r.operation !== 'STORE' || r.secret_id === null || r.write_version || r.protected_result === null) return false;
+ const live = await tx.secret.findUnique({ where: { id: r.secret_id }, select: { metadata: true } });
+ return live !== null && isDeepStrictEqual(r.metadata, live.metadata);
+}
+
+/** The one line the proof page shows for a staged change. One case per branch; the bytes are the ceremony's contract (#4626 item 17, #5299 item 2). */
+function changeText(r: Pick<ChangeRequest, 'operation' | 'secret_id' | 'write_version' | 'protected_result'>, flagOnly: boolean): string {
+ if (r.operation !== 'STORE') return ({ DELETE: 'Delete this secret', SET_PROTECTED: 'Turn protection on', CLEAR_PROTECTED: 'Turn protection off' } as const)[r.operation];
+ const protection = r.protected_result === null ? '' : r.protected_result ? ' and turn protection on' : ' and turn protection off';
+ if (r.secret_id === null) return 'Create a protected secret' + protection;
+ if (r.write_version) return 'Store a new version' + protection;
+ if (flagOnly) return r.protected_result ? 'Turn protection on' : 'Turn protection off';
+ return 'Update secret metadata' + protection;
+}
+
+
 async function request(db: Prisma.TransactionClient, id: string): Promise<ChangeRequest | null> {
  const [r] = await db.$queryRaw<ChangeRequest[]>`SELECT * FROM secret_change_requests WHERE id=${id}`;
  return r ?? null;
@@ -101,18 +119,11 @@ export async function proveSecretChange(db: PrismaClient, a: SecretAssertion) {
   const secretUrn = appUrn.replace(/^hrn:app:([^:]+):(.+)$/, 'hrn:secret:$1:app:$2') + ':' + current.secret_name;
   // #4626 item 17: a STORE that stages neither a value nor a metadata change is a protection-flag-only change. Its text
   // names the flag alone and its summary carries no metadata, so the page never claims a metadata change. The live row is
-  // read under the secret lock `authorized` already took, so the comparison cannot race a concurrent edit.
-  const live = current.secret_id ? await tx.secret.findUnique({where:{id:current.secret_id},select:{metadata:true}}) : null;
-  const flagOnly = current.secret_id!==null && !current.write_version && current.protected_result!==null && live!==null
-   && isDeepStrictEqual(current.metadata, live.metadata);
-  const protection = current.protected_result === null ? '' : current.protected_result ? ' and turn protection on' : ' and turn protection off';
-  // The proof exposes metadata only; neither ciphertext nor plaintext leaves the server.
-  const change = current.operation === 'STORE'
-   ? !current.secret_id ? 'Create a protected secret' + protection
-   : current.write_version ? 'Store a new version' + protection
-   : flagOnly ? (current.protected_result ? 'Turn protection on' : 'Turn protection off')
-   : 'Update secret metadata' + protection
-   : ({DELETE:'Delete this secret',SET_PROTECTED:'Turn protection on',CLEAR_PROTECTED:'Turn protection off'} as const)[current.operation];
+  // read under the secret lock `authorized` already took, so the comparison cannot race a concurrent edit. #5299 item 2: it is
+  // read only where the answer can matter (an existing secret, no staged value, a protection change); the text itself is
+  // `changeText`, one case per line, pinned byte for byte by proofText5299.test.ts.
+  const flagOnly = await isProtectionFlagOnly(tx, current);
+  const change = changeText(current, flagOnly);
   return { outcome:'change' as const,nonce,ceremonyId:ceremony.id,challenge:challenge.toString('base64url'),rpId:passkeyRpId(),decline:{ceremonyId:declineCeremony.id,challenge:declineChallenge.toString('base64url')},
    summary:{app:appUrn,secret:secretUrn,operation:current.operation,change,...(current.operation==='STORE'&&!flagOnly?{metadata:current.metadata}:{}),sizeBytes:current.size_bytes,requester:current.requester_id,expiresAt:current.expires_at.toISOString()} };
  });

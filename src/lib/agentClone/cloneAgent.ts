@@ -275,7 +275,7 @@ async function writeClone(
   const urn = suppliedSlug
     ? `${targetUrn}:${deriveSlugFromName(suppliedSlug)}`
     : `${targetUrn}:${await nextFreeDerivedSlug(derivedSlugBase(name), (candidate) => urnHeld(tx, `${targetUrn}:${candidate}`))}`;
-  if (suppliedSlug) await claimUrn(tx, urn);
+  if (suppliedSlug) await claimUrn(tx, urn, ctx.userId);
 
   // #5015/#5016: one Agent more for the target organization, and its system memory copy's nodes, asked in the clone's one multi-key call
   // after every anchor and row lock and before the first insert. The copy's own memory is a `system` one and free.
@@ -385,7 +385,7 @@ async function urnHeld(tx: Prisma.TransactionClient, urn: string): Promise<boole
 }
 
 /** A tombstoned Agent or system memory holding the SUPPLIED slug's URN is reclaimed (as createAgent does); a live one refuses. */
-async function claimUrn(tx: Prisma.TransactionClient, urn: string): Promise<void> {
+async function claimUrn(tx: Prisma.TransactionClient, urn: string, userId: string | null | undefined): Promise<void> {
   const existing = await tx.agent.findUnique({ where: { urn } });
   if (existing && !existing.deletedAt) throw new AgentUrnTakenError(urn);
   if (existing) {
@@ -397,7 +397,7 @@ async function claimUrn(tx: Prisma.TransactionClient, urn: string): Promise<void
     }
   }
   const holder = await tx.memory.findUnique({ where: { urn: `${urn}-system` } });
-  if (holder && !(holder.deletedAt && (await reclaimTombstonedMemory(tx, holder.id)))) {
+  if (holder && !(holder.deletedAt && (await reclaimTombstonedMemory(tx, holder.id, [userId])))) {
     throw new AgentUrnTakenError(urn, `A memory with URN "${urn}-system" already exists`);
   }
 }
