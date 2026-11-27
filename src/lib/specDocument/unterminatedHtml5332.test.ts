@@ -103,12 +103,14 @@ describe('#5332: what the rule leaves to main', () => {
     ['\r<!--\r- \n><pre><![CDATA[x\r    ]]><scr# h\n', '\r&lt;!--\r- \n>&lt;pre><![CDATA[x\r    ]]>&lt;scr# h\n', []],
     // A hidden tag at the head of a line with a tag after it: markdown-it reads the line as an HTML block start where CommonMark reads it as
     // paragraph text (or code), so escaping it would move the later tag into another block (both lost the anchor where escaped).
-    ['\n\n\n1.    --<![\n    <script></<\n\t- - -    <title>', '\n\n\n1.    --<![\n    <script></<\n\t- - -    <title>', ['commonmark.js']],
-    ['\n   >\t> </ \n    <textarea><!</<plaintext>', '\n   >\t> </ \n    <textarea><!</<plaintext>', ['commonmark.js', 'marked']],
+    // #5388 (Charles QA): the `<![` before the last tag is text to every reader, so that hidden `<title>` is escaped; the losses are unchanged.
+    ['\n\n\n1.    --<![\n    <script></<\n\t- - -    <title>', '\n\n\n1.    --<![\n    <script></<\n\t- - -    &lt;title>', ['commonmark.js']],
+    ['\n   >\t> </ \n    <textarea><!</<plaintext>', '\n   >\t> </ \n    <textarea><!</&lt;plaintext>', ['commonmark.js', 'marked']],
     ['<!x\r<script>- - -<!\r<script><?<\r```<p- ', '<!x\r<script>- - -<!\r<script>&lt;?<\r```&lt;p- ', ['marked']],
-    ['<!x- a\n\n<!T><!\r<plaintext>\r<script><!<<style>', '<!x- a\n\n<!T><!\r<plaintext>\r&lt;script><!<<style>', ['marked']],
-    // Before the tag, something Markdown could read another way (a backtick, a backslash), or more than one line break.
-    ['x<!` <script>', 'x<!` <script>', ALL], ['x<!\\ <script>', 'x<!\\ <script>', ALL], ['x<! a\nb\nc <script>', 'x<! a\nb\nc <script>', ALL],
+    ['<!x- a\n\n<!T><!\r<plaintext>\r<script><!<<style>', '<!x- a\n\n<!T><!\r<plaintext>\r&lt;script><!<&lt;style>', ['marked']],
+    // Before the tag, more than one line break. #5388 (Charles QA): a backtick with none after the tag, and a backslash that escapes nothing,
+    // are text to Markdown, so those tags are escaped now and every reader keeps the anchor (main lost it in all three).
+    ['x<!` <script>', 'x<!` &lt;script>', []], ['x<!\\ <script>', 'x<!\\ &lt;script>', []], ['x<! a\nb\nc <script>', 'x<! a\nb\nc <script>', ALL],
     // A tag broken across lines (escaping it measured more bodies over-escaped than fixed, #5332's harness).
     ['x<!<script\na>', 'x<!<script\na>', ALL],
   ] as Array<[string, string, string[]]>)('%j', (body, out, lose) => {
@@ -122,7 +124,7 @@ describe('#5332: the acceptance set keeps every reader main keeps', () => {
   // the bodies variant A of #5291 regressed. No reader that keeps the anchor on main loses it here.
   it.each([
     ['-*-\n    <xmp>\n<!</xmp>', '-*-\n    <xmp>\n<!</xmp>', [], []],
-    ['<??><!<xmp>\n<!</xmp>', '<??><!<xmp>\n<!</xmp>', [], []],
+    ['<??><!<xmp>\n<!</xmp>', '<??><!&lt;xmp>\n<!</xmp>', [], []],
     ['<!<xmp><pre></xmp></<template>', '<!<xmp><pre></xmp></<template>', ['commonmark.js', 'markdown-it'], ['commonmark.js', 'markdown-it']],
     ['</<noembed><pre></<template>', '</&lt;noembed><pre></<template>', ['commonmark.js', 'markdown-it'], ALL],
     ['<!<iframE><h1></<template>', '<!&lt;iframE><h1></<template>', ALL, ALL],
@@ -131,7 +133,8 @@ describe('#5332: the acceptance set keeps every reader main keeps', () => {
     ['<!</xmp><![CDATA[x<!<plaintext><!T>--<div></ <template><b', '<!</xmp>&lt;![CDATA[x<!&lt;plaintext><!T>--<div></ <template>&lt;b', ALL, ALL],
     ['<ba</ <noembed><pre><div/<template>', '&lt;ba</ &lt;noembed><pre><div/&lt;template>', [], ALL],
     ['--><!<plaintext>a<pre><x*-*- <template># h', '--><!&lt;plaintext>a<pre><x*-*- &lt;template># h', [], ALL],
-    ['- - -<![\n<noscript><noscript><![\n    <!--<![CDATA[]]>\r\n`', '- - -<![\n<noscript>&lt;noscript><![\n    <!--<![CDATA[]]>\r\n`', ALL, ALL],
+    // #5388 (QA): the line-head `<noscript>` has more on its line, so no reader opens a block there and it is escaped too; losses unchanged.
+    ['- - -<![\n<noscript><noscript><![\n    <!--<![CDATA[]]>\r\n`', '- - -<![\n&lt;noscript>&lt;noscript><![\n    <!--<![CDATA[]]>\r\n`', ALL, ALL],
     ['<!--<!<noembed><![CDATA[]]>\n<!DOCTYPE html><h1></<<template>>\n', '&lt;!--<!&lt;noembed><![CDATA[]]>\n<!DOCTYPE html><h1></<<template>>\n', ['marked'], ALL],
     ['<title></ <noembed><div/> - \n  </div><a<![<![CDATA[x<noembed>', '&lt;title></ &lt;noembed><div/> - \n  </div>&lt;a<![<![CDATA[x<noembed>', ['marked'], ALL],
   ] as Array<[string, string, string[], string[]]>)('%j', (body, out, lose, mainLose) => {
