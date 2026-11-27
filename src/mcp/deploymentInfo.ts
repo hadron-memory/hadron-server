@@ -312,7 +312,11 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // naming no worker and one naming a worker the caller may not read get one answer (the WORKER_MISMATCH refusal carries
 // expectedWorkerId null, or NOTHING_TO_RESUME). The refusal extension `expectedWorkerId` keeps its name (an output id).
 // MCP tool inputs are unchanged (hadron_resume_session sends no expected worker). (0.47.0 is #5240, merged first.)
-export const HADRON_SERVER_VERSION = '0.48.0';
+// 0.49.0 — ANSWER CHANGE, #5334 (cor:sec:070:02, Decided, Holger 2026-11-26): `withdrawSecretChangeRequest` on a request that expired while
+// open now answers false (nothing was withdrawn); it still ends as expired with its staged value cleared, as before. It answered true.
+// A live request still answers true and ends withdrawn; an ended one, and another person's or unknown id, are unchanged. No SDL shape change.
+// (0.48.0 is #5314, merged first.)
+export const HADRON_SERVER_VERSION = '0.49.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

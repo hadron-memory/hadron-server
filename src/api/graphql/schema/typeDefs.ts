@@ -15493,7 +15493,9 @@ export const typeDefs = `#graphql
     setSecretProtected(ref: ID!, protected: Boolean!): Secret!
     """
     Withdraw your own open change request and clear its staged value; the request then
-    reads withdrawn. Only the requester can withdraw, complete or decline a request, and
+    reads withdrawn, and the answer is true. The answer is false when nothing was withdrawn:
+    the request had already ended, or it expired while still open (it is then recorded as
+    expired, with its staged value cleared). Only the requester can withdraw, complete or decline a request, and
     anyone else is answered as for a request that does not exist. Declining is done on
     the ceremony page, with a passkey proof, and reads declined.
     hrn:node:hadronmemory.com:specs:cor:sec:070:02
