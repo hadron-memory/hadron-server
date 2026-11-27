@@ -74,8 +74,31 @@ function bogusHiddenTag(text: string, at: number, close: number): number {
   if (/[\n\r][ \t]*$/.test(before) && text.includes('<', close + 1)) return -1;
   if (inHtmlBlock(text, at + 2 + raw.index)) return -1;
   const name = raw[1].toLowerCase();
-  if (name !== 'plaintext' && new RegExp(`</${name}(?=[\\s/>])`, 'i').test(text.slice(close + 1))) return -1;
+  if (name !== 'plaintext' && emittedEndTag(text, close + 1, name)) return -1;
   return at + 2 + raw.index;
+}
+
+/**
+ * #5369 (#5370 BLIND P2b) — whether an end tag of `name` after `from` closes the hidden element: one every reader emits raw. Only a tag
+ * Markdown accepts (`</name>`, blanks before the `>`), with no fence-like line anywhere before it, no backtick run between `from` and it that
+ * a run of the same length after it could close into a code span, no indent before it on its line that could make the line code (four
+ * columns, also after quote and list markers), and no backslash right before it. Anything else is not counted, which keeps the escape.
+ */
+function emittedEndTag(text: string, from: number, name: string): boolean {
+  const re = new RegExp(`</${name}[ \\t\\r\\n]*>`, 'gi');
+  re.lastIndex = from;
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    if (/(?:^|[\r\n])[ \t>*+\-\d.)]*(?:`{3,}|~{3,})/.test(text.slice(0, m.index))) return false;
+    // A backtick run before it that a run of the same length after it could close: a code span may hold it.
+    const after = text.slice(m.index);
+    for (const run of text.slice(from, m.index).match(/`+/g) ?? []) {
+      if (new RegExp(`(?<!\`)${run}(?!\`)`).test(after)) return false;
+    }
+    const lineHead = text.slice(Math.max(text.lastIndexOf('\n', m.index - 1), text.lastIndexOf('\r', m.index - 1)) + 1, m.index);
+    // Indented code (also inside a quote or after a list marker), or a backslash that makes the `<` text.
+    if (!/^(?: {0,3}>)*[ \t]*(?:(?:[-+*]|\d{1,9}[.)])[ \t]*)?(?:\t| {4})/.test(lineHead) && !/^[ \t>]*\t/.test(lineHead) && text[m.index - 1] !== '\\') return true;
+  }
+  return false;
 }
 
 /**
