@@ -60,6 +60,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.appRuns",
   "Query.apps",
   "Query.assets",
+  "Query.attachableMemories", // #5393: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.automationApprovals",
   "Query.automationTeamSnapshotGrants", // #3350: pageTake default20/cap200; common omitted100 is conservative.
   "Query.calendarEvents",
