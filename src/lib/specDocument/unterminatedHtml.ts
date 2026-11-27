@@ -79,43 +79,67 @@ function bogusHiddenTag(text: string, at: number, close: number): number {
 }
 
 /**
- * #5369 — whether every reader has `at` inside an HTML block of type 6 that opened at column 0 of an earlier line (or its own) with no blank
- * line since, where the browser reads the bogus comment and the tag it hides is inert. Lines end at LF, CRLF and a bare CR, as in the readers.
- * The lines before are read for what could hold that opener line instead (a fence, an HTML block of types 1 to 5): any of those, even one
- * that only looks like it, and the answer is no, which keeps the escape.
+ * #5369 — whether every reader has `at` (a raw-text start a bogus comment hides) inside an HTML block, where Markdown passes the bogus comment
+ * through and the browser reads it, so the tag it hides is inert. Only blocks that open at column 0 count, so that no list item or quote can
+ * hold the line instead: a type 6 block up to the next blank line, and a type 1 to 5 block up to where both readers end it (CommonMark ends
+ * one of types 1 and 2 with the line that holds its closer, marked ends types 3 to 5 right after the closer). Lines end at LF, CRLF and a
+ * bare CR, as in the readers. The lines before are read for what could hold the opener line instead (a fence, a block of types 1 to 5 that
+ * is still open): any of those, even one that only looks like it, and the answer is no, which keeps the escape. After a paragraph line an
+ * opener counts only as a tag alone on its line: marked reads a paragraph line, an opener line holding more and a `-` line as one heading.
  */
 function inHtmlBlock(text: string, at: number): boolean {
-  const lineAt = text.slice(0, at).search(/[^\r\n]*$/);
-  const lines = text.slice(0, lineAt).split(/\r\n|\r|\n/);
-  lines[lines.length - 1] = text.slice(lineAt, at);
+  const lineEnd = (k: number): number => {
+    const m = /\r\n|\r|\n/.exec(text.slice(k));
+    return m === null ? text.length : k + m.index;
+  };
+  const nextLine = (k: number): number => {
+    const m = /\r\n|\r|\n/.exec(text.slice(k));
+    return m === null ? -1 : k + m.index + m[0].length;
+  };
   let fence: RegExp | null = null;
-  let closer: RegExp | null = null;
   let opened = false;
   let afterText = false;
-  for (const line of lines) {
+  for (let s = 0; s !== -1 && s <= at; ) {
+    const e = lineEnd(s);
+    const line = text.slice(s, Math.min(e, at));
     const before = afterText;
     afterText = false;
-    if (fence !== null) { if (fence.test(line)) fence = null; opened = false; continue; }
-    if (closer !== null) { if (closer.test(line)) closer = null; opened = false; continue; }
-    if (line.trim() === '') { opened = false; continue; }
-    if (opened) continue;
-    // marked reads a paragraph line, then an opener line holding more than its tag, then a `-` or `=` line as one setext heading.
-    if (BLOCK6_LINE.test(line) && (!before || /^<\/?[A-Za-z0-9]+[ ]*\/?>[ \t]*$/.test(line))) { opened = true; continue; }
-    afterText = true;
+    if (fence !== null) { if (fence.test(line)) fence = null; s = nextLine(s); continue; }
+    if (line.trim() === '') { opened = false; s = nextLine(s); continue; }
+    if (opened) { s = nextLine(s); continue; }
+    if (BLOCK6_LINE.test(line) && (!before || /^<\/?[A-Za-z0-9]+ *\/?>$/.test(line))) { opened = true; s = nextLine(s); continue; }
     const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (f) { fence = new RegExp(`^ {0,3}${f[1][0] === '`' ? '`' : '~'}{${f[1].length},}[ \\t]*$`); continue; }
-    const t = TYPE15_OPEN.find(([o]) => o.test(line));
-    if (t && !t[1].test(line)) closer = t[1];
+    if (f) { fence = new RegExp(`^ {0,3}${f[1][0] === '`' ? '`' : '~'}{${f[1].length},}[ \\t]*$`); s = nextLine(s); continue; }
+    const t = TYPE15.find((x) => x.open.test(text.slice(s, e)));
+    if (t) {
+      // CommonMark and markdown-it test the closer on the opener's line from its `<` (`<?>` closes at once); marked searches after the opener.
+      const find = (from: number): [number, number] => {
+        const c = text.slice(from).search(t.close);
+        if (c === -1) return [text.length, text.length];
+        return [from + c, from + c + (text.slice(from + c).match(t.close) as RegExpMatchArray)[0].length];
+      };
+      const [, cmEnd] = find(s);
+      const [mAt, mEnd] = find(s + t.from);
+      // Where every reader keeps the block raw: CommonMark to the end of the closer's line; marked to its closer, or that line's end for types 1 and 2.
+      const rawTo = Math.min(lineEnd(cmEnd), t.wholeLine ? lineEnd(mEnd) : mAt);
+      if (!before && line[0] === '<' && at < rawTo) return true;
+      const closeEnd = Math.max(cmEnd, mEnd);
+      afterText = !t.wholeLine && text.slice(mEnd, lineEnd(closeEnd)).trim() !== '';
+      s = nextLine(closeEnd);
+      continue;
+    }
+    afterText = true;
+    s = nextLine(s);
   }
   return opened;
 }
-/** HTML blocks of types 1 to 5 (CommonMark), each with the closer that ends it; a line starting with one is read as opening it. */
-const TYPE15_OPEN: ReadonlyArray<readonly [RegExp, RegExp]> = [
-  [/^ {0,3}<(?:script|pre|style|textarea)(?:[\s>]|$)/i, /<\/(?:script|pre|style|textarea)>/i],
-  [/^ {0,3}<!--/, /-->/],
-  [/^ {0,3}<\?/, /\?>/],
-  [/^ {0,3}<![A-Za-z]/, />/],
-  [/^ {0,3}<!\[CDATA\[/, /\]\]>/],
+/** HTML blocks of types 1 to 5 (CommonMark): the line start that opens one, where its closer is searched from, the closer, and whether marked keeps the rest of the closer's line in the block. */
+const TYPE15: ReadonlyArray<{ open: RegExp; from: number; close: RegExp; wholeLine: boolean }> = [
+  { open: /^ {0,3}<(?:script|pre|style|textarea)(?:[ \t>]|$)/i, from: 1, close: /<\/(?:script|pre|style|textarea)>/i, wholeLine: true },
+  { open: /^ {0,3}<!--/, from: 2, close: /-->/, wholeLine: true },
+  { open: /^ {0,3}<\?/, from: 2, close: /\?>/, wholeLine: false },
+  { open: /^ {0,3}<![A-Za-z]/, from: 2, close: />/, wholeLine: false },
+  { open: /^ {0,3}<!\[CDATA\[/, from: 9, close: /\]\]>/, wholeLine: false },
 ];
 
 const isLetter = (c: string | undefined): boolean => c !== undefined && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
