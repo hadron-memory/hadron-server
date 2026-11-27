@@ -257,19 +257,23 @@ export async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: 
       }
       continue;
     }
-    if (p.type === 'memory-ref' || p.type === 'org-ref') {
-      // #5321: the memory or the organization shows as its canonical URN. A memory the prover cannot read, or a gone one, and an
-      // organization other than the grant's App's own make the sentence unsignable, never a guess.
-      const id = values[p.name];
-      if (typeof id !== 'string') continue;
-      if (p.type === 'memory-ref') {
+    if (p.type === 'memory-ref') {
+      // #5321 (memory.read's two forms): a single value that is the grant's App's own organization shows as that organization's
+      // canonical URN (form (a)); otherwise each named memory shows as its canonical memory URN (form (b)). A memory the prover cannot
+      // read, a gone one, and any other id make the sentence unsignable, never a guess.
+      const value = values[p.name];
+      if (typeof value === 'string') {
+        const org = await tx.organization.findFirst({ where: { id: value, deletedAt: null, apps: { some: { id: g.app_id } } }, select: { urn: true } });
+        if (org) {
+          try { refs[value] = { urn: emitEntityUrnV2('org', org.urn) }; } catch { return null; }
+          continue;
+        }
+      }
+      for (const id of Array.isArray(value) ? value : [value]) {
+        if (typeof id !== 'string' || Object.prototype.hasOwnProperty.call(refs, id)) continue;
         const memory = await tx.memory.findFirst({ where: { id, deletedAt: null }, select: { urn: true } });
         if (!memory || !(await isMemoryReadableCached(ctx, id))) return null;
         try { refs[id] = { urn: emitEntityUrnV2('mem', memory.urn) }; } catch { return null; }
-      } else {
-        const org = await tx.organization.findFirst({ where: { id, deletedAt: null, apps: { some: { id: g.app_id } } }, select: { urn: true } });
-        if (!org) return null;
-        try { refs[id] = { urn: emitEntityUrnV2('org', org.urn) }; } catch { return null; }
       }
       continue;
     }

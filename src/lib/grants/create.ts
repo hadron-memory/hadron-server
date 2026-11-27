@@ -47,7 +47,7 @@ import { generateId } from '../id.js';
 import { autoDeleteLimitRefusal } from '../secrets/autoDelete.js';
 import { isModelReadableKind } from '../secrets.js';
 import { grantTermsBytes, GrantTermsError, type GrantHolderKind } from './terms.js';
-import { KNOWLEDGE_READ_ACTION, MEMORY_READ_ACTION, READ_GRANT_TARGET_SELECT, memoryReadTargetRefusal } from './readGrant.js';
+import { MEMORY_READ_ACTION, READ_GRANT_TARGET_SELECT, memoryReadTargetRefusal } from './readGrant.js';
 
 export type GrantCreateCode =
   | 'GRANT_REQUESTER_NOT_WORKER'
@@ -127,8 +127,12 @@ function valueMatchesType(type: string, value: unknown): boolean {
     const oneWorker = (v: unknown) => typeof v === 'string' && NODE_ID_RE.test(v);
     return Array.isArray(value) ? value.length > 0 && value.every(oneWorker) : oneWorker(value);
   }
-  // #5321: a memory or an organization is named by its stored id, exactly one, never a list or the wildcard.
-  if (type === 'memory-ref' || type === 'org-ref') return typeof value === 'string' && NODE_ID_RE.test(value);
+  // #5321: memories are named by their stored ids, one or a non-empty list, never the wildcard; a single value may instead be the
+  // grant's App's own organization id (form (a), judged below with the rows).
+  if (type === 'memory-ref') {
+    const one = (v: unknown) => typeof v === 'string' && NODE_ID_RE.test(v);
+    return Array.isArray(value) ? value.length > 0 && value.every(one) : one(value);
+  }
   if (type === 'https-prefix') return isSecretUsePrefix(value);
   if (type === 'header-name') return isSecretUseHeaderName(value);
   if (type !== 'node-ref') return false;
@@ -136,8 +140,8 @@ function valueMatchesType(type: string, value: unknown): boolean {
   return Array.isArray(value) ? value.every(one) : one(value);
 }
 
-/** #5321: the read-grant actions, held only by the grant's own App (cor:acl:140:02). */
-const APP_READ_ACTIONS: ReadonlySet<string> = new Set([MEMORY_READ_ACTION, KNOWLEDGE_READ_ACTION]);
+/** #5321: the read-grant action, held only by the grant's own App (cor:acl:140:02). */
+const APP_READ_ACTIONS: ReadonlySet<string> = new Set([MEMORY_READ_ACTION]);
 
 /** The one action a person may hold (#3998). */
 const SECRET_REVEAL_ACTION = 'secret.reveal';
@@ -298,20 +302,24 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     }
   }
 
-  // #5321: a memory-ref names a memory the requester can read and that a read grant may name (memoryReadTargetRefusal, judged again at
-  // every read); an org-ref names the App's own organization. A missing, deleted, unreadable or inadmissible target is the same refusal as
-  // a malformed id, so this is no existence oracle. A read grant is held by the App only (the holder rule above refuses every other kind).
+  // #5321 (cor:acl:140:02, two forms): a memory-ref value is either (a) the grant's App's OWN organization id, as a single value (anyone
+  // may create it; an ADMIN or OWNER of that organization signs it), or (b) one or more memory ids, each a memory the requester can read
+  // and that a read grant may name (memoryReadTargetRefusal, judged again at every read), none repeated. A missing, deleted, unreadable
+  // or inadmissible target, another organization, and a repeat are the same refusal as a malformed id, so this is no existence oracle.
+  // A read grant is held by the App only (the holder rule above refuses every other kind).
   for (const p of declared) {
-    if (p.type !== 'memory-ref' && p.type !== 'org-ref') continue;
-    const id = (values as Record<string, unknown>)[p.name] as string;
-    if (p.type === 'org-ref') {
+    if (p.type !== 'memory-ref') continue;
+    const v = (values as Record<string, unknown>)[p.name];
+    const refuse = () => new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    if (!Array.isArray(v)) {
       const app = await tx.app.findFirst({ where: { id: appId, deletedAt: null }, select: { organizationId: true } });
-      if (!app || app.organizationId === null || app.organizationId !== id) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
-      continue;
+      if (app?.organizationId != null && v === app.organizationId) continue; // form (a)
     }
-    const memory = await tx.memory.findFirst({ where: { id, deletedAt: null }, select: READ_GRANT_TARGET_SELECT });
-    if (!memory || !(await args.canReadMemory(id)) || (await memoryReadTargetRefusal(tx as never, appId, memory)) !== null) {
-      throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    const ids = (Array.isArray(v) ? v : [v]) as string[];
+    if (new Set(ids).size !== ids.length) throw refuse();
+    for (const id of ids) {
+      const memory = await tx.memory.findFirst({ where: { id, deletedAt: null }, select: READ_GRANT_TARGET_SELECT });
+      if (!memory || !(await args.canReadMemory(id)) || (await memoryReadTargetRefusal(tx as never, appId, memory)) !== null) throw refuse();
     }
   }
 

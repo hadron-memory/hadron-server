@@ -1,5 +1,5 @@
 /**
- * #5321 (cor:acl:140:02 `memory.read` / `knowledge.read`, cor:agt:010:01, cor:dmo:060:22, cor:acl:010:01 and :04): an App that acts
+ * #5321 (cor:acl:140:02 `memory.read`, its two forms (Holger, 2026-11-27 afternoon), cor:agt:010:01, cor:dmo:060:22, cor:acl:010:01 and :04): an App that acts
  * with no person behind it (a pure App key, a userless run) reads a memory outside its own ONLY through a grant. An attachment gives
  * no access. Every reach case runs through the MCP gate (`canReadMemory`) AND the GraphQL node set (`getAccessibleMemoryIds`).
  *
@@ -92,14 +92,15 @@ beforeEach(async () => {
   key2Id = (await db.appKey.create({ data: { appId: app2.id, keyHash: generateId(), keyPreview: 'k2' } })).id;
 });
 
-describe('the two actions are seeded (cor:acl:140:02)', () => {
-  it('memory.read and knowledge.read exist with one wildcard-refusing parameter each, enforced by the server', async () => {
+describe('the action is seeded (cor:acl:140:02)', () => {
+  it('memory.read exists with one wildcard-refusing parameter that takes a list, enforced by the server; there is no knowledge.read', async () => {
     const rows = await db.action.findMany({ where: { name: { in: ['memory.read', 'knowledge.read'] } }, orderBy: { name: 'asc' } });
     expect(rows.map((r) => ({ name: r.name, enforcement: r.enforcement, tool: r.tool, parameters: r.parameters }))).toEqual([
-      { name: 'knowledge.read', enforcement: 'SERVER', tool: null, parameters: [{ name: 'organization', type: 'org-ref', refusesWildcard: true }] },
       { name: 'memory.read', enforcement: 'SERVER', tool: null, parameters: [{ name: 'memory', type: 'memory-ref', refusesWildcard: true }] },
     ]);
-    expect(PLATFORM_ACTIONS.map((a) => a.name)).toEqual(expect.arrayContaining(['memory.read', 'knowledge.read']));
+    expect(PLATFORM_ACTIONS.map((a) => a.name)).toContain('memory.read');
+    expect(PLATFORM_ACTIONS.map((a) => a.name)).not.toContain('knowledge.read');
+    expect(PLATFORM_ACTIONS.find((a) => a.name === 'memory.read')?.listParameters).toEqual(['memory']);
   });
 
   it('grant:read is a scope of the closed list', () => {
@@ -150,6 +151,17 @@ describe('memory.read: the App reads through its grant', () => {
     await grantScope(keyId);
     const urn = `hrn:node:${m.urn}:note`;
     expect(await createTestableMcpServer(keyAuth(app.id, keyId)).callToolText('hadron_get_node', { urn })).toContain('granted-body-5321');
+  });
+
+  it('names one or more memories: a list opens each, and only those', async () => {
+    const [a, b, c] = [await alicesMemory(), await alicesMemory(), await alicesMemory()];
+    await activeGrant(app.id, 'memory.read', { memory: [a.id, b.id] });
+    await grantScope(keyId);
+    for (const x of [a, b]) {
+      expect(await reachFor(runAuth(app.id), x.id)).toEqual(BOTH);
+      expect(await reachFor(keyAuth(app.id, keyId), x.id)).toEqual(BOTH);
+    }
+    expect(await reachFor(runAuth(app.id), c.id)).toEqual(NONE);
   });
 
   it('a grant on one App never reaches another App\'s key or runs', async () => {
@@ -224,11 +236,11 @@ describe('memory.read: the App reads through its grant', () => {
   });
 });
 
-describe('knowledge.read: a userless run reads its organization\'s ORGANIZATION knowledge', () => {
+describe('memory.read, the organization form: a userless run reads its organization\'s ORGANIZATION knowledge', () => {
   it('without the grant a run reads none of it; with it, read only, never a key', async () => {
     const k = await orgKnowledge(org.id, org.urn);
     expect(await reachFor(runAuth(app.id), k.id)).toEqual(NONE);
-    await activeGrant(app.id, 'knowledge.read', { organization: org.id }, admin);
+    await activeGrant(app.id, 'memory.read', { memory: org.id }, admin);
     expect(await reachFor(runAuth(app.id), k.id)).toEqual(BOTH);
     const { canWriteToMemory } = await import('../../../mcp/access-control.js');
     expect(await canWriteToMemory(db as never, runAuth(app.id), k.id)).toBe(false);
@@ -238,7 +250,7 @@ describe('knowledge.read: a userless run reads its organization\'s ORGANIZATION 
   });
 
   it('never another organization\'s knowledge, a group, personal or private memory, or an App-scoped one', async () => {
-    await activeGrant(app.id, 'knowledge.read', { organization: org.id }, admin);
+    await activeGrant(app.id, 'memory.read', { memory: org.id }, admin);
     const foreign = await orgKnowledge(otherOrg.id, otherOrg.urn);
     const group = await orgKnowledge(org.id, org.urn, { class: 'group', visibility: null });
     const pers = await db.memory.create({ data: { id: generateId(), name: 'p', urn: `${org.urn}:p-${generateId().slice(-6)}`, class: 'personal', userId: alice, organizationId: org.id } as never });
@@ -249,9 +261,9 @@ describe('knowledge.read: a userless run reads its organization\'s ORGANIZATION 
     expect(await reachFor(runAuth(app.id), k.id)).toEqual(BOTH);
   });
 
-  it('a knowledge.read grant naming another organization opens nothing', async () => {
+  it('a memory.read grant naming another organization opens nothing', async () => {
     const k = await orgKnowledge(otherOrg.id, otherOrg.urn);
-    await activeGrant(app.id, 'knowledge.read', { organization: otherOrg.id }, admin);
+    await activeGrant(app.id, 'memory.read', { memory: otherOrg.id }, admin);
     expect(await reachFor(runAuth(app.id), k.id)).toEqual(NONE);
   });
 });

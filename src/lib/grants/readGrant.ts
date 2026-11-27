@@ -1,5 +1,5 @@
 /**
- * #5321 (hrn:node:hadronmemory.com:specs:cor:acl:140:02 `memory.read` and `knowledge.read`; cor:agt:010:01; cor:acl:010:01 and
+ * #5321 (hrn:node:hadronmemory.com:specs:cor:acl:140:02 `memory.read`, its two forms; cor:agt:010:01; cor:acl:010:01 and
  * :04; cor:dmo:060:22): the ONE judge of what an App that acts with no person behind it reads outside its own memories through a
  * grant. Both read surfaces call it, MCP (`getPrincipalAppMemoryAccess`, `canReadMemoryRow`) and GraphQL (`getAccessibleMemoryIds`,
  * the record gate, the memories listing), so neither re-derives the rule.
@@ -8,11 +8,12 @@
  * selected), no impersonation, no session-bound key and no run that carries a user id. A person gains nothing from a grant the App
  * holds (the grant never widens what a person reads, cor:acl:140:02 "What it reaches").
  *
- *  - `memory.read` (holder: the grant's own App) reaches the App's userless runs, and a pure key ONLY while that key holds the
- *    `grant:read` scope (Holger, 2026-11-27: "Only keys whose scopes say so").
- *  - `knowledge.read` (holder: the grant's own App, value: the App's own organization) reaches the App's userless runs only, never
- *    a key (cor:acl:010:04: a key never reads the organization's ORGANIZATION knowledge), and opens only knowledge memories of
- *    ORGANIZATION visibility owned by that organization: never another organization's, a group, personal, private or App-scoped one.
+ *  - `memory.read` naming memories (form (b); holder: the grant's own App) reaches the App's userless runs, and a pure key ONLY
+ *    while that key holds the `grant:read` scope (Holger, 2026-11-27: "Only keys whose scopes say so").
+ *  - `memory.read` naming the App's own organization (form (a), Holger 2026-11-27: "The grant may be for all org memories") reaches
+ *    the App's userless runs only, never a key (cor:acl:010:04: a key never reads the organization's ORGANIZATION knowledge), and
+ *    opens only knowledge memories of ORGANIZATION visibility owned by that organization: never another organization's, a group,
+ *    personal, private or App-scoped one. There is no `knowledge.read` action (Holger: "is to unspecific").
  *
  * Judged at EVERY read, with no cache: the grant allows by the one definition (`grantLiveSql`: signed, not revoked, departed,
  * expired or spent, started, its App not deleted); the App is live and installed; the target still qualifies
@@ -20,7 +21,7 @@
  * 2026-11-27: "Judged at every read"). A giver whose account is erased (`issuer_user_id` set NULL, or the user soft-deleted)
  * leaves the grant active (cor:acl:140:08). Read only: nothing here admits a write.
  */
-import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import type { PrismaClient } from '../../generated/prisma/index.js';
 import { isRunPrincipal } from '../auth/runPrincipal.js';
 import { isPureAppKeyShape, readsInOwnRight } from '../appMemoryLinks.js';
 import { isAgentInstalled } from '../appAgent.js';
@@ -29,7 +30,6 @@ import { keyHoldsScope } from '../appKeyScopes/scopes.js';
 import { LIVE_ORG_MEMBERSHIP } from '../auth/liveOrgMembership.js';
 
 export const MEMORY_READ_ACTION = 'memory.read';
-export const KNOWLEDGE_READ_ACTION = 'knowledge.read';
 /** The App key scope a pure key needs before a `memory.read` grant held by its App reaches it. */
 export const GRANT_READ_SCOPE = 'grant:read';
 
@@ -82,7 +82,7 @@ export async function memoryReadTargetRefusal(db: Db, appId: string, memory: Rea
   return null;
 }
 
-interface ReadGrantRow { action: string; action_values: unknown; issuer_user_id: string | null }
+interface ReadGrantRow { action_values: unknown; issuer_user_id: string | null }
 
 /** The App, live and installed, with its organization; null otherwise. */
 async function liveApp(db: PrismaClient, appId: string): Promise<{ id: string; organizationId: string | null } | null> {
@@ -116,8 +116,8 @@ async function giverCounts(
 
 /**
  * The ids App `appId` reads through its grants right now (or among `onlyMemoryIds`). `run`: the principal is a userless run
- * (it reaches `knowledge.read` too); otherwise a pure key, which reaches `memory.read` only (its scope is checked by the caller,
- * {@link grantReadReachFor}).
+ * (it reaches the organization form too); otherwise a pure key, which reaches the named-memory form only (its scope is checked by
+ * the caller, {@link grantReadReachFor}).
  */
 export async function appReadGrantReach(
   db: PrismaClient,
@@ -126,26 +126,30 @@ export async function appReadGrantReach(
 ): Promise<Set<string>> {
   const out = new Set<string>();
   if (opts.onlyMemoryIds && opts.onlyMemoryIds.length === 0) return out;
-  const actions = opts.run ? [MEMORY_READ_ACTION, KNOWLEDGE_READ_ACTION] : [MEMORY_READ_ACTION];
   // Grants first: most Apps hold none, and this runs for every read of a pure key or a userless run.
   const rows = await db.$queryRaw<ReadGrantRow[]>`
-    SELECT g.action, g.action_values, g.issuer_user_id FROM grants g
+    SELECT g.action_values, g.issuer_user_id FROM grants g
     WHERE g.app_id = ${appId} AND g.grantee_app_id = ${appId} AND g.user_id IS NULL AND g.agent_id IS NULL AND g.worker_id IS NULL
-      AND g.action IN (${Prisma.join(actions)}) AND ${grantLiveSql('g')}`;
+      AND g.action = ${MEMORY_READ_ACTION} AND ${grantLiveSql('g')}`;
   if (rows.length === 0) return out;
   const app = await liveApp(db, appId);
   if (!app) return out;
   const givers = new Map<string, { roles: unknown } | null>();
   const only = opts.onlyMemoryIds ? new Set(opts.onlyMemoryIds) : null;
 
-  // memory.read: one memory each, the target judged now, the giver's own read judged now.
+  // Split the rows by form. (a): the value is the App's own organization id, a single string. (b): one or more memory ids.
+  const orgIssuers: Array<string | null> = [];
   const byMemory = new Map<string, Array<string | null>>();
   for (const r of rows) {
-    if (r.action !== MEMORY_READ_ACTION) continue;
-    const memoryId = (r.action_values as { memory?: unknown } | null)?.memory;
-    if (typeof memoryId !== 'string' || (only && !only.has(memoryId))) continue;
-    byMemory.set(memoryId, [...(byMemory.get(memoryId) ?? []), r.issuer_user_id]);
+    const v = (r.action_values as { memory?: unknown } | null)?.memory;
+    if (typeof v === 'string' && app.organizationId !== null && v === app.organizationId) { orgIssuers.push(r.issuer_user_id); continue; }
+    for (const memoryId of Array.isArray(v) ? v : [v]) {
+      if (typeof memoryId !== 'string' || (only && !only.has(memoryId))) continue;
+      byMemory.set(memoryId, [...(byMemory.get(memoryId) ?? []), r.issuer_user_id]);
+    }
   }
+
+  // (b): each named memory, the target judged now, the giver's own read judged now.
   if (byMemory.size > 0) {
     const memories = await db.memory.findMany({ where: { id: { in: [...byMemory.keys()] } }, select: READ_GRANT_TARGET_SELECT });
     for (const memory of memories) {
@@ -156,16 +160,10 @@ export async function appReadGrantReach(
     }
   }
 
-  // knowledge.read (runs only): the App's OWN organization's ORGANIZATION knowledge, while the giver is still a live member of it.
-  if (opts.run && app.organizationId) {
-    const issuers: Array<string | null> = [];
-    for (const r of rows) {
-      if (r.action !== KNOWLEDGE_READ_ACTION) continue;
-      if ((r.action_values as { organization?: unknown } | null)?.organization !== app.organizationId) continue;
-      issuers.push(r.issuer_user_id);
-    }
+  // (a), runs only: the App's OWN organization's ORGANIZATION knowledge, while the giver is still a live member of it.
+  if (opts.run && app.organizationId && orgIssuers.length > 0) {
     let open = false;
-    for (const issuer of issuers) {
+    for (const issuer of orgIssuers) {
       const member = (giver: { id: string }) => db.orgMember.findFirst({
         where: { organizationId: app.organizationId!, userId: giver.id, ...LIVE_ORG_MEMBERSHIP }, select: { userId: true },
       }).then((m) => m !== null);

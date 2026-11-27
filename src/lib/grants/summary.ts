@@ -89,12 +89,36 @@ export const SUMMARY_FORMATTERS = {
   'worker-ref': (urn: string, placeholder: string) => canonical('worker-ref', placeholder, urn),
   'secret-ref': (urn: string, placeholder: string) => canonicalSecret(placeholder, urn),
   'secret-mark': (mark: string, placeholder: string) => secretMark(placeholder, mark),
-  // #5321: a memory and an organization are written as their canonical grammar-v2 URNs, as every other reference.
+  // #5321: a memory, and (memory.read's organization form) an organization, are written as their canonical grammar-v2 URNs.
   'memory-ref': (urn: string, placeholder: string) => canonical('memory-ref', placeholder, urn),
   'org-ref': (urn: string, placeholder: string) => canonical('org-ref', placeholder, urn),
 } as const;
 
 export type SummaryFormatters = { app: (urn: string) => string; 'node-ref': (urn: string, placeholder: string) => string; 'worker-ref': (urn: string, placeholder: string) => string; 'secret-ref': (urn: string, placeholder: string) => string; 'secret-mark': (mark: string, placeholder: string) => string; 'memory-ref'?: (urn: string, placeholder: string) => string; 'org-ref'?: (urn: string, placeholder: string) => string };
+
+/**
+ * #5321 (cor:acl:140:02, `memory.read`'s two forms): a memory-ref value is written with the words that say which form it is, so the
+ * signer reads what it opens. A single reference that resolves to an ORGANIZATION URN is form (a), "all ORGANIZATION knowledge of
+ * <org>"; one or more references that resolve to memory URNs are form (b), "the memory <urn>" or "the memories <urn>, <urn>" in the
+ * stored order. An organization inside a list, an entry the caller did not resolve, and anything else is refused, never guessed.
+ */
+function memoryRefWords(name: string, value: unknown, entries: unknown[], refs: SummaryInput['refs'], fmt: SummaryFormatters): string {
+  const urns: string[] = [];
+  for (const entry of entries) {
+    if (entry === undefined || entry === null || entry === '') throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
+    if (entry === '*' || typeof entry === 'object') throw new GrantSummaryError('WILDCARD', `summary placeholder {${name}} has a wildcard or structured value`);
+    if (typeof entry !== 'string') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a value of a type the summary cannot write`);
+    const ref = Object.prototype.hasOwnProperty.call(refs, entry) ? refs[entry] : undefined;
+    if (!ref) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no resolved reference`);
+    urns.push(ref.urn);
+  }
+  let isOrg = false;
+  try { isOrg = !Array.isArray(value) && parseUrnV2(urns[0]).type === 'org'; } catch { isOrg = false; }
+  if (isOrg) return `all ORGANIZATION knowledge of ${(fmt['org-ref'] ?? SUMMARY_FORMATTERS['org-ref'])(urns[0], name)}`;
+  const format = fmt['memory-ref'] ?? SUMMARY_FORMATTERS['memory-ref'];
+  const written = urns.map((u) => format(u, name));
+  return `${written.length === 1 ? 'the memory' : 'the memories'} ${written.join(', ')}`;
+}
 
 export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters = SUMMARY_FORMATTERS): string {
   const { action, app, values, refs } = input;
@@ -114,6 +138,7 @@ export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters =
     // write refuses the whole sentence. An empty list has no value.
     const entries: unknown[] = Array.isArray(value) ? value : [value];
     if (entries.length === 0) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
+    if (param.type === 'memory-ref') { resolved.set(name, memoryRefWords(name, value, entries, refs, fmt)); continue; }
     const written: string[] = [];
     for (const entry of entries) {
       if (entry === undefined || entry === null || entry === '') throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
@@ -129,15 +154,6 @@ export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters =
         // A mark is its own words, not a reference: there is nothing to resolve, and a list of marks names nothing.
         if (Array.isArray(value)) throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a list value`);
         written.push(fmt['secret-mark'](entry as string, name));
-        continue;
-      }
-      if (param.type === 'memory-ref' || param.type === 'org-ref') {
-        // #5321: exactly one reference, never a list (the action takes none).
-        if (Array.isArray(value) || typeof entry !== 'string') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a list value`);
-        const ref = Object.prototype.hasOwnProperty.call(refs, entry) ? refs[entry] : undefined;
-        if (!ref) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no resolved reference`);
-        const format = fmt[param.type] ?? SUMMARY_FORMATTERS[param.type];
-        written.push(format(ref.urn, name));
         continue;
       }
       if (param.type !== 'node-ref' && param.type !== 'secret-ref' && param.type !== 'worker-ref') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a parameter type the summary cannot write`);
