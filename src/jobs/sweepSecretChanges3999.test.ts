@@ -4,7 +4,7 @@ import { startSecretChangeSweepLoop } from './sweepSecretChanges.js';
 afterEach(()=>{vi.useRealTimers();vi.unstubAllEnvs();});
 it('clears expired staging independently of DISABLE_SECRET_SWEEP, and stops cleanly',async()=>{
  vi.useFakeTimers();vi.stubEnv('NODE_ENV','development');vi.stubEnv('DISABLE_SECRET_SWEEP','true');
- const execute=vi.fn().mockResolvedValue(1),transaction=vi.fn(async(f:Function)=>f({$executeRaw:execute}));
+ const execute=vi.fn().mockResolvedValue(1),transaction=vi.fn(async(f:Function)=>f({$queryRaw:vi.fn().mockResolvedValue([]),$executeRaw:execute}));
  const loop=startSecretChangeSweepLoop({$transaction:transaction} as never);expect(loop).not.toBeNull();
  await vi.advanceTimersByTimeAsync(60_000);expect(execute).toHaveBeenCalledTimes(1);
  await loop!.stop();await vi.advanceTimersByTimeAsync(120_000);expect(execute).toHaveBeenCalledTimes(1);
