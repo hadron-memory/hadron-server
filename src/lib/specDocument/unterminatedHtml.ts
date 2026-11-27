@@ -68,15 +68,16 @@ function bogusHiddenTag(text: string, at: number, close: number, ctx: () => Hidd
   const raw = RAW_TEXT_START.exec(body);
   if (raw === null) return -1;
   const before = body.slice(0, raw.index);
-  // Charles QA (#5388 at 722ea31f): only what Markdown could read another way rules it out: a `<` that may start a construct holding the tag
-  // (a comment, processing instruction or CDATA section with its closer somewhere after it, a declaration every reader takes (marked needs a blank after the name, markdown-it a
-  // capital), or a start tag with a quoted value, the one place a tag holds a `<`; `</`, `<!<`, `<![` and a name followed by `<` are text),
-  // a backslash that escapes the tag's own `<`, or a backtick run with a backtick after the tag.
-  // Whether `closer` occurs at or after `k`: the last one is looked up once per text, so each hidden tag costs no rescan.
-  const after = (closer: string, k: number): boolean => { const last = ctx().lastOf; let l = last.get(closer); if (l === undefined) { l = text.lastIndexOf(closer); last.set(closer, l); } return l >= k; };
-  const backtick = [...before.matchAll(/`+/g)].some((m) => runAfter(text, ctx(), m[0].length, close + 1));
-  const opens = (re: RegExp, closer: string): boolean => { const m = re.exec(before); return m !== null && after(closer, at + 2 + m.index + 2); };
-  if (/<(?:![A-Z]+[ \t\r\n])|<[A-Za-z][^<]*["']/.test(before) || opens(/<!--/, '-->') || opens(/<!\[CDATA\[/, ']]>') || opens(/<\?/, '?>') || /(?:^|[^\\])(?:\\\\)*\\$/.test(before) || backtick || before.split('\n').length > 2 || !CM_OPEN_TAG.test(body.slice(raw.index)) || body.includes('\n', raw.index)) return -1;
+  // Before the first hidden start this pass escaped, the earlier, stricter test stands (#5332): a `<`, a backtick or a backslash before the tag
+  // rules it out. Behind one, what that element's raw text masked is read afresh, so a tag there that Markdown emits must be caught (Charles QA,
+  // #5388 at 722ea31f): only what Markdown could read another way rules it out there, a `<` that may start a construct holding the tag (a
+  // comment, processing instruction or CDATA section with its closer somewhere after it, a declaration with a blank after its name, or a start
+  // tag with a quoted value, the one place a tag holds a `<`; `</`, `<!<`, `<![` and a name followed by `<` are text), a backslash that escapes
+  // the tag's own `<`, or a backtick run with a run of its length after the tag. Before a bare CR (a line break to every reader, not to the walk)
+  // the stricter test stands there too.
+  const strict = /[<`\\]/.test(before);
+  const ruledOut = at < ctx().escapedFrom || before.includes('\r') ? strict : maskedRuledOut(text, ctx(), at, close, before);
+  if (ruledOut || before.split('\n').length > 2 || !CM_OPEN_TAG.test(body.slice(raw.index)) || body.includes('\n', raw.index)) return -1;
   // At the head of a line the tag may start an HTML block in one reader and continue a paragraph in another (markdown-it's lazy lines), so
   // escaping it can move what follows into another block: only when nothing after it holds a tag. A block starts there only for a type 1 or 6
   // name, or a tag alone on its line (type 7); any other tag with more on its line is inline in every reader (#5388 QA).
@@ -86,8 +87,23 @@ function bogusHiddenTag(text: string, at: number, close: number, ctx: () => Hidd
   if (lineHead && blockish && text.includes('<', close + 1)) return -1;
   if (inHtmlBlock(text, ctx(), at + 2 + raw.index)) return -1;
   const name = raw[1].toLowerCase();
-  if (name !== 'plaintext' && emittedEndTag(text, ctx(), close + 1, name)) return -1;
+  if (name !== 'plaintext') {
+    if (emittedEndTag(text, ctx(), at, close + 1, name) !== -1) return -1;
+  }
   return at + 2 + raw.index;
+}
+
+/** #5388 (Charles QA) — the test of {@link bogusHiddenTag} behind an escaped hidden start: whether `before` holds what Markdown reads another way. */
+function maskedRuledOut(text: string, ctx: HiddenContext, at: number, close: number, before: string): boolean {
+  // Whether `closer` occurs at or after `k`: the last one is looked up once per text, so each hidden tag costs no rescan.
+  const after = (closer: string, k: number): boolean => {
+    let l = ctx.lastOf.get(closer);
+    if (l === undefined) { l = text.lastIndexOf(closer); ctx.lastOf.set(closer, l); }
+    return l >= k;
+  };
+  const opens = (re: RegExp, closer: string): boolean => { const m = re.exec(before); return m !== null && after(closer, at + 2 + m.index + 2); };
+  return /<(?:![A-Za-z]+[ \t\r\n])|<[A-Za-z][^<]*["']/.test(before) || opens(/<!--/, '-->') || opens(/<!\[CDATA\[/, ']]>') || opens(/<\?/, '?>')
+    || /(?:^|[^\\])(?:\\\\)*\\$/.test(before) || [...before.matchAll(/`+/g)].some((m) => runAfter(text, ctx, m[0].length, close + 1));
 }
 
 /**
@@ -103,8 +119,10 @@ interface HiddenContext {
   readonly lastOf: Map<string, number>;
   /** Per backtick run length, where the last run of exactly that length starts (see {@link runAfter}), built on first use. */
   lastRun?: Map<number, number>;
-  /** The `<` that start no simple tag (see {@link otherLtIndex}), built on first use. */
-  otherLt?: number[];
+  /** #5388 (QA) — where the first hidden raw-text start this pass escaped (`<!&lt;name`, `</&lt;name`) begins (Infinity for none). */
+  readonly escapedFrom: number;
+  /** The raw reader's one pass over the text (see {@link rawReader}), built on first use. */
+  raw?: RawWalks;
   /** Where each line starts. */
   readonly lineStarts: number[];
   /** The walk of {@link inHtmlBlock}: where each step starts, and the walk's state before it. */
@@ -130,42 +148,122 @@ function hiddenContext(text: string): HiddenContext {
   walkBlocks(text, 0, { fence: null, opened: false, afterText: false }, Infinity, (s, state) => { steps.push(s); states.push(state); });
   const lineStarts = [0];
   for (const m of text.matchAll(LINE_END)) lineStarts.push(m.index + m[0].length);
-  return { codeFrom, endTags: new Map(), lastOf: new Map(), lineStarts, steps, states };
+  const escaped = /<[!/]&lt;(?:script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext)(?=[\s/>]|$)/i.exec(text);
+  return { codeFrom, endTags: new Map(), lastOf: new Map(), escapedFrom: escaped === null ? Infinity : escaped.index, lineStarts, steps, states };
 }
 
 /** The offset just past the next line end at or after `k` (-1 for none), and that line end (the text's length for none). */
 const LINE_END = /\r\n|\r|\n/g;
+/** The line ends of the last text asked about (start and length of each), so a lookup is a binary search, not a scan to the next one. */
+let lineEndsOf: { text: string; at: number[]; len: number[] } | null = null;
 function lineEndFrom(text: string, k: number): { end: number; next: number } {
-  LINE_END.lastIndex = k;
-  const m = LINE_END.exec(text);
-  return m === null ? { end: text.length, next: -1 } : { end: m.index, next: m.index + m[0].length };
+  if (lineEndsOf === null || lineEndsOf.text !== text) {
+    const at: number[] = [];
+    const len: number[] = [];
+    for (const m of text.matchAll(LINE_END)) { at.push(m.index); len.push(m[0].length); }
+    lineEndsOf = { text, at, len };
+  }
+  const { at, len } = lineEndsOf;
+  let lo = 0;
+  let hi = at.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (at[mid] < k) lo = mid + 1; else hi = mid; }
+  return lo === at.length ? { end: text.length, next: -1 } : { end: at[lo], next: at[lo] + len[lo] };
 }
 
 /**
- * #5369 (#5370 BLIND P2b) — whether an end tag of `name` after `from` closes the hidden element: one every reader emits raw. Only a tag
+ * #5369 (#5370 BLIND P2b) — the end tag of `name` after `from` that closes the hidden element (its offset, -1 for none): one every reader emits raw. Only a tag
  * Markdown accepts (`</name>`, spaces or tabs before the `>`), with no fence-like line, link destination, link title or reference definition
  * anywhere before it, no backtick run between `from` and it that a run of the same length after it could close into a code span, no indent
  * before it on its line that could make the line code (a tab or four spaces among the line's leading blanks and quote and list markers,
  * stacked or not), and no backslash right before it. Anything else is not counted, which keeps the escape. The first end tag that is not
  * held in code or behind a backslash decides; one before it held in a code span keeps the escape as well.
  */
-function emittedEndTag(text: string, ctx: HiddenContext, from: number, name: string): boolean {
+function emittedEndTag(text: string, ctx: HiddenContext, at: number, from: number, name: string): number {
   let index = ctx.endTags.get(name);
   if (index === undefined) { index = endTagIndex(text, ctx, name); ctx.endTags.set(name, index); }
   let lo = 0;
   let hi = index.at.length;
   while (lo < hi) { const mid = (lo + hi) >> 1; if (index.at[mid] < from) lo = mid + 1; else hi = mid; }
-  if (lo === index.at.length) return false;
+  if (lo === index.at.length) return -1;
   const stop = index.next[lo];
-  if (stop === -1 || index.fenced[stop] || index.upTo[lo] >= from) return false;
+  if (stop === -1 || index.fenced[stop] || index.upTo[lo] >= from) return -1;
   // Charles QA F1: Markdown's raw text ends at this end tag, so a browser resumes right after it; a raw reader of the string must be in data
-  // there too. Between the bogus comment's `>` and the end tag, every `<` must start a simple tag that closes before it: a comment,
-  // declaration, raw-text start or open tag there would still hold the raw reader at the end tag, and what follows would be read two ways.
-  const others = (ctx.otherLt ??= otherLtIndex(text));
-  let a = 0;
-  let b = others.length;
-  while (a < b) { const mid = (a + b) >> 1; if (others[mid] < from) a = mid + 1; else b = mid; }
-  return a === others.length || others[a] >= index.at[stop];
+  // there too, or what follows is read two ways. It is when the end tag starts a token in data, or a token ends at its own `>`: a raw-text
+  // element of its own name that the reader opened after the bogus comment, or a bogus comment that holds it. The reading is the
+  // pass of {@link rawReader} from the start when that pass reads the bogus comment at `at` from data too; otherwise a walk from the comment's
+  // `>`, which stops where it meets a token an earlier walk read from data (both read alike from there), so every offset is walked once.
+  const end = index.at[stop];
+  const walks = (ctx.raw ??= { owner: new Map(), walks: [] });
+  if (walks.walks.length === 0) rawReader(text, 0, walks);
+  let w = walks.owner.get(at) === 0 ? walks.walks[0] : rawReader(text, from, walks);
+  while (w.joinAt !== -1 && end >= w.joinAt) w = walks.walks[w.joinWalk];
+  return w.data.has(end) || w.ends.has(text.indexOf('>', end) + 1) ? end : -1;
+}
+
+/**
+ * Where a raw reader's tokens start in data, where each token ends (a raw-text element's at its end tag's `>`), and where the walk
+ * joined an earlier one (from `joinAt` on, walk `joinWalk` holds the reading; -1 for none).
+ */
+interface RawReading { data: Set<number>; ends: Set<number>; joinAt: number; joinWalk: number }
+/** The walks of {@link rawReader} over one text: which walk first read each token start from data, and each walk (0 is from the start). */
+interface RawWalks { owner: Map<number, number>; walks: RawReading[] }
+/**
+ * #5388 (Charles QA F1) — an HTML tokenizer's reading of `text` from `from` (in data), up to a token an earlier walk read: the offsets of the `<` that start a token
+ * in data, and just past each token. Comments end at `-->` or `--!>`; `<!`, `<?` and `</`
+ * before a non-letter are bogus comments to the next `>`; a tag ends at the first `>` outside a quoted value; `<` before anything else is text.
+ */
+function rawReader(text: string, from: number, walks: RawWalks): RawReading {
+  const data = new Set<number>();
+  const ends = new Set<number>();
+  const self = walks.walks.length;
+  const reading: RawReading = { data, ends, joinAt: -1, joinWalk: -1 };
+  walks.walks.push(reading);
+  const tagEnd = (k: number): number => {
+    for (let j = k; j < text.length; j += 1) {
+      const c = text[j];
+      if (c === '>') return j;
+      if ((c === '"' || c === "'") && /=[ \t\n\f\r]*$/.test(text.slice(Math.max(k, j - 8), j))) { const q = text.indexOf(c, j + 1); if (q === -1) return -1; j = q; }
+    }
+    return -1;
+  };
+  let i = text.indexOf('<', from);
+  while (i !== -1) {
+    const owner = walks.owner.get(i);
+    if (owner !== undefined && owner !== self) { reading.joinAt = i; reading.joinWalk = owner; break; }
+    walks.owner.set(i, self);
+    data.add(i);
+    const c = text[i + 1];
+    let next: number;
+    if (text.startsWith('<!--', i)) {
+      const m = /<!--->?|<!--[\s\S]*?--!?>/y;
+      m.lastIndex = i;
+      const r = text.startsWith('<!-->', i) ? i + 5 : text.startsWith('<!--->', i) ? i + 6 : (m.exec(text) ? m.lastIndex : -1);
+      next = r;
+    } else if (c === '!' || c === '?' || (c === '/' && !isLetter(text[i + 2]) && text[i + 2] !== '>')) {
+      const r = text.indexOf('>', i + 2);
+      next = r === -1 ? -1 : r + 1;
+    } else if (c === '/' && text[i + 2] === '>') {
+      next = i + 3;
+    } else if (isLetter(c) || (c === '/' && isLetter(text[i + 2]))) {
+      const r = tagEnd(i + 1);
+      next = r === -1 ? -1 : r + 1;
+      const name = c === '/' ? null : (/^[A-Za-z][^\s/>]*/.exec(text.slice(i + 1, i + 40)) as RegExpExecArray)[0].toLowerCase();
+      if (next !== -1 && name === 'plaintext') next = -1;
+      else if (next !== -1 && name !== null && RAW_TEXT.has(name)) {
+        const close = new RegExp(`</${name}(?=[\\t\\n\\f\\r />])`, 'gi');
+        close.lastIndex = next;
+        const m = close.exec(text);
+        if (m === null) next = -1;
+        else { const r2 = tagEnd(m.index + 2); next = r2 === -1 ? -1 : r2 + 1; }
+      }
+    } else {
+      next = i + 1;
+    }
+    if (next === -1) break;
+    ends.add(next);
+    i = text.indexOf('<', next);
+  }
+  return reading;
 }
 
 /** #5388 (Charles QA) — whether a backtick run of exactly `len` starts at or after `k` (the last start per length is found once per text). */
@@ -179,34 +277,35 @@ function runAfter(text: string, ctx: HiddenContext, len: number, k: number): boo
 }
 
 /**
- * #5388 (Charles QA F2) — whether a line between `at` and `close` opens a comment or a CDATA section (up to three spaces in) that runs past
- * `close`: Markdown holds that block to its closer, and a reader that keeps CDATA (htmlparser2) or the comment would too.
+ * #5388 (Charles QA F2) — whether a line between `at` and `close` that continues the `<!`'s paragraph opens a comment or a CDATA section (up to
+ * three spaces in) that runs past `close`: Markdown holds that block to its closer, and a reader that keeps CDATA (htmlparser2) or the comment
+ * would too. A bare CR is not a line break here, as in the walk (a stated limit).
  */
+/** Where each line-head `<!--` or `<![CDATA[` of the last text asked about starts, found once per text. */
+let commentLinesOf: { text: string; open: number[]; kind: string[] } | null = null;
 function commentLineCrossed(text: string, at: number, close: number): boolean {
-  const re = /[\r\n] {0,3}(<!--|<!\[CDATA\[)/g;
-  re.lastIndex = at;
-  for (let m = re.exec(text); m !== null && m.index < close; m = re.exec(text)) {
-    const open = m.index + m[0].length - m[1].length;
-    const end = m[1] === '<![CDATA[' ? text.indexOf(']]>', open + 9)
+  if (commentLinesOf === null || commentLinesOf.text !== text) {
+    const open: number[] = [];
+    const kind: string[] = [];
+    for (const m of text.matchAll(/\n {0,3}(<!--|<!\[CDATA\[)/g)) { open.push(m.index + m[0].length - m[1].length); kind.push(m[1]); }
+    commentLinesOf = { text, open, kind };
+  }
+  const { open: opens, kind } = commentLinesOf;
+  let lo = 0;
+  let hi = opens.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (opens[mid] <= at) lo = mid + 1; else hi = mid; }
+  for (let x = lo; x < opens.length && opens[x] < close; x += 1) {
+    const open = opens[x];
+    // Only a line that continues the `<!`'s paragraph: past a blank line, or a line that opens another HTML block, the opener is in that
+    // block, and both readers read it the same way.
+    if (/\n[ \t]*\n|\n {0,3}<(?:[?!]|\/?(?:script|style|textarea|pre)[\s>])/i.test(text.slice(at, open - 1))) break;
+    const end = kind[x] === '<![CDATA[' ? text.indexOf(']]>', open + 9)
       : text.startsWith('<!-->', open) ? open + 2 : text.startsWith('<!--->', open) ? open + 3 : text.indexOf('-->', open + 4);
     if (end === -1 || end > close - 2) return true;
   }
   return false;
 }
 
-/** A simple start or end tag: a name, attributes whose values hold no `<` or `>`, and its `>`. Not a raw-text start, `plaintext` or `template`. */
-const SIMPLE_TAG = /<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^'<>]*'|"[^"<>]*"))?)*\s*\/?>/y;
-/** #5369 (Charles QA F1) — the offsets of every `<` in the text that does not start a {@link SIMPLE_TAG} (an end tag of any name counts as simple). */
-function otherLtIndex(text: string): number[] {
-  const out: number[] = [];
-  for (let i = text.indexOf('<'); i !== -1; i = text.indexOf('<', i + 1)) {
-    SIMPLE_TAG.lastIndex = i;
-    const m = SIMPLE_TAG.exec(text);
-    const name = m?.[1].toLowerCase();
-    if (m === null || (text[i + 1] !== '/' && (RAW_TEXT.has(name as string) || name === 'plaintext' || name === 'template'))) out.push(i);
-  }
-  return out;
-}
 
 function endTagIndex(text: string, ctx: HiddenContext, name: string): EndTagIndex {
   const at: number[] = [];
@@ -823,8 +922,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       const first = text.indexOf('>', i + 2);
       const closer = text.indexOf(']]>', i + 9);
       if (first === -1 || closer === -1 || first !== closer + 2 || closer + 3 > blockLimit(i)) return i;
-      // marked ends this block right after its closer and reads the rest of the line as Markdown (or reads it inline after a paragraph line).
-      if (startsLine(i)) raw(model === 'marked' ? first + 1 : lineEndAt(closer));
+      if (startsLine(i)) raw(lineEndAt(closer));
       i = first + 1;
       continue;
     }
@@ -832,8 +930,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       const first = text.indexOf('>', i + 2);
       const closer = text.indexOf('?>', i + 1);
       if (first === -1 || closer === -1 || first !== closer + 1 || closer + 2 > blockLimit(i)) return i;
-      // marked ends this block right after its closer and reads the rest of the line as Markdown (or reads it inline after a paragraph line).
-      if (startsLine(i)) raw(model === 'marked' ? first + 1 : lineEndAt(closer));
+      if (startsLine(i)) raw(lineEndAt(closer));
       i = first + 1;
       continue;
     }
