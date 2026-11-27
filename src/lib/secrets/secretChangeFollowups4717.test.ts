@@ -7,7 +7,7 @@
  */
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import pg from 'pg';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -112,7 +112,19 @@ describe('#4717 item 3: a protected create of a taken name refuses at staging', 
 
 describe('#4717 item 4: the change-request objects apply by either path, in either order, twice', () => {
   const read = (p: string) => readFileSync(new URL(`../../../prisma/${p}`, import.meta.url), 'utf8');
-  const MIGRATION = 'migrations/20261127090000_secret_delete_after_use/migration.sql';
+  // #5392 item 5 (Brooks BLIND P3-7/F8): find the newest carrier the way resolvers.appSecrets3997.test.ts does, instead of a
+  // name updated by hand whenever the carrier moves (#5335 had to repoint this pin at its own migration; a hand-pointed name
+  // keeps testing the OLD migration's file after the source moves, silently).
+  const carrierMigration = () => {
+    const invariants = read('secret-change-requests-invariants.sql');
+    const first = invariants.split('\n')[0]!;
+    const migrations = new URL('../../../prisma/migrations/', import.meta.url);
+    const dir = readdirSync(migrations).sort().reverse()
+      .find((d) => { try { return readFileSync(new URL(`${d}/migration.sql`, migrations), 'utf8').includes(first); } catch { return false; } });
+    if (!dir) throw new Error('no migration carries secret-change-requests-invariants.sql');
+    return `migrations/${dir}/migration.sql`;
+  };
+  const MIGRATION = carrierMigration();
   it('the migration and post-push share one source for these objects', () => {
     const invariants = read('secret-change-requests-invariants.sql');
     expect(read(MIGRATION)).toContain(invariants);
