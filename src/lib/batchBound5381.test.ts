@@ -11,7 +11,8 @@
  * Harness (#5371's pin R8): `SET LOCAL enable_hashjoin = off` and `SET LOCAL enable_mergejoin = off` in the statement's own
  * transaction, on the per-worker clone. The row-count pins are red against the old shapes only while the planner still picks the
  * rescanning nested loop (a table without statistics); the plan pins are red against them in any order: every row-locking node of
- * a batch must be scanned once, inside a CTE with no join between. Real database throughout.
+ * a batch must be scanned once, inside a CTE with no join between, and the batch must be declared MATERIALIZED (the guard the
+ * plan alone cannot show: see expectLocksScannedOnce). Real database throughout.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
@@ -52,7 +53,7 @@ const forcedClient = new Proxy(db, {
  * The batch statements `run` sends, captured instead of executed: `$queryRaw` answers [] and `$executeRaw` 0, so a drain stops
  * after its first statement. Then each is EXPLAINed (not run) and the path from the root to every LockRows node is returned.
  */
-async function lockPaths(run: (client: any) => Promise<unknown>): Promise<string[][][]> {
+async function lockPaths(run: (client: any) => Promise<unknown>): Promise<Array<{ sql: string; locks: string[][] }>> {
   const captured: Prisma.Sql[] = [];
   const grab = (answer: unknown) => (strings: TemplateStringsArray | Prisma.Sql, ...values: unknown[]) => {
     captured.push(Array.isArray(strings) ? Prisma.sql(strings as TemplateStringsArray, ...values) : strings as Prisma.Sql);
@@ -64,7 +65,7 @@ async function lockPaths(run: (client: any) => Promise<unknown>): Promise<string
       : k === '$transaction' ? (fn: (tx: unknown) => unknown) => fn(fake) : (t as any)[k],
   });
   await run(fake);
-  const out: string[][][] = [];
+  const out: Array<{ sql: string; locks: string[][] }> = [];
   for (const sql of captured) {
     if (!/SKIP LOCKED/.test(sql.sql)) continue;
     const rows = await db.$queryRaw<Array<{ 'QUERY PLAN': unknown }>>(Prisma.sql`EXPLAIN (FORMAT JSON) ${sql}`);
@@ -74,7 +75,7 @@ async function lockPaths(run: (client: any) => Promise<unknown>): Promise<string
       if (n['Node Type'] === 'LockRows') locks.push(here);
       for (const c of n.Plans ?? []) walk(c, here);
     })((rows[0]['QUERY PLAN'] as Array<{ Plan: PlanNode }>)[0].Plan, []);
-    out.push(locks);
+    out.push({ sql: sql.sql, locks });
   }
   return out;
 }
@@ -84,9 +85,13 @@ async function lockPaths(run: (client: any) => Promise<unknown>): Promise<string
  * the outer join) is the rescannable shape. An enclosing data-modifying CTE (the reconcile's `gone`) does not count, as the lock
  * still sits under the join inside it.
  */
-function expectLocksScannedOnce(paths: string[][][], statements: number) {
-  expect(paths.length, 'batch statements captured').toBe(statements);
-  for (const locks of paths) {
+function expectLocksScannedOnce(statements: Array<{ sql: string; locks: string[][] }>, count: number) {
+  expect(statements.length, 'batch statements captured').toBe(count);
+  for (const { sql, locks } of statements) {
+    // The declared guard. On the Postgres this runs on, a CTE holding a locking clause was not inlined even without the keyword
+    // (the remove-MATERIALIZED mutants left the plan unchanged), so the plan alone cannot pin it; MATERIALIZED is what keeps the
+    // batch scanned once if a planner ever does inline it.
+    expect(sql, 'the batch statement').toMatch(/\bbatch AS MATERIALIZED \(/);
     expect(locks.length, 'LockRows nodes in the statement').toBeGreaterThan(0);
     for (const path of locks) {
       const cte = path.map((p) => p.startsWith('CTE ')).lastIndexOf(true);
@@ -133,7 +138,7 @@ describe('#5381 deleteEndedSecretChanges (the #5333 retention DELETE)', () => {
     expect(n, `deleteEndedSecretChanges(tx, 1) deleted ${n} rows`).toBe(1);
     expect(await left('ret')).toBe(59);
   });
-  it('B2: every row lock of the batch is scanned once (inside a CTE, no join between)', async () => {
+  it('B2: the batch is a MATERIALIZED CTE and every row lock is scanned once (inside a CTE, no join between)', async () => {
     expectLocksScannedOnce(await lockPaths((c) => deleteEndedSecretChanges(c, 1)), 1);
   });
   it('B3: a run holds batch x maxBatches, and successive runs delete every row past retention exactly once, nothing else', async () => {
@@ -179,7 +184,7 @@ describe('#5381 reconcileOrphanedChatToolConnections (the cor:int:030:03 reconci
     expect(n).toBe(2);
     expect(await db.chatToolTeardownIntent.count()).toBe(2);
   });
-  it('C2: every row lock of both UPDATEs is scanned once (inside a CTE, no join between)', async () => {
+  it('C2: both batches are MATERIALIZED CTEs and every row lock is scanned once (inside a CTE, no join between)', async () => {
     expectLocksScannedOnce(await lockPaths((c) => reconcileOrphanedChatToolConnections(c, 1)), 2);
   });
   it('C3: successive forced-plan calls queue every orphan exactly once and never a live owner\'s row', async () => {
@@ -224,7 +229,7 @@ describe('#5381 purgeSupersededVersions (the version retention purge)', () => {
     expect(r.purged, `purgeSupersededVersions({ batchSize: 1, maxBatches: 1 }) purged ${r.purged}`).toBe(1);
     expect(await db.secretVersion.count()).toBe(19);
   });
-  it('P2: every row lock of the batch is scanned once (inside a CTE, no join between)', async () => {
+  it('P2: the batch is a MATERIALIZED CTE and every row lock is scanned once (inside a CTE, no join between)', async () => {
     expectLocksScannedOnce(await lockPaths((c) => purgeSupersededVersions(c, { batchSize: 1, maxBatches: 1 })), 1);
   });
   it('P3: a run holds batch x maxBatches; successive runs purge every superseded version exactly once and never a current one', async () => {
@@ -258,7 +263,7 @@ describe('#5381 sweepPasskeyCeremonies (the #3122 ceremony sweep)', () => {
     expect(n, `sweepPasskeyCeremonies({ batchSize: 1, maxPasses: 1 }) deleted ${n}`).toBe(1);
     expect(await old()).toBe(39);
   });
-  it('K2: every row lock of the pass is scanned once (inside a CTE, no join between)', async () => {
+  it('K2: the batch is a MATERIALIZED CTE and every row lock is scanned once (inside a CTE, no join between)', async () => {
     expectLocksScannedOnce(await lockPaths((c) => sweepPasskeyCeremonies(c, { batchSize: 1, maxPasses: 1 })), 1);
   });
   it('K3: a run holds batch x passes; successive runs delete every retired ceremony once; live ceremonies and credentials are untouched', async () => {
