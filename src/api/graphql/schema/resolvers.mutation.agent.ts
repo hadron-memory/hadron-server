@@ -495,7 +495,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       // #1468 — reclaim through the shared guard: a deleted mint-stamped
       // corpus holding a protected spec refuses. A holder revived since the
       // read above is live, the same slot-occupied case as below.
-      const reclaimed = !!staleHolder?.deletedAt && await reclaimTombstonedMemory(tx, staleHolder.id);
+      const reclaimed = !!staleHolder?.deletedAt && await reclaimTombstonedMemory(tx, staleHolder.id, [ctx.userId]);
       if (staleHolder && !reclaimed) {
         // #935: typed — under racing creates of the same name, the loser
         // can land HERE (the winner's system memory committed between the

@@ -261,9 +261,9 @@ export async function repairAgentSystemMemoryOwner(
       // #1468 — reclaim through the shared guard: a deleted mint-stamped
       // corpus holding a protected spec refuses. A holder revived since the
       // read above stays, and is reported like any live holder.
-      const reclaimed = !!holder?.deletedAt && await reclaimTombstonedMemory(tx, holder.id);
+      const reclaimed = !!holder?.deletedAt && await reclaimTombstonedMemory(tx, holder.id, [actor]);
       if (holder && !reclaimed) {
-        urnNote = `URN left as "${memory.urn}" — "${derivedUrn}" is held by live memory ${holder.id}.`;
+        urnNote = `URN left as "${memory.urn}" — "${derivedUrn}" is held by memory ${holder.id}.`;
       } else {
         urn = derivedUrn;
       }

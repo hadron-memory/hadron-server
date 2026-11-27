@@ -17,6 +17,7 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
@@ -196,6 +197,7 @@ beforeEach(async () => {
   const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   const key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label: 'orca1' } });
   const asOwner = { db, userId: holder.id, roles: ['READER'] } as Context;
+  await joinHostForKey(db, key.id, 'orca1');
   await M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate', hostId: 'orca1' }, asOwner);
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 600, workers: [
     { worker: target.id, family: 'claude', worktrees: ['hadron-server/target'] },

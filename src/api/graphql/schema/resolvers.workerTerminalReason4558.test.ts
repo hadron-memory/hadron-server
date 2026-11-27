@@ -27,6 +27,7 @@ import { TERMINAL_REASONS } from '../../../lib/workerTerminal.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { deploymentSchema } from './deploymentSchema.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -86,6 +87,7 @@ beforeEach(async () => {
   kit = await w('Kit');
   ada = await w('Ada');
   orca1 = await mkKey(app.id, 'orca1');
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
   await register(orca1, [{ worker: kit.id, family: 'glm' }, { worker: ada.id, family: 'glm' }]);
 });
