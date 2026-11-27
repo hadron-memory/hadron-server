@@ -188,3 +188,63 @@ describe('#5345 a user-owned non-personal linked memory reaches no surface of th
     expect(await mcpIds(orgApp.id)).toEqual([ok.id]);
   });
 });
+
+/**
+ * #5375 item 2: the inert link is visible to its owner and fully reversible. The pins above assert the judge row only; these
+ * pin what a person sees through App.attachedMemories (the link listed with active: false) and that detach drops it while
+ * re-attach restores it, still inert. Item 3 is ruled "Keep silent" (cor:dmo:060:22, Decided 2026-11-27: attaching a memory
+ * the App's key cannot reach succeeds, silently), so the attach itself is pinned to succeed and nothing refuses or warns.
+ */
+describe('#5375 the inert link is listed with active: false, and detach / re-attach round-trip it', () => {
+  const M = resolvers.Mutation as any;
+  const detach = (c: Context, memoryRef: string, appRef: string) => M.detachMemoryFromApp(null, { memoryRef, appRef }, c);
+  type Entry = { memory: { id: string }; attachedById: string | null; active: boolean };
+  const listed = async (appId: string, c: Context) =>
+    ((await (resolvers as any).App.attachedMemories({ id: appId }, {}, c)) as Entry[])
+      .map((e) => ({ memoryId: e.memory.id, attachedById: e.attachedById, active: e.active }))
+      .sort((x, y) => x.memoryId.localeCompare(y.memoryId));
+  const ownPersonal = () => db.memory.create({
+    data: { id: generateId(), name: 'own', urn: `hrn-test-${generateId().slice(-8)}`, class: 'personal', userId: otto, ownerUserId: otto, organizationId: null, visibility: null } as never,
+  });
+
+  it.each(['knowledge', 'group', 'app'] as const)(
+    'App.attachedMemories lists a linked user-owned %s memory with active: false, beside an active control', async (klass) => {
+      const extra = klass === 'app'
+        ? { appId: (await db.app.create({ data: { id: generateId(), ownerUserId: otto, name: 'Other', urn: `otto-${generateId().slice(-6)}:other` } as never })).id }
+        : {};
+      const inert = await userOwned(klass, extra);
+      const own = await ownPersonal();
+      // Keep silent (cor:dmo:060:22): the attach of a memory the key can never reach succeeds and returns the memory.
+      expect((await attach(asUser(otto), inert.id, userApp.id)).id).toBe(inert.id);
+      await attach(asUser(otto), own.id, userApp.id);
+      expect(await listed(userApp.id, asUser(otto))).toEqual(
+        [
+          { memoryId: inert.id, attachedById: otto, active: false },
+          { memoryId: own.id, attachedById: otto, active: true },
+        ].sort((x, y) => x.memoryId.localeCompare(y.memoryId)),
+      );
+      // The listing agrees with what the key reaches: the active entry only.
+      expect(await mcpIds(userApp.id)).toEqual([own.id]);
+    },
+  );
+
+  it('detach drops the inert link from the listing and the judge; re-attach restores it, still inert', async () => {
+    const uk = await userOwned('knowledge');
+    await attach(asUser(otto), uk.id, userApp.id);
+    expect(await listed(userApp.id, asUser(otto))).toEqual([{ memoryId: uk.id, attachedById: otto, active: false }]);
+
+    expect(await detach(asUser(otto), uk.id, userApp.id)).toBe(true);
+    expect(await listed(userApp.id, asUser(otto))).toEqual([]);
+    expect(await judgeAppLinks(db as never, userApp.id, { onlyMemoryIds: [uk.id] })).toEqual([]);
+    expect(await db.appMemoryLink.count({ where: { appId: userApp.id, memoryId: uk.id } })).toBe(0);
+
+    expect((await attach(asUser(otto), uk.id, userApp.id)).id).toBe(uk.id);
+    expect(await listed(userApp.id, asUser(otto))).toEqual([{ memoryId: uk.id, attachedById: otto, active: false }]);
+    const judged = await judgeAppLinks(db as never, userApp.id, { onlyMemoryIds: [uk.id] });
+    expect(judged.map((j) => [j.memoryId, j.active])).toEqual([[uk.id, false]]);
+    // Re-attaching grants the key nothing: still no reach on any surface.
+    expect(await linkedReachFor(db as never, keyAuth(userApp.id))).toEqual(new Set());
+    expect(await mcpIds(userApp.id)).toEqual([]);
+    expect(await recordRead(keyCtx(userApp.id), uk.id)).toBe(false);
+  });
+});
