@@ -10525,7 +10525,14 @@ model ChatRootCounter {
   messageCount Int @default(0) @map("message_count")
   lastMessageAt DateTime? @map("last_message_at")
   updatedAt DateTime @updatedAt @map("updated_at")
+  /// #5027 (Ask 6): the Agent the chat was started with, written by startChat for every new chat. Read first by the
+  /// turn lookup (`resolveChatHomeAgent`) and by `myChats`, because a named home (a group, a private memory, another
+  /// Agent's personal memory) carries no per-Agent pointer. Null for chats started before it existed: they read
+  /// exactly as before. Not a foreign key, so deleting an Agent leaves the chat's record as it was (the turn lookup
+  /// treats a deleted Agent as today's pointer does). Never encrypted.
+  agentId String? @map("agent_id")
   chatRoot Node @relation(fields: [chatRootNodeId], references: [id], onDelete: Cascade)
+  @@index([agentId])
   @@map("chat_root_counters")
 }
 

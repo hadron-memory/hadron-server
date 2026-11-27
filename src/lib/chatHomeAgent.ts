@@ -73,8 +73,16 @@ export async function resolveChatHomeAgent(
   db: PrismaClient | Prisma.TransactionClient,
   memory: { id: string; appId: string | null; sharedMemoryOfAgentId: string | null; userMemoryOfAgentId: string | null },
   caller?: ChatCaller,
+  chatRootId?: string,
 ): Promise<{ agent: any | null; deletedAgentId: string | null }> {
-  const pointer = memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId;
+  // #5027 Ask 6 (b): the chat's own recorded Agent first (a named home such as a group or a private memory carries no
+  // per-Agent pointer, and another Agent's personal memory carries the wrong one), then today's memory pointer, then
+  // the legacy memory item. A chat started before the record existed has a null and resolves exactly as before. The
+  // reach and licence checks on the result are unchanged.
+  const recorded = chatRootId
+    ? (await db.chatRootCounter.findUnique({ where: { chatRootNodeId: chatRootId }, select: { agentId: true } }))?.agentId ?? null
+    : null;
+  const pointer = recorded ?? memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId;
   let agent: any | null = null;
   let deletedAgentId: string | null = null;
   if (pointer) {

@@ -3,3 +3,7 @@
 CREATE TYPE "ChatHome" AS ENUM ('APP_SHARED', 'PERSONAL', 'PRIVATE');
 
 ALTER TABLE "agents" ADD COLUMN "default_chat_home" "ChatHome";
+
+-- #5027 Ask 6: the chat records its Agent. Nullable, no backfill: an existing chat keeps a null and reads as before.
+ALTER TABLE "chat_root_counters" ADD COLUMN "agent_id" TEXT;
+CREATE INDEX "chat_root_counters_agent_id_idx" ON "chat_root_counters"("agent_id");

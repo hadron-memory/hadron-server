@@ -1075,7 +1075,8 @@ export const chatMutations = {
                 createdBy: txCtx.userId ?? null,
               },
             });
-            await tx.chatRootCounter.create({data:{chatRootNodeId:chatNodeId}});
+            // #5027 Ask 6: the chat records its Agent, the one the turn lookup and myChats read first.
+            await tx.chatRootCounter.create({data:{chatRootNodeId:chatNodeId,agentId:resolvedAgentId}});
             await tx.chatRootEngineState.create({ data: { chatRootNodeId: chatNodeId, state: storedState.data as InputJsonValue } });
             // #2047: the chat's record, written with the chat so neither exists without the other (R37).
             if (chatServed) {
@@ -1181,7 +1182,7 @@ export const chatMutations = {
         : await normalizeChatAiConfigChoice(ctx.db, memory.appId ?? null, aiConfigChoice).catch(rethrowAiConfigTyped);
       // #4076: one shared lookup (resolve, deleted = none, licence). Personal/legacy turns already refused a
       // deleted Agent through the serve gate before any write (#3654); keep that refusal. App-class chats retain their empty result.
-      const { agent, deletedAgentId } = await resolveChatHomeAgent(ctx.db, memory);
+      const { agent, deletedAgentId } = await resolveChatHomeAgent(ctx.db, memory, undefined, chatNode.id);
       if (memory.class !== 'app' && deletedAgentId) throw new AgentNotFoundError(deletedAgentId);
       // #4070: an App-less home the caller can no longer reach is refused here, before the pinned revision is read.
       await refuseUnreachableChatHomeAgent(ctx.db, memory, agent, ctx);
@@ -1813,7 +1814,7 @@ export const chatMutations = {
       // #4076/#4043: share main's resolve/deleted/licence lookup BEFORE any pinned script or stage read. #4070: the response passes
       // the request principal so an App-less home re-checks the caller's CURRENT reach in the same lookup.
       const turnMemory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
-      const turnAgent = turnMemory ? (await resolveChatHomeAgent(ctx.db, turnMemory, ctx)).agent as { systemMemoryId?: string | null } | null : null;
+      const turnAgent = turnMemory ? (await resolveChatHomeAgent(ctx.db, turnMemory, ctx, chatNode.id)).agent as { systemMemoryId?: string | null } | null : null;
       const sysMemId = turnAgent?.systemMemoryId;
       if (sysMemId) script = await loadChatScript(ctx.db, sysMemId, (chatData.startedWithRevision as string | null) ?? null);
       const stageOrder = script ? await conversationStageOrder(script, origin.conversationName ?? null) : null;
