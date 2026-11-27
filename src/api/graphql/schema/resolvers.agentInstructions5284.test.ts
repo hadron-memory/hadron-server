@@ -147,7 +147,10 @@ describe('#5284 the ranked list: score, phrase, cap', () => {
     expect(hits[1].score).toBeLessThan(hits[0].score);
   });
 
-  it('with embeddings unavailable the keyword list has score null', async () => {
+  // #5360 N1: this and its NO_MATCH twin below are THE guard for "a task the search could not score is never
+  // MATCHED" — the keyword fallback's `score: null` mapping (agentDefinitionLists.ts) is what makes an unscored
+  // task unable to reach the floor. Keep them as that guard if the fallback ever changes (#2421).
+  it('GUARD (unscored never MATCHED): with embeddings unavailable the keyword fallback maps score null, so the list carries no score', async () => {
     vi.stubEnv('EMBEDDING_API_URL', '');
     resetEmbeddingClientForTests();
     const hits = await list({ phrase: 'deploy' });
@@ -172,13 +175,106 @@ describe('#5284 agentInstructions: input', () => {
   it.each([
     ['neither phrase nor eventCode', { a: null, p: null }],
     ['an empty phrase', { ph: '   ' }],
-    ['a phrase over 500 characters', { ph: 'x'.repeat(501) }],
+    ['a phrase over 512 characters', { ph: 'x'.repeat(513) }], // #5360 B2: 512 for both (Holger, 2026-11-27)
     ['an eventCode without appRef', { c: 'task.finish.open-children' }],
   ])('%s is BAD_USER_INPUT', async (_n, vars) => {
     expect((await ask({ a: coder.id, ...vars })).refused?.code).toBe('BAD_USER_INPUT');
   });
   it('a 500-character phrase is answered', async () => {
     expect((await ask({ a: coder.id, ph: 'x'.repeat(500) })).state).toBe('NO_MATCH');
+  });
+});
+
+// #5360 — the #5347 follow-ups (gate CHECKED, issue #5360): one shared phrase bound (512, Holger's ruling of
+// 2026-11-27 "512 for both"), a trimmed and length-bounded event code, the stale-mapping answer, validation
+// before the read, the keyword-only tail and the floor boundary.
+describe('#5360 input bounds: one shared 512 phrase bound, a trimmed and bounded event code, both before any read', () => {
+  it('a 505-character phrase is answered (501-512 were refused by the old 500 cap; the list\'s 512 bound now governs both)', async () => {
+    expect((await ask({ a: coder.id, ph: 'x'.repeat(505) })).state).toBe('NO_MATCH');
+  });
+  it('a 512-character phrase is answered and a 513-character one is BAD_USER_INPUT', async () => {
+    expect((await ask({ a: coder.id, ph: 'x'.repeat(512) })).state).toBe('NO_MATCH');
+    expect((await ask({ a: coder.id, ph: 'x'.repeat(513) })).refused?.code).toBe('BAD_USER_INPUT');
+  });
+  it('an event code is trimmed before the register read', async () => {
+    const r = await ask({ a: coder.id, p: app.id, c: '  task.finish.open-children  ' });
+    expect([r.state, r.route, r.register.state]).toEqual(['MATCHED', 'REGISTER', 'MAPPED']);
+  });
+  it('an event code longer than a code can be (64, the register loc atom bound, cor:agt:110:01) is BAD_USER_INPUT; one of exactly 64 is taken', async () => {
+    expect((await ask({ a: coder.id, p: app.id, c: `${'a'.repeat(63)}.x` })).refused?.code).toBe('BAD_USER_INPUT');
+    expect((await ask({ a: coder.id, p: app.id, c: `${'a'.repeat(62)}.x` })).state).toBe('NO_MATCH');
+  });
+  it('both bounds run before any read: they win over an unknown Agent and an unknown App', async () => {
+    expect((await ask({ a: generateId(), ph: 'x'.repeat(513) })).refused?.code).toBe('BAD_USER_INPUT');
+    expect((await ask({ a: generateId(), p: app.id, c: 'x'.repeat(65) })).refused?.code).toBe('BAD_USER_INPUT');
+    expect((await ask({ a: coder.id, p: generateId(), c: 'x'.repeat(65) })).refused?.code).toBe('BAD_USER_INPUT');
+  });
+});
+
+describe('#5360 a stale mapping: register MAPPED, task not in the asking Agent\'s list', () => {
+  it('answers NO_MATCH with register still MAPPED (cor:dmo:050:24 S1/S2 do not state otherwise; the answer is reported, the task is not invented)', async () => {
+    // The register resolves a loc through the asking Agent's own memory, where a pos-1 node is locatable whatever
+    // its node type (effectiveSystemMemory filters comments only on INHERITED positions), and it asks only
+    // runnable + live + readable. The task LIST excludes a comment unconditionally (agentDefinitionLists, #1935),
+    // so a runnable comment at a task loc in the Agent's own memory is the deterministic stale shape: the entry
+    // maps, yet the task is never in the list the answer is allowed to serve. Built by hand in one transaction
+    // (the comment invariants are deferred to commit): target, comment node, meta, anchor edge.
+    const target = await node(coder.memoryId, 'notes:stale-target');
+    const retired = generateId();
+    await db.$transaction(async (tx) => {
+      await tx.node.create({ data: { id: retired, memoryId: coder.memoryId, loc: 'tasks:retired', name: 'Retired chore', nodeType: 'comment', isRunnable: true, abstract: 'A chore that is no longer runnable', content: 'gone' } });
+      await tx.commentMeta.create({ data: { nodeId: retired, targetNodeId: target.id, threadState: 'OPEN', authorKey: `u:${admin.id}` } });
+      await tx.edge.create({ data: { memoryId: coder.memoryId, sourceId: retired, targetId: target.id, loc: `tasks:retired:anchor`, name: 'comment-anchor', governedKind: 'COMMENT_ANCHOR', anchorRevNo: 1, anchorApprovalHash: 'a'.repeat(64) } });
+    });
+    await entry(team.memoryId, 'task.stale.mapping', 'tasks:retired');
+    const r = await ask({ a: coder.id, p: app.id, c: 'task.stale.mapping' });
+    expect(r.register.state).toBe('MAPPED');
+    expect([r.state, r.route]).toEqual(['NO_MATCH', null]);
+    expect(r.candidates).toEqual([]);
+    expect(r.instructions).toBeNull();
+    expect(r.fallback.node.id).toBe(askCoordinator.id); // the instructions.no-match fallback still applies
+  });
+});
+
+describe('#5360 the task list validates before it reads', () => {
+  const refusalOf = async (ref: string, args: Record<string, unknown>) =>
+    (await run('query($r: ID!, $ph: String, $l: Int) { agentTaskList(ref: $r, phrase: $ph, limit: $l) { trigger } }', { r: ref, ...args }, ctx(admin.id)))
+      .errors?.[0]?.extensions?.code;
+  it('an invalid limit is BAD_USER_INPUT even for an unknown Agent (the check runs before the gate read)', async () => {
+    expect(await refusalOf(generateId(), { ph: 'deploy failed', l: 11 })).toBe('BAD_USER_INPUT');
+  });
+  it('an over-long phrase is BAD_USER_INPUT before the read (512, the bound shared with agentInstructions)', async () => {
+    expect(await refusalOf(generateId(), { ph: 'x'.repeat(513) })).toBe('BAD_USER_INPUT');
+  });
+  it('a valid ranked call still reads the gate first: an unknown Agent is AGENT_NOT_FOUND, as before', async () => {
+    expect(await refusalOf(generateId(), { ph: 'deploy failed' })).toBe('AGENT_NOT_FOUND');
+  });
+});
+
+describe('#5360 the keyword-only tail under a live embedding', () => {
+  it('a keyword hit with no abstract vector follows every scored task, score null, matchedBy KEYWORD', async () => {
+    // The keyword half is an AND over the phrase's words, so the manual task's abstract carries both ('deploy',
+    // 'failed'); it has no abstract VECTOR, so under the live embedding it is the keyword-only tail.
+    const manual = await task(coder.memoryId, 'tasks:manual', 'Deploy the failed service by hand', null);
+    const hits = await (resolvers.Query as any).agentTaskList({}, { ref: coder.id, phrase: 'deploy failed', limit: 10 }, ctx(admin.id));
+    expect(hits[0].node.id).toBe(deploy.id);
+    expect(hits[0].matchedBy).toBe('BOTH');
+    expect(typeof hits[0].score).toBe('number');
+    const tail = hits[hits.length - 1];
+    expect(tail.node.id).toBe(manual.id);
+    expect([tail.matchedBy, tail.score]).toEqual(['KEYWORD', null]);
+    expect(hits.slice(0, -1).every((h: any) => h.score != null)).toBe(true);
+  });
+});
+
+describe('#5360 the floor boundary', () => {
+  it('a task scoring exactly the floor is MATCHED (>=, not >)', async () => {
+    const under = await ask({ a: coder.id, ph: 'something weak' });
+    const measured = (under.nearest.find((n: any) => n.node.loc === 'tasks:weak') as { score: number }).score;
+    expect(measured).toBeCloseTo(0.4, 5);
+    vi.stubEnv('TASK_MATCH_MIN_SCORE', String(measured)); // String round-trips the exact double: floor === score
+    const r = await ask({ a: coder.id, ph: 'something weak' });
+    expect([r.state, locs(r.candidates)]).toEqual(['MATCHED', ['tasks:weak']]);
   });
 });
 
@@ -239,7 +335,8 @@ describe('#5284 agentInstructions: the search arm and the floor', () => {
     expect(r.candidates).toEqual([]);
     expect(r.instructions).toBeNull();
   });
-  it('with embeddings unavailable, a keyword hit is NO_MATCH with the hits in nearest, never MATCHED', async () => {
+  // #5360 N1: the NO_MATCH half of the "unscored never MATCHED" guard — see the keyword-list pin above.
+  it('GUARD (unscored never MATCHED): with embeddings unavailable a keyword hit is NO_MATCH with the hits in nearest, never MATCHED', async () => {
     vi.stubEnv('EMBEDDING_API_URL', '');
     resetEmbeddingClientForTests();
     const r = await ask({ a: coder.id, ph: 'deploy' });
