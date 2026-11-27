@@ -304,7 +304,15 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // relied on the old bind and rename still parses the call but silently gets a link only. (0.45.0 is #5239, merged first.)
 // 0.47.0 — ADDITIVE, #5218: `App.viewerAppUserMemoryClasses: [MemoryClass!]!`, the personal/private classes the
 // signed-in viewer may still create in the App through `createMemoryInApp`. A lagging client still validates. (0.46.0 is #5258, merged first.)
-export const HADRON_SERVER_VERSION = '0.47.0';
+// 0.48.0 — BREAKING, #5163: `ResumeSessionInput.expectedWorkerId` is renamed `expectedWorkerRef`, no alias (cor:api:140:01),
+// and takes a worker reference: the id, as before, or a fully qualified worker URN resolved through `resolveWorkerRef`. A
+// lagging client's `expectedWorkerId` is an UNKNOWN input field and GraphQL refuses the whole operation, so the CLI's
+// resume (hadron-cli `team.graphql`) ships in the same window. A ref that is neither an id nor a worker URN (a name, a
+// relative URN, another type) now refuses URN_NOT_QUALIFIED where it was BAD_USER_INPUT; blank stays BAD_USER_INPUT. A URN
+// naming no worker and one naming a worker the caller may not read get one answer (the WORKER_MISMATCH refusal carries
+// expectedWorkerId null, or NOTHING_TO_RESUME). The refusal extension `expectedWorkerId` keeps its name (an output id).
+// MCP tool inputs are unchanged (hadron_resume_session sends no expected worker). (0.47.0 is #5240, merged first.)
+export const HADRON_SERVER_VERSION = '0.48.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

@@ -20,6 +20,7 @@ import { resolveSessionEndRequest, sweepSessionEndRequests } from './sessionEnd.
 import { pendingTaskWakes } from '../agentTasks/taskWakes.js';
 import { loadWorkerWorkStates } from '../agentTasks/matcher.js';
 import { writeSessionHandoff } from '../../api/graphql/schema/resolvers.mutation.session.js';
+import { joinHostForKey } from '../../test/agentTeamHost.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -83,6 +84,7 @@ beforeEach(async () => {
   kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Kit', slug: 'kit', heldByUserId: holder.id, reportsToWorkerId: ada.id }, select: { id: true } });
   const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   orca1 = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4) }, select: { id: true } });
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
   // A 10-minute check-in, so the registration is still live when the 10-minute grace runs out (it lapses after 30).
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] }] } }, keyCtx(orca1));
@@ -139,6 +141,16 @@ describe('the ask (cor:agt:050:10)', () => {
 });
 
 describe('the fallback after the grace (cor:agt:050:10 S4, cor:agt:070:05)', () => {
+  it('#5259: a host removed inside its refresh window is no live host for the fallback: no worker.end is issued to it', async () => {
+    const t = await startedTask();
+    await finish(t.id);
+    const r = (await requestOf(t.id))!;
+    // Kit's session is open on orca1, so the removal is forced (cor:agt:070:01, Proposed: removal ends the registration at once).
+    expect(await M.removeAgentTeamHost({}, { input: { appRef: app.id, hostId: 'orca1', force: true } }, ctx(manager.id))).toBe(true);
+    expect(await resolveSessionEndRequest(db, r.id, r.dueAt)).toBe('no-live-host');
+    expect(await db.hostOperation.count({ where: { type: 'worker.end' } })).toBe(0);
+  });
+
   it('S4: still open at the grace, the platform issues worker.end for that exact session to Kit\'s live host; not a moment before', async () => {
     const t = await startedTask();
     await finish(t.id);

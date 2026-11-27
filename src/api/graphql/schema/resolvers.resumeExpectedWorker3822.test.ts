@@ -3,7 +3,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
  * #3822 — resumeSession with an expected worker (cor:agt:020:03, Vera's FIT 6762455524 and ruling 6762811449).
  *
  * On 2026-11-09 a no-argument resume in Jonas's worktree redeemed Greer's waiting claim and bound Greer there. The
- * CLI now sends the worktree's last-bound worker as `expectedWorkerId` (hadron-cli#1839). With it, the call is the
+ * CLI now sends the worktree's last-bound worker as `expectedWorkerId` (hadron-cli#1839; `expectedWorkerRef` since #5163). With it, the call is the
  * no-argument resume restricted to that worker:
  *  - a claim or live session of the expected worker A binds A, even when another worker B's claim waits too;
  *  - nothing of A's waits but something of the caller's for B does (a claim, or one live session): refused
@@ -97,7 +97,7 @@ describe('#3822 mismatch: nothing of the expected worker waits, something of ano
   it('a waiting claim of B only, expected A: refused WORKER_MISMATCH naming both; B\'s claim unconsumed and redeemable', async () => {
     const b = await beaClaimOnly();
     const before = await footprint();
-    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada }));
+    const g = await refusal(resume(ctx(holder), { expectedWorkerRef: ada }));
     expect(g.extensions).toMatchObject({
       code: 'RESUME_REFUSED',
       reason: 'WORKER_MISMATCH',
@@ -111,7 +111,7 @@ describe('#3822 mismatch: nothing of the expected worker waits, something of ano
     expect(g.message).toContain('Bea');
     expect(await footprint()).toEqual(before);
     // B's claim still waits: a resume naming B redeems it.
-    const r = await resume(ctx(holder), { expectedWorkerId: bea });
+    const r = await resume(ctx(holder), { expectedWorkerRef: bea });
     expect(r).toMatchObject({ outcome: 'RESUMED', session: { id: b.id } });
   });
 
@@ -119,7 +119,7 @@ describe('#3822 mismatch: nothing of the expected worker waits, something of ano
     const b = await start(holder, bea);
     await M.endSession({}, { id: b.id, handoff: 'h', resumeClaim: true }, ctx(holder));
     const before = await footprint();
-    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada }));
+    const g = await refusal(resume(ctx(holder), { expectedWorkerRef: ada }));
     expect(g.extensions).toMatchObject({ code: 'RESUME_REFUSED', reason: 'WORKER_MISMATCH', foundWorkerId: bea });
     expect(await footprint()).toEqual(before);
   });
@@ -127,7 +127,7 @@ describe('#3822 mismatch: nothing of the expected worker waits, something of ano
   it('no claim, one live session of B, expected A: refused naming both; B\'s session unchanged and a no-argument resume adopts it', async () => {
     const b = await start(holder, bea);
     const before = await footprint();
-    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada }));
+    const g = await refusal(resume(ctx(holder), { expectedWorkerRef: ada }));
     expect(g.extensions).toMatchObject({
       code: 'RESUME_REFUSED',
       reason: 'WORKER_MISMATCH',
@@ -147,7 +147,7 @@ describe('#3822 mismatch: nothing of the expected worker waits, something of ano
     await db.worker.update({ where: { id: ada }, data: { heldByUserId: null, heldAt: null } });
     await beaClaimOnly();
     const before = await footprint();
-    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada }));
+    const g = await refusal(resume(ctx(holder), { expectedWorkerRef: ada }));
     expect(g.extensions).toMatchObject({ code: 'RESUME_REFUSED', reason: 'WORKER_MISMATCH', expectedWorkerName: 'Ada', foundWorkerId: bea });
     expect(await footprint()).toEqual(before);
   });
@@ -155,7 +155,7 @@ describe('#3822 mismatch: nothing of the expected worker waits, something of ano
   it('picking B\'s session by `session` with expected A is the same mismatch, and consumes nothing', async () => {
     const b = await beaClaimOnly();
     const before = await footprint();
-    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada, session: b.id }));
+    const g = await refusal(resume(ctx(holder), { expectedWorkerRef: ada, session: b.id }));
     expect(g.extensions).toMatchObject({ code: 'RESUME_REFUSED', reason: 'WORKER_MISMATCH', foundWorkerId: bea });
     expect(await footprint()).toEqual(before);
   });
@@ -166,7 +166,7 @@ describe('#3822 mismatch: nothing of the expected worker waits, something of ano
     await beaClaimOnly();
     const unknown = generateId();
     for (const expected of [cy, unknown]) {
-      const g = await refusal(resume(ctx(holder), { expectedWorkerId: expected }));
+      const g = await refusal(resume(ctx(holder), { expectedWorkerRef: expected }));
       expect(g.extensions).toMatchObject({ code: 'RESUME_REFUSED', reason: 'WORKER_MISMATCH', expectedWorkerId: expected, expectedWorkerName: null, foundWorkerId: bea });
       expect(g.message).not.toContain('Cy');
     }
@@ -178,7 +178,7 @@ describe('#3822 the expected worker wins', () => {
     const a = await start(holder, ada);
     await claim(holder, a.id);
     const b = await beaClaimOnly();
-    const r = await resume(ctx(holder), { expectedWorkerId: ada });
+    const r = await resume(ctx(holder), { expectedWorkerRef: ada });
     expect(r).toMatchObject({ outcome: 'RESUMED', session: { id: a.id }, candidates: [] });
     const bClaim = await db.resumeClaim.findFirstOrThrow({ where: { sessionId: b.id } });
     expect(bClaim.consumedAt).toBeNull();
@@ -188,7 +188,7 @@ describe('#3822 the expected worker wins', () => {
   it('a live session of A alongside B\'s claim: binds A, B\'s claim untouched', async () => {
     const a = await start(holder, ada);
     const b = await beaClaimOnly();
-    const r = await resume(ctx(holder), { expectedWorkerId: ada });
+    const r = await resume(ctx(holder), { expectedWorkerRef: ada });
     expect(r).toMatchObject({ outcome: 'RESUMED', session: { id: a.id } });
     expect((await db.resumeClaim.findFirstOrThrow({ where: { sessionId: b.id } })).consumedAt).toBeNull();
     expect((await db.session.findUniqueOrThrow({ where: { id: b.id } })).endedAt).toBeNull();
@@ -199,7 +199,7 @@ describe('#3822 the expected worker wins', () => {
     await M.endSession({}, { id: a.id, handoff: 'h', resumeClaim: true }, ctx(holder));
     const b = await start(holder, bea);
     const bBefore = await db.session.findUniqueOrThrow({ where: { id: b.id } });
-    const r = await resume(ctx(holder), { expectedWorkerId: ada });
+    const r = await resume(ctx(holder), { expectedWorkerRef: ada });
     expect(r.outcome).toBe('STARTED');
     expect(r.session.workerId).toBe(ada);
     expect(await db.session.findUniqueOrThrow({ where: { id: b.id } })).toEqual(bBefore);
@@ -212,7 +212,7 @@ describe('#3822 the expected worker wins', () => {
     const a2 = await start(holder, ada, 'second');
     await claim(holder, a2.id);
     await beaClaimOnly();
-    const r = await resume(ctx(holder), { expectedWorkerId: ada });
+    const r = await resume(ctx(holder), { expectedWorkerRef: ada });
     expect(r.outcome).toBe('CHOOSE');
     expect(r.candidates.map((c: any) => c.workerName)).toEqual(['Ada', 'Ada']);
     expect(await db.resumeClaim.count({ where: { consumedAt: { not: null } } })).toBe(0);
@@ -220,7 +220,7 @@ describe('#3822 the expected worker wins', () => {
 
   it('expected worker equals the one waiting claim\'s worker: resumes as today', async () => {
     const b = await beaClaimOnly();
-    expect(await resume(ctx(holder), { expectedWorkerId: bea })).toMatchObject({ outcome: 'RESUMED', session: { id: b.id } });
+    expect(await resume(ctx(holder), { expectedWorkerRef: bea })).toMatchObject({ outcome: 'RESUMED', session: { id: b.id } });
   });
 });
 
@@ -236,21 +236,21 @@ describe('#3822 unchanged answers', () => {
     const o = await start(other, bea);
     await claim(other, o.id);
     const before = await footprint();
-    expect(await envelope(resume(ctx(holder), { expectedWorkerId: ada }))).toBe(none);
-    expect(await envelope(resume(ctx(holder), { expectedWorkerId: bea }))).toBe(none);
-    expect(await envelope(resume(ctx(holder), { expectedWorkerId: generateId() }))).toBe(none);
+    expect(await envelope(resume(ctx(holder), { expectedWorkerRef: ada }))).toBe(none);
+    expect(await envelope(resume(ctx(holder), { expectedWorkerRef: bea }))).toBe(none);
+    expect(await envelope(resume(ctx(holder), { expectedWorkerRef: generateId() }))).toBe(none);
     // A non-holder, an App key and an impersonation probing with the holder's worker learn nothing either.
-    expect(await envelope(resume({ db, appId: app.id, roles: [] } as unknown as Context, { expectedWorkerId: ada }))).toBe(none);
-    expect(await envelope(resume({ ...ctx(other), impersonation: { actorUserId: holder } } as unknown as Context, { expectedWorkerId: ada }))).toBe(none);
+    expect(await envelope(resume({ db, appId: app.id, roles: [] } as unknown as Context, { expectedWorkerRef: ada }))).toBe(none);
+    expect(await envelope(resume({ ...ctx(other), impersonation: { actorUserId: holder } } as unknown as Context, { expectedWorkerRef: ada }))).toBe(none);
     expect(await footprint()).toEqual(before);
   });
 
-  it('a blank expectedWorkerId is refused as bad input before any read, and only for a real caller', async () => {
+  it('a blank expectedWorkerRef (was expectedWorkerId) is refused as bad input before any read, and only for a real caller', async () => {
     const none = await nothingEnvelope();
     await beaClaimOnly();
     const before = await footprint();
-    expect((await refusal(resume(ctx(holder), { expectedWorkerId: '  ' }))).extensions.code).toBe('BAD_USER_INPUT');
-    expect(await envelope(resume({ db, appId: app.id, roles: [] } as unknown as Context, { expectedWorkerId: '' }))).toBe(none);
+    expect((await refusal(resume(ctx(holder), { expectedWorkerRef: '  ' }))).extensions.code).toBe('BAD_USER_INPUT');
+    expect(await envelope(resume({ db, appId: app.id, roles: [] } as unknown as Context, { expectedWorkerRef: '' }))).toBe(none);
     expect(await footprint()).toEqual(before);
   });
 });
@@ -268,13 +268,13 @@ describe('#3901 BLIND fix head (Glen)', () => {
     await liveRows(bea, OPEN_SESSION_SCAN_CAP + 1);
     // Without the narrowing the whole pool is over the cap: today's no-argument answer refuses RESUME_AMBIGUOUS.
     expect((await refusal(resume(ctx(holder)))).extensions.code).toBe('RESUME_AMBIGUOUS');
-    expect(await resume(ctx(holder), { expectedWorkerId: ada })).toMatchObject({ outcome: 'RESUMED', session: { id: a.id } });
+    expect(await resume(ctx(holder), { expectedWorkerRef: ada })).toMatchObject({ outcome: 'RESUMED', session: { id: a.id } });
   });
 
   it('P2: nothing of A, other workers\' live sessions past the cap: still the mismatch, nothing touched', async () => {
     await liveRows(bea, OPEN_SESSION_SCAN_CAP + 1);
     const before = await footprint();
-    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada }));
+    const g = await refusal(resume(ctx(holder), { expectedWorkerRef: ada }));
     expect(g.extensions).toMatchObject({ code: 'RESUME_REFUSED', reason: 'WORKER_MISMATCH', foundWorkerId: bea, foundSource: 'LIVE_SESSION' });
     expect(await footprint()).toEqual(before);
   });
@@ -292,7 +292,7 @@ describe('#3901 BLIND fix head (Glen)', () => {
         issuedAt: new Date(t + 1000 + i), expiresAt: new Date(t + 60_000),
       })),
     });
-    expect(await resume(ctx(holder), { expectedWorkerId: ada })).toMatchObject({ outcome: 'STARTED', session: { workerId: ada } });
+    expect(await resume(ctx(holder), { expectedWorkerRef: ada })).toMatchObject({ outcome: 'STARTED', session: { workerId: ada } });
     expect(await db.resumeClaim.count({ where: { workerId: bea, consumedAt: null, revokedAt: null } })).toBe(50);
   });
 
@@ -301,47 +301,47 @@ describe('#3901 BLIND fix head (Glen)', () => {
     await claim(holder, a.id);
     const b = await beaClaimOnly();
     const before = await footprint();
-    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada, session: b.id }));
+    const g = await refusal(resume(ctx(holder), { expectedWorkerRef: ada, session: b.id }));
     expect(g.extensions).toMatchObject({ code: 'RESUME_REFUSED', reason: 'WORKER_MISMATCH', picked: true, foundWorkerId: bea, foundSource: 'CLAIM' });
     expect(g.message).toContain('The session you picked is Bea');
     expect(g.message).not.toContain('Nothing of Ada');
     expect(await footprint()).toEqual(before);
     // A's claim still binds A.
-    expect(await resume(ctx(holder), { expectedWorkerId: ada })).toMatchObject({ outcome: 'RESUMED', session: { id: a.id } });
+    expect(await resume(ctx(holder), { expectedWorkerRef: ada })).toMatchObject({ outcome: 'RESUMED', session: { id: a.id } });
   });
 
   it('P3-1: a pick that is nothing of the caller\'s answers NOTHING_TO_RESUME even while B is live (the pick, not the pool, decides)', async () => {
     const none = await nothingEnvelope();
     const b = await start(holder, bea);
     const before = await footprint();
-    expect(await envelope(resume(ctx(holder), { expectedWorkerId: ada, session: generateId() }))).toBe(none);
+    expect(await envelope(resume(ctx(holder), { expectedWorkerRef: ada, session: generateId() }))).toBe(none);
     expect(await footprint()).toEqual(before);
     // Picking B's live session itself is the mismatch.
-    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada, session: b.id }));
+    const g = await refusal(resume(ctx(holder), { expectedWorkerRef: ada, session: b.id }));
     expect(g.extensions).toMatchObject({ reason: 'WORKER_MISMATCH', picked: true, foundSource: 'LIVE_SESSION' });
   });
 
   it('P3-1: the unpicked mismatch carries picked: false', async () => {
     await beaClaimOnly();
-    expect((await refusal(resume(ctx(holder), { expectedWorkerId: ada }))).extensions).toMatchObject({ picked: false });
+    expect((await refusal(resume(ctx(holder), { expectedWorkerRef: ada }))).extensions).toMatchObject({ picked: false });
   });
 
   it('limit: the expected worker is named only through the worker read gate — a holder who left the App gets the id only', async () => {
     await beaClaimOnly();
     await db.appMember.deleteMany({ where: { appId: app.id, userId: holder } });
-    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada }));
+    const g = await refusal(resume(ctx(holder), { expectedWorkerRef: ada }));
     expect(g.extensions).toMatchObject({ code: 'RESUME_REFUSED', reason: 'WORKER_MISMATCH', expectedWorkerId: ada, expectedWorkerName: null });
     expect(g.message).not.toContain('Ada');
   });
 
-  it('P3-2: through the published schema, resumeSession accepts expectedWorkerId and the refusal carries its extensions', async () => {
+  it('P3-2: through the published schema, resumeSession accepts expectedWorkerRef (was expectedWorkerId) and the refusal carries its extensions', async () => {
     const a = await start(holder, ada);
     await claim(holder, a.id);
     await beaClaimOnly();
     const run = (expected: string) =>
       graphql({
         schema: buildSchema(typeDefs),
-        source: `mutation($e: ID) { resumeSession(input: { expectedWorkerId: $e }) { outcome session { id workerId } candidates { workerName } } }`,
+        source: `mutation($e: ID) { resumeSession(input: { expectedWorkerRef: $e }) { outcome session { id workerId } candidates { workerName } } }`,
         variableValues: { e: expected },
         contextValue: ctx(holder),
         fieldResolver(parent, args, context, info) {

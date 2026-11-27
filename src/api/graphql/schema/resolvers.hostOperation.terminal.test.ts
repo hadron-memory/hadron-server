@@ -18,6 +18,7 @@ import { resolvers, type Context } from './resolvers.js';
 import * as workerGate from './resolvers.worker.js';
 import { typeDefs } from './typeDefs.js';
 import { renderRosterEntry } from '../../../mcp/agentTaskTools.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -96,8 +97,11 @@ beforeEach(async () => {
   orca2 = await mkKey(app.id, 'orca2');
   plainKey = await mkKey(app.id, 'plain');
   foreignKey = await mkKey(otherApp.id, 'foreign');
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
+  await joinHostForKey(db, orca2.id, 'orca2');
   await M.grantAppKeyScope({}, { id: orca2.id, scope: 'host:operate', hostId: 'orca2' }, ctx(manager.id));
+  await joinHostForKey(db, foreignKey.id, 'orca1');
   await M.grantAppKeyScope({}, { id: foreignKey.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
   await register(orca1, [{ worker: coord.id, family: 'claude' }, { worker: kit.id, family: 'claude' }, { worker: ada.id, family: 'claude' }]);
 });
