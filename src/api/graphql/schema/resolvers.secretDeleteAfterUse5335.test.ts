@@ -143,6 +143,30 @@ describe('#5335 Ask 1: the protected auto-delete exception is refused at issuanc
   });
 });
 
+describe('#5335 Ask 1 (Rook P3-1): no protection oracle for a non-person caller either', () => {
+  it.each([
+    ['worker session', () => ctx({ workerId: 'w' } as never)],
+    ['App key', () => ctx({ appKeyId: 'k' } as never)],
+    ['impersonation', () => ctx({ impersonation: { adminUserId: 'adm', targetUserId: 'x' } } as never)],
+    ['run', () => ctx({ clientId: `${RUN_CLIENT_PREFIX}r1` } as never)],
+  ])('a %s gets the same answer for a protected-unarmed secret as for a missing one', async (label, make) => {
+    const other = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'plain', kind: 'generic', value: 'x' }, ctx())).id;
+    await protect(false);
+    const as = <T>(f: () => Promise<T>) => runAsActor({ workerId: label === 'worker session' ? workerId : null, agentId: null }, f);
+    const answers = [];
+    for (const ref of [secretId, other, generateId()]) {
+      answers.push(await as(() => resolvers.Mutation.issueSecretReadClient({}, { input: { secretRef: ref, holderKind: 'WORKER', holderRef: workerId,
+        autoDelete: true, maxReads: 1, reason: 'no' } } as never, make()))
+        .then(() => 'OK', (e: { message: string; extensions: Record<string, unknown> }) => JSON.stringify([e.message, e.extensions])));
+    }
+    // Protected-unarmed answers exactly as a missing secret. The unprotected one is the control: a caller the issuer rule admits
+    // (the App-key context here carries the owner) is issued there, so its answer may differ without telling protection apart.
+    expect(answers[0]).not.toBe('OK');
+    expect(answers[0]).toBe(answers[2]);
+    expect(await db.secretReadClient.count({ where: { secretId } })).toBe(0);
+  });
+});
+
 describe('#5335 Ask 2: the option arms the existing deletion moments', () => {
   it.each(['last-read', 'window-end'] as const)('protected + deleteAfterUse: a marked client deletes at %s, signed, audited, staged requests cleared', async (mode) => {
     await protect(true);
@@ -257,6 +281,20 @@ describe('#5335 Ask 3: who sets the option', () => {
     const already = await answer(as(() => setOption(false, make())));
     expect([already?.message, already?.extensions]).toEqual([value?.message, value?.extensions]);
     expect(await db.secretChangeRequest.count({ where: { secretId, state: 'open' } })).toBe(0);
+  });
+  it('protected: true together with the option on an UNPROTECTED secret is refused (one change at a time), nothing written', async () => {
+    const answer = await resolvers.Mutation.updateSecret({}, { ref: secretId, deleteAfterUse: true, protected: true } as never, ctx())
+      .then(() => null, (e: { message: string; extensions?: Record<string, unknown> }) => [e.message, e.extensions?.code]);
+    expect(answer).toEqual(['On a protected secret, change deleteAfterUse on its own.', 'BAD_USER_INPUT']);
+    expect(await db.secret.findUniqueOrThrow({ where: { id: secretId } })).toMatchObject({ protected: false, deleteAfterUse: false });
+    expect(await db.secretChangeRequest.count({ where: { secretId } })).toBe(0);
+  });
+  it('the option on a user secret is refused by its own rule, even beside a value (the value is not written)', async () => {
+    const own = await resolvers.Mutation.createSecret({}, { ownerType: 'user', name: 'mine', kind: 'generic', value: 'v' }, ctx());
+    const answer = await resolvers.Mutation.updateSecret({}, { ref: own.id, deleteAfterUse: true, value: 'v2' } as never, ctx())
+      .then(() => null, (e: { message: string; extensions?: Record<string, unknown> }) => [e.message, e.extensions?.code]);
+    expect(answer).toEqual(['deleteAfterUse is available only for App secrets.', 'BAD_USER_INPUT']);
+    expect((await db.secret.findUniqueOrThrow({ where: { id: own.id } })).updatedAt).toEqual(own.updatedAt);
   });
   it('completion judges the deletion authority again: a manager demoted after staging SET_DELETE_AFTER_USE is refused', async () => {
     const mgr = (await db.user.create({ data: { handle: `mgr-${generateId()}` } })).id;
