@@ -6,6 +6,6 @@ it('clears expired staging independently of DISABLE_SECRET_SWEEP, and stops clea
  vi.useFakeTimers();vi.stubEnv('NODE_ENV','development');vi.stubEnv('DISABLE_SECRET_SWEEP','true');
  const execute=vi.fn().mockResolvedValue(1),transaction=vi.fn(async(f:Function)=>f({$executeRaw:execute}));
  const loop=startSecretChangeSweepLoop({$transaction:transaction} as never);expect(loop).not.toBeNull();
- await vi.advanceTimersByTimeAsync(60_000);expect(execute).toHaveBeenCalledTimes(1);
- await loop!.stop();await vi.advanceTimersByTimeAsync(120_000);expect(execute).toHaveBeenCalledTimes(1);
+ await vi.advanceTimersByTimeAsync(60_000);expect(execute).toHaveBeenCalledTimes(2); // #5333: the expiry drain, then the retention phase
+ await loop!.stop();await vi.advanceTimersByTimeAsync(120_000);expect(execute).toHaveBeenCalledTimes(2);
 });
