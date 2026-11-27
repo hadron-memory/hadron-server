@@ -31,6 +31,7 @@ import { adjustCredits, clearPriceCache, debitCredits, grantCredits, recordLlmUs
 import { settleAndMeasure, writeSettlements } from './settleExpiredGrants.js';
 import { ensurePeriodGrant, periodGrantCacheKeysForTests, reloadOwnerDefaultMonthlyGrantForTests, resetPeriodGrantStateForTests, setPeriodGrantWriterForTests } from './periodGrant.js';
 import { repointMergedLedgerOwners } from './repointMergedOwners.js';
+import { appendForLiveOwner } from './ledgerOwner.js';
 
 vi.mock('../slackClient.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../slackClient.js')>()),
@@ -337,5 +338,27 @@ describe('D: the paths the blind review named (#5400 at a1457934)', () => {
     expect(await db.creditLedgerEntry.count()).toBe(0);
     const shape = (e: unknown) => ({ name: (e as Error).name, message: (e as Error).message.replace(p, 'REF').replace(gone, 'REF') });
     expect(r.ok ? null : shape(r.error)).toEqual(sequential.ok ? null : shape(sequential.error));
+  });
+
+  it('D6 the owner lock is held by the append\'s OWN transaction: a delete started before the insert waits for that transaction', async () => {
+    // The write pauses BEFORE its insert, so the only lock it can hold on the organization row is the one appendForLiveOwner took;
+    // a lock taken on another connection (or autocommitted) before the transaction would not make the delete wait for this pid.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let ready!: (pid: number) => void;
+    const appendPid = new Promise<number>((r) => { ready = r; });
+    const append = settled(appendForLiveOwner(db, { organizationId: org }, async (tx) => {
+      const [{ pid }] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      ready(pid);
+      await gate;
+      return tx.creditLedgerEntry.create({ data: { id: generateId(), organizationId: org, kind: 'grant', amountMicroCents: 1n, sourceType: 't5352', sourceId: generateId() } });
+    }));
+    const pid = await appendPid;
+    const del = settled(db.$transaction((tx) => softDeleteOrganizationCore(tx, org, null)));
+    await waitForLockWaitersBlockedBy(db, pid, 1, 5_000);
+    release();
+    expect(await append).toMatchObject({ ok: true });
+    expect(await del).toMatchObject({ ok: true });
+    expect(await naming({ organizationId: org })).toBe(0); // the delete, after the append committed, cleared it
   });
 });
