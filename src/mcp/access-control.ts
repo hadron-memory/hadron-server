@@ -1,4 +1,5 @@
 import { isPureAppKeyShape } from '../lib/appMemoryLinks.js';
+import { mayBeOwnAppMemory, ownAppMemoryIds } from '../lib/appOwnMemory.js';
 import { grantReadReachFor } from '../lib/grants/readGrant.js';
 import { personalOrgAgentTextBatch } from '../lib/auth/personalOrgAgentInstall.js';
 import { listAppInstallations, loadAppInstallationPage } from '../lib/appInstallations.js';
@@ -583,6 +584,10 @@ export async function getPrincipalAppMemoryAccess(
   // grants (READ only, judged at use). One judge, shared with the GraphQL gate; never a user's, a session's or an impersonation's
   // reach. An attachment adds nothing (cor:dmo:060:22).
   for (const id of await grantReadReachFor(db, principal)) if (!access.has(id)) access.set(id, 'READ_ONLY');
+  // #5398 (cor:api:120:03): a pure App key reads its own App's shared app-class memories, READ only. The one predicate
+  // (`src/lib/appOwnMemory.ts`); for an org App it repeats the team-space fold, for a user-owned App it is the read that
+  // `admissibleFoldRows` rule 2 withholds from a credential-only principal.
+  for (const id of await ownAppMemoryIds(db, principal)) if (!access.has(id)) access.set(id, 'READ_ONLY');
   return access;
 }
 
@@ -1287,6 +1292,9 @@ async function canReadMemoryRow(
   // use, READ only, the one judge). Before the user-owned branches below, which would answer for it first; a miss falls
   // through to today's logic unchanged.
   if (isPureAppKeyShape(auth) && (await grantReadReachFor(db, auth, [memory.id])).has(memory.id)) return true;
+  // #5398: a pure App key reads its own App's shared app-class memory (the one predicate, READ only). Also above the
+  // user-owned branch below, which would refuse a user-owned App's own memory first.
+  if (mayBeOwnAppMemory(auth, memory) && (await ownAppMemoryIds(db, auth, [memory.id])).has(memory.id)) return true;
   if (memory.class === 'personal' || memory.class === 'private') {
     // #1719 R5a: private is categorically unavailable to every AppRun,
     // including detached/free-standing holdings. No input or grant overrides it.

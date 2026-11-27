@@ -29,6 +29,7 @@ import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { grantReadReachFor } from '../../../lib/grants/readGrant.js';
+import { ownAppMemoryIds } from '../../../lib/appOwnMemory.js';
 import { activeAgentInstallLicenseIds, isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 import { findInstallMemory, resolveInstallTarget } from './installMemory.js';
 import { listableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
@@ -570,6 +571,19 @@ export const memoryQueries = {
           const linkedRows = await ctx.db.memory.findMany({ where: { id: { in: linkedIds }, deletedAt: null }, include: MEMORY_INCLUDE });
           for (const memory of linkedRows) {
             if (classSet ? !classSet.has(memory.class) : memory.class === 'system') continue;
+            if (f.visibility && memory.visibility !== f.visibility) continue;
+            if (!(await canReadMemoryRecord(ctx, memory))) continue;
+            memoryMap.set(memory.id, memory);
+          }
+        }
+        // #5398 (cor:api:120:03, App-key line): plus the App's own shared app-class memories, by the one predicate the
+        // reads use (`ownAppMemoryIds`), so the list follows the read. The caller's filters and the record gate apply, as for
+        // the links above. Empty for any caller but a pure App key.
+        const ownIds = [...(await ownAppMemoryIds(ctx.db, ctx))].filter((id) => !memoryMap.has(id));
+        if (ownIds.length > 0) {
+          const ownRows = await ctx.db.memory.findMany({ where: { id: { in: ownIds }, deletedAt: null }, include: MEMORY_INCLUDE });
+          for (const memory of ownRows) {
+            if (classSet && !classSet.has(memory.class)) continue;
             if (f.visibility && memory.visibility !== f.visibility) continue;
             if (!(await canReadMemoryRecord(ctx, memory))) continue;
             memoryMap.set(memory.id, memory);
