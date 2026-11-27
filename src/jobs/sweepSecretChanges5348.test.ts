@@ -17,6 +17,8 @@ import {
   SECRET_CHANGE_SWEEP_TX_TIMEOUT_MS,
 } from '../lib/secrets/changeRequests.js';
 
+type PlanNode = { 'Node Type': string; 'Subplan Name'?: string; Plans?: PlanNode[] };
+
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 });
 
 let appId: string, userId: string;
@@ -124,10 +126,30 @@ describe('#5348 the expiry drain makes progress when a batch is slower than the 
     expect(sizes).toEqual([250]);
   });
 
-  it('R8: a batch updates at most its limit whatever join the planner picks (a rescanned LIMIT ... SKIP LOCKED subquery slid past it)', async () => {
+  it('R8: a batch updates at most its limit (the locking subquery runs once, inside the materialized CTE, whatever the statistics)', async () => {
     await seed(300, 'bound');
-    // A nested loop rescans the inner side per outer row; each rescan skipped the rows this statement had just updated and took
-    // the next ones, so a LIMIT 1 batch on a table without statistics updated all 300 (seen with the planner's own choice).
+    // Under a nested-loop semi join the planner rescanned the `id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)` subquery per outer
+    // row; each rescan skipped the rows this statement had just updated and took the next ones, so one LIMIT 1 batch updated all 300.
+    // The planner picks that shape only while the table has no statistics (with them it runs the subquery once, through a hash
+    // aggregate or a sort), so the row counts below are red against the old statement only when this test runs before any other
+    // in its clone. The plan check is red against it in any order: every row-locking node of the batch must sit inside the CTE.
+    const plan = await db.$transaction(async tx => {
+      let captured: Prisma.Sql | undefined;
+      await sweepExpiredSecretChanges(new Proxy(tx, { get: (t, k) => k === '$executeRaw'
+        ? (strings: TemplateStringsArray, ...values: unknown[]) => { captured = Prisma.sql(strings, ...values); return Promise.resolve(0); }
+        : (t as any)[k] }) as never, 1);
+      const rows = await tx.$queryRaw<Array<{ 'QUERY PLAN': unknown }>>(Prisma.sql`EXPLAIN (FORMAT JSON) ${captured!}`);
+      return (rows[0]['QUERY PLAN'] as Array<{ Plan: PlanNode }>)[0].Plan;
+    });
+    const locks: string[][] = [];
+    (function walk(n: PlanNode, path: string[]) {
+      const here = [...path, n['Subplan Name'] ?? n['Node Type']];
+      if (n['Node Type'] === 'LockRows') locks.push(here);
+      for (const c of n.Plans ?? []) walk(c, here);
+    })(plan, []);
+    expect(locks.length).toBeGreaterThan(0);
+    for (const path of locks) expect(path.some(p => p.startsWith('CTE '))).toBe(true);
+
     const forced = await db.$transaction(async tx => {
       await tx.$executeRawUnsafe('SET LOCAL enable_hashjoin = off');
       await tx.$executeRawUnsafe('SET LOCAL enable_mergejoin = off');
@@ -138,4 +160,3 @@ describe('#5348 the expiry drain makes progress when a batch is slower than the 
     expect(await count('open', 'bound')).toBe(297);
   });
 });
-
