@@ -3687,6 +3687,8 @@ export const typeDefs = `#graphql
     #5185 — the memories linked to this App with 'attachMemoryToApp'. You see only entries whose memory you can read in your
     own right; others are absent and not counted. 'active' is whether the link counts right now (its attacher still reads the
     memory in their own right, the App is installed, and a personal or private memory is the App owner's and was linked by the owner).
+    #5345: a user-owned memory of any other class is never active for the App's key — the record gate refuses it, so the link
+    grants the key nothing (it stays listed, inert, until detached).
     """
     attachedMemories: [AppAttachedMemory!]!
     "The App's members. null means WITHHELD from this caller (#2089): an impersonated caller, or one who reaches a user-owned App only by an outer-object route. Never read null as an empty roster. The App's owning user, a current owner-role member of a user-owned App (ruling 0260, #3765), and callers of an org-owned App get the real list (a real empty list included)."
@@ -11296,6 +11298,28 @@ export const typeDefs = `#graphql
     """
     memories(filter: MemoryFilter, orgRef: ID, limit: Int, offset: Int): MemoriesPage!
 
+    """
+    #5393: the attachable-memory picker's search, one page of the memories the caller could
+    attach to this App with attachMemoryToApp (hrn:node:hadronmemory.com:specs:cor:dmo:060:20).
+
+    Who may call: the callers attachMemoryToApp admits, refused the same way. No signed-in user:
+    UNAUTHENTICATED. An App key, worker session, impersonation or run: FORBIDDEN. An unknown or
+    deleted App, or a caller who is not a member of it: the same FORBIDDEN. A member of an
+    uninstalled App: APP_UNINSTALLED. A call past the caller checks takes one
+    FAN_OUT_READS rate admission before it reads anything.
+
+    Candidates: the memories the caller reads in their own right (the same judgment attach applies,
+    so never a memory reached only through an App), except deleted ones, class system, class app,
+    and any memory already linked to this App by anyone, including a link that is inactive.
+
+    query: case-insensitive "contains" on the name or the URN (a leading hrn:mem: is ignored for
+    the URN); omitted, empty or blank applies no text filter.
+
+    Paging per hrn:node:hadronmemory.com:specs:cor:api:120:02: name ascending, id tiebreak;
+    limit default 20, cap 200; limit: 0 returns only the total. Accepts the App's ID or URN.
+    """
+    attachableMemories(appRef: ID!, query: String, limit: Int, offset: Int): MemoriesPage!
+
     "#772 — the caller's placed dashboard widgets, ordered by position. Empty for a non-user (App-key) caller."
     dashboardWidgets: [DashboardWidget!]!
     """
@@ -14948,7 +14972,10 @@ export const typeDefs = `#graphql
     through any App); when you lose read the link goes inert, and it works again if you regain it. A user, with or without the
     App selected, gains nothing from a link. For a 'personal' or 'private' memory the key reads it only when the memory's owner
     is the App's owner (a user-owned App whose owner linked their own memory); in an organization's App the link is inert for
-    the key. Any class except 'system', in any tenant. One memory may be linked into several Apps. A link you already hold is
+    the key. The same holds for a user-owned memory of any other class (#5345): a knowledge or group memory under a user root
+    never reaches the key through a link — attaching gives no access, and the record gate refuses it — so the link sits inert
+    (listed with 'active: false' in attachedMemories) until it is detached. Any class except 'system', in any tenant. One
+    memory may be linked into several Apps. A link you already hold is
     success and writes nothing. 'agentRef' is accepted and ignored (deployed clients keep working).
 
     Person only: a signed-in user acting as themselves, and a member of the App. Typed errors, judged in this order before any
