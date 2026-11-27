@@ -429,17 +429,31 @@ export async function managesPersonalAppOf(ctx: Context, appId: string): Promise
 }
 
 /**
- * #5077 (F3a-2, Q4; cor:dmo:050:12): the answer a platform admin gets for cancelling a run of an App a person owns. The
- * run's identity, status and owner stay; what it carried and did (its input, data, hops, logs, policy, snapshots, failure,
- * pin and the nodes it named) is withheld, because a platform admin never reads a person's run. The nested field resolvers
- * gate themselves (`servedPrompt` on `canReadAppRun`, which refuses a platform admin here).
+ * #5077 (F3a-2, Q4, Petra; cor:dmo:050:12): the AppRun columns a platform admin who cancels a run of an App a person owns
+ * gets back: its identity, owner, status, timestamps, budgets and spend. An ALLOWLIST: every other column, including one
+ * added later, is withheld (`withheldRunContent`). `ADMIN_CANCEL_WITHHELD_RUN_FIELDS` names today's withheld columns, so
+ * the classification pin can fail on a column that is in neither list.
+ */
+export const ADMIN_CANCEL_KEPT_RUN_FIELDS: ReadonlySet<string> = new Set([
+  'id', 'organizationId', 'ownerUserId', 'appId', 'agentId', 'userId', 'triggerKind', 'triggerId', 'parentRunId', 'createdBy',
+  'status', 'attempts', 'timeoutMs', 'publishedAt', 'startedAt', 'finishedAt', 'durationMs', 'createdAt',
+  'budgetTokens', 'budgetActions', 'budgetTokensInitial', 'budgetActionsInitial', 'tokensSpent', 'actionsSpent', 'costMicroCents',
+]);
+export const ADMIN_CANCEL_WITHHELD_RUN_FIELDS: ReadonlySet<string> = new Set([
+  'automationPin', 'entryNodeUrn', 'entryNodeId', 'eventData', 'data', 'hops', 'derivedLog', 'spawn', 'policy', 'curNodeUrn',
+  'scopeSnapshot', 'registerSnapshot', 'failure',
+]);
+
+/**
+ * The run with every column outside `ADMIN_CANCEL_KEPT_RUN_FIELDS` withheld: null, and `entryNodeUrn` '' (it is `String!`
+ * in the SDL). The nested field resolvers gate themselves (`servedPrompt` on `canReadAppRun`, which refuses a platform
+ * admin a person's run), so they disclose nothing either.
  */
 function withheldRunContent<T extends Record<string, unknown>>(run: T): T {
-  return {
-    ...run,
-    eventData: null, data: null, hops: null, derivedLog: null, spawn: null, policy: null, scopeSnapshot: null,
-    registerSnapshot: null, failure: null, automationPin: null, curNodeUrn: null, entryNodeId: null, entryNodeUrn: '',
-  };
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(run)) out[key] = ADMIN_CANCEL_KEPT_RUN_FIELDS.has(key) ? value : null;
+  out.entryNodeUrn = '';
+  return out as T;
 }
 
 /**

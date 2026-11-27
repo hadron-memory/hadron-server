@@ -23,8 +23,10 @@ vi.mock('../../../integrations/objectstore/index.js', () => ({
 }));
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
+vi.mock('../../../lib/webFetch.js', () => ({ fetchWebPage: vi.fn(async () => ({ html: '<p>x</p>', finalUrl: 'https://example.test/' })) }));
 
 import { buildSchema, isNonNullType } from 'graphql';
+import { fetchWebPage } from '../../../lib/webFetch.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -36,6 +38,8 @@ import { mergeUsers } from '../../../test/mergeConsent.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
+import { ADMIN_CANCEL_KEPT_RUN_FIELDS, ADMIN_CANCEL_WITHHELD_RUN_FIELDS, managesPersonalAppOf } from './resolvers.appRun.js';
+import { Prisma } from '../../../generated/prisma/index.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 
 const ON = 'PERSONAL_APP_RUNS_ENABLED';
@@ -144,6 +148,8 @@ describe('#5077 acceptance 2: nobody else launches on a person\'s App (FORBIDDEN
     ['a subscriber of the App\'s Agent', async a => as((await subscriber(a, 'sub5077')).id)],
     ['a platform admin', async () => ({ ...as((await userWith('adm5077', ['ADMIN'])).id), roles: ['ADMIN'] }) as unknown as Context],
     ['the owner under impersonation', async a => as(a.user.id, { impersonation: { actorUserId: generateId() } })],
+    // managesApp admits the owner here; only the door's isRefusedPrincipal refuses a run principal.
+    ['the owner as a run principal', async a => as(a.user.id, { clientId: `run:${generateId()}` })],
     ['a user who only SELECTED the App (a user principal with appId set)', async a => as((await userWith('sel5077')).id, { appId: a.app.id })],
   ];
   for (const [label, ctxOf] of callers) {
@@ -193,6 +199,15 @@ describe('#5077 acceptance 3: another person\'s memory at the door', () => {
     expect(await db.node.count()).toBe(nodesBefore);
     expect(await db.appRun.count()).toBe(0);
   });
+
+  it('importNode(url:, taskRef:) across persons refuses before it fetches anything (the door\'s check, not mint\'s)', async () => {
+    const a = await person('pd5077');
+    const b = await person('pe5077');
+    expect(code(await M.importNode({}, { input: {
+      memoryRef: a.memory.id, loc: 'clips:y', url: 'https://example.test/', taskRef: b.entryId, appRef: a.app.id,
+    } }, as(a.user.id)).catch((e: unknown) => e))).toBe('ENTRY_NOT_IN_ORG');
+    expect(vi.mocked(fetchWebPage)).not.toHaveBeenCalled();
+  });
 });
 
 describe('#5077 acceptance 11: with the switch off the door is main\'s, byte for byte', () => {
@@ -231,6 +246,14 @@ describe('#5077 acceptance 5: reading a person\'s run', () => {
     expect(await Q.appRun({}, { ref: run.id }, appKey(a))).toMatchObject({ id: run.id });
   });
 
+  it('another App\'s key reads nothing of it', async () => {
+    const a = await person('pd5077');
+    const b = await person('pe5077');
+    const run = await mint(a);
+    expect(await Q.appRun({}, { ref: run.id }, appKey(b))).toBeNull();
+    expect(await Q.resolveUrn({}, { urn: composeAppRunUrn(`${a.handle}:app`, run.id) }, appKey(b))).toBeNull();
+  });
+
   it('an ordinary member reads only their own run (on their behalf, or one they started), never another\'s', async () => {
     const a = await person('pd5077');
     const m = await member(a, 'mem5077', 'member');
@@ -244,13 +267,23 @@ describe('#5077 acceptance 5: reading a person\'s run', () => {
     await expect(Q.latestAppRun({}, { appRef: a.app.id }, as(m.id))).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
   });
 
-  it('a platform admin, another person and the impersonated owner read nothing, like a missing run', async () => {
+  it('a former member reads nothing of their own run once their relationship with the App is gone', async () => {
+    const a = await person('pd5077');
+    const m = await member(a, 'mem5077', 'member');
+    const mine = await mint(a, { userId: m.id, createdBy: m.id });
+    expect(await Q.appRun({}, { ref: mine.id }, as(m.id))).toMatchObject({ id: mine.id });
+    await db.appMember.delete({ where: { appId_userId: { appId: a.app.id, userId: m.id } } });
+    expect(await Q.appRun({}, { ref: mine.id }, as(m.id))).toBeNull();
+  });
+
+  it('a platform admin, another person, the impersonated owner and the owner as a run principal read nothing, like a missing run', async () => {
     const a = await person('pd5077');
     const b = await person('pe5077');
     const run = await mint(a, { userId: a.user.id, createdBy: a.user.id });
     const admin = { ...as((await userWith('adm5077', ['ADMIN'])).id), roles: ['ADMIN'] } as unknown as Context;
     const imp = as(a.user.id, { impersonation: { actorUserId: generateId() } });
-    for (const ctx of [admin, as(b.user.id), imp]) {
+    const runPrincipal = as(a.user.id, { clientId: `run:${generateId()}` });
+    for (const ctx of [admin, as(b.user.id), imp, runPrincipal]) {
       expect(await Q.appRun({}, { ref: run.id }, ctx)).toBeNull();
       expect(await Q.appRun({}, { ref: generateId() }, ctx)).toBeNull();
       expect(await Q.resolveUrn({}, { urn: composeAppRunUrn(`${a.handle}:app`, run.id) }, ctx)).toBeNull();
@@ -310,6 +343,25 @@ describe('#5077 acceptance 5: cancelling a person\'s run', () => {
     }
   });
 
+  it('Q4 allowlist (Petra): every AppRun column is classified kept or withheld, never both, so a new column fails here', () => {
+    const columns = Prisma.dmmf.datamodel.models.find(m => m.name === 'AppRun')!.fields.filter(f => f.kind !== 'object').map(f => f.name);
+    const unclassified = columns.filter(c => !ADMIN_CANCEL_KEPT_RUN_FIELDS.has(c) && !ADMIN_CANCEL_WITHHELD_RUN_FIELDS.has(c));
+    expect(unclassified, 'classify each new AppRun column in resolvers.appRun.ts (kept or withheld)').toEqual([]);
+    expect([...ADMIN_CANCEL_KEPT_RUN_FIELDS].filter(c => ADMIN_CANCEL_WITHHELD_RUN_FIELDS.has(c))).toEqual([]);
+    expect([...ADMIN_CANCEL_KEPT_RUN_FIELDS, ...ADMIN_CANCEL_WITHHELD_RUN_FIELDS].filter(c => !columns.includes(c))).toEqual([]);
+  });
+
+  it('Q4 allowlist: the admin\'s answer holds no value outside the kept set, whatever the row carries', async () => {
+    const a = await person('pd5077');
+    const admin = { ...as((await userWith('adm5077', ['ADMIN'])).id), roles: ['ADMIN'] } as unknown as Context;
+    const run = await mint(a, { eventData: { k: 'v' } });
+    const out = await M.cancelAppRun({}, { ref: run.id }, admin) as Record<string, unknown>;
+    for (const [k, v] of Object.entries(out)) {
+      if (ADMIN_CANCEL_KEPT_RUN_FIELDS.has(k)) continue;
+      expect(k === 'entryNodeUrn' ? v === '' : v === null, k).toBe(true);
+    }
+  });
+
   it('the App\'s own key and an ordinary member who started the run are FORBIDDEN, and the run stays PENDING', async () => {
     const a = await person('pd5077');
     const m = await member(a, 'mem5077', 'member');
@@ -320,16 +372,29 @@ describe('#5077 acceptance 5: cancelling a person\'s run', () => {
     expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe('PENDING');
   });
 
-  it('another person and the impersonated owner get NOT_FOUND, as for a missing run', async () => {
+  it('another person, the impersonated owner and the owner as a run principal get NOT_FOUND, as for a missing run', async () => {
     const a = await person('pd5077');
     const b = await person('pe5077');
     const run = await mint(a);
     const imp = as(a.user.id, { impersonation: { actorUserId: generateId() } });
     const impAdmin = { ...as((await userWith('adm5077', ['ADMIN'])).id, { impersonation: { actorUserId: generateId() } }), roles: ['ADMIN'] } as unknown as Context;
-    for (const ctx of [as(b.user.id), imp, impAdmin]) {
+    const runPrincipal = as(a.user.id, { clientId: `run:${generateId()}` });
+    for (const ctx of [as(b.user.id), imp, impAdmin, runPrincipal]) {
       expect(code(await M.cancelAppRun({}, { ref: run.id }, ctx).catch((e: unknown) => e))).toBe('NOT_FOUND');
     }
     expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe('PENDING');
+  });
+});
+
+describe('#5077 managesPersonalAppOf widens only a person\'s-App gate', () => {
+  it('is false for an organization\'s App even for the organization\'s admin, who manages it', async () => {
+    const org = await db.organization.create({ data: { name: 'Org', urn: 'org5077.test' } });
+    const app = await db.app.create({ data: { name: 'oa', urn: 'org5077.test:app', organizationId: org.id } });
+    const admin = await userWith('oadm5077');
+    await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } as never });
+    expect(await managesPersonalAppOf(as(admin.id), app.id)).toBe(false);
+    const a = await person('pd5077');
+    expect(await managesPersonalAppOf(as(a.user.id), a.app.id)).toBe(true);
   });
 });
 
