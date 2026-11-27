@@ -1105,6 +1105,7 @@ export async function canOpenMemoryRecordById(ctx: Context, memoryId: string): P
       organizationId: true,
       appId: true,
       userMemoryOfAgentId: true,
+      createdBy: true,
       deletedAt: true,
     },
   });
@@ -1235,12 +1236,13 @@ export type MemoryRecordGateRow = {
   organizationId: string | null;
   appId: string | null;
   userMemoryOfAgentId: string | null;
+  createdBy: string | null;
 };
 
 /** The Prisma `select` that yields a {@link MemoryRecordGateRow}; spread it, then add your own fields. */
 export const MEMORY_RECORD_GATE_SELECT = {
   id: true, class: true, userId: true, ownerUserId: true,
-  organizationId: true, appId: true, userMemoryOfAgentId: true,
+  organizationId: true, appId: true, userMemoryOfAgentId: true, createdBy: true,
 } as const satisfies Record<keyof MemoryRecordGateRow, true>;
 
 /**
@@ -1362,6 +1364,13 @@ export async function canReadMemoryRecord(
     if (memory.class !== 'app') return false;
     const ids = await accessible();
     return ids.includes(memory.id);
+  }
+  // A per-user "holding" (userMemoryOfAgentId set, e.g. the startChat no-App downgrade) is read by its CREATOR alone
+  // (cor:cht:010:02), the same identity the node-access set and the write gate use. It sits ABOVE the platform ADMIN/OWNER
+  // short-circuit and the org-member fast path below, so neither can admit it; an impersonated session, an App key and a
+  // run principal never read it. App-class records keep their own shape-aware audience (below).
+  if (memory.class !== 'app' && memory.userMemoryOfAgentId != null) {
+    return !!ctx.userId && !ctx.impersonation && !isRunPrincipal(ctx) && memory.createdBy === ctx.userId;
   }
   if (ctx.appId && ctx.sessionId && !ctx.userId) {
     const ids = await accessible();

@@ -841,6 +841,8 @@ export const nodeQueries = {
               // Load-bearing: `canReadMemoryRecord`'s share path reads it, and
               // omitting it silently refuses every grantee.
               userMemoryOfAgentId: true,
+              // Load-bearing too: the holding gate judges the creator.
+              createdBy: true,
               deletedAt: true,
             },
           });

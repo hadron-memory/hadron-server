@@ -367,7 +367,10 @@ describe('#329 memory — never over-reported (item 5; regression pins, green on
       },
     });
     await subscribe('CONTRIBUTOR', mem.id);
-    const res = await call(contribB.id, `hrn:memory:${mem.urn}`, asAdmin());
+    // The holding's record is read by its creator alone (cor:cht:010:02): a platform admin cannot audit it, it answers as missing.
+    await expect(call(contribB.id, `hrn:memory:${mem.urn}`, asAdmin())).rejects.toThrow('Resource not found');
+    // The creator opens it; the live subscription of their org still reaches nothing.
+    const res = await call(readerB.id, `hrn:memory:${mem.urn}`, ctx({ userId: readerB.id, roles: ['READER'] }));
     expect(subGrants(res)).toHaveLength(0);
     expect(res.canRead).toBe(false);
     expect(res.canWrite).toBe(false);
@@ -551,7 +554,13 @@ describe('#329 parity with the enforced gates (item 6)', () => {
       },
     });
     await subscribe('CONTRIBUTOR', mem.id);
-    await assertParity(contribB.id, mem.id, mem.urn);
+    // Only the creator can open the record (cor:cht:010:02), so nobody can audit a SUBSCRIBED member's access through
+    // effectiveAccess: a platform admin gets the missing answer. The enforced gates the audit mirrors still refuse that
+    // member both ways, which is what this case pinned.
+    await expect(call(contribB.id, `hrn:memory:${mem.urn}`, asAdmin())).rejects.toThrow('Resource not found');
+    expect((await getOrgReadableMemoryIds(db, contribB.id, mem.id)).includes(mem.id)).toBe(false);
+    await expect(requireMemoryWriteAccess(ctx({ userId: contribB.id, roles: ['READER'] }), mem.id))
+      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
   });
 
   it('a stranger with no membership and no subscription', async () => {
