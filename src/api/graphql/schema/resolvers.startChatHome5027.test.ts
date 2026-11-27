@@ -357,3 +357,114 @@ describe('#5027 (h) who sets the default', () => {
     expect((await db.agent.findUniqueOrThrow({ where: { id: agentId } })).defaultChatHome).toBe('PERSONAL');
   });
 });
+
+// Ask 6 (Option A): the chat records its Agent, and a home's readers are the chat's audience. Holger's rulings of
+// 2026-11-27 (R1: a group memory made in an App is read and written through its MemoryMembers; R4: the smallest unit of
+// access is the memory, so a personal memory's share grantee reads a chat started there), recorded with Vera's FIT
+// (hrn:node:hadronmemory.com:hadron-dev-team-shared:decisions:2026-11-27-holger-rulings-to-vera-group-chat-no-admin-read).
+describe('#5027 Ask 6: the chat records its Agent; the home\'s readers are its audience', () => {
+  const turn = (ctx: Context, chatId: string, userMessage = 'next turn') =>
+    M.sendChatMessage({}, { chatId, userMessage }, ctx) as Promise<{ systemMessage: string }>;
+  const history = (ctx: Context, chatId: string) => Q.chatHistory({}, { chatId }, ctx) as Promise<unknown[]>;
+  const withCarolInApp = async () => {
+    await db.orgMember.create({ data: { organizationId: orgId, userId: carol, role: 'CONTRIBUTOR' } });
+    await db.appMember.create({ data: { appId, userId: carol, role: 'member' } });
+  };
+
+  it('(i) a chat in a group home and one in a private home answer the next turn with the recorded Agent', async () => {
+    const group = await groupHome('writer');
+    const priv = await appUserMemory('private');
+    for (const memoryRef of [group, priv]) {
+      const started = await start(as(ann), { memoryRef });
+      const reply = await turn(as(ann), started.chatId);
+      // The private memory's own pointer names the OTHER Agent (it was made through it), and the group row has none:
+      // only the recorded Agent gives this flow's stage prompt.
+      expect(reply.systemMessage, memoryRef === group ? 'group' : 'private').toContain('HOME STAGE');
+    }
+  });
+
+  it('(ii) an old chat with no recorded Agent routes and lists exactly as today', async () => {
+    const started = await start(as(ann));
+    const root = await chatNodeByLocOrThrow(db, started.chatId);
+    await db.$executeRawUnsafe('UPDATE chat_root_counters SET agent_id = NULL WHERE chat_root_node_id = $1', root.id);
+    expect((await turn(as(ann), started.chatId)).systemMessage).toContain('HOME STAGE');
+    expect(await listed(ann, started.chatId)).toBeDefined();
+  });
+
+  it('(iii) a second group member reads, lists and posts in a group chat they did not start', async () => {
+    const group = await groupHome('writer');
+    await db.memoryMember.create({ data: { memoryId: group, userId: bob, role: 'writer' } });
+    const started = await start(as(ann), { memoryRef: group });
+    await turn(as(ann), started.chatId, 'from ann');
+    expect((await history(as(bob), started.chatId)).length).toBeGreaterThan(0);
+    expect(await listed(bob, started.chatId), 'listed for the other member').toBeDefined();
+    expect((await turn(as(bob), started.chatId, 'from bob')).systemMessage).toContain('HOME STAGE');
+  });
+
+  it('(iv) a personal memory\'s share grantee reads, lists and posts in a chat started there (R4)', async () => {
+    const personal = await appUserMemory('personal');
+    await db.memoryShare.create({ data: { memoryId: personal, granteeId: bob, grantorId: ann, role: 'writer' } });
+    const started = await start(as(ann), { memoryRef: personal });
+    await turn(as(ann), started.chatId, 'from ann');
+    expect((await history(as(bob), started.chatId)).length).toBeGreaterThan(0);
+    expect(await listed(bob, started.chatId), 'listed for the grantee').toBeDefined();
+    expect((await turn(as(bob), started.chatId, 'from bob')).systemMessage).toContain('HOME STAGE');
+  });
+
+  it('(v) a non-reader of the home gets the not-found of a chat that does not exist, and no listing', async () => {
+    await withCarolInApp();
+    const group = await groupHome('writer');
+    const personal = await appUserMemory('personal');
+    const priv = await appUserMemory('private');
+    const missing = `chats:${Date.now()}-${generateId().slice(0, 8)}-flow`;
+    const nothing = {
+      history: await refusal(history(as(carol), missing)),
+      send: await refusal(turn(as(carol), missing)),
+    };
+    for (const memoryRef of [group, personal, priv]) {
+      const started = await start(as(ann), { memoryRef });
+      await turn(as(ann), started.chatId, 'from ann');
+      const before = await footprint();
+      const seen = {
+        history: await refusal(history(as(carol), started.chatId)),
+        send: await refusal(turn(as(carol), started.chatId)),
+      };
+      // Each answer is compared with the missing chat's after swapping the chat id, the one thing the caller named.
+      const swap = (e: { message: string; extensions: unknown }) => JSON.parse(JSON.stringify(e).split(started.chatId).join(missing));
+      expect(swap(seen.history), `${memoryRef} history`).toEqual(nothing.history);
+      expect(swap(seen.send), `${memoryRef} send`).toEqual(nothing.send);
+      expect(await footprint(), 'nothing written').toEqual(before);
+      expect(await listed(carol, started.chatId)).toBeUndefined();
+    }
+  });
+
+  it('(vi) the validator accepts a group home as shared and a private home as private, and refuses a mismatched label', async () => {
+    const group = await groupHome('writer');
+    const priv = await appUserMemory('private');
+    expect((await chatNodeByLocOrThrow(db, (await start(as(ann), { memoryRef: group, scope: 'shared' })).chatId)).memoryId).toBe(group);
+    expect((await chatNodeByLocOrThrow(db, (await start(as(ann), { memoryRef: priv, scope: 'private' })).chatId)).memoryId).toBe(priv);
+    expect((await refusal(start(as(ann), { memoryRef: group, scope: 'private' }))).extensions?.code).toBe('BAD_USER_INPUT');
+    expect((await refusal(start(as(ann), { memoryRef: priv, scope: 'shared' }))).extensions?.code).toBe('BAD_USER_INPUT');
+  });
+
+  it('(vii) a group MemoryMember reads and writes an App-scoped group memory; an App member outside it is refused as for a missing memory (R1)', async () => {
+    await withCarolInApp();
+    const group = await groupHome('writer');
+    await db.memoryMember.create({ data: { memoryId: group, userId: bob, role: 'writer' } });
+    const made = await M.createNode({}, { input: { memoryRef: group, loc: 'notes:one', name: 'one', content: 'by bob' } }, as(bob));
+    expect(made.memoryId ?? (await db.node.findUniqueOrThrow({ where: { id: made.id } })).memoryId).toBe(group);
+    expect((await Q.node({}, { ref: 'notes:one', memoryRef: group }, as(bob)))?.content).toBe('by bob');
+    const missingMemory = generateId();
+    const read = async (memoryRef: string) => {
+      const r = await Q.node({}, { ref: 'notes:one', memoryRef }, as(carol)).then((n: unknown) => ({ value: n }), (e: any) => ({ message: e.message, code: e.extensions?.code ?? null }));
+      return JSON.parse(JSON.stringify(r).split(memoryRef).join('<ref>'));
+    };
+    expect(await read(group)).toEqual(await read(missingMemory));
+    const write = async (memoryRef: string) => {
+      const r = await refusal(M.createNode({}, { input: { memoryRef, loc: 'notes:two', name: 'two', content: 'x' } }, as(carol)));
+      return JSON.parse(JSON.stringify(r).split(memoryRef).join('<ref>'));
+    };
+    expect(await write(group)).toEqual(await write(missingMemory));
+    expect(await db.node.count({ where: { memoryId: group, loc: 'notes:two' } })).toBe(0);
+  });
+});
