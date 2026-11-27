@@ -703,8 +703,6 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
   let lineFirst = -1;
   // marked ends a line-head declaration block at its first `>` and starts the next block right after it (#5211).
   let markedBlockAt = -1;
-  // #5320 — where the next block starts after a declaration that did start an HTML block in marked (`markedBlockAt` is set for any line-head one).
-  let markedRealBlockAt = -1;
   // Whether the line before was taken for a link reference definition: marked's grammar for one is stricter, so it may be a paragraph there.
   let prevDefinition = false;
   let lineContent = -1;
@@ -960,11 +958,9 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
         // #5320 — marked starts the next block right after the `>`: a fence opener there that nothing closes takes the anchor with it. The
         // declaration stays as written (escaping it turns the line into paragraph text and moves later lines' readings, #5291); the opener's
         // first character is written as a character reference instead, which a browser decodes to the same character.
-        // A declaration right after another one's `>` starts a block too, when that one did; a line above that is a link reference definition does
-        // not stop it (marked reads the definition as its own block, and the declaration then starts a new one).
-        if (i >= rawUntil && lineContainers.length === 0
-          && (i === markedRealBlockAt || (prevBefore !== 'other' && prevBefore !== 'marker' && !loneEqualsAbove(text, i)))) {
-          markedRealBlockAt = close + 1;
+        // The line above is judged for both declarations of a line alike, so a declaration right after another one's `>` starts a block exactly when
+        // that one did; a line above that is a link reference definition does not stop it (marked reads the definition as a block of its own).
+        if (i >= rawUntil && lineContainers.length === 0 && prevBefore !== 'other' && prevBefore !== 'marker' && !loneEqualsAbove(text, i)) {
           const f = markedUnclosedFenceAfter(text, close + 1);
           if (f !== -1) return f;
         }
@@ -1155,7 +1151,11 @@ function escapeLoop(text: string): string {
     if (at === -1) return cur;
     // A text that keeps hiding another construct behind the one just escaped: close the question for every `<` it holds.
     if (k === MAX_RESTARTS) return cur.replace(/</g, '&lt;');
-    cur = `${cur.slice(0, at)}${ESCAPES[cur[at]!] ?? '&lt;'}${cur.slice(at + 1)}`;
+    // #5320: a fence opener is written whole (every character of its run), so no part of the run is left to pair with a later one as a code span.
+    const c = cur[at]!;
+    let end = at + 1;
+    if (c !== '<') while (cur[end] === c) end += 1;
+    cur = `${cur.slice(0, at)}${(ESCAPES[c] ?? '&lt;').repeat(end - at)}${cur.slice(end)}`;
   }
 }
 

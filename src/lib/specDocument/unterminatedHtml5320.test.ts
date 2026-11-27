@@ -36,21 +36,33 @@ const losers = (body: string): string[] => NAMES.filter((r) => !lives(body, r));
 describe('#5320: a fence opener after a line-head declaration that nothing closes', () => {
   // [body as authored, the pass's output]
   it.each([
-    ['<!DOCTYPE html>```\n', '<!DOCTYPE html>&#96;``\n'],
-    ['<!DOCTYPE html>```', '<!DOCTYPE html>&#96;``'],
-    ['<!DOCTYPE html>~~~', '<!DOCTYPE html>&#126;~~'],
-    ['<!DOCTYPE html>````js\n', '<!DOCTYPE html>&#96;```js\n'],
-    ['<!DOCTYPE html>   ```\nx\n', '<!DOCTYPE html>   &#96;``\nx\n'],
-    ['[a]: b\n<!DOCTYPE html>```\n', '[a]: b\n<!DOCTYPE html>&#96;``\n'],
-    ['<!x><!DOCTYPE html>```\n', '<!x><!DOCTYPE html>&#96;``\n'],
-    ['p\n=\n<!DOCTYPE>```\n', 'p\n=\n<!DOCTYPE>&#96;``\n'],
-    ['x\n\n<!x y>~~~~ t\n- a\n', 'x\n\n<!x y>&#126;~~~ t\n- a\n'],
-    ['<!DOCTYPE html>```\r\ntext\r\n', '<!DOCTYPE html>&#96;``\r\ntext\r\n'],
+    ['<!DOCTYPE html>```\n', '<!DOCTYPE html>&#96;&#96;&#96;\n'],
+    ['<!DOCTYPE html>```', '<!DOCTYPE html>&#96;&#96;&#96;'],
+    ['<!DOCTYPE html>~~~', '<!DOCTYPE html>&#126;&#126;&#126;'],
+    ['<!DOCTYPE html>````js\n', '<!DOCTYPE html>&#96;&#96;&#96;&#96;js\n'],
+    ['<!DOCTYPE html>   ```\nx\n', '<!DOCTYPE html>   &#96;&#96;&#96;\nx\n'],
+    ['[a]: b\n<!DOCTYPE html>```\n', '[a]: b\n<!DOCTYPE html>&#96;&#96;&#96;\n'],
+    ['<!x><!DOCTYPE html>```\n', '<!x><!DOCTYPE html>&#96;&#96;&#96;\n'],
+    ['p\n=\n<!DOCTYPE>```\n', 'p\n=\n<!DOCTYPE>&#96;&#96;&#96;\n'],
+    ['x\n\n<!x y>~~~~ t\n- a\n', 'x\n\n<!x y>&#126;&#126;&#126;&#126; t\n- a\n'],
+    ['<!DOCTYPE html>```\r\ntext\r\n', '<!DOCTYPE html>&#96;&#96;&#96;\r\ntext\r\n'],
   ])('%j is written %j; marked lost the anchor as authored, none does now', (body, written) => {
     expect(losers(body)).toEqual(['marked']);
     expect(escapeUnterminatedHtml(body)).toBe(written);
     expect(losers(written)).toEqual([]);
     expect(escapeUnterminatedHtml(written)).toBe(written);
+  });
+});
+
+describe('#5320: the whole opener run is written (no backticks left to pair as a code span)', () => {
+  it('a four-backtick opener above an unterminated comment: the comment is escaped too and no reader loses', () => {
+    const body = '<!X y>````\n\t<!--```';
+    expect(escapeUnterminatedHtml(body)).toBe('<!X y>&#96;&#96;&#96;&#96;\n\t&lt;!--```');
+    expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+    expect(losers(body)).toContain('marked');
+  });
+  it('a four-space indented fence line is not a closer', () => {
+    expect(escapeUnterminatedHtml('<!DOCTYPE html>```\n    ```\n')).toBe('<!DOCTYPE html>&#96;&#96;&#96;\n    ```\n');
   });
 });
 
@@ -80,14 +92,14 @@ describe('#5320: bytes that stay as written (the over-escape check)', () => {
 
   it('a shorter run does not close a longer opener (the closer needs at least as many characters)', () => {
     // The ``` line opens a fence of its own in CommonMark, so only the output is pinned here.
-    expect(escapeUnterminatedHtml('<!DOCTYPE html>````\n```\n')).toBe('<!DOCTYPE html>&#96;```\n```\n');
+    expect(escapeUnterminatedHtml('<!DOCTYPE html>````\n```\n')).toBe('<!DOCTYPE html>&#96;&#96;&#96;&#96;\n```\n');
     expect(escapeUnterminatedHtml('<!DOCTYPE html>````\n````\n')).toBe('<!DOCTYPE html>````\n````\n');
   });
 
   it('a closer that is not one: a shorter run, another character, a trailing word', () => {
     for (const closer of ['``', '~~~', '``` x']) {
       const body = `<!DOCTYPE html>\`\`\`\nx\n${closer}\n`;
-      expect(escapeUnterminatedHtml(body)).toBe(`<!DOCTYPE html>&#96;\`\`\nx\n${closer}\n`);
+      expect(escapeUnterminatedHtml(body)).toBe(`<!DOCTYPE html>&#96;&#96;&#96;\nx\n${closer}\n`);
     }
   });
 });
