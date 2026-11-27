@@ -163,10 +163,11 @@ export const APP_SELF_JOIN_COST = 8;
  * shape the test fixture prices: three installed Agents, none licensed, so the licence loop runs to its end (the membership
  * read, the install listing, a licence check per Agent, the held-class read).
  *
- * KNOWN UNDER-ESTIMATE, stated here and not only in the issue: this is NOT an upper bound. The licence loop costs about five
+ * KNOWN UNDER-ESTIMATE, stated here and not only in the issue: this is NOT an upper bound. The licence loop costs five to six
  * statements per installed Agent that does not pass, so an App with more than three unlicensed installed Agents costs more than
  * this weight. Closing it means capping the licence scan in the shared licence check the door uses too (the field's answer is the
- * door's own judgement, `cor:dmo:060:20`), which changes the door's answer and needs a ruling; #5267 does neither.
+ * door's own judgement, `cor:dmo:060:20`), which changes the door's answer and needs a ruling; #5267 does neither. The number of
+ * installed Agents per App is not bounded by any rule today; the follow-up that asks for the ruling is #5362.
  *
  * Measured per member App when set (0.50.0): 7 with no Agent, 14 with one licensed Agent, 24 with three unlicensed ones, as
  * the Prisma query events the field alone adds (`resolvers.appUserMemoryClassesCost5267.test.ts`, which pins this constant to
