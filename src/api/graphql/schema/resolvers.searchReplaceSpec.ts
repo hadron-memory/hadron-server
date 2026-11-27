@@ -27,7 +27,7 @@ import {
 } from '../../../lib/nodeRevisionSnapshot.js';
 import { decryptNodeFields, encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
-import { assertNodeContentSize, resultingNodeContent } from '../../../lib/nodeContentLimit.js';
+import { assertNodeContentSize, resultingNodeContent, type NodeContentFields } from '../../../lib/nodeContentLimit.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { assertAuthoring, authoringFromRequest, type AuthoredWith } from '../../../lib/authoringAttestation.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
@@ -71,6 +71,12 @@ interface ChangedNode {
   plaintext: { content: string | null; abstract: string | null };
   /** #2041 S2b — the content before replacement, read under the apply transaction's row locks. */
   storedContent: string | null;
+  /**
+   * #5223 — the decrypted row the ceiling is measured against (the snapshot's `pt`). The size check no longer runs in
+   * the snapshot (a dry run cannot run the authoring gate, so it must not answer the size bit at all); the apply
+   * pass measures from this, on a row the loop's `revisionStateMatches`-equivalent plan check proved current.
+   */
+  sizeAgainst: NodeContentFields;
   isEncrypted: boolean;
   contentChanged: boolean;
   abstractChanged: boolean;
@@ -286,6 +292,7 @@ export async function searchReplaceInSpecNodes(
         changed: {},
         plaintext: { content: pt.content, abstract: pt.abstract },
         storedContent: pt.content,
+        sizeAgainst: pt,
         isEncrypted: encryption.isEncrypted,
         contentChanged: false,
         abstractChanged: false,
@@ -321,7 +328,6 @@ export async function searchReplaceInSpecNodes(
       }
       replacement.authoredChange = authoredContentChanged(diffNodeChanges(pt, replacement.changed));
       if (replacement.total > 0) {
-        assertNodeContentSize(resultingNodeContent(replacement.changed, pt)); // #5019 — before any write; a dry run too
         changed.push(replacement);
       }
     }
@@ -395,12 +401,24 @@ export async function searchReplaceInSpecNodes(
     if (input.maxNodesChanged != null && current.changed.length > input.maxNodesChanged) {
       throw error('The replacement exceeds maxNodesChanged.', 'SEARCH_REPLACE_MAX_NODES_CHANGED');
     }
+    // #5223 — passes, not one interleaved loop: every authoring gate runs for the WHOLE batch, then every size check,
+    // then the writes. A size refusal counts stored fields, so a writer the authoring gate refuses (on this row or any
+    // other) must not learn the over/under bit. All three passes share one transaction: a later refusal still rolls
+    // back an earlier write, exactly as the interleaved loop did.
+    const authoredStamps = new Map<ChangedNode, Awaited<ReturnType<typeof assertAuthoring>>>();
     for (const node of current.changed) {
       // #1328 — a spec's role rule answers to the same claim as any other writer.
-      const authoredStamp = await assertAuthoring(tx, memoryId, {
+      authoredStamps.set(node, await assertAuthoring(tx, memoryId, {
         priorRole: node.raw.role, priorRunnable: node.raw.isRunnable,
         role: node.raw.role, runnable: node.raw.isRunnable, mintHuman: true, authoredChange: node.authoredChange,
-      }, authoringFromRequest(ctx, input.authoredWith));
+      }, authoringFromRequest(ctx, input.authoredWith)));
+    }
+    for (const node of current.changed) {
+      // #5019 — the resulting node, before any write (moved out of the snapshot by #5223).
+      assertNodeContentSize(resultingNodeContent(node.changed, node.sizeAgainst));
+    }
+    for (const node of current.changed) {
+      const authoredStamp = authoredStamps.get(node)!;
       await createNodeRevision(tx, buildNodeRevisionSnapshot(node.raw, editorFromAuth(ctx), {
         revLabel: input.reason,
         changes: Object.keys(node.changed),

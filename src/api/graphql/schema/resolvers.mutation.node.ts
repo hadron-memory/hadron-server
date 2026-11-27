@@ -1518,9 +1518,6 @@ async function writeNodeCoreRaw(
               return { conflict: false, node: unchanged };
             }
 
-            // #5019 — an edit that leaves the node over the ceiling is refused, whichever field it changes; inline edges are not node content.
-            if (changes.length > 0 || changesUnversionedField) assertSizeCeiling(currentForDiff);
-
             // #1328 — before the first write of this edit, and judged on the
             // locked row: the role before and after, the claim, the current
             // task revision. A write that changes no authored field needs no
@@ -1531,6 +1528,11 @@ async function writeNodeCoreRaw(
               runnable: mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
               mintHuman: true, authoredChange: authoredContentChanged(changes),
             }, opts.authoring);
+
+            // #5019 — an edit that leaves the node over the ceiling is refused, whichever field it changes; inline edges
+            // are not node content. #5223: after the role and authoring gates — a size refusal counts stored fields, so a
+            // writer those gates refuse must not learn the over/under bit.
+            if (changes.length > 0 || changesUnversionedField) assertSizeCeiling(currentForDiff);
 
             // A guarded claim happens only after the no-op decision and inside
             // this transaction. Since revSeq names the CURRENT state, the
@@ -3308,6 +3310,12 @@ export const nodeMutations = {
         plaintext: { content: string | null; abstract: string | null };
         /** #2041 S2b — content before the replace; the row lock below revalidates it (revisionStateMatches). */
         storedContent: string | null;
+        /**
+         * #5223 — the decrypted row the ceiling is measured against. The size check no longer runs in the planning
+         * pass (a dry run cannot run the authoring gate, so it must not answer the size bit at all); the write pass
+         * measures from this, on rows its `revisionStateMatches` check proved current.
+         */
+        sizeAgainst: NodeContentFields;
         fieldResults: Array<{ field: string; matches: number }>;
         total: number;
         abstractChanged: boolean;
@@ -3426,8 +3434,6 @@ export const nodeMutations = {
         }
 
         if (total > 0) {
-          // #5019 — the resulting node, for the whole batch before any write, as the abstract cap above.
-          assertNodeContentSize(resultingNodeContent(changed, pt));
           plans.push({
             raw,
             isEncrypted: memEnc.isEncrypted,
@@ -3437,6 +3443,7 @@ export const nodeMutations = {
               abstract: abstractChanged ? (changed.abstract as string | null) : pt.abstract,
             },
             storedContent: pt.content ?? null,
+            sizeAgainst: pt,
             fieldResults,
             total,
             abstractChanged,
@@ -3622,6 +3629,12 @@ export const nodeMutations = {
             priorRole: locked.role, priorRunnable: locked.isRunnable,
             role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: p.authoredChange,
           }, authoring));
+        }
+        // #5019 (moved here by #5223): the whole batch's authoring gates have run; now every size check, then the
+        // writes. A size refusal counts stored fields, so a writer the authoring gate refuses (on this row or any
+        // other) must not learn the over/under bit — the dry run above never answers it either.
+        for (const p of plans) {
+          assertNodeContentSize(resultingNodeContent(p.changed, p.sizeAgainst));
         }
         for (const p of plans) {
           const raw = p.raw;
@@ -4752,10 +4765,10 @@ export const nodeMutations = {
       }
 
       // #5019 — the merged target, before any write. A merge that touches no encrypted field holds no key, so the stored
-      // body is then measured from its envelope.
-      if (Object.keys(changed).length > 0) {
-        assertNodeContentSize(() => resultingNodeContent(changed, tgtEnc.isEncrypted && !touchesEncrypted ? withEncryptedSizes(target) : tgtPt));
-      }
+      // body is then measured from its envelope. #5223: measured inside the write transaction, after the role-writer and
+      // authoring gates — a size refusal counts stored fields, so a writer those gates refuse must not learn the
+      // over/under bit. `revisionStateMatches(target, lockedTarget)` below proves the pre-transaction plan (and `tgtPt`,
+      // its decrypted view) is still the row being written.
 
       // Post-merge plaintext content drives the spec-032 abstract hash.
       const postMergeContent = contentChanged
@@ -4924,6 +4937,10 @@ export const nodeMutations = {
           authoredChange: Object.keys(changed).length > 0,
           mintHuman: false, // a fold, not an authoring write (D-2026-09-26-D)
         }, authoringFromRequest(ctx, input.authoredWith));
+        // #5019 (moved here by #5223): the merged target, before any write, after the gates above.
+        if (Object.keys(changed).length > 0) {
+          assertNodeContentSize(() => resultingNodeContent(changed, tgtEnc.isEncrypted && !touchesEncrypted ? withEncryptedSizes(target) : tgtPt));
+        }
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
@@ -5353,8 +5370,6 @@ export const nodeMutations = {
           decryptNodeFieldsWithKey(logicalCurrent, requireKey(current.memoryId));
         }
         const changes = diffNodeChanges(logicalCurrent, logicalRestoreFields);
-        // #5019 — a restore is checked like an update (the gate; exempting it is cor:dmo:060:19's Open Question).
-        assertNodeContentSize(resultingNodeContent(logicalRestoreFields, logicalCurrent));
         const restoreFields = { ...logicalRestoreFields };
         if (selectedDestination.isEncrypted) {
           Object.assign(restoreFields, encryptNodeFieldsWithKey(plaintextFields, requireKey(current.memoryId)));
@@ -5399,6 +5414,10 @@ export const nodeMutations = {
           'objectType' in restoreFields ? (restoreFields.objectType as string | null) : current.objectType,
           'properties' in restoreFields ? restoreFields.properties : current.properties,
         );
+        // #5019 — a restore is checked like an update (the gate; exempting it is cor:dmo:060:19's Open Question).
+        // #5223: after the authoritative role-writer gate above — a size refusal counts stored fields, so a writer that
+        // gate refuses must not learn the over/under bit.
+        assertNodeContentSize(resultingNodeContent(logicalRestoreFields, logicalCurrent));
         if (truncate) {
           // #617 truncate: collapse the history so the selected revision becomes
           // the new baseline. Delete every snapshot NEWER than the selected one

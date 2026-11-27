@@ -43,7 +43,7 @@ const node = (loc: string, extra: Record<string, unknown> = {}, memoryId = mem) 
   db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, ...extra } });
 const row = (id: string) => db.node.findUniqueOrThrow({ where: { id } });
 /** The rulebook rows a door's role/authoring gate reads, on the memory under test. */
-async function rules(memoryId: string, ...rows: Array<Record<string, unknown>>) {
+async function rules(memoryId: string, ...rows: Array<Record<string, unknown> & { role: string }>) {
   const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId } });
   for (const r of rows) await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, ...r } });
   return config;
