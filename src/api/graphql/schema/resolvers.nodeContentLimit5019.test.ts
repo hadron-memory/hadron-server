@@ -213,11 +213,14 @@ describe('#5019 the other content doors', () => {
     ok(await gql(UPDATE_DATA, { ref: n.id, data: { first: a(5) } }));
   });
 
-  it('searchReplaceInNodes refuses the whole batch and writes nothing, in a dry run too', async () => {
+  it('searchReplaceInNodes refuses the whole batch and writes nothing; #5223: a dry run previews the over-size change', async () => {
     const small = await node('a-small', { content: 'cat' });
     const big = await node('b-big', { content: `cat${a(990)}` });
     const input = { oldText: 'cat', newText: a(20), nodeRefs: [small.id, big.id], fields: ['content'] };
-    refusedAt(await gql(REPLACE, { input: { ...input, dryRun: true } }));
+    // A dry run cannot run the authoring gate (read-only), so it no longer answers the size bit at all (#5223).
+    const dry = await gql(REPLACE, { input: { ...input, dryRun: true } });
+    expect(dry.errors).toBeUndefined();
+    expect(dry.data!.searchReplaceInNodes.nodesChanged).toBe(2);
     refusedAt(await gql(REPLACE, { input }));
     expect((await row(small.id)).content).toBe('cat');
     expect(await db.nodeRevision.count({ where: { nodeId: { in: [small.id, big.id] } } })).toBe(0);
@@ -246,16 +249,18 @@ describe('#5019 the other content doors', () => {
     ok(await gql(RESTORE, { ref: rev.id }));
   });
 
-  it('searchReplaceInSpecNodes is refused and writes nothing', async () => {
+  it('searchReplaceInSpecNodes is refused on apply and writes nothing; #5223: a dry run previews the over-size change', async () => {
     const draft = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'specs-draft', draftCorpus: true } as never, { db, roles: ['ADMIN'], userId: admin } as Context) as { id: string };
     const spec = await node('pas:010:01', { content: `cat ${a(990)}`, role: 'spec' }, draft.id);
     const input = { memoryRef: draft.id, nodeRefs: [spec.id], oldText: 'cat', newText: a(20), fields: ['content'], dryRun: true };
     const run = (extra = {}) => resolvers.Mutation.searchReplaceInSpecNodes(null, { input: { ...input, ...extra } } as never, { db, roles: ['ADMIN'], userId: admin } as Context);
     cap('');
-    const { plan } = await run() as { plan: string };
+    const { plan, nodesChanged } = await run() as { plan: string; nodesChanged: number };
     cap(1000);
+    // A dry run cannot run the authoring gate (read-only), so it no longer answers the size bit at all (#5223).
+    const dry = await run() as { nodesChanged: number };
+    expect(dry.nodesChanged).toBe(nodesChanged);
     await expect(run({ dryRun: false, expectedPlan: plan })).rejects.toMatchObject({ extensions: { code: 'NODE_CONTENT_TOO_LARGE', maxBytes: 1000 } });
-    await expect(run()).rejects.toMatchObject({ extensions: { code: 'NODE_CONTENT_TOO_LARGE' } });
     expect((await row(spec.id)).content).toContain('cat');
   });
 
