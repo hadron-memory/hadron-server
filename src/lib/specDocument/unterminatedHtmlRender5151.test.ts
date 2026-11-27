@@ -7,7 +7,7 @@
  * A body is judged only where the same body with no `<` in it keeps the anchor: an unterminated fence swallows the rest by itself, and no
  * HTML escape changes that.
  *
- * Not covered: a tag value holding `<template` (linkedom models no template; #5211).
+ * linkedom models no template: a tag value holding `<template` is judged through parse5 in unterminatedHtmlTemplate5289.test.ts (#5289).
  */
 import * as commonmark from 'commonmark';
 import { parseHTML } from 'linkedom';
@@ -101,7 +101,7 @@ describe('#5151 the escaped text through a Markdown renderer and an HTML parser'
     }, 120_000);
   });
 
-  it('known limit: a value holding `<template` is held back (#5211)', () => {
-    expect(escapeUnterminatedHtml('a <b y= <template>')).toBe('a <b y= <template>');
+  it('a value holding `<template` is escaped (#5211 limit lifted by #5289, judged through parse5 in unterminatedHtmlTemplate5289.test.ts)', () => {
+    expect(escapeUnterminatedHtml('a <b y= <template>')).toBe('a <b y= &lt;template>');
   });
 });
