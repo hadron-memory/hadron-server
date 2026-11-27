@@ -185,28 +185,15 @@ async function memoryGrants(
         where: { memoryId_granteeId: { memoryId: memory.id, granteeId: subject.id } },
         select: { role: true },
       });
+      // #5389: the share alone admits, App personal memories included: no AgentSubscription licence (the old
+      // "step 3c"), in lockstep with granteeShareAccess and getAccessibleMemoryIds (cor:dmo:060:20 S6).
       if (share) {
-        // An agent-scoped personal memory additionally requires the grantee
-        // to hold an active subscription to the scoping Agent before the
-        // share is honored (resolveMemoryAuthorization step 3c).
-        let licensed = true;
-        if (memory.userMemoryOfAgentId) {
-          const sub = await db.agentSubscription.findUnique({
-            where: {
-              userId_agentId: { userId: subject.id, agentId: memory.userMemoryOfAgentId },
-            },
-            select: { activatedAt: true, revokedAt: true, expiresAt: true },
-          });
-          licensed = !!sub && isActiveAgentSubscription(sub);
-        }
-        if (licensed) {
-          grants.push({
-            source: 'MEMORY_SHARE',
-            role: share.role,
-            via: memory.urn,
-            caps: share.role === 'writer' ? WRITE : READ,
-          });
-        }
+        grants.push({
+          source: 'MEMORY_SHARE',
+          role: share.role,
+          via: memory.urn,
+          caps: share.role === 'writer' ? WRITE : READ,
+        });
       }
     }
     return grants;

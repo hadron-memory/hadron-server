@@ -468,7 +468,8 @@ export const memoryQueries = {
         return page({
           deletedAt: null,
           class: 'personal',
-          userMemoryOfAgentId: null,
+          // #5389: App personal memories (userMemoryOfAgentId set) are listed to a grantee too, in lockstep with
+          // granteeShareAccess and getAccessibleMemoryIds.
           ...(f.visibility ? { visibility: f.visibility as any } : {}),
           // `shares` is the Prisma relation field on Memory → MemoryShare.
           shares: { some: { granteeId: ctx.userId } },

@@ -148,7 +148,9 @@ describe('#5026 memories() lists the owner\'s per-user Agent memories', () => {
     expect(ids(page)).not.toContain(m.org);
   });
 
-  it('(c) sharedWithMe: a plain shared personal memory lists, a shared per-user one still does not', async () => {
+  // #5389 (specs engineer's read: cor:dmo:060:20 S6, cor:api:120:03): a share on a per-user personal memory lists like any
+  // other share; before #5389 the slice omitted it.
+  it('(c) sharedWithMe: a plain shared personal memory lists, and so does a shared per-user one (#5389)', async () => {
     const m = await seedPerUser();
     const plain = await db.memory.create({
       data: { id: generateId(), class: 'personal', name: 'plain', urn: 'org-5026:plain', organizationId: orgId, userId: owner },
@@ -156,8 +158,8 @@ describe('#5026 memories() lists the owner\'s per-user Agent memories', () => {
     await db.memoryShare.create({ data: { memoryId: plain.id, granteeId: grantee, grantorId: owner, role: 'reader' } });
     await db.memoryShare.create({ data: { memoryId: m.org, granteeId: grantee, grantorId: owner, role: 'reader' } });
     const page = await list(ctxOf(grantee), { filter: { sharedWithMe: true } });
-    expect(ids(page)).toEqual([plain.id]);
-    expect(page.total).toBe(1);
+    expect(ids(page)).toEqual([plain.id, m.org].sort());
+    expect(page.total).toBe(2);
   });
 
   it('(d) total equals the items across pages when the limit is smaller than the result', async () => {

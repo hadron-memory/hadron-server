@@ -2455,11 +2455,13 @@ export async function resolveOrgScope(
  * revoked-membership cross-org share can't admit a non-member (which would also
  * expose the org's nested app/key/member objects via `Memory.organization`).
  *
- * Only `personal` is shareable (`private` never is), and agent-scoped personal
- * "holding" memories (`userMemoryOfAgentId` set) are deliberately excluded here
- * — their share additionally requires an active AgentSubscription
- * (resolveMemoryAuthorization step 3c), which this portal surface doesn't model;
- * excluding them is the safe, no-regression direction.
+ * Only `personal` is shareable (`private` never is). #5389: a personal memory
+ * made in an App (`userMemoryOfAgentId` set, which `chk_memory_personal_agent_id`
+ * requires whenever `app_id` is) is shared exactly like a free-standing one: the
+ * share alone admits, at its role, with no AgentSubscription licence
+ * (cor:dmo:060:20 and its S6, "unless the therapist shares it"; cor:acl:010:01;
+ * the specs engineer's read on #5389). Before #5389 such a share was accepted and
+ * listed to its grantor but granted nothing here.
  *
  * @param opts.requireWrite when true, only a `writer` share qualifies.
  */
@@ -2474,7 +2476,7 @@ export async function granteeShareAccess(
   },
   opts?: { requireWrite?: boolean },
 ): Promise<boolean> {
-  if (memory.class !== 'personal' || memory.userMemoryOfAgentId !== null) return false;
+  if (memory.class !== 'personal') return false;
   const share = await db.memoryShare.findUnique({
     where: { memoryId_granteeId: { memoryId: memory.id, granteeId: userId } },
     select: { role: true },
@@ -2748,7 +2750,7 @@ export async function getAccessibleMemoryIds(
       select: { id: true },
     });
     // #778 — personal memories shared WITH the caller (they are a grantee).
-    // Only `personal` is shareable; agent-scoped holdings are excluded (see
+    // Only `personal` is shareable, App personal memories included (#5389, see
     // granteeShareAccess). Org-owned shares are additionally membership-gated so
     // a legacy/revoked cross-org share can't admit a non-member — mirrors the
     // create rule and keeps this node-read gate in lockstep with Query.memory.
@@ -2758,7 +2760,6 @@ export async function getAccessibleMemoryIds(
         ...scope,
         deletedAt: null,
         class: 'personal',
-        userMemoryOfAgentId: null,
         shares: { some: { granteeId: ctx.userId } },
         OR: [{ organizationId: null }, { organizationId: { in: memberOrgIds } }],
       },

@@ -226,7 +226,9 @@ describe('#5184 nobody else learns more than from a read', () => {
 
   // A share grants no read on an agent-scoped personal row (`granteeShareAccess`),
   // and every App personal row is agent-scoped, so a grantee is a non-reader too.
-  it('a share grantee gets the missing-memory answer', async () => {
+  // #5389: a share now grants its grantee read, so the memory's existence is no secret to them: the answer is the plain
+  // refusal a reader gets (FORBIDDEN), never the owner's APP_MEMORY_SLUG_FIXED, and nothing changes.
+  it('a share grantee gets the plain refusal, not the owner\'s code (#5389)', async () => {
     const mem = await appMemory('personal', 'organization');
     await db.memoryShare.create({
       data: { memoryId: mem.id, granteeId: user.grantee.id, grantorId: user.owner.id, role: 'writer' },
@@ -235,7 +237,7 @@ describe('#5184 nobody else learns more than from a read', () => {
     const existing = await gql('grantee', RENAME, { r: mem.id, u: 'another-slug' });
     const missing = await gql('grantee', RENAME, { r: absent, u: 'another-slug' });
     expect(code(missing)).toBe('MEMORY_NOT_FOUND');
-    expect(JSON.stringify(existing).split(mem.id).join('<REF>')).toBe(JSON.stringify(missing).split(absent).join('<REF>'));
+    expect(code(existing)).toBe('FORBIDDEN');
     await expectUntouched(mem);
   });
 
