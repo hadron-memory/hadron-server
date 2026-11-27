@@ -15,6 +15,7 @@ import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import { excludeTeamChat, excludeChannelRoots } from '../../../lib/teamChatLoc.js';
 import { teamSpaceAudienceFilter } from '../../../lib/auth/teamSpace.js';
+import { groupMemberMemoryWhere } from '../../../lib/auth/groupMemberMemory.js';
 import {
   type Context,
   deriveChatTitle,
@@ -30,8 +31,8 @@ import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
  * #3223 (#2212 A3): the ONE gate and readable-chat scope behind `myChats` and `myChatsPage`. It is the #876 chat
  * surface, which authorizes on raw caller identity and bypasses `memoryAccessFilter`, so a copy of it would drift
  * exactly where that incident was. Throws for an unauthenticated caller and for impersonation (before any read);
- * answers `null` (the caller lists nothing) for an unknown Agent (#1946, no existence oracle) and for a caller with
- * no readable memory; otherwise the `where` of the chat-root rows the caller may list.
+ * answers `null` (the caller lists nothing) for an unknown Agent (#1946, no existence oracle); otherwise the `where`
+ * of the chat-root rows the caller may list.
  */
 async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.NodeWhereInput | null> {
   if (!ctx.userId) throw unauthenticatedError();
@@ -114,7 +115,21 @@ async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.Node
     for (const m of sharedMemories) readableMemoryIds.push(m.id);
   }
 
-  if (readableMemoryIds.length === 0) return null;
+  // #5027 Ask 6 (d), cor:acl:030:01 (Holger R1/R4): a chat started in a named home (a group, a private memory, a
+  // personal memory that is not this Agent's per-user holding) carries no per-Agent pointer on its memory, so it is
+  // found by the Agent its root recorded (`chat_root_counters.agent_id`) inside a home the caller reads, with the same
+  // identity arms as `chatLocFilter` (group: the shared MemoryMember predicate; personal/private: the owner). A chat
+  // with no recorded Agent lists exactly as before. Impersonation was refused above, so no support-session bound.
+  const recordedHomeArm: Prisma.NodeWhereInput = {
+    chatRootCounter: { is: { agentId: resolvedAgentId } },
+    memory: {
+      deletedAt: null,
+      OR: [
+        groupMemberMemoryWhere(ctx.userId),
+        { class: { in: ['personal', 'private'] as never }, userId: ctx.userId },
+      ],
+    },
+  };
 
   // Top-level chat nodes live at loc "chats:<id>" (depth 2). Message
   // shapes — `chats:<id>:messages` (container) and
@@ -139,7 +154,7 @@ async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.Node
   // ordering, sortable at the DB layer with `take`/`skip` — no
   // application-side resort, no JS slice.
   return {
-    memoryId: { in: readableMemoryIds },
+    OR: [...(readableMemoryIds.length > 0 ? [{ memoryId: { in: readableMemoryIds } }] : []), recordedHomeArm],
     loc: { startsWith: 'chats:' },
     NOT: { loc: { contains: ':messages' } },
     deletedAt: null,
