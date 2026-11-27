@@ -167,7 +167,7 @@ describe('#3229 every selected column is load-bearing in the Chat row', () => {
       scope: 'shared',
       // #5027: the home memory's class and URN (memoryId is load-bearing for them too).
       homeMemoryClass: 'app',
-      homeMemoryUrn: shared.urn,
+      homeMemoryUrn: `hrn:mem:${shared.urn}`,
       createdBy: owner.id,
       aiConfigChoice: 'glm-flash',
     });
@@ -183,7 +183,7 @@ describe('#3229 every selected column is load-bearing in the Chat row', () => {
       lastMessageAt: null,
       scope: 'private',
       homeMemoryClass: 'knowledge',
-      homeMemoryUrn: ownerPersonal.urn,
+      homeMemoryUrn: `hrn:mem:${ownerPersonal.urn}`,
       createdBy: owner.id,
       aiConfigChoice: null,
     });

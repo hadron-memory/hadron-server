@@ -25,6 +25,7 @@ import {
 } from './resolvers.helpers.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { chatServedPromptsById } from './resolvers.servedPrompt.js';
+import { safeEntityUrnV2 } from '../../../lib/urnEmit.js';
 import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
@@ -232,7 +233,8 @@ async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
       lastMessageAt: counters.get(node.id)?.lastMessageAt ?? null,
       scope,
       homeMemoryClass: homes.get(node.memoryId)!.class,
-      homeMemoryUrn: homes.get(node.memoryId)!.urn,
+      // Charles QA F1 on #5391: the same canonical v2 form Memory.urn emits (`hrn:mem:<root>:<slug>`), never the bare stored urn.
+      homeMemoryUrn: safeEntityUrnV2('memory', homes.get(node.memoryId)!.urn),
       createdBy: node.createdBy ?? null,
       // #3957: the AI config choice stored with the chat, or null.
       aiConfigChoice: typeof data.aiConfigChoice === 'string' ? data.aiConfigChoice : null,

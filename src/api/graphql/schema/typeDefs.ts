@@ -5950,7 +5950,7 @@ export const typeDefs = `#graphql
     scope: ChatScope! @deprecated(reason: "Use homeMemoryClass and homeMemoryUrn (#5027).")
     "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01, R2: every surface shows the host memory's own kind plus its URN): the class of the memory this chat lives in. scope is kept for installed clients and is a label derived from this class."
     homeMemoryClass: MemoryClass!
-    "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01): the URN of the memory this chat lives in."
+    "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01): the URN of the memory this chat lives in, in the same form Memory.urn returns (hrn:mem:...)."
     homeMemoryUrn: String!
     """
     The chat's author (chat-root node's createdBy). Null for legacy

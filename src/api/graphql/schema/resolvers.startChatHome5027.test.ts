@@ -116,7 +116,7 @@ describe('#5027 (a) a chat started with memoryRef lives in the named memory', ()
       const chat = await listed(ann, started.chatId);
       expect(chat, 'the chat is listed for its starter').toBeDefined();
       expect({ homeMemoryClass: chat.homeMemoryClass, homeMemoryUrn: chat.homeMemoryUrn, scope: chat.scope })
-        .toEqual({ homeMemoryClass: host.klass, homeMemoryUrn: memory.urn, scope: host.label });
+        .toEqual({ homeMemoryClass: host.klass, homeMemoryUrn: `hrn:mem:${memory.urn}`, scope: host.label });
     });
   }
 
@@ -319,6 +319,35 @@ describe('#5027 (d) part 3: a home lost after the first judgement', () => {
     const before = await footprint();
     await refusal(start(as(ann, { db: racing }), { memoryRef: home }));
     expect(deleted).toBe(true);
+    expect(await footprint()).toEqual(before);
+  });
+});
+
+describe('#5027 (d) part 3b: write lost after the first judgement (Babaya LOCAL P3-1 on #5391, mutant G)', () => {
+  // The home survives, but the caller is downgraded from writer to reader in the window. Nothing but the in-transaction
+  // re-judgement sees this, so it answers CHAT_HOME_INVALID and nothing is written.
+  it('a group writer made reader between the first judgement and the transaction is CHAT_HOME_INVALID, writing nothing', async () => {
+    const home = await groupHome('writer');
+    let downgraded = false;
+    const racing = new Proxy(db, {
+      get(target, key) {
+        if (key === '$transaction') {
+          return async (...args: unknown[]) => {
+            if (!downgraded) {
+              downgraded = true;
+              await db.memoryMember.update({ where: { memoryId_userId: { memoryId: home, userId: ann } }, data: { role: 'reader' } });
+            }
+            return (target.$transaction as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as typeof db;
+    const before = await footprint();
+    const err = await refusal(start(as(ann, { db: racing }), { memoryRef: home }));
+    expect(downgraded).toBe(true);
+    expect(err.extensions?.code).toBe('CHAT_HOME_INVALID');
     expect(await footprint()).toEqual(before);
   });
 });
