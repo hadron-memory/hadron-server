@@ -110,15 +110,15 @@
   ],
   [
    "hadron_set_automation_read_grant",
-   "794d5db028b3d28a3df7fba57826f974460b0544e7e9e29d418468a3200a3380"
+   "bbfc130d08384fef773616ef887bbbeea3ed99a73701b5422a7dbb81c4f4ae07"
   ],
   [
    "hadron_revoke_automation_read_grant",
-   "5c1b1f995ed9efdee856629261f40ed7de0c5b005fa5b0b57a38ede3ba35dc71"
+   "298ab867db76c8023ac26cfda39087478778a055a51c9f8a231a5740395dacc1"
   ],
   [
    "hadron_list_automation_read_grants",
-   "04b5644fd8c70c19bc3b6cbbcd37cee4cdec0d09713fce92cc70e05e73064833"
+   "c9fb943639c39cf6341d026f5b5f7602e73674d72ae0972ef3d79497541c6d01"
   ],
   [
    "hadron_set_automation_team_snapshot_grant",
@@ -476,15 +476,15 @@
   ],
   [
    "hadron_set_automation_read_grant",
-   "794d5db028b3d28a3df7fba57826f974460b0544e7e9e29d418468a3200a3380"
+   "bbfc130d08384fef773616ef887bbbeea3ed99a73701b5422a7dbb81c4f4ae07"
   ],
   [
    "hadron_revoke_automation_read_grant",
-   "5c1b1f995ed9efdee856629261f40ed7de0c5b005fa5b0b57a38ede3ba35dc71"
+   "298ab867db76c8023ac26cfda39087478778a055a51c9f8a231a5740395dacc1"
   ],
   [
    "hadron_list_automation_read_grants",
-   "04b5644fd8c70c19bc3b6cbbcd37cee4cdec0d09713fce92cc70e05e73064833"
+   "c9fb943639c39cf6341d026f5b5f7602e73674d72ae0972ef3d79497541c6d01"
   ],
   [
    "hadron_set_automation_team_snapshot_grant",
@@ -842,15 +842,15 @@
   ],
   [
    "hadron_set_automation_read_grant",
-   "794d5db028b3d28a3df7fba57826f974460b0544e7e9e29d418468a3200a3380"
+   "bbfc130d08384fef773616ef887bbbeea3ed99a73701b5422a7dbb81c4f4ae07"
   ],
   [
    "hadron_revoke_automation_read_grant",
-   "5c1b1f995ed9efdee856629261f40ed7de0c5b005fa5b0b57a38ede3ba35dc71"
+   "298ab867db76c8023ac26cfda39087478778a055a51c9f8a231a5740395dacc1"
   ],
   [
    "hadron_list_automation_read_grants",
-   "04b5644fd8c70c19bc3b6cbbcd37cee4cdec0d09713fce92cc70e05e73064833"
+   "c9fb943639c39cf6341d026f5b5f7602e73674d72ae0972ef3d79497541c6d01"
   ],
   [
    "hadron_set_automation_team_snapshot_grant",
@@ -1208,15 +1208,15 @@
   ],
   [
    "hadron_set_automation_read_grant",
-   "794d5db028b3d28a3df7fba57826f974460b0544e7e9e29d418468a3200a3380"
+   "bbfc130d08384fef773616ef887bbbeea3ed99a73701b5422a7dbb81c4f4ae07"
   ],
   [
    "hadron_revoke_automation_read_grant",
-   "5c1b1f995ed9efdee856629261f40ed7de0c5b005fa5b0b57a38ede3ba35dc71"
+   "298ab867db76c8023ac26cfda39087478778a055a51c9f8a231a5740395dacc1"
   ],
   [
    "hadron_list_automation_read_grants",
-   "04b5644fd8c70c19bc3b6cbbcd37cee4cdec0d09713fce92cc70e05e73064833"
+   "c9fb943639c39cf6341d026f5b5f7602e73674d72ae0972ef3d79497541c6d01"
   ],
   [
    "hadron_set_automation_team_snapshot_grant",
