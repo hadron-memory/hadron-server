@@ -479,6 +479,8 @@ model User {
   // App/Agent/Memory). `ownedMemories` above is the personal/private strict
   // owner (Memory.userId) — a DIFFERENT relation from `tenantMemories` here.
   ownedApps                     App[]                       @relation("AppOwner")
+  /// #5077: the runs of the Apps this person owns (`app_runs.owner_user_id`).
+  ownedAppRuns                  AppRun[]                    @relation("AppRunOwner")
   ownedAgents                   Agent[]                     @relation("AgentOwner")
   tenantMemories                Memory[]                    @relation("MemoryTenantOwner")
   agentSubscriptions            AgentSubscription[]         @relation("UserAgentSubscriptions")
@@ -6125,7 +6127,12 @@ enum AppRunTriggerKind {
 /// #538, #832, #1719, #2047, #2438, #2439. Background (history, not law): the Spec Kit specs 040 and 049.
 model AppRun {
   id                   String               @id
-  organizationId       String               @map("organization_id")
+  /// #5077 (Billing F3a): the run's owner is copied from its App when the row is written, never taken from a caller:
+  /// exactly one of `organizationId` and `ownerUserId` is set (`chk_app_run_owner_xor`). `organizationId` has no foreign
+  /// key; `ownerUser` cascades, though account deletion keeps the user row and deletes the runs itself.
+  organizationId       String?              @map("organization_id")
+  ownerUserId          String?              @map("owner_user_id")
+  ownerUser            User?                @relation("AppRunOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   appId                String               @map("app_id")
   /// #3689 (hrn:node:hadronmemory.com:specs:cor:agt:010:01 rev 45): every run names an existing Agent. The DATABASE
   /// guarantees it: NOT NULL with a foreign key; an Agent hard delete removes its runs (gate R4). Mint refuses an
@@ -6254,6 +6261,7 @@ model AppRun {
   @@index([agentId])
   @@index([parentRunId]) // spawn completion checks + child listings (plan-spawn)
   @@index([organizationId, createdAt])
+  @@index([ownerUserId, createdAt])
   @@index([organizationId, durationMs])
   @@map("app_runs")
 }

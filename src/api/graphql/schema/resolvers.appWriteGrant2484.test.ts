@@ -269,7 +269,7 @@ describe('what a userless run of the App may write', () => {
       create: { memoryId: flow.id, loc: 'flow:report', name: 'report', content: 'Produce.', data: { output: { writeTo, mode: 'replace' } } as never },
       update: { data: { output: { writeTo, mode: 'replace' } } as never },
     });
-    const run = await mintAppRun(db, { organizationId: f.org.id, appId: f.app.id, agentId: agent.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:grant2484.test:flow:flow:report', eventData: {} });
+    const run = await mintAppRun(db, { owner: { organizationId: f.org.id }, appId: f.app.id, agentId: agent.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:grant2484.test:flow:flow:report', eventData: {} });
     const deps = makeProdRunDeps(db);
     await entry(`hrn:node:grant2484.test:dest:${PREFIX}:{runId}`);
     const id = await deps.writeOutput(run, 'hrn:node:grant2484.test:flow:flow:report', 'the report');
@@ -344,7 +344,7 @@ describe('what a userless run of the App may write', () => {
     const agent = await db.agent.create({ data: { name: 'store-agent', urn: 'grant2484.test:store-agent', organizationId: f.org.id } as never });
     await db.appAgent.create({ data: { appId: f.app.id, agentId: agent.id } });
     await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.');
-    const row = await mintAppRun(db, { organizationId: f.org.id, appId: f.app.id, agentId: agent.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:grant2484.test:dest:x', eventData: {} });
+    const row = await mintAppRun(db, { owner: { organizationId: f.org.id }, appId: f.app.id, agentId: agent.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:grant2484.test:dest:x', eventData: {} });
     await expect(STORE_TOOLS[0].execute({ db, run: row, principal: run, log: () => {} } as never, { urn: `hrn:node:grant2484.test:dest:${PREFIX}:file`, filename: 'a.md', content: 'x' })).rejects.toThrow(/not writable/i);
     expect(await db.node.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ deletedAt: null });
     expect((await db.memory.findUniqueOrThrow({ where: { id: f.dest.id } })).name).toBe('dest');

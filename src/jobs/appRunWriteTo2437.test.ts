@@ -71,7 +71,7 @@ async function setOutput(writeTo: string, mode: 'replace' | 'append'): Promise<v
 /** One MANUAL run of the single-node flow; the LLM seam returns `body`. */
 async function runOnce(body = 'report body'): Promise<{ runId: string; outcome: string }> {
   const run = await mintAppRun(db, {
-    organizationId: orgId,
+    owner: { organizationId: orgId },
     appId,
     agentId,
     triggerKind: 'MANUAL',

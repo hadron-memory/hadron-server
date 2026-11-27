@@ -1,4 +1,5 @@
-import { isPureAppKeyShape, linkedReachFor, registerOwnRightReader } from '../../../lib/appMemoryLinks.js';
+import { registerOwnRightReader } from '../../../lib/appMemoryLinks.js';
+import { grantReadReachFor } from '../../../lib/grants/readGrant.js';
 import { currentAgentOrgMember } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireOrgRole, isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
 import { endGrantsOfAgentsNoLongerInstalled, importedPairsOfParent } from '../../../lib/grants/agentInstallDeparture.js';
@@ -1330,9 +1331,8 @@ export async function canReadMemoryRecord(
     if (isStrictOwner(ctx, memory.userId)) return true;
     // No `as never`: the cast is what let a caller omit the fields this reads.
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
-    // #5185: a pure App key / userless run reads a personal or private memory its App owner linked (the one judge decides,
-    // including that a run never reads `private`), so `memory(ref:)` answers as the node reads and MCP do.
-    if (isPureAppKeyShape(ctx) && (await linkedReachFor(ctx.db, ctx, [memory.id])).has(memory.id)) return true;
+    // #5321: an attachment gives no access (cor:dmo:060:22), and no read grant names a personal or private memory
+    // (src/lib/grants/readGrant.ts memoryReadTargetRefusal), so a pure App key or a userless run reads none here.
     return false;
   }
   // System records follow the installed/licensed Agent or manager audience,
@@ -2691,11 +2691,11 @@ export async function getAccessibleMemoryIds(
     // right, so an attachment gate asking "what does this caller hold?" gets
     // the empty set rather than that App's fold (#1349).
     if (options?.excludeAppDerived) return [];
-    // #5185: plus what the App's links let a pure key / userless run read (judged at use). Added AFTER the strict-owner
-    // class filter above on purpose: the one judge applies its own personal/private rule.
+    // #5321 (cor:acl:140:02, cor:agt:010:01): plus what the App's read grants let a pure key (holding grant:read) or a userless
+    // run read, judged at use by the one judge MCP shares. An attachment adds nothing (cor:dmo:060:22).
     const derived = [...new Set([
       ...await appDerivedMemoryIds(ctx, onlyMemoryId),
-      ...await linkedReachFor(ctx.db, ctx, onlyMemoryId ? [onlyMemoryId] : undefined),
+      ...await grantReadReachFor(ctx.db, ctx, onlyMemoryId ? [onlyMemoryId] : undefined),
     ])];
     // #3306 / ruling 0104: a pure App key or userless run also reads PUBLIC knowledge (App-less, ownerless, live),
     // read-only. One shared predicate with the MCP point gate; reads only (no list surface returns these ids).

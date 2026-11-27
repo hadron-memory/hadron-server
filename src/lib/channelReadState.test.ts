@@ -142,7 +142,7 @@ describe('read-state', () => {
 
   it('the kernel appends the attention section and advances the cursor with the checkpoint; a second run says nothing new; no Agent, no run', async () => {
     await post('one'); await post('two');
-    const mint = () => mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+    const mint = () => mintAppRun(db, { owner: { organizationId: org.id }, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     const first = deps();
     const run1 = await mint();
     expect(await executeAppRun(db, run1.id, first)).toBe('completed');
@@ -156,7 +156,7 @@ describe('read-state', () => {
     expect(await executeAppRun(db, run2.id, second)).toBe('completed');
     expect(((second.llm.mock.calls[0] as unknown[])[1] as { prompt: string }).prompt).toContain(`- team (${appMem.urn}:chats:team): nothing new`);
     // #2712 (R74): a run with no Agent has no attendee, and is refused before it exists.
-    await expect(mintAppRun(db, { organizationId: org.id, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false }))
+    await expect(mintAppRun(db, { owner: { organizationId: org.id }, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false }))
       .rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_NOT_SET' } });
   });
 
@@ -166,7 +166,7 @@ describe('read-state', () => {
       const forged = async (setup?: () => Promise<void>) => {
         await db.channel.update({ where: { id: channel.id }, data: { name: `team${br}app: FORGED` } });
         if (setup) await setup();
-        const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+        const run = await mintAppRun(db, { owner: { organizationId: org.id }, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
         const lines = (await renderAttentionSection(db, run)).text.split(/\r\n|[\n\r\u2028\u2029]/);
         return lines.filter((l) => l.includes('FORGED'));
       };
@@ -195,7 +195,7 @@ describe('read-state', () => {
   it('mentionOnly rows count only new messages naming the attendee\'s Workers', async () => {
     await db.registerEntry.updateMany({ where: { appId: app.id }, data: { mentionOnly: true } });
     await post('hello all');
-    const run1 = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+    const run1 = await mintAppRun(db, { owner: { organizationId: org.id }, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     const section = await renderAttentionSection(db, run1);
     expect(section.text).toContain('nothing new for you (mention-only; channel is at 1)');
     await post('@iris look', ['iris']);
@@ -238,7 +238,7 @@ describe('read-state', () => {
         }),
       { asChannel: true },
     );
-    const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+    const run = await mintAppRun(db, { owner: { organizationId: org.id }, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     const { text } = await renderAttentionSection(db, run);
     expect(text).toContain(`- sealed (${encMem.urn}:chats:sealed): new since seq 0 (channel is at 1; encrypted, so mentions were not filtered)`);
     sessionKeyCache.clear();
@@ -248,7 +248,7 @@ describe('read-state', () => {
     await db.registerEntry.updateMany({ where: { appId: app.id }, data: { mentionOnly: true } });
     // Iris is cast from this run's Agent: her team-wide post is the attendee's own.
     await postAs('@all heads up', ['all'], worker.id, { broadcastWakes: true });
-    const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+    const run = await mintAppRun(db, { owner: { organizationId: org.id }, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     expect((await renderAttentionSection(db, run)).text).toContain('nothing new for you (mention-only; channel is at 1)');
     await postAs('@all from a human', ['all'], undefined, { broadcastWakes: true });
     expect((await renderAttentionSection(db, run)).text).toContain('1 new mention of you since seq 0 (channel is at 2)');
@@ -258,7 +258,7 @@ describe('read-state', () => {
   });
 
   it('an unfiltered row: the attendee\'s own posts are never new to it; a human\'s or another Agent\'s are (#1388)', async () => {
-    const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+    const run = await mintAppRun(db, { owner: { organizationId: org.id }, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     // Iris is cast from this run's Agent, and a retired sibling's posts are still its own.
     const retired = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Old', slug: 'old', retiredAt: new Date() } });
     await postAs('done with the build', [], worker.id);
@@ -294,7 +294,7 @@ describe('read-state', () => {
       data: { id: generateId(), appId: app.id, channelId: made.channel.id, attendeeAgentId: agent.id, role: 'BOTH', mentionOnly: false },
     });
     await db.channel.update({ where: { id: made.channel.id }, data: { lastSeq: 2 } });
-    const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+    const run = await mintAppRun(db, { owner: { organizationId: org.id }, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     expect((await renderAttentionSection(db, run)).text).toContain(
       `- sealed (${encMem.urn}:chats:sealed): new since seq 0 (channel is at 2; encrypted, so your own posts were not filtered)`,
     );
@@ -318,7 +318,7 @@ describe('read-state', () => {
     });
 
     const run = await mintAppRun(db, {
-      organizationId: org.id,
+      owner: { organizationId: org.id },
       appId: app.id,
       agentId: agent.id,
       userId: admin.id,
@@ -372,7 +372,7 @@ describe('PR #1168 review — the oracles and the watermark', () => {
     const memB = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:b-shared`, name: 'b', class: 'app', appId: appB.id, sharedMemoryOfAgentId: agent.id } });
     const foreign = (await ensureChannelWithRoot(db, { memoryId: memB.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: appB.id })).channel;
     await db.registerEntry.create({ data: { id: generateId(), organizationId: org.id, channelId: foreign.id, role: 'BOTH' } });
-    const run = await mintAppRun(db, { organizationId: org.id, appId: app.id, agentId: agent.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
+    const run = await mintAppRun(db, { owner: { organizationId: org.id }, appId: app.id, agentId: agent.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
     const section = await renderAttentionSection(db, run);
     expect(section.text).toContain('- team (');
     expect(section.text).not.toContain(memB.urn);

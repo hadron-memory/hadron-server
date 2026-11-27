@@ -60,7 +60,7 @@ describe('#5019 git sync', () => {
   it('#5160: a file exactly at the ceiling is written', async () => {
     file('at', 'x'.repeat(1000));
     const result = await syncGraphFromGithub(graph);
-    expect(result.skippedOversize ?? []).toEqual([]);
+    expect(result.skippedOversize).toEqual([]);
     expect((await at('at'))!.content).toHaveLength(1000);
   });
 
@@ -95,7 +95,7 @@ describe('#5019 git sync', () => {
   it('unset: nothing is skipped', async () => {
     vi.stubEnv('NODE_CONTENT_MAX_BYTES', '');
     file('big', 'x'.repeat(5000));
-    expect((await syncGraphFromGithub(graph)).skippedOversize ?? []).toEqual([]);
+    expect((await syncGraphFromGithub(graph)).skippedOversize).toEqual([]);
     expect(await at('big')).not.toBeNull();
   });
 });

@@ -140,7 +140,7 @@ const WRITE_NODE_CORE: Record<string, { limits: string[]; size?: string[]; becau
   [`${G}/resolvers.mutation.node.ts#nodeMutations.cloneNode`]: { limits: ['refuse'], size: ['skip'], because: 'cloneNode' },
   [`${G}/resolvers.mutation.importNode.ts#importNode.store`]: { limits: ['refuse'], because: 'importNode (update or upsert)' },
   'src/controller/operations/createAssetReferenceNode.ts#createAssetReferenceNode': { limits: ['refuse'], because: 'an asset\'s reference node' },
-  'src/lib/runner/tools/nodeTools.ts#hadronCreateNode.execute': { limits: ['refuse'], because: 'run tool create; the refusal is returned to the model (ownerLimitToolError)' },
+  'src/lib/runner/tools/nodeTools.ts#hadronCreateNode.execute': { limits: ['refuse'], because: 'run tool create; the refusal is returned to the model (createRefusalToolError)' },
   'src/lib/runner/tools/storeTools.ts#hadronStoreFile.execute': { limits: ['refuse'], because: 'hadron_store_file\'s reference node; returned to the model, asset row and object removed' },
   [`${G}/resolvers.specCorpus.ts#specCorpusMutations.reserveSpecCitation`]: { limits: ['refuse'], size: ['skip'], because: 'a reserved spec citation' },
   [`${G}/resolvers.specCorpus.ts#specCorpusMutations.allocateSpecNode`]: { limits: ['refuse'], size: ['skip'], because: 'an allocated spec node' },

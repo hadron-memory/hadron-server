@@ -20,6 +20,7 @@ import { splitNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from 
 import { resolveFlowMemory, loadFlowNode } from '../loadFlowNode.js';
 import { createRefusalToolError } from '../../ownerLimits/errors.js';
 import type { RunToolDef, RunToolContext } from './types.js';
+import { requireOwnerRefOf } from '../../owner.js';
 
 /** Shared arg schema for the write tools (full NodeInput parity, minus edges — v1). */
 const WRITE_ARG_PROPERTIES = {
@@ -92,7 +93,7 @@ export const hadronReadNode: RunToolDef = {
     const { memoryUrn, loc } = splitNodeUrn(urn);
     let memory: Awaited<ReturnType<typeof resolveFlowMemory>>;
     let viaGrant = false;
-    try { memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, urn); }
+    try { memory = await resolveFlowMemory(ctx.db, memoryUrn, requireOwnerRefOf(ctx.run), urn); }
     catch (err) {
       // #2883: a grant may name a memory outside the run's org (an Agent of another org, installed in this App). Only a
       // live grant admits it; every other shape rethrows the org-scoped answer unchanged, so a missing memory and an
@@ -145,7 +146,7 @@ export const hadronCreateNode: RunToolDef = {
   execute: async (ctx, args) => {
     const urn = String(args.urn ?? '');
     const { memoryUrn, loc } = splitNodeUrn(urn);
-    const memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, urn);
+    const memory = await resolveFlowMemory(ctx.db, memoryUrn, requireOwnerRefOf(ctx.run), urn);
     // No pre-existence probe (PR-545 review, Copilot): writeNodeCore's own
     // create gate rejects live-loc collisions (NodeLocConflictError) and
     // resurrects soft-deleted ones — duplicating the check here would run
@@ -190,7 +191,7 @@ export const hadronUpdateNode: RunToolDef = {
   cost: 1,
   execute: async (ctx, args) => {
     const urn = String(args.urn ?? '');
-    const { memory, loc, node } = await loadFlowNode(ctx.db, urn, ctx.run.organizationId, principalAuth(ctx));
+    const { memory, loc, node } = await loadFlowNode(ctx.db, urn, requireOwnerRefOf(ctx.run), principalAuth(ctx));
     const fields = pickWriteFields(args);
     if (fields.data !== undefined) {
       // The model controls this input — validate before spreading (PR-545

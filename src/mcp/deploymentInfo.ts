@@ -347,6 +347,16 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // CHAT_APP_NOT_IDENTIFIED before any Agent lookup; the App is never searched for, and SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is
 // retired. A previously working signed-in start that names no App is now refused, so a client keys on this version before sending
 // `appRef` (hadron-portal#2683, hadron-cli#3310). (0.53.0 is #5416, merged first.)
+// 0.55.0 — BREAKING (behaviour, no SDL removal) (#5321, cor:acl:140:02, cor:agt:010:01, cor:dmo:060:22, cor:acl:010:04): an App that acts
+// with no person behind it (a pure App key, or a userless run) now reads a memory outside its own App ONLY through a signed `memory.read`
+// grant the App holds. Attaching a memory (#5258's `app_memory_links`) no longer gives any read on any surface: the link is the App's scope
+// list, and `AppAttachedMemory.active` still shows whether it would count. Upgrade: on deploy every existing attachment stops giving reads,
+// with no backfill (only the memory's manager may sign a read grant, cor:acl:140:02); a key or run that read through one gets the
+// missing-memory answer until the memory's manager signs a grant. The grant has two forms: (a) the App's own organization, opening its
+// ORGANIZATION-visibility unencrypted knowledge memories no App scopes, to userless runs only; (b) named memories, to userless runs and to a
+// pure key holding the new App-key scope `grant:read` (ADDITIVE: the closed scope list gains it; a client that validates scopes against the
+// old list cannot give it). A person, an impersonation, a session-bound key and a run carrying a user id gain nothing. #5398's own-memory
+// read (0.53.0) is neither an attachment nor a grant and is unchanged. (0.53.0 is #5398 and 0.54.0 is #5394, both merged first.)
 // 0.56.0 — BREAKING (behaviour) + ADDITIVE, #5027 (cor:acl:030:01, R1-R4, Holger 2026-11-27): a chat lives in a memory the caller
 // names. ADDITIVE: `startChat(memoryRef:)` (an id or URN of an app, group, personal or private memory of the Agent's App that the caller
 // can read and write as themselves); `Agent.defaultChatHome` (APP_SHARED, PERSONAL or PRIVATE, set through `updateAgent` by whoever
@@ -355,7 +365,7 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // that fails any step, including a caller with no AppMember row in the home's App (a group MemoryMember outside the App), is refused
 // with the one `CHAT_HOME_INVALID` and writes nothing; only the person themselves creates a missing personal or private default home
 // (an App key, a run or a worker session is refused). A start with neither memoryRef nor a default behaves as before.
-// (0.54.0 is #5407, merged first; 0.55.0 is #5411, renumbering ahead of this.)
+// (0.54.0 is #5407 and 0.55.0 is #5411, both merged first.)
 export const HADRON_SERVER_VERSION = '0.56.0';
 
 /**

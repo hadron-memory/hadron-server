@@ -30,7 +30,7 @@ async function fixture(agentOwnedByOtherOrg: boolean) {
   await db.aiModelPrice.create({ data: { id: generateId(), provider: 'test', model: 'test', tier: 1, inputMicroCentsPerMTok: 300_000_000n, outputMicroCentsPerMTok: 1_500_000_000n, effectiveAt: new Date('2020-01-01') } as never });
   const ctx = { db, userId: user.id, roles: [] };
   const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, name: 'Bill', cron: '* * * * *', entryNodeUrn: 'hrn:node:billa.test:flow:entry', runAsSelf: true } }, ctx);
-  const run = await mintAppRun(db, { appId: app.id, organizationId: org.id, agentId: agent.id, userId: user.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn });
+  const run = await mintAppRun(db, { appId: app.id, owner: { organizationId: org.id }, agentId: agent.id, userId: user.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn });
   const llm = vi.fn(async () => ({ text: 'ok', tokensIn: 1000, tokensOut: 500, provider: 'test', model: 'test' }));
   const deps: RunExecutionDeps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: { provider: 'test', model: 'test' }, ownerType: 'HADRON_SERVER' }) as never), llm, writeOutput: vi.fn(async () => null) };
   return { user, org, other, app, run, deps };
