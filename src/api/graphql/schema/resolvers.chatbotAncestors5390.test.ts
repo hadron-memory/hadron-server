@@ -59,6 +59,8 @@ describe('#5390 which parents a loc needs', () => {
     // Not the families, or not their depths: nothing.
     ['conversations', []], ['prompts', []], ['conversations:a:b:c', []], ['prompts:a:b:c', []],
     ['notes:a:b', []], ['chats:x:messages', []], ['conversations::x', []],
+    // Names every object inherits are not families (blind P2 at e7219623).
+    ['constructor:a', []], ['constructor:a:b', []], ['__proto__:a:b', []], ['toString:a', []], ['hasOwnProperty:a:b', []],
   ])('%s', (loc, want) => {
     expect(chatbotContainerLocs(loc)).toEqual(want);
   });

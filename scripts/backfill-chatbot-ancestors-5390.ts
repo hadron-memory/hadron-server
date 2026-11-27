@@ -21,12 +21,17 @@ const db = new PrismaClient();
 async function main(): Promise<void> {
   const rows = await retrofitAgentSkeletons(db, { dryRun, actor: 'system:5390' });
   let total = 0;
+  let embedFailures = 0;
   for (const r of rows) {
     if (r.created.length) console.log(`${dryRun ? 'would create' : 'created'} ${r.created.join(', ')} in ${r.agentUrn}`);
     total += r.created.length;
-    if (!dryRun && r.created.length) await backfillMemoryEmbeddings(db, r.memoryId).catch((e) => console.warn('embedding stamp failed', r.agentUrn, e));
+    if (!dryRun && r.created.length) {
+      await backfillMemoryEmbeddings(db, r.memoryId).catch((e) => { embedFailures += 1; console.warn('embedding stamp failed', r.agentUrn, e); });
+    }
   }
   console.log(`${rows.length} system memories checked, ${total} node(s) ${dryRun ? 'to create' : 'created'}.`);
+  // The nodes stand either way; a failed stamp only delays their embedding, but the run must not read as clean.
+  if (embedFailures) { console.error(`${embedFailures} memory(ies) failed the embedding stamp; their nodes were created, but a re-run creates nothing and so stamps nothing: backfill those memories' embeddings (logged above).`); process.exitCode = 1; }
 }
 
 main().catch((e) => { console.error(e); process.exitCode = 1; }).finally(() => db.$disconnect());

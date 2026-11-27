@@ -36,19 +36,11 @@ import { LocProtectedError, assertLocWritable } from './protectedLoc.js';
 
 type Db = Prisma.TransactionClient | PrismaClient;
 
-/** The two family roots and what their parents are called. */
-const FAMILIES: Record<string, { name: string; description: string; child: (name: string) => string }> = {
-  conversations: {
-    name: 'Conversations',
-    description: 'Parent of the Agent\'s conversations.',
-    child: () => '',
-  },
-  prompts: {
-    name: 'Prompts',
-    description: 'Parent of the Agent\'s prompt templates, one parent per conversation.',
-    child: (name) => `Parent of the prompt templates of the stages of conversation ${name}.`,
-  },
-};
+/** The two family roots and what their parents are called. A Map, so a loc's first segment is never read as an inherited object key. */
+const ROOTS: ReadonlyMap<string, { name: string; description: string }> = new Map([
+  ['conversations', { name: 'Conversations', description: 'Parent of the Agent\'s conversations.' }],
+  ['prompts', { name: 'Prompts', description: 'Parent of the Agent\'s prompt templates, one parent per conversation.' }],
+]);
 
 /**
  * The container parents a node at `loc` needs, shallowest first: `conversations` for a conversation or stage,
@@ -58,7 +50,7 @@ export function chatbotContainerLocs(loc: string): string[] {
   const parts = loc.split(':');
   if (parts.length < 2 || parts.length > 3 || parts.some((p) => p === '')) return [];
   const root = parts[0]!;
-  if (!(root in FAMILIES)) return [];
+  if (!ROOTS.has(root)) return [];
   if (root === 'conversations') return ['conversations'];
   return parts.length === 3 ? ['prompts', `prompts:${parts[1]}`] : ['prompts'];
 }
@@ -100,10 +92,11 @@ export async function missingChatbotContainers(db: Db, memoryId: string, locs: r
 /** Create the parents {@link missingChatbotContainers} returned, as empty `info` nodes. */
 export async function createChatbotContainers(db: Db, memoryId: string, locs: readonly string[], createdBy: string | null): Promise<void> {
   for (const loc of locs) {
+    // Only a root (`conversations`, `prompts`) or a `prompts:<name>` parent is ever created here.
     const parts = loc.split(':');
-    const family = FAMILIES[parts[0]!]!;
-    const name = parts.length === 1 ? family.name : parts[1]!;
-    const description = parts.length === 1 ? family.description : family.child(parts[1]!);
+    const root = ROOTS.get(parts[0]!)!;
+    const name = parts.length === 1 ? root.name : parts[1]!;
+    const description = parts.length === 1 ? root.description : `Parent of the prompt templates of the stages of conversation ${parts[1]}.`;
     await db.node.create({ data: { id: generateId(), memoryId, loc, name, description, nodeType: 'info', createdBy } });
   }
 }
