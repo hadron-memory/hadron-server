@@ -194,6 +194,9 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
 
   // The holder. A worker session: itself or its role agent. A manager (no `me`): any live worker of this App, or an agent installed
   // and licensed in it (#3711, cor:acl:140:05; ruling 0253 item 4). Anything else, and anything outside this App, is the one refusal.
+  // #5321 (cor:acl:140:02): a read grant is held by the grant's own App and nothing else; the read judge (readGrant.ts) reads only
+  // App-held rows, so a worker-, agent- or person-held one would be signed and allow nothing. Refused here, not left to fail at use.
+  if (APP_READ_ACTIONS.has(args.action) && holder.kind !== 'app') throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
   if (holder.kind === 'worker') {
     // A use grant is consumed only by a run of its agent or App (readClientReveal prepareSecretUse); a worker holder could never consume it,
     // so signing one would mint a live read client nothing can read. Refused here, not left to fail at use.
