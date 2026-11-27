@@ -164,6 +164,8 @@ describe('#5331 item 6: protected: true with metadata identical to the live row'
     for (const more of [{ metadata: { note: 'changed', owner: 'ops' } }, { metadata: { note: 'kept', owner: 'ops', extra: 1 } }, { metadata: { note: 'kept' } }, { metadata: { note: 'kept', owner: 'ops' }, value: 'v2' }]) {
       const e = await error(protectAgain(ctxOf(), more));
       expect(e.extensions, JSON.stringify(more)).toMatchObject({ code: 'SECRET_PROTECTED_NEEDS_PASSKEY', requestId: expect.any(String) });
+      // Jack F5: the request stages exactly the metadata sent, so the no-op and staging judge the same (normalized) value.
+      expect((await db.secretChangeRequest.findFirstOrThrow()).metadata, JSON.stringify(more)).toEqual(more.metadata);
       await db.$executeRaw`DELETE FROM secret_change_requests`;
     }
   });
@@ -201,6 +203,15 @@ describe('#5331 item 6: protected: true with metadata identical to the live row'
       expect(res.body.singleResult.errors).toBeUndefined();
       expect(res.body.singleResult.data?.updateSecret).toEqual({ id: secretId, protected: true });
     }
+    expect(await db.secretChangeRequest.count()).toBe(0);
+  });
+
+  it('identical is judged on the NORMALIZED metadata: a webfetch-auth re-assert that omits the derived type is the no-op (Rook N1)', async () => {
+    const id = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'hook', kind: 'webfetch-auth',
+      metadata: { urlPrefix: 'https://api.example.test/v1/' }, value: { type: 'bearer', token: 'tok' } }, ctxOf())).id;
+    await db.secret.update({ where: { id }, data: { protected: true } });
+    const out = await resolvers.Mutation.updateSecret({}, { ref: id, protected: true, metadata: { urlPrefix: 'https://api.example.test/v1/' } }, ctxOf());
+    expect(out).toMatchObject({ id, protected: true, metadata: { urlPrefix: 'https://api.example.test/v1/', type: 'bearer' } });
     expect(await db.secretChangeRequest.count()).toBe(0);
   });
 
