@@ -41,6 +41,7 @@ import { githubIssueSnapshot } from '../lib/runner/tools/githubTools.js';
 import { hadronTeamSnapshot } from '../lib/runner/tools/teamSnapshotTools.js';
 import { billableAccountOfRun } from '../lib/metering/billableAccount.js';
 import { hasAppRelationship } from '../lib/auth/appRelationship.js';
+import { composeAppRunUrn } from '../lib/entityRef/appRunRef.js';
 import { mergeUsers } from '../test/mergeConsent.js';
 import { deleteUserAccount } from '../controller/operations/deleteUser.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
@@ -461,6 +462,8 @@ describe('#5077 F3a-1 interim: reads and cancel of a person\'s run fail closed u
     const admin = { db, userId: (await db.user.create({ data: { handle: 'adm5077' } })).id, roles: ['ADMIN'] } as unknown as Context;
     expect(await resolvers.Query.appRun({}, { ref: run.id }, admin)).toBeNull();
     await expect(resolvers.Query.latestAppRun({}, { appRef: a.app.id }, admin)).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
+    // Rook SEC10 P3-1 on #5420: without resolveUrn's null-organization guard, isOrgMember admits a platform admin.
+    expect(await resolvers.Query.resolveUrn({}, { urn: composeAppRunUrn('pa5077:app', run.id) }, admin)).toBeNull();
   });
 
   it('nobody else reads one either: the owner (a run on their behalf, one they started), the App key and MCP get nothing', async () => {
