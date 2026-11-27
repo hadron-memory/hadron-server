@@ -86,7 +86,7 @@ describe('#3278 userless run item admission', () => {
     }
   });
   it('RED: refuses item-only flow loads', async () => {
-    expect(await rejection(loadFlowNode(db, urn(f.write), f.org.id, f.principal))).toMatchObject({ message: expect.stringContaining('not readable') });
+    expect(await rejection(loadFlowNode(db, urn(f.write), { organizationId: f.org.id }, f.principal))).toMatchObject({ message: expect.stringContaining('not readable') });
   });
   it('refuses item-only writes exactly as without an item and publishes no node', async () => {
     const withItem = await rejection(hadronCreateNode.execute(f.tool, { urn: urn(f.write, 'docs:new'), name: 'new' }));

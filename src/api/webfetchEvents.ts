@@ -166,7 +166,7 @@ export async function dispatchWebFetchEvent(event: InboundWebFetchEvent): Promis
     // Keep the run unpublished until its dedupe receipt commits in this same
     // transaction. A crash after commit is recovered by the PENDING sweep.
     const routedRun = await mintAppRun(tx as unknown as PrismaClient, {
-      organizationId: lockedBinding.organizationId,
+      owner: { organizationId: lockedBinding.organizationId }, // #5077: a poll binding is an organization's
       appId: lockedBinding.appId,
       agentId: lockedBinding.agentId,
       userId: lockedBinding.userId,

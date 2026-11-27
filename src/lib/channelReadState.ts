@@ -37,6 +37,7 @@ import { parseRunRegisterSnapshot, type RegisterAttendee } from './resolveRegist
 import { escapePrismaLikePattern } from './literalLocPrefix.js';
 import { TEAM_CHAT_LOC } from './teamChatLoc.js';
 import { collapseLineBreaks } from './collapseLineBreaks.js';
+import { orgIdOf, requireOwnerRefOf } from './owner.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -290,7 +291,7 @@ export interface AttentionSection {
  */
 export async function renderAttentionSection(
   db: Db,
-  run: { id: string; agentId: string | null; appId: string; userId: string | null; organizationId: string; registerSnapshot: unknown },
+  run: { id: string; agentId: string | null; appId: string; userId: string | null; organizationId: string | null; ownerUserId: string | null; registerSnapshot: unknown },
 ): Promise<AttentionSection> {
   const none: AttentionSection = { text: '', captured: new Map() };
   if (!run.agentId) return none;
@@ -308,7 +309,8 @@ export async function renderAttentionSection(
     db: db as PrismaClient,
     appId: run.appId,
     userId: run.userId ?? undefined,
-    organizationId: run.organizationId,
+    // #5077: a person's run carries no organization (as runAuthContext).
+    organizationId: orgIdOf(requireOwnerRefOf(run)) ?? undefined,
     clientId: `run:${run.id}`,
   } as unknown as Context;
   const accessible = await getAccessibleMemoryIds(principal);

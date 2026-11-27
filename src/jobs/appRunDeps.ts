@@ -25,7 +25,10 @@ import type { PrismaClient, AppRun } from '../generated/prisma/index.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { writeNodeCore } from '../api/graphql/schema/resolvers.mutation.node.js';
 import { runAuthoring } from '../lib/runner/runAuthoring.js';
-import { resolveAiConfigWithFallback, type ResolvedAiConfig } from '../lib/aiConfig.js';
+import type { ResolvedAiConfig } from '../lib/aiConfig.js';
+import { resolveRunAiConfig } from '../lib/runner/runAiConfig.js';
+import { requireOwnerRefOf } from '../lib/owner.js';
+import { orgOnlyToolsMessage, orgOnlyToolsRefused } from '../lib/runner/tools/orgOnly.js';
 import { generateText, generateExtraction, generateWithTools, type ExtractionField } from '../lib/llm/index.js';
 import { validateExtractionSpec } from '../lib/edge-conditions/reserved-names.js';
 import { selectNextEdge } from '../lib/runner/selectNextEdge.js';
@@ -80,7 +83,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
     },
 
     loadNodeSpec: async (run, nodeUrn): Promise<RunNodeSpec> => {
-      const { node } = await loadFlowNode(db, nodeUrn, run.organizationId, runContext(db, run));
+      const { node } = await loadFlowNode(db, nodeUrn, requireOwnerRefOf(run), runContext(db, run));
       const data =
         node.data && typeof node.data === 'object' && !Array.isArray(node.data)
           ? (node.data as Record<string, unknown>)
@@ -117,6 +120,9 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
       if (Array.isArray(data.tools)) {
         const names = (data.tools as unknown[]).filter((t): t is string => typeof t === 'string');
         if (names.length > 0) {
+          // #5077: a run of an App a person owns refuses the organization-only tools here, before any model call.
+          const refused = orgOnlyToolsRefused(requireOwnerRefOf(run), names);
+          if (refused.length > 0) throw new Error(orgOnlyToolsMessage(refused));
           // Unknown names fail the hop LOUD before any LLM call (D-TL-6).
           // `mcp__<slug>__<tool>` / `ha__<slug>__<op>` names resolve
           // against the run org's registries instead of the static
@@ -125,12 +131,12 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
           const { unknown } = resolveRunTools(builtin);
           const unknownMcp = await unknownMcpToolNames(
             db,
-            run.organizationId,
+            requireOwnerRefOf(run),
             names.filter(isMcpRunToolName),
           );
           const unknownHa = await unknownHaToolNames(
             db,
-            run.organizationId,
+            requireOwnerRefOf(run),
             names.filter(isHaRunToolName),
           );
           const allUnknown = [...unknown, ...unknownMcp, ...unknownHa];
@@ -159,10 +165,13 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
           );
         }
         const name = call.tool;
+        // #5077: the same organization-only refusal for a script node's one tool.
+        const refusedScript = orgOnlyToolsRefused(requireOwnerRefOf(run), [name]);
+        if (refusedScript.length > 0) throw new Error(orgOnlyToolsMessage(refusedScript));
         const unknown = isMcpRunToolName(name)
-          ? await unknownMcpToolNames(db, run.organizationId, [name])
+          ? await unknownMcpToolNames(db, requireOwnerRefOf(run), [name])
           : isHaRunToolName(name)
-            ? await unknownHaToolNames(db, run.organizationId, [name])
+            ? await unknownHaToolNames(db, requireOwnerRefOf(run), [name])
             : resolveRunTools([name]).unknown;
         if (unknown.length > 0) {
           throw new Error(`Unknown tool(s) on "${nodeUrn}": ${unknown.join(', ')}.`);
@@ -180,7 +189,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
     },
 
     selectNext: async (run, nodeUrn, view) => {
-      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, run.organizationId, runContext(db, run));
+      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, requireOwnerRefOf(run), runContext(db, run));
       return selectNextEdge(db, {
         sourceNode: { id: node.id, memoryId: memory.id, loc, urn: nodeUrn },
         view,
@@ -195,10 +204,11 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
         run.eventData && typeof run.eventData === 'object'
           ? ((run.eventData as Record<string, unknown>).__aiConfigName as string | undefined)
           : undefined;
-      const resolved = await resolveAiConfigWithFallback(db, override ?? null, {
+      // #5077: the run's own owner, through the one run wrapper (a person's run: the App's or the Agent's own key only).
+      const resolved = await resolveRunAiConfig(db, override ?? null, {
         appId: run.appId,
         agentId: run.agentId ?? undefined,
-        organizationId: run.organizationId,
+        tenant: requireOwnerRefOf(run),
       });
       assertPinnedAiIdentity(run, resolved.config);
       return resolved;
@@ -244,7 +254,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
     onTerminal: (run) => dispatchRunCallback(db, run),
 
     writeOutput: async (run, nodeUrn, text) => {
-      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, run.organizationId, runContext(db, run));
+      const { memory, loc, node } = await loadFlowNode(db, nodeUrn, requireOwnerRefOf(run), runContext(db, run));
       const spec: OutputSpec =
         node.data && typeof node.data === 'object' && !Array.isArray(node.data)
           ? ((node.data as Record<string, unknown>).output as OutputSpec) ?? {}
@@ -266,7 +276,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
         // Shared guards (tenant scope + encrypted-memory denial) — a writeTo
         // into an encrypted memory is denied like every other flow touch.
         const targetMemory = await resolveFlowMemory(
-          db, split.memoryUrn, run.organizationId, expanded,
+          db, split.memoryUrn, requireOwnerRefOf(run), expanded,
         );
         // #2437 acceptance 2: the register-grant check (a memory-level
         // grant covers any node under it) through the same shared predicate

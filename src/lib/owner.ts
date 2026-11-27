@@ -60,3 +60,56 @@ export function ownerWhere(owner: OwnerRef): { organizationId: string } | { owne
   return cols.ownerUserId != null ? { ownerUserId: cols.ownerUserId } : { organizationId: cols.organizationId as string };
 
 }
+
+/**
+ * #5077 (Billing F3a; finding hrn:node:hadronmemory.com:hadron-server:findings:org-xor-owner-null-comparison-bypass):
+ * the run path's tenant. Unlike {@link ownerRefOf}, a row that names no owner, or both, THROWS: a malformed run or App
+ * fails closed (the run fails, the launch refuses) and never becomes a null that widens a filter or passes a `null !==
+ * null` comparison.
+ */
+export function requireOwnerRefOf(row: OwnedRow): OwnerRef {
+  const hasOrg = typeof row.organizationId === 'string' && row.organizationId.length > 0;
+  const hasUser = typeof row.ownerUserId === 'string' && row.ownerUserId.length > 0;
+  if (hasOrg === hasUser) throw new Error('A run-path row names exactly one owner: an organization or a person.');
+  return hasUser ? { userId: row.ownerUserId as string } : { organizationId: row.organizationId as string };
+}
+
+/**
+ * #5077: the Prisma filter for "rows this owner owns" that ALWAYS states both columns, so an organization's filter also
+ * says `ownerUserId: null` and a person's says `organizationId: null`. Never `{ organizationId: null }` alone, which is
+ * `IS NULL` and would match every person's row.
+ */
+export function ownedBy(owner: OwnerRef): { organizationId: string | null; ownerUserId: string | null } {
+  return ownerColumns(owner);
+}
+
+/**
+ * #5077: true only when the row has exactly one owner and it is `owner`. Two nulls never match, and a row naming both
+ * owners matches nobody.
+ */
+export function isOwnedBy(row: OwnedRow, owner: OwnerRef): boolean {
+  const cols = ownerColumns(owner);
+  return cols.ownerUserId != null
+    ? row.organizationId == null && row.ownerUserId === cols.ownerUserId
+    : row.ownerUserId == null && row.organizationId === cols.organizationId;
+}
+
+/** #5077: the organization id of an owner, or null for a person. For a feature only an organization has: refuse on null before any query. */
+export function orgIdOf(owner: OwnerRef): string | null {
+  return 'organizationId' in owner ? owner.organizationId : null;
+}
+
+/** #5077: are two owner values the same owner? Never true across kinds. */
+export function sameOwnerRef(a: OwnerRef, b: OwnerRef): boolean {
+  const ca = ownerColumns(a);
+  const cb = ownerColumns(b);
+  return ca.ownerUserId != null ? ca.ownerUserId === cb.ownerUserId : ca.organizationId === cb.organizationId && cb.ownerUserId == null;
+}
+
+/**
+ * #5077 (decision a): the deploy-window switch for runs of an App a person owns. Only the exact value `true`, read per
+ * call. Off: the manual gate answers as before and mint refuses a person as owner with APP_NOT_FOUND.
+ */
+export function personalAppRunsEnabled(): boolean {
+  return process.env.PERSONAL_APP_RUNS_ENABLED === 'true';
+}

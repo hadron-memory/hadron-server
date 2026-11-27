@@ -46,7 +46,7 @@ beforeEach(async () => {
   expect(await resolveUnfilteredAppInstallation(db,app.id,target.id)).not.toBeNull();
   expect(await isAgentInstalledAndLicensed(db,app.id,target.id)).toBe(false);
 });
-const mint = () => mintAppRun(db,{organizationId:holder.id,appId:app.id,agentId:target.id,triggerKind:'MANUAL',entryNodeUrn:entry,publish:false});
+const mint = () => mintAppRun(db,{owner:{organizationId:holder.id},appId:app.id,agentId:target.id,triggerKind:'MANUAL',entryNodeUrn:entry,publish:false});
 const session = () => M.startAgentSession({}, {agentRef:target.id,externalUserId:'synthetic'}, {db,appId:app.id,organizationId:holder.id,roles:[]} as Context);
 it('mint refuses an unlicensed derived Agent before a run or served prompt is written',async()=>{
   const prompts = await db.servedPrompt.count();
@@ -131,11 +131,11 @@ it.each(['unactivated', 'expired'] as const)('preserves mint subscriber semantic
   await db.agentSubscription.updateMany({where:{userId:stranger.id,agentId:target.id},data:
     state === 'unactivated' ? {activatedAt:null} : {expiresAt:new Date(0)}});
   expect(await hasAppRelationship(db,app.id,stranger.id)).toBe(false);
-  const run = await mintAppRun(db,{organizationId:holder.id,appId:app.id,agentId:target.id,userId:stranger.id,
+  const run = await mintAppRun(db,{owner:{organizationId:holder.id},appId:app.id,agentId:target.id,userId:stranger.id,
     triggerKind:'MANUAL',entryNodeUrn:entry,publish:false});
   expect(run.userId).toBe(stranger.id);
   await db.agentSubscription.updateMany({where:{userId:stranger.id,agentId:target.id},data:{revokedAt:new Date()}});
-  await expect(mintAppRun(db,{organizationId:holder.id,appId:app.id,agentId:target.id,userId:stranger.id,
+  await expect(mintAppRun(db,{owner:{organizationId:holder.id},appId:app.id,agentId:target.id,userId:stranger.id,
     triggerKind:'MANUAL',entryNodeUrn:entry,publish:false})).rejects.toMatchObject({code:'RELATIONSHIP_MISSING'});
 });
 
@@ -143,7 +143,7 @@ it('mint on-behalf membership uses the App holder license for DERIVED entries wi
   await createDbAgentSubscription(db,stranger.id,target.id);
   await db.agentSubscription.updateMany({where:{userId:stranger.id,agentId:target.id},data:{activatedAt:null}});
   const installedParent = await db.appAgent.findFirstOrThrow({where:{appId:app.id},select:{agentId:true}});
-  const input = {organizationId:holder.id,appId:app.id,agentId:installedParent.agentId,userId:stranger.id,triggerKind:'MANUAL' as const,
+  const input = {owner:{organizationId:holder.id},appId:app.id,agentId:installedParent.agentId,userId:stranger.id,triggerKind:'MANUAL' as const,
     entryNodeUrn:entry,publish:false};
   await expect(mintAppRun(db,input)).rejects.toMatchObject({code:'RELATIONSHIP_MISSING'});
   await createDbAgentOrgGrant(db,holder.id,target.id);

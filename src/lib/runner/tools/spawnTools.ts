@@ -16,6 +16,7 @@
 import { mintAppRun, mergedView, RunLaunchDeniedError } from '../../../jobs/appRuns.js';
 import { resolveScopeForTrigger, snapshotScopeForTrigger } from '../../scopes.js';
 import type { RunToolDef } from './types.js';
+import { requireOwnerRefOf } from '../../owner.js';
 
 const MAX_SPAWN_ITEMS = (() => {
   const raw = Number(process.env.RUN_MAX_SPAWN_ITEMS);
@@ -144,7 +145,7 @@ export const hadronSpawn: RunToolDef = {
       for (const item of items) {
         try {
           await mintAppRun(ctx.db, {
-            organizationId: ctx.run.organizationId,
+            owner: requireOwnerRefOf(ctx.run),
             appId: ctx.run.appId,
             agentId: ctx.run.agentId,
             userId: ctx.run.userId,
