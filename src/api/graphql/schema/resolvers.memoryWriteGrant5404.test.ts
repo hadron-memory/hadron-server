@@ -29,6 +29,7 @@ import { canReadMemory, canWriteToMemory } from '../../../mcp/access-control.js'
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/create.js';
 import { requireActionIssuer } from '../../../lib/grants/issuers.js';
+import { userlessRunHoldsMemoryWriteGrant } from '../../../lib/grants/writeGrant.js';
 import { activeMemoryReadGrant, activeMemoryWriteGrant, revokeGrantRow } from '../../../test/appGrants5404.js';
 import { testRunAgentId } from '../../../test/runAgent.js';
 import { hadronCreateNode, hadronReadNode } from '../../../lib/runner/tools/nodeTools.js';
@@ -338,5 +339,23 @@ describe('6. Q3 (gate amendment 7228432741): memory.write takes the 0083 target 
     await db.memory.update({ where: { id: f.dest.id }, data: { isEncrypted: true } });
     await expect(write(f.dest.id, `${LOC}:2`)).rejects.toBeTruthy();
     expect(await nodeAt(f.dest.id, `${LOC}:2`)).toBeNull();
+  });
+
+  it('judged at every write: the App must stay live (an uninstalled App or a soft-deleted organization writes nothing more)', async () => {
+    // An erased giver (cor:acl:140:08) always counts, so only the App's own liveness can end this grant.
+    await activeMemoryWriteGrant(f.app.id, f.dest.id, { issuerUserId: null });
+    await write(f.dest.id, LOC);
+    const holds = () => userlessRunHoldsMemoryWriteGrant(db as never, auth(), f.dest.id, { loc: `${LOC}:org` } as never);
+    expect(await holds()).toBe(true);
+    await db.organization.update({ where: { id: f.org.id }, data: { deletedAt: new Date() } });
+    // The grant arm itself refuses (other layers refuse too; this pins the arm's own check).
+    expect(await holds()).toBe(false);
+    await expect(write(f.dest.id, `${LOC}:org`)).rejects.toBeTruthy();
+    expect(await nodeAt(f.dest.id, `${LOC}:org`)).toBeNull();
+    await db.organization.update({ where: { id: f.org.id }, data: { deletedAt: null } });
+    await write(f.dest.id, `${LOC}:back`);
+    await db.app.update({ where: { id: f.app.id }, data: { uninstalledAt: new Date() } });
+    await expect(write(f.dest.id, `${LOC}:app`)).rejects.toBeTruthy();
+    expect(await nodeAt(f.dest.id, `${LOC}:app`)).toBeNull();
   });
 });
