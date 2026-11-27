@@ -182,6 +182,17 @@ describe('pin 9 and 10: each model hop; never a script hop', () => {
     expect(await creditBalance(db, { organizationId: orgId })).toBeLessThan(0n);
   });
 
+  it('a model hop on an own-key configuration is never gated, even at a balance below zero (local review P3)', async () => {
+    switchesOn();
+    await ownKeyConfig(); // the launch resolves the App's own key too, so it is not gated either
+    const run = await mint('flow:a', {});
+    // the run's resolved configuration is the App's own key at its hops, whatever the credit
+    const { deps, llm } = runDeps();
+    (deps.resolveConfig as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ config: { provider: 'anthropic', model: 'test' }, ownerType: 'APP' });
+    expect(await executeAppRun(db, run.id, deps)).toBe('completed');
+    expect(llm).toHaveBeenCalledTimes(2); // both hops ran
+  });
+
   it('a script hop after the balance reached zero still runs: it makes no model call', async () => {
     switchesOn();
     await grantCredits(db, { owner: { organizationId: orgId }, amountMicroCents: 1n, sourceType: 't', sourceId: 'one' });
@@ -269,6 +280,17 @@ describe('the helper', () => {
       await requireCreditHeadroom(tx as never, { organizationId: orgId });
     });
     expect(await db.creditLedgerEntry.count()).toBe(before); // wrote neither the grant nor a settlement
+  });
+
+  it('INSIDE a caller\'s transaction an expired, unsettled grant is subtracted: with only that grant the call is refused and nothing is written (local review P2)', async () => {
+    const past = new Date(Date.now() - 3_600_000);
+    await db.creditLedgerEntry.create({
+      data: { id: generateId(), organizationId: orgId, kind: 'grant', amountMicroCents: 1000n, sourceType: 't', sourceId: 'old-tx', createdAt: new Date(past.getTime() - 86_400_000), expiresAt: past },
+    });
+    expect(await creditBalance(db, { organizationId: orgId })).toBe(1000n); // the stored sum still counts it
+    const before = await db.creditLedgerEntry.count();
+    await expect(db.$transaction(async (tx) => requireCreditHeadroom(tx as never, { organizationId: orgId }))).rejects.toMatchObject({ code: 'CREDITS_EXHAUSTED' });
+    expect(await db.creditLedgerEntry.count()).toBe(before);
   });
 
   it('outside a transaction it ensures the month\'s grant and settles an expired one before judging', async () => {
