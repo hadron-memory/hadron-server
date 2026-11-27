@@ -55,7 +55,7 @@ beforeEach(async () => {
   await serveEveryAgent(db);
 });
 
-const startChat = (scope: 'private' | 'shared' = 'private') => M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope }, ctx());
+const startChat = (scope: 'private' | 'shared' = 'private') => M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope, appRef: appId }, ctx());
 
 /** Whole rows a start may write: nodes (chat, parents), subscriptions and served records. Memory rows are compared separately. */
 async function startWrites() {
@@ -149,8 +149,10 @@ describe('#4108 item 1: the selected App owner changes after anchor discovery', 
     const first = await startChat();
     const home = (await chatNodeByLocOrThrow(db, first.chatId)).memoryId;
     expect((await db.memory.findUniqueOrThrow({ where: { id: home } })).appId).toBe(appId);
-    // Not a participant: the home App is not a carrier, so only the selected-App completeness check sees its owner.
-    await db.appMember.delete({ where: { appId_userId: { appId, userId } } });
+    // #5394: this pin removed the caller's membership here, so the home App was no carrier and only the selected-App
+    // completeness check saw its owner. A start now names its App (appRef), which resolves only among the Apps the caller
+    // takes part in, so a non-participant is refused before any anchor is read. The membership stays; the pin still
+    // proves the stale attempt aborts on the owner change and the retry waits on the NEW owner's domain.
 
     let holder: Awaited<ReturnType<typeof holdAnchors>> | null = null;
     let transactions = 0;

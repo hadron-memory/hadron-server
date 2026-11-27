@@ -84,7 +84,7 @@ async function start(pinned = false) {
     const rev = await M.createRevision({}, { agentRef: agentId }, ctx());
     await M.publishRevision({}, { agentRef: agentId, revisionLoc: rev.revisionLoc }, ctx());
   }
-  return M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, ctx());
+  return M.startChat({}, { agentRef: agentId, appRef: appId, scope: 'private', conversationName: 'flow' }, ctx());
 }
 
 /** Observe memory-scoped Node/edge reads from the Agent's definition, without replacing results (as #4043's). */

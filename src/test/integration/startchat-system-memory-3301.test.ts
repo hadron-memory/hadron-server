@@ -83,27 +83,32 @@ describe('#3301 — an Agent\'s system memory is refused as a startChat target o
     expect(await footprint(f.systemId)).toEqual(before);
   });
 
+  // #5394: before, the user branch's home lookup had no App filter, so the Agent's own system memory (app_id null)
+  // stamped for this caller was selected and refused. The lookup now reuses only a home of the identified App, and an
+  // Agent's system memory never has an App (chk_memory_class_app_id), so the row is never selected: it is left alone
+  // and a fresh personal home is provisioned in the App. The #3301 guard stays pinned on the session branch above.
   it('user branch: a class=system row carrying userMemoryOfAgentId is refused, not chatted into or replaced by a fresh memory (RED on main)', async () => {
     const f = await fixture();
     // the corrupt row: the system memory ALSO carries the per-user provenance column for this caller
     await db.memory.update({ where: { id: f.systemId }, data: { userMemoryOfAgentId: f.agentId, createdBy: f.userId } as never });
     const before = await footprint(f.systemId);
-    const refused = await start(f.agentId, { userId: f.userId });
-    expect(refused).toMatch(/No target memory available/);
-    // nothing written into the system memory, and nothing provisioned in its place
-    expect(await footprint(f.systemId)).toEqual(before);
+    expect(await start(f.agentId, { userId: f.userId }, { appRef: f.appId })).toBeNull();
+    // nothing written into the system memory; the chat lives in a fresh personal home of the App
+    const after = await footprint(f.systemId);
+    expect(after.systemNodes).toBe(before.systemNodes);
+    expect(after.memories).toBe(before.memories + 1);
+    expect(await db.memory.count({ where: { appId: f.appId, class: 'personal', userId: f.userId, userMemoryOfAgentId: f.agentId } })).toBe(1);
   });
 
+  // #5394: before, Agent B's system memory stamped with A's id was the selected row and refused. With the lookup
+  // limited to the identified App's homes it is never selected, so nothing is written into it.
   it("user branch: ANOTHER Agent's system memory carrying userMemoryOfAgentId=A is refused when chatting with A (Rico §10 P2)", async () => {
-    // The reachable user-branch row is not the chat's own Agent's system memory: the lookup keys on
-    // userMemoryOfAgentId + createdBy, so Agent B's system memory stamped with A's id is what it selects.
-    // A guard narrowed to "A's own systemMemoryId" would pass every other pin here; this one is red for it.
     const a = await fixture();
     const b = await fixture();
     await db.memory.update({ where: { id: b.systemId }, data: { userMemoryOfAgentId: a.agentId, createdBy: a.userId } as never });
     const before = await footprint(b.systemId);
-    expect(await start(a.agentId, { userId: a.userId })).toMatch(/No target memory available/);
-    expect(await footprint(b.systemId)).toEqual(before);
+    expect(await start(a.agentId, { userId: a.userId }, { appRef: a.appId })).toBeNull();
+    expect((await footprint(b.systemId)).systemNodes).toBe(before.systemNodes);
   });
 
   it('shared branch (pin-only decline, green on main): unreachable, the DB refuses a system row on the (App, Agent) shared key', async () => {
@@ -114,7 +119,7 @@ describe('#3301 — an Agent\'s system memory is refused as a startChat target o
       db.memory.update({ where: { id: f.systemId }, data: { appId: f.appId, sharedMemoryOfAgentId: f.agentId } as never }),
     ).rejects.toThrow(/chk_memory_class_app_id/);
     // the pre-#723 adopt scan is scoped to class='app', so it never adopts a system row either
-    expect(await start(f.agentId, { userId: f.userId }, { scope: 'shared' })).toBeNull();
+    expect(await start(f.agentId, { userId: f.userId }, { scope: 'shared', appRef: f.appId })).toBeNull();
     expect((await db.memory.findUniqueOrThrow({ where: { id: f.systemId } })).sharedMemoryOfAgentId).toBeNull();
   });
 
@@ -142,8 +147,10 @@ describe('#3301 — an Agent\'s system memory is refused as a startChat target o
 
   it('refusal is byte-identical across branches and to the unreadable-target answer', async () => {
     const a = await fixture();
-    await db.memory.update({ where: { id: a.systemId }, data: { userMemoryOfAgentId: a.agentId, createdBy: a.userId } as never });
-    const userRefusal = await start(a.agentId, { userId: a.userId });
+    // #5394: the user branch no longer reaches a system row (see the user-branch pins above), so the branch compared
+    // here is the legacy run-principal one, whose system-memory refusal is unchanged.
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: a.agentId, memoryId: a.systemId, role: 'read-write' } as never });
+    const branchRefusal = await start(a.agentId, { appId: a.appId, clientId: `run:${generateId()}` });
     const b = await fixture();
     // an unreadable target: a session naming a memory outside the session's verified reach
     const outside = await db.memory.create({
@@ -152,13 +159,13 @@ describe('#3301 — an Agent\'s system memory is refused as a startChat target o
     const session = await db.session.create({ data: { id: generateId(), appId: b.appId, agentId: b.agentId, memoryId: outside.id } as never });
     const unreadable = await start(b.agentId, { appId: b.appId, sessionId: session.id });
     expect(unreadable).toMatch(/No target memory available/);
-    expect(userRefusal).toBe(unreadable);
+    expect(branchRefusal).toBe(unreadable);
   });
 
   it('control: a normal user chat still starts when no system row is in the way', async () => {
     const f = await fixture();
     const before = await footprint(f.systemId);
-    expect(await start(f.agentId, { userId: f.userId })).toBeNull();
+    expect(await start(f.agentId, { userId: f.userId }, { appRef: f.appId })).toBeNull();
     // the chat landed in a per-user memory (a new one), never in the system memory
     const after = await footprint(f.systemId);
     expect(after.nodes).toBeGreaterThan(before.nodes);
