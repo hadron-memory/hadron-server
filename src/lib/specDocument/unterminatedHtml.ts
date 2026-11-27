@@ -703,6 +703,8 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
   let lineFirst = -1;
   // marked ends a line-head declaration block at its first `>` and starts the next block right after it (#5211).
   let markedBlockAt = -1;
+  // #5320 — where the next block starts after a declaration that did start an HTML block in marked (`markedBlockAt` is set for any line-head one).
+  let markedRealBlockAt = -1;
   // Whether the line before was taken for a link reference definition: marked's grammar for one is stricter, so it may be a paragraph there.
   let prevDefinition = false;
   let lineContent = -1;
@@ -958,7 +960,11 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
         // #5320 — marked starts the next block right after the `>`: a fence opener there that nothing closes takes the anchor with it. The
         // declaration stays as written (escaping it turns the line into paragraph text and moves later lines' readings, #5291); the opener's
         // first character is written as a character reference instead, which a browser decodes to the same character.
-        if (i >= rawUntil && lineContainers.length === 0 && lineFirst === i && prevBefore !== 'other' && prevBefore !== 'marker' && !prevDefinition && !loneEqualsAbove(text, i)) {
+        // A declaration right after another one's `>` starts a block too, when that one did; a line above that is a link reference definition does
+        // not stop it (marked reads the definition as its own block, and the declaration then starts a new one).
+        if (i >= rawUntil && lineContainers.length === 0
+          && (i === markedRealBlockAt || (prevBefore !== 'other' && prevBefore !== 'marker' && !loneEqualsAbove(text, i)))) {
+          markedRealBlockAt = close + 1;
           const f = markedUnclosedFenceAfter(text, close + 1);
           if (f !== -1) return f;
         }
@@ -1104,7 +1110,7 @@ export function escapeUnterminatedHtml(text: string): string {
 /**
  * #5320 — where the first character of a fence opener is, when the rest of the line at `from` (just past a declaration's `>`) opens a fenced
  * code block in marked (up to three spaces, then three or more backticks with none in the info string, or three or more tildes) and no
- * line after it closes the fence; -1 otherwise. A closer is the same character, at least as many, up to three spaces and then only blanks.
+ * line after it closes the fence; -1 otherwise. A closer is marked's: the opener's run, then any backticks and tildes, then blanks (so `~~~` then backticks closes).
  */
 function markedUnclosedFenceAfter(text: string, from: number): number {
   const nl = text.indexOf('\n', from);
@@ -1112,7 +1118,8 @@ function markedUnclosedFenceAfter(text: string, from: number): number {
   const m = /^( {0,3})(`{3,}(?=[^`]*$)|~{3,})/.exec(rest);
   if (m === null) return -1;
   const mark = m[2]!;
-  const closer = new RegExp(`^ {0,3}${mark[0] === '`' ? '`' : '~'}{${mark.length},}[ \\t]*$`);
+  // marked's closer (its fences rule): up to three spaces, the opener's own run, then any run of backticks and tildes, then blanks.
+  const closer = new RegExp(`^ {0,3}${mark}[~\`]* *$`);
   for (let s = nl === -1 ? text.length : nl + 1; s < text.length;) {
     const e = text.indexOf('\n', s);
     const line = text.slice(s, e === -1 ? text.length : e).replace(/\r$/, '');

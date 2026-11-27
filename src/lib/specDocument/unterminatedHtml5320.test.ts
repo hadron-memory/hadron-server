@@ -41,6 +41,8 @@ describe('#5320: a fence opener after a line-head declaration that nothing close
     ['<!DOCTYPE html>~~~', '<!DOCTYPE html>&#126;~~'],
     ['<!DOCTYPE html>````js\n', '<!DOCTYPE html>&#96;```js\n'],
     ['<!DOCTYPE html>   ```\nx\n', '<!DOCTYPE html>   &#96;``\nx\n'],
+    ['[a]: b\n<!DOCTYPE html>```\n', '[a]: b\n<!DOCTYPE html>&#96;``\n'],
+    ['<!x><!DOCTYPE html>```\n', '<!x><!DOCTYPE html>&#96;``\n'],
     ['p\n=\n<!DOCTYPE>```\n', 'p\n=\n<!DOCTYPE>&#96;``\n'],
     ['x\n\n<!x y>~~~~ t\n- a\n', 'x\n\n<!x y>&#126;~~~ t\n- a\n'],
     ['<!DOCTYPE html>```\r\ntext\r\n', '<!DOCTYPE html>&#96;``\r\ntext\r\n'],
@@ -62,15 +64,24 @@ describe('#5320: bytes that stay as written (the over-escape check)', () => {
     ['a backtick in a backtick opener\'s info string (not a fence)', '<!DOCTYPE html>```a`b\n'],
     ['only two backticks', '<!DOCTYPE html>``\n'],
     ['four spaces before the opener (indented code)', '<!DOCTYPE html>    ```\n'],
+    ['marked closes a fence with its run followed by other fence characters', '<!DOCTYPE>~~~[a]: b\n~~~```\n'],
     ['the declaration sits inside a type 6 block (no new block starts there)', '<div>\n<!DOCTYPE html>```\n'],
     ['the declaration sits after a bare list marker line', '-\n<!DOCTYPE html>```\n'],
     ['the declaration sits inside a type 1 block that is still open', '<pre>\n<!DOCTYPE html>```\n</pre>\n'],
     ['a line of a block quote (the quote ends at the blank line that follows)', '> <!DOCTYPE html>```\n'],
     ['a lone `=` line is paragraph text, so the declaration after it is no block start', '=\n<!DOCTYPE>```\n'],
+    ['the first declaration continues a paragraph, so the one after its `>` starts no block either', 'p\n<!x><!DOCTYPE html>```\n'],
+    ['a lone `=` line, then two declarations: neither starts a block', '=\n<!x><!DOCTYPE html>```\n'],
     ['no declaration', '```\nx\n'],
     ['a tag, not a declaration', '<div>```\n'],
   ])('%s', (_name, body) => {
     expect(escapeUnterminatedHtml(body)).toBe(body);
+  });
+
+  it('a shorter run does not close a longer opener (the closer needs at least as many characters)', () => {
+    // The ``` line opens a fence of its own in CommonMark, so only the output is pinned here.
+    expect(escapeUnterminatedHtml('<!DOCTYPE html>````\n```\n')).toBe('<!DOCTYPE html>&#96;```\n```\n');
+    expect(escapeUnterminatedHtml('<!DOCTYPE html>````\n````\n')).toBe('<!DOCTYPE html>````\n````\n');
   });
 
   it('a closer that is not one: a shorter run, another character, a trailing word', () => {
