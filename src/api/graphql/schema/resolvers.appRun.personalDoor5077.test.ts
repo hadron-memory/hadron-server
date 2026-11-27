@@ -189,6 +189,24 @@ describe('#5077 MCP passes the impersonation through to the run gates', () => {
   });
 });
 
+describe('#5077 MCP passes a refused session binding through to the run gates (Rook, SEC10 on #5441)', () => {
+  it('the owner whose session binding was refused: MCP starts no run and reads nothing, as GraphQL refuses', async () => {
+    const a = await person('pd5077');
+    const run = await mint(a, { userId: a.user.id, createdBy: a.user.id });
+    expect(code(await trigger(a, as(a.user.id, { sessionBindingRefused: true })).catch((e: unknown) => e))).toBe('FORBIDDEN');
+    expect(await Q.appRun({}, { ref: run.id }, as(a.user.id, { sessionBindingRefused: true }))).toBeNull();
+    const mcp = createTestableMcpServer({
+      userId: a.user.id, roles: ['READER'], clientId: `user:${a.user.id}`, sessionBindingRefused: true,
+    } as unknown as AuthContext);
+    expect(await mcp.callToolText('hadron_run_task', { urn: a.entryUrn, appRef: a.app.id })).toBe('Could not start run: Forbidden');
+    expect(await db.appRun.count()).toBe(1);
+    expect(await mcp.callToolText('hadron_get_run', { ref: run.id })).toBe('Run not found.');
+    // Control: the same owner with the binding intact reads the run on MCP.
+    const ok = createTestableMcpServer({ userId: a.user.id, roles: ['READER'], clientId: `user:${a.user.id}` } as unknown as AuthContext);
+    expect(await ok.callToolText('hadron_get_run', { ref: run.id })).toContain(`Run ${run.id}`);
+  });
+});
+
 describe('#5077 acceptance 3: another person\'s memory at the door', () => {
   it('A\'s App with the entry in B\'s memory is ENTRY_NOT_IN_ORG before any write, and importNode writes no node', async () => {
     const a = await person('pd5077');

@@ -9781,8 +9781,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (!runRef) return textResult('Pass the run id or hrn:apprun URN that hadron_run_task printed.');
       let run: Record<string, unknown> | null;
       try {
-        // #5077 (F3a-2): the read gate refuses an impersonated session a person's run, so it must see one.
-        run = (await resolvers.Query.appRun({}, { ref: runRef }, { ...chatCtx(), impersonation: auth.impersonation ?? undefined })) as Record<string, unknown> | null;
+        // #5077 (F3a-2): the read gate refuses an impersonated session and a refused session binding (isRefusedPrincipal) a
+        // person's run, so it must see both, as GraphQL does (Rook, SEC10 on #5441).
+        run = (await resolvers.Query.appRun({}, { ref: runRef }, {
+          ...chatCtx(), ...mcpRequestSessionContext(auth), impersonation: auth.impersonation ?? undefined,
+        })) as Record<string, unknown> | null;
       } catch (e) {
         // A denied read is indistinguishable from a missing run (no oracle).
         if (/^(Forbidden|Unauthenticated)/.test((e as Error)?.message ?? '')) run = null;
@@ -9835,10 +9838,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             userId: auth.userId ?? undefined,
             apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
-            sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
             organizationId: auth.organizationId ?? undefined,
-            // #5077 (F3a-2): the door refuses an impersonated session on a person's App, so it must see one.
+            // #5077 (F3a-2): the door refuses an impersonated session and a refused session binding (isRefusedPrincipal) on
+            // a person's App, so it must see both, as GraphQL does (Rook, SEC10 on #5441).
+            ...mcpRequestSessionContext(auth),
             impersonation: auth.impersonation ?? undefined,
           };
           try {
