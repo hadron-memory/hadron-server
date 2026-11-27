@@ -78,8 +78,10 @@ export async function resolveChatHomeAgent(
   // #5027 Ask 6 (b): the chat's own recorded Agent first (a named home such as a group or a private memory carries no
   // per-Agent pointer, and another Agent's personal memory carries the wrong one), then today's memory pointer, then
   // the legacy memory item. A chat started before the record existed has a null and resolves exactly as before. The
-  // reach and licence checks on the result are unchanged.
-  const recorded = chatRootId
+  // reach and licence checks on the result are unchanged. Read only while the home still carries an App: every home
+  // startChat accepts does, and a home that lost its App (the erasure detach, #4105) keeps today's answer, which
+  // routes nothing once the pointer is cleared.
+  const recorded = chatRootId && memory.appId
     ? (await db.chatRootCounter.findUnique({ where: { chatRootNodeId: chatRootId }, select: { agentId: true } }))?.agentId ?? null
     : null;
   const pointer = recorded ?? memory.sharedMemoryOfAgentId ?? memory.userMemoryOfAgentId;
