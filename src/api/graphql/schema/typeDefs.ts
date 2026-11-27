@@ -9775,8 +9775,8 @@ export const typeDefs = `#graphql
     hash: String!
     summary: AutomationSummary!
     depth: JSON!
-    "#2883: the live read grants this automation holds (memory and loc prefix), so the adopter approves what it may read. memoryUrn is null when the adopter cannot read that memory."
-    readGrants: [AutomationReadGrant!]!
+    "#5404: always empty. Per-automation read grants are retired; what the App's runs read is its signed memory.read grants."
+    readGrants: [AutomationReadGrant!]! @deprecated(reason: "Retired by #5404; always empty.")
   }
 
   type AutomationApprovalRow {
@@ -10091,14 +10091,14 @@ export const typeDefs = `#graphql
     automationApprovals(appRef: String!, limit: Int = 20, after: String): AutomationApprovalPage!
     "#2441: state, hash, plain summary and graph depth for one trigger. MANUAL takes the origin run id. Same gate as approveAutomation."
     automationApproval(triggerKind: AutomationTriggerKind!, triggerRef: String!): AutomationApproval!
-    "#2484: the write grants an App holds for its userless runs, oldest first; revoked rows only with includeRevoked. Only whoever manages the App may list them, as themselves or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0111 A: one team event per admitted instructed call, never a grant id); a grant on a personal or private memory is listed to the holder alone, when they own it. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
-    appMemoryWriteGrants(appRef: String!, includeRevoked: Boolean = false, instruction: ActInstructionInput): [AppMemoryWriteGrant!]!
+    "#5404: retired; answers DOOR_RETIRED (extensions.replacement names the signed grant action). Read the App's memory.write grants from the grant listing instead."
+    appMemoryWriteGrants(appRef: String!, includeRevoked: Boolean = false, instruction: ActInstructionInput): [AppMemoryWriteGrant!]! @deprecated(reason: "Retired by #5404: sign a memory.write grant (createGrant).")
     "#3350: only this App's managers list its team snapshot grants; includeRevoked defaults false. Optional triggerKind (SCHEDULE or WEBHOOK) and triggerId narrow rows and total; triggerId requires triggerKind. Unknown or foreign triggers give an empty page. Authority is checked before filter validation. A held worker on a validated instruction may list within its own App; one ids-only team event per admitted instructed call, including an empty page."
     automationTeamSnapshotGrants(appRef: ID!, triggerKind: String, triggerId: ID, includeRevoked: Boolean, limit: Int, offset: Int, instruction: ActInstructionInput): AutomationTeamSnapshotGrantPage!
     "#3381: read one grant's eight metadata fields by id, including revoked rows. Only a person managing the grant's own App; no worker instruction arm. Unknown and unauthorized ids both refuse NOT_FOUND with the same message. hrn:node:hadronmemory.com:specs:cor:agt:050:23"
     automationTeamSnapshotGrant(id: ID!): AutomationTeamSnapshotGrant!
-    "#2883: automation read grants. Give an App (its managers see its grants) and/or a memory (that memory's manager, or an Agent's manager for its system memory, sees the grants on it); a reader sees only the rows they manage the App or the target of. A held worker on a validated instruction is scoped to its own App, including memory-only lists; each admitted instructed list records one ids-only team event. A person supplying instruction must also supply appRef; omit instruction to retain a cross-App memory-only list."
-    automationReadGrants(appRef: String, memoryRef: String, includeRevoked: Boolean = false, instruction: ActInstructionInput): [AutomationReadGrant!]!
+    "#5404: retired; answers DOOR_RETIRED (extensions.replacement names the signed grant action). Read the App's memory.read grants from the grant listing instead."
+    automationReadGrants(appRef: String, memoryRef: String, includeRevoked: Boolean = false, instruction: ActInstructionInput): [AutomationReadGrant!]! @deprecated(reason: "Retired by #5404: sign a memory.read grant (createGrant).")
 
     """
     #1705 — one agent task, or null when it does not exist or the caller may
@@ -12957,18 +12957,18 @@ export const typeDefs = `#graphql
     approveAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!, expectedHash: String!): Boolean!
     "#2441: decline. An adopted trigger is revoked, so its next run fails AUTOMATION_UNADOPTED (REVOKE event); with nothing adopted it changes no state (DECLINE event). A MANUAL origin deletes its consent row. Runs already started keep their snapshot."
     declineAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): Boolean!
-    "#2484: let an App's userless runs create or update a node in one memory under one loc prefix (required; no memory-wide grant). The caller is a person acting as themselves who manages the App and can write the memory (person-only, hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277). A shared memory must be one the App's own org or team space holds; a personal or private memory only by its owner, who must also manage the App; an encrypted memory is never grantable; nor is a system-class memory (#2710: an Agent's system memory, its boot-prompt source included, is written only by whoever manages the Agent, hrn:node:hadronmemory.com:specs:cor:agt:040:11), and a grant made on one before that rule authorizes no write. Granting the same prefix again returns the live grant. One content-free event is recorded. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
-    setAppMemoryWriteGrant(appRef: String!, memoryRef: String!, prefix: String!, registerNodeUrn: String): AppMemoryWriteGrant!
-    "#2484: end a grant; the next write by the App's run is refused. Whoever manages the App may revoke, as themselves or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A; one team event, never the grant id). The row stays with its end time; revoking a revoked grant changes nothing and records nothing. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
-    revokeAppMemoryWriteGrant(id: ID!, instruction: ActInstructionInput): AppMemoryWriteGrant!
+    "#5404: retired; answers DOOR_RETIRED (extensions.replacement names the signed grant action). Sign a memory.write grant instead."
+    setAppMemoryWriteGrant(appRef: String!, memoryRef: String!, prefix: String!, registerNodeUrn: String): AppMemoryWriteGrant! @deprecated(reason: "Retired by #5404: sign a memory.write grant (createGrant).")
+    "#5404: retired; answers DOOR_RETIRED (extensions.replacement names the signed grant action). Revoke the memory.write grant instead."
+    revokeAppMemoryWriteGrant(id: ID!, instruction: ActInstructionInput): AppMemoryWriteGrant! @deprecated(reason: "Retired by #5404: sign a memory.write grant (createGrant).")
     "#3350: App managers, as people acting as themselves, give this live schedule/webhook a read-only own-App team snapshot grant, off until given; identical repeat returns the live row. hrn:node:hadronmemory.com:specs:cor:agt:050:23"
     setAutomationTeamSnapshotGrant(appRef: ID!, triggerKind: String!, triggerId: ID!): AutomationTeamSnapshotGrant!
     "#3350: terminal revoke, App managers only. A held worker on a validated instruction may revoke within its own App; changing revokes record the worker and holder."
     revokeAutomationTeamSnapshotGrant(id: ID!, instruction: ActInstructionInput): AutomationTeamSnapshotGrant!
-    "#2883: give an automation (a live schedule or webhook of the App) a read grant on one memory or loc prefix. Given by whoever manages the target: the Agent for its system memory, the memory's manager otherwise, as a person (person-only, hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277). A refusal is the same Forbidden as an unknown App, trigger or memory."
-    setAutomationReadGrant(appRef: String!, triggerKind: String!, triggerId: ID!, memoryRef: String!, prefix: String): AutomationReadGrant!
-    "#2883: end an automation read grant. The App's managers or the target's manager, as themselves or through a held worker on a validated instruction within its own App. Terminal, with no event on a repeat."
-    revokeAutomationReadGrant(id: ID!, instruction: ActInstructionInput): AutomationReadGrant!
+    "#5404: retired; answers DOOR_RETIRED (extensions.replacement names the signed grant action). Sign a memory.read grant held by the App instead."
+    setAutomationReadGrant(appRef: String!, triggerKind: String!, triggerId: ID!, memoryRef: String!, prefix: String): AutomationReadGrant! @deprecated(reason: "Retired by #5404: sign a memory.read grant (createGrant).")
+    "#5404: retired; answers DOOR_RETIRED (extensions.replacement names the signed grant action). Revoke the memory.read grant instead."
+    revokeAutomationReadGrant(id: ID!, instruction: ActInstructionInput): AutomationReadGrant! @deprecated(reason: "Retired by #5404: sign a memory.read grant (createGrant).")
 
     """
     #1705 — create an agent task (hrn:node:hadronmemory.com:specs:cor:agt:050:06 root, :07 child). Writes
