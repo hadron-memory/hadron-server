@@ -1087,6 +1087,11 @@ function hasCloser(line: string, close: string): boolean {
 export function escapeUnterminatedHtml(text: string): string {
   scansRun = 0;
   if (!text.includes('<')) return text;
+  // #5388 LOCAL P3 at dabc70c5: the per-text caches hold the last text (up to 2 MB) and its offsets; release them when the call ends.
+  try { return escapeLoop(text); } finally { lineEndsOf = null; commentLinesOf = null; }
+}
+
+function escapeLoop(text: string): string {
   let cur = text;
   for (let k = 0; ; k += 1) {
     const ats = [firstUnterminated(cur, 0, 'commonmark'), firstUnterminated(cur, 0, 'marked')].filter((x) => x !== -1);
