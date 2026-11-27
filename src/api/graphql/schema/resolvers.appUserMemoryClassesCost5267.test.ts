@@ -23,6 +23,14 @@ let viewer: string;
 const apps: Record<'A' | 'B' | 'C', string[]> = { A: [], B: [], C: [] };
 let logged: import('../../../generated/prisma/index.js').PrismaClient;
 let statements = 0;
+/**
+ * #5397: the one statement the count must not see. Under CPU load a bare `SELECT 1` shows up on this client now and then
+ * (seen +1 in 4 of 1200 repeated runs, in the with-field or the without-field run, so a per-App difference came out one off;
+ * the failing CI run read 12 where 14 is the shape's cost). It is not a query the app or the field writes: it is what the
+ * pool sends on its own (a connection check). So it is excluded BY TEXT, exactly: any other statement, however it arrives,
+ * is still counted, and the per-App equality and the [7,14,24] pins stay exact (no tolerance).
+ */
+const isPoolPing = (query: string): boolean => query.trim() === 'SELECT 1';
 
 async function select(ref: string, withField: boolean): Promise<number> {
   statements = 0;
@@ -61,9 +69,28 @@ beforeAll(async () => {
   const { PrismaClient } = await import('../../../generated/prisma/index.js');
   expect(process.env.DATABASE_URL, 'the counting client must use the same database as db').toBeTruthy();
   logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
-  (logged as any).$on('query', () => { statements += 1; });
+  (logged as any).$on('query', (e: { query: string }) => { if (!isPoolPing(e.query)) statements += 1; });
 });
 afterAll(async () => { await logged?.$disconnect(); });
+
+describe('#5397 the statement counter counts the field\'s statements and only those', () => {
+  const count = async (fn: () => Promise<unknown>): Promise<number> => { statements = 0; await fn(); return statements; };
+
+  it('a pool check-out ping inside a counted window is not counted, wherever it lands', async () => {
+    expect(await count(() => logged.$queryRaw`SELECT 1`)).toBe(0);
+    // Interleaved with a real selection: the same count as without the ping.
+    const plain = await select(apps.A[0]!, true);
+    statements = 0;
+    const [withPing] = await Promise.all([select(apps.A[0]!, true), logged.$queryRaw`SELECT 1`]);
+    expect(withPing).toBe(plain);
+  });
+
+  it('every other statement is still counted, so a real extra statement is not hidden', async () => {
+    expect(await count(() => logged.$queryRaw`SELECT 2`)).toBe(1);
+    expect(await count(() => logged.$queryRaw`SELECT 1 AS one`)).toBe(1);
+    expect(await count(async () => { await logged.$queryRaw`SELECT 1`; await logged.$queryRaw`SELECT 2`; })).toBe(1);
+  });
+});
 
 describe('#5267 the weight is what the field costs', () => {
   it('the fixture is the shapes the issue names: A none, B one licensed, C three unlicensed', async () => {
