@@ -19,6 +19,9 @@ import { PLATFORM_ACTIONS, type IssuerRuleKey } from './actions.js';
 import { managesApp } from '../auth/appManagement.js';
 import { resolveAppRef } from '../entityRef/appRef.js';
 import { requireSecretReadClientIssuer } from '../secrets/readClientIssuer.js';
+import { managesReadGrantTarget } from '../../api/graphql/schema/resolvers.automationReadGrant.js';
+import { READ_GRANT_MEMORY_SELECT } from '../automationReadGrant.js';
+import { LIVE_ORG_MEMBERSHIP } from '../auth/liveOrgMembership.js';
 
 /** #3823: whoever manages the App (the gate the boot-prompt actions' signer faces; the node-specific part is judged where the grant is spent). */
 async function requireAppManager(ctx: Context, appRef: string): Promise<void> {
@@ -39,12 +42,48 @@ async function requireSecretReadIssuer(ctx: Context, appRef: string, values?: un
   if (issuance.appId !== appId) throw authorizationDenied();
 }
 
+/** The one value of a single-valued grant parameter, or undefined. */
+function oneValue(values: unknown, name: string): unknown {
+  return values && typeof values === 'object' && !Array.isArray(values) ? (values as Record<string, unknown>)[name] : undefined;
+}
+
+/**
+ * #5321 (cor:acl:140:02, Holger 2026-11-27 "Only the memory's manager"): the memory's manager gives `memory.read`; for an Agent's
+ * system memory, whoever manages that Agent (the #2883 rule, `managesReadGrantTarget`). A member who only reads it cannot. Unknown,
+ * deleted and unmanaged memories are the one refusal.
+ */
+async function requireMemoryManager(ctx: Context, _appRef: string, values?: unknown): Promise<void> {
+  const id = oneValue(values, 'memory');
+  if (typeof id !== 'string') throw authorizationDenied();
+  const memory = await ctx.db.memory.findFirst({ where: { id, deletedAt: null }, select: { ...READ_GRANT_MEMORY_SELECT, urn: true } });
+  if (!memory || !(await managesReadGrantTarget(ctx, memory))) throw authorizationDenied();
+}
+
+/**
+ * #5321 (cor:acl:140:02 R3; the issuer is not ruled: Built as, raised as Q1 on #5321): `knowledge.read` is given by an ADMIN or OWNER
+ * of the App's own organization, as a live MEMBER of it (no platform-role arm: the grant allows only while its giver reads that
+ * knowledge, src/lib/grants/readGrant.ts). Its value must be that organization; anything else is the one refusal.
+ */
+async function requireOrgKnowledgeManager(ctx: Context, appRef: string, values?: unknown): Promise<void> {
+  const orgId = oneValue(values, 'organization');
+  if (typeof orgId !== 'string' || !ctx.userId) throw authorizationDenied();
+  const { id: appId } = await resolveAppRef(ctx.db, appRef);
+  const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null }, select: { organizationId: true } });
+  if (!app || app.organizationId !== orgId) throw authorizationDenied();
+  const member = await ctx.db.orgMember.findFirst({
+    where: { organizationId: orgId, userId: ctx.userId, role: { in: ['ADMIN', 'OWNER'] }, ...LIVE_ORG_MEMBERSHIP }, select: { userId: true },
+  });
+  if (!member) throw authorizationDenied();
+}
+
 /** #3730 item 1: keyed by the closed {@link IssuerRuleKey} union — every key has a gate, and no other key can be indexed. */
 export const ISSUER_RULES: Readonly<Record<IssuerRuleKey, IssuerGate>> = {
   APP_SCHEDULE_ADMIN: requireScheduleAdmin,
   APP_WEBHOOK_ADMIN: requireScheduleAdmin,
   APP_MANAGER: requireAppManager,
   SECRET_READ_CLIENT: requireSecretReadIssuer,
+  MEMORY_MANAGER: requireMemoryManager,
+  ORG_KNOWLEDGE_MANAGER: requireOrgKnowledgeManager,
 };
 
 /**

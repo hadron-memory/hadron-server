@@ -257,6 +257,22 @@ export async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: 
       }
       continue;
     }
+    if (p.type === 'memory-ref' || p.type === 'org-ref') {
+      // #5321: the memory or the organization shows as its canonical URN. A memory the prover cannot read, or a gone one, and an
+      // organization other than the grant's App's own make the sentence unsignable, never a guess.
+      const id = values[p.name];
+      if (typeof id !== 'string') continue;
+      if (p.type === 'memory-ref') {
+        const memory = await tx.memory.findFirst({ where: { id, deletedAt: null }, select: { urn: true } });
+        if (!memory || !(await isMemoryReadableCached(ctx, id))) return null;
+        try { refs[id] = { urn: emitEntityUrnV2('mem', memory.urn) }; } catch { return null; }
+      } else {
+        const org = await tx.organization.findFirst({ where: { id, deletedAt: null, apps: { some: { id: g.app_id } } }, select: { urn: true } });
+        if (!org) return null;
+        try { refs[id] = { urn: emitEntityUrnV2('org', org.urn) }; } catch { return null; }
+      }
+      continue;
+    }
     if (p.type !== 'node-ref') continue;
     // A single value or a list of them (a batch grant names several nodes): every entry is resolved behind the prover's read gate,
     // and one the prover cannot read withholds the whole sentence. Anything that is not an id is left for the renderer to refuse.

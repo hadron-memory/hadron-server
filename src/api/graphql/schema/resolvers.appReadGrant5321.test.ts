@@ -240,7 +240,7 @@ describe('knowledge.read: a userless run reads its organization\'s ORGANIZATION 
   it('never another organization\'s knowledge, a group, personal or private memory, or an App-scoped one', async () => {
     await activeGrant(app.id, 'knowledge.read', { organization: org.id }, admin);
     const foreign = await orgKnowledge(otherOrg.id, otherOrg.urn);
-    const group = await orgKnowledge(org.id, org.urn, { class: 'group' });
+    const group = await orgKnowledge(org.id, org.urn, { class: 'group', visibility: null });
     const pers = await db.memory.create({ data: { id: generateId(), name: 'p', urn: `${org.urn}:p-${generateId().slice(-6)}`, class: 'personal', userId: alice, organizationId: org.id } as never });
     const scoped = await orgKnowledge(org.id, org.urn, { appId: app2.id });
     for (const x of [foreign, group, pers, scoped]) expect(await reachFor(runAuth(app.id), x.id)).toEqual(NONE);

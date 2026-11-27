@@ -34,7 +34,18 @@ export function registerOwnRightReader(reader: OwnRightReader | null): void {
   if (reader) warnedNoReader = false;
 }
 
-/** The principal shape the link reach applies to: an App key or a userless run, nothing else. */
+/**
+ * #5321: does `userId` read `memoryId` NOW in their own right (`holdsContentReadIndependently`)? The read-grant judge
+ * (src/lib/grants/readGrant.ts) asks it of a grant's giver at every read. False while the GraphQL helpers have not
+ * registered the reader, and false when the judgement throws (fail closed).
+ */
+export async function readsInOwnRight(db: PrismaClient, userId: string, roles: unknown, memoryId: string): Promise<boolean> {
+  const holds = ownRightReader;
+  if (holds === null) return false;
+  return holds({ db, userId, roles: roles as never }, memoryId).catch(() => false);
+}
+
+/** The principal shape a grant read applies to: an App key or a userless run, nothing else. */
 export function isPureAppKeyShape(auth: {
   appId?: string | null; userId?: string | null; sessionId?: string | null; impersonation?: unknown; sessionBindingRefused?: boolean;
 }): boolean {

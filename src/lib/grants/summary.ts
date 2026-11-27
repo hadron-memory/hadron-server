@@ -51,7 +51,7 @@ export function summaryPlaceholders(template: string): string[] {
   return names;
 }
 
-const URN_KIND = { app: 'app', 'node-ref': 'node', 'worker-ref': 'worker' } as const;
+const URN_KIND = { app: 'app', 'node-ref': 'node', 'worker-ref': 'worker', 'memory-ref': 'mem', 'org-ref': 'org' } as const;
 /**
  * The whole string must be a canonical grammar-v2 URN of the right entity kind: the strict v2 parser accepts it whole (so no
  * space, control character, brace or trailing text can ride behind a valid prefix) and carries no `#` fragment. A caller that
@@ -89,9 +89,12 @@ export const SUMMARY_FORMATTERS = {
   'worker-ref': (urn: string, placeholder: string) => canonical('worker-ref', placeholder, urn),
   'secret-ref': (urn: string, placeholder: string) => canonicalSecret(placeholder, urn),
   'secret-mark': (mark: string, placeholder: string) => secretMark(placeholder, mark),
+  // #5321: a memory and an organization are written as their canonical grammar-v2 URNs, as every other reference.
+  'memory-ref': (urn: string, placeholder: string) => canonical('memory-ref', placeholder, urn),
+  'org-ref': (urn: string, placeholder: string) => canonical('org-ref', placeholder, urn),
 } as const;
 
-export type SummaryFormatters = { app: (urn: string) => string; 'node-ref': (urn: string, placeholder: string) => string; 'worker-ref': (urn: string, placeholder: string) => string; 'secret-ref': (urn: string, placeholder: string) => string; 'secret-mark': (mark: string, placeholder: string) => string };
+export type SummaryFormatters = { app: (urn: string) => string; 'node-ref': (urn: string, placeholder: string) => string; 'worker-ref': (urn: string, placeholder: string) => string; 'secret-ref': (urn: string, placeholder: string) => string; 'secret-mark': (mark: string, placeholder: string) => string; 'memory-ref'?: (urn: string, placeholder: string) => string; 'org-ref'?: (urn: string, placeholder: string) => string };
 
 export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters = SUMMARY_FORMATTERS): string {
   const { action, app, values, refs } = input;
@@ -126,6 +129,15 @@ export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters =
         // A mark is its own words, not a reference: there is nothing to resolve, and a list of marks names nothing.
         if (Array.isArray(value)) throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a list value`);
         written.push(fmt['secret-mark'](entry as string, name));
+        continue;
+      }
+      if (param.type === 'memory-ref' || param.type === 'org-ref') {
+        // #5321: exactly one reference, never a list (the action takes none).
+        if (Array.isArray(value) || typeof entry !== 'string') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a list value`);
+        const ref = Object.prototype.hasOwnProperty.call(refs, entry) ? refs[entry] : undefined;
+        if (!ref) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no resolved reference`);
+        const format = fmt[param.type] ?? SUMMARY_FORMATTERS[param.type];
+        written.push(format(ref.urn, name));
         continue;
       }
       if (param.type !== 'node-ref' && param.type !== 'secret-ref' && param.type !== 'worker-ref') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a parameter type the summary cannot write`);

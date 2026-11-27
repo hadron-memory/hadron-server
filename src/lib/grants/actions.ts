@@ -33,7 +33,7 @@ export type GrantReach = 'WORKER' | 'WORKER_OR_ROLE_AGENT' | 'NO_WORKER';
  * definition that names a key the registry does not provide is a compile error, and re-checked at validation because the
  * registry is code and definitions may arrive from anywhere a list can.
  */
-export const ISSUER_RULE_KEYS = ['APP_SCHEDULE_ADMIN', 'APP_WEBHOOK_ADMIN', 'APP_MANAGER', 'SECRET_READ_CLIENT'] as const;
+export const ISSUER_RULE_KEYS = ['APP_SCHEDULE_ADMIN', 'APP_WEBHOOK_ADMIN', 'APP_MANAGER', 'SECRET_READ_CLIENT', 'MEMORY_MANAGER', 'ORG_KNOWLEDGE_MANAGER'] as const;
 export type IssuerRuleKey = (typeof ISSUER_RULE_KEYS)[number];
 
 export interface ActionDefinition {
@@ -136,6 +136,27 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
       { name: 'binding-header', type: 'header-name', refusesWildcard: true },
     ],
     summaryTemplate: 'Use the secret {secret} of {app} at {binding-prefix} with header {binding-header}, and {auto-delete}',
+    reach: 'NO_WORKER',
+  },
+  // #5321 (hrn:node:hadronmemory.com:specs:cor:acl:140:02, D-2026-11-26-003; Holger 2026-11-27): read ONE memory outside the App, read
+  // only, as the App acting with no person behind it (its userless runs, and a pure key holding the grant:read scope). The memory is
+  // named by its stored id (one value, never a list or the wildcard) and shown as its canonical URN. Only the memory's manager gives it
+  // (an Agent's system memory: whoever manages the Agent). The holder is the grant's own App. Judged at every read, the giver's own read
+  // included (src/lib/grants/readGrant.ts). The optional branch and one-automation parameters (Proposed) are not seeded here: an action's
+  // meaning never changes under its name, so they come as their own slice (#5321's plan, S2).
+  {
+    name: 'memory.read', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'MEMORY_MANAGER',
+    parameters: [{ name: 'memory', type: 'memory-ref', refusesWildcard: true }],
+    summaryTemplate: 'Let {app}, acting with no person behind it, read the memory {memory}, read only',
+    reach: 'NO_WORKER',
+  },
+  // #5321 (cor:acl:140:02 R3, Holger 2026-11-27 "Own action, no wildcard"; cor:agt:010:01 D-2026-11-26-004): the App's userless runs read the
+  // knowledge memories of ORGANIZATION visibility of the App's OWN organization, read only; never a key, another organization, a group, personal
+  // or private memory. Its one value is that organization's id (never the wildcard). Given by an ADMIN or OWNER of that organization.
+  {
+    name: 'knowledge.read', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'ORG_KNOWLEDGE_MANAGER',
+    parameters: [{ name: 'organization', type: 'org-ref', refusesWildcard: true }],
+    summaryTemplate: 'Let the runs of {app} that act for no person read the ORGANIZATION knowledge of {organization}, read only',
     reach: 'NO_WORKER',
   },
 ];

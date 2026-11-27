@@ -4281,7 +4281,7 @@ export const typeDefs = `#graphql
     hostUsesPage(limit: Int, offset: Int): HostKeyUsePage!
   }
 
-  "#1749 — a scope an App key holds. A closed list: attention:deliver, and (#1709) host:operate."
+  "#1749 — a scope an App key holds. A closed list: attention:deliver, (#1709) host:operate, and (#5321) grant:read, which lets a pure key read through the memory.read grants its App holds (hrn:node:hadronmemory.com:specs:cor:acl:140:02)."
   type AppKeyScope {
     scope: String!
     grantedAt: DateTime!
