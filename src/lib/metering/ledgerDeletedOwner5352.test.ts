@@ -6,7 +6,8 @@
  * that committed while a deletion waited for it is cleared by that deletion.
  *
  * Red on main:
- *  - A1-A4: no append path re-checks the owner, so each writes an entry naming the deleted owner.
+ *  - A1-A4: no append path re-checks the owner, so each writes an entry naming the deleted owner. (There is no A5: it was
+ *    folded into A3, the debit.)
  *  - B1: the organization delete takes no lock that FOR KEY SHARE (or the FK check) waits for, so an append during an open
  *    delete commits naming the organization after the delete has run its clear.
  *  - B2: the append waits for the person delete's FOR UPDATE (the FK check), then writes an entry naming the deleted person.
@@ -27,7 +28,8 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { deleteUserAccount } from '../../controller/operations/deleteUser.js';
 import { softDeleteOrganizationCore } from '../../controller/operations/softDeleteOrganization.js';
 import { adjustCredits, clearPriceCache, debitCredits, grantCredits, recordLlmUsage } from './index.js';
-import { writeSettlements } from './settleExpiredGrants.js';
+import { settleAndMeasure, writeSettlements } from './settleExpiredGrants.js';
+import { ensurePeriodGrant, periodGrantCacheKeysForTests, reloadOwnerDefaultMonthlyGrantForTests, resetPeriodGrantStateForTests, setPeriodGrantWriterForTests } from './periodGrant.js';
 import { repointMergedLedgerOwners } from './repointMergedOwners.js';
 
 vi.mock('../slackClient.js', async (importOriginal) => ({
@@ -59,7 +61,13 @@ beforeEach(async () => {
   q = await mkUser('l5352-q');
   admin = await mkUser('l5352-admin', ['ADMIN']);
 });
-afterEach(() => { vi.unstubAllEnvs(); });
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+  setPeriodGrantWriterForTests(null);
+  resetPeriodGrantStateForTests();
+  reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '' });
+});
 
 const softDeleteOrg = (id: string) => db.organization.update({ where: { id }, data: { deletedAt: new Date() } });
 const softDeleteUser = (id: string) => db.user.update({ where: { id }, data: { deletedAt: new Date() } });
@@ -147,8 +155,7 @@ describe('B: an append that waits for an open deletion sees it and is refused', 
     const del = holdOpen(async (tx) => { await softDeleteOrganizationCore(tx, org, null); });
     const pid = await del.pid;
     const append = settled(grant({ organizationId: org }));
-    // On main nothing makes the append wait; the barrier then times out and the pin reads what the append wrote.
-    await waitForLockWaitersBlockedBy(db, pid, 1, 3_000).catch(() => undefined);
+    await waitForLockWaitersBlockedBy(db, pid, 1, 5_000);
     del.release();
     await del.done;
     const r = await append;
@@ -157,17 +164,23 @@ describe('B: an append that waits for an open deletion sees it and is refused', 
     expect(r.ok ? null : (r.error as Error).name).toBe('LedgerOwnerDeletedError');
   });
 
-  it('B2 the person delete is open (owner row FOR UPDATE, soft delete, clear): the debit waits, then writes nothing', async () => {
-    const del = holdOpen(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM users WHERE id = ${p} AND deleted_at IS NULL FOR UPDATE`;
-      await tx.user.update({ where: { id: p }, data: { deletedAt: new Date() } });
-      await tx.$executeRaw`UPDATE credit_ledger_entries SET owner_user_id = NULL WHERE owner_user_id = ${p}`;
-    });
-    const pid = await del.pid;
+  it('B2 the real person delete (deleteUserAccount) is open holding the person row: the debit waits, then writes nothing', async () => {
+    // p is a member of an organization with another member, so the delete revokes p's membership row AFTER it holds p's row
+    // FOR UPDATE; this connection holds that membership row, so the delete stops there with the person row held.
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org, userId: p, role: 'READER' } });
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org, userId: q, role: 'OWNER' } });
+    await pg.query('BEGIN');
+    const { rows: [{ pid: holder }] } = await pg.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+    await pg.query('SELECT id FROM org_members WHERE user_id = $1 FOR UPDATE', [p]);
+    const del = settled(deleteUserAccount(db, { targetUserId: p, actorUserId: p }));
+    await waitForLockWaitersBlockedBy(db, holder, 1, 5_000);
+    const [{ pid: deleter }] = await db.$queryRaw<{ pid: number }[]>`
+      SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND ${holder}::int = ANY (pg_blocking_pids(pid))`;
     const append = settled(debitCredits(db, { owner: { userId: p }, amountMicroCents: 7n, sourceType: 'usage-event', sourceId: generateId() }));
-    await waitForLockWaitersBlockedBy(db, pid, 1, 3_000);
-    del.release();
-    await del.done;
+    // The debit waits for the DELETE (the person row), not for this connection: the real deleter takes the lock.
+    await waitForLockWaitersBlockedBy(db, deleter, 1, 5_000);
+    await pg.query('COMMIT');
+    expect(await del).toMatchObject({ ok: true });
     const r = await append;
     expect(await naming({ ownerUserId: p })).toBe(0);
     expect(r.ok ? null : (r.error as Error).name).toBe('LedgerOwnerDeletedError');
@@ -183,7 +196,7 @@ describe('B: an append that waits for an open deletion sees it and is refused', 
     const del = holdOpen(async (tx) => { await softDeleteOrganizationCore(tx, org, null); });
     const pid = await del.pid;
     const raced = mutate(org); // resolution reads the organization live: the delete has not committed
-    await waitForLockWaitersBlockedBy(db, pid, 1, 3_000).catch(() => undefined);
+    await waitForLockWaitersBlockedBy(db, pid, 1, 5_000);
     del.release();
     await del.done;
     const r = await raced;
@@ -228,8 +241,7 @@ describe('C: an append that commits while the deletion waits for it is cleared b
   it('C2 the organization delete waits for the append, then clears its entry', async () => {
     const a = await appendHeldOpen({ organizationId: org });
     const del = settled(M.deleteOrganization({}, { ref: org }, ctx(admin, ['ADMIN'])));
-    // On main the delete does not wait; it commits before the append does.
-    await waitForLockWaitersBlockedBy(db, a.pid, 1, 3_000).catch(() => undefined);
+    await waitForLockWaitersBlockedBy(db, a.pid, 1, 5_000);
     await a.commit();
     expect(await del).toMatchObject({ ok: true });
     expect(await db.creditLedgerEntry.count()).toBe(1);
@@ -240,11 +252,90 @@ describe('C: an append that commits while the deletion waits for it is cleared b
     await db.orgMember.create({ data: { id: generateId(), organizationId: org, userId: p, role: 'OWNER' } });
     const a = await appendHeldOpen({ organizationId: org });
     const del = settled(deleteUserAccount(db, { targetUserId: p, actorUserId: p }));
-    await waitForLockWaitersBlockedBy(db, a.pid, 1, 3_000).catch(() => undefined);
+    await waitForLockWaitersBlockedBy(db, a.pid, 1, 5_000);
     await a.commit();
     expect(await del).toMatchObject({ ok: true });
     expect((await db.organization.findUniqueOrThrow({ where: { id: org } })).deletedAt).not.toBeNull();
     expect(await db.creditLedgerEntry.count()).toBe(1);
     expect(await naming({ organizationId: org })).toBe(0);
+  });
+});
+
+/** An organization grant that expired a day ago, so a read at the database's now settles it. */
+async function expiredGrant(owner: { organizationId: string } | { userId: string }) {
+  const now = Date.now();
+  await grantCredits(db, {
+    owner, amountMicroCents: 1_000n, sourceType: 't5352', sourceId: generateId(),
+    createdAt: new Date(now - 2 * 86_400_000), expiresAt: new Date(now - 86_400_000),
+  });
+}
+
+/**
+ * The writing balance read's snapshot (resolvers.metering.ts `creditBalance`): `settleAndMeasure` in ONE REPEATABLE READ
+ * transaction, its snapshot taken before `between` runs on another connection and commits.
+ */
+async function settleInSnapshotAfter(owner: { organizationId: string }, between: () => Promise<unknown>) {
+  return db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM credit_ledger_entries LIMIT 1`; // the snapshot is taken here
+    await between();
+    return settleAndMeasure(tx as unknown as typeof db, owner, new Date(), { write: true });
+  }, { isolationLevel: 'RepeatableRead', timeout: 30_000 });
+}
+
+describe('D: the paths the blind review named (#5400 at a1457934)', () => {
+  it('D1 inside the read snapshot, an UPDATE of the owner row that deletes nothing does not fail the settlement (no 40001)', async () => {
+    await expiredGrant({ organizationId: org });
+    const m = await settleInSnapshotAfter({ organizationId: org }, () => pg.query('UPDATE organizations SET name = $1 WHERE id = $2', ['l5352-renamed', org]));
+    expect(m.settled).toHaveLength(1);
+    expect(await db.creditLedgerEntry.count({ where: { organizationId: org, sourceType: 'grant-expiry' } })).toBe(1);
+  });
+
+  it('D2 inside the read snapshot, a deletion committed after the snapshot makes the lock fail the read, which writes nothing', async () => {
+    await expiredGrant({ organizationId: org });
+    const r = await settled(settleInSnapshotAfter({ organizationId: org }, () => db.$transaction((tx) => softDeleteOrganizationCore(tx, org, null))));
+    expect(r.ok).toBe(false);
+    expect(r.ok ? null : (r.error as { meta?: { code?: string } }).meta?.code).toBe('40001');
+    expect(await db.creditLedgerEntry.count()).toBe(1); // the grant alone
+  });
+
+  it('D3 the period grant whose owner is deleted between its check and its append writes nothing, logs nothing, caches nothing', async () => {
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"organization":"500"}' });
+    setPeriodGrantWriterForTests(async (d, params) => { await softDeleteOrg(org); return grantCredits(d, params); });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await expect(ensurePeriodGrant(db, { organizationId: org }, new Date())).resolves.toBeUndefined();
+    expect(await db.creditLedgerEntry.count()).toBe(0);
+    expect(errors).not.toHaveBeenCalled();
+    expect(periodGrantCacheKeysForTests()).toEqual([]);
+  });
+
+  it('D4 a replay of a grant whose owner was deleted since its first write is refused, and the first entry is untouched', async () => {
+    const sourceId = generateId();
+    const first = await grantCredits(db, { owner: { organizationId: org }, amountMicroCents: 1_000n, sourceType: 't5352', sourceId });
+    await softDeleteOrg(org);
+    await expect(grantCredits(db, { owner: { organizationId: org }, amountMicroCents: 1_000n, sourceType: 't5352', sourceId }))
+      .rejects.toMatchObject({ name: 'LedgerOwnerDeletedError' });
+    expect(await db.creditLedgerEntry.findMany({ select: { id: true } })).toEqual([{ id: first.id }]);
+  });
+
+  it('D5 the adjustCredits mutation for a person deleted in the race answers what it answers for a person already deleted', async () => {
+    const gone = await mkUser('l5352-gone');
+    await softDeleteUser(gone);
+    const mutate = (ref: string) =>
+      settled(M.adjustCredits({}, { input: { userRef: ref, amountMicroCents: '-5', sourceType: 't5352', sourceId: generateId(), note: 'refund' } }, ctx(admin, ['ADMIN'])));
+    const sequential = await mutate(gone);
+    expect(sequential.ok).toBe(false);
+    const del = holdOpen(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${p} AND deleted_at IS NULL FOR UPDATE`;
+      await tx.user.update({ where: { id: p }, data: { deletedAt: new Date() } });
+    });
+    const pid = await del.pid;
+    const raced = mutate(p); // resolution reads the person live: the delete has not committed
+    await waitForLockWaitersBlockedBy(db, pid, 1, 5_000);
+    del.release();
+    await del.done;
+    const r = await raced;
+    expect(await db.creditLedgerEntry.count()).toBe(0);
+    const shape = (e: unknown) => ({ name: (e as Error).name, message: (e as Error).message.replace(p, 'REF').replace(gone, 'REF') });
+    expect(r.ok ? null : shape(r.error)).toEqual(sequential.ok ? null : shape(sequential.error));
   });
 });

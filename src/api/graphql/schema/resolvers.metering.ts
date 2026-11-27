@@ -140,7 +140,8 @@ async function resolveLedgerOwner(
  */
 function ledgerRefusal(err: unknown, refs: { orgRef?: string | null; userRef?: string | null }): never {
   if (err instanceof LedgerOwnerDeletedError) {
-    throw refs.orgRef != null ? new OrganizationNotFoundError(refs.orgRef) : new UserNotFoundError(refs.userRef as string);
+    if (refs.orgRef != null) throw new OrganizationNotFoundError(refs.orgRef);
+    if (refs.userRef != null) throw new UserNotFoundError(refs.userRef);
   }
   if (err instanceof InvalidLedgerAmountError) throw badInput(err.message);
   // Mismatched replay of an existing (sourceType, sourceId): a typed,
