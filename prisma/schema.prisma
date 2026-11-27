@@ -199,6 +199,16 @@ enum AgentLifecycle {
   SHORT_LIVED
 }
 
+/// #5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01, D-2026-11-26-008) — where a chat goes when its starter names no
+/// home memory. APP_SHARED: the App's shared memory, found or created as a `shared` chat's is. PERSONAL and PRIVATE: the
+/// caller's own memory of that class in the App (one per class, hrn:node:hadronmemory.com:specs:cor:dmo:060:20). GROUP is
+/// not a value: a group home needs a named memory.
+enum ChatHome {
+  APP_SHARED
+  PERSONAL
+  PRIVATE
+}
+
 /// #4291 (S14 of #4229; decision record run-settings-are-not-worker-identity, settled A) — the generic effort scale
 /// of a
 /// run. LOW..MAX are requests the launcher maps to the family's own values (hadron-cli#2199); UNSET is the family's
@@ -2433,6 +2443,10 @@ model Agent {
   /// LONG_LIVED Agent that its host reports idle is reset (`worker.reset-context`), at most once an hour. Null (the default)
   /// is no cap. Written by whoever manages the Agent, like `usesTasks`. `chk_agents_context_cap` keeps it at 1 or more.
   contextCap            Int?            @map("context_cap")
+  /// #5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01) — the home a chat takes when `startChat` names neither
+  /// `memoryRef` nor `scope`. Null (the default) keeps today's behaviour. Written by whoever manages the Agent
+  /// (hrn:node:hadronmemory.com:specs:cor:dmo:050:13), like `usesTasks`.
+  defaultChatHome       ChatHome?       @map("default_chat_home")
   organizationId        String?         @map("organization_id")
   /// User owner of a user-owned Agent (rooted on the bare `<handle>` — #697 v2,
   /// no `@` sigil). The org/owner XOR is ENFORCED — `chk_agent_owner_xor` in

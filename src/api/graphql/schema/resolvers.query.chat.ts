@@ -164,6 +164,12 @@ type ChatRootRow = Prisma.NodeGetPayload<{ select: typeof CHAT_ROOT_SELECT }>;
 async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
   const counters = await readChatCounters(ctx.db,tops,ctx.sessionId);
   const engine = await readChatEngineStates(ctx.db, tops);
+  // #5027 (cor:acl:030:01, R2): every surface shows the home memory's own class and URN. One read for the page; the
+  // rows were already selected through the caller's chat scope, so this discloses nothing the row did not.
+  const homes = new Map((await ctx.db.memory.findMany({
+    where: { id: { in: [...new Set(tops.map((t) => t.memoryId))] } },
+    select: { id: true, class: true, urn: true },
+  })).map((m) => [m.id, m]));
   // First-message lookup, scoped to the visible page only (was: every
   // candidate chat). Parallelized via Promise.all.
   const firstMessageEntries = await Promise.all(
@@ -210,6 +216,8 @@ async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
       createdAt: node.createdAt,
       lastMessageAt: counters.get(node.id)?.lastMessageAt ?? null,
       scope,
+      homeMemoryClass: homes.get(node.memoryId)!.class,
+      homeMemoryUrn: homes.get(node.memoryId)!.urn,
       createdBy: node.createdBy ?? null,
       // #3957: the AI config choice stored with the chat, or null.
       aiConfigChoice: typeof data.aiConfigChoice === 'string' ? data.aiConfigChoice : null,
