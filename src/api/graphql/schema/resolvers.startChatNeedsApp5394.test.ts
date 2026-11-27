@@ -35,10 +35,8 @@ const adminCtx = (extra: Partial<Context> = {}): Context => ({ db, userId: admin
 
 const seedFlow = async (memoryId: string) => {
   for (const row of [
-    { loc: 'conversations', data: {} },
     { loc: 'conversations:flow', data: { stageOrder: ['step'], isSetup: false } },
     { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
-    { loc: 'prompts', data: {} },
     { loc: 'prompts:step', content: 'NEEDS APP STAGE', data: {} },
   ]) await db.node.create({ data: { memoryId, name: row.loc, nodeType: 'system', ...row } });
 };

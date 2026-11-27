@@ -35,7 +35,6 @@ beforeEach(async () => {
   // #5394: the start runs under a named App (the no-App manager route is retired), so the fixture installs one.
   appId = (await db.app.create({ data: { name: 'eval-app', urn: `${org.urn}:eval-app`, organizationId: org.id, appAgents: { create: { agentId } } } })).id;
   const rows = [
-    { loc: 'conversations', data: null },
     { loc: 'conversations:a', data: { stageOrder: ['s'], entryCondition: { '<': [{ var: 'memory.age' }, 5] } }, seq: 1 },
     { loc: 'conversations:a:s', data: {}, content: 'p' },
     { loc: 'conversations:b', data: { stageOrder: ['s'] }, seq: 2 },

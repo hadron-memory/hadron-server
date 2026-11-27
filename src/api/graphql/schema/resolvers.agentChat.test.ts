@@ -79,7 +79,6 @@ beforeEach(async () => {
 
   // Seed the system memory with conversations + stages + prompts
   const nodes = [
-    { loc: 'conversations', name: 'conversations', nodeType: 'system' },
     {
       loc: 'conversations:research',
       name: 'research',
@@ -98,7 +97,6 @@ beforeEach(async () => {
       nodeType: 'system',
       data: { promptRef: 'prompts:research:analysis' },
     },
-    { loc: 'prompts', name: 'prompts', nodeType: 'system' },
     { loc: 'prompts:research', name: 'research', nodeType: 'system' },
     { loc: 'prompts:research:scope', name: 'scope', nodeType: 'system', content: 'Scope the research.' },
     { loc: 'prompts:research:analysis', name: 'analysis', nodeType: 'system', content: 'Analyze findings.' },
@@ -668,7 +666,6 @@ describe('chatHistory', () => {
     await serveAgentBootPrompt(db, noAppAgent.id, 'Test boot prompt.');
     // Seed minimal conversation + stage so startChat can find a first stage.
     const seedNodes = [
-      { loc: 'conversations', name: 'conversations', nodeType: 'system' },
       {
         loc: 'conversations:default',
         name: 'default',
@@ -681,7 +678,6 @@ describe('chatHistory', () => {
         nodeType: 'system',
         data: { promptRef: 'prompts:default:greet' },
       },
-      { loc: 'prompts', name: 'prompts', nodeType: 'system' },
       { loc: 'prompts:default', name: 'default', nodeType: 'system' },
       {
         loc: 'prompts:default:greet',

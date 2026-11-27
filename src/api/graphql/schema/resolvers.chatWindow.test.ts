@@ -316,7 +316,6 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
       where: { id: created.systemMemoryId! },
     });
     const nodes = [
-      { loc: 'conversations', name: 'conversations', nodeType: 'system' },
       {
         loc: 'conversations:research',
         name: 'research',
@@ -329,7 +328,6 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
         nodeType: 'system',
         data: { promptRef: 'prompts:research:scope' },
       },
-      { loc: 'prompts', name: 'prompts', nodeType: 'system' },
       { loc: 'prompts:research', name: 'research', nodeType: 'system' },
       {
         loc: 'prompts:research:scope',
