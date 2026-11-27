@@ -13,13 +13,17 @@ import { generateId } from '../id.js';
 describe('stop-signal-invariants.sql (#2022)', () => {
   it('the migration carries a byte-identical copy, and post-push includes the file', () => {
     const source = readFileSync(new URL('../../../prisma/stop-signal-invariants.sql', import.meta.url), 'utf8');
-    // #5325 amends the shared file, so a later migration carries it: the newest migration that contains the file's first line
-    // is the carrier and ends with it verbatim (the first one, 20261020030000_stop_signals, carries the original text).
+    // #5325 amends the shared file's shape CHECK, so a later migration carries that block: the newest migration that contains the
+    // CHECK's own first statement ends with the block verbatim (it carries the block only, never the file's trigger functions:
+    // re-creating them would drop the search_path a later migration gave them). The first migration carries the original file.
     const dir = new URL('../../../prisma/migrations/', import.meta.url);
     const first = source.split('\n')[0]!;
-    const carrier = readdirSync(dir).sort().reverse().find((d) => { try { return readFileSync(new URL(`${d}/migration.sql`, dir), 'utf8').includes(first); } catch { return false; } });
+    const start = source.indexOf('ALTER TABLE team_stop_signals DROP CONSTRAINT IF EXISTS chk_team_stop_signals_shape;');
+    const block = source.slice(start, source.indexOf('\n);\n', start) + '\n);\n'.length);
+    expect(block).toContain("'app'");
+    const carrier = readdirSync(dir).sort().reverse().find((d) => { try { return readFileSync(new URL(`${d}/migration.sql`, dir), 'utf8').includes(block.split('\n')[0]!); } catch { return false; } });
     expect(carrier).toBe('20261127110000_stop_signal_app_scope');
-    expect(readFileSync(new URL(`${carrier}/migration.sql`, dir), 'utf8').endsWith(`\n${source}`)).toBe(true);
+    expect(readFileSync(new URL(`${carrier}/migration.sql`, dir), 'utf8').endsWith(block)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/migrations/20261020030000_stop_signals/migration.sql', import.meta.url), 'utf8')).toContain(first);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir stop-signal-invariants.sql');
   });
