@@ -51,14 +51,17 @@ const VARIANTS = [
 // The golden records what each door answers. #5266 moved every row that was not a typed refusal onto one
 // (INTERNAL_SERVER_ERROR on revokeAppKey, startSession's session/customer ids, node/object(ref); recordHostSweepRun's
 // GRAPHQL_VALIDATION_FAILED): the golden and the probe now hold neither code. The ONE exception is group 2, the
-// AiServiceConfig class names below. None of them echoes.
+// AiServiceConfig class names below. None of them echoes. A row's code can depend on the probe order within one target (startSession(input.customerId)
+// answers SESSION_ID_TAKEN because the probe reuses `id: "x"`, so its second call finds the first call's row); each target gets a fresh database.
 /**
  * Group 2 of #5266, kept on purpose: `rethrowAiConfigTyped` emits the error class name as the code, and that is a published CLIENT
  * contract (hadron-portal `src/lib/server/llm/chatError.ts` and `src/routes/app/apps/[appId]/+page.server.ts` match the exact string
  * `AiServiceConfigNotFoundError`; hadron-cli `internal/api/errors.go` lists it and the other four class names). Renaming them starts in the
  * clients, which must accept both codes first; it is a separate change, not filed.
  */
-const CLIENT_CONTRACT_CLASS_CODE = /^AiServiceConfig[A-Za-z]*Error$/;
+const CLIENT_CONTRACT_CLASS_CODES = new Set([
+  'AiServiceConfigNotFoundError', 'DuplicateAiServiceConfigNameError', 'UnknownAiProviderError', 'NoAiConfigAvailableError', 'AiConfigValidationError',
+]); // the five error classes `rethrowAiConfigTyped` emits by name
 const GOLDEN = fileURLToPath(new URL('./__fixtures__/refEcho5168.codes.json', import.meta.url));
 
 const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
@@ -230,7 +233,7 @@ describe('#5168: a malformed ref is refused without quoting it, on every door wi
     // #5266: no door answers a raw fault or a validation failure for a bad reference, and no class name is a code except group 2's.
     const untyped = probes.filter((p) => p.code === 'INTERNAL_SERVER_ERROR' || p.code === 'GRAPHQL_VALIDATION_FAILED').map((p) => `${p.key}: ${p.code}`);
     expect(untyped).toEqual([]);
-    const classNames = probes.filter((p) => /Error$/.test(p.code) && !CLIENT_CONTRACT_CLASS_CODE.test(p.code)).map((p) => `${p.key}: ${p.code}`);
+    const classNames = probes.filter((p) => /Error$/.test(p.code) && !CLIENT_CONTRACT_CLASS_CODES.has(p.code)).map((p) => `${p.key}: ${p.code}`);
     expect(classNames).toEqual([]);
     expect(Object.entries(golden).filter(([, c]) => c === 'INTERNAL_SERVER_ERROR' || c === 'GRAPHQL_VALIDATION_FAILED')).toEqual([]);
   }, 600_000);

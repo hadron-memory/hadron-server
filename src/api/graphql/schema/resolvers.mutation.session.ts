@@ -716,14 +716,16 @@ function revisionNotFound(): GraphQLError {
  * key violation on the parent or previous link (a session deleted between the check and the write) is SESSION_NOT_FOUND. No message quotes a
  * value (#5225). Any other fault passes through untouched.
  */
-async function answerStartSessionWriteFaults<T>(work: Promise<T>): Promise<T> {
+export async function answerStartSessionWriteFaults<T>(work: Promise<T>): Promise<T> {
   try {
     return await work;
   } catch (e) {
-    const err = e as { code?: string; meta?: { target?: unknown; field_name?: unknown } } | null;
-    if (err?.code === 'P2002') {
-      const target = Array.isArray(err.meta?.target) ? (err.meta!.target as unknown[]).join(',') : String(err.meta?.target ?? '');
-      if (/^id$|sessions_pkey/.test(target)) throw new GraphQLError('A session with this id already exists.', { extensions: { code: 'SESSION_ID_TAKEN' } });
+    const err = e as { code?: string; meta?: { modelName?: unknown; target?: unknown; field_name?: unknown } } | null;
+    const target = Array.isArray(err?.meta?.target) ? (err!.meta!.target as unknown[]).join(',') : String(err?.meta?.target ?? '');
+    // Only the SESSION table's own id: the same transaction writes other tables, and a unique violation on any of those (their `id`
+    // column is the same bare name) is not a taken session id and must not be answered as one (a retry could never succeed).
+    if (err?.code === 'P2002' && err.meta?.modelName === 'Session' && (/^id$/.test(target) || /sessions_pkey/.test(target))) {
+      throw new GraphQLError('A session with this id already exists.', { extensions: { code: 'SESSION_ID_TAKEN' } });
     }
     if (err?.code === 'P2003' && /parent_session_id|prev_session_id|parentSessionId|prevSessionId/.test(String(err.meta?.field_name ?? ''))) {
       throw notFoundError('SESSION_NOT_FOUND', 'Session not found');

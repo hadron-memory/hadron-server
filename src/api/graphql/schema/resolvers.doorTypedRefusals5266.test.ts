@@ -11,6 +11,9 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { GraphQLError } from 'graphql';
 import { resolvers, type Context } from './resolvers.js';
+import { answerStartSessionWriteFaults } from './resolvers.mutation.session.js';
+import { hashAppKey, APP_KEY_PREFIX } from '../../../middleware/auth.js';
+import { randomBytes } from 'node:crypto';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -28,7 +31,7 @@ const refusal = async (p: Promise<unknown>) => {
     : { message: 'Internal server error.', extensions: { code: 'INTERNAL_SERVER_ERROR' } as Record<string, unknown> };
 };
 const codeOf = (f: { extensions?: Record<string, unknown> }) => String(f.extensions?.code);
-const quotes = (f: { message: string; extensions?: Record<string, unknown> }) => JSON.stringify({ m: f.message, x: f.extensions }).includes(NEEDLE);
+const quotes = (f: { message: string; extensions?: Record<string, unknown> }) => JSON.stringify({ m: f.message, x: f.extensions }).toLowerCase().includes(NEEDLE.toLowerCase());
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -41,6 +44,47 @@ describe('#5266 revokeAppKey with an unknown key id, as a person', () => {
     const f = await refusal(M.revokeAppKey({}, { id: NEEDLE }, ctx()));
     expect(codeOf(f)).toBe('APP_KEY_NOT_FOUND');
     expect(quotes(f)).toBe(false);
+  });
+});
+
+describe('#5266 revokeAppKey keeps its posture for a key that EXISTS (blind P2-1: only a missing key changed)', () => {
+  it('a person who does not manage the key\'s App still gets the refusal they had, not APP_KEY_NOT_FOUND; an unknown id gets the typed not-found', async () => {
+    const app = await db.app.create({ data: { ownerUserId: otherId, name: 'S6 key', urn: `${generateId().toLowerCase()}:s6k` } });
+    const raw = APP_KEY_PREFIX + randomBytes(32).toString('hex');
+    const key = await db.appKey.create({ data: { appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(0, 12) } });
+    const foreign = await refusal(M.revokeAppKey({}, { id: key.id }, ctx()));
+    const missing = await refusal(M.revokeAppKey({}, { id: generateId() }, ctx()));
+    expect(codeOf(missing)).toBe('APP_KEY_NOT_FOUND');
+    expect(codeOf(foreign)).not.toBe('APP_KEY_NOT_FOUND');
+    expect(codeOf(foreign)).not.toBe('INTERNAL_SERVER_ERROR');
+    expect((await db.appKey.findUniqueOrThrow({ where: { id: key.id } })).revokedAt).toBeNull();
+    // and the App's own manager still revokes it
+    expect(await M.revokeAppKey({}, { id: key.id }, ctx(otherId))).toBe(true);
+  });
+});
+
+describe('#5266 the startSession write-fault mapping, on synthetic Prisma-shaped errors (blind P2-4, security N2)', () => {
+  const fault = (code: string, meta: Record<string, unknown>) => Object.assign(new Error('db fault'), { code, meta });
+  const run = (e: unknown) => answerStartSessionWriteFaults(Promise.reject(e)).then(() => 'ok', (err) => err);
+  it('P2002 on the SESSION table id is SESSION_ID_TAKEN', async () => {
+    expect((await run(fault('P2002', { modelName: 'Session', target: ['id'] }))).extensions.code).toBe('SESSION_ID_TAKEN');
+  });
+  it('P2002 on another table\'s id, or with no model name, passes through untouched (never answered as a taken session id)', async () => {
+    for (const meta of [{ modelName: 'User', target: ['id'] }, { target: ['id'] }, { modelName: 'Session', target: ['worker_id'] }]) {
+      const e = fault('P2002', meta);
+      expect(await run(e)).toBe(e);
+    }
+  });
+  it('P2003 on the parent or previous link is SESSION_NOT_FOUND, on an unrelated foreign key it passes through', async () => {
+    expect((await run(fault('P2003', { field_name: 'sessions_parent_session_id_fkey (index)' }))).extensions.code).toBe('SESSION_NOT_FOUND');
+    expect((await run(fault('P2003', { field_name: 'sessions_prev_session_id_fkey (index)' }))).extensions.code).toBe('SESSION_NOT_FOUND');
+    const other = fault('P2003', { field_name: 'sessions_app_id_fkey (index)' });
+    expect(await run(other)).toBe(other);
+  });
+  it('a plain Error and a success pass through untouched', async () => {
+    const plain = new Error('boom');
+    expect(await run(plain)).toBe(plain);
+    expect(await answerStartSessionWriteFaults(Promise.resolve(7))).toBe(7);
   });
 });
 
