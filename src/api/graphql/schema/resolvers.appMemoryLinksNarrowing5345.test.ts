@@ -110,6 +110,43 @@ describe('#5345 a user-owned non-personal linked memory reaches no surface of th
     expect(await Q.node({}, { ref: doc.id }, keyCtx(userApp.id))).toBeNull();
   });
 
+  it.each([
+    ['knowledge', null],
+    ['knowledge', 'ORGANIZATION'],
+    ['group', null],
+  ] as const)('a %s (visibility %s) user-owned memory loses node reads: node(ref:) and findNodes (red on main)', async (klass, visibility) => {
+    // Joran's LOCAL delta at bfc5ab7a: on main, memory(ref:) and the memories list refused such a memory, but its NODES were
+    // readable through node(ref:) and returned by findNodes once the owner linked it (both read the accessible set, whose link
+    // arm is the judge). The narrowing removes them; before the link they were refused too.
+    const mem = await userOwned(klass, { visibility });
+    const token = `narrow5345${generateId().slice(-8)}`;
+    const doc = await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'doc', name: token, content: `${token} body` } });
+    const hits = async (c: Context) =>
+      ((await Q.findNodes(null, { query: token, mode: 'keyword' }, c)).hits as { node: { id: string } }[]).map((h) => h.node.id);
+    expect(await Q.node({}, { ref: doc.id }, keyCtx(userApp.id))).toBeNull();
+    await attach(asUser(otto), mem.id, userApp.id);
+    expect(await Q.node({}, { ref: doc.id }, keyCtx(userApp.id))).toBeNull();
+    expect(await hits(keyCtx(userApp.id))).toEqual([]);
+    // Control on the same memory: its owner still reads the node and finds it.
+    expect((await Q.node({}, { ref: doc.id }, asUser(otto)))?.id).toBe(doc.id);
+    expect(await hits(asUser(otto))).toEqual([doc.id]);
+  });
+
+  it('control: node reads through an owner-linked personal and an org-owned linked memory still work', async () => {
+    const own = await db.memory.create({
+      data: { id: generateId(), name: 'own', urn: `hrn-test-${generateId().slice(-8)}`, class: 'personal', userId: otto, ownerUserId: otto, organizationId: null, visibility: null } as never,
+    });
+    const ok = await db.memory.create({
+      data: { id: generateId(), name: 'ok', urn: `${org.urn}:ok-${generateId().slice(-6)}`, class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id } as never,
+    });
+    const a = await db.node.create({ data: { id: generateId(), memoryId: own.id, loc: 'doc', name: 'P', content: 'personal body' } });
+    const b = await db.node.create({ data: { id: generateId(), memoryId: ok.id, loc: 'doc', name: 'O', content: 'org body' } });
+    await attach(asUser(otto), own.id, userApp.id);
+    await attach(asUser(alice), ok.id, orgApp.id);
+    expect((await Q.node({}, { ref: a.id }, keyCtx(userApp.id)))?.id).toBe(a.id);
+    expect((await Q.node({}, { ref: b.id }, keyCtx(orgApp.id)))?.id).toBe(b.id);
+  });
+
   it('control: a personal memory its owner linked still lists on BOTH surfaces and memory(ref:) answers it', async () => {
     const own = await db.memory.create({
       data: { id: generateId(), name: 'own', urn: `hrn-test-${generateId().slice(-8)}`, class: 'personal', userId: otto, ownerUserId: otto, organizationId: null, visibility: null } as never,
