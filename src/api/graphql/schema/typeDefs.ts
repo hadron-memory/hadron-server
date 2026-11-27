@@ -15775,8 +15775,8 @@ export const typeDefs = `#graphql
     # runs under the identified App, an App credential's included, which
     # installs this Agent with a live licence (FR-006), and is started by a
     # person: a signed-in user who is an AppMember of that App, or the user a
-    # pure App key of that App acts for, which is a live AppMember of the App
-    # or a user the App created (createAppUser; #5430). Otherwise
+    # pure App key of that App acts for, who must be a live AppMember of the
+    # App or a user the App created (createAppUser; #5430). Otherwise
     # SHARED_CHAT_REQUIRES_APP_CONTEXT (or the unknown-user refusal for a user
     # the key may not act for). Either way the chat lives in the App's shared
     # app-class memory. (SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is retired.)
