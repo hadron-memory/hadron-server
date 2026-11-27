@@ -11636,8 +11636,9 @@ export const typeDefs = `#graphql
     #5284 (hrn:node:hadronmemory.com:specs:cor:dmo:050:24) - the role task to follow, with its body, or that no
     task fits. Give a phrase, an eventCode or both; eventCode needs appRef. With an eventCode, the App's register
     answers first (register), and a mapped task is MATCHED by REGISTER — but an entry that maps while its task is
-    not in the Agent's list answers NO_MATCH with the register still MAPPED (#5360: a stale mapping is reported,
-    the task is never invented). Otherwise the phrase ranks the Agent's
+    not in the Agent's list (a stale mapping) never matches by REGISTER: it falls through, so with no phrase the
+    answer is NO_MATCH with the register still MAPPED and with a phrase the search arm decides as usual — the
+    mapping is still reported, the task never invented (#5360). Otherwise the phrase ranks the Agent's
     agentTaskList tasks on their abstracts, and the tasks scoring at or above the no-match floor (default 0.45,
     TASK_MATCH_MIN_SCORE) are MATCHED by SEARCH, best first, at most 3, with the body of the first only. With no
     embedding available nothing can reach the floor, so the answer is NO_MATCH with the keyword hits as nearest.
@@ -11646,7 +11647,7 @@ export const typeDefs = `#graphql
     Without appRef the Agent is read as agentTaskList reads it; with appRef you must take part in the App and the
     Agent must be installed or cast there. Refused as APP_NOT_FOUND or AGENT_NOT_FOUND, alike for unknown and
     unreadable. A phrase is 1 to 512 characters after trimming (the one bound every search surface shares, #5360);
-    an eventCode is trimmed and at most 64 characters, the register loc atom bound (#5360) — both judged before
+    an eventCode is trimmed and 1 to 64 characters, the register loc atom bound (#5360) — both judged before
     any read. Nothing is recorded or logged. The MCP tool
     hadron_get_instructions returns the same answer. Accepts IDs or URNs.
     """

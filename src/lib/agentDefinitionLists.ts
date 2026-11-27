@@ -261,14 +261,6 @@ async function resolveIndexSources(
 }
 
 /**
- * An Agent's tasks (cor:dmo:050:15): its effective runnable nodes and every
- * chain index's listed tasks, each once, with a trigger where an index edge
- * gives one. Ordered by loc, then memory id, for a stable list.
- * #2421, #5284: a phrase ranks the runnable effective-chain subset by abstract
- * ({@link matchAgentTasks}) and returns at most `limit` (default 3, at most
- * {@link RANKED_TASK_LIST_MAX}); omission preserves the original list.
- */
-/**
  * #5360 B7 — validate a ranked-list search before ANY read, the Agent ref's resolution included: an invalid
  * limit or an over-long phrase is BAD_USER_INPUT even for an unknown or unreadable Agent, so a caller's bad
  * input is named as such instead of losing to the gate's AGENT_NOT_FOUND, and no agent row is read to refuse
@@ -286,10 +278,20 @@ export function assertAgentTaskSearch(search: AgentTaskSearch): void {
   assertQueryLength(phrase);
 }
 
+/**
+ * An Agent's tasks (cor:dmo:050:15): its effective runnable nodes and every
+ * chain index's listed tasks, each once, with a trigger where an index edge
+ * gives one. Ordered by loc, then memory id, for a stable list.
+ * #2421, #5284: a phrase ranks the runnable effective-chain subset by abstract
+ * ({@link matchAgentTasks}) and returns at most `limit` (default 3, at most
+ * {@link RANKED_TASK_LIST_MAX}); omission preserves the original list.
+ */
 export async function listAgentTasks(db: Db, auth: AuthContext, agentId: string, ref: string, search: AgentTaskSearch = {}): Promise<AgentTaskEntry[]> {
   assertAgentTaskSearch(search);
   const tasks = await openAgentTasks(db, auth, agentId, ref);
   if (search.phrase == null) return tasks.entries; // byte-identical legacy list
+  // The ranker judges the same TRIMMED phrase the validation above refused at (#5408, Baylor's F3: noted as
+  // equivalence — the validation trims first, and this trim is what keeps the two arms on one string).
   return (await tasks.rank(search.phrase.trim())).ranked.slice(0, search.limit ?? 3);
 }
 
