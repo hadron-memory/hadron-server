@@ -1053,6 +1053,11 @@ ON CONFLICT (id) DO NOTHING;
 
 -- #451: delete-path FK columns need a leading index (the same statements as the four 20261031110x migrations).
 CREATE INDEX IF NOT EXISTS "usage_events_node_id_idx" ON "usage_events"("node_id");
+
+-- #5020 (Billing A13, cor:dmo:170:05): a usage event names at most one billable account. The migration
+-- 20261126090000_usage_events_billable_user adds the same constraint NOT VALID and 20261126090200 validates it.
+ALTER TABLE "usage_events" DROP CONSTRAINT IF EXISTS "chk_usage_event_one_billable";
+ALTER TABLE "usage_events" ADD CONSTRAINT "chk_usage_event_one_billable" CHECK (num_nonnulls("organization_id", "billable_user_id") <= 1);
 CREATE INDEX IF NOT EXISTS "sessions_agent_id_idx" ON "sessions"("agent_id");
 CREATE INDEX IF NOT EXISTS "sessions_memory_id_idx" ON "sessions"("memory_id");
 CREATE INDEX IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organization_id");

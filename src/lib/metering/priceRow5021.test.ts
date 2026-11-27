@@ -71,21 +71,21 @@ describe('#5021 a unit records its price row', () => {
   it('pin 1: a priced unit carries the id of the row in force', async () => {
     await mkPrice(new Date('2026-01-01T00:00:00Z'), { inRate: 1n });
     const inForce = await mkPrice(new Date('2026-02-01T00:00:00Z'));
-    const event = await recordLlmUsage(db, { ...BASE, organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     expect(event).not.toBeNull();
     const row = await unitRow(event!.id);
     expect([row.price_row_id, row.cost_micro_cents]).toEqual([inForce.id, COST.toString()]);
   });
 
   it('pin 1b: an unpriced unit carries no price row', async () => {
-    const event = await recordLlmUsage(db, { ...BASE, organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     const row = await unitRow(event!.id);
     expect([row.price_row_id, row.cost_micro_cents]).toEqual([null, null]);
   });
 
   it('pin 1c: an openai-compatible unit carries no price row even when a row exists for it', async () => {
     await db.aiModelPrice.create({ data: { id: generateId(), provider: 'openai-compatible', model: BASE.model, tier: 1, inputMicroCentsPerMTok: IN_RATE, outputMicroCentsPerMTok: OUT_RATE, effectiveAt: new Date('2026-01-01T00:00:00Z') } });
-    const event = await recordLlmUsage(db, { ...BASE, provider: 'openai-compatible', organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    const event = await recordLlmUsage(db, { ...BASE, provider: 'openai-compatible', billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     expect((await unitRow(event!.id)).price_row_id).toBeNull();
   });
 });
@@ -95,7 +95,7 @@ describe('#5021 a unit records the markup of its charge', () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     vi.stubEnv('CREDIT_MARKUP_PERCENT', '25');
     await mkPrice(new Date('2026-01-01T00:00:00Z'));
-    const event = await recordLlmUsage(db, { ...BASE, organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     expect((await unitRow(event!.id)).markup_basis_points).toBe(2500);
     const [debit] = await db.creditLedgerEntry.findMany({ where: { sourceId: event!.id } });
     expect(debit.amountMicroCents).toBe(-131_250n); // 105_000 x 1.25
@@ -105,14 +105,14 @@ describe('#5021 a unit records the markup of its charge', () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     vi.stubEnv('CREDIT_MARKUP_PERCENT', '25');
     await mkPrice(new Date('2026-01-01T00:00:00Z'));
-    const event = await recordLlmUsage(db, { ...BASE, organizationId: orgId, keyOwnerType: 'ORGANIZATION' });
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId }, keyOwnerType: 'ORGANIZATION' });
     expect((await unitRow(event!.id)).markup_basis_points).toBeNull();
   });
 
   it('pin 2c: with debits off, a platform-key unit records no markup', async () => {
     vi.stubEnv('CREDIT_MARKUP_PERCENT', '25');
     const price = await mkPrice(new Date('2026-01-01T00:00:00Z'));
-    const event = await recordLlmUsage(db, { ...BASE, organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     const row = await unitRow(event!.id);
     expect([row.price_row_id, row.markup_basis_points]).toEqual([price.id, null]);
   });
@@ -121,7 +121,7 @@ describe('#5021 a unit records the markup of its charge', () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     vi.stubEnv('CREDIT_MARKUP_PERCENT', '25');
     await mkPrice(new Date('2026-01-01T00:00:00Z'));
-    const event = await recordLlmUsage(db, { ...BASE, keyOwnerType: 'HADRON_SERVER' });
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: null, keyOwnerType: 'HADRON_SERVER' });
     expect((await unitRow(event!.id)).markup_basis_points).toBeNull();
   });
 
@@ -129,7 +129,7 @@ describe('#5021 a unit records the markup of its charge', () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     vi.stubEnv('CREDIT_MARKUP_PERCENT', '25');
     await mkPrice(new Date('2026-01-01T00:00:00Z'), { markupBasisPoints: 1000 });
-    const event = await recordLlmUsage(db, { ...BASE, organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     expect((await unitRow(event!.id)).markup_basis_points).toBe(1000);
     const [debit] = await db.creditLedgerEntry.findMany({ where: { sourceId: event!.id } });
     expect(debit.amountMicroCents).toBe(-115_500n); // 105_000 x 1.10
@@ -145,14 +145,14 @@ describe('#5021 a unit records its run (gate ruling 9)', () => {
   it('pin 11: a priced unit of a run names the run, and the run total still moves in the same transaction', async () => {
     await mkPrice(new Date('2026-01-01T00:00:00Z'));
     const runId = await mkRun();
-    const event = await recordLlmUsage(db, { ...BASE, organizationId: orgId, appRunId: runId });
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId }, appRunId: runId });
     expect((await unitRow(event!.id)).app_run_id).toBe(runId);
     expect((await db.appRun.findUniqueOrThrow({ where: { id: runId } })).costMicroCents).toBe(COST);
   });
 
   it('pin 11b: an unpriced unit of a run names the run too', async () => {
     const runId = await mkRun();
-    const event = await recordLlmUsage(db, { ...BASE, organizationId: orgId, appRunId: runId });
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId }, appRunId: runId });
     expect((await unitRow(event!.id)).app_run_id).toBe(runId);
   });
 });
@@ -167,7 +167,7 @@ describe('#5021 every process switches to a new row at its effective instant', (
     const cached = await getAiModelPrice(db, 'anthropic', BASE.model); // fills this process's cache with the old row
     expect(cached?.inputMicroCentsPerMTok).toBe(1n);
     vi.setSystemTime(new Date(T.getTime() + 1_000));
-    const event = await recordLlmUsage(db, { ...BASE, organizationId: orgId });
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId } });
     expect(event!.costMicroCents).toBe(COST); // the old row (input rate 1) would give 75_001
     const row = await unitRow(event!.id);
     expect([row.price_row_id, row.cost_micro_cents]).toEqual([next.id, COST.toString()]);
@@ -178,7 +178,7 @@ describe('#5021 every process switches to a new row at its effective instant', (
     const next = await mkPrice(T);
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date(T.getTime() + 1_000));
-    const event = await recordLlmUsage(db, { ...BASE, organizationId: orgId });
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId } });
     expect(event!.createdAt.getTime()).toBe(T.getTime() + 1_000);
     expect((await unitRow(event!.id)).price_row_id).toBe(next.id);
   });
@@ -206,7 +206,7 @@ describe('#5021 every process switches to a new row at its effective instant', (
         });
       },
     }) as typeof db;
-    const event = await recordLlmUsage(slow, { ...BASE, organizationId: orgId });
+    const event = await recordLlmUsage(slow, { ...BASE, billableAccount: { organizationId: orgId } });
     const inForceAtStamp = event!.createdAt.getTime() >= T.getTime() ? next.id : old.id;
     expect((await unitRow(event!.id)).price_row_id).toBe(inForceAtStamp);
   });
@@ -225,7 +225,7 @@ describe('#5021 price rows are kept', () => {
   });
 
   it('pin 7b: DELETE of a row a unit references is refused', async () => {
-    const event = await recordLlmUsage(db, { ...BASE, organizationId: orgId });
+    const event = await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId } });
     expect((await unitRow(event!.id)).price_row_id).toBe(priceId);
     expect(await code('DELETE FROM ai_model_prices WHERE id = $1', [priceId])).toBe('23514');
     expect(await priceRow()).toBeTruthy();
@@ -294,7 +294,7 @@ describe('#5021 price rows are kept', () => {
   });
 
   it('pin 12: cleanDb empties the price table and the units that reference it, though the trigger refuses a DELETE', async () => {
-    await recordLlmUsage(db, { ...BASE, organizationId: orgId });
+    await recordLlmUsage(db, { ...BASE, billableAccount: { organizationId: orgId } });
     await cleanDb(db);
     expect((await pg.query('SELECT (SELECT count(*) FROM ai_model_prices)::int AS p, (SELECT count(*) FROM usage_events)::int AS u')).rows[0]).toEqual({ p: 0, u: 0 });
   });

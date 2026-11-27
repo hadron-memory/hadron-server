@@ -11268,7 +11268,11 @@ export const typeDefs = `#graphql
     Default scope: the caller's union — (1) their OWN personal/private
     memories (always; they are user-owned and show in every org context),
     (2) memories their member orgs own, (3) memories their member orgs
-    subscribe to. Per-user agent memories (userMemoryOfAgentId) are excluded.
+    subscribe to, (4) their OWN per-user Agent memories (#5026,
+    hrn:node:hadronmemory.com:specs:cor:api:120:03: listed to their owner like
+    any other user-owned memory, and to nobody else, not even through
+    filter.sharedWithMe, which still omits them: a share grant on a per-user
+    memory surfaces nothing in either list).
     App-key callers get the union of their installed Agents' memory items.
     A pure App key's list also holds every memory its App's links let it read
     (#5272, hrn:node:hadronmemory.com:specs:cor:api:120:03), judged at the call
@@ -12820,9 +12824,9 @@ export const typeDefs = `#graphql
     "The owner limits of an organization or a person, one row per measure (hadron-server issue 5009). Give exactly one ref. An organization's: its ADMIN or OWNER. A person's: that person in their own session. A platform admin reads any."
     ownerLimits(orgRef: String, userRef: ID): [OwnerLimitUsage!]!
     """
-    One organization's AI spend for [from, to), grouped one way (#5008, hrn:node:hadronmemory.com:specs:cor:dmo:170:04). Org-ADMIN, the gate of creditBalance, answered before the range is read. from is inclusive and to exclusive; both are ISO 8601 dates or date-times, a value with no offset is UTC and a date alone is midnight UTC. The range is at most 366 days. At most 500 rows are returned, largest charge first; truncated says more groups exist and totalGroups is the exact number of groups. Only token-bearing units of the organization count, soft-deleted ones are left out.
+    One organization's or one person's AI spend for [from, to), grouped one way (#5008, hrn:node:hadronmemory.com:specs:cor:dmo:170:04). Give exactly one of orgRef and userRef, else BAD_USER_INPUT, answered before anything is read. An organization's: its ADMIN or OWNER, the gate of creditBalance, answered before the range is read. A person's (#5020, hrn:node:hadronmemory.com:specs:cor:dmo:170:05): that person in their own session, or a platform admin; an App key and an impersonated session are refused, and so is anyone else, with the same FORBIDDEN whether or not the user exists. A person's figures are the units billed to them as the owner of the work, never the units of an organization's App done for them, and never the token counts a client reports itself (those are not spend). from is inclusive and to exclusive; both are ISO 8601 dates or date-times, a value with no offset is UTC and a date alone is midnight UTC. The range is at most 366 days. At most 500 rows are returned, largest charge first; truncated says more groups exist and totalGroups is the exact number of groups. Only token-bearing units of that account count, soft-deleted ones are left out.
     """
-    aiSpend(orgRef: String!, from: String!, to: String!, groupBy: AiSpendGroup!): AiSpendSummary!
+    aiSpend(orgRef: String, userRef: ID, from: String!, to: String!, groupBy: AiSpendGroup!): AiSpendSummary!
   }
 
   """
@@ -14453,6 +14457,11 @@ export const typeDefs = `#graphql
     """
     Open a session — and, when \`input.workerRef\` is given, a WORKER SESSION:
     the binding that makes the work attributable to that named teammate.
+
+    Refusals worth knowing (#5266, none quotes your value): a \`parentSessionId\` or \`prevSessionId\` that names no
+    session you may read answers SESSION_NOT_FOUND, the same for a session that does not exist and for one you may not read,
+    before anything is written; an \`id\` that is already taken answers SESSION_ID_TAKEN, whoever owns the existing row,
+    your own repeat included (a repeat is not a resume: resume through the claim and \`--session\` paths).
 
     The binding is held server-side and is independent of the caller's CHAT
     SESSION (the human's Desktop window, Claude Code session or IDE chat).
@@ -17190,7 +17199,7 @@ export const typeDefs = `#graphql
     \`instruction\` (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0098; hrn:node:hadronmemory.com:specs:cor:dmo:050:05;
     hrn:node:hadronmemory.com:specs:cor:acl:010:01). ${RUN_REFUSAL_3340} A worker session that is refused cannot tell a missing key from an existing one.
     An admitted instructed revoke records one team event (never the key id); a key already revoked records none.
-    AppKey has no URN; the id is raw ID-only.
+    AppKey has no URN; the id is raw ID-only. An unknown key id answers APP_KEY_NOT_FOUND to a person (#5266); it never quotes the id.
     """
     revokeAppKey(id: ID!, instruction: ActInstructionInput): Boolean!
     """

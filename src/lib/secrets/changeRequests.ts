@@ -96,7 +96,7 @@ export function visibleChange(r: ChangeRequest, now: Date) {
 /**
  * Engineering bounds of the expiry sweep (#5244; the Proposed sweep-backlog line of hrn:node:hadronmemory.com:specs:cor:sec:070:02),
  * the same as the version purge: a batch is one transaction of at most this many rows, a run is at most this many batches, and a
- * backlog beyond them waits for the next run. Numbers, not rules: they may change without a spec change.
+ * backlog beyond them waits for the next run. The #5333 retention deletion uses the same numbers, each phase its own per-run budget. Numbers, not rules: they may change without a spec change.
  */
 export const SECRET_CHANGE_SWEEP_BATCH = 500;
 export const SECRET_CHANGE_SWEEP_MAX_BATCHES = 20;
@@ -175,6 +175,45 @@ export async function drainExpiredSecretChanges(
   }
   total += n;
   if (n < limit) break;
+ }
+ return total;
+}
+
+/**
+ * #5333; hrn:node:hadronmemory.com:specs:cor:sec:070:02: an ended request's record is deleted this many days after it ended.
+ * An engineering bound, not ruled (as put to Holger, like the retention of old secret versions); a constant, not an env var.
+ */
+export const SECRET_CHANGE_RETENTION_DAYS = 30;
+/** The states whose record is deleted. `stale` is Proposed, for Holger to confirm (cor:sec:070:02): dropping it is a one-line change. */
+export const SECRET_CHANGE_RETENTION_STATES = ['completed', 'declined', 'expired', 'withdrawn', 'stale'] as const;
+
+/**
+ * Delete ONE batch of ended requests past retention. Only a DELETE: the value is already null on every ended row
+ * (chk_secret_change_shape), which the predicate repeats as a backstop. The outer DELETE repeats the predicate as the subquery's
+ * row locks already hold the rows (findings:purge-key-subquery-must-recheck-expiry). Days are counted on the database clock.
+ */
+export async function deleteEndedSecretChanges(tx: Prisma.TransactionClient, limit: number = SECRET_CHANGE_SWEEP_BATCH): Promise<number> {
+ const states = [...SECRET_CHANGE_RETENTION_STATES];
+ return tx.$executeRaw`DELETE FROM secret_change_requests
+ WHERE state = ANY(${states}::text[]) AND staged_value_encrypted IS NULL
+ AND ended_at <= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${SECRET_CHANGE_RETENTION_DAYS}::int)
+ AND id IN (SELECT id FROM secret_change_requests WHERE state = ANY(${states}::text[]) AND staged_value_encrypted IS NULL
+ AND ended_at <= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${SECRET_CHANGE_RETENTION_DAYS}::int)
+ ORDER BY ended_at, id LIMIT ${limit}::int FOR UPDATE SKIP LOCKED)`;
+}
+
+/** Delete ended requests past retention in batches, each its own transaction (same shape and bounds as the expiry drain; its own per-run budget). Returns the number deleted. */
+export async function drainEndedSecretChanges(
+ db: Pick<PrismaClient, '$transaction'>,
+ bounds: { batchSize?: number; maxBatches?: number; shouldStop?: () => boolean } = {},
+): Promise<number> {
+ const batchSize = bounds.batchSize ?? SECRET_CHANGE_SWEEP_BATCH, maxBatches = bounds.maxBatches ?? SECRET_CHANGE_SWEEP_MAX_BATCHES;
+ let total = 0;
+ for (let i = 0; i < maxBatches; i++) {
+  if (i > 0 && bounds.shouldStop?.()) break;
+  const n = await db.$transaction(tx => deleteEndedSecretChanges(tx, batchSize));
+  total += n;
+  if (n < batchSize) break;
  }
  return total;
 }
