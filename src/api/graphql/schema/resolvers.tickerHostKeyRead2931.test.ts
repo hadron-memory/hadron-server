@@ -408,7 +408,8 @@ describe('#2931 the nested surface is no wider than today (executable schema)', 
     const asMember = await run(api, `query($r:String!){ ticker(ref:$r){ owner { id name urn } subscribers { items { createdBy { id name urn } } } } }`, ctx(member.id), { r: shared.id });
     expect((viaTicker.data as any).ticker.owner).toEqual((asMember.data as any).ticker.owner);
     expect(items[0].createdBy).toEqual((asMember.data as any).ticker.subscribers.items[0].createdBy);
-    expect((viaTicker.data as any).ticker.owner).toMatchObject({ id: admin.id, urn: null });
+    // #5319: a person owner reads hrn:user:<handle> (it read null before); the key and the member still read the same owner.
+    expect((viaTicker.data as any).ticker.owner).toMatchObject({ id: admin.id, urn: expect.stringMatching(/^hrn:user:hk-admin-\d+$/) });
   });
 
   it('a subscription\'s ticker, read back through the key, still lists only the host\'s workers', async () => {

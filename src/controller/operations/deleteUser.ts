@@ -502,6 +502,12 @@ async function runDeletionTxn(
         },
       });
 
+      // #5302 (hrn:node:hadronmemory.com:specs:cor:dmo:170:08, Edge Cases: an erased person's entries are "kept without the person"),
+      // AFTER the soft delete above: the append-only trigger lets the owner link go only for a person with no live row. Only the owner
+      // column changes. A merge never comes here (mergeUsers re-points instead, #5014). Before the grant writes below, so the grant
+      // row lock stays the last lock this transaction takes.
+      await tx.$executeRaw`UPDATE credit_ledger_entries SET owner_user_id = NULL WHERE owner_user_id = ${targetUserId}`;
+
       // #3690 (S2a-h, cor:acl:140:03 and :08, ruling 0255 item 3), AFTER the soft delete above: the database lets an issuer link go only
       // for an erased person (a users row that is soft-deleted or gone), and that is true only from here.
       //  - Grants this person HOLDS end (the grant allows nothing and the record stays, holder id sealed). The soft delete fires no

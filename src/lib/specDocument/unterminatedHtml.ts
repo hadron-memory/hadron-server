@@ -587,10 +587,9 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     if (isEnd && tagEnd !== text.indexOf('>', i) + 1) return i;
     // #5211 — outside an HTML block, a tag CommonMark does not accept is text to Markdown, which reads what it holds: the scan goes on inside
     // it. A raw-text element, a template and a block opener at the head of a line keep the browser's reading, which is the stricter one.
+    // #5289 — that holds for a tag whose value holds `<template` too: Markdown emits it live and the anchor lands in its content (parse5).
     if (i >= rawUntil && !RAW_TEXT.has(name) && name !== 'template' && name !== 'plaintext' && !(startsLine(i) && opensBlock)
-      && !(isEnd ? CM_CLOSE_TAG : CM_OPEN_TAG).test(text.slice(i, tagEnd))
-      // Held back while no reader the tests can run shows the loss: linkedom does not model `template` (#5211, a parser waits on a ruling).
-      && !/<template(?=[\s/>]|$)/i.test(text.slice(i + 1, tagEnd))) { i += 1; continue; }
+      && !(isEnd ? CM_CLOSE_TAG : CM_OPEN_TAG).test(text.slice(i, tagEnd))) { i += 1; continue; }
     // A block-level tag at the head of a line (type 6), or a complete tag alone on its line that does not interrupt a paragraph (type 7),
     // starts an HTML block that runs to the next blank line.
     if (startsLine(i)) {
