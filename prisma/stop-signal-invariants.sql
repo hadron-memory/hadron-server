@@ -3,14 +3,16 @@
 -- (pinned by src/lib/stopSignals/invariants.test.ts) and post-push.sql includes this file.
 
 -- cor:agt:090:01 — a level and a scope from the closed lists; a worker or team signal names a target worker and no host,
--- a host signal a host registration and no worker; exactly one setter (a person or a host key); an until later than the
--- set time; an end that is either absent or complete: when, how, and (for a lift) who.
+-- a host signal a host registration and no worker, an app signal (#5325) neither; exactly one setter (a person or a host
+-- key); an until later than the set time; an end that is either absent or complete: when, how, and (for a lift) who.
 ALTER TABLE team_stop_signals DROP CONSTRAINT IF EXISTS chk_team_stop_signals_shape;
 ALTER TABLE team_stop_signals ADD CONSTRAINT chk_team_stop_signals_shape CHECK (
   level IN ('pause-dispatch', 'pause', 'halt')
-  AND scope IN ('worker', 'team', 'host')
+  AND scope IN ('worker', 'team', 'app', 'host')
   AND (CASE WHEN scope = 'host'
             THEN target_host_registration_id IS NOT NULL AND target_worker_id IS NULL
+            WHEN scope = 'app'
+            THEN target_host_registration_id IS NULL AND target_worker_id IS NULL
             ELSE target_worker_id IS NOT NULL AND target_host_registration_id IS NULL END)
   AND num_nonnulls(set_by_user_id, set_by_app_key_id) = 1
   AND (until IS NULL OR until > set_at)

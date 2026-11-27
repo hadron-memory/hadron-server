@@ -31,7 +31,7 @@ import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { previewServedBootPrompt, readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt, type PageServedMemo, type ServeTarget } from '../../../lib/bootPrompt/serve.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { workerRunRecordOf, type WorkerRunRecord } from '../../../lib/agentTasks/runSettings.js';
-import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { appStopSignalLive, lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { generateId } from '../../../lib/id.js';
 import { GraphQLError } from 'graphql';
@@ -1058,6 +1058,7 @@ export const workerMutations = {
       for (let attempt = 0; attempt < SLUG_RACE_RETRY_LIMIT; attempt++) {
         try {
           const plannedWorkerId = generateId();
+          let stopFenced = false; // #5325: set in afterLock when this cast took the stop fence (see there)
           return await withAuthorizedTx(ctx, anchors, async () => {}, async (tx, txCtx) => {
             // Exclusive anchors prevent concurrent casts from upgrading SHARE App rows together.
             await lockWorkerNames(tx, appId);
@@ -1138,7 +1139,9 @@ export const workerMutations = {
             if (choice.kind !== 'UNSET') {
               await writeReportsTo(tx, { workerId: castWorkerRow.id, appId, to: freshTarget.reportingHeadId, actor: staffingActActor(admission), setBy: 'cast' });
             }
-            if (freshTarget.reportingHeadId) await reconcileStopCoverage(tx, appId, new Date());
+            // #5325: a worker born into an App under a live APP stop signal is covered from its birth, with or without a reporting
+            // line, so a cast that took the fence reconciles (a reporting-line birth, or an App with an unended APP signal).
+            if (freshTarget.reportingHeadId || stopFenced) await reconcileStopCoverage(tx, appId, new Date());
             // #2024 (S8): the Agent's declared tickers become this worker's, with the worker subscribed, in this
             // same transaction. Any refusal rolls the whole cast back, the name allocation included.
             try {
@@ -1151,9 +1154,14 @@ export const workerMutations = {
             return castWorkerRow;
           }, { lockMode: 'exclusive', timeout: 30_000, afterLock: async tx => {
             await lockAgentTemplates(tx, agent.id, 'shared');
-            // Only a reporting-line birth changes S6 topology. Acquire its fence
-            // before name/graph/Worker resources; no-head casts need no coverage write.
-            if (choice.kind === 'REPORTS_TO') await lockStopFence(tx, appId, 'exclusive');
+            // A reporting-line birth changes S6 topology: acquire the fence before name/graph/Worker resources. A no-head cast
+            // is unrelated to the stop fence (castReporting2028), EXCEPT while the App has an unended APP signal (#5325): that
+            // signal covers a worker born now, so the cast is ordered with it and tells the worker. With none, nothing changes;
+            // a worker born in the instant one is set is covered at once by enforcement (computed live) and told at its first
+            // bind, which reconciles coverage.
+            // Assigned on every run of this callback (not only set to true), so a re-run of the transaction cannot keep a stale `true`.
+            stopFenced = choice.kind === 'REPORTS_TO' || (await appStopSignalLive(tx, appId));
+            if (stopFenced) await lockStopFence(tx, appId, 'exclusive');
           } });
         } catch (e) {
           // Order matters: a slug race is private and retried; a name

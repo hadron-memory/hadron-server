@@ -202,17 +202,22 @@ export const SECRET_CHANGE_RETENTION_STATES = ['completed', 'declined', 'expired
 
 /**
  * Delete ONE batch of ended requests past retention. Only a DELETE: the value is already null on every ended row
- * (chk_secret_change_shape), which the predicate repeats as a backstop. The outer DELETE repeats the predicate as the subquery's
+ * (chk_secret_change_shape), which the predicate repeats as a backstop. The outer DELETE repeats the predicate as the batch's
  * row locks already hold the rows (findings:purge-key-subquery-must-recheck-expiry). Days are counted on the database clock.
+ * #5381: the batch is a MATERIALIZED CTE, run once (the #5348 shape above). As an `id IN (subquery)` a nested-loop plan rescanned
+ * the LIMIT ... SKIP LOCKED subquery per outer row, so one batch could delete the whole backlog, past the batch and per-run bounds
+ * of hrn:node:hadronmemory.com:specs:cor:sec:070:02. For this DELETE that was an oversized batch only (size and lock time), never
+ * a wrong deletion: every row it reached was past retention.
  */
 export async function deleteEndedSecretChanges(tx: Prisma.TransactionClient, limit: number = SECRET_CHANGE_SWEEP_BATCH): Promise<number> {
  const states = [...SECRET_CHANGE_RETENTION_STATES];
- return tx.$executeRaw`DELETE FROM secret_change_requests
+ return tx.$executeRaw`WITH batch AS MATERIALIZED (SELECT id FROM secret_change_requests
  WHERE state = ANY(${states}::text[]) AND staged_value_encrypted IS NULL
  AND ended_at <= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${SECRET_CHANGE_RETENTION_DAYS}::int)
- AND id IN (SELECT id FROM secret_change_requests WHERE state = ANY(${states}::text[]) AND staged_value_encrypted IS NULL
- AND ended_at <= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${SECRET_CHANGE_RETENTION_DAYS}::int)
- ORDER BY ended_at, id LIMIT ${limit}::int FOR UPDATE SKIP LOCKED)`;
+ ORDER BY ended_at, id LIMIT ${limit}::int FOR UPDATE SKIP LOCKED)
+ DELETE FROM secret_change_requests s USING batch
+ WHERE s.id = batch.id AND s.state = ANY(${states}::text[]) AND s.staged_value_encrypted IS NULL
+ AND s.ended_at <= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${SECRET_CHANGE_RETENTION_DAYS}::int)`;
 }
 
 /** Delete ended requests past retention in batches, each its own transaction (same shape and bounds as the expiry drain; its own per-run budget). Returns the number deleted. */
