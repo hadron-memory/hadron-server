@@ -419,7 +419,7 @@ describe('#5008 aiSpend — a real debit through the write path (pin 12)', () =>
     });
     clearPriceCache();
     const rec = await recordLlmUsage(db, {
-      type: 'app-run', organizationId: orgA, provider: 'anthropic', model: 'claude-spend', tokensIn: 1000, tokensOut: 1000, keyOwnerType: 'HADRON_SERVER',
+      type: 'app-run', billableAccount: { organizationId: orgA }, provider: 'anthropic', model: 'claude-spend', tokensIn: 1000, tokensOut: 1000, keyOwnerType: 'HADRON_SERVER',
     });
     expect(rec).not.toBeNull();
     const debitRow = await db.creditLedgerEntry.findFirstOrThrow({ where: { sourceType: 'usage-event', sourceId: rec!.id } });

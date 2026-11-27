@@ -1090,7 +1090,10 @@ async function executeAppRunInner(
           nodeLoc: cur,
           appId: run.appId,
           userId: run.userId ?? null,
-          organizationId: run.organizationId,
+          // #5020 (cor:dmo:170:05): the owner of the work is the owner of the App the run is in, which is the run's own
+          // organization (checked at the mint, `launchAppRun`). Never the Agent's owner: an Agent another organization owns
+          // bills the App's organization (spec S3). F3a (a person's App) passes the run's owner here.
+          billableAccount: { organizationId: run.organizationId },
           provider,
           model,
           tokensIn,

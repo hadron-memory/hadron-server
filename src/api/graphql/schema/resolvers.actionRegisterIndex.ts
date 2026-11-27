@@ -59,8 +59,9 @@ async function requireAskingAgentInApp(c: Context, appId: string, id: string, re
  * Agent must be live, readable, and installed or live-cast in this App.
  * The implicit refusal uses the authenticated Agent's emitted
  * URN, never its raw id. No Agent and no ref remains BAD_USER_INPUT.
+ * Exported for #5284's agentInstructions, which asks in an App by the same rule.
  */
-async function askingAgentId(c: Context, appId: string, agentRef: string | null | undefined): Promise<string> {
+export async function askingAgentId(c: Context, appId: string, agentRef: string | null | undefined): Promise<string> {
   if (agentRef == null) {
     const own = currentActor().agentId;
     if (!own) {

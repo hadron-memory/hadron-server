@@ -165,7 +165,7 @@ describe('recordLlmUsage', () => {
     await mkPrice('anthropic', 'claude-m', new Date('2026-01-01'));
     const event = await recordLlmUsage(db, {
       ...base,
-      organizationId: orgId,
+      billableAccount: { organizationId: orgId },
       keyOwnerType: 'HADRON_SERVER',
     });
     expect(event).not.toBeNull();
@@ -178,14 +178,14 @@ describe('recordLlmUsage', () => {
   it('openai-compatible is recorded UNPRICED even when a price row exists, so it is never debited at another host\'s rate (#1389 review)', async () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     await mkPrice('openai-compatible', 'claude-m', new Date('2026-01-01'));
-    const event = await recordLlmUsage(db, { ...base, provider: 'openai-compatible', organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    const event = await recordLlmUsage(db, { ...base, provider: 'openai-compatible', billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     expect(event!.costMicroCents).toBeNull();
     expect(await db.creditLedgerEntry.count()).toBe(0);
     vi.unstubAllEnvs();
   });
 
   it('stores a null cost for an unpriced pair (and never blocks)', async () => {
-    const event = await recordLlmUsage(db, { ...base, organizationId: orgId });
+    const event = await recordLlmUsage(db, { ...base, billableAccount: { organizationId: orgId } });
     expect(event).not.toBeNull();
     expect(event!.costMicroCents).toBeNull();
     expect(event!.tokensIn).toBe(1000);
@@ -193,7 +193,7 @@ describe('recordLlmUsage', () => {
 
   it('does NOT debit when BILLING_DEBIT_ENABLED is unset (default off)', async () => {
     await mkPrice('anthropic', 'claude-m', new Date('2026-01-01'));
-    await recordLlmUsage(db, { ...base, organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    await recordLlmUsage(db, { ...base, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     expect(await db.creditLedgerEntry.count()).toBe(0);
   });
 
@@ -201,7 +201,7 @@ describe('recordLlmUsage', () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     vi.stubEnv('CREDIT_MARKUP_PERCENT', '25');
     await mkPrice('anthropic', 'claude-m', new Date('2026-01-01'));
-    await recordLlmUsage(db, { ...base, organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    await recordLlmUsage(db, { ...base, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     const entries = await db.creditLedgerEntry.findMany({ where: { organizationId: orgId } });
     expect(entries).toHaveLength(1);
     expect(entries[0].kind).toBe('debit');
@@ -217,7 +217,7 @@ describe('recordLlmUsage', () => {
     await mkPrice('anthropic', 'claude-m', new Date('2026-01-01'), IN_RATE, OUT_RATE, {
       markupBasisPoints: 5000, // 50%
     });
-    await recordLlmUsage(db, { ...base, organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    await recordLlmUsage(db, { ...base, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     const [entry] = await db.creditLedgerEntry.findMany({ where: { organizationId: orgId } });
     // 105_000 × 1.5 = 157_500, stored negated — NOT the env's 131_250.
     expect(entry.amountMicroCents).toBe(-157_500n);
@@ -226,7 +226,7 @@ describe('recordLlmUsage', () => {
   it('never debits BYOK spend (FR-004), even when enabled', async () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     await mkPrice('anthropic', 'claude-m', new Date('2026-01-01'));
-    await recordLlmUsage(db, { ...base, organizationId: orgId, keyOwnerType: 'ORGANIZATION' });
+    await recordLlmUsage(db, { ...base, billableAccount: { organizationId: orgId }, keyOwnerType: 'ORGANIZATION' });
     expect(await db.creditLedgerEntry.count()).toBe(0);
   });
 
@@ -234,13 +234,13 @@ describe('recordLlmUsage', () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     await mkPrice('anthropic', 'claude-m', new Date('2026-01-01'));
     // No organizationId: event recorded, no debit.
-    const noOrg = await recordLlmUsage(db, { ...base, keyOwnerType: 'HADRON_SERVER' });
+    const noOrg = await recordLlmUsage(db, { ...base, billableAccount: null, keyOwnerType: 'HADRON_SERVER' });
     expect(noOrg).not.toBeNull();
     expect(await db.creditLedgerEntry.count()).toBe(0);
     // Nonexistent org: FK violation is swallowed (throw-safe), returns null.
     const bad = await recordLlmUsage(db, {
       ...base,
-      organizationId: 'no-such-org',
+      billableAccount: { organizationId: 'no-such-org' },
       keyOwnerType: 'HADRON_SERVER',
     });
     expect(bad).toBeNull();

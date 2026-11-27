@@ -46,7 +46,7 @@ const WRITE_ARG_PROPERTIES = {
   },
   tags: { type: 'array', items: { type: 'string' } },
   description: { type: 'string', description: 'Short description.' },
-  abstract: { type: 'string', description: 'Paragraph-length summary (max 2000 chars).' },
+  abstract: { type: 'string', description: 'Paragraph-length summary (max 2000 chars); for the long form use `content`.' },
   properties: { type: 'object', description: 'Structured key-value properties.' },
   isRunnable: { type: 'boolean', description: 'Whether the node can be run as a task.' },
 } as const;

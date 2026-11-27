@@ -16,6 +16,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { startDesiredWorker, startDesiredWorkers, START_FAILING_EVENT_TYPE } from './desiredStart.js';
 import { loadHostDesiredState } from './desiredState.js';
+import { ensureAgentTeamHost, joinHostForKey } from '../../test/agentTeamHost.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -40,6 +41,7 @@ let orca1: { id: string };
 /** A second host, orca2, registering Kit in its own worktree. */
 async function registerOrca2() {
   const k = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'efgh', label: 'orca2' }, select: { id: true } });
+  await joinHostForKey(db, k.id, 'orca2');
   await M.grantAppKeyScope({}, { id: k.id, scope: 'host:operate', hostId: 'orca2' }, ctx(admin.id));
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 2', pollIntervalSeconds: 600, workers: [
     { worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit2'] },
@@ -83,6 +85,7 @@ beforeEach(async () => {
   kit = await w(longAgent, 'Kit', { heldByUserId: bo.id, heldAt: new Date(), reportsToWorkerId: ada.id });
   sam = await w(shortAgent, 'Sam', { heldByUserId: bo.id, heldAt: new Date(), reportsToWorkerId: ada.id });
   orca1 = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd', label: 'orca1' }, select: { id: true } });
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(admin.id));
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 1', pollIntervalSeconds: 600, workers: [
     { worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] },
@@ -139,6 +142,7 @@ describe('#4231: one host failing does not stop the pass (#4257 blind F1, F2)', 
     const agentId = (await db.worker.findUniqueOrThrow({ where: { id: kit.id }, select: { agentId: true } })).agentId;
     const kai = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app2.id, agentId, name: 'Kai', slug: 'kai', heldByUserId: bo.id, heldAt: new Date() }, select: { id: true } });
     const k = await db.appKey.create({ data: { id: generateId(), appId: app2.id, keyHash: `h-${generateId()}`, keyPreview: 'ijkl', label: 'orca9' }, select: { id: true } });
+    await joinHostForKey(db, k.id, 'orca9');
     await M.grantAppKeyScope({}, { id: k.id, scope: 'host:operate', hostId: 'orca9' }, ctx(admin.id));
     await M.registerHost({}, { input: { appRef: app2.id, label: 'Orca 9', pollIntervalSeconds: 600, workers: [
       { worker: kai.id, family: 'claude', worktrees: ['hadron-server/kai'] },
@@ -212,6 +216,8 @@ describe('#4231 under hostSetupSource SERVER: only through a live host the worke
   });
 
   it('assigned to a host with no live registration: not started', async () => {
+    // #5259: a host joined to the App (its record), that never registered.
+    await ensureAgentTeamHost(db, app.id, 'orca3');
     await assign('Kit', 'orca3', 'hadron-server/kit');
     await server();
     await tick();

@@ -8,7 +8,7 @@ import { parseHTML } from 'linkedom';
 import MarkdownIt from 'markdown-it';
 import { marked } from 'marked';
 import { describe, expect, it } from 'vitest';
-import { escapeUnterminatedHtml } from './unterminatedHtml.js';
+import { escapeUnterminatedHtml, scansOfLastCallForTests } from './unterminatedHtml.js';
 
 const reader = new commonmark.Parser();
 const writer = new commonmark.HtmlRenderer();
@@ -158,3 +158,101 @@ it('#5211 stays linear on deep quotes inside list items', () => {
     expect({ unit: unit.slice(0, 20), fast: Date.now() - t0 < 5000 }).toEqual({ unit: unit.slice(0, 20), fast: true });
   }
 }, 120_000);
+
+describe('#5265 item 2: a list closed by an HTML block keeps its code', () => {
+  // CommonMark's own closing line: a type 7 block (`<span>`) does not close the item, so the code stays the item's (Bradley, LOCAL at 8dd599df:
+  // a mutant using marked's line leaves it raw for commonmark.js and markdown-it).
+  cases([['a type 7 line does not close it', '- a\n<span>\n\n    §script>', ['commonmark.js', 'markdown-it']]]);
+  // The last is a type 1 line (`<script>`), which closes the item as a type 6 one does (main escapes the code's tag).
+  it.each(['- a\n<div>\n\n    <script>', '> - a\n> <div>\n>\n>     <script>', '- a\nb\n<div>\n\n    <script>', '- a\n<script></script>\n    <script>'])('%j stays as written', (body) => {
+    expect(escapeUnterminatedHtml(body)).toBe(body);
+    expect(losers(body)).toEqual([]);
+  });
+});
+
+describe('#5265 item 2 in a text with a bare CR: main\'s list close', () => {
+  // Bradley, LOCAL at 6457cd8e: the readers end the code line at the CR and read `<plaintext>` as a new line, which this walk does not, so
+  // closing the item at `<div>` hid it. A text with a bare CR keeps main's list close, which reads the line as the item's paragraph.
+  cases([['a raw-text start after a bare CR in the code', '- a\n<div>\n\n    x\r§plaintext>', ALL]]);
+});
+
+describe('#5265 item 4: a tab before a quote inside a list item', () => {
+  cases([
+    // #5332: marked's model, with the bogus-comment rule it would otherwise expose.
+    ['marked strips the whole tab after a quote marker', '1.        \n>\t  > > <b y= §script>\n\n  >   > ', ['marked']],
+    ['the quote continues the item', '> - a\n>\t> q\n>\n>     §script>', ['commonmark.js', 'markdown-it']],
+    // The marker at column 3: the tab after it is a full tab's worth again.
+    ['with the inner quote three columns in', '> - a\n   >\t> q\n>\n>     §script>', ['commonmark.js', 'markdown-it']],
+  ]);
+  // The marker at column 1 or 2 (Beryl, BLIND at 6457cd8e): at column 2 the tab after it is one column wide, all of it the marker's blank, so
+  // it is not measured again as a whole tab, and the code stays as written, as on main.
+  it.each(['> - a\n >\t> q\n>\n>     <script>', '> - a\n  >\t> q\n>\n>     <script>'])('%j stays as written', (body) => {
+    expect(escapeUnterminatedHtml(body)).toBe(body);
+    expect(losers(body)).toEqual([]);
+  });
+});
+
+describe('#5265 item 9: a line of mixed -, * and _ is no thematic break', () => {
+  cases([
+    ['-*- continues the item', '- a\n-*-\n\n    §script>', ALL],
+    ['*-* too', '- a\n*-*\n\n    §script>', ALL],
+    // CommonMark's line alone: the item stays open past the type 7 line and the mixed one, so the tab's tag is the item's paragraph.
+    ['after a type 7 line', "- a\n<span>\n-*-\n\t§b x='", ['marked']],
+  ]);
+});
+
+it('#5265 item 9 changes only the list close: outside a list a mixed line is still taken for a block, as on main', () => {
+  // The `<span>` line then starts an HTML block, and the `<pre x=` in it is escaped: an over-escape no reader loses on (row 9 is the list
+  // close). Reading the mixed line as paragraph text here too would reach main's setext gaps (`-*-`, `-`, `<x>`, `~~~<xmp`), which lose.
+  const body = 'a\n-*-\n<span>\nuse `<pre x=` here';
+  expect(escapeUnterminatedHtml(body)).toBe('a\n-*-\n<span>\nuse `&lt;pre x=` here');
+  expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+  for (const b of ['-*-\n-\n<x>\n~~~<xmp', '<!E><v>\n-\n  ~~~\n\n-*-\n<!X']) expect(losers(escapeUnterminatedHtml(b)), b).toEqual([]);
+});
+
+describe('#5265 item 7 is not changed (Victor #151094: a raw-string reader counts under option (b))', () => {
+  it('an open tag in the raw block after `</b>` stays escaped', () => {
+    expect(escapeUnterminatedHtml('</b>\n```\n<b x=\n```\nz')).toBe('</b>\n```\n&lt;b x=\n```\nz');
+  });
+});
+
+describe('#5265 rebuild on items 2, 4 and 9: the bodies main keeps', () => {
+  // Each was lost at 5d444777 without item 6 and is kept by main (alphaY, extended and original fuzz sets).
+  cases([
+    // marked closes a list item at fewer HTML lines than CommonMark (no instruction, CDATA or declaration), so the line stays the item's.
+    ['marked keeps an instruction line in the item', '- /\n<?>\n    §script>', ['marked']],
+    ['and a CDATA line', '- b\n<![CDATA[]]>\n    §textarea>', ['marked']],
+    ['an ordered item', '1. t\n<![CDATA[]]>\n    §script>', ['marked']],
+    // #5332: a `<!` or `</` with no letter after it is text to Markdown, which emits the raw-text element after it (a browser reading the raw
+    // string ends a bogus comment at the `>`): the hidden tag is escaped, the comment is not.
+    ['a raw-text element behind `<!`', '> x<!§script>', ALL],
+    ['behind `</`', '>>r</§script>\n</§script>', ['commonmark.js', 'markdown-it']],
+    ['on the next line', '>></§script><!\n    §script>', ['commonmark.js', 'markdown-it']],
+  ]);
+  it('a lesser tag behind `<!`, a later line past a blank, and an HTML block are left as main leaves them', () => {
+    // [body, the readers that lose it, the same on main]: a line-head `<!<b>`, a raw-text element two lines on or past a blank, `<!` inside
+    // an HTML block (a browser's bogus comment is the only reading there), and a lesser tag.
+    // Known losses that main has too (Xan, team chat #152402): the `</textarea>` two lines on is #5323 (escaping it would lose the anchor
+    // in commonmark.js and markdown-it, which keep it on main), and the `<xmp>` behind `<div/` is #5324 (not the window's).
+    for (const [body, lost] of [
+      ['<!<b>\n-\n<!x>~~~', []], ['<!\n\n</textarea>\n~~~', ['marked']], ['<!\n-\n</textarea>\n~~~', ['marked']], ['<x>\n```<!<xmp>', []],
+      // The `</` site's mirror of the `<!` one inside an HTML block (Bradley, LOCAL at 8dd599df).
+      ['<x>\n```</<xmp>', []], ['<div>\n</<script>', []],
+      ['-<!<pre>\n<div/<xmp>', ['commonmark.js', 'markdown-it']],
+    ] as Array<[string, string[]]>) {
+      expect(escapeUnterminatedHtml(body), body).toBe(body);
+      expect(losers(body), body).toEqual(lost);
+    }
+  });
+});
+
+describe('#5265 one call is bounded in work', () => {
+  // The work, not the wall clock: each escape rescans the text once per model, and past MAX_RESTARTS (32) escapes every `<` is escaped.
+  it('160 KB with 40 open tags spread through it runs 66 scans', () => {
+    const unit = `${'word '.repeat(800)}<b x='\n\n`;
+    const body = Array(40).fill(unit).join('');
+    const out = escapeUnterminatedHtml(body);
+    expect(scansOfLastCallForTests()).toBe(66);
+    expect(out).toBe(body.replace(/</g, '&lt;'));
+  });
+});

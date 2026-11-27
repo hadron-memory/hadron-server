@@ -11,7 +11,7 @@ import { parseRunPolicySnapshot } from '../runner/runPolicy.js';
  * event commit before the value leaves this function. A client id that is unknown, belongs to another holder or another App is
  * the one uniform SECRET_READ_CLIENT_NOT_FOUND, so a client id is no existence oracle. Past that, the refusal names the state.
  */
-import { deleteLockedAppSecret } from './autoDelete.js';
+import { deleteLockedAppSecret, secretArmedForAutoDelete } from './autoDelete.js';
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.js';
@@ -139,8 +139,9 @@ async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise
     const value = await currentAppSecretValue(tx, { id: secret.id, ownerId: secret.ownerId });
     const after = await tx.grant.findUniqueOrThrow({ where: { id: client.grantId }, select: { maxUses: true, useCount: true } });
     const terms = await tx.grant.findUniqueOrThrow({ where: { id: client.grantId }, select: { values: true, signatureId: true } });
+    // #5335: and only when the secret is armed (a protected secret needs `deleteAfterUse`), judged now, under the secret lock.
     if (terms.signatureId && (terms.values as Record<string, unknown>)['auto-delete'] === 'delete'
-        && after.maxUses !== null && after.useCount >= after.maxUses) {
+        && after.maxUses !== null && after.useCount >= after.maxUses && await secretArmedForAutoDelete(tx, secret.id)) {
       await deleteLockedAppSecret(tx, secret);
     }
     return { value: JSON.stringify(value), secretName: secret.name, readsLeft: after.maxUses === null ? null : after.maxUses - after.useCount };
@@ -301,7 +302,8 @@ async function prepareSecretUseOnce(
     // Liveness above already required activation; the signature is checked the same way the reveal path checks it.
     if (terms['auto-delete'] === 'delete' && grant.signatureId) {
       const after = await tx.grant.findUniqueOrThrow({ where: { id: grant.id }, select: { maxUses: true, useCount: true } });
-      if (after.maxUses !== null && after.useCount >= after.maxUses) await deleteLockedAppSecret(tx, secret);
+      // #5335: a protected secret is deleted only when armed by `deleteAfterUse`, judged now, under the secret lock.
+      if (after.maxUses !== null && after.useCount >= after.maxUses && await secretArmedForAutoDelete(tx, secret.id)) await deleteLockedAppSecret(tx, secret);
     }
     return { url, auth };
   }, { afterLock: (tx) => lockAppManagerMemberships(tx, issuer ?? undefined, app) });

@@ -18,6 +18,7 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 import { memoryIdFilter, type OnlyMemoryIds } from './memoryIdScope.js';
+import { SUBSCRIPTION_WRITE_CLASSES } from './memorySubscriptionAccess.js';
 
 export async function getOrgWritableMemoryIds(
   db: PrismaClient,
@@ -67,7 +68,9 @@ export async function getSubscribedWritableMemoryIds(
   const rows = await db.memory.findMany({
     where: {
       ...(onlyMemoryId ? { id: memoryIdFilter(onlyMemoryId) } : {}),
-      deletedAt: null, class: 'knowledge', appId: null, ownerUserId: null, userMemoryOfAgentId: null,
+      // The write-class list is the SAME export the gate's own arm and the
+      // #329 audit use — one list, three readers, no drift.
+      deletedAt: null, class: { in: [...SUBSCRIPTION_WRITE_CLASSES] }, appId: null, ownerUserId: null, userMemoryOfAgentId: null,
       subscriptions: { some: {
         organizationId: { in: memberships.map(m => m.organizationId) }, deletedAt: null,
         role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] },

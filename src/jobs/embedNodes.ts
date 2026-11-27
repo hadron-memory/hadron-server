@@ -317,7 +317,9 @@ export async function embedNode(
         nodeLoc: node.loc,
         nodeId,
         memoryId: memory.id, // #796
-        organizationId: memory.organizationId,
+        // #5020: the attribution is unchanged (the memory's organization, none for a memory a person owns) until
+        // section 13 item 3 is ruled; an embedding is never debited whoever it names (NEVER_DEBITED_TYPES).
+        billableAccount: memory.organizationId ? { organizationId: memory.organizationId } : null,
         provider: usedClient.provider,
         model: usedClient.model,
         tokensIn: Math.ceil(embeddedChars / 4),

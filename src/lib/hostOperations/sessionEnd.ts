@@ -270,6 +270,7 @@ async function pickLiveHost(
     FROM host_registrations r
     JOIN host_registration_workers w ON w.registration_id = r.id AND w.worker_id = ${workerId}
     WHERE r.app_id = ${appId}
+      AND r.lost_at IS NULL
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * ${checkIns}) >= ${toNaiveUtc(now)}::timestamp
     ORDER BY r.host_id`;
   if (rows.length === 0) return null;

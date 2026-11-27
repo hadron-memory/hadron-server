@@ -17,6 +17,7 @@ import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -97,8 +98,11 @@ beforeEach(async () => {
   orca2 = await mkKey(app.id, 'orca2');
   plainKey = await mkKey(app.id, 'plain');
   foreignKey = await mkKey(otherApp.id, 'foreign');
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
+  await joinHostForKey(db, orca2.id, 'orca2');
   await M.grantAppKeyScope({}, { id: orca2.id, scope: 'host:operate', hostId: 'orca2' }, ctx(manager.id));
+  await joinHostForKey(db, foreignKey.id, 'orca1');
   await M.grantAppKeyScope({}, { id: foreignKey.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
 });
 
@@ -112,11 +116,13 @@ describe('the host:operate scope is granted for one host (cor:agt:070:04)', () =
   });
 
   it('a key operates as one host: granting it again for the same host changes nothing, for another is refused', async () => {
+    await joinHostForKey(db, orca1.id, 'orca1');
     await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
     expect(await db.appKeyScope.count({ where: { appKeyId: orca1.id } })).toBe(1);
     expect(await code(M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca2' }, ctx(manager.id)))).toBe('APP_KEY_SCOPE_HOST_CONFLICT');
     // Revoked, it can be given for another host.
     await M.revokeAppKeyScope({}, { id: orca1.id, scope: 'host:operate' }, ctx(manager.id));
+    await joinHostForKey(db, orca1.id, 'orca3');
     await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca3' }, ctx(manager.id));
     expect((await db.appKeyScope.findFirstOrThrow({ where: { appKeyId: orca1.id, revokedAt: null } })).hostId).toBe('orca3');
   });

@@ -42,6 +42,7 @@ import { generateId } from '../id.js';
 import { jsonOrDbNull } from '../nodeRevisionSnapshot.js';
 import { reclaimTombstonedMemory } from '../mintedSpecPermanence.js';
 import { deriveSlugFromName } from '../urn.js';
+import { derivedSlugBase, nextFreeDerivedSlug } from '../derivedSlug.js';
 import { CLONE_BLOCKER_CODES, CLONE_SOURCE_CHANGED, cloneBlockers } from './blockers.js';
 
 /** Whole-transaction attempts before a changing source is refused as {@link CLONE_SOURCE_CHANGED}. */
@@ -266,9 +267,15 @@ async function writeClone(
   // The target's URN is re-read under the org row's FOR SHARE lock: the pre-transaction read may predate a rename.
   const targetUrn = (await tx.organization.findUniqueOrThrow({ where: { id: target.orgId }, select: { urn: true } })).urn;
   const name = (input.name ?? '').trim() || source.name;
-  const slug = deriveSlugFromName((input.slug ?? '').trim() || name);
-  const urn = `${targetUrn}:${slug}`;
-  await claimUrn(tx, urn);
+  const suppliedSlug = (input.slug ?? '').trim();
+  // #5203 S3: with no slug supplied, the slug is DERIVED from the name and never refuses the clone
+  // (hrn:node:hadronmemory.com:specs:cor:urn:010:01): it skips a reserved word, an Agent row holding the URN and a memory
+  // holding `<urn>-system`, live or deleted, so a deleted holder is never reclaimed. Read under the org row's lock
+  // (the clone's anchors), as the URN is. A supplied slug keeps today's claim: reclaim a tombstone, refuse a live one.
+  const urn = suppliedSlug
+    ? `${targetUrn}:${deriveSlugFromName(suppliedSlug)}`
+    : `${targetUrn}:${await nextFreeDerivedSlug(derivedSlugBase(name), (candidate) => urnHeld(tx, `${targetUrn}:${candidate}`))}`;
+  if (suppliedSlug) await claimUrn(tx, urn, ctx.userId);
 
   // #5015/#5016: one Agent more for the target organization, and its system memory copy's nodes, asked in the clone's one multi-key call
   // after every anchor and row lock and before the first insert. The copy's own memory is a `system` one and free.
@@ -371,8 +378,14 @@ async function writeClone(
   return tx.agent.findUniqueOrThrow({ where: { id: agent.id }, include: AGENT_INCLUDE });
 }
 
-/** A tombstoned Agent or system memory holding the derived URN is reclaimed (as createAgent does); a live one refuses. */
-async function claimUrn(tx: Prisma.TransactionClient, urn: string): Promise<void> {
+/** #5203 S3: true when any Agent row (live or deleted) holds `urn`, or any memory holds `<urn>-system` as `urn` or `legacyUrn`. */
+async function urnHeld(tx: Prisma.TransactionClient, urn: string): Promise<boolean> {
+  if (await tx.agent.count({ where: { urn } })) return true;
+  return (await tx.memory.count({ where: { OR: [{ urn: `${urn}-system` }, { legacyUrn: `${urn}-system` }] } })) > 0;
+}
+
+/** A tombstoned Agent or system memory holding the SUPPLIED slug's URN is reclaimed (as createAgent does); a live one refuses. */
+async function claimUrn(tx: Prisma.TransactionClient, urn: string, userId: string | null | undefined): Promise<void> {
   const existing = await tx.agent.findUnique({ where: { urn } });
   if (existing && !existing.deletedAt) throw new AgentUrnTakenError(urn);
   if (existing) {
@@ -384,7 +397,7 @@ async function claimUrn(tx: Prisma.TransactionClient, urn: string): Promise<void
     }
   }
   const holder = await tx.memory.findUnique({ where: { urn: `${urn}-system` } });
-  if (holder && !(holder.deletedAt && (await reclaimTombstonedMemory(tx, holder.id)))) {
+  if (holder && !(holder.deletedAt && (await reclaimTombstonedMemory(tx, holder.id, [userId])))) {
     throw new AgentUrnTakenError(urn, `A memory with URN "${urn}-system" already exists`);
   }
 }

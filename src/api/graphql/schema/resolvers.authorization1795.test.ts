@@ -184,9 +184,9 @@ describe('#1795 public GraphQL boundary', () => {
       });
       expect(response.status).toBe(200);
       const body = await response.json() as { errors?: Array<{ extensions?: { code?: string } }>; data?: Record<string, unknown> };
-      // #1807: an uninstalled contributor cannot open the system record;
-      // conceal it rather than distinguishing its write refusal.
-      expect(body.errors?.[0]?.extensions?.code).toBe(key === 'definition' ? 'MEMORY_NOT_FOUND' : 'FORBIDDEN');
+      // #1807: an uninstalled contributor cannot open the system record; conceal it rather than distinguishing its
+      // write refusal. A per-user holding's record is its creator's alone (cor:cht:010:02), so it is concealed the same way.
+      expect(body.errors?.[0]?.extensions?.code).toBe('MEMORY_NOT_FOUND');
       expect(body.data?.[field]).toBeFalsy();
     expect(await db.node.count({ where: { memoryId, loc: 'new' } })).toBe(0);
     expect(await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId, loc: 'existing' } } })).toMatchObject({ name: 'Original', content: 'Original' });

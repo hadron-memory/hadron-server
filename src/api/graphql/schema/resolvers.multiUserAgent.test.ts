@@ -133,16 +133,24 @@ describe('App CRUD', () => {
     expect(result.urn).toBe('org-a:my-custom-slug');
   });
 
-  it('rejects duplicate URNs', async () => {
-    await resolvers.Mutation.createApp(
+  // #5203 S3 (cor:urn:010:01): a duplicate NAME no longer refuses; the derived URN iterates. A SUPPLIED urn a live
+  // App holds is still refused.
+  it('a duplicate name iterates the derived URN; a supplied duplicate URN is rejected', async () => {
+    const first = await resolvers.Mutation.createApp(
       {},
       { orgRef: orgA.id, agentRef: agent.id, name: 'Dup' },
       adminCtx(),
     );
+    const second = await resolvers.Mutation.createApp(
+      {},
+      { orgRef: orgA.id, agentRef: agent.id, name: 'Dup' },
+      adminCtx(),
+    );
+    expect(second.urn).toBe(`${first.urn}-2`);
     await expect(
       resolvers.Mutation.createApp(
         {},
-        { orgRef: orgA.id, agentRef: agent.id, name: 'Dup' },
+        { orgRef: orgA.id, agentRef: agent.id, name: 'Dup', urn: 'dup' },
         adminCtx(),
       ),
     ).rejects.toThrow(/already exists/);

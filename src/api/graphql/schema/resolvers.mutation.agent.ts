@@ -58,6 +58,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
+import { derivedSlugBase, nextFreeDerivedSlug } from '../../../lib/derivedSlug.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
 import { generateId } from '../../../lib/id.js';
@@ -88,6 +89,7 @@ import {
   assertAiConfigAppOwnerInstalled,
   lockAiConfigAppOwnerInstalled,
   suppliedSlug,
+  assertNameNotBlank,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
@@ -352,14 +354,28 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // from this one, so it inherits the clean slug).
   // #5203 S1: a supplied slug skips the name-derived check, so the name's own storability is judged here, typed, before any write.
   assertStorableText({ name });
-  const agentSlug = input.slug != null ? suppliedSlug(input.slug) : deriveSlugFromName(name);
+  const supplied = input.slug != null;
+  if (!supplied) assertNameNotBlank(name, 'Agent');
+  // #5203 S3: a slug DERIVED from the name never refuses the create (hrn:node:hadronmemory.com:specs:cor:urn:010:01).
+  // It skips a reserved word, an Agent row holding the URN (live or deleted) and, when the system memory is
+  // auto-provisioned, any memory holding `<urn>-system` (as `urn` or `legacyUrn`). A deleted holder is never
+  // reclaimed, so it stays restorable. A SUPPLIED slug keeps today's answers below.
+  const agentSlug = supplied
+    ? suppliedSlug(input.slug!)
+    : await nextFreeDerivedSlug(derivedSlugBase(name), async (candidate) => {
+      const urn = `${namespace}:${candidate}`;
+      if (await ctx.db.agent.count({ where: { urn } })) return true;
+      return !systemMemoryId && (await ctx.db.memory.count({
+        where: { OR: [{ urn: `${urn}-system` }, { legacyUrn: `${urn}-system` }] },
+      })) > 0;
+    });
   const agentUrn = `${namespace}:${agentSlug}`;
-  // Check for existing agent with the same URN. A tombstone is reclaimed —
-  // worker-name permanence lives on Worker rows (cor:agt:020:02), never on
+  // Check for existing agent with the same URN (a supplied slug only: a derived one was minted free above). A tombstone
+  // is reclaimed — worker-name permanence lives on Worker rows (cor:agt:020:02), never on
   // agent tombstones (the #974 re-cut removed the persona-reservation branch
   // here; a Worker's agent FK is Restrict, so a casting's agent can't be a
   // hard-deletable tombstone anyway).
-  const existing = await ctx.db.agent.findUnique({ where: { urn: agentUrn } });
+  const existing = supplied ? await ctx.db.agent.findUnique({ where: { urn: agentUrn } }) : null;
   if (existing) {
     if (existing.deletedAt) {
       // A retained install memory still needs this identity to enforce its org-text audience.
@@ -479,7 +495,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       // #1468 — reclaim through the shared guard: a deleted mint-stamped
       // corpus holding a protected spec refuses. A holder revived since the
       // read above is live, the same slot-occupied case as below.
-      const reclaimed = !!staleHolder?.deletedAt && await reclaimTombstonedMemory(tx, staleHolder.id);
+      const reclaimed = !!staleHolder?.deletedAt && await reclaimTombstonedMemory(tx, staleHolder.id, [ctx.userId]);
       if (staleHolder && !reclaimed) {
         // #935: typed — under racing creates of the same name, the loser
         // can land HERE (the winner's system memory committed between the

@@ -95,8 +95,17 @@ for (const door of ['personal', 'organization', 'app', 'installed'] as const) de
     expect(snapshot()).toEqual(before);
     noParticipants();
   });
-  // #5149: only a name that cannot be stored or yields no slug still refuses.
-  it.each(['..', '.:..', '/', ':', 'a\0b'])('preserves invalid-name refusal %j before database writes', async name => {
+  // #5149: only a name that cannot be stored still refuses; #5203 S3: a name with no slug creates under the fallback
+  // base (pinned next) and an empty or blank name refuses in its place.
+  it.each(['..', '.:..', '/', ':'])('creates no-slug name %j under the fallback slug, filesystem byte-identical', async name => {
+    const before = snapshot();
+    const memory = await create(door, name);
+    expect(memory.name).toBe(name);
+    expect(memory.urn.split(':').pop()).toBe('untitled');
+    expect(await db.node.count()).toBe(0);
+    expect(snapshot()).toEqual(before); noParticipants();
+  });
+  it.each(['', '   ', 'a\0b'])('preserves invalid-name refusal %j before database writes', async name => {
     const before = snapshot();
     await expect(create(door, name)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     expect(await db.memory.count()).toBe(0); expect(await db.node.count()).toBe(0);

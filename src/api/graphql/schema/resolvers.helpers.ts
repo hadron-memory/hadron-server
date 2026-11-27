@@ -1,3 +1,4 @@
+import { isPureAppKeyShape, linkedReachFor, registerOwnRightReader } from '../../../lib/appMemoryLinks.js';
 import { currentAgentOrgMember } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireOrgRole, isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
 import { endGrantsOfAgentsNoLongerInstalled, importedPairsOfParent } from '../../../lib/grants/agentInstallDeparture.js';
@@ -57,13 +58,13 @@ import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
-  deriveSlugFromName,
   formatCanonicalUrn,
   validateUserSlug,
   UrnNotQualifiedError,
   UrnParseError,
   type CanonicalUrnType,
 } from '../../../lib/urn.js';
+import { derivedSlugBase } from '../../../lib/derivedSlug.js';
 import { safeEntityUrnV2 } from '../../../lib/urnEmit.js';
 import {
   validateEdgeCondition,
@@ -101,6 +102,7 @@ import {
 } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { SUBSCRIPTION_WRITE_CLASSES } from '../../../lib/auth/memorySubscriptionAccess.js';
 import { isUserOwnedAgentDefinition } from '../../../lib/auth/userOwnedAgentDefinition.js';
 import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemory.js';
 import { isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
@@ -782,12 +784,15 @@ function userPrincipalOnly(ctx: Context): Context {
  * audience, which is precisely what this gate exists to stop. Stripping the
  * active App made the reach broader, not narrower.
  */
-function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
+export function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
   const self = userPrincipalOnly(ctx);
   return getAccessibleMemoryIds(self, memoryId, { excludeAppDerived: true }).then(
     (ids) => ids.includes(memoryId),
   );
 }
+
+// #5185: the link judge (src/lib/appMemoryLinks.ts) asks this question for each attacher; registered here so it imports no resolver.
+registerOwnRightReader(holdsContentReadIndependently as never);
 
 /**
  * The same-App attach (#1357; Holger's ruling, 2026-09-26): an appropriately
@@ -1100,6 +1105,7 @@ export async function canOpenMemoryRecordById(ctx: Context, memoryId: string): P
       organizationId: true,
       appId: true,
       userMemoryOfAgentId: true,
+      createdBy: true,
       deletedAt: true,
     },
   });
@@ -1230,12 +1236,13 @@ export type MemoryRecordGateRow = {
   organizationId: string | null;
   appId: string | null;
   userMemoryOfAgentId: string | null;
+  createdBy: string | null;
 };
 
 /** The Prisma `select` that yields a {@link MemoryRecordGateRow}; spread it, then add your own fields. */
 export const MEMORY_RECORD_GATE_SELECT = {
   id: true, class: true, userId: true, ownerUserId: true,
-  organizationId: true, appId: true, userMemoryOfAgentId: true,
+  organizationId: true, appId: true, userMemoryOfAgentId: true, createdBy: true,
 } as const satisfies Record<keyof MemoryRecordGateRow, true>;
 
 /**
@@ -1315,6 +1322,9 @@ export async function canReadMemoryRecord(
     if (isStrictOwner(ctx, memory.userId)) return true;
     // No `as never`: the cast is what let a caller omit the fields this reads.
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
+    // #5185: a pure App key / userless run reads a personal or private memory its App owner linked (the one judge decides,
+    // including that a run never reads `private`), so `memory(ref:)` answers as the node reads and MCP do.
+    if (isPureAppKeyShape(ctx) && (await linkedReachFor(ctx.db, ctx, [memory.id])).has(memory.id)) return true;
     return false;
   }
   // System records follow the installed/licensed Agent or manager audience,
@@ -1354,6 +1364,13 @@ export async function canReadMemoryRecord(
     if (memory.class !== 'app') return false;
     const ids = await accessible();
     return ids.includes(memory.id);
+  }
+  // A per-user "holding" (userMemoryOfAgentId set, e.g. the startChat no-App downgrade) is read by its CREATOR alone
+  // (cor:cht:010:02), the same identity the node-access set and the write gate use. It sits ABOVE the platform ADMIN/OWNER
+  // short-circuit and the org-member fast path below, so neither can admit it; an impersonated session, an App key and a
+  // run principal never read it. App-class records keep their own shape-aware audience (below).
+  if (memory.class !== 'app' && memory.userMemoryOfAgentId != null) {
+    return !!ctx.userId && !ctx.impersonation && !isRunPrincipal(ctx) && memory.createdBy === ctx.userId;
   }
   if (ctx.appId && ctx.sessionId && !ctx.userId) {
     const ids = await accessible();
@@ -2505,7 +2522,7 @@ export async function granteeShareAccess(
  *
  * The filter is also what keeps this gate's own contract: `getAccessibleMemoryIds`
  * admits personal/private ONLY through its identity-scoped clauses (owner,
- * holdings, share grantee). Nothing App-derived may add to that set.
+ * holdings, share grantee). Nothing App-derived may add to that set, EXCEPT the App's links for a pure key (#5185), which `getAccessibleMemoryIds` unions in after this filter through `src/lib/appMemoryLinks.ts`, the one judge of them.
  *
  * Both strict-owner axes live upstream as well (PR #1102 and #1260 reviews):
  * a map carrying rows the canonical point gate hard-denies is wrong for every
@@ -2655,7 +2672,12 @@ export async function getAccessibleMemoryIds(
     // right, so an attachment gate asking "what does this caller hold?" gets
     // the empty set rather than that App's fold (#1349).
     if (options?.excludeAppDerived) return [];
-    const derived = await appDerivedMemoryIds(ctx, onlyMemoryId);
+    // #5185: plus what the App's links let a pure key / userless run read (judged at use). Added AFTER the strict-owner
+    // class filter above on purpose: the one judge applies its own personal/private rule.
+    const derived = [...new Set([
+      ...await appDerivedMemoryIds(ctx, onlyMemoryId),
+      ...await linkedReachFor(ctx.db, ctx, onlyMemoryId ? [onlyMemoryId] : undefined),
+    ])];
     // #3306 / ruling 0104: a pure App key or userless run also reads PUBLIC knowledge (App-less, ownerless, live),
     // read-only. One shared predicate with the MCP point gate; reads only (no list surface returns these ids).
     if (!readsPublicKnowledgeWithoutUser(ctx)) return derived;
@@ -3123,9 +3145,11 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
   // live org CONTRIBUTOR+, group via its MemoryMember writer/owner grant.
   if ((await getOrgWritableMemoryIds(ctx.db, ctx.userId, memoryId)).includes(memoryId)) return;
 
-  // A subscription grants writes only to ordinary shared knowledge. Group
-  // membership stays the exclusive group-write arm (cor:acl:010:01).
-  if (memory.class === 'knowledge' && memory.userMemoryOfAgentId === null) {
+  // A subscription grants writes only to ordinary shared knowledge — the SAME
+  // exported list the audit and getSubscribedWritableMemoryIds use, so the
+  // writable class cannot drift between the copies. Group membership stays the
+  // exclusive group-write arm (cor:acl:010:01).
+  if ((SUBSCRIPTION_WRITE_CLASSES as readonly string[]).includes(memory.class) && memory.userMemoryOfAgentId === null) {
     const userOrgs = await ctx.db.orgMember.findMany({
       where: {
         userId: ctx.userId,
@@ -4525,21 +4549,27 @@ export function suppliedSlug(slug: string): string {
 }
 
 /**
- * #5149 — the slug a new memory takes from the caller's display name, or a typed BAD_USER_INPUT before any write.
- * The name itself has no grammar (hrn:node:hadronmemory.com:specs:cor:dmo:060:01) and reaches no path: the mirror checkout
- * is placed by the memory's URN, so only the slug is judged (hrn:node:hadronmemory.com:specs:cor:urn:010:02). Two names
- * still refuse: one that cannot be stored (a NUL or an unpaired surrogate), and one that yields no slug.
+ * #5149 / #5203 S3 — the slug BASE a new memory takes from the caller's display name, or a typed BAD_USER_INPUT before
+ * any write. The name itself has no grammar (hrn:node:hadronmemory.com:specs:cor:dmo:060:01) and reaches no path: the
+ * mirror checkout is placed by the memory's URN, so only the slug is judged (hrn:node:hadronmemory.com:specs:cor:urn:010:02).
+ *
+ * A supplied slug is validated and returned as is (S1). Otherwise the NAME is judged first: one that cannot be stored
+ * (a NUL or an unpaired surrogate) or that is empty or blank is refused, as an invalid name. Then the base is derived,
+ * and a name that yields no slug gets the fallback base: the derivation never refuses (hrn:node:hadronmemory.com:specs:cor:urn:010:01).
+ * The base may still be a reserved word or taken; the door mints the final slug from it ({@link nextFreeDerivedSlug},
+ * or `mintMemoryUrnV2`, which skip both).
  * Call it after the authorization gates and before the door's first write.
  */
 export function deriveMemorySlug(name: string, supplied?: string | null): string {
   assertStorableText({ name });
   if (supplied != null) return suppliedSlug(supplied);
-  try {
-    return deriveSlugFromName(name);
-  } catch (err) {
-    if (!(err instanceof UrnParseError)) throw err;
-    throw new GraphQLError('Invalid memory name: it must contain at least one ASCII letter or digit.', {
-      extensions: { code: 'BAD_USER_INPUT' },
-    });
+  assertNameNotBlank(name, 'Memory');
+  return derivedSlugBase(name);
+}
+
+/** #5203 S3: an empty or whitespace-only name is an invalid NAME, refused before any slug is derived from it. */
+export function assertNameNotBlank(name: string, entity: 'Memory' | 'Agent' | 'App'): void {
+  if (!name.trim()) {
+    throw new GraphQLError(`${entity} name must not be empty.`, { extensions: { code: 'BAD_USER_INPUT' } });
   }
 }

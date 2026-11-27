@@ -33,6 +33,7 @@ import {
   InvalidLedgerAmountError,
   isServerWrittenSourceType,
   LEDGER_SOURCE_CONFLICT_MESSAGE,
+  PRICE_CACHE_TTL_MS,
   PRICE_TIER_DEFAULT,
   PRICE_TIER_MAX,
   PRICE_TIER_MIN,
@@ -51,6 +52,7 @@ import {
 } from '../../../lib/metering/settleExpiredGrants.js';
 import type { ReplayResult } from '../../../lib/metering/expiry.js';
 import { isReadOnlyImpersonation } from '../impersonationReadOnlyPlugin.js';
+import { ensurePeriodGrant, periodGrantDue } from '../../../lib/metering/periodGrant.js';
 import { safeErrorCode } from '../../../lib/safeErrorCode.js';
 import type { CreditLedgerEntry, AiModelPrice } from '../../../generated/prisma/index.js';
 
@@ -268,27 +270,47 @@ export const meteringQueries = {
     // sweep commits meanwhile is then in neither or in both of the replay and the sum, never counted twice. A writing read
     // that fails (a serialization failure with a concurrent settler included) logs one line and answers from the read-only
     // snapshot (ruling 10.4).
-    const snapshot = (write: boolean): Promise<{ measure: CreditMeasure; sum: bigint }> =>
+    // #5242 item 3: which phase of the writing snapshot failed, so a failed stored-sum read is logged as one
+    // (`credit_expiry.read_failed`) and not as a failed settlement. The whole snapshot stays in the one `try` (the sum read cannot be
+    // moved out of the transaction); only the line's name differs. The fallback answers the same either way.
+    let failedPhase = 'settle' as 'settle' | 'read';
+    // `withDue`: the month's grant still owed (#5022, ruling 9a) is read in the SAME snapshot as the sum (sec10 P3-2 and the
+    // LOCAL and BLIND notes on #5317), so a grant another read commits meanwhile is in both or in neither, never counted twice.
+    const snapshot = (write: boolean, withDue = false): Promise<{ measure: CreditMeasure; sum: bigint; due: bigint }> =>
       ctx.db.$transaction(
         async (tx) => {
           const m = await settleAndMeasure(tx as unknown as typeof ctx.db, owner, asOf, { write });
-          return { measure: m, sum: await creditBalance(tx as unknown as typeof ctx.db, owner) };
+          try {
+            const sum = await creditBalance(tx as unknown as typeof ctx.db, owner);
+            const due = withDue ? await periodGrantDue(tx, owner, asOf) : 0n;
+            return { measure: m, sum, due };
+          } catch (err) {
+            failedPhase = 'read';
+            throw err;
+          }
         },
         { isolationLevel: 'RepeatableRead' },
       );
     let measure: CreditMeasure;
     let sum: bigint;
+    // #5022 (Billing A9, hrn:node:hadronmemory.com:specs:cor:dmo:170:12): the grant this month still owes the owner. A read that
+    // may not write adds it to its figure (gate ruling 9a), so it answers what the next writing read will.
+    let due = 0n;
     if (isReadOnlyImpersonation(ctx)) {
-      ({ measure, sum } = await snapshot(false));
+      // S4: an impersonated session is read-only, so it writes no grant.
+      ({ measure, sum, due } = await snapshot(false, true));
     } else {
       try {
         // #5014 (local review P2): first bring in any entry still named by a person merged into this one, so the figure
         // and the settlement below see the whole ledger whatever the interleaving of a merge and a write.
         if ('userId' in owner) await repointMergedLedgerOwners(ctx.db, { survivor: owner.userId });
+        // #5022: the month's default grant, after the gate and for the owner it admitted, OUTSIDE the snapshot below (a concurrent
+        // writer of the same grant raises a unique violation that would abort it). Never throws (cor:dmo:170:09).
+        await ensurePeriodGrant(ctx.db, owner, asOf);
         // #5014 (the #5221 carry, #5242 item 2): the probe, the replay, any settlement written and the stored sum in ONE snapshot.
         ({ measure, sum } = await snapshot(true));
       } catch (err) {
-        console.error('credit_expiry.settle_failed', {
+        console.error(failedPhase === 'read' ? 'credit_expiry.read_failed' : 'credit_expiry.settle_failed', {
           ...('organizationId' in owner ? { organizationId: owner.organizationId } : { ownerUserId: owner.userId }),
           code: safeErrorCode(err),
         });
@@ -298,7 +320,7 @@ export const meteringQueries = {
     return {
       organizationId: 'organizationId' in owner ? owner.organizationId : null,
       ownerUserId: 'userId' in owner ? owner.userId : null,
-      balanceMicroCents: (sum - measure.unsettled).toString(),
+      balanceMicroCents: (sum - measure.unsettled + due).toString(),
       asOf,
       replay: measure.replay,
     };
@@ -306,29 +328,42 @@ export const meteringQueries = {
 
   /**
    * #5008 (Billing A2): the organization's AI spend for [from, to), one grouping. Org-ADMIN, the gate of `creditBalance`
-   * and answered first, so a caller who may not read gets FORBIDDEN whatever the range says. Rows are scalars: `APP` keys
+   * and answered first, so a caller who may not read gets FORBIDDEN whatever the range says. #5020 (A13): or one PERSON's, by
+   * `userRef`, read by the billable account (the units that name them as the owner of the work), never by the user the work
+   * was done for. Rows are scalars: `APP` keys
    * are ids, never an App object (cor:dmo:170:04 keeps cost and charge apart; see the SDL).
    */
   aiSpend: async (
     _: unknown,
-    { orgRef, from, to, groupBy }: { orgRef: string; from: string; to: string; groupBy: AiSpendGroup },
+    { orgRef, userRef, from, to, groupBy }: { orgRef?: string | null; userRef?: string | null; from: string; to: string; groupBy: AiSpendGroup },
     ctx: Context,
   ) => {
-    // A reference that names no organization answers the denial any non-admin gets for an existing one, so the
-    // refusal does not tell which organizations exist (and echoes nothing of the ref). A platform admin passes
-    // the gate for every organization, so for them nothing is concealed and the not-found stays. Only the RESPONSE is
-    // equalised, not the work: a missing organization skips the membership lookup an existing one runs, so a timing
-    // difference remains. That is not a secret kept: organizations are listable (the #5008 issue), and the refusal is
-    // identical so this surface does not read as an existence oracle. An App key (no user) is denied by
-    // requireOrgRole with the same authorizationDenied(), so it gets the same answer for either.
-    let orgId: string;
-    try {
-      ({ id: orgId } = await resolveOrgRef(ctx.db, orgRef));
-    } catch (e) {
-      if (e instanceof OrganizationNotFoundError && !isPlatformAdmin(ctx)) throw authorizationDenied();
-      throw e;
+    // #5020: exactly one of the two refs, judged before any read or gate, so a malformed call is answered the same for every
+    // caller and discloses nothing.
+    if ((orgRef == null) === (userRef == null)) throw badInput('Give exactly one of orgRef and userRef.');
+    let scope: { organizationId: string } | { userId: string };
+    if (userRef != null) {
+      // A person's spend: that person in a user session, or a platform admin (A6's gate, which refuses an App key and an
+      // impersonated session on the credential and answers a missing user as it answers another person's).
+      scope = { userId: await requirePersonRecordRead(ctx, userRef) };
+    } else {
+      // A reference that names no organization answers the denial any non-admin gets for an existing one, so the
+      // refusal does not tell which organizations exist (and echoes nothing of the ref). A platform admin passes
+      // the gate for every organization, so for them nothing is concealed and the not-found stays. Only the RESPONSE is
+      // equalised, not the work: a missing organization skips the membership lookup an existing one runs, so a timing
+      // difference remains. That is not a secret kept: organizations are listable (the #5008 issue), and the refusal is
+      // identical so this surface does not read as an existence oracle. An App key (no user) is denied by
+      // requireOrgRole with the same authorizationDenied(), so it gets the same answer for either.
+      let orgId: string;
+      try {
+        ({ id: orgId } = await resolveOrgRef(ctx.db, orgRef!));
+      } catch (e) {
+        if (e instanceof OrganizationNotFoundError && !isPlatformAdmin(ctx)) throw authorizationDenied();
+        throw e;
+      }
+      await requireOrgRole(ctx, orgId, 'ADMIN');
+      scope = { organizationId: orgId };
     }
-    await requireOrgRole(ctx, orgId, 'ADMIN');
     const fromAt = parseSpendInstant(from);
     const toAt = parseSpendInstant(to);
     if (!fromAt || !toAt) throw badInput('from and to must be ISO 8601 dates or date-times (a value with no offset is UTC).');
@@ -336,7 +371,7 @@ export const meteringQueries = {
     if (toAt.getTime() - fromAt.getTime() > AI_SPEND_MAX_DAYS * 86_400_000) {
       throw badInput(`The range may span at most ${AI_SPEND_MAX_DAYS} days.`);
     }
-    const summary = await aiSpendSummary(ctx.db, { organizationId: orgId, from: fromAt, to: toAt, groupBy });
+    const summary = await aiSpendSummary(ctx.db, { ...scope, from: fromAt, to: toAt, groupBy });
     return { from: fromAt.toISOString(), to: toAt.toISOString(), ...summary };
   },
 };
@@ -384,8 +419,22 @@ export const meteringMutations = {
     if (markupBasisPoints != null && (!Number.isInteger(markupBasisPoints) || markupBasisPoints < 0)) {
       throw badInput('markupBasisPoints must be a non-negative integer (2500 = 25%).');
     }
-    const effectiveAt = input.effectiveAt ? new Date(input.effectiveAt) : new Date();
-    if (Number.isNaN(effectiveAt.getTime())) throw badInput('effectiveAt is not a valid date.');
+    // #5021 (hrn:node:hadronmemory.com:specs:cor:dmo:170:06): a row may not take effect in the past, which would
+    // change which row covers units already recorded, nor before every process's price cache has had one lifetime
+    // to expire (or learn the new row's instant), so it takes effect everywhere at once. An omitted date is the
+    // earliest allowed instant. The text is read by the strict ISO rule (gate ruling 7, #5008's rule).
+    const earliest = new Date(Date.now() + PRICE_CACHE_TTL_MS);
+    let effectiveAt = earliest;
+    if (input.effectiveAt != null) {
+      const parsed = parseSpendInstant(input.effectiveAt);
+      if (!parsed) throw badInput('effectiveAt must be an ISO 8601 date or date-time, for example 2026-12-01T00:00:00Z.');
+      if (parsed.getTime() < earliest.getTime()) {
+        throw badInput(
+          `effectiveAt must be at least ${PRICE_CACHE_TTL_MS / 1000} seconds from now (not before ${earliest.toISOString()}): a price takes effect only once every server can apply it, and never in the past. Leave it out for the earliest allowed time.`,
+        );
+      }
+      effectiveAt = parsed;
+    }
     let row: AiModelPrice;
     try {
       row = await ctx.db.aiModelPrice.create({
@@ -409,8 +458,8 @@ export const meteringMutations = {
       }
       throw err;
     }
-    // The hot-path cache may hold the now-superseded row for up to its TTL;
-    // drop it so new events price correctly right away.
+    // #5021: no longer needed for correctness (the lead and the next-row expiry switch every process at the
+    // effective instant); dropping this process's cache just makes it look the new row up on its next unit.
     clearPriceCache();
     return projectPrice(row);
   },

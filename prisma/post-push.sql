@@ -786,6 +786,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- 20261125130000_credit_ledger_append_only (pinned by src/test/migrations/creditLedgerAppendOnly5010.test.ts).
 \ir credit-ledger-invariants.sql
 
+-- #5021: price rows are kept (no DELETE, no content UPDATE; audit ids follow a recorded merge). One source, shared
+-- verbatim with migration 20261126080400_ai_model_prices_kept (pinned by src/test/migrations/priceRowKept5021.test.ts).
+\ir ai-model-price-invariants.sql
+
 -- #5212: the one writer of user_merges. One source, shared verbatim with migration 20261126070000_user_merge_record_function
 -- (pinned by src/test/migrations/userMergeRecord5212.test.ts). After the tables it reads: users, user_merges, user_merge_consents.
 \ir user-merge-record-invariants.sql
@@ -995,6 +999,10 @@ CREATE TRIGGER agent_clone_audits_immutable
 -- worker-reference-invariants.sql, whose fence function its trigger uses.
 \ir host-assignment-invariants.sql
 
+-- #5259: the hosts of a team App and their settings. One source, shared verbatim with migration
+-- 20261126160000_agent_team_hosts (pinned by src/api/graphql/schema/resolvers.agentTeamHost5259.test.ts).
+\ir agent-team-host-invariants.sql
+
 -- S12 explicit reporting choice (legacy UNSET retained).
 \ir worker-team-choice-invariants.sql
 -- #4224: the leave-alone marker's shape (same rule as migration 20261115160000_desired_state).
@@ -1045,6 +1053,11 @@ ON CONFLICT (id) DO NOTHING;
 
 -- #451: delete-path FK columns need a leading index (the same statements as the four 20261031110x migrations).
 CREATE INDEX IF NOT EXISTS "usage_events_node_id_idx" ON "usage_events"("node_id");
+
+-- #5020 (Billing A13, cor:dmo:170:05): a usage event names at most one billable account. The migration
+-- 20261126090000_usage_events_billable_user adds the same constraint NOT VALID and 20261126090200 validates it.
+ALTER TABLE "usage_events" DROP CONSTRAINT IF EXISTS "chk_usage_event_one_billable";
+ALTER TABLE "usage_events" ADD CONSTRAINT "chk_usage_event_one_billable" CHECK (num_nonnulls("organization_id", "billable_user_id") <= 1);
 CREATE INDEX IF NOT EXISTS "sessions_agent_id_idx" ON "sessions"("agent_id");
 CREATE INDEX IF NOT EXISTS "sessions_memory_id_idx" ON "sessions"("memory_id");
 CREATE INDEX IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organization_id");

@@ -14,7 +14,7 @@
   ],
   [
    "hadron_create_memory",
-   "6a6dbcc360d0abc1b9526ca38e9c2fa094def0a0fbc6e0ac114bd88a250ff7be"
+   "9042d9084eec57a3acb446849596a9cf1417f5bf76a8766f02fffde52c9ffdcf"
   ],
   [
    "hadron_create_app_memory",
@@ -162,7 +162,11 @@
   ],
   [
    "hadron_agent_tasks",
-   "ff505d4c18614f0f4ab4671b3e88a523a2d61b4c346974edf16c82c91db4254b"
+   "24cea80e8bfbfb3be914d917eda80d1acaaa790899a16a38e8301852e556cb18"
+  ],
+  [
+   "hadron_get_instructions",
+   "62b5b613863a3cd45d53c891bd755feb6da23abe1ea9673b8552d492ef993104"
   ],
   [
    "hadron_agent_processes",
@@ -234,7 +238,7 @@
   ],
   [
    "hadron_get_nodes",
-   "75c791760d8f93174c046f355b7477c074b3890455954f4c140967fb66a624f6"
+   "c7d1479d95cbeab8875fe7801aa33dacb03b3f80ac597330525648793ae2cc66"
   ],
   [
    "hadron_get_next_node",
@@ -254,27 +258,27 @@
   ],
   [
    "hadron_create_node",
-   "f603f151267ab00bb9b580de9696626e8237f1ffde1854685462f39baad1314e"
+   "cb289fc28977375df006e2f65c3b40adfc4105516f68f211a574b61b82e4694c"
   ],
   [
    "hadron_update_node",
-   "c5cf91dbbdbc3da9b2df0d5ecdc68e0d958634e481f670e92058c91c65a0075a"
+   "2e5a1a70ea2c7deda3bd217f006430564bff9068c25a2640b37829b7a75a7bb5"
   ],
   [
    "hadron_create_task",
-   "16d6db6e8d89cbed1ab5b388a0c058ad83c6731144064913b0ba2106c75e5c8b"
+   "84ed35dd110bd0fa78775f39f2ff7f107b66e2a4409b67f1f2894287a3ab95f2"
   ],
   [
    "hadron_update_task",
-   "8e87664e94ad0b072fdc09dbf55c2ff86f09f6eda0abe7a34f60d89da2cb6948"
+   "88aae14b0fa005eca6b32fc14f9227f138debc18a9435e7fa846cb885c3cfe33"
   ],
   [
    "hadron_create_review",
-   "54879a05e42f96f295f22208a4b2aa324dcd30ffb8b2f04391eeac623f22cd35"
+   "7c5a49fa809c8a53186c4471d5958c44cd5c55cb11a55cf63a10b43328bbcc0c"
   ],
   [
    "hadron_update_review",
-   "be8879438ab2ac40db3b13dba164216834cee5ec8a272321a72e77a4c2c5aa4e"
+   "625d9de42e4ffa99204331591b265ab9fbcf367abf9fa0f57e9f356f1f1a9772"
   ],
   [
    "hadron_retire_spec",
@@ -376,7 +380,7 @@
   ],
   [
    "hadron_create_memory",
-   "6a6dbcc360d0abc1b9526ca38e9c2fa094def0a0fbc6e0ac114bd88a250ff7be"
+   "9042d9084eec57a3acb446849596a9cf1417f5bf76a8766f02fffde52c9ffdcf"
   ],
   [
    "hadron_create_app_memory",
@@ -524,7 +528,11 @@
   ],
   [
    "hadron_agent_tasks",
-   "ff505d4c18614f0f4ab4671b3e88a523a2d61b4c346974edf16c82c91db4254b"
+   "24cea80e8bfbfb3be914d917eda80d1acaaa790899a16a38e8301852e556cb18"
+  ],
+  [
+   "hadron_get_instructions",
+   "62b5b613863a3cd45d53c891bd755feb6da23abe1ea9673b8552d492ef993104"
   ],
   [
    "hadron_agent_processes",
@@ -596,7 +604,7 @@
   ],
   [
    "hadron_get_nodes",
-   "75c791760d8f93174c046f355b7477c074b3890455954f4c140967fb66a624f6"
+   "c7d1479d95cbeab8875fe7801aa33dacb03b3f80ac597330525648793ae2cc66"
   ],
   [
    "hadron_get_next_node",
@@ -616,27 +624,27 @@
   ],
   [
    "hadron_create_node",
-   "f603f151267ab00bb9b580de9696626e8237f1ffde1854685462f39baad1314e"
+   "cb289fc28977375df006e2f65c3b40adfc4105516f68f211a574b61b82e4694c"
   ],
   [
    "hadron_update_node",
-   "c5cf91dbbdbc3da9b2df0d5ecdc68e0d958634e481f670e92058c91c65a0075a"
+   "2e5a1a70ea2c7deda3bd217f006430564bff9068c25a2640b37829b7a75a7bb5"
   ],
   [
    "hadron_create_task",
-   "16d6db6e8d89cbed1ab5b388a0c058ad83c6731144064913b0ba2106c75e5c8b"
+   "84ed35dd110bd0fa78775f39f2ff7f107b66e2a4409b67f1f2894287a3ab95f2"
   ],
   [
    "hadron_update_task",
-   "8e87664e94ad0b072fdc09dbf55c2ff86f09f6eda0abe7a34f60d89da2cb6948"
+   "88aae14b0fa005eca6b32fc14f9227f138debc18a9435e7fa846cb885c3cfe33"
   ],
   [
    "hadron_create_review",
-   "54879a05e42f96f295f22208a4b2aa324dcd30ffb8b2f04391eeac623f22cd35"
+   "7c5a49fa809c8a53186c4471d5958c44cd5c55cb11a55cf63a10b43328bbcc0c"
   ],
   [
    "hadron_update_review",
-   "be8879438ab2ac40db3b13dba164216834cee5ec8a272321a72e77a4c2c5aa4e"
+   "625d9de42e4ffa99204331591b265ab9fbcf367abf9fa0f57e9f356f1f1a9772"
   ],
   [
    "hadron_retire_spec",
@@ -738,7 +746,7 @@
   ],
   [
    "hadron_create_memory",
-   "6a6dbcc360d0abc1b9526ca38e9c2fa094def0a0fbc6e0ac114bd88a250ff7be"
+   "9042d9084eec57a3acb446849596a9cf1417f5bf76a8766f02fffde52c9ffdcf"
   ],
   [
    "hadron_create_app_memory",
@@ -886,7 +894,11 @@
   ],
   [
    "hadron_agent_tasks",
-   "ff505d4c18614f0f4ab4671b3e88a523a2d61b4c346974edf16c82c91db4254b"
+   "24cea80e8bfbfb3be914d917eda80d1acaaa790899a16a38e8301852e556cb18"
+  ],
+  [
+   "hadron_get_instructions",
+   "62b5b613863a3cd45d53c891bd755feb6da23abe1ea9673b8552d492ef993104"
   ],
   [
    "hadron_agent_processes",
@@ -958,7 +970,7 @@
   ],
   [
    "hadron_get_nodes",
-   "75c791760d8f93174c046f355b7477c074b3890455954f4c140967fb66a624f6"
+   "c7d1479d95cbeab8875fe7801aa33dacb03b3f80ac597330525648793ae2cc66"
   ],
   [
    "hadron_get_next_node",
@@ -978,27 +990,27 @@
   ],
   [
    "hadron_create_node",
-   "f603f151267ab00bb9b580de9696626e8237f1ffde1854685462f39baad1314e"
+   "cb289fc28977375df006e2f65c3b40adfc4105516f68f211a574b61b82e4694c"
   ],
   [
    "hadron_update_node",
-   "c5cf91dbbdbc3da9b2df0d5ecdc68e0d958634e481f670e92058c91c65a0075a"
+   "2e5a1a70ea2c7deda3bd217f006430564bff9068c25a2640b37829b7a75a7bb5"
   ],
   [
    "hadron_create_task",
-   "16d6db6e8d89cbed1ab5b388a0c058ad83c6731144064913b0ba2106c75e5c8b"
+   "84ed35dd110bd0fa78775f39f2ff7f107b66e2a4409b67f1f2894287a3ab95f2"
   ],
   [
    "hadron_update_task",
-   "8e87664e94ad0b072fdc09dbf55c2ff86f09f6eda0abe7a34f60d89da2cb6948"
+   "88aae14b0fa005eca6b32fc14f9227f138debc18a9435e7fa846cb885c3cfe33"
   ],
   [
    "hadron_create_review",
-   "54879a05e42f96f295f22208a4b2aa324dcd30ffb8b2f04391eeac623f22cd35"
+   "7c5a49fa809c8a53186c4471d5958c44cd5c55cb11a55cf63a10b43328bbcc0c"
   ],
   [
    "hadron_update_review",
-   "be8879438ab2ac40db3b13dba164216834cee5ec8a272321a72e77a4c2c5aa4e"
+   "625d9de42e4ffa99204331591b265ab9fbcf367abf9fa0f57e9f356f1f1a9772"
   ],
   [
    "hadron_retire_spec",
@@ -1100,7 +1112,7 @@
   ],
   [
    "hadron_create_memory",
-   "6a6dbcc360d0abc1b9526ca38e9c2fa094def0a0fbc6e0ac114bd88a250ff7be"
+   "9042d9084eec57a3acb446849596a9cf1417f5bf76a8766f02fffde52c9ffdcf"
   ],
   [
    "hadron_create_app_memory",
@@ -1248,7 +1260,11 @@
   ],
   [
    "hadron_agent_tasks",
-   "ff505d4c18614f0f4ab4671b3e88a523a2d61b4c346974edf16c82c91db4254b"
+   "24cea80e8bfbfb3be914d917eda80d1acaaa790899a16a38e8301852e556cb18"
+  ],
+  [
+   "hadron_get_instructions",
+   "62b5b613863a3cd45d53c891bd755feb6da23abe1ea9673b8552d492ef993104"
   ],
   [
    "hadron_agent_processes",
@@ -1320,7 +1336,7 @@
   ],
   [
    "hadron_get_nodes",
-   "75c791760d8f93174c046f355b7477c074b3890455954f4c140967fb66a624f6"
+   "c7d1479d95cbeab8875fe7801aa33dacb03b3f80ac597330525648793ae2cc66"
   ],
   [
    "hadron_get_next_node",
@@ -1340,27 +1356,27 @@
   ],
   [
    "hadron_create_node",
-   "f603f151267ab00bb9b580de9696626e8237f1ffde1854685462f39baad1314e"
+   "cb289fc28977375df006e2f65c3b40adfc4105516f68f211a574b61b82e4694c"
   ],
   [
    "hadron_update_node",
-   "c5cf91dbbdbc3da9b2df0d5ecdc68e0d958634e481f670e92058c91c65a0075a"
+   "2e5a1a70ea2c7deda3bd217f006430564bff9068c25a2640b37829b7a75a7bb5"
   ],
   [
    "hadron_create_task",
-   "16d6db6e8d89cbed1ab5b388a0c058ad83c6731144064913b0ba2106c75e5c8b"
+   "84ed35dd110bd0fa78775f39f2ff7f107b66e2a4409b67f1f2894287a3ab95f2"
   ],
   [
    "hadron_update_task",
-   "8e87664e94ad0b072fdc09dbf55c2ff86f09f6eda0abe7a34f60d89da2cb6948"
+   "88aae14b0fa005eca6b32fc14f9227f138debc18a9435e7fa846cb885c3cfe33"
   ],
   [
    "hadron_create_review",
-   "54879a05e42f96f295f22208a4b2aa324dcd30ffb8b2f04391eeac623f22cd35"
+   "7c5a49fa809c8a53186c4471d5958c44cd5c55cb11a55cf63a10b43328bbcc0c"
   ],
   [
    "hadron_update_review",
-   "be8879438ab2ac40db3b13dba164216834cee5ec8a272321a72e77a4c2c5aa4e"
+   "625d9de42e4ffa99204331591b265ab9fbcf367abf9fa0f57e9f356f1f1a9772"
   ],
   [
    "hadron_retire_spec",

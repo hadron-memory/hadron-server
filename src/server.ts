@@ -80,11 +80,13 @@ import { assertProductionSigningSecret } from './auth/signingSecret.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
+import { signedOutRefDoorsPlugin } from './api/graphql/signedOutRefDoorsPlugin.js';
 import { taskWarningsPlugin } from './api/graphql/taskWarningsPlugin.js';
 import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
 import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
 import { loadOwnerDefaultLimits } from './lib/ownerLimits/defaults.js';
+import { loadOwnerDefaultMonthlyGrant } from './lib/metering/periodGrant.js';
 import { nodeContentMaxBytes } from './lib/nodeContentLimit.js';
 import { complexityAdmissionPlugin } from './api/graphql/admissionComplexity.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
@@ -1231,6 +1233,11 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // #5009: the deployment's default owner limits; a malformed value refuses boot.
   loadOwnerDefaultLimits();
   nodeContentMaxBytes(); // #5019: a malformed ceiling refuses boot
+  // #5022: the default monthly grant; a malformed value refuses boot. The effective amounts on one line (micro-cents).
+  const monthlyGrant = loadOwnerDefaultMonthlyGrant();
+  console.log(JSON.stringify({
+    event: 'period_grant.config', user: monthlyGrant.user.toString(), organization: monthlyGrant.organization.toString(),
+  }));
   // The effective L4 configuration, on one line, so ops can confirm the mode a deploy actually booted with.
   console.log(JSON.stringify({
     event: 'graphql.admission.config', mode: admission.complexityMode, maxDepth: admission.maxDepth,
@@ -1249,7 +1256,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     status400ForVariableCoercionErrors: false,
     typeDefs,
     resolvers: deploymentResolvers,
-    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission), memoryPressurePlugin()],
+    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, signedOutRefDoorsPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission), memoryPressurePlugin()],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
     formatError: formatGraphQLError,

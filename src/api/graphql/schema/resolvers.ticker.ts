@@ -99,6 +99,7 @@ import { loadWorkersActivity } from './resolvers.worker.js';
 import { nextFreeTickerSlug } from '../../../lib/tickers/tickerSlug.js';
 import { TickerNotFoundError, composeTickerUrn, resolveTickerRef } from '../../../lib/tickers/tickerRef.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
+import { userUrn } from '../../../lib/userHandle.js';
 import {
   GeneratedAgentNotInstalledError, GeneratedNameTooLongError, GeneratedTickerLimitError, GeneratedTickerNameTakenError,
   applyAgentTickerTemplates,
@@ -1195,11 +1196,13 @@ async function actorRef(ctx: Context, workerId: string | null, userId: string | 
     } catch {
       urn = null;
     }
-    return { id: w.id, name: w.name, urn };
+    return { id: w.id, name: w.name, handle: null, urn };
   }
   if (userId) {
     const u = await ctx.db.user.findUnique({ where: { id: userId }, select: { id: true, name: true, handle: true } });
-    return u ? { id: u.id, name: u.name ?? u.handle, urn: null } : null;
+    // #5319: a person is addressed as hrn:user:<handle> (cor:urn:010:01). userUrn is null for a person with no handle
+    // (or a legacy handle that is not URN-legal), so a URN that does not resolve is never emitted.
+    return u ? { id: u.id, name: u.name ?? u.handle, handle: u.handle, urn: userUrn(u.handle) } : null;
   }
   return null;
 }

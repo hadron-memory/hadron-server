@@ -207,3 +207,8 @@ test('compose.yaml: OWNER_DEFAULT_LIMITS is mapped from E2E_OWNER_DEFAULT_LIMITS
   const compose = readFileSync(new URL('./compose.yaml', import.meta.url), 'utf8');
   assert.match(compose, /^\s+OWNER_DEFAULT_LIMITS: \$\{E2E_OWNER_DEFAULT_LIMITS:-\}$/m);
 });
+
+test('compose.yaml: OWNER_DEFAULT_MONTHLY_GRANT is mapped from E2E_OWNER_DEFAULT_MONTHLY_GRANT, empty by default (#5022)', () => {
+  const compose = readFileSync(new URL('./compose.yaml', import.meta.url), 'utf8');
+  assert.match(compose, /^\s+OWNER_DEFAULT_MONTHLY_GRANT: \$\{E2E_OWNER_DEFAULT_MONTHLY_GRANT:-\}$/m);
+});

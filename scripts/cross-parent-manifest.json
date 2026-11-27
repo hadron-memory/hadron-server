@@ -616,6 +616,18 @@
       "resolver": "src/api/graphql/schema/resolvers.types.ts::sharedMemory",
       "gate": "canReadMemoryRecord"
     },
+    "App.attachedMemories": {
+      "target": "AppAttachedMemory",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::attachedMemories",
+      "gate": "holdsContentReadIndependently"
+    },
+    "AppAttachedMemory.memory": {
+      "target": "Memory",
+      "class": "parent-implies-child",
+      "audience": "Only an entry whose memory the viewer reads in their own right is listed by App.attachedMemories (holdsContentReadIndependently, per link); the field is that same row, so no entry names a memory its viewer cannot read.",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::attachedMemories"
+    },
     "App.selfJoin": {
       "target": "AppSelfJoin",
       "class": "self-gated",
@@ -1226,6 +1238,12 @@
       "audience": "hostSetup gated by withReadableApp: App participants plus the App's own key; a host key reads only its own host's rows, a revoked host scope reads nothing (#4222)",
       "resolver": "src/api/graphql/schema/resolvers.hostAssignment.ts::withReadableApp",
       "target": "HostWorkerAssignment"
+    },
+    "JoinAgentTeamHostPayload.host": {
+      "class": "parent-implies-child",
+      "audience": "joinAgentTeamHost's caller only: a person who manages the App as themselves (createAppKey's gate); the host is the record this join just wrote (#5259)",
+      "resolver": "src/api/graphql/schema/resolvers.agentTeamHost.ts::asKeyIssuer",
+      "target": "AgentTeamHost"
     },
     "HostWorkerAssignment.worker": {
       "class": "parent-implies-child",

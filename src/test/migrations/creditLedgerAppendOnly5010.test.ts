@@ -79,12 +79,21 @@ describe('#5010 migration', () => {
     expect(read('post-push.sql')).toContain('\\ir credit-ledger-invariants.sql');
   });
 
-  it('pin 12: both ledger functions pin search_path, in the installed database and in the migration text', async () => {
-    const r = await pg.query(`SELECT proname, proconfig FROM pg_proc WHERE proname IN ('hadron_credit_ledger_user_merged', 'hadron_credit_ledger_entries_append_only') ORDER BY proname`);
+  it('pin 12: every ledger function pins search_path, in the installed database and in the migration text', async () => {
+    // #5238 adds the two owner-gone functions; the shared file (the newest carrier's tail, pin 11) holds all four.
+    const r = await pg.query(`SELECT proname, proconfig FROM pg_proc WHERE proname IN ('hadron_credit_ledger_user_merged', 'hadron_credit_ledger_entries_append_only', 'hadron_credit_ledger_org_gone', 'hadron_credit_ledger_user_gone') ORDER BY proname`);
     expect(r.rows).toEqual([
       { proname: 'hadron_credit_ledger_entries_append_only', proconfig: ['search_path=public, pg_temp'] },
+      { proname: 'hadron_credit_ledger_org_gone', proconfig: ['search_path=public, pg_temp'] },
+      { proname: 'hadron_credit_ledger_user_gone', proconfig: ['search_path=public, pg_temp'] },
       { proname: 'hadron_credit_ledger_user_merged', proconfig: ['search_path=public, pg_temp'] },
     ]);
     expect(MIGRATION.match(/SET search_path = public, pg_temp/g)).toHaveLength(2);
+    expect(SOURCE.match(/SET search_path = public, pg_temp/g)).toHaveLength(4);
+    // #5083: the bodies read the schema-qualified tables, so a session TEMP table of the same name cannot answer them.
+    for (const table of ['user_merges', 'organizations', 'users']) {
+      expect(SOURCE).toMatch(new RegExp(`FROM public\\.${table} `));
+      expect(SOURCE).not.toMatch(new RegExp(`FROM ${table}\\b`));
+    }
   });
 });

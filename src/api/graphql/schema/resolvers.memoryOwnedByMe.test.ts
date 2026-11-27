@@ -269,14 +269,17 @@ describe('#1176 — the list does not diverge from the node read gate', () => {
     const listed = ids(await list(null, over));
 
     // Documented list-surface exclusions, named rather than inferred from the
-    // diff: share grants (the sharedWithMe slice), the system class (opt-in),
-    // and per-user agent holdings (the chatbot flow). Each is a rule in
-    // cor:api:120:03; a row appearing here for any OTHER reason is the drift
-    // this test exists to catch.
-    const excluded = new Set([f.sharedWithOwner, f.userOwnedSystem, f.userOwnedHolding]);
+    // diff: share grants (the sharedWithMe slice) and the system class
+    // (opt-in). Each is a rule in cor:api:120:03; a row appearing here for any
+    // OTHER reason is the drift this test exists to catch. #5026: per-user
+    // agent holdings are NO LONGER an exclusion (cor:api:120:03 amended
+    // 2026-11-24): the owner's own holding is accessible AND listed.
+    const excluded = new Set([f.sharedWithOwner, f.userOwnedSystem]);
     const expected = accessible.filter((id) => !excluded.has(id));
 
     expect(expected.length).toBeGreaterThan(0);
+    expect(accessible).toContain(f.userOwnedHolding);
+    expect(listed).toContain(f.userOwnedHolding);
     expect([...listed].sort()).toEqual([...new Set(expected)].sort());
   });
 });
@@ -307,7 +310,7 @@ describe('#1215 — a personal row whose two owner columns disagree', () => {
       where: { id: f.divergentPersonal },
       select: {
         id: true, class: true, userId: true, ownerUserId: true,
-        organizationId: true, appId: true, userMemoryOfAgentId: true,
+        organizationId: true, appId: true, userMemoryOfAgentId: true, createdBy: true,
       },
     });
 
@@ -349,7 +352,7 @@ describe('#1215 — a personal row whose two owner columns disagree', () => {
       where: { id: f.divergentPersonal },
       select: {
         id: true, class: true, userId: true, ownerUserId: true,
-        organizationId: true, appId: true, userMemoryOfAgentId: true,
+        organizationId: true, appId: true, userMemoryOfAgentId: true, createdBy: true,
       },
     });
 
@@ -465,17 +468,17 @@ describe('#1179 — filter.ownedByMe', () => {
     expect(ids(page)).toContain(f.userOwnedKnowledge);
   });
 
-  it('excludes a per-user agent HOLDING the caller owns', async () => {
-    // cor:api:120:03 keeps chatbot holdings out of the regular memory list, so
-    // the owner slice must exclude them too — a filter that surfaced rows the
-    // default list hides would WIDEN rather than narrow. Nothing in production
-    // is currently both user-owned and a holding (0 of 24 measured), which is
-    // precisely why this needs a fixture rather than a reading of the column.
+  it('includes a per-user agent HOLDING the caller owns (#5026)', async () => {
+    // #5026: cor:api:120:03 (amended 2026-11-24) lists a person's own per-user
+    // Agent memory like any other of their user-owned memories, so the owner
+    // slice includes it too — a slice that hid it would be narrower than the
+    // list it narrows. Nothing in production was both user-owned and a holding
+    // (0 of 24 measured at #1179), which is why this needs a fixture.
     const page = await owned({ userId: f.ownerId, roles: ['READER'] });
-    expect(ids(page)).not.toContain(f.userOwnedHolding);
-    // …and the default list excludes it as well, so the two agree.
+    expect(ids(page)).toContain(f.userOwnedHolding);
+    // …and the default list includes it as well, so the two agree.
     const dflt = await list(null, { userId: f.ownerId, roles: ['READER'] });
-    expect(ids(dflt)).not.toContain(f.userOwnedHolding);
+    expect(ids(dflt)).toContain(f.userOwnedHolding);
   });
 
   it('hides the system class by default here too', async () => {

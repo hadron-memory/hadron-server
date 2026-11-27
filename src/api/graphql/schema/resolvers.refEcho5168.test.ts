@@ -48,9 +48,20 @@ const VARIANTS = [
   ['padded', `  ${CANARY}  `],
   ['well-formed', `hrn:mem:acme.test:${CANARY_CORE.toLowerCase().replace(/_/g, '-')}`],
 ] as const;
-// The golden records what each door answers today, not what it should: #5266 tracks the rows that are not typed
-// refusals (INTERNAL_SERVER_ERROR on revokeAppKey, startSession's session/customer ids, node/object(ref); the
-// AiServiceConfigNotFoundError class name; recordHostSweepRun's GRAPHQL_VALIDATION_FAILED). None of them echoes.
+// The golden records what each door answers. #5266 moved every row that was not a typed refusal onto one
+// (INTERNAL_SERVER_ERROR on revokeAppKey, startSession's session/customer ids, node/object(ref); recordHostSweepRun's
+// GRAPHQL_VALIDATION_FAILED): the golden and the probe now hold neither code. The ONE exception is group 2, the
+// AiServiceConfig class names below. None of them echoes. A row's code can depend on the probe order within one target (startSession(input.customerId)
+// answers SESSION_ID_TAKEN because the probe reuses `id: "x"`, so its second call finds the first call's row); each target gets a fresh database.
+/**
+ * Group 2 of #5266, kept on purpose: `rethrowAiConfigTyped` emits the error class name as the code, and that is a published CLIENT
+ * contract (hadron-portal `src/lib/server/llm/chatError.ts` and `src/routes/app/apps/[appId]/+page.server.ts` match the exact string
+ * `AiServiceConfigNotFoundError`; hadron-cli `internal/api/errors.go` lists it and the other four class names). Renaming them starts in the
+ * clients, which must accept both codes first; it is a separate change, not filed.
+ */
+const CLIENT_CONTRACT_CLASS_CODES = new Set([
+  'AiServiceConfigNotFoundError', 'DuplicateAiServiceConfigNameError', 'UnknownAiProviderError', 'NoAiConfigAvailableError', 'AiConfigValidationError',
+]); // the five error classes `rethrowAiConfigTyped` emits by name
 const GOLDEN = fileURLToPath(new URL('./__fixtures__/refEcho5168.codes.json', import.meta.url));
 
 const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
@@ -88,6 +99,8 @@ function literal(t: GraphQLType, depth = 0): string | null {
     if (base.name === 'Int' || base.name === 'Float') return '1';
     if (base.name === 'Boolean') return 'false';
     if (base.name === 'JSON') return '{}';
+    // #5266 group 3: a required DateTime gets a valid ISO 8601 literal, so the door's own resolver runs ("x" failed GraphQL validation).
+    if (base.name === 'DateTime') return '"2026-01-01T00:00:00.000Z"';
     return '"x"';
   }
   if (isInputObjectType(base)) return inputObject(base, depth + 1);
@@ -216,5 +229,12 @@ describe('#5168: a malformed ref is refused without quoting it, on every door wi
       .filter((p) => p.key in golden && golden[p.key] !== p.code)
       .map((p) => `${p.key}: ${golden[p.key]} -> ${p.code}`);
     expect(moved).toEqual([]);
+
+    // #5266: no door answers a raw fault or a validation failure for a bad reference, and no class name is a code except group 2's.
+    const untyped = probes.filter((p) => p.code === 'INTERNAL_SERVER_ERROR' || p.code === 'GRAPHQL_VALIDATION_FAILED').map((p) => `${p.key}: ${p.code}`);
+    expect(untyped).toEqual([]);
+    const classNames = probes.filter((p) => /Error$/.test(p.code) && !CLIENT_CONTRACT_CLASS_CODES.has(p.code)).map((p) => `${p.key}: ${p.code}`);
+    expect(classNames).toEqual([]);
+    expect(Object.entries(golden).filter(([, c]) => c === 'INTERNAL_SERVER_ERROR' || c === 'GRAPHQL_VALIDATION_FAILED')).toEqual([]);
   }, 600_000);
 });

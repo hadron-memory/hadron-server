@@ -33,17 +33,30 @@ const GROUP_KEY: Record<AiSpendGroup, Prisma.Sql> = {
   KEY_OWNER: Prisma.sql`coalesce(ue.key_owner_type, '')`,
 };
 
-export type AiSpendScope = { organizationId: string };
+/** Whose units: one organization's, or one person's (#5020: the units BILLED to the person, never those done for them). */
+export type AiSpendScope = { organizationId: string } | { userId: string };
 
-/** Whose units: one organization's. One fragment, so a later owner kind adds a branch here and nowhere else. */
-const ownerPredicate = (scope: AiSpendScope): Prisma.Sql => Prisma.sql`ue.organization_id = ${scope.organizationId}`;
+/**
+ * Whose units: one fragment, so a later owner kind adds a branch here and nowhere else. A person's are the units that name
+ * them as the billable account (`billable_user_id`, #5020, cor:dmo:170:05), never `user_id`: the user the work was done for
+ * is a different person from the one who pays, and a unit of an organization's App done for a member is the
+ * organization's, not the member's. Branches on the scope's own kind first, so no comparison can match two null columns.
+ */
+const ownerPredicate = (scope: AiSpendScope): Prisma.Sql =>
+  'userId' in scope ? Prisma.sql`ue.billable_user_id = ${scope.userId}` : Prisma.sql`ue.organization_id = ${scope.organizationId}`;
 
 /**
  * The charge of a unit: the debit the ledger holds for it, joined on the ledger's unique (source_type, source_id). Only
- * a live debit of the unit's own organization joins: a grant, an adjustment, a deleted row or another owner's row naming
- * this unit's id is not what was charged for it.
+ * a live debit of the unit's own billable account joins: a grant, an adjustment, a deleted row or another owner's row naming
+ * this unit's id is not what was charged for it. The account is the unit's organization or its billable person, one
+ * fragment per scope kind, each comparing that one column (a unit has exactly one).
  */
-const CHARGE_JOIN = Prisma.sql`LEFT JOIN credit_ledger_entries c
+const chargeJoin = (scope: AiSpendScope): Prisma.Sql =>
+  'userId' in scope
+    ? Prisma.sql`LEFT JOIN credit_ledger_entries c
+    ON c.source_type = 'usage-event' AND c.source_id = ue.id AND c.kind = 'debit'
+   AND c.deleted_at IS NULL AND c.owner_user_id = ue.billable_user_id`
+    : Prisma.sql`LEFT JOIN credit_ledger_entries c
     ON c.source_type = 'usage-event' AND c.source_id = ue.id AND c.kind = 'debit'
    AND c.deleted_at IS NULL AND c.organization_id = ue.organization_id`;
 
@@ -93,7 +106,7 @@ export async function aiSpendSummary(db: Db, input: AiSpendInput): Promise<AiSpe
              -- charge instead of netting against another. This query does not police a debit's sign.
              coalesce(sum(abs(c.amount_micro_cents)), 0) AS charged
       FROM usage_events ue
-      ${CHARGE_JOIN}
+      ${chargeJoin(input)}
       WHERE ${ownerPredicate(input)}
         AND ue.deleted_at IS NULL
         AND ue.created_at >= ${toNaiveUtc(input.from)}::timestamp

@@ -103,6 +103,7 @@ import { sessionRestartMutations } from './resolvers.sessionRestart4855.js';
 import { hostSweepRunMutations, hostSweepRunQueries } from './resolvers.hostSweepRuns.js';
 import { desiredStateMutations, desiredStateQueries, desiredStateWorkerFields } from './resolvers.desiredState.js';
 import { hostAssignmentMutations, hostAssignmentQueries, hostAssignmentFieldResolvers } from './resolvers.hostAssignment.js';
+import { agentTeamHostMutations, agentTeamHostQueries } from './resolvers.agentTeamHost.js';
 import {
   agentTaskAlarmMutations,
   agentTaskAlarmQueries,
@@ -248,6 +249,7 @@ export const resolvers = {
     ...desiredStateQueries,
     ...hostSweepRunQueries,
     ...hostAssignmentQueries,
+    ...agentTeamHostQueries,
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
     ...accountUsageQueries,
@@ -340,6 +342,7 @@ export const resolvers = {
     ...desiredStateMutations,
     ...hostSweepRunMutations,
     ...hostAssignmentMutations,
+    ...agentTeamHostMutations,
     ...agentTaskAlarmMutations,
     ...memoryConfigMutations,
     ...memoryConfigTemplateMutations,

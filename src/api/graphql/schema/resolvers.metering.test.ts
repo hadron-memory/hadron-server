@@ -85,11 +85,13 @@ describe('setAiModelPrice', () => {
   });
 
   it('rejects a duplicate (provider, model, effectiveAt) as BAD_USER_INPUT', async () => {
-    const effectiveAt = '2026-01-01T00:00:00.000Z';
+    // #5021: a fixed past date is now refused for its own reason; a day ahead reaches the duplicate check.
+    const effectiveAt = new Date(Date.now() + 86_400_000).toISOString();
     const input = { ...priceInput, effectiveAt };
     expect((await gql(SET_PRICE, platformCtx(), { input })).errors).toBeUndefined();
     const dup = await gql(SET_PRICE, platformCtx(), { input });
     expect(dup.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(dup.errors?.[0]?.message).toMatch(/already exists/);
   });
 
   it('refuses a price for openai-compatible, whose cost depends on the host serving it (#1389 review)', async () => {

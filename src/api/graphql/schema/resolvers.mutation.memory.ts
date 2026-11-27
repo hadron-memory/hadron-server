@@ -12,6 +12,7 @@ import { generateId } from '../../../lib/id.js';
 import { UrnNotQualifiedError } from '../../../lib/urn.js';
 import { AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
+import { nextFreeDerivedSlug } from '../../../lib/derivedSlug.js';
 import { generateUniqueHandle, ensureUserHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import {
@@ -750,13 +751,24 @@ export const memoryMutations = {
         : (await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId! }, select: { urn: true } })).urn;
       // #574: slugify the display name — a raw name would persist a
       // case-sensitive / space-bearing URN that can't round-trip through parseUrn.
-      const memoryUrn = `${memRoot}:${memorySlug}`;
-      // Check for existing memory with the same URN
-      const existing = await ctx.db.memory.findUnique({ where: { urn: memoryUrn } });
+      // #5203 S3: a slug DERIVED from the name never refuses the create (hrn:node:hadronmemory.com:specs:cor:urn:010:01):
+      // it skips a reserved word and every row holding the URN, live or deleted, as `urn` or `legacyUrn` (the probe
+      // mintMemoryUrnV2 uses), so a deleted holder is never reclaimed and stays restorable. A SUPPLIED slug keeps
+      // today's answers below: a deleted holder is reclaimed, a live one refused CONFLICT.
+      const memoryUrn = slug != null
+        ? `${memRoot}:${memorySlug}`
+        : `${memRoot}:${await nextFreeDerivedSlug(memorySlug, async (candidate) =>
+          (await ctx.db.memory.count({
+            where: { OR: [{ urn: `${memRoot}:${candidate}` }, { legacyUrn: `${memRoot}:${candidate}` }] },
+          })) > 0)}`;
+      // Check for existing memory with the same URN (a supplied slug only: a derived one was minted free above)
+      const existing = slug != null ? await ctx.db.memory.findUnique({ where: { urn: memoryUrn } }) : null;
       if (existing) {
         if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
+          // Reusing an org-owned memory's URN takes memory.create on every arm, the personal one included (private#47).
+          if (existing.userId === null && !userOwned) await requireOrgAction(ctx, resolvedOrgId!, 'memory.create');
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id, [ctx.userId]));
         } else {
           // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${memoryUrn}" already exists`, {
@@ -1573,27 +1585,23 @@ export const memoryMutations = {
         select: { urn: true },
       });
 
-      // Cross-org gate (#604): dropping a memory into a DIFFERENT org requires
-      // the caller to be an ACTUAL member of the target org whose role is not
-      // READER. findFirst + deletedAt:null so a revoked membership can't
-      // authorize (findings:revoked-membership-auth-gates); no global-role
-      // bypass — "member and not read-only" means real membership.
-      if (targetOrgId !== source.organizationId) {
-        if (!ctx.userId) {
-          throw new GraphQLError(
-            'Cloning into another organization requires an authenticated user.',
-            { extensions: { code: 'UNAUTHENTICATED' } },
-          );
-        }
-        const membership = await ctx.db.orgMember.findFirst({
-          where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
-        });
-        if (!membership || membership.role === 'READER') {
-          throw new GraphQLError(
-            'Forbidden: cloning into an organization requires a non-reader membership there.',
-            { extensions: { code: 'FORBIDDEN' } },
-          );
-        }
+      // Target-org gate, on EVERY arm and before any URN collision is looked at (#604; hadron-internal#78): the
+      // caller must be an ACTUAL, non-READER member of the target org. findFirst + deletedAt:null so a revoked
+      // membership can't authorize (findings:revoked-membership-auth-gates); no global-role bypass.
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'Cloning into an organization requires an authenticated user.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      const membership = await ctx.db.orgMember.findFirst({
+        where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
+      });
+      if (!membership || membership.role === 'READER') {
+        throw new GraphQLError(
+          'Forbidden: cloning into an organization requires a non-reader membership there.',
+          { extensions: { code: 'FORBIDDEN' } },
+        );
       }
 
       const newUrn = `${targetOrg.urn}:${targetSlug}`;
@@ -1605,8 +1613,10 @@ export const memoryMutations = {
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
       if (existing) {
         if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
+          // Reusing an org-owned memory's URN takes the authority createMemory's org-shared reuse takes (hadron-internal#78).
+          if (existing.userId === null) await requireOrgAction(ctx, targetOrgId, 'memory.create');
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id, [ctx.userId]));
         } else {
           // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
@@ -1770,9 +1780,9 @@ export const memoryMutations = {
         const membership = await ctx.db.orgMember.findFirst({
           where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
         });
-        if (!membership) {
+        if (!membership || membership.role === 'READER') {
           throw new GraphQLError(
-            'You must be a member of the organization to extract a personal/private subtree into it.',
+            'Forbidden: extracting a personal/private subtree into an organization requires a non-reader membership there.',
             { extensions: { code: 'FORBIDDEN' } },
           );
         }
@@ -1833,8 +1843,10 @@ export const memoryMutations = {
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
       if (existing) {
         if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
+          // Reusing an org-owned memory's URN takes the authority createMemory's org-shared reuse takes (hadron-internal#78).
+          if (existing.userId === null) await requireOrgAction(ctx, targetOrgId, 'memory.create');
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id, [ctx.userId]));
         } else {
           // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
@@ -3238,6 +3250,12 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
+      // A caller without a user is refused before the memory resolves, as on the share doors (cor:api:140:02).
+      if (!ctx.userId) {
+        throw new GraphQLError('Authenticated user required', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
       // #764: memoryRef/userRef accept id/URN/handle/email. Resolve the memory
       // (a miss maps to the uniform member FORBIDDEN — no existence oracle) +
       // run the owner gate FIRST, then resolve the user — so an unauthorized
@@ -3301,6 +3319,12 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
+      // A caller without a user is refused before the memory resolves, as on the share doors (cor:api:140:02).
+      if (!ctx.userId) {
+        throw new GraphQLError('Authenticated user required', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
       // #764: resolve memory (miss → uniform member FORBIDDEN, no existence
       // oracle) + owner-gate FIRST, then resolve the user (auth before
       // revealing user existence — #816 review).

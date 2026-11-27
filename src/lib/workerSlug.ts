@@ -14,7 +14,8 @@
 // `-3`, … until it finds a free atom. A caller can only ever observe one
 // allocation failure, WORKER_NAME_TAKEN, exactly as before this existed.
 
-import { deriveSlugFromName, MAX_ATOM_LEN } from './urn.js';
+import { deriveSlugFromName } from './urn.js';
+import { derivedSlugCandidate, isReservedSlug } from './derivedSlug.js';
 
 /**
  * The fallback base for a name that slugifies to nothing ("!!!", "ミ"). Such a
@@ -37,19 +38,10 @@ export function workerSlugBase(name: string): string {
 }
 
 /**
- * The `n`th slug candidate for `base` (1-indexed: n=1 IS the bare base). The
- * suffix is applied with room-trimming so the result never exceeds the 64-char
- * atom cap — an over-long atom would compose into a URN the parser rejects,
- * turning a successful cast into an unaddressable worker.
+ * The `n`th slug candidate for `base` (1-indexed: n=1 IS the bare base), capped at the 64-char atom limit. The one
+ * implementation lives in `derivedSlug.ts` (#5203 S3), shared by every door that derives a slug from a name.
  */
-export function workerSlugCandidate(base: string, n: number): string {
-  if (n <= 1) return base;
-  const suffix = `-${n}`;
-  const room = MAX_ATOM_LEN - suffix.length;
-  const trimmed =
-    base.length > room ? base.slice(0, room).replace(/[._-]+$/g, '') : base;
-  return `${trimmed}${suffix}`;
-}
+export const workerSlugCandidate = derivedSlugCandidate;
 
 /** The slice of Prisma this module needs — keeps it trivially unit-testable. */
 type WorkerSlugDb = {
@@ -87,9 +79,11 @@ export async function nextFreeWorkerSlug(
     select: { slug: true },
   });
   const taken = new Set(rows.map((r) => r.slug));
-  // Terminates: `taken` is finite, so some n yields an unseen candidate.
+  // Terminates: `taken` is finite, and only a bare base can be a reserved word (a suffixed candidate ends in `-<n>`,
+  // which no reserved word does), so some n yields an unseen, unreserved candidate.
   for (let n = 1; ; n++) {
     const candidate = workerSlugCandidate(base, n);
-    if (!taken.has(candidate)) return candidate;
+    // #5203 S3: a reserved word is skipped like a taken slug (cor:urn:010:01), case-insensitively.
+    if (!taken.has(candidate) && !isReservedSlug(candidate)) return candidate;
   }
 }

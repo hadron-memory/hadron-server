@@ -22,9 +22,9 @@ vi.mock('../../../lib/mintedSpecPermanence.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../../lib/mintedSpecPermanence.js')>();
   return {
     ...real,
-    reclaimTombstonedMemory: (tx: never, id: string) => {
+    reclaimTombstonedMemory: (tx: never, id: string, reclaimers: ReadonlyArray<string | null | undefined>) => {
       if (reclaimFault.code) throw new GraphQLError('fault', { extensions: { code: reclaimFault.code } });
-      return real.reclaimTombstonedMemory(tx, id);
+      return real.reclaimTombstonedMemory(tx, id, reclaimers);
     },
   };
 });

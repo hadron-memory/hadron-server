@@ -56,7 +56,16 @@ for (const door of ['personal', 'app', 'installed']) {
       const checkout = memoryLocalPath(memory.urn.split(':')[0]!, memory.urn);
       expect(checkout.startsWith(`${projection.root}${sep}`)).toBe(true);
     });
-    it.each(['..', '.:..', ':'])('refuses a name with no slug, %j, before persistence', async name => {
+    // #5203 S3 (cor:urn:010:01): a name with no slug is no longer refused; it creates under the fallback base, and
+    // still projects nothing. An empty or blank name is the refusal that replaced it.
+    it.each(['..', '.:..', ':'])('creates a name with no slug, %j, under the fallback slug with no projection', async name => {
+      const memory = await create(door, name);
+      expect(memory.name).toBe(name);
+      expect(memory.urn.split(':').pop()).toBe('untitled');
+      expect(await db.node.count()).toBe(0);
+      expect(readdirSync(projection.root)).toEqual([]);
+    });
+    it.each(['', '   '])('refuses an empty or blank name, %j, before persistence', async name => {
       await expect(create(door, name)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
       expect(await db.memory.count()).toBe(0);
       expect(readdirSync(projection.root)).toEqual([]);

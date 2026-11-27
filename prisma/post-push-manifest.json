@@ -196,6 +196,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_agent_team_hosts_shape",
+      "kind": "check-constraint",
+      "file": "agent-team-host-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_agent_ticker_templates_shape",
       "kind": "check-constraint",
       "file": "agent-ticker-template-invariants.sql",
@@ -838,6 +844,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_secret_delete_after_use_app_only",
+      "kind": "check-constraint",
+      "file": "secret-versions-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_secret_owner_type",
       "kind": "check-constraint",
       "file": "secret-versions-invariants.sql",
@@ -973,6 +985,12 @@
       "name": "chk_tickers_shape",
       "kind": "check-constraint",
       "file": "ticker-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_usage_event_one_billable",
+      "kind": "check-constraint",
+      "file": "post-push.sql",
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
@@ -1186,6 +1204,18 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_ai_model_price_user_merged",
+      "kind": "function",
+      "file": "ai-model-price-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_ai_model_prices_kept",
+      "kind": "function",
+      "file": "ai-model-price-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_alarm_escalation_end_write_once",
       "kind": "function",
       "file": "alarm-escalation-end-invariants.sql",
@@ -1289,6 +1319,18 @@
     },
     {
       "name": "hadron_credit_ledger_entries_append_only",
+      "kind": "function",
+      "file": "credit-ledger-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_credit_ledger_org_gone",
+      "kind": "function",
+      "file": "credit-ledger-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "hadron_credit_ledger_user_gone",
       "kind": "function",
       "file": "credit-ledger-invariants.sql",
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
@@ -2389,6 +2431,12 @@
       "name": "agents.boot_prompt_approval_entry_agent",
       "kind": "trigger",
       "file": "boot-prompt-approval-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "ai_model_prices.ai_model_prices_kept",
+      "kind": "trigger",
+      "file": "ai-model-price-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
     },
     {
