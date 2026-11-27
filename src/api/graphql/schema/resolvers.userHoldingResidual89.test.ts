@@ -1,8 +1,9 @@
 /**
- * (hadron-internal#89 residual pins; header of the #88 file it was cut from follows.) The node-side read gates for a per-user chat holding (hadron-internal#89, cor:cht:010:02, ruling 0226 and Holger's 2026-11-27 decision "User only", which supersedes ruling 0232 Q1): the
- * holding's nodes are read by its creator alone, whatever the caller's global role, on GraphQL and on MCP alike. Seeded through
- * the product's own write path (a real startChat by an Agent manager with no installed App); the platform admins are REAL
- * user rows, since a context-only role gives a false null.
+ * The doors around a per-user chat holding that no earlier gate pinned (hadron-internal#89, cor:cht:010:02: a holding is read and managed by
+ * the user it serves alone, whatever the caller's organisation or global role; ruling 0226 and the "User only" decision that superseded
+ * ruling 0232 Q1). Covers the platform-role write shortcuts, mergeMemories, task discovery and run-by-reference, the subscription arm and
+ * the copy-out and transfer doors (cloneMemory, transferMemoryOwnership). Seeded through a real startChat with no installed App; every
+ * admin is a REAL user row, since a context-only role gives a false null.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -15,7 +16,7 @@ import { canReadMemory, canWriteToMemory, filterReadableMemoryIds } from '../../
 import { resolvers, type Context } from './resolvers.js';
 import { getAccessibleMemoryIds, requireMemoryWriteAccess } from './resolvers.helpers.js';
 import { foreignIdentityScopedMemoryFilter } from '../../../lib/auth/memoryOwnership.js';
-import { isForeignUserHolding, isUserHolding } from '../../../lib/auth/userHolding.js';
+import { isUserHolding } from '../../../lib/auth/userHolding.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -29,7 +30,6 @@ const u: Record<string, string> = {};
 const ROLES: Record<string, string[]> = { platformadmin: ['ADMIN'], platformowner: ['OWNER'], orgadminplat: ['ADMIN'] };
 const gql = (who: string): Context => ({ db, userId: u[who], roles: ROLES[who] ?? ['READER'] }) as Context;
 const mcpAuth = (who: string) => ({ userId: u[who], roles: ROLES[who] ?? [], clientId: `user:${u[who]}` });
-const mcp = (who: string) => createTestableMcpServer(mcpAuth(who) as never);
 
 async function user(handle: string, orgRole?: 'READER' | 'CONTRIBUTOR' | 'ADMIN' | 'OWNER', org = orgId) {
   const id = (await db.user.create({ data: { handle, roles: (ROLES[handle] ?? ['READER']) as never } })).id;
@@ -69,6 +69,7 @@ beforeEach(async () => {
   const holding = await db.memory.findUniqueOrThrow({ where: { id: holdingId } });
   holdingUrn = holding.urn;
   // The fixture asserts its own shape, so these pins cannot go green on a different row.
+  expect(isUserHolding(holding)).toBe(true);
   expect(holding).toMatchObject({ class: 'knowledge', ownerUserId: null, appId: null, userMemoryOfAgentId: agentId, createdBy: u.creator });
   plainId = (await db.memory.create({
     data: { id: generateId(), name: 'Plain', urn: 'holding89.test:plain', organizationId: orgId, class: 'knowledge', visibility: 'ORGANIZATION', createdBy: u.creator },
@@ -150,7 +151,7 @@ describe('task discovery and run-by-reference never surface a per-user chat hold
   beforeEach(async () => {
     await db.node.update({ where: { id: nodeId }, data: { isRunnable: true, alias: ALIAS, description: 'chatdesc89' } });
   });
-  const LEAK = new RegExp(`${ALIAS}|chatdesc89|${NEEDLE}|holding89\\.test:[0-9a-z]{32}`);
+  const LEAK = new RegExp(`${ALIAS}|chatdesc89|${NEEDLE}`);
   const principals = (): Array<[string, Context]> => [
     ['orgadmin', gql('orgadmin')], ['orgowner', gql('orgowner')], ['platformadmin', gql('platformadmin')], ['platformowner', gql('platformowner')],
     ['orgadminplat', gql('orgadminplat')], ['impersonated', imp()], ['runCreator', run(u.creator)], ['runNone', run(null)], ['appKey', appKey()],
@@ -162,7 +163,7 @@ describe('task discovery and run-by-reference never surface a per-user chat hold
       const m = createTestableMcpServer(mcpOf(c) as never);
       for (const args of [{ task: ALIAS }, { task: 'go', memory: holding.name }, { task: ALIAS, memory: `hrn:mem:${holdingUrn}` }, { task: 'private chat' }]) {
         const text = await m.callToolText('hadron_run_task', args as never);
-        expect([label, JSON.stringify(args), LEAK.test(text) || text.includes(holding.name) || text.includes(holdingId)]).toEqual([label, JSON.stringify(args), false]);
+        expect([label, JSON.stringify(args), LEAK.test(text) || text.includes(holding.name) || text.includes(holdingId) || text.includes(holdingUrn)]).toEqual([label, JSON.stringify(args), false]);
       }
     }
   });
@@ -171,7 +172,9 @@ describe('task discovery and run-by-reference never surface a per-user chat hold
     const m = createTestableMcpServer(mcpOf(gql('platformadmin')) as never);
     const text = await m.callToolText('hadron_run_task', { task: ALIAS } as never);
     expect(text).toContain('Plain'); // the ordinary memory is still listed
-    expect(text).not.toContain('Holding89 agent —');
+    const holding = await db.memory.findUniqueOrThrow({ where: { id: holdingId } });
+    expect(text).not.toContain(holding.name);
+    expect(text).not.toContain(holdingUrn);
     const all = await db.memory.findMany({ where: { deletedAt: null, NOT: foreignIdentityScopedMemoryFilter(u.platformadmin) }, select: { id: true } });
     expect(all.map((r) => r.id)).not.toContain(holdingId);
     expect(all.map((r) => r.id)).toContain(plainId);
@@ -186,11 +189,15 @@ describe('task discovery and run-by-reference never surface a per-user chat hold
         const a = norm(await m.callToolText(tool, { urn } as never), holdingUrn, nodeLoc);
         const b = norm(await m.callToolText(tool, { urn: missing } as never), missingUrn, nodeLoc);
         expect([label, tool, a]).toEqual([label, tool, b]);
-        expect(LEAK.test(a)).toBe(false);
+        expect(LEAK.test(a) || a.includes(holdingId)).toBe(false);
       }
-      const g = await code(M.runTask({}, { nodeRef: urn }, c));
-      expect([label, g]).not.toEqual([label, 'ok']);
+      expect([label, await code(M.runTask({}, { nodeRef: urn }, c))]).toEqual([label, await code(M.runTask({}, { nodeRef: missing }, c))]);
     }
+  });
+
+  it('control: the creator is not answered as for a missing node by GraphQL runTask', async () => {
+    const urn = `hrn:node:${holdingUrn}:${nodeLoc}`;
+    expect(await code(M.runTask({}, { nodeRef: urn }, gql('creator')))).not.toEqual(await code(M.runTask({}, { nodeRef: `hrn:node:${missingUrn}:${nodeLoc}` }, gql('creator'))));
   });
 
   it('control: the creator reads the node by reference through run_action (the gate is the holding rule, not a broken fixture)', async () => {
@@ -202,14 +209,14 @@ describe('task discovery and run-by-reference never surface a per-user chat hold
 describe('the subscription arm of the access map (hadron-internal#89)', () => {
   it('a live subscription row on a holding grants its subscriber organization nothing (subscribedMemoryWhere keeps per-user holdings out)', async () => {
     await db.memorySubscription.create({ data: { memoryId: holdingId, organizationId: otherOrgId, role: 'CONTRIBUTOR', activated: true } });
-    await db.memorySubscription.create({ data: { memoryId: plainId, organizationId: otherOrgId, role: 'READER' } });
+    await db.memorySubscription.create({ data: { memoryId: plainId, organizationId: otherOrgId, role: 'CONTRIBUTOR', activated: true } });
     // control: the same subscription reaches the ordinary memory, so the arm is live and the holding is the only difference.
     expect(await canReadMemory(db, mcpAuth('foreigner') as never, plainId)).toBe(true);
     for (const who of ['foreigner', 'orgadmin', 'member'] as const) {
       expect([who, await canReadMemory(db, mcpAuth(who) as never, holdingId)]).toEqual([who, false]);
       expect([who, await canWriteToMemory(db, mcpAuth(who) as never, holdingId)]).toEqual([who, false]);
       expect([who, [...(await filterReadableMemoryIds(db, mcpAuth(who) as never, [holdingId]))]]).toEqual([who, []]);
-      expect([who, await getAccessibleMemoryIds(gql(who))]).not.toEqual([who, expect.arrayContaining([holdingId])]);
+      expect((await getAccessibleMemoryIds(gql(who))) ?? []).not.toContain(holdingId);
       expect([who, await code(requireMemoryWriteAccess(gql(who), holdingId))]).toEqual([who, 'FORBIDDEN']);
     }
     expect(await getAccessibleMemoryIds(gql('foreigner'))).toContain(plainId);
@@ -223,8 +230,9 @@ describe('copy-out and transfer doors do not carry a per-user chat holding to a 
   const nonCreators = (): Array<[string, Context]> => [
     ['orgadmin', gql('orgadmin')], ['orgowner', gql('orgowner')], ['platformadmin', gql('platformadmin')], ['platformowner', gql('platformowner')],
     ['orgadminplat', gql('orgadminplat')], ['runCreator', run(u.creator)], ['impersonated', imp()],
+    ['member', gql('member')], ['foreigner', gql('foreigner')], ['outsider', gql('outsider')], ['runNone', run(null)], ['appKey', appKey()],
   ];
-  const before = async () => db.memory.findUniqueOrThrow({ where: { id: holdingId }, select: { organizationId: true, userId: true, ownerUserId: true, urn: true, class: true } });
+  const before = async () => db.memory.findUniqueOrThrow({ where: { id: holdingId }, select: { organizationId: true, userId: true, ownerUserId: true, urn: true, class: true, createdBy: true, userMemoryOfAgentId: true, visibility: true, deletedAt: true } });
 
   it('control: an ordinary org memory is cloned and transferred (preview) by an org admin, so the refusals below are the holding rule', async () => {
     expect(await code(M.cloneMemory({}, { ref: plainId, targetUrn: 'holding89.test::plain-copy' }, gql('orgadmin')))).toBe('ok');
@@ -235,6 +243,8 @@ describe('copy-out and transfer doors do not carry a per-user chat holding to a 
   it('control: the creator clones the holding and the copy carries its nodes', async () => {
     const out = await M.cloneMemory({}, { ref: holdingId, targetUrn: 'holding89.test::creator-copy' }, gql('creator'));
     expect(await db.node.count({ where: { memoryId: out.id, content: { contains: NEEDLE } } })).toBeGreaterThan(0);
+    // Stated limit: the creator's own copy is an ordinary memory of the org, not a holding (the clone does not carry the marker).
+    expect(await db.memory.findUniqueOrThrow({ where: { id: out.id }, select: { class: true, userMemoryOfAgentId: true, createdBy: true } })).toEqual({ class: 'knowledge', userMemoryOfAgentId: null, createdBy: u.creator });
     expect(await code(M.transferMemoryOwnership({}, { memoryRef: holdingId, userRef: u.creator, dryRun: true }, gql('creator')))).toBe('ok');
   });
 
@@ -257,8 +267,20 @@ describe('copy-out and transfer doors do not carry a per-user chat holding to a 
       for (const dryRun of [true, false]) {
         expect([label, dryRun, await code(M.transferMemoryOwnership({}, { memoryRef: holdingId, userRef: c.userId ?? u.platformadmin, dryRun }, c))]).toEqual([label, dryRun, missing]);
         expect([label, dryRun, await code(M.transferMemoryOwnership({}, { memoryRef: holdingId, orgRef: otherOrgId, dryRun }, c))]).toEqual([label, dryRun, missing]);
+        expect([label, dryRun, await code(M.transferMemoryOwnership({}, { memoryRef: holdingUrn, userRef: u.platformadmin, dryRun }, c))]).toEqual([label, dryRun, missing]);
+        // An invalid target must not tell a holding from a missing memory: the source gate runs first.
+        expect([label, dryRun, await code(M.transferMemoryOwnership({}, { memoryRef: holdingId, orgRef: generateId(), dryRun }, c))]).toEqual([label, dryRun, missing]);
       }
     }
     expect(await before()).toEqual(row);
+  });
+
+  it('control: a real transfer by the creator is refused by the existing Agent-scope dependency check, so a holding does not move today; a non-creator still reads nothing', async () => {
+    await expect(M.transferMemoryOwnership({}, { memoryRef: holdingId, userRef: u.creator, targetClass: 'private', dryRun: false }, gql('creator')))
+      .rejects.toThrow(/Agent scope/);
+    expect(await before()).toMatchObject({ class: 'knowledge', createdBy: u.creator, userMemoryOfAgentId: agentId });
+    for (const who of ['orgadmin', 'platformadmin', 'member'] as const) {
+      expect([who, await Q.node({}, { ref: nodeId }, gql(who))]).toEqual([who, null]);
+    }
   });
 });

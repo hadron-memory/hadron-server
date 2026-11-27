@@ -1506,7 +1506,7 @@ export const memoryMutations = {
       // as if it were missing (MEMORY_NOT_FOUND), so the denial itself does not
       // disclose that the memory exists; one who can keeps the Forbidden.
       await concealUnreadableDenial(ctx, source.id, ref, async () => {
-        // hadron-internal#89: a copy is a read-out, so a per-user chat holding is cloned by its creator alone, acting as themselves.
+        // hadron-internal#89 (cor:cht:010:02): a copy is a read-out, so a per-user chat holding is cloned by its creator alone, acting as themselves.
         if (isUserHolding(source) && !userHoldingCreatorMayRead(ctx, source)) throw forbiddenError();
         if (source.class === 'personal' || source.class === 'private') {
           if (!ctx.userId || source.userId !== ctx.userId) {
