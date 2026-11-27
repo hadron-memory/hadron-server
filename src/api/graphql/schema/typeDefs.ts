@@ -7042,7 +7042,7 @@ export const typeDefs = `#graphql
     updatedBy: String
     "Whether changes need a person's change request. App secrets only; always false for org and user secrets."
     protected: Boolean!
-    "Whether a read client's auto-delete mark may delete this secret after its use (hrn:node:hadronmemory.com:specs:cor:sec:060:03). Needed only on a protected secret: without it a mark is refused there, and none deletes it. App secrets only; always false for org and user secrets."
+    "Whether a read client's auto-delete mark may delete this secret after its use (hrn:node:hadronmemory.com:specs:cor:sec:060:03). Needed only on a protected secret: without it a mark is refused there, and none deletes it. Turning protection on (updateSecret(protected: true) or setSecretProtected) clears it, so a protected secret is armed only through the passkey ceremony. App secrets only; always false for org and user secrets."
     deleteAfterUse: Boolean!
     "The newest version's number. App secrets only; null for org and user secrets (they have no versions)."
     currentVersion: Int
@@ -15492,7 +15492,9 @@ export const typeDefs = `#graphql
     deleteAfterUse (App secrets only; refused on org and user secrets) is the
     consent that lets a read client's auto-delete mark delete a PROTECTED secret
     (hrn:node:hadronmemory.com:specs:cor:sec:060:03). On an unprotected secret it is
-    a plain field any member may set, and changes nothing by itself. On a protected
+    a plain field any member may set, and changes nothing by itself; turning protection
+    on (here or through setSecretProtected) clears it, so a protected secret is armed only
+    through the ceremony below. On a protected
     secret it must be passed alone and is staged as SET_DELETE_AFTER_USE or
     CLEAR_DELETE_AFTER_USE through the requester's ceremony, as above; setting it
     needs the secret's creator or whoever manages the App. Asking for the value it
