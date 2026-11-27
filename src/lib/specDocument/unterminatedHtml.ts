@@ -54,6 +54,29 @@ const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe
 const MAX_RESTARTS = 32;
 /** #5265 — the scans the last call of escapeUnterminatedHtml ran (one per model per escape), for a pin that bounds the work, not the wall clock. */
 let scansRun = 0;
+/** #5332 — a raw-text element's (or `plaintext`) start: it takes the rest of the page as text once a reader emits it. */
+const RAW_TEXT_START = /<(script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext)(?=[\s/>]|$)/i;
+/**
+ * #5332 — where a bogus comment (`<!` or `</` with no letter after it, at `at`, running to the `>` at `close`) hides a raw-text start that
+ * Markdown emits, or -1. Markdown reads the `<!` or `</` as text and the tag before the `>` as a tag (`<!<script>` emits the `<script>` raw);
+ * a browser reading the raw string ends a bogus comment at that `>`. Only a start tag Markdown accepts, on one line and ending at that `>`, with nothing
+ * before it in the comment that Markdown could read another way (a `<`, a backtick, a backslash), on the comment's line or the next, and
+ * not closed later by its own end tag (Markdown's raw text then ends where a browser's reading resumes anyway).
+ */
+function bogusHiddenTag(text: string, at: number, close: number): number {
+  const body = text.slice(at + 2, close + 1);
+  const raw = RAW_TEXT_START.exec(body);
+  if (raw === null) return -1;
+  const before = body.slice(0, raw.index);
+  if (/[<`\\]/.test(before) || before.split('\n').length > 2 || !CM_OPEN_TAG.test(body.slice(raw.index)) || body.includes('\n', raw.index)) return -1;
+  // At the head of a line the tag may start an HTML block in one reader and continue a paragraph in another (markdown-it's lazy lines), so
+  // escaping it can move what follows into another block: only when nothing after it holds a tag.
+  if (/[\n\r][ \t]*$/.test(before) && text.includes('<', close + 1)) return -1;
+  const name = raw[1].toLowerCase();
+  if (name !== 'plaintext' && new RegExp(`</${name}(?=[\\s/>])`, 'i').test(text.slice(close + 1))) return -1;
+  return at + 2 + raw.index;
+}
+
 const isLetter = (c: string | undefined): boolean => c !== undefined && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
 const isBlank = (c: string): boolean => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
 const isAsciiPunct = (c: string | undefined): boolean => c !== undefined && /[!-/:-@[-`{-~]/.test(c);
@@ -429,7 +452,10 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       const quotes = line.slice(0, line.length - inner.length);
       const from = columnAfter(quotes);
       // A tab right after a quote marker gives its first column to the marker.
-      const indent = columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0], from) - from - (quotes.endsWith('>') && inner.startsWith('\t') ? 1 : 0);
+      const tabAfterQuote = quotes.endsWith('>') && inner.startsWith('\t');
+      const indent = model === 'marked' && tabAfterQuote
+        ? columnAfter((/^[ \t]*/.exec(inner.slice(1)) as RegExpExecArray)[0])
+        : columnAfter((/^[ \t]*/.exec(inner) as RegExpExecArray)[0], from) - from - (tabAfterQuote ? 1 : 0);
       // A line right after a definition's line continues its paragraph, so its indent makes no code of it.
       const afterDefinition = inDefinition;
       prevDefinition = afterDefinition;
@@ -550,6 +576,10 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
+      if (i >= rawUntil && !isLetter(text[i + 2])) {
+        const hidden = bogusHiddenTag(text, i, close);
+        if (hidden !== -1) return hidden;
+      }
       // marked ends such a block at the declaration's first `>` and reads the rest of the line as text (#5211); CommonMark keeps it raw.
       if (startsLine(i) && isLetter(text[i + 2]) && model === 'commonmark') raw(lineEndAt(close));
       if (startsLine(i) && isLetter(text[i + 2]) && model === 'marked') markedBlockAt = close + 1;
@@ -561,6 +591,10 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       // `</` and anything but a letter or `>` is a bogus comment, which runs to the next `>`.
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > tagLimit(i, false)) return i;
+      if (i >= rawUntil) {
+        const hidden = bogusHiddenTag(text, i, close);
+        if (hidden !== -1) return hidden;
+      }
       i = close + 1;
       continue;
     }
@@ -638,8 +672,14 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       // CommonMark type 1 ends at a line holding any one of these four end tags.
       const closer = /<\/(?:pre|script|style|textarea)>/gi;
       closer.lastIndex = i;
-      if (!closer.test(text) || closer.lastIndex > containerEnd(i, false)) return i;
-      raw(lineEndAt(closer.lastIndex));
+      const end = containerEnd(i, false);
+      if (closer.test(text) && closer.lastIndex <= end) raw(lineEndAt(closer.lastIndex));
+      // #5332 — in a quote the block ends with the quote, which ends before the next part's anchor: it absorbs nothing, and what it holds is
+      // read as a browser reads it. Not in a list item: marked ends a list's HTML block elsewhere.
+      // Only where the quote ends at a blank line or the end of the text with no bare CR inside: markdown-it carries a quote on through a
+      // lazy line, and every reader breaks a line at a bare CR, which this walk does not.
+      else if (lineContainers.length > 0 && lineContainers.every((c) => c.quote) && !/\r(?!\n)/.test(text.slice(i, end)) && /^(?:\r?\n[ \t]*(?:\r?\n|$)|$)/.test(text.slice(end))) raw(end);
+      else return i;
     }
     i = tagEnd;
   }

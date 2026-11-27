@@ -53,7 +53,6 @@ function changeText(r: Pick<ChangeRequest, 'operation' | 'secret_id' | 'write_ve
  return 'Update secret metadata' + protection;
 }
 
-
 async function request(db: Prisma.TransactionClient, id: string): Promise<ChangeRequest | null> {
  const [r] = await db.$queryRaw<ChangeRequest[]>`SELECT * FROM secret_change_requests WHERE id=${id}`;
  return r ?? null;
