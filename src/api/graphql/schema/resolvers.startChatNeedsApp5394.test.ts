@@ -304,6 +304,50 @@ describe('#5394 shared chats run under the identified App', () => {
   });
 });
 
+// #5430 (#5407 local review P3-1): appKeyMayActFor admits two kinds of shared starter for a pure App key, a live AppMember
+// of its App and a user that App minted (createAppUser, User.externalAppId), who today has no AppMember row. These pin
+// the second kind's shared start: its home, and that the App's members list it (hrn:node:hadronmemory.com:specs:cor:acl:030:01:
+// the creator is provenance, not a gate). Whether the minted user reads it back is deliberately unpinned, in either
+// direction, pending Holger's ruling on trusted or certified Apps (hrn:node:hadronmemory.com:specs:cor:dmo:050:04).
+describe('#5430 a shared chat an App key starts for a user its App minted', () => {
+  const appKey = (sessionId?: string) => ({ db, appId: appB, roles: [], ...(sessionId ? { sessionId } : {}) }) as unknown as Context;
+  const mintedStart = async (via: 'session' | 'userId') => {
+    await db.app.update({ where: { id: appB }, data: { createUserPermission: 'EXPLICIT' } });
+    await M.createAppUser({}, { externalId: `ext-5430-${via}` }, appKey());
+    const minted = await db.user.findFirstOrThrow({ where: { externalAppId: appB, deletedAt: null }, select: { id: true } });
+    // The premise: the App minted this user and wrote no AppMember row for it.
+    expect(await db.appMember.findUnique({ where: { appId_userId: { appId: appB, userId: minted.id } } })).toBeNull();
+    if (via === 'userId') {
+      return { minted: minted.id, started: await M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope: 'shared', userId: minted.id }, appKey()) };
+    }
+    const session = await M.startAgentSession({}, { agentRef: agentId, externalUserId: `ext-5430-${via}` }, appKey());
+    const sessionId: string = session.sessionId ?? session.session?.id ?? session.id;
+    return { minted: minted.id, started: await M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope: 'shared' }, appKey(sessionId)) };
+  };
+
+  for (const via of ['session', 'userId'] as const) {
+    it(`home: the chat lives in the App's own shared app-class memory (key ${via === 'session' ? 'bound to her session' : 'naming her by userId'})`, async () => {
+      const { started } = await mintedStart(via);
+      const home = await db.memory.findUniqueOrThrow({ where: { id: await homeOf(started.chatId) } });
+      expect({ class: home.class, appId: home.appId, ownerUserId: home.ownerUserId, userId: home.userId })
+        .toEqual({ class: 'app', appId: appB, ownerUserId: null, userId: null });
+      // The same memory a member's shared start in that App uses: one shared home per App, not one per starter.
+      const memberStart = await M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope: 'shared', appRef: appB }, as(ann));
+      expect(await homeOf(memberStart.chatId)).toBe(home.id);
+    });
+  }
+
+  it('listing: an AppMember of the App sees the chat in myChats and myChatsPage', async () => {
+    const { started } = await mintedStart('session');
+    const loc = (await chatNodeByLocOrThrow(db, started.chatId)).loc;
+    const Q = resolvers.Query as any;
+    const listed = await Q.myChats({}, { agentRef: agentId }, as(ann));
+    expect(listed.map((c: { loc: string }) => c.loc)).toContain(loc);
+    const page = await Q.myChatsPage({}, { agentRef: agentId }, as(ann));
+    expect(page.items.map((c: { loc: string }) => c.loc)).toContain(loc);
+  });
+});
+
 // #5407 review (Bindi P3): the #5168 ref-echo harness fills only required arguments, so with no appRef its startChat
 // probes now stop at CHAT_APP_NOT_IDENTIFIED. This keeps its agentRef and userId cover on the same wire (formatGraphQLError):
 // past identification, a malformed or unknown ref is still never quoted back.
