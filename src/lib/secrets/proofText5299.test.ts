@@ -80,4 +80,14 @@ describe('#5299 item 2: the proof text of every staged change, byte for byte', (
     await setProtected(true);
     expect(await textOf(resolvers.Mutation.setSecretProtected({}, { ref: secretId, protected: false }, ctx()))).toEqual({ change: 'Turn protection off', hasMetadata: false });
   });
+  it('stale judgment (#5331 item 4): a flag-only request whose live metadata changed before the proof reads as a metadata update, with the metadata', async () => {
+    await setProtected(false);
+    const e = await error(update({ protected: true }));
+    expect(e.extensions?.code).toBe('SECRET_PROTECTED_NEEDS_PASSKEY');
+    await db.secret.update({ where: { id: secretId }, data: { metadata: { note: 'moved meanwhile' } } });
+    const proof = await proofOf(e.extensions.requestId as string);
+    if (proof.outcome !== 'change') throw new Error('change expected');
+    expect(proof.summary.change).toBe('Update secret metadata and turn protection on');
+    expect(proof.summary).toHaveProperty('metadata');
+  });
 });
