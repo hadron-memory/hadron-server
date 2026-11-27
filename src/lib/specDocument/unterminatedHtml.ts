@@ -69,8 +69,8 @@ function bogusHiddenTag(text: string, at: number, close: number, ctx: () => Hidd
   if (raw === null) return -1;
   const before = body.slice(0, raw.index);
   // Before the first hidden start this pass escaped, the earlier, stricter test stands (#5332): a `<`, a backtick or a backslash before the tag
-  // rules it out. Behind one, what that element's raw text masked is read afresh, so a tag there that Markdown emits must be caught (#5388 QA,
-  // #5388 at 722ea31f): only what Markdown could read another way rules it out there, a `<` that may start a construct holding the tag (a
+  // rules it out. Behind one, what that element's raw text masked is read afresh, so a tag there that Markdown emits must be caught (#5388 QA at
+  // 722ea31f): only what Markdown could read another way rules it out there, a `<` that may start a construct holding the tag (a
   // comment, processing instruction or CDATA section with its closer somewhere after it, a declaration with a blank after its name, or a start
   // tag with a quoted value, the one place a tag holds a `<`; `</`, `<!<`, `<![` and a name followed by `<` are text), a backslash that escapes
   // the tag's own `<`, or a backtick run with a run of its length after the tag. Before a bare CR (a line break to every reader, not to the walk)
@@ -212,6 +212,8 @@ interface RawWalks { owner: Map<number, number>; walks: RawReading[] }
  * in data, and just past each token. Comments end at `-->` or `--!>`; `<!`, `<?` and `</`
  * before a non-letter are bogus comments to the next `>`; a tag ends at the first `>` outside a quoted value; `<` before anything else is text.
  */
+/** A comment from its `<!--` to the first `-->` or `--!>` (sticky: its one user sets `lastIndex` first). */
+const RAW_COMMENT = /<!--[\s\S]*?--!?>/y;
 function rawReader(text: string, from: number, walks: RawWalks): RawReading {
   const data = new Set<number>();
   const ends = new Set<number>();
@@ -236,9 +238,8 @@ function rawReader(text: string, from: number, walks: RawWalks): RawReading {
     let next: number;
     if (text.startsWith('<!--', i)) {
       // `<!-->` and `<!--->` end at once (handled here); any other comment, `<!---x` included, runs to `-->` or `--!>` (#5388 BLIND P2 at dabc70c5).
-      const m = /<!--[\s\S]*?--!?>/y;
-      m.lastIndex = i;
-      const r = text.startsWith('<!-->', i) ? i + 5 : text.startsWith('<!--->', i) ? i + 6 : (m.exec(text) ? m.lastIndex : -1);
+      RAW_COMMENT.lastIndex = i;
+      const r = text.startsWith('<!-->', i) ? i + 5 : text.startsWith('<!--->', i) ? i + 6 : (RAW_COMMENT.exec(text) ? RAW_COMMENT.lastIndex : -1);
       next = r;
     } else if (c === '!' || c === '?' || (c === '/' && !isLetter(text[i + 2]) && text[i + 2] !== '>')) {
       const r = text.indexOf('>', i + 2);

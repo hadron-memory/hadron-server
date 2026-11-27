@@ -14,7 +14,7 @@ import MarkdownIt from 'markdown-it';
 import { marked } from 'marked';
 import { parse } from 'parse5';
 import { describe, expect, it } from 'vitest';
-import { escapeUnterminatedHtml } from './unterminatedHtml.js';
+import { escapeUnterminatedHtml, scansOfLastCallForTests } from './unterminatedHtml.js';
 
 const reader = new commonmark.Parser();
 const writer = new commonmark.HtmlRenderer();
@@ -126,6 +126,9 @@ describe('#5369 (P2b): only an end tag every reader emits raw closes the hidden 
   it.each([
     ['a line end before its `>`', 'x<!§script>\n§/script\n>'],
     ['a CRLF before its `>`', 'x<!§script>\r\n§/script\r\n>'],
+    // BLIND P2-1 at a6d5bdfb: the only end tag in the text, on the hidden tag's own line.
+    ['the only candidate, a line end before its `>`', 'x<!§script>a§/script\n>'],
+    ['the only candidate, a CRLF before its `>`', 'x<!§style>§/style\r\n>'],
   ])('an end tag that crosses a line does not close it, %s: %j', (_label, marked_) => {
     const body = marked_.replace(/§/g, '<');
     expect(escapeUnterminatedHtml(body)).toBe(marked_.replace(/§/g, '&lt;'));
@@ -189,15 +192,56 @@ describe('#5369 (#5388 BLIND P2 at dabc70c5): a bare CR is not a line break to t
     ['<!<style>\r<!\r<!--\\</style>', '<!&lt;style>\r<!\r<!--\\</style>', ALL],
     ['<!\r<!--\\</style>', '<!\r<!--\\</style>', ALL],
     ['<!<textarea><!\r<![CDATA[</textarea>', '<!<textarea><!\r<![CDATA[</textarea>', []],
+    // The two fuzzed bodies that reading a bare CR as a break in the F2 rule alone lost where main keeps them (harness r16). As written
+    // here they keep what main keeps: the first loses in marked on main too, the second keeps in every reader.
+    ['<!DOCTYPE html></><!\r<!--\r<script>\\\r```<xmp>\r\n\t-*-', '<!DOCTYPE html></><!\r<!--\r<script>\\\r```&lt;xmp>\r\n\t-*-', ['marked']],
+    ['\n<div>\n\n<!\r<!--<!--x\n<!<x y=\n1.<title>\n>-->', '\n<div>\n\n<!\r<!--<!--x\n<!<x y=\n1.<title>\n>-->', []],
   ])('%j', (body, out, lose) => {
     expect(escapeUnterminatedHtml(body)).toBe(out);
     expect(losers(out)).toEqual(lose);
+  });
+
+  // BLIND P2-3 at a6d5bdfb: a CRLF is a line end to the F2 rule and to a line-head hidden tag, as an LF is.
+  it.each([
+    ['<!<textarea><!\r\n<![CDATA[</textarea>', '<!<textarea>&lt;!\r\n&lt;![CDATA[</textarea>'],
+    ['<!\r\n<!--\\</style>', '&lt;!\r\n&lt;!--\\</style>'],
+    ['<!<style>\r\n<!\r\n<!--\\</style>', '<!&lt;style>\r\n&lt;!\r\n&lt;!--\\</style>'],
+    ['<!<textarea><!\r\n<xmp>', '<!&lt;textarea><!\r\n&lt;xmp>'],
+  ])('CRLF %j', (body, out) => {
+    expect(escapeUnterminatedHtml(body)).toBe(out);
+    expect(losers(out)).toEqual([]);
+  });
+});
+
+describe('#5369 (#5388 BLIND P2-4 at a6d5bdfb): the rescans after escapes are bounded', () => {
+  // Each escape rescans the text once per model, at most MAX_RESTARTS (32) times; past that every `<` is escaped (#5211). So a text that
+  // needs many escapes costs at most 33 scans per model, whatever its hidden tags: 66 in all.
+  it.each([
+    ['hidden tags, each behind a declaration', 'x<!<style><!x'.repeat(40)],
+    ['hidden tags with no end tag', 'x<!<script> '.repeat(60)],
+    ['nested hidden starts', '<!<textarea><!<style><!<title>'.repeat(20)],
+  ])('%s', (_label, body) => {
+    const out = escapeUnterminatedHtml(body);
+    expect(scansOfLastCallForTests()).toBeLessThanOrEqual(66);
+    expect(losers(out)).toEqual([]);
+  });
+});
+
+describe('#5369 (#5388 BLIND P3 at a6d5bdfb): the raw reader ends each comment boundary form where a browser does', () => {
+  // `<!-->` and `<!--->` end at once and `<!---->` at its own `-->`, so the `</textarea>` after each is in data and closes the hidden one.
+  it.each([
+    ['<!<script><!<textarea><!--></textarea>]:<xmp>--></script>', '<!&lt;script><!<textarea><!--></textarea>]:&lt;xmp>--></script>'],
+    ['<!<script><!<textarea><!---></textarea>]:<xmp>--></script>', '<!&lt;script><!<textarea><!---></textarea>]:&lt;xmp>--></script>'],
+    ['<!<script><!<textarea><!----></textarea>]:<xmp>--></script>', '<!&lt;script><!<textarea><!----></textarea>]:&lt;xmp>--></script>'],
+  ])('%j', (body, out) => {
+    expect(escapeUnterminatedHtml(body)).toBe(out);
+    expect(losers(out)).toEqual([]);
   });
 });
 
 describe('#5369 (#5388 QA at 722ea31f): an escape never uncovers what a hidden tag had masked', () => {
   // [body, the pass's output]: every reader keeps the anchor with the output. QA's F1 kept it on main and lost it at 722ea31f in all three
-  // readers (the hidden `<textarea>`'s end tag sat in a comment the raw reader had opened, so the escaped `<script>` uncovered it); his F2 and
+  // readers (the hidden `<textarea>`'s end tag sat in a comment the raw reader had opened, so the escaped `<script>` uncovered it); QA's F2 and
   // the nested shapes behind it lost it on main as written, where they stood alone, or once an outer hidden tag was escaped.
   it.each([
     // F1: an end tag counts only where a raw reader of the string is back in data (every `<` before it starts a simple tag).
