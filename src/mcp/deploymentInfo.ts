@@ -320,12 +320,23 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // the statements it issues for a member App with three unlicensed installed Agents (a known under-estimate beyond three, tracked in #5362; see admissionComplexity.ts). A list that selects it for many Apps costs more and can
 // now be refused QUERY_TOO_COMPLEX where it was admitted; a single-App selection is unaffected in practice. Answers and the SDL are unchanged.
 // (0.48.0 is #5314, merged first; 0.49.0 is #5334, merged first (the order is Peter's, #153292), so 0.50.0 leaves no gap.)
-// 0.51.0 — ADDITIVE, #5325 (cor:agt:090:01, :02): `StopSignalScope` gains `APP`, a stop signal that covers every live worker of the App,
+// 0.51.0 — BREAKING (behaviour, no SDL removal) (#5345): the reach of an App's links narrows to the record gate. A user-owned
+// memory of a class other than personal/private (`ownerUserId` set) that its owner linked to an App no longer reaches the App's
+// pure key or a userless run on ANY surface; the link row stays, inert (`active: false` in App.attachedMemories), until detached.
+// What main did differed by class. A knowledge/group memory (for example under a user root) was listed by `hadron_list_memories`
+// and its access map, and its NODES were readable through GraphQL `node(ref:)` and returned by `findNodes`, while only
+// `memory(ref:)` and the GraphQL `memories` list refused it. Those callers now lose node content reads and search hits, not only
+// a listing. An app-class memory (a user-owned App's own, linked into itself included) reached every read on main (the record
+// gate's app arm reads the same link judge), so `memory(ref:)` and the `memories` list lose it as well. Both are
+// cor:dmo:060:22 (Decided D-2026-11-26: attaching gives no access; the #5258/#5185 interim covers own personal/private only);
+// the grant (#5321) is the path to that access. Own personal/private linked by the App's owner and organization-owned links are
+// unchanged. (0.50.0 is #5267, merged first.)
+// 0.52.0 — ADDITIVE, #5325 (cor:agt:090:01, :02): `StopSignalScope` gains `APP`, a stop signal that covers every live worker of the App,
 // one cast after it was set included (worked out at each check, no stored roster) and naming no target; whoever manages the App sets and
 // lifts it, a host key never does (STOP_SIGNAL_SCOPE_FORBIDDEN for every shape of the call). The MCP `hadron_stop_signal_set` scope enum
 // gains APP. The three older scopes behave as before. A lagging client that still validates against the old enum cannot send APP, and one
-// that lists signals may now read a scope it does not know. (0.50.0 is #5267, merged first.)
-export const HADRON_SERVER_VERSION = '0.51.0';
+// that lists signals may now read a scope it does not know. (0.51.0 is #5345, merged first.)
+export const HADRON_SERVER_VERSION = '0.52.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
