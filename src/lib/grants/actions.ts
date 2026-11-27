@@ -147,7 +147,7 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
   //  (b) one or more memory ids (a single id or a list, never the wildcard): signed by whoever manages every named memory, so a grant
   //      naming memories of different managers cannot be signed by one person (one grant per manager).
   // Judged at every read, the giver's own read included (src/lib/grants/readGrant.ts). There is no `knowledge.read` (Holger: "is to
-  // unspecific"). The optional branch and one-automation parameters and `memory.write` come in S2 (#5404).
+  // unspecific"). The optional branch and one-automation parameters are #5412; `memory.write` is below (#5404).
   {
     name: 'memory.read', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'MEMORY_READ_APPROVER',
     parameters: [{ name: 'memory', type: 'memory-ref', refusesWildcard: true }],
