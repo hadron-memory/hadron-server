@@ -14465,6 +14465,11 @@ export const typeDefs = `#graphql
     Open a session — and, when \`input.workerRef\` is given, a WORKER SESSION:
     the binding that makes the work attributable to that named teammate.
 
+    Refusals worth knowing (#5266, none quotes your value): a \`parentSessionId\` or \`prevSessionId\` that names no
+    session you may read answers SESSION_NOT_FOUND, the same for a session that does not exist and for one you may not read,
+    before anything is written; an \`id\` that is already taken answers SESSION_ID_TAKEN, whoever owns the existing row,
+    your own repeat included (a repeat is not a resume: resume through the claim and \`--session\` paths).
+
     The binding is held server-side and is independent of the caller's CHAT
     SESSION (the human's Desktop window, Claude Code session or IDE chat).
     **Ending your chat session does not end a worker session** (#1034): a chat
@@ -15450,13 +15455,14 @@ export const typeDefs = `#graphql
     SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl, no
     secret exists yet, and the requester's own passkey ceremony at that URL makes
     it (hrn:node:hadronmemory.com:specs:cor:sec:070:02). A staged request lasts
-    one hour; at most 5 are open per secret name and at most 2 per requester
-    (SECRET_CHANGE_REQUEST_LIMIT, SECRET_CHANGE_REQUESTER_LIMIT). Across the App at
-    most 100 are open (SECRET_CHANGE_APP_LIMIT) and one requester holds at most 20
-    (SECRET_CHANGE_REQUESTER_LIMIT). A staged create counts open protected creates
-    toward the App's 500-secret limit and is refused SECRET_LIMIT_REACHED at staging
-    when there is no room; completion rejudges it. Those numbers are engineering
-    bounds, not ruled values (hrn:node:hadronmemory.com:specs:cor:sec:070:02).
+    one hour. Open staged requests are capped by scope (#5356): at most 5 per
+    secret name (SECRET_CHANGE_REQUEST_LIMIT); at most 2 per requester for one
+    secret name and at most 20 per requester across the App, both refused with
+    SECRET_CHANGE_REQUESTER_LIMIT; and at most 100 across the App
+    (SECRET_CHANGE_APP_LIMIT). These four caps are engineering bounds, not ruled
+    values (hrn:node:hadronmemory.com:specs:cor:sec:070:02). A staged create counts
+    open protected creates toward the App's 500-secret limit and is refused
+    SECRET_LIMIT_REACHED at staging when there is no room; completion rejudges it.
     """
     createSecret(
       ownerType: String!
@@ -15479,7 +15485,13 @@ export const typeDefs = `#graphql
     SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl instead
     of a Secret, and nothing changes until the requester completes the passkey
     ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The expiry and the two
-    caps are as for createSecret.
+    caps are as for createSecret. One exception: protected: true on a secret
+    that is already protected, with no value and with metadata omitted or
+    identical to the stored metadata, asks for no change and answers the
+    Secret unchanged, staging nothing, to a person who passes the staging
+    checks (hrn:node:hadronmemory.com:specs:cor:sec:070:01). A worker session,
+    an App key, an impersonation and a run keep SECRET_PROTECTED_NEEDS_PASSKEY,
+    as for a real change.
     Legacy webfetch-auth rows (written before metadata.type was derived from
     the value) recover differently per owner kind, because only org and user
     rows are re-validated against their own decrypted stored value. There, any
@@ -17201,7 +17213,7 @@ export const typeDefs = `#graphql
     \`instruction\` (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0098; hrn:node:hadronmemory.com:specs:cor:dmo:050:05;
     hrn:node:hadronmemory.com:specs:cor:acl:010:01). ${RUN_REFUSAL_3340} A worker session that is refused cannot tell a missing key from an existing one.
     An admitted instructed revoke records one team event (never the key id); a key already revoked records none.
-    AppKey has no URN; the id is raw ID-only.
+    AppKey has no URN; the id is raw ID-only. An unknown key id answers APP_KEY_NOT_FOUND to a person (#5266); it never quotes the id.
     """
     revokeAppKey(id: ID!, instruction: ActInstructionInput): Boolean!
     """

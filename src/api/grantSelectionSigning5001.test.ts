@@ -632,7 +632,10 @@ async function forge(table: 'grant_signatures' | 'grant_selection_signatures', s
   });
 }
 
-describe('P3 + P5 + P12: each record re-verifies alone, from the touch record\'s kept item list', () => {
+// #5374: every pin here runs a full signing ceremony (`signed()`: schedule, open, prove, complete) and then re-verifies.
+// About 350 ms unloaded; a merge-group shard loaded far past that (1530 s, 1003 s of it import) timed P5 out at
+// vitest's 5 s default. 30 s is the file's own budget for its slow pins.
+describe('P3 + P5 + P12: each record re-verifies alone, from the touch record\'s kept item list', { timeout: 30_000 }, () => {
   async function signed(n = 3) {
     const gs: string[] = [];
     for (let i = 0; i < n; i++) gs.push(await scheduleGrant());

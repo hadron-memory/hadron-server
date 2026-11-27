@@ -524,14 +524,16 @@ export const chatMutations = {
         // never lands in it. Refused through the same null as any unreadable target, so nothing is disclosed.
         // (#3301 moved this check below the branch chain so every branch shares it.)
       } else if (ctx.userId) {
-        const existing = await ctx.db.memory.findFirst({
-          where: {
-            userMemoryOfAgentId: resolvedAgentId,
-            createdBy: ctx.userId,
-            deletedAt: null,
-          },
-          select: { id: true },
-        });
+        // #5380 (cor:cht:010:02): createMemoryInApp stamps the Agent on a person's private memory too (#5183), and a
+        // private memory is never a chat home (validateChatScopeInvariants refuses it at the first send), so the lookup
+        // never selects one: with no other row it takes the no-home path below. Personal first, then any other stamped
+        // row (the no-App manager route's knowledge home; a corrupt system row is still found and refused below, #3301);
+        // oldest, then id, within each, so the pick never depends on row order.
+        const userHomeWhere = { userMemoryOfAgentId: resolvedAgentId, createdBy: ctx.userId, deletedAt: null };
+        const userHomeOrder = [{ createdAt: 'asc' as const }, { id: 'asc' as const }];
+        const existing =
+          await ctx.db.memory.findFirst({ where: { ...userHomeWhere, class: 'personal' }, select: { id: true }, orderBy: userHomeOrder }) ??
+          await ctx.db.memory.findFirst({ where: { ...userHomeWhere, class: { not: 'private' } }, select: { id: true }, orderBy: userHomeOrder });
         if (existing) {
           targetMemoryId = existing.id;
         } else {
