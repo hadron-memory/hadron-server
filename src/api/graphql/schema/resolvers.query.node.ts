@@ -1297,7 +1297,9 @@ export const nodeQueries = {
 
       const parsed = parseUrnInput(ref);
       const typeErr = validateUrnType(parsed, 'node');
-      if (typeErr) throw new Error(typeErr);
+      // #5266: a URN of another kind is a typed input refusal naming the expected kind. The plain Error this replaces reached the wire as
+      // INTERNAL_SERVER_ERROR, and `typeErr` echoes the caller's own prefix, which no message may quote (#5225).
+      if (typeErr) throw new GraphQLError('Expected node URN (hrn:node:...).', { extensions: { code: 'BAD_USER_INPUT' } });
       const value = parsed.value;
       // #1885 (cor:dmo:050:14) — a node URN in an Agent's system memory whose
       // loc has no node of its own (and none moved from it) reads through to
