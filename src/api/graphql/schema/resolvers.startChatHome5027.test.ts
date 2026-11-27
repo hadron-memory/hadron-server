@@ -401,14 +401,32 @@ describe('#5027 Ask 6: the chat records its Agent; the home\'s readers are its a
     expect((await turn(as(bob), started.chatId, 'from bob')).systemMessage).toContain('HOME STAGE');
   });
 
-  it('(iv) a personal memory\'s share grantee reads, lists and posts in a chat started there (R4)', async () => {
+  // (iv) Xan's call on the gate, 2026-11-27 (#154086, option B): R4 makes the memory the unit, so the chat follows the
+  // memory's read gate exactly. The shared gate admits no share grantee to an App personal memory (granteeShareAccess
+  // and getAccessibleMemoryIds' sharedWithMe arm require user_memory_of_agent_id NULL, which chk_memory_personal_agent_id
+  // forbids once app_id is set), and every chat home carries an App. So a grantee of a personal chat home gets the
+  // not-found of a chat that does not exist, writes nothing and lists nothing. Whether such a share should grant
+  // anything is a separate question, filed apart from #5027.
+  it('(iv) a share grantee of an App personal home is refused as for a missing chat: the chat follows the memory gate (R4, option B)', async () => {
     const personal = await appUserMemory('personal');
     await db.memoryShare.create({ data: { memoryId: personal, granteeId: bob, grantorId: ann, role: 'writer' } });
+    const missing = `chats:${Date.now()}-${generateId().slice(0, 8)}-flow`;
+    const nothing = {
+      history: await refusal(history(as(bob), missing)),
+      send: await refusal(turn(as(bob), missing)),
+    };
     const started = await start(as(ann), { memoryRef: personal });
     await turn(as(ann), started.chatId, 'from ann');
-    expect((await history(as(bob), started.chatId)).length).toBeGreaterThan(0);
-    expect(await listed(bob, started.chatId), 'listed for the grantee').toBeDefined();
-    expect((await turn(as(bob), started.chatId, 'from bob')).systemMessage).toContain('HOME STAGE');
+    const before = await footprint();
+    const seen = {
+      history: await refusal(history(as(bob), started.chatId)),
+      send: await refusal(turn(as(bob), started.chatId)),
+    };
+    const swap = (e: { message: string; extensions: unknown }) => JSON.parse(JSON.stringify(e).split(started.chatId).join(missing));
+    expect(swap(seen.history), 'history').toEqual(nothing.history);
+    expect(swap(seen.send), 'send').toEqual(nothing.send);
+    expect(await footprint(), 'nothing written').toEqual(before);
+    expect(await listed(bob, started.chatId), 'not listed for the grantee').toBeUndefined();
   });
 
   it('(v) a non-reader of the home gets the not-found of a chat that does not exist, and no listing', async () => {
