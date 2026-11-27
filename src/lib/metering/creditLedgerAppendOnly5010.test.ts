@@ -59,17 +59,24 @@ describe('#5010 restrict, not cascade', () => {
     expect((await pg.query('SELECT count(*)::int AS n FROM credit_ledger_entries WHERE organization_id = $1', [orgId])).rows[0].n).toBe(2);
   });
 
-  it('pin 8 (guard): deleteOrganization, the product path, keeps every entry and the balance', async () => {
+  it('pin 8 (guard): deleteOrganization, the product path, keeps every entry, with the link to the organization removed (#5302)', async () => {
     const server = new ApolloServer<Context>({ typeDefs, resolvers });
     const before = await creditBalance(db, { organizationId: orgId });
+    const ids = (await pg.query('SELECT id FROM credit_ledger_entries WHERE organization_id = $1', [orgId])).rows.map((r) => r.id);
     const res = await server.executeOperation(
       { query: 'mutation($ref: ID!) { deleteOrganization(ref: $ref) }', variables: { ref: orgId } },
       { contextValue: { db, userId: admin, roles: ['ADMIN'] } as Context },
     );
     if (res.body.kind !== 'single') throw new Error('unexpected');
     expect(res.body.singleResult.errors).toBeUndefined();
-    expect((await pg.query('SELECT count(*)::int AS n FROM credit_ledger_entries WHERE organization_id = $1', [orgId])).rows[0].n).toBe(1);
-    expect(await creditBalance(db, { organizationId: orgId })).toBe(before);
+    // The entry is kept (restrict, not cascade) and its amount still sums to the balance it made; #5302 (cor:dmo:170:08 S2): it no
+    // longer names the deleted organization, so the organization's own figure is now empty.
+    const kept = await pg.query('SELECT organization_id, owner_user_id, amount_micro_cents FROM credit_ledger_entries WHERE id = ANY($1)', [ids]);
+    expect(kept.rows).toHaveLength(1);
+    expect(kept.rows.map((r) => BigInt(r.amount_micro_cents)).reduce((a, b) => a + b, 0n)).toBe(before);
+    expect(kept.rows.every((r) => r.organization_id === null && r.owner_user_id === null)).toBe(true);
+    expect((await pg.query('SELECT count(*)::int AS n FROM credit_ledger_entries WHERE organization_id = $1', [orgId])).rows[0].n).toBe(0);
+    expect(await creditBalance(db, { organizationId: orgId })).toBe(0n);
   });
 });
 
