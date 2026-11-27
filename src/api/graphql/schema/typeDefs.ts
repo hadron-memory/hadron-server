@@ -15772,11 +15772,14 @@ export const typeDefs = `#graphql
     and detail), and nothing is created. A named start never checks a condition.
     """
     # 017: scope defaults to private (FR-003). #5394: a shared request
-    # runs under the identified App, an App credential's included, and is
-    # started by a person (the signed-in user, or the user an App key acts
-    # for) who is an AppMember of that App, which installs this Agent with a
-    # live licence (FR-006). Otherwise SHARED_CHAT_REQUIRES_APP_CONTEXT.
-    # (SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is retired.)
+    # runs under the identified App, an App credential's included, which
+    # installs this Agent with a live licence (FR-006), and is started by a
+    # person: a signed-in user who is an AppMember of that App, or the user a
+    # pure App key of that App acts for, who must be a live AppMember of the
+    # App or a user the App created (createAppUser; #5430). Otherwise
+    # SHARED_CHAT_REQUIRES_APP_CONTEXT (or the unknown-user refusal for a user
+    # the key may not act for). Either way the chat lives in the App's shared
+    # app-class memory. (SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is retired.)
     #
     # 019: isTestRun suppresses the AgentSubscription auto-provision
     # side-effect for chats started by the spec-019 Tester. Default
