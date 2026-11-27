@@ -18,6 +18,7 @@ import {
   requireCallerIdentity,
 } from './resolvers.helpers.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { isUserHolding, userHoldingCreatorMayRead } from '../../../lib/auth/userHolding.js';
 
 type TransferClass = 'knowledge' | 'group' | 'personal' | 'private';
 type TransferDb = Prisma.TransactionClient;
@@ -46,6 +47,9 @@ function refusal(code: string, message: string): GraphQLError {
 async function authorizeSource(ctx: Context, memory: Memory, ref: string): Promise<void> {
   await concealUnreadableDenial(ctx, memory.id, ref, async () => {
     if (!ctx.userId || ctx.impersonation) throw forbiddenError();
+    // hadron-internal#89: a per-user chat holding is moved by its creator alone, acting as themselves. A platform or organisation role
+    // that could carry it into its own namespace would read it back (cor:cht:010:02, user only).
+    if (isUserHolding(memory) && !userHoldingCreatorMayRead(ctx, memory)) throw forbiddenError();
     // personal/private's strict owner is separate from the tenant owner. An
     // org ADMIN cannot read, edit, or transfer someone else's private content.
     if (memory.userId !== null) {

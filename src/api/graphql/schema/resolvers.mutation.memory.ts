@@ -177,6 +177,7 @@ import { installDeleteAllowed, lockInstallAuthorityFirst } from './installMemory
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { refuseBillingMemberRole } from '../../../lib/auth/billingRole.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { isUserHolding, userHoldingCreatorMayRead } from '../../../lib/auth/userHolding.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 
 /**
@@ -1505,6 +1506,8 @@ export const memoryMutations = {
       // as if it were missing (MEMORY_NOT_FOUND), so the denial itself does not
       // disclose that the memory exists; one who can keeps the Forbidden.
       await concealUnreadableDenial(ctx, source.id, ref, async () => {
+        // hadron-internal#89: a copy is a read-out, so a per-user chat holding is cloned by its creator alone, acting as themselves.
+        if (isUserHolding(source) && !userHoldingCreatorMayRead(ctx, source)) throw forbiddenError();
         if (source.class === 'personal' || source.class === 'private') {
           if (!ctx.userId || source.userId !== ctx.userId) {
             throw new GraphQLError(
