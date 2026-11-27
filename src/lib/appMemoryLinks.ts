@@ -1,37 +1,17 @@
 /**
- * #5185 (A3 of #5182; cor:dmo:060:20, Exceptions, "An attached memory"): what an App's links let its key read.
+ * #5185 (A3 of #5182; cor:dmo:060:20, Exceptions, "An attached memory"), narrowed by #5321 (cor:dmo:060:22, cor:acl:140:02): an
+ * App's links are its scope list, and give no access. Since #5321 the App reads outside its own memories only through a
+ * `memory.read` grant (src/lib/grants/readGrant.ts), never through a link; the reach this module once gave a pure key or a
+ * userless run (`linkedMemoryReach`, `linkedReachFor`) is gone.
  *
- * `attachMemoryToApp` writes a row in `app_memory_links` and changes nothing on the memory. This module is the ONE place that
- * judges those rows, at use, for both read surfaces (GraphQL's `getAccessibleMemoryIds` and MCP's `getPrincipalAppMemoryAccess`
- * and `canReadMemoryRow`):
- *
- *  - The reach is READ only, and only for a PURE App key or a userless run of the App: no user (with or without the App
- *    selected), no impersonation, no session-bound key (session isolation stays whole), and no run that carries a user id.
- *  - A link counts only while the App is live and installed, the memory is live and not `system`, and the ATTACHER can read
- *    the memory NOW in their own right (not through any App-derived reach: `holdsContentReadIndependently`, #1349). A row whose
- *    attacher lost read stays, inert; restoring the read restores the reach.
- *  - For `personal` and `private` the link reaches the key only when the memory's owner is the App's owner AND the owner made
- *    the link (a user-owned App whose owner linked their own memory). In an organization's App, or for another person's memory shared with the attacher,
- *    the link grants nothing (Victor's reading of Holger's rulings, Proposed in the spec). A run never reads a `private`
- *    memory, linked or not (#1719 R5a).
- *  - Any other USER-OWNED memory (`ownerUserId` set, #5345) is inert for the key — cor:dmo:060:22 (D-2026-11-26): attaching
- *    gives no access, the interim key read of #5258/#5185 covering own personal/private only; and a list must equal the reads
- *    on every surface (cor:api:120:03). The refusal keys on the tenant-owner axis, not `userId` and not the class. What it
- *    removes differed by class on main. A knowledge/group row had no link arm in the record gate's `ownerUserId` branch, so
- *    `memory(ref:)` and the `memories` list refused it, but node reads (`node(ref:)`, `findNodes`) read the shared accessible
- *    set, whose link arm IS this judge, so they returned its nodes, as MCP listed it. An app-class row fell through that
- *    branch to the same set, so it reached every read. Refusing here removes all of those reads together, which is wider
- *    than "the read gate is unchanged" and still the Decided rule. An organization-owned link is unaffected. The row stays,
- *    inert like a lapsed one (nothing restores it but a transfer of the memory out of the user tenant); detach works as
- *    before.
- *
- * A link deliberately bypasses the strict-owner folds (`admissibleFoldRows` rules 2 and 3, the `appDerivedMemoryIds` class
- * filter, the `ownerUserId` early return of `canReadMemoryRow`): the attach is the only consent step, and this module is the
- * only judge, so a caller of it must not re-derive the rule.
+ * What stays here: `judgeAppLinks`, which says whether each link is ACTIVE (shown as `AppAttachedMemory.active`): the App is live
+ * and installed, the memory is live and not `system`, and the ATTACHER can read the memory NOW in their own right
+ * (`holdsContentReadIndependently`, #1349, registered by the GraphQL helpers; with none registered every link is inactive, failing
+ * closed). For `personal` and `private` a link is active only when the memory's owner is the App's owner and made the link.
+ * Since #5345 a link to any other USER-OWNED memory (`ownerUserId` set) is inactive too; with #5321 that changes only what
+ * `active` shows, since no link reads. `isPureAppKeyShape` and `readsInOwnRight` are shared with the grant judge.
  */
-import { USER_HOLDING_CLASSES } from './auth/userHolding.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
-import { isRunPrincipal } from './auth/runPrincipal.js';
 
 /**
  * "Reads it in their own right" is `holdsContentReadIndependently` (#1349), which lives with the GraphQL read gate. This module
@@ -45,7 +25,18 @@ export function registerOwnRightReader(reader: OwnRightReader | null): void {
   if (reader) warnedNoReader = false;
 }
 
-/** The principal shape the link reach applies to: an App key or a userless run, nothing else. */
+/**
+ * #5321: does `userId` read `memoryId` NOW in their own right (`holdsContentReadIndependently`)? The read-grant judge
+ * (src/lib/grants/readGrant.ts) asks it of a grant's giver at every read. False while the GraphQL helpers have not
+ * registered the reader, and false when the judgement throws (fail closed).
+ */
+export async function readsInOwnRight(db: PrismaClient, userId: string, roles: unknown, memoryId: string): Promise<boolean> {
+  const holds = ownRightReader;
+  if (holds === null) return false;
+  return holds({ db, userId, roles: roles as never }, memoryId).catch(() => false);
+}
+
+/** The principal shape a grant read applies to: an App key or a userless run, nothing else. */
 export function isPureAppKeyShape(auth: {
   appId?: string | null; userId?: string | null; sessionId?: string | null; impersonation?: unknown; sessionBindingRefused?: boolean;
 }): boolean {
@@ -126,41 +117,4 @@ export async function judgeAppLinks(
     attachedBy: link.attachedBy,
     active: eligible(link) && (await verdicts.get(`${link.attachedBy}:${link.memoryId}`)) === true,
   })));
-}
-
-/**
- * The ids, among the App's links (or among `onlyMemoryIds`), that its key may read through a link right now. `run`: the
- * principal is a run, which never reads a `private` memory (#1719 R5a), linked or not.
- */
-export async function linkedMemoryReach(
-  db: PrismaClient,
-  appId: string,
-  opts: { onlyMemoryIds?: readonly string[]; run?: boolean } = {},
-): Promise<Set<string>> {
-  const judged = await judgeAppLinks(db, appId, opts);
-  const ids = new Set(judged.filter((l) => l.active).map((l) => l.memoryId));
-  if (opts.run && ids.size > 0) {
-    const privateRows = await db.memory.findMany({ where: { id: { in: [...ids] }, class: 'private' }, select: { id: true } });
-    for (const row of privateRows) ids.delete(row.id);
-  }
-  // hadron-internal#88 (cor:cht:010:02): a per-user chat holding is its creator's alone, so no App link reaches it, for a key
-  // or a run, whoever attached it.
-  if (ids.size > 0) {
-    const holdings = await db.memory.findMany({
-      where: { id: { in: [...ids] }, class: { in: [...USER_HOLDING_CLASSES] }, userMemoryOfAgentId: { not: null } },
-      select: { id: true },
-    });
-    for (const row of holdings) ids.delete(row.id);
-  }
-  return ids;
-}
-
-/** Every id the pure-key shape may read through links, for a fold or a listing; empty for any other shape. */
-export async function linkedReachFor(
-  db: PrismaClient,
-  auth: { appId?: string | null; userId?: string | null; sessionId?: string | null; impersonation?: unknown; sessionBindingRefused?: boolean; clientId?: string | null },
-  onlyMemoryIds?: readonly string[],
-): Promise<Set<string>> {
-  if (!isPureAppKeyShape(auth)) return new Set();
-  return linkedMemoryReach(db, auth.appId!, { onlyMemoryIds, run: isRunPrincipal(auth) });
 }

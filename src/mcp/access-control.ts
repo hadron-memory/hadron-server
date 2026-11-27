@@ -1,5 +1,6 @@
-import { isPureAppKeyShape, linkedReachFor } from '../lib/appMemoryLinks.js';
+import { isPureAppKeyShape } from '../lib/appMemoryLinks.js';
 import { mayBeOwnAppMemory, ownAppMemoryIds } from '../lib/appOwnMemory.js';
+import { grantReadReachFor } from '../lib/grants/readGrant.js';
 import { personalOrgAgentTextBatch } from '../lib/auth/personalOrgAgentInstall.js';
 import { listAppInstallations, loadAppInstallationPage } from '../lib/appInstallations.js';
 /**
@@ -579,9 +580,10 @@ export async function getPrincipalAppMemoryAccess(
       }
     }
   }
-  // #5185: what a pure App key / userless run may read through its App's links (READ only, judged at use). One judge,
-  // shared with the GraphQL gate; it is never a user's, a session's or an impersonation's reach.
-  for (const id of await linkedReachFor(db, principal)) if (!access.has(id)) access.set(id, 'READ_ONLY');
+  // #5321 (cor:acl:140:02, cor:agt:010:01): what a pure App key holding grant:read, or a userless run, reads through its App's read
+  // grants (READ only, judged at use). One judge, shared with the GraphQL gate; never a user's, a session's or an impersonation's
+  // reach. An attachment adds nothing (cor:dmo:060:22).
+  for (const id of await grantReadReachFor(db, principal)) if (!access.has(id)) access.set(id, 'READ_ONLY');
   // #5398 (cor:api:120:03): a pure App key reads its own App's shared app-class memories, READ only. The one predicate
   // (`src/lib/appOwnMemory.ts`); for an org App it repeats the team-space fold, for a user-owned App it is the read that
   // `admissibleFoldRows` rule 2 withholds from a credential-only principal.
@@ -1286,9 +1288,10 @@ async function canReadMemoryRow(
 ): Promise<boolean> {
   // #2044: an install memory's content is its live App's participants alone.
   if (isInstallMemoryRow(memory)) return (await installMemoryAudience(db, auth, memory)).read;
-  // #5185: a pure App key / userless run reads a linked memory (judged at use, READ only). Before the strict-owner and
-  // user-owned branches below, which would answer for it first; a miss falls through to today's logic unchanged.
-  if (isPureAppKeyShape(auth) && memory.class !== 'system' && (await linkedReachFor(db, auth, [memory.id])).has(memory.id)) return true;
+  // #5321: a pure App key holding grant:read, or a userless run, reads a memory its App holds a live read grant for (judged at
+  // use, READ only, the one judge). Before the user-owned branches below, which would answer for it first; a miss falls
+  // through to today's logic unchanged.
+  if (isPureAppKeyShape(auth) && (await grantReadReachFor(db, auth, [memory.id])).has(memory.id)) return true;
   // #5398: a pure App key reads its own App's shared app-class memory (the one predicate, READ only). Also above the
   // user-owned branch below, which would refuse a user-owned App's own memory first.
   if (mayBeOwnAppMemory(auth, memory) && (await ownAppMemoryIds(db, auth, [memory.id])).has(memory.id)) return true;

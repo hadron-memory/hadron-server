@@ -9,6 +9,12 @@
  * narrowing; the record read stays green. For class app that branch fell through to the accessible set as well, so EVERY
  * surface admitted it (each assertion in that test is red on main on its own).
  * Every control here was green on main and must stay green.
+ *
+ * #5321 (merged in after #5345): a link gives NO read at all; an App reads outside its own memories only through a
+ * `memory.read` grant (src/lib/grants/readGrant.ts). So `linkedReachFor` is gone (its assertions now read the MCP listing),
+ * and the controls whose link alone reached the key are restated: a link alone reaches nothing, and an org-owned memory
+ * reaches the key (with the `grant:read` scope) or a userless run through a grant. Each flipped expectation is marked
+ * `#5321: was`.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -16,7 +22,9 @@ import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { getMemoryAccess, canReadMemory } from '../../../mcp/access-control.js';
-import { linkedReachFor, judgeAppLinks } from '../../../lib/appMemoryLinks.js';
+import { judgeAppLinks } from '../../../lib/appMemoryLinks.js';
+import { DB_NOW, raw, insertGrantUnguarded, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -34,7 +42,19 @@ let userApp: { id: string }; // otto's App
 const asUser = (userId: string): Context => ({ db, userId, roles: [] } as unknown as Context);
 const keyAuth = (appId: string): AuthContext => ({ appId, roles: [], clientId: `app:${appId}` } as AuthContext);
 const runAuth = (appId: string): AuthContext => ({ appId, roles: [], clientId: 'run:r1' } as AuthContext);
-const keyCtx = (appId: string): Context => ({ db, ...keyAuth(appId) } as unknown as Context);
+const keyCtx = (appId: string, auth: AuthContext = keyAuth(appId)): Context => ({ db, ...auth } as unknown as Context);
+/** #5321: a pure key of `appId` holding the `grant:read` scope (what a `memory.read` grant needs to reach a key). */
+async function scopedKey(appId: string): Promise<AuthContext> {
+  const k = await db.appKey.create({ data: { appId, keyHash: generateId(), keyPreview: 'k' } });
+  await db.$executeRawUnsafe(
+    `INSERT INTO app_key_scopes (id, app_key_id, scope, granted_by_user_id) VALUES ($1, $2, 'grant:read', $3)`, generateId(), k.id, otto);
+  return { ...keyAuth(appId), appKeyId: k.id } as AuthContext;
+}
+/** #5321: an ACTIVE `memory.read` grant held by `appId`, given by `giver`, written around the ceremony (the read is what is pinned). */
+const grantRead = (appId: string, memoryId: string, giver: string) => insertGrantUnguarded({ appId, userId: giver } as World, {
+  user_id: null, grantee_app_id: appId, issuer_user_id: giver, action: 'memory.read', action_values: { memory: memoryId },
+  activated_at: raw(DB_NOW), verification_kind: 'PASSKEY', verified_by: giver,
+} as never);
 const attach = (c: Context, memoryRef: string, appRef: string) =>
   (resolvers.Mutation as any).attachMemoryToApp(null, { memoryRef, appRef }, c);
 const listIds = async (c: Context) =>
@@ -55,6 +75,7 @@ async function userOwned(klass: 'knowledge' | 'group' | 'app' = 'knowledge', ext
 
 beforeEach(async () => {
   await cleanDb(db);
+  await upsertPlatformActions(db);
   org = (await createDbOrgAndGraph(db, { orgName: 'narrow5345', graphName: 'base' })).org;
   const person = async (n: number, h: string) =>
     (await db.user.create({ data: { id: generateId(), githubId: 5_345_000 + n, githubUsername: h, handle: `${h}-${generateId().slice(-6)}` } })).id;
@@ -67,10 +88,10 @@ beforeEach(async () => {
 });
 
 describe('#5345 a user-owned non-personal linked memory reaches no surface of the App key', () => {
-  it('the judge refuses it: linkedReachFor omits it and the link row sits inert (red on main)', async () => {
+  it('the judge refuses it: the key lists nothing and the link row sits inert (red on main)', async () => {
     const uk = await userOwned('knowledge');
     await attach(asUser(otto), uk.id, userApp.id);
-    expect(await linkedReachFor(db as never, keyAuth(userApp.id))).toEqual(new Set());
+    expect(await mcpIds(userApp.id)).toEqual([]); // #5321: was linkedReachFor, removed with the link reach
     const judged = await judgeAppLinks(db as never, userApp.id, { onlyMemoryIds: [uk.id] });
     expect(judged).toHaveLength(1); // the row is there — the attach is still the consent step, it just grants the key nothing
     expect(judged[0]!.active).toBe(false);
@@ -93,7 +114,7 @@ describe('#5345 a user-owned non-personal linked memory reaches no surface of th
   it('the same narrowing holds for a group-class user-owned memory (the judge keys on the owner axis, not the class)', async () => {
     const grp = await userOwned('group');
     await attach(asUser(otto), grp.id, userApp.id);
-    expect(await linkedReachFor(db as never, keyAuth(userApp.id))).toEqual(new Set());
+    expect(await mcpIds(userApp.id)).toEqual([]); // #5321: was linkedReachFor, removed with the link reach
   });
 
   it('an app-class user-owned memory loses every surface, node reads included (all red on main)', async () => {
@@ -105,7 +126,7 @@ describe('#5345 a user-owned non-personal linked memory reaches no surface of th
     const team = await userOwned('app', { appId: otherApp.id });
     const doc = await db.node.create({ data: { id: generateId(), memoryId: team.id, loc: 'teamdoc', name: 'T', content: 'app-class body' } });
     await attach(asUser(otto), team.id, userApp.id);
-    expect(await linkedReachFor(db as never, keyAuth(userApp.id))).toEqual(new Set());
+    expect(await mcpIds(userApp.id)).toEqual([]); // #5321: was linkedReachFor, removed with the link reach
     expect(await canReadMemory(db as never, keyAuth(userApp.id), team.id)).toBe(false);
     expect(await recordRead(keyCtx(userApp.id), team.id)).toBe(false);
     expect(await listIds(keyCtx(userApp.id))).toEqual([]);
@@ -134,7 +155,7 @@ describe('#5345 a user-owned non-personal linked memory reaches no surface of th
     expect(await hits(asUser(otto))).toEqual([doc.id]);
   });
 
-  it('control: node reads through an owner-linked personal and an org-owned linked memory still work', async () => {
+  it('control: node reads through an owner-linked personal and an org-owned linked memory (#5321: a link alone reads neither; a grant opens the org one)', async () => {
     const own = await db.memory.create({
       data: { id: generateId(), name: 'own', urn: `hrn-test-${generateId().slice(-8)}`, class: 'personal', userId: otto, ownerUserId: otto, organizationId: null, visibility: null } as never,
     });
@@ -145,47 +166,56 @@ describe('#5345 a user-owned non-personal linked memory reaches no surface of th
     const b = await db.node.create({ data: { id: generateId(), memoryId: ok.id, loc: 'doc', name: 'O', content: 'org body' } });
     await attach(asUser(otto), own.id, userApp.id);
     await attach(asUser(alice), ok.id, orgApp.id);
-    expect((await Q.node({}, { ref: a.id }, keyCtx(userApp.id)))?.id).toBe(a.id);
-    expect((await Q.node({}, { ref: b.id }, keyCtx(orgApp.id)))?.id).toBe(b.id);
+    const key = await scopedKey(orgApp.id);
+    expect(await Q.node({}, { ref: a.id }, keyCtx(userApp.id))).toBeNull(); // #5321: was a.id
+    expect(await Q.node({}, { ref: b.id }, keyCtx(orgApp.id, key))).toBeNull(); // #5321: was b.id
+    await grantRead(orgApp.id, ok.id, alice);
+    expect((await Q.node({}, { ref: b.id }, keyCtx(orgApp.id, key)))?.id).toBe(b.id);
   });
 
-  it('control: a personal memory its owner linked still lists on BOTH surfaces and memory(ref:) answers it', async () => {
+  it('control: a personal memory its owner linked lists on neither surface and memory(ref:) refuses it (#5321)', async () => {
     const own = await db.memory.create({
       data: { id: generateId(), name: 'own', urn: `hrn-test-${generateId().slice(-8)}`, class: 'personal', userId: otto, ownerUserId: otto, organizationId: null, visibility: null } as never,
     });
     await attach(asUser(otto), own.id, userApp.id);
-    expect(await listIds(keyCtx(userApp.id))).toEqual([own.id]);
-    expect(await mcpIds(userApp.id)).toEqual([own.id]);
-    expect(await recordRead(keyCtx(userApp.id), own.id)).toBe(true);
+    expect(await listIds(keyCtx(userApp.id))).toEqual([]); // #5321: was [own.id]
+    expect(await mcpIds(userApp.id)).toEqual([]); // #5321: was [own.id]
+    expect(await recordRead(keyCtx(userApp.id), own.id)).toBe(false); // #5321: was true
   });
 
-  it('control: an org-owned linked memory still reaches the key on both surfaces (the narrowing is the owner axis only)', async () => {
+  it('control: an org-owned linked memory reaches the key on both surfaces through a grant, never through the link (#5321)', async () => {
     const ok = await db.memory.create({
       data: { id: generateId(), name: 'ok', urn: `${org.urn}:ok-${generateId().slice(-6)}`, class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id } as never,
     });
     await attach(asUser(alice), ok.id, orgApp.id);
-    expect(await listIds(keyCtx(orgApp.id))).toEqual([ok.id]);
-    expect(await mcpIds(orgApp.id)).toEqual([ok.id]);
-    expect(await recordRead(keyCtx(orgApp.id), ok.id)).toBe(true);
+    const auth = await scopedKey(orgApp.id);
+    const key = keyCtx(orgApp.id, auth);
+    expect(await listIds(key)).toEqual([]); // #5321: was [ok.id]
+    expect(await canReadMemory(db as never, auth, ok.id)).toBe(false); // #5321: was true
+    expect(await recordRead(key, ok.id)).toBe(false); // #5321: was true
+    await grantRead(orgApp.id, ok.id, alice);
+    expect(await listIds(key)).toEqual([ok.id]);
+    expect(await canReadMemory(db as never, auth, ok.id)).toBe(true);
+    expect(await recordRead(key, ok.id)).toBe(true);
   });
 
-  it('controls: a run principal, and a lapsed link', async () => {
-    // A userless run of the App reads a linked org memory and refuses the user-owned one.
+  it('controls: a run principal, and a giver who loses read (#5321: was a lapsed link)', async () => {
+    // A userless run of the App reads a linked org memory only through a grant, and never the user-owned one.
     const ok = await db.memory.create({
       data: { id: generateId(), name: 'ok2', urn: `${org.urn}:ok2-${generateId().slice(-6)}`, class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id } as never,
     });
     await attach(asUser(alice), ok.id, orgApp.id);
     const uk = await userOwned('knowledge');
     await attach(asUser(otto), uk.id, userApp.id);
+    expect(await canReadMemory(db as never, runAuth(orgApp.id), ok.id)).toBe(false); // #5321: was true through the link
+    await grantRead(orgApp.id, ok.id, alice);
     expect(await canReadMemory(db as never, runAuth(orgApp.id), ok.id)).toBe(true);
     expect(await canReadMemory(db as never, runAuth(userApp.id), uk.id)).toBe(false);
-    // A link that lapses (the attacher loses read) drops out of both surfaces at once, and returns with the read.
-    expect(await mcpIds(orgApp.id)).toEqual([ok.id]);
+    // The giver is judged at every read: alice loses read, the run loses it at once, and regains it with her read.
     await db.orgMember.updateMany({ where: { organizationId: org.id, userId: alice }, data: { deletedAt: new Date() } });
-    expect(await mcpIds(orgApp.id)).toEqual([]);
-    expect(await listIds(keyCtx(orgApp.id))).toEqual([]);
+    expect(await canReadMemory(db as never, runAuth(orgApp.id), ok.id)).toBe(false);
     await db.orgMember.updateMany({ where: { organizationId: org.id, userId: alice }, data: { deletedAt: null } });
-    expect(await mcpIds(orgApp.id)).toEqual([ok.id]);
+    expect(await canReadMemory(db as never, runAuth(orgApp.id), ok.id)).toBe(true);
   });
 });
 
@@ -223,8 +253,9 @@ describe('#5375 the inert link is listed with active: false, and detach / re-att
           { memoryId: own.id, attachedById: otto, active: true },
         ].sort((x, y) => x.memoryId.localeCompare(y.memoryId)),
       );
-      // The listing agrees with what the key reaches: the active entry only.
-      expect(await mcpIds(userApp.id)).toEqual([own.id]);
+      // #5321: `active` says whether the link would count, not that it reads. A link gives the key nothing on its own, and a
+      // personal memory is never a memory.read target, so the key reaches neither entry.
+      expect(await mcpIds(userApp.id)).toEqual([]);
     },
   );
 
@@ -243,7 +274,7 @@ describe('#5375 the inert link is listed with active: false, and detach / re-att
     const judged = await judgeAppLinks(db as never, userApp.id, { onlyMemoryIds: [uk.id] });
     expect(judged.map((j) => [j.memoryId, j.active])).toEqual([[uk.id, false]]);
     // Re-attaching grants the key nothing: still no reach on any surface.
-    expect(await linkedReachFor(db as never, keyAuth(userApp.id))).toEqual(new Set());
+    // #5321: was linkedReachFor, removed with the link reach; the MCP listing and the record read below carry it.
     expect(await mcpIds(userApp.id)).toEqual([]);
     expect(await recordRead(keyCtx(userApp.id), uk.id)).toBe(false);
   });
