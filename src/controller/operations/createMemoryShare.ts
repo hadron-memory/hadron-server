@@ -126,12 +126,13 @@ export async function createMemoryShare(
   // MUST be a current member of the memory's org. A free-standing (org-less)
   // personal memory skips this check. AGENT-SCOPED personal memories
   // (userMemoryOfAgentId set — the spec-023 per-pairing App/mentor pattern) are
-  // ALSO exempt: their sharing is governed by AppMember + AgentSubscription (the
-  // resolveMemoryAuthorization predicate), not org membership. #5389: the read
-  // arms now honor their shares, but keep the org-membership mirror, so a share
-  // on an org-set agent-scoped row to a non-member is accepted here and stays
-  // inert there (rows createMemoryInApp makes are org-less, where the mirror is
-  // moot). findFirst + deletedAt: null so a REVOKED membership no longer qualifies.
+  // ALSO exempt from this create-time check. #5389: no AgentSubscription licence
+  // governs them any more; every read arm (granteeShareAccess, getAccessibleMemoryIds,
+  // the memories sharedWithMe slice, effectiveAccess) honors their shares at the
+  // share's role and applies the org-membership mirror there, so a share on an
+  // org-set agent-scoped row to a non-member is accepted here and stays inert on
+  // read (rows createMemoryInApp makes are org-less, where the mirror is moot).
+  // findFirst + deletedAt: null so a REVOKED membership no longer qualifies.
   if (memory.organizationId !== null && memory.userMemoryOfAgentId === null) {
     const member = await db.orgMember.findFirst({
       where: { organizationId: memory.organizationId, userId: args.granteeId, ...LIVE_ORG_MEMBERSHIP },

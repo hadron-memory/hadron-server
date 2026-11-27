@@ -26,6 +26,8 @@ const M = resolvers.Mutation as any;
 let org: { id: string; urn: string };
 let appId: string, agentId: string;
 let owner: string, grantee: string, writer: string, stranger: string, outsider: string;
+/** A grantee who is in neither the org nor the App: the share alone must admit on the org-less row. */
+let loner: string;
 /** App personal memory as createMemoryInApp makes it today: organizationId NULL, the App and its Agent set. */
 let appPersonal: string;
 /** An App personal memory carrying the App's org (an older door): the org-membership mirror applies. */
@@ -49,7 +51,7 @@ beforeEach(async () => {
   await cleanDb(db);
   org = await db.organization.create({ data: { id: generateId(), name: 'p5389', urn: `p5389-${generateId().slice(-8)}.example` } });
   owner = await user('owner'); grantee = await user('grantee'); writer = await user('writer'); stranger = await user('stranger');
-  outsider = await user('outsider');
+  outsider = await user('outsider'); loner = await user('loner');
   for (const u of [owner, grantee, writer, stranger]) await db.orgMember.create({ data: { organizationId: org.id, userId: u, role: 'READER' } });
   agentId = (await db.agent.create({ data: { name: 'Tutor', urn: `${org.urn}:tutor`, organizationId: org.id } })).id;
   appId = (await db.app.create({ data: { name: 'Tutor', urn: `${org.urn}:tutor-app`, organizationId: org.id } })).id;
@@ -61,6 +63,7 @@ beforeEach(async () => {
   await share(appPersonal, grantee, 'reader');
   await share(appPersonal, writer, 'writer');
   await share(appPersonal, outsider, 'reader');
+  await share(appPersonal, loner, 'reader');
   await share(orgAppPersonal, grantee, 'reader');
   await share(orgAppPersonal, outsider, 'reader'); // a non-member of the row's org: the mirror keeps it inert
   await share(freePersonal, grantee, 'reader');
@@ -99,11 +102,19 @@ describe('#5389 red: a share on an App personal memory grants its role', () => {
     expect(none.canRead).toBe(false);
   });
 
+  it('the share alone admits: a grantee in neither the org nor the App opens, lists and reads it', async () => {
+    expect(await db.appMember.count({ where: { userId: loner } })).toBe(0);
+    expect(await db.orgMember.count({ where: { userId: loner } })).toBe(0);
+    expect((await Q.memory(null, { ref: appPersonal }, ctx(loner)))?.id).toBe(appPersonal);
+    expect(await listed(loner)).toEqual([appPersonal]);
+    expect((await gate(ctx(loner))).includes(appPersonal)).toBe(true);
+  });
+
   it('a WRITER grantee writes a node; a READER grantee may not', async () => {
     const written = await M.createNode(null, { input: { memoryRef: appPersonal, loc: 'notes:by-writer', name: 'w' } }, ctx(writer));
     expect(written?.loc).toBe('notes:by-writer');
     await expect(M.createNode(null, { input: { memoryRef: appPersonal, loc: 'notes:by-reader', name: 'r' } }, ctx(grantee)))
-      .rejects.toThrow(/Forbidden|no write access/);
+      .rejects.toThrow(/^Forbidden: no write access to this memory$/);
     expect(await db.node.count({ where: { memoryId: appPersonal, loc: 'notes:by-reader' } })).toBe(0);
   });
 });
@@ -114,13 +125,25 @@ describe('#5389: still refused', () => {
     expect(await listed(stranger)).toEqual([]);
     expect((await gate(ctx(stranger))).includes(appPersonal)).toBe(false);
     await expect(M.createNode(null, { input: { memoryRef: appPersonal, loc: 'notes:x', name: 'x' } }, ctx(stranger)))
-      .rejects.toThrow(/Forbidden|no write access|MEMORY_NOT_FOUND/);
+      .rejects.toThrow(/^MEMORY_NOT_FOUND: nothing found for the given ref\.$/);
   });
 
   it('the org-membership mirror: a grantee who is not a member of the row\'s org gets nothing from that share', async () => {
     await expect(Q.memory(null, { ref: orgAppPersonal }, ctx(outsider))).resolves.toBeNull();
     expect(await listed(outsider)).toEqual([appPersonal]);
     expect((await gate(ctx(outsider))).includes(orgAppPersonal)).toBe(false);
+  });
+
+  it('effectiveAccess applies the same mirror: no read for a non-member grantee of an org-set row (Gustav, 9f98fd9b)', async () => {
+    const urn = (await db.memory.findUniqueOrThrow({ where: { id: orgAppPersonal }, select: { urn: true } })).urn;
+    const asOwner = ctx(owner);
+    const out = await Q.effectiveAccess(null, { user: outsider, resource: `hrn:memory:${urn}` }, asOwner);
+    expect(out.canRead).toBe(false);
+    expect(out.grants).toEqual([]);
+    const member = await Q.effectiveAccess(null, { user: grantee, resource: `hrn:memory:${urn}` }, asOwner);
+    expect(member).toMatchObject({ canRead: true, canWrite: false, role: 'reader' });
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: org.id, userId: grantee } }, data: { deletedAt: new Date() } });
+    expect((await Q.effectiveAccess(null, { user: grantee, resource: `hrn:memory:${urn}` }, asOwner)).canRead).toBe(false);
   });
 
   it('a revoked membership drops the org-set share from every arm; the org-less one stays', async () => {

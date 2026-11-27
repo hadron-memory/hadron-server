@@ -185,9 +185,19 @@ async function memoryGrants(
         where: { memoryId_granteeId: { memoryId: memory.id, granteeId: subject.id } },
         select: { role: true },
       });
-      // #5389: the share alone admits, App personal memories included: no AgentSubscription licence (the old
-      // "step 3c"), in lockstep with granteeShareAccess and getAccessibleMemoryIds (cor:dmo:060:20 S6).
-      if (share) {
+      // #5389: a share admits at its role, App personal memories included: no AgentSubscription licence (the old
+      // "step 3c"), in lockstep with granteeShareAccess and getAccessibleMemoryIds (cor:dmo:060:20 S6). On an
+      // org-set row the grantee must also be a live member of that org, the same mirror those two apply, so this
+      // never reports a read the gate refuses.
+      let admitted = !!share;
+      if (share && memory.organizationId !== null) {
+        const member = await db.orgMember.findFirst({
+          where: { organizationId: memory.organizationId, userId: subject.id, ...LIVE_ORG_MEMBERSHIP },
+          select: { userId: true },
+        });
+        admitted = !!member;
+      }
+      if (share && admitted) {
         grants.push({
           source: 'MEMORY_SHARE',
           role: share.role,
