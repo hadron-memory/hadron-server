@@ -316,7 +316,11 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // open now answers false (nothing was withdrawn); it still ends as expired with its staged value cleared, as before. It answered true.
 // A live request still answers true and ends withdrawn; an ended one, and another person's or unknown id, are unchanged. No SDL shape change.
 // (0.48.0 is #5314, merged first.)
-export const HADRON_SERVER_VERSION = '0.49.0';
+// 0.50.0 — ADMISSION COST, #5267: `App.viewerAppUserMemoryClasses` (#5218) is priced at 24 per App by GraphQL admission (it was a leaf, 1),
+// the statements it issues for a member App with three unlicensed installed Agents (a known under-estimate beyond three, tracked in #5362; see admissionComplexity.ts). A list that selects it for many Apps costs more and can
+// now be refused QUERY_TOO_COMPLEX where it was admitted; a single-App selection is unaffected in practice. Answers and the SDL are unchanged.
+// (0.48.0 is #5314, merged first; 0.49.0 is #5334, merged first (the order is Peter's, #153292), so 0.50.0 leaves no gap.)
+export const HADRON_SERVER_VERSION = '0.50.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

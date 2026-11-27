@@ -1,0 +1,11 @@
+-- #5020: aiSpend(userRef:) reads a person's billed units, newest first within a window. Built CONCURRENTLY so writes to the
+-- usage_events firehose are not blocked (convention:
+-- hrn:node:hadronmemory.com:hadron-server:findings:create-index-concurrently-in-prisma-migrations).
+--
+-- CONCURRENTLY cannot run inside a transaction block, and `prisma migrate deploy` sends a file as one simple query: one
+-- statement runs outside a transaction, several run as one implicit transaction (SQLSTATE 25001). Keep this file a single
+-- statement.
+--
+-- A failed CONCURRENTLY build leaves an INVALID index under this name, which IF NOT EXISTS would then skip. If it is ever
+-- INVALID, drop it and re-run this statement by hand.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "usage_events_billable_user_id_created_at_idx" ON "usage_events"("billable_user_id", "created_at");

@@ -493,7 +493,9 @@ model User {
   // #620: revisions this user approved (NodeRevision.approvedBy).
   approvedNodeRevisions         NodeRevision[]              @relation("NodeRevisionApprover")
   // 046-usage-metering: billing attribution back-relation.
-  usageEvents                   UsageEvent[]
+  usageEvents                   UsageEvent[]                  @relation("UsageEventUser")
+  /// #5020: units billed to this person (UsageEvent.billableUserId), apart from `usageEvents` (the work done for them).
+  billedUsageEvents             UsageEvent[]                  @relation("UsageEventBillableUser")
   // #772: the user's placed /app/dashboard widgets (user-scoped layout config).
   dashboardWidgets              DashboardWidget[]
   // #806: the user's SAVED widget configurations (a palette, not a placement).
@@ -2238,9 +2240,15 @@ model UsageEvent {
   /// The on-behalf-of user (billing attribution). Nullable — pure-App
   /// service runs have no user. Distinct from the audit `createdBy` string.
   userId           String?   @map("user_id")
-  /// The billable organization. Set on every metered event so ledger
-  /// attribution never needs a join through App.
+  /// The billable organization: set only when the billable account is an organization (the owner of the work,
+  /// hrn:node:hadronmemory.com:specs:cor:dmo:170:05), so ledger attribution never needs a join through App. At most
+  /// one of this and `billableUserId` is set (`chk_usage_event_one_billable`); neither is set for a unit with no
+  /// owner of the work.
   organizationId   String?   @map("organization_id")
+  /// #5020 (Billing A13): the billable person, when the owner of the work is a person (hrn:node:hadronmemory.com:specs:cor:dmo:170:05
+  /// and the person arm of hrn:node:hadronmemory.com:specs:cor:dmo:170:01). Distinct from `userId`, the user the work was
+  /// done for: `aiSpend(userRef:)` reads by this column and never by `userId`. Set null if the user row is deleted.
+  billableUserId   String?   @map("billable_user_id")
   /// LLM provider that served the call — `model` alone is ambiguous
   /// across providers (e.g. claude via anthropic vs bedrock).
   provider         String?
@@ -2284,8 +2292,9 @@ model UsageEvent {
   session      Session?      @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   app          App?          @relation(fields: [appId], references: [id], onDelete: SetNull)
   appKey       AppKey?       @relation(fields: [appKeyId], references: [id], onDelete: SetNull)
-  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user         User?         @relation("UsageEventUser", fields: [userId], references: [id], onDelete: SetNull)
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  billableUser User?         @relation("UsageEventBillableUser", fields: [billableUserId], references: [id], onDelete: SetNull)
   priceRow     AiModelPrice? @relation(fields: [priceRowId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   appRun       AppRun?       @relation(fields: [appRunId], references: [id], onDelete: SetNull)
 
@@ -2303,6 +2312,8 @@ model UsageEvent {
   @@index([userId, createdAt])
   @@index([memoryId, createdAt])
   @@index([organizationId, createdAt])
+  /// #5020: aiSpend(userRef:) reads a person's billed units, newest first within a window.
+  @@index([billableUserId, createdAt])
   /// #2944: the key-filtered read (usageEvents(appKey:)), newest first within a window.
   @@index([appKeyId, createdAt])
   /// #5021: cost corrections (A15) select units by their price row.
