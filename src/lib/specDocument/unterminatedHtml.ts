@@ -62,11 +62,11 @@ const RAW_TEXT_START = /<(script|style|textarea|title|xmp|iframe|noembed|noframe
  * a browser reading the raw string ends a bogus comment at that `>`. Only a start tag Markdown accepts, on one line and ending at that `>`, with nothing
  * before it in the comment that Markdown could read another way (a `<`, a backtick, a backslash), on the comment's line or the next, and
  * not closed later by its own end tag (Markdown's raw text then ends where a browser's reading resumes anyway).
- * #5324 — the same test serves a line-head `<div/` (`prefix` is the length of the text Markdown reads before the hidden tag: 2 for `<!`
- * and `</`), where a browser reads the hidden tag as an attribute of the tag that ends at `close`.
+ * #5324 — the same test serves a line-head `<div/` (`at` is its `<`), where a browser reads the hidden tag as an attribute of the tag that
+ * ends at `close`: what lies between `at + 2` and the hidden tag is the rest of the block name and its `/`, which rule nothing out.
  */
-function bogusHiddenTag(text: string, at: number, close: number, ctx: () => HiddenContext, prefix = 2): number {
-  const body = text.slice(at + prefix, close + 1);
+function bogusHiddenTag(text: string, at: number, close: number, ctx: () => HiddenContext): number {
+  const body = text.slice(at + 2, close + 1);
   const raw = RAW_TEXT_START.exec(body);
   if (raw === null) return -1;
   const before = body.slice(0, raw.index);
@@ -78,7 +78,7 @@ function bogusHiddenTag(text: string, at: number, close: number, ctx: () => Hidd
   // the tag's own `<`, or a backtick run with a run of its length after the tag. Before a bare CR (a line break to every reader, not to the walk)
   // the stricter test stands there too.
   const strict = /[<`\\]/.test(before);
-  const ruledOut = at < ctx().escapedFrom || before.includes('\r') ? strict : maskedRuledOut(text, ctx(), at, close, before, prefix);
+  const ruledOut = at < ctx().escapedFrom || before.includes('\r') ? strict : maskedRuledOut(text, ctx(), at, close, before);
   if (ruledOut || before.split('\n').length > 2 || !CM_OPEN_TAG.test(body.slice(raw.index)) || body.includes('\n', raw.index)) return -1;
   // At the head of a line the tag may start an HTML block in one reader and continue a paragraph in another (markdown-it's lazy lines), so
   // escaping it can move what follows into another block: only when nothing after it holds a tag. A block starts there only for a type 1 or 6
@@ -87,23 +87,23 @@ function bogusHiddenTag(text: string, at: number, close: number, ctx: () => Hidd
   const name0 = raw[1].toLowerCase();
   const blockish = TYPE1_NAMES.has(name0) || BLOCK6_NAMES.has(name0) || /^[ \t]*(?:[\r\n]|$)/.test(text.slice(close + 1, close + 1 + 256));
   if (lineHead && blockish && text.includes('<', close + 1)) return -1;
-  if (inHtmlBlock(text, ctx(), at + prefix + raw.index)) return -1;
+  if (inHtmlBlock(text, ctx(), at + 2 + raw.index)) return -1;
   const name = raw[1].toLowerCase();
   if (name !== 'plaintext') {
     if (emittedEndTag(text, ctx(), at, close + 1, name) !== -1) return -1;
   }
-  return at + prefix + raw.index;
+  return at + 2 + raw.index;
 }
 
 /** #5388 (QA) — the test of {@link bogusHiddenTag} behind an escaped hidden start: whether `before` holds what Markdown reads another way. */
-function maskedRuledOut(text: string, ctx: HiddenContext, at: number, close: number, before: string, prefix: number): boolean {
+function maskedRuledOut(text: string, ctx: HiddenContext, at: number, close: number, before: string): boolean {
   // Whether `closer` occurs at or after `k`: the last one is looked up once per text, so each hidden tag costs no rescan.
   const after = (closer: string, k: number): boolean => {
     let l = ctx.lastOf.get(closer);
     if (l === undefined) { l = text.lastIndexOf(closer); ctx.lastOf.set(closer, l); }
     return l >= k;
   };
-  const opens = (re: RegExp, closer: string): boolean => { const m = re.exec(before); return m !== null && after(closer, at + prefix + m.index + 2); };
+  const opens = (re: RegExp, closer: string): boolean => { const m = re.exec(before); return m !== null && after(closer, at + 2 + m.index + 2); };
   return /<(?:![A-Za-z]+[ \t\r\n])|<[A-Za-z][^<]*["']/.test(before) || opens(/<!--/, '-->') || opens(/<!\[CDATA\[/, ']]>') || opens(/<\?/, '?>')
     || /(?:^|[^\\])(?:\\\\)*\\$/.test(before) || [...before.matchAll(/`+/g)].some((m) => runAfter(text, ctx, m[0].length, close + 1));
 }
@@ -1009,9 +1009,10 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     // #5324 — a block name at the head of a line starts no block when a `/` follows it with no `>` after (`<div/<xmp>`): CommonMark needs a
     // blank, `>`, `/>` or the line's end there, and marked a space, newline or `>`. Markdown reads `<div/` as text and emits a raw-text
     // start after it, which a browser reading the raw string takes for an attribute: that start is escaped, as behind a bogus comment
-    // (#5332). The rest of the line keeps the reading below, so no body whose anchor already survives changes.
-    if (i >= rawUntil && startsLine(i) && opensBlock && text[nameEnd] === '/' && text[nameEnd + 1] !== '>') {
-      const hidden = bogusHiddenTag(text, i, tagEnd - 1, hiddenCtx, nameEnd + 1 - i);
+    // (#5332). The rest of the line keeps the reading below, so no body whose anchor already survives changes. (`<div/>` ends at its `/>`
+    // and hides nothing, so the test needs no exception for it.)
+    if (i >= rawUntil && startsLine(i) && opensBlock && text[nameEnd] === '/') {
+      const hidden = bogusHiddenTag(text, i, tagEnd - 1, hiddenCtx);
       if (hidden !== -1) return hidden;
     }
     if (i >= rawUntil && !RAW_TEXT.has(name) && name !== 'template' && name !== 'plaintext' && !(startsLine(i) && opensBlock)
