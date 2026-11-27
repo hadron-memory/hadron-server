@@ -3,9 +3,9 @@
  * The MCP twins (`src/mcp/stopSignalTools.ts`) call these resolvers, so the gates and refusals are one.
  *
  * Who may (cor:agt:090:06, Holger plan r2 R1; Vera's receipt §2):
- * - **Whoever manages the App** (`managesApp`, through `actorManagesApp`): any level at any scope, and lift any signal.
+ * - **Whoever manages the App** (`managesApp`, through `actorManagesApp`): any level at any scope (WORKER, TEAM, APP, HOST), and lift any signal.
  *   A person acting as themselves, or their held worker on an instruction: impersonation never manages.
- * - **A host key** (`host:operate`, cor:agt:070:04): a `halt` on its OWN host only, the host taken from the key's
+ * - **A host key** (`host:operate`, cor:agt:070:04): a `halt` on its OWN host only (never the APP scope, #5325), the host taken from the key's
  *   binding and never from the request (a named host that isn't the key's refuses); and lift a `halt` on its own
  *   host (Proposed). Every call is recorded as a host-key use with action `stop`, refusals included (cor:agt:070:07).
  * - **Only where a consumer serves (#2173/#2169, R95):** setting a signal answers STOP_SIGNAL_UNAVAILABLE while any worker it
@@ -46,7 +46,7 @@ import { Prisma as P } from '../../../generated/prisma/index.js';
 
 const LEVEL_IN: Record<string, StopLevel> = { PAUSE_DISPATCH: 'pause-dispatch', PAUSE: 'pause', HALT: 'halt' };
 const LEVEL_OUT: Record<StopLevel, string> = { 'pause-dispatch': 'PAUSE_DISPATCH', pause: 'PAUSE', halt: 'HALT' };
-const SCOPE_IN: Record<string, StopScope> = { WORKER: 'worker', TEAM: 'team', HOST: 'host' };
+const SCOPE_IN: Record<string, StopScope> = { WORKER: 'worker', TEAM: 'team', APP: 'app', HOST: 'host' };
 
 export const STOP_SIGNAL_PAGE_DEFAULT = 20;
 const PAGE_MAX = 200;
@@ -94,7 +94,7 @@ const managerRequired = (): GraphQLError =>
 const hostScopeRequired = (): GraphQLError =>
   taskError('HOST_SCOPE_REQUIRED', "A host key sets or lifts a stop signal only on its own host, taken from the key's binding. Omit host: this key's host is used.", { right: 'own-host' });
 const scopeForbidden = (): GraphQLError =>
-  taskError('STOP_SIGNAL_SCOPE_FORBIDDEN', 'A host key sets or lifts only a HALT, on its own host: no other level, and no WORKER or TEAM scope.', { right: 'host-halt-only' });
+  taskError('STOP_SIGNAL_SCOPE_FORBIDDEN', 'A host key sets or lifts only a HALT, on its own host: no other level, and no WORKER, TEAM or APP scope.', { right: 'host-halt-only' });
 const workerSession = (): GraphQLError =>
   taskError('APP_MANAGER_REQUIRED', "A worker's session acts with the worker's own rights, which don't include stop signals. Retry with a plain session (hadron_start_session with no worker) as a person who manages the App.", { right: 'manage-app' });
 
@@ -155,7 +155,7 @@ function parseLevel(raw: unknown): StopLevel {
 
 function parseScope(raw: unknown): StopScope {
   const s = typeof raw === 'string' ? SCOPE_IN[raw] : undefined;
-  if (!s) throw badInput('scope is one of WORKER, TEAM, HOST.');
+  if (!s) throw badInput('scope is one of WORKER, TEAM, APP, HOST.');
   return s;
 }
 
@@ -230,7 +230,9 @@ async function setSignal(input: SetTeamStopSignalInput, ctx: Context, instructio
   const workerRef = trimmed(input?.worker);
   const hostRef = trimmed(input?.host);
   if (scope === 'host' && workerRef) throw badInput('A host signal names a host, not a worker.');
-  if (scope !== 'host' && hostRef) throw badInput('A worker or team signal names a worker, not a host.');
+  // #5325: an APP signal names no target. A host key's APP call is refused as a scope refusal (below), whatever it names, so
+  // the refusal does not depend on the shape of the request; a person's APP call that names a target is malformed.
+  if (scope !== 'host' && scope !== 'app' && hostRef) throw badInput('A worker or team signal names a worker, not a host.');
 
   if (appKeyCaller(ctx)) {
     return (async () => {
@@ -256,7 +258,9 @@ async function setSignal(input: SetTeamStopSignalInput, ctx: Context, instructio
     })();
   }
 
-  if (scope === 'host' ? !hostRef : !workerRef) {
+  if (scope === 'app') {
+    if (workerRef || hostRef) throw badInput('An APP signal names no worker and no host: it covers every worker of the App.');
+  } else if (scope === 'host' ? !hostRef : !workerRef) {
     throw badInput(scope === 'host' ? 'A host signal names its host.' : 'A worker or team signal names its worker.');
   }
   const { app, actor } = await managerEntry(ctx, input.appRef, instruction);
@@ -264,7 +268,7 @@ async function setSignal(input: SetTeamStopSignalInput, ctx: Context, instructio
     if (!(await actorManagesApp(txCtx, fresh, actor, actor.instructed))) throw managerRequired();
     const now = new Date();
     const until = parseUntil(input.until, now);
-    const targetWorkerId = scope === 'host' ? null : await targetWorker(txCtx, fresh.id, workerRef as string);
+    const targetWorkerId = scope === 'host' || scope === 'app' ? null : await targetWorker(txCtx, fresh.id, workerRef as string);
     const targetHostRegistrationId = scope === 'host' ? await targetHost(tx, fresh.id, hostRef as string) : null;
     const s = await setStopSignal(tx, { appId: fresh.id, level, scope, targetWorkerId, targetHostRegistrationId, until, by: stopActor(actor) }, now);
     await requireNoticeLane(tx, fresh.id, s.id, now); // #2173/#2169: after the manager gate and the target checks

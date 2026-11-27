@@ -1138,7 +1138,9 @@ export const workerMutations = {
             if (choice.kind !== 'UNSET') {
               await writeReportsTo(tx, { workerId: castWorkerRow.id, appId, to: freshTarget.reportingHeadId, actor: staffingActActor(admission), setBy: 'cast' });
             }
-            if (freshTarget.reportingHeadId) await reconcileStopCoverage(tx, appId, new Date());
+            // #5325: a worker born into an App under a live APP stop signal is covered from its birth, with or without a reporting
+            // line, so every cast reconciles (the call returns at once when the App has no unended signal and no open interval).
+            await reconcileStopCoverage(tx, appId, new Date());
             // #2024 (S8): the Agent's declared tickers become this worker's, with the worker subscribed, in this
             // same transaction. Any refusal rolls the whole cast back, the name allocation included.
             try {
@@ -1151,9 +1153,9 @@ export const workerMutations = {
             return castWorkerRow;
           }, { lockMode: 'exclusive', timeout: 30_000, afterLock: async tx => {
             await lockAgentTemplates(tx, agent.id, 'shared');
-            // Only a reporting-line birth changes S6 topology. Acquire its fence
-            // before name/graph/Worker resources; no-head casts need no coverage write.
-            if (choice.kind === 'REPORTS_TO') await lockStopFence(tx, appId, 'exclusive');
+            // A reporting-line birth changes S6 topology, and any birth changes what an APP signal covers (#5325): acquire the
+            // fence before name/graph/Worker resources, for every cast.
+            await lockStopFence(tx, appId, 'exclusive');
           } });
         } catch (e) {
           // Order matters: a slug race is private and retried; a name

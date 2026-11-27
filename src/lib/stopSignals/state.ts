@@ -28,8 +28,8 @@ type Db = PrismaClient | Prisma.TransactionClient;
 /** cor:agt:090:01 — the three levels, weakest first. Each stops everything the one before it stops (R68). */
 export const STOP_LEVELS = ['pause-dispatch', 'pause', 'halt'] as const;
 export type StopLevel = (typeof STOP_LEVELS)[number];
-/** cor:agt:090:01 — the three scopes. A team is named by its head (D-2026-10-16-004). */
-export const STOP_SCOPES = ['worker', 'team', 'host'] as const;
+/** cor:agt:090:01 — the four scopes. A team is named by its head (D-2026-10-16-004); `app` names no target (#5325, Holger 2026-11-27). */
+export const STOP_SCOPES = ['worker', 'team', 'app', 'host'] as const;
 export type StopScope = (typeof STOP_SCOPES)[number];
 
 export const levelRank = (l: StopLevel): number => STOP_LEVELS.indexOf(l);
@@ -83,7 +83,9 @@ export async function lockStopFence(tx: Prisma.TransactionClient, appId: string,
  *
  * - worker scope: the target worker;
  * - team scope: the head and every worker in its reporting tree, at any depth (never the worker the head reports to);
- * - host scope: every worker the registration lists, whether or not it has a live session there (R84).
+ * - host scope: every worker the registration lists, whether or not it has a live session there (R84);
+ * - app scope (#5325): every worker of the App that is not retired, as the workers are NOW: no stored roster, so a worker cast
+ *   after the signal was set is covered from the moment it exists.
  *
  * A retired worker is covered by nothing (it is never assigned, ticked or stalled). `workerIds` null means every worker
  * of the App. Workers of another App never match. A worker no live signal covers is absent from the map. The order
@@ -110,6 +112,7 @@ export async function coveringSignals(db: Db, appId: string, workerIds: string[]
     SELECT ws.id AS "workerId", ${SIGNAL_COLUMNS}
     FROM ws JOIN team_stop_signals s ON s.app_id = ${appId} AND ${liveSql(now)} AND (
       (s.scope = 'worker' AND s.target_worker_id = ws.id)
+      OR s.scope = 'app'
       OR (s.scope = 'team' AND EXISTS (SELECT 1 FROM chain c WHERE c.worker_id = ws.id AND c.anc_id = s.target_worker_id))
       OR (s.scope = 'host' AND EXISTS (SELECT 1 FROM host_registration_workers h
                                        WHERE h.registration_id = s.target_host_registration_id AND h.worker_id = ws.id)))
