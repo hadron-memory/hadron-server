@@ -740,7 +740,13 @@ export const chatMutations = {
             }
             // Selecting a new App home is also a grant: PUBLIC reach cannot
             // preserve stale App participation after an anchor wait.
-            if (target.sharedAppId && txCtx.userId && !target.named) {
+            // #5027 (BLIND F1 on #5391, Xan's gate answer #154355): a judged home also requires the caller's AppMember
+            // row in the home's App, judged here after the anchor wait, so a group MemoryMember who is not in the App
+            // cannot start a chat there. Proposed for Holger: selecting an App home is also a grant. One home refusal.
+            if (target.named && target.appId && txCtx.userId) {
+              const member = await txCtx.db.appMember.findUnique({ where: { appId_userId: { appId: target.appId, userId: txCtx.userId } } });
+              if (!member) throw chatHomeInvalid();
+            } else if (target.sharedAppId && txCtx.userId) {
               const member = await txCtx.db.appMember.findUnique({ where: { appId_userId: { appId: target.sharedAppId, userId: txCtx.userId } } });
               if (!member) throw new AgentNotFoundError(agentRef);
             } else if (target.ensureTarget && target.appId && txCtx.userId) {

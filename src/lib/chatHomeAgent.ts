@@ -72,8 +72,9 @@ export async function refuseUnreachableChatHomeAgent(
 export async function resolveChatHomeAgent(
   db: PrismaClient | Prisma.TransactionClient,
   memory: { id: string; appId: string | null; sharedMemoryOfAgentId: string | null; userMemoryOfAgentId: string | null },
-  caller?: ChatCaller,
-  chatRootId?: string,
+  caller: ChatCaller | undefined,
+  // #5027 (BLIND F8 on #5391): required, so a new caller states whether it has a chat root (null: none, the pointer decides).
+  chatRootId: string | null,
 ): Promise<{ agent: any | null; deletedAgentId: string | null }> {
   // #5027 Ask 6 (b): the chat's own recorded Agent first (a named home such as a group or a private memory carries no
   // per-Agent pointer, and another Agent's personal memory carries the wrong one), then today's memory pointer, then

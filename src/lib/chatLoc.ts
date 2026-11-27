@@ -277,14 +277,14 @@ export async function chatLocFilter(
       // group, personal or private home is a candidate for whoever the host memory's read gate admits. These arms are
       // the identity halves of that gate, as relation filters, so the filter stays a superset; each call site's own
       // content gate still decides. Group: its MemoryMembers (the shared predicate; bounded to the support session's
-      // org under impersonation). Personal: its owner and its share grantees (the grantee's org membership is judged
-      // by the site gate). Private: its owner. Impersonation never reaches the identity-scoped personal/private arms.
+      // org under impersonation). Personal and private: the owner. No share-grantee arm: every home startChat accepts carries
+      // an App, and the shared gate admits no grantee to an App personal memory (option B; #5389 widens both together).
+      // Impersonation never reaches the identity-scoped personal/private arm.
       { memory: groupMemberMemoryWhere(userId, { restrictToOrgId: principal.impersonation?.orgId ?? null }) },
       ...(principal.impersonation
         ? []
         : [
             { memory: { class: { in: ['personal', 'private'] as never }, userId } },
-            { memory: { class: 'personal' as never, userMemoryOfAgentId: null, shares: { some: { granteeId: userId } } } },
           ]),
     ],
   };

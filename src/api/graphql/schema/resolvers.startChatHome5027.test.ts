@@ -22,6 +22,8 @@ import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { RUN_CLIENT_PREFIX } from '../../../lib/auth/runPrincipal.js';
 import { resolvers, type Context } from './resolvers.js';
 import { canReadMemory as mcpCanRead, canWriteToMemory as mcpCanWrite } from '../../../mcp/access-control.js';
+import { chatLocFilter } from '../../../lib/chatLoc.js';
+import { cloneMemoryGraphInTx } from '../../../controller/operations/cloneMemory.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -394,7 +396,11 @@ describe('#5027 (h) who sets the default', () => {
     expect(set.defaultChatHome).toBe('PERSONAL');
     const err = await refusal(M.updateAgent({}, { ref: agentId, defaultChatHome: 'PRIVATE' }, as(bob)));
     expect(err.extensions?.code).toMatch(/FORBIDDEN|NOT_FOUND/);
-    await refusal(M.updateAgent({}, { ref: agentId, defaultChatHome: 'PRIVATE' }, as(carol)));
+    // BLIND P3-14 on #5391: carol, in no org of the Agent, gets exactly the answer for an Agent that does not exist.
+    const ghost = generateId();
+    const carolSees = await refusal(M.updateAgent({}, { ref: agentId, defaultChatHome: 'PRIVATE' }, as(carol)));
+    const nothing = await refusal(M.updateAgent({}, { ref: ghost, defaultChatHome: 'PRIVATE' }, as(carol)));
+    expect(JSON.parse(JSON.stringify(carolSees).split(agentId).join(ghost))).toEqual(nothing);
     expect((await db.agent.findUniqueOrThrow({ where: { id: agentId } })).defaultChatHome).toBe('PERSONAL');
   });
 });
@@ -595,5 +601,73 @@ describe('#5027 Ask 6: the chat records its Agent; the home\'s readers are its a
     const g = await groupOf(false, [[bob, 'writer']]);
     expect(await answers(as(bob), g)).toEqual(EVERYTHING);
     expect(await answers(as(ann), g)).toEqual(NOTHING);
+  });
+});
+
+// Findings on the frozen head 68808aa6 (#5391): Bob's BLIND F1, F5 and P3-14, Rodolfo's Security P3.
+describe('#5027 review fixes on #5391', () => {
+  it('F1: a group MemoryMember who is not in the App is refused CHAT_HOME_INVALID and nothing is written; an App member in the group starts', async () => {
+    const group = await groupHome('writer');
+    await db.orgMember.create({ data: { organizationId: orgId, userId: carol, role: 'CONTRIBUTOR' } });
+    await db.memoryMember.create({ data: { memoryId: group, userId: carol, role: 'writer' } });
+    const missing = await refusal(start(as(ann), { memoryRef: generateId() }));
+    const before = await footprint();
+    expect(await refusal(start(as(carol), { memoryRef: group })), 'group member, not in the App').toEqual(missing);
+    expect(await footprint(), 'no chat, counter or subscription').toEqual(before);
+    // The same person once in the App starts there (R1: the group is theirs to read and write).
+    await db.appMember.create({ data: { appId, userId: carol, role: 'member' } });
+    expect((await chatNodeByLocOrThrow(db, (await start(as(carol), { memoryRef: group })).chatId)).memoryId).toBe(group);
+  });
+
+  it('F5: a chat in a named App memory that is not the Agent\'s shared memory lists and reads for another App member', async () => {
+    const free = (await M.createMemoryInApp({}, { appRef: appId, agentRef: agentId, memoryClass: 'app', name: 'Team notes' }, as(ann))).id as string;
+    const started = await start(as(ann), { memoryRef: free });
+    expect((await chatNodeByLocOrThrow(db, started.chatId)).memoryId).toBe(free);
+    await M.sendChatMessage({}, { chatId: started.chatId, userMessage: 'from ann' }, as(ann));
+    const row = await listed(bob, started.chatId);
+    expect(row, 'listed for another App member').toBeDefined();
+    expect(row.homeMemoryClass).toBe('app');
+    expect(((await Q.chatHistory({}, { chatId: started.chatId }, as(bob))) as unknown[]).length).toBeGreaterThan(0);
+  });
+
+  it('P3-14: a group READER reads a group chat but cannot post into it; nothing is written', async () => {
+    const group = await groupHome('writer');
+    await db.memoryMember.create({ data: { memoryId: group, userId: bob, role: 'reader' } });
+    const started = await start(as(ann), { memoryRef: group });
+    await M.sendChatMessage({}, { chatId: started.chatId, userMessage: 'from ann' }, as(ann));
+    expect(((await Q.chatHistory({}, { chatId: started.chatId }, as(bob))) as unknown[]).length).toBeGreaterThan(0);
+    const before = await footprint();
+    await refusal(M.sendChatMessage({}, { chatId: started.chatId, userMessage: 'from bob' }, as(bob)));
+    expect(await footprint()).toEqual(before);
+    // Nor may the reader start a chat there: the home gate's write step.
+    expect((await refusal(start(as(bob), { memoryRef: group }))).extensions?.code).toBe('CHAT_HOME_INVALID');
+  });
+
+  it('Security P3: under impersonation chatLocFilter admits no chat in the target\'s personal or private home', async () => {
+    const personal = await appUserMemory('personal');
+    const priv = await appUserMemory('private');
+    for (const memoryRef of [personal, priv]) {
+      const started = await start(as(ann), { memoryRef });
+      const root = await chatNodeByLocOrThrow(db, started.chatId);
+      // Written by someone else, so only the owner arm could admit it.
+      await db.node.updateMany({ where: { memoryId: memoryRef }, data: { createdBy: bob } });
+      await db.memory.update({ where: { id: memoryRef }, data: { createdBy: bob } });
+      const find = async (principal: Context) =>
+        db.node.findMany({ where: await chatLocFilter(db, started.chatId, principal), select: { id: true } });
+      expect((await find(as(ann))).map((n) => n.id), 'the owner, as themselves').toEqual([root.id]);
+      expect(await find(as(ann, { impersonation: { orgId } } as Partial<Context>)), 'a support session as the owner').toEqual([]);
+    }
+  });
+
+  it('P3-14: cloning a memory copies each chat\'s recorded Agent', async () => {
+    const group = await groupHome('writer');
+    const started = await start(as(ann), { memoryRef: group });
+    const root = await chatNodeByLocOrThrow(db, started.chatId);
+    const copy = await db.$transaction((tx) => cloneMemoryGraphInTx(tx, {
+      ownerLimitCaller: null, sourceMemoryId: group, name: 'copy', newUrn: `${orgUrn}:copy-${generateId().slice(0, 6)}`,
+      targetOrganizationId: orgId, ownerUserId: null, groupOwnerUserId: ann, actorId: ann, copierReadableMemoryIds: null,
+    } as any));
+    const copied = await db.chatRootCounter.findUniqueOrThrow({ where: { chatRootNodeId: copy.nodeIdMap.get(root.id)! } });
+    expect(copied.agentId).toBe(agentId);
   });
 });

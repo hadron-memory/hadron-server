@@ -8,7 +8,6 @@ import type { Prisma } from '../../../generated/prisma/index.js';
 import { activeAppInstallLicenseIdsForAgent } from '../../../lib/appAgent.js';
 import { generateId } from '../../../lib/id.js';
 import { type Context, getAccessibleMemoryIds, requireMemoryWriteAccess } from './resolvers.helpers.js';
-import { heldAppUserMemoryClasses } from './appUserMemoryEligibility.js';
 import { mintAppUserMemoryAddress, isUrnUniqueViolation, conflictWithoutUrn } from './resolvers.mutation.appMemory.js';
 
 /** The four memory classes a chat may live in (D-2026-05-12-007, D-2026-11-26-008). */
@@ -49,8 +48,9 @@ export async function judgeChatHome(ctx: Context, memoryId: string, agentId: str
   try {
     await requireMemoryWriteAccess(ctx, memoryId);
   } catch (e) {
-    const code = (e as GraphQLError)?.extensions?.code;
-    if (code === 'FORBIDDEN' || code === 'UNAUTHENTICATED') throw chatHomeInvalid();
+    // BLIND P3-9 on #5391: a row removed after the existence read (findUniqueOrThrow's P2025) is the same miss.
+    const code = (e as GraphQLError)?.extensions?.code ?? (e as { code?: string })?.code;
+    if (code === 'FORBIDDEN' || code === 'UNAUTHENTICATED' || code === 'P2025') throw chatHomeInvalid();
     throw e;
   }
   if (!(CHAT_HOME_CLASSES as readonly string[]).includes(row.class)) throw chatHomeInvalid();
@@ -91,10 +91,9 @@ export async function provisionAppUserChatHome(
     SELECT user_id FROM app_members WHERE app_id = ${appId} AND user_id = ${userId} FOR UPDATE`;
   if (member.length === 0) throw chatHomeInvalid();
   for (let attempt = 0; attempt < 3; attempt++) {
-    if ((await heldAppUserMemoryClasses(tx, appId, userId)).includes(klass)) {
-      const existing = await findAppUserChatHome(tx, appId, userId, klass);
-      if (existing) return existing;
-    }
+    // One read (BLIND P3-10 on #5391): the same filter as heldAppUserMemoryClasses, so the two cannot disagree.
+    const existing = await findAppUserChatHome(tx, appId, userId, klass);
+    if (existing) return existing;
     await tx.$executeRaw`SAVEPOINT chat_home_provision`;
     try {
       const own = await mintAppUserMemoryAddress(tx, appId, userId, klass);

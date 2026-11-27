@@ -593,5 +593,9 @@ describe('validateChatScopeInvariants', () => {
     for (const memoryClass of ['private', 'group'] as const) {
       expect(() => validateChatScopeInvariants({ scope: undefined, memoryClass, allowMissingScope: true })).toThrow(ChatScopeError);
     }
+    // BLIND P3-13 on #5391: a system memory never holds a chat-root, whatever the label.
+    for (const scope of ['private', 'shared', undefined] as const) {
+      expect(() => validateChatScopeInvariants({ scope, memoryClass: 'system', allowMissingScope: true })).toThrow(ChatScopeError);
+    }
   });
 });
