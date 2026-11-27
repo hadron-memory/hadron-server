@@ -35,6 +35,7 @@ import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import { emitNodeUrnV2 } from '../lib/urnEmit.js';
 import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/aiConfig.js';
 import { recordLlmUsage } from '../lib/metering/index.js';
+import { CreditsExhaustedError, gateCredit } from '../lib/metering/gate.js';
 // Spec 049 Phase 3b — the trigger's scope snapshot on the run.
 import { parseRunScopeSnapshot, snapshotScopeForTrigger } from '../lib/scopes.js';
 import { snapshotRegisterForRun } from '../lib/resolveRegister.js';
@@ -105,7 +106,9 @@ export class RunLaunchDeniedError extends Error {
       | 'APP_NOT_FOUND'
       | 'AGENT_NOT_INSTALLED'
       | 'ENCRYPTED_MEMORY_UNSUPPORTED'
-      | 'ENTRY_NOT_IN_ORG',
+      | 'ENTRY_NOT_IN_ORG'
+      // #5023 (cor:acl:050:05): the billable account has no credit left for work on the platform's own key.
+      | 'CREDITS_EXHAUSTED',
   ) {
     super(message);
     this.name = 'RunLaunchDeniedError';
@@ -622,6 +625,32 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   }
   const budgets = effectiveRunBudgets(requestedBudgets ?? {});
 
+  // cor:dmo:150:08: `session.llmModel` is the run's model. It is the one the run will resolve (same override, same registry
+  // walk as `resolveConfig`), taken now so the record holds it; with none configured the run fails NO_AI_CONFIG anyway.
+  // #5023 (gate ruling 1a): resolved BEFORE the quota block (it only reads), so the credit check below runs before any counter
+  // moves and a refused launch leaves both run counters where they were.
+  let runModel = '';
+  let runKeyOwnerType: string | null = null;
+  {
+    const override = args.eventData && typeof args.eventData === 'object' ? ((args.eventData as Record<string, unknown>).__aiConfigName as string | undefined) : undefined;
+    try {
+      const resolvedConfig = await resolveAiConfigWithFallback(db as PrismaClient, override ?? null, { appId: args.appId, agentId: args.agentId ?? undefined, organizationId: args.organizationId });
+      runModel = resolvedConfig.config.model ?? '';
+      runKeyOwnerType = resolvedConfig.ownerType;
+    } catch (err) {
+      if (!(err instanceof NoAiConfigAvailableError)) throw err;
+    }
+  }
+  // #5023 (cor:acl:050:05): the credit check, an access control before the work starts. Only a configuration on the platform's
+  // own key is gated; the billable account of a run is the owner of the App it runs in (cor:dmo:170:05), which is the run's
+  // organization. It is the run's own refusal, mapped by every door like QUOTA_EXCEEDED.
+  try {
+    await gateCredit(db, runKeyOwnerType, { organizationId: args.organizationId });
+  } catch (err) {
+    if (err instanceof CreditsExhaustedError) throw new RunLaunchDeniedError(err.message, 'CREDITS_EXHAUSTED');
+    throw err;
+  }
+
   // Quota tier 1: runs/day per App AND per owner, then the token look-ahead.
   await consumeRunLaunchQuota(db, { appId: args.appId, owner: { organizationId: args.organizationId } });
 
@@ -674,17 +703,6 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   const runAgent = await db.agent.findUnique({ where: { id: runAgentId }, select: { id: true, name: true, urn: true, personaRole: true } });
   if (!runAgent) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
   await resolveServedBootPrompt(db, { surface: 'run', appId: args.appId, agent: { id: runAgent.id, name: runAgent.name } });
-  // cor:dmo:150:08: `session.llmModel` is the run's model. It is the one the run will resolve (same override, same registry
-  // walk as `resolveConfig`), taken now so the record holds it; with none configured the run fails NO_AI_CONFIG anyway.
-  let runModel = '';
-  {
-    const override = args.eventData && typeof args.eventData === 'object' ? ((args.eventData as Record<string, unknown>).__aiConfigName as string | undefined) : undefined;
-    try {
-      runModel = (await resolveAiConfigWithFallback(db as PrismaClient, override ?? null, { appId: args.appId, agentId: runAgentId, organizationId: args.organizationId })).config.model ?? '';
-    } catch (err) {
-      if (!(err instanceof NoAiConfigAvailableError)) throw err;
-    }
-  }
   const runId = generateId();
   const createRun = (client: Pick<PrismaClient, 'appRun'>) => client.appRun.create({
     data: {
@@ -1027,6 +1045,18 @@ async function executeAppRunInner(
           'Run cancelled, expired, action budget exhausted, or llm.invoke denied by policy.',
           `DENIED_${entryDenial}`,
         );
+      }
+
+      // #5023 (gate ruling 2: after the activation verdict, so a cancelled, policy-denied or over-budget run is still reported
+      // as such): a model hop on the platform's own key is refused before any model call when the owner has no credit left.
+      // A script hop makes no model call and is not checked. The refusal is stored as DENIED_CREDITS.
+      if (!spec.script && resolved !== null) {
+        try {
+          await gateCredit(db, resolved.ownerType, { organizationId: run.organizationId });
+        } catch (err) {
+          if (err instanceof CreditsExhaustedError) return fail('ACTIVATION_DENIED', err.message, 'DENIED_CREDITS');
+          throw err;
+        }
       }
 
       // The resolved AI config, for model hops only (resolved just above). Loud, not a cast: a script hop has none,

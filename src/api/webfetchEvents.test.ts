@@ -181,6 +181,21 @@ describe('POST /internal/webfetch-events', () => {
     ).resolves.toMatchObject({ routedRunId: run.id });
   });
 
+  it('#5023: a poll event for an owner at zero credit is answered 409 and mints no run and records no receipt (the transaction rolls back)', async () => {
+    vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
+    vi.stubEnv('BILLING_CREDIT_GATE_ENABLED', 'true');
+    const seeded = await seedBinding();
+    const host = await db.hadronServer.create({ data: { id: generateId(), url: 'https://webfetch-cg.hadron.local' } });
+    await db.aiServiceConfig.create({ data: { name: 'default', provider: 'anthropic', model: 'test', hadronServerId: host.id } as never });
+    const runsBefore = await db.appRun.count();
+    const response = await post(pollEvent({ orgId: seeded.orgId, appId: seeded.appId }), 'events-secret');
+    expect(response.status).toBe(409);
+    expect(await db.appRun.count()).toBe(runsBefore);
+    expect(await db.webFetchEventReceipt.count()).toBe(0);
+    expect(await db.creditLedgerEntry.count()).toBe(0); // the gate wrote nothing inside the ingress's transaction
+    vi.unstubAllEnvs();
+  });
+
   it('dedupes the same (jobId, snapshotHash, kind) without minting another run', async () => {
     const seeded = await seedBinding();
     const event = pollEvent({ orgId: seeded.orgId, appId: seeded.appId });

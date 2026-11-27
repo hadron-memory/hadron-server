@@ -42,7 +42,7 @@ const MTOK = 1_000_000n;
 export const HOST_PRICED_PROVIDERS: ReadonlySet<string> = new Set(['openai-compatible']);
 
 /** FR-006: automatic usage debits are OFF unless explicitly enabled. */
-function debitEnabled(): boolean {
+export function debitEnabled(): boolean {
   const raw = process.env.BILLING_DEBIT_ENABLED?.trim().toLowerCase();
   return raw === 'true' || raw === '1';
 }
