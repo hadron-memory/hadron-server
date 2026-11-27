@@ -12,6 +12,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { seedRateConfig } from '../../../lib/rateLimit/index.js';
+import { getAccessibleMemoryIds, memoryIdsHeldIndependently, holdsContentReadIndependently } from './resolvers.helpers.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -23,6 +24,7 @@ const server = new ApolloServer<Context>({ typeDefs, resolvers });
 const M = resolvers.Mutation as any;
 
 let org: { id: string; urn: string };
+let base: { id: string }; // the org's own knowledge memory createDbOrgAndGraph makes; alice reads it
 let otherOrg: { id: string; urn: string };
 let alice: string; // org READER, member of orgApp and appB: the picker's user
 let bob: string; // org READER, member of orgApp: another attacher
@@ -75,7 +77,7 @@ async function memory(data: Record<string, unknown>) {
 
 beforeEach(async () => {
   await cleanDb(db);
-  org = (await createDbOrgAndGraph(db, { orgName: 'attachable5393', graphName: 'base' })).org;
+  ({ org, graph: base } = await createDbOrgAndGraph(db, { orgName: 'attachable5393', graphName: 'base' }));
   otherOrg = (await createDbOrgAndGraph(db, { orgName: 'elsewhere5393', graphName: 'base' })).org;
   const person = async (n: number, h: string, roles: string[] = []) =>
     (await db.user.create({ data: { id: generateId(), githubId: 5_393_000 + n, githubUsername: h, handle: `${h}-${generateId().slice(-6)}`, roles } as never })).id;
@@ -97,7 +99,7 @@ beforeEach(async () => {
 async function fixture() {
   const m = {
     knowledge: await memory({ name: 'Alpha Knowledge' }),
-    group: await memory({ name: 'Beta Group', class: 'group' }),
+    group: await memory({ name: 'Beta Group', class: 'group', visibility: 'GROUP' }),
     personal: await memory({ name: 'Gamma Personal', class: 'personal', userId: alice, visibility: null }),
     privateOwn: await memory({ name: 'Delta Private', class: 'private', userId: alice, visibility: null }),
     userOwned: await memory({ name: 'Epsilon Mine', organizationId: null, ownerUserId: alice, urn: `alice-${generateId().slice(-6)}:mine` }),
@@ -105,12 +107,15 @@ async function fixture() {
     system: await memory({ name: 'Eta System', class: 'system', visibility: null }),
     appClass: await memory({ name: 'Theta App', class: 'app', appId: orgApp.id, visibility: null }),
     viaOtherAppOnly: await memory({ name: 'Iota Other App', class: 'app', appId: otherApp.id, visibility: null }),
+    // #653: a knowledge memory provisioned inside another App: alice reaches it only through that App, never in her own right
+    knowledgeOfOtherApp: await memory({ name: 'Iota Knowledge Other App', appId: otherApp.id }),
     ottos: await memory({ name: 'Kappa Otto', class: 'personal', userId: otto, organizationId: null, ownerUserId: otto, visibility: null, urn: `otto-${generateId().slice(-6)}:p` }),
     foreignOrg: await memory({ name: 'Lambda Foreign', organizationId: otherOrg.id, urn: `${otherOrg.urn}:k` }),
     deleted: await memory({ name: 'Mu Deleted', deletedAt: new Date() }),
     linkedByBob: await memory({ name: 'Nu Linked' }),
     linkedInactive: await memory({ name: 'Xi Inactive' }),
   };
+  await db.memoryMember.create({ data: { memoryId: m.group.id, userId: alice, role: 'reader' } as never });
   await db.appMemoryLink.create({ data: { appId: orgApp.id, memoryId: m.linkedByBob.id, attachedBy: bob } });
   // carol reads nothing of this memory in her own right: the link exists and is INACTIVE (cor:dmo:060:22).
   await db.appMemoryLink.create({ data: { appId: orgApp.id, memoryId: m.linkedInactive.id, attachedBy: carol } });
@@ -136,12 +141,26 @@ describe('#5393 pin 1: the differential — the door and attachMemoryToApp canno
     }
   });
 
-  it('offers exactly the own-right readable set for alice (knowledge, group, personal, private, user-owned, PUBLIC elsewhere)', async () => {
+  it('offers exactly the own-right readable set for alice (org knowledge, group member, personal, private, user-owned, PUBLIC elsewhere)', async () => {
     const m = await fixture();
     const offered = new Set(await walk(asUser(alice), orgApp.id));
     expect([...offered].sort()).toEqual(
-      [m.knowledge, m.group, m.personal, m.privateOwn, m.userOwned, m.publicElsewhere].map((x) => x.id).sort(),
+      [base, m.knowledge, m.group, m.personal, m.privateOwn, m.userOwned, m.publicElsewhere].map((x) => x.id).sort(),
     );
+  });
+});
+
+describe('#5393 pin 1b: the shared own-right enumeration', () => {
+  it('memoryIdsHeldIndependently leaves out what alice reaches only through an App, and agrees row by row with holdsContentReadIndependently', async () => {
+    const m = await fixture();
+    const ctx = asUser(alice);
+    // the fixture is meaningful: alice's App-inclusive reach does contain the other App's memory
+    expect(await getAccessibleMemoryIds(ctx)).toContain(m.viaOtherAppOnly.id);
+    const held = await memoryIdsHeldIndependently(ctx);
+    expect(held).not.toContain(m.viaOtherAppOnly.id);
+    for (const mem of await db.memory.findMany({ select: { id: true } })) {
+      expect({ id: mem.id, held: held.includes(mem.id) }).toEqual({ id: mem.id, held: await holdsContentReadIndependently(ctx, mem.id) });
+    }
   });
 });
 
@@ -223,20 +242,20 @@ describe('#5393 pin 5: paging (cor:api:120:02)', () => {
     await memory({ name: 'Zebra' });
     const ctx = asUser(alice);
     const count = await page(ctx, { appRef: orgApp.id, limit: 0 });
-    expect(count).toEqual({ total: 7, items: [] });
+    expect(count).toEqual({ total: 8, items: [] }); // the seven above and the org's base memory
     const first = await page(ctx, { appRef: orgApp.id, limit: 200 });
-    expect(first.total).toBe(7);
+    expect(first.total).toBe(8);
     const expected = await db.memory.findMany({
       where: { organizationId: org.id, deletedAt: null }, orderBy: [{ name: 'asc' }, { id: 'asc' }], select: { id: true },
     });
     expect(first.items.map((x) => x.id)).toEqual(expected.map((x) => x.id));
     const walked = await walk(ctx, orgApp.id);
     expect(walked).toEqual(expected.map((x) => x.id));
-    expect(new Set(walked).size).toBe(7);
+    expect(new Set(walked).size).toBe(8);
     // default page is 20, cap 200
     for (let i = 0; i < 20; i++) await memory({ name: `Filler ${String(i).padStart(2, '0')}` });
     expect((await page(ctx, { appRef: orgApp.id })).items).toHaveLength(20);
-    expect((await page(ctx, { appRef: orgApp.id, limit: 1000 })).items).toHaveLength(27);
+    expect((await page(ctx, { appRef: orgApp.id, limit: 1000 })).items).toHaveLength(28);
   });
 });
 
@@ -250,11 +269,13 @@ describe('#5393 pin 6: text match', () => {
     expect(hit.items.map((x) => x.id).sort()).toEqual([byName.id, byUrn.id].sort());
     expect(hit.total).toBe(2);
     expect((await page(ctx, { appRef: orgApp.id, query: 'rTeRlY rEp' })).items.map((x) => x.id)).toEqual([byName.id]);
+    // the URN as clients render it (hrn:mem:<stored urn>) finds the memory too
+    expect((await page(ctx, { appRef: orgApp.id, query: `HRN:MEM:${org.urn}:quarterly` })).items.map((x) => x.id)).toEqual([byUrn.id]);
     // a LIKE wildcard in the query is matched literally, never as a pattern
     expect((await page(ctx, { appRef: orgApp.id, query: '%' })).total).toBe(0);
     expect((await page(ctx, { appRef: orgApp.id, query: '_' })).total).toBe(0);
     const unfiltered = await page(ctx, { appRef: orgApp.id });
-    expect(unfiltered.total).toBe(3);
+    expect(unfiltered.total).toBe(4); // the three above and the org's base memory
     expect(await page(ctx, { appRef: orgApp.id, query: '' })).toEqual(unfiltered);
     expect(await page(ctx, { appRef: orgApp.id, query: '   ' })).toEqual(unfiltered);
   });

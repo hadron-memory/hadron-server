@@ -785,10 +785,17 @@ function userPrincipalOnly(ctx: Context): Context {
  * active App made the reach broader, not narrower.
  */
 export function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
-  const self = userPrincipalOnly(ctx);
-  return getAccessibleMemoryIds(self, memoryId, { excludeAppDerived: true }).then(
-    (ids) => ids.includes(memoryId),
-  );
+  return memoryIdsHeldIndependently(ctx, memoryId).then((ids) => ids.includes(memoryId));
+}
+
+/**
+ * #5393: the memories this caller holds CONTENT-READ on in their own right, enumerated — the set
+ * `holdsContentReadIndependently` asks about one memory at a time. Both go through this one function, so the attachable-memory
+ * picker (`attachableMemories`) and `attachMemoryToApp` read the same judgment and cannot drift
+ * (hrn:node:hadronmemory.com:specs:cor:dmo:060:22). `onlyMemoryId` narrows the lookup to that one row.
+ */
+export function memoryIdsHeldIndependently(ctx: Context, onlyMemoryId?: string): Promise<string[]> {
+  return getAccessibleMemoryIds(userPrincipalOnly(ctx), onlyMemoryId, { excludeAppDerived: true });
 }
 
 // #5185: the link judge (src/lib/appMemoryLinks.ts) asks this question for each attacher; registered here so it imports no resolver.
