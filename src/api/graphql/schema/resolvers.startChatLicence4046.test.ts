@@ -490,15 +490,15 @@ async function retainedForeignHomeWithoutParticipation() {
   await db.appMember.deleteMany({ where: { appId, userId } });
   await db.orgMember.deleteMany({ where: { organizationId: foreignOrgId, userId } });
 }
-it('a home-only App anchor fences uninstall even when the Agent manager has no App participation', async () => {
+it('a retained home-only App with no participation left: the start is refused at once, not held behind an uninstall on the App anchor', async () => {
   await retainedForeignHomeWithoutParticipation();
   await assertImmediateRefusal({ kind: 'app', id: appId }, tx => tx.appAgent.delete({ where: { appId_agentId: { appId, agentId } } }));
 }, 15_000);
-it('a home-only App org anchor fences tenant deletion independently of the Agent org', async () => {
+it('a retained home-only App with no participation left: the start is refused at once, not held behind a tenant deletion on the App org anchor', async () => {
   await retainedForeignHomeWithoutParticipation();
   await assertImmediateRefusal({ kind: 'org', id: foreignOrgId }, tx => tx.organization.update({ where: { id: foreignOrgId }, data: { deletedAt: new Date() } }));
 }, 15_000);
-it('a home-only user-App owner anchor fences owner licence revocation independently of the caller', async () => {
+it('a retained home-only user App with no participation left: the start is refused at once, not held behind an owner licence revocation on the owner anchor', async () => {
   const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
   const owner = await db.user.create({ data: { handle: 'home4046-owner' } });
   await db.orgMember.create({ data: { organizationId: agent.organizationId!, userId: owner.id, role: 'READER' } });

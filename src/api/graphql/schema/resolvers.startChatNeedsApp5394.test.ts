@@ -234,6 +234,60 @@ describe('#5394 shared chats run under the identified App', () => {
     expect({ class: row.class, appId: row.appId }).toEqual({ class: 'app', appId: appB });
   });
 
+  // #5407 review (Gravitus BLIND P2-1): the App-key shared leg's only person check is appKeyMayActFor, run before the
+  // target is chosen (resolvers.mutation.chat.ts, "acts only for a live AppMember of THAT App"). These pin its refusals.
+  it('an App key naming a user it may not act for gets no shared chat, with or without a session; nothing is written', async () => {
+    const appKey = (sessionId?: string) => ({ db, appId: appB, roles: [], ...(sessionId ? { sessionId } : {}) }) as unknown as Context;
+    // adminId is an org ADMIN but no AppMember of appB and not a user appB minted.
+    const before = await counts();
+    const r = await refusal(M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope: 'shared', userId: adminId }, appKey()));
+    expect(r.code).toBe('USER_NOT_FOUND');
+    expect(await counts()).toEqual(before);
+    // A session-bound key acts only for its session's user, even for a member of its App (ann is one).
+    await db.app.update({ where: { id: appB }, data: { createUserPermission: 'EXPLICIT' } });
+    await M.createAppUser({}, { externalId: 'ext-5394-b' }, appKey());
+    const session = await M.startAgentSession({}, { agentRef: agentId, externalUserId: 'ext-5394-b' }, appKey());
+    const sessionId: string = session.sessionId ?? session.session?.id ?? session.id;
+    const mid = await counts();
+    const s = await refusal(M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope: 'shared', userId: ann }, appKey(sessionId)));
+    expect(s.code).toBe('USER_NOT_FOUND');
+    expect(await counts()).toEqual(mid);
+  });
+
+  it('a pure App key with no person to start it for is refused the shared chat; nothing is written', async () => {
+    const before = await counts();
+    const r = await refusal(M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope: 'shared' }, { db, appId: appB, roles: [] } as unknown as Context));
+    expect(r.code).toBe('SHARED_CHAT_REQUIRES_APP_CONTEXT');
+    expect(await counts()).toEqual(before);
+  });
+
+  // #5407 review (Riana SEC10 P3 1): an org CONTRIBUTOR takes part in every App of the org, so the App is identified for
+  // her, but a shared chat needs her AppMember row in THAT App (the userId filter on the AppMember lookup).
+  it('an org CONTRIBUTOR who is no member of the App starts a private chat there but is refused the shared one', async () => {
+    const cora = (await db.user.create({ data: { handle: 'cora5394' } })).id;
+    await db.orgMember.create({ data: { organizationId: orgId, userId: cora, role: 'CONTRIBUTOR' } });
+    // The App has a member (the admin), so a lookup that dropped the userId filter would find a row and admit her.
+    await db.appMember.create({ data: { appId: outsiderApp, userId: adminId, role: 'member' } });
+    const priv = await M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: outsiderApp }, as(cora));
+    expect((await db.memory.findUniqueOrThrow({ where: { id: await homeOf(priv.chatId) } })).appId).toBe(outsiderApp);
+    const before = await counts();
+    const r = await refusal(M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope: 'shared', appRef: outsiderApp }, as(cora)));
+    expect(r.code).toBe('SHARED_CHAT_REQUIRES_APP_CONTEXT');
+    expect(await counts()).toEqual(before);
+  });
+
+  // #5407 review (Riana SEC10 P3 3): the shared path's own licence check.
+  it('a shared start in an App she is a member of whose install has no live licence is refused; nothing is written', async () => {
+    const foreign = await db.organization.create({ data: { name: 'Foreign shared', urn: 'foreignshared5394.test' } });
+    const unlicensed = (await db.app.create({ data: { name: 'Unlicensed', urn: `${foreign.urn}:app`, organizationId: foreign.id } })).id;
+    await db.appAgent.create({ data: { appId: unlicensed, agentId } });
+    await db.appMember.create({ data: { appId: unlicensed, userId: ann, role: 'member' } });
+    const before = await counts();
+    const r = await refusal(M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope: 'shared', appRef: unlicensed }, as(ann)));
+    expect(r.code).toBe('SHARED_CHAT_REQUIRES_APP_CONTEXT');
+    expect(await counts()).toEqual(before);
+  });
+
   it('a shared start naming an App she is a member of that does not install the Agent keeps its existing refusal', async () => {
     const bare = await db.app.create({ data: { name: 'Bare', urn: `${orgUrn}:bare`, organizationId: orgId } });
     await db.appMember.create({ data: { appId: bare.id, userId: ann, role: 'member' } });

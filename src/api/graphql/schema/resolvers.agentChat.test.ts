@@ -290,7 +290,7 @@ describe('startChat (JWT user)', () => {
   it('auto-provisions a user memory and picks the non-setup conversation', async () => {
     const result = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id , appRef: researchApp.id},
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     expect(result.chatId).toMatch(/^chats:/);
@@ -350,7 +350,7 @@ describe('startChat (JWT user)', () => {
 
   // Control case: the default (isTestRun unset / false) still provisions.
   it('isTestRun=false (default) DOES auto-provision an AgentSubscription', async () => {
-    await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(otherUser.id));
+    await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(otherUser.id));
     const sub = await db.agentSubscription.findUnique({
       where: { userId_agentId: { userId: otherUser.id, agentId: agent.id } },
     });
@@ -358,8 +358,8 @@ describe('startChat (JWT user)', () => {
   });
 
   it('reuses the existing user memory on a second startChat', async () => {
-    const r1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(adminUser.id));
-    const r2 = await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(adminUser.id));
+    const r1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
+    const r2 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     expect(r1.chatId).not.toBe(r2.chatId);
 
     const mems = await db.memory.findMany({
@@ -369,8 +369,8 @@ describe('startChat (JWT user)', () => {
   });
 
   it('gives two users separate memories on the same agent', async () => {
-    await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(adminUser.id));
-    await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(otherUser.id));
+    await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
+    await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(otherUser.id));
 
     const mems = await db.memory.findMany({
       where: { userMemoryOfAgentId: agent.id, deletedAt: null },
@@ -389,7 +389,7 @@ describe('startChat (JWT user)', () => {
     });
     const result = await resolvers.Mutation.startChat(
       {},
-      { agentRef: stored.urn , appRef: researchApp.id},
+      { agentRef: stored.urn, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     expect(result.chatId).toMatch(/^chats:/);
@@ -420,7 +420,7 @@ describe('startChat (JWT user)', () => {
       data: { id: generateId(), name: 'naked-agent', urn: `${orgA.urn}:naked-agent`, organizationId: orgA.id },
     });
     await expect(
-      resolvers.Mutation.startChat({}, { agentRef: naked.id , appRef: researchApp.id}, userCtx(adminUser.id)),
+      resolvers.Mutation.startChat({}, { agentRef: naked.id, appRef: researchApp.id }, userCtx(adminUser.id)),
     ).rejects.toThrow(/system memory/);
   });
 });
@@ -432,10 +432,10 @@ describe('startChat (JWT user)', () => {
 describe('myChats', () => {
   it('returns the current user\'s chats only', async () => {
     // User 1 creates 2 chats
-    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(adminUser.id));
-    const c2 = await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(adminUser.id));
+    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
+    const c2 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     // User 2 creates 1 chat
-    const c3 = await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(otherUser.id));
+    const c3 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(otherUser.id));
 
     const adminChats = await resolvers.Query.myChats(
       {},
@@ -465,7 +465,7 @@ describe('myChats', () => {
 
   // 007-entity-id-or-urn: myChats accepts agentRef as ID or URN.
   it('accepts a URN as agentRef input', async () => {
-    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(adminUser.id));
+    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     const stored = await db.agent.findUniqueOrThrow({
       where: { id: agent.id },
       select: { urn: true },
@@ -479,7 +479,7 @@ describe('myChats', () => {
   });
 
   it('accepts a prefixed URN (urn:agent:...) as agentRef input', async () => {
-    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(adminUser.id));
+    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     const stored = await db.agent.findUniqueOrThrow({
       where: { id: agent.id },
       select: { urn: true },
@@ -508,7 +508,7 @@ describe('myChats', () => {
     // code too and prove nothing.
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id , appRef: researchApp.id},
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     let last: { summarizationNeeded?: unknown } | null = null;
@@ -527,7 +527,7 @@ describe('myChats', () => {
   it('derives the title from the first user message', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id , appRef: researchApp.id},
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
@@ -547,7 +547,7 @@ describe('myChats', () => {
   it('prefers an explicit user-set title over the first message', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id , appRef: researchApp.id},
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
@@ -570,10 +570,10 @@ describe('myChats', () => {
   });
 
   it('sorts newest first by lastMessageAt', async () => {
-    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(adminUser.id));
+    const c1 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     // Small delay so timestamps differ
     await new Promise((r) => setTimeout(r, 5));
-    const c2 = await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(adminUser.id));
+    const c2 = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     await new Promise((r) => setTimeout(r, 5));
     await resolvers.Mutation.sendChatMessage(
       {},
@@ -599,7 +599,7 @@ describe('chatHistory', () => {
   it('returns messages in order with correct role attribution', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id , appRef: researchApp.id},
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
@@ -631,7 +631,7 @@ describe('chatHistory', () => {
   it('refuses access to another user\'s chat', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id , appRef: researchApp.id},
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     // #829: a caller with NO entitlement to this chat now gets not-found
@@ -771,7 +771,7 @@ describe('chatHistory', () => {
   it('role detection does not depend on agent-name substrings (Invariant #14)', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id , appRef: researchApp.id},
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
 
@@ -852,7 +852,7 @@ describe('chat ownership mutations', () => {
   it('updateChatTitle refuses a non-owner', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id , appRef: researchApp.id},
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     // #829: a caller with NO entitlement to this chat now gets not-found
@@ -873,7 +873,7 @@ describe('chat ownership mutations', () => {
   it('deleteChat soft-deletes the chat and its messages', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id , appRef: researchApp.id},
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     await resolvers.Mutation.sendChatMessage(
@@ -907,7 +907,7 @@ describe('chat ownership mutations', () => {
   it('deleteChat refuses a non-owner', async () => {
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id , appRef: researchApp.id},
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     // #829: a caller with NO entitlement to this chat now gets not-found
@@ -1653,7 +1653,7 @@ describe('spec 017 — chat scope (US1 private path)', () => {
   it('startChat creates a chat with data.scope="private" in a personal-class memory', async () => {
     const result = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id , appRef: researchApp.id},
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
 
@@ -1676,7 +1676,7 @@ describe('spec 017 — chat scope (US1 private path)', () => {
     // Start a real private chat first (so memory + chat-root are real).
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id , appRef: researchApp.id},
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     const memory = await db.memory.findFirst({
@@ -1711,7 +1711,7 @@ describe('spec 017 — chat scope (US1 private path)', () => {
     // passes for the duration of the migration window — FR-017/T036).
     const start = await resolvers.Mutation.startChat(
       {},
-      { agentRef: agent.id , appRef: researchApp.id},
+      { agentRef: agent.id, appRef: researchApp.id },
       userCtx(adminUser.id),
     );
     const memory = await db.memory.findFirst({
@@ -2005,13 +2005,13 @@ it('3501: encrypted startChat stores ciphertext root and state at birth, with no
   const { generateDataKey } = await import('../../../lib/crypto.js');
   const { sessionKeyCache } = await import('../../../lib/sessionKeyCache.js');
   const { decryptNodeFields } = await import('../../../lib/nodeCrypto.js');
-  await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(adminUser.id));
+  await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
   const memory = await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agent.id, createdBy: adminUser.id } });
   const key = generateDataKey();
   await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
   sessionKeyCache.set(generateId(), memory.id, key);
   try {
-    const result = await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(adminUser.id));
+    const result = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     const root = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: memory.id, loc: result.chatId } } });
     const engine = await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } });
     expect(root.data).toHaveProperty('__enc'); expect(engine.state).toHaveProperty('__enc');
@@ -2027,7 +2027,7 @@ it('3501: encrypted startChat stores ciphertext root and state at birth, with no
 describe('3583: a keyless turn on an encrypted chat', () => {
   async function encryptedKeylessChat() {
     const { sessionKeyCache } = await import('../../../lib/sessionKeyCache.js');
-    const started = await resolvers.Mutation.startChat({}, { agentRef: agent.id , appRef: researchApp.id}, userCtx(adminUser.id));
+    const started = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: researchApp.id }, userCtx(adminUser.id));
     await resolvers.Mutation.sendChatMessage({}, { chatId: started.chatId, userMessage: 'before' }, userCtx(adminUser.id));
     const memory = await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agent.id, createdBy: adminUser.id } });
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });

@@ -87,7 +87,7 @@ describe('#3301 — an Agent\'s system memory is refused as a startChat target o
   // stamped for this caller was selected and refused. The lookup now reuses only a home of the identified App, and an
   // Agent's system memory never has an App (chk_memory_class_app_id), so the row is never selected: it is left alone
   // and a fresh personal home is provisioned in the App. The #3301 guard stays pinned on the session branch above.
-  it('user branch: a class=system row carrying userMemoryOfAgentId is refused, not chatted into or replaced by a fresh memory (RED on main)', async () => {
+  it('user branch: a class=system row carrying userMemoryOfAgentId is never selected: nothing is written into it, and the chat gets a fresh personal home of the App', async () => {
     const f = await fixture();
     // the corrupt row: the system memory ALSO carries the per-user provenance column for this caller
     await db.memory.update({ where: { id: f.systemId }, data: { userMemoryOfAgentId: f.agentId, createdBy: f.userId } as never });
@@ -102,7 +102,7 @@ describe('#3301 — an Agent\'s system memory is refused as a startChat target o
 
   // #5394: before, Agent B's system memory stamped with A's id was the selected row and refused. With the lookup
   // limited to the identified App's homes it is never selected, so nothing is written into it.
-  it("user branch: ANOTHER Agent's system memory carrying userMemoryOfAgentId=A is refused when chatting with A (Rico §10 P2)", async () => {
+  it("user branch: ANOTHER Agent's system memory carrying userMemoryOfAgentId=A is never selected when chatting with A; nothing is written into it (Rico §10 P2)", async () => {
     const a = await fixture();
     const b = await fixture();
     await db.memory.update({ where: { id: b.systemId }, data: { userMemoryOfAgentId: a.agentId, createdBy: a.userId } as never });
