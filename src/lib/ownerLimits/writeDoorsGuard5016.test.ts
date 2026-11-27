@@ -22,6 +22,7 @@ const SITES: Record<string, Verdict> = {
   'src/api/graphql/schema/resolvers.mutation.app.ts': { n: 2, kind: 'refuses', because: 'createApp: the App and each dependency App ask `apps`', asks: 'apps' },
   'src/api/graphql/schema/resolvers.mutation.appMemory.ts': { n: 2, kind: 'free', because: 'a memory inside an App (app_id set) is not in the `memories` count' },
   'src/api/graphql/schema/installMemory.ts': { n: 1, kind: 'free', because: 'an install memory is not in the `memories` count' },
+  'src/api/graphql/schema/chatHome.ts': { n: 1, kind: 'free', because: 'startChat\'s own personal or private memory in the App (#5027 Ask 3, app_id set) is not in the `memories` count' },
   'src/api/graphql/schema/chat-scope.ts': { n: 1, kind: 'free', because: 'the shared App-class memory (class app) is not in the `memories` count' },
   'src/api/graphql/schema/resolvers.worker.ts': { n: 1, kind: 'free', because: 'a worker memory is App-class and not in the `memories` count' },
   'src/api/graphql/schema/resolvers.mutation.session.ts': { n: 2, kind: 'free', because: 'startAgentSession memories carry app_id (class app/personal inside an App) and are never refused' },
