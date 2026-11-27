@@ -1,6 +1,6 @@
 -- #3997 (S2 of #3991) — App-owned secrets: the widened owner CHECK, the value/owner pairing, versions bound to their
 -- App, the append-only event trail with its one-year purge rule, the tombstone, and "no secret outlives its App".
--- Prisma cannot model any of these. One source; the newest migration to carry it (today 20261124180200_qualify_secret_guard_reads) ends with it verbatim (pinned by src/api/graphql/schema/resolvers.appSecrets3997.test.ts).
+-- Prisma cannot model any of these. One source; the newest migration to carry it (today 20261127090000_secret_delete_after_use, #5335; before it 20261124180200_qualify_secret_guard_reads) ends with it verbatim (pinned by src/api/graphql/schema/resolvers.appSecrets3997.test.ts).
 
 -- The owner types: user, org, app. (#696 narrowed to user/org; D-2026-11-12-001 made an App an owner again.)
 ALTER TABLE secrets DROP CONSTRAINT IF EXISTS chk_secret_owner_type;
@@ -11,6 +11,9 @@ ALTER TABLE secrets DROP CONSTRAINT IF EXISTS chk_secret_app_value;
 ALTER TABLE secrets ADD CONSTRAINT chk_secret_app_value CHECK ((owner_type = 'app') = (value_encrypted IS NULL));
 ALTER TABLE secrets DROP CONSTRAINT IF EXISTS chk_secret_protected_app_only;
 ALTER TABLE secrets ADD CONSTRAINT chk_secret_protected_app_only CHECK (owner_type = 'app' OR NOT protected);
+-- #5335 (cor:sec:060:03): deleteAfterUse, like protection, exists only on App rows.
+ALTER TABLE secrets DROP CONSTRAINT IF EXISTS chk_secret_delete_after_use_app_only;
+ALTER TABLE secrets ADD CONSTRAINT chk_secret_delete_after_use_app_only CHECK (owner_type = 'app' OR NOT delete_after_use);
 
 ALTER TABLE secret_versions DROP CONSTRAINT IF EXISTS chk_secret_version_shape;
 ALTER TABLE secret_versions ADD CONSTRAINT chk_secret_version_shape

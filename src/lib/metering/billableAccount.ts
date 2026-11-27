@@ -29,3 +29,13 @@ export async function billableAccountFor(
   const agent = !app && work.agentId ? await db.agent.findUnique({ where: { id: work.agentId }, select: OWNER_SELECT }) : null;
   return ownerOfWork(app, agent);
 }
+
+/**
+ * #5023 (blind review F2): the billable account of a headless run, in ONE place. The credit gate (at launch and at each model
+ * hop) and the usage record of each hop both call it, so what is checked and what is debited cannot drift apart. Today it is
+ * the run's own organization (the owner of the App the run is in, which `launchAppRun`/`mintAppRun` stamp on the run); slice F3a
+ * (a person's App) changes this one function to the run's owner.
+ */
+export function billableAccountOfRun(run: { organizationId: string }): OwnerRef {
+  return { organizationId: run.organizationId };
+}

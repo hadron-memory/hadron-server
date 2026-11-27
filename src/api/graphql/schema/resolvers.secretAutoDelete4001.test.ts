@@ -148,8 +148,8 @@ it('failure after decryption rolls back spend, reveal event, deletion and client
   expect(await db.grantEvent.count({ where: { grantId: a.grantId, action: 'USE' } })).toBe(0);
   expect(await db.secretEvent.count({ where: { secretId, kind: { in: ['REVEAL', 'DELETE'] } } })).toBe(0);
 });
-it('a signed mark deletes a protected secret without a change request and never reaches a replacement by name', async () => {
-  await db.secret.update({ where: { id: secretId }, data: { protected: true } });
+it('a signed mark deletes an ARMED protected secret (deleteAfterUse, #5335) without a change request and never reaches a replacement by name', async () => {
+  await db.secret.update({ where: { id: secretId }, data: { protected: true, deleteAfterUse: true } });
   const a = await client();
   await reveal(a.clientId); expect(await exists()).toBe(0);
   const replacement = await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'tok', kind: 'generic', value: 'replacement' }, ctx());
@@ -171,12 +171,17 @@ it('post-push retains distinct S4 own-worker and S6 auto-delete trigger bindings
     { name: 'secret_client_own_worker_immutable', table_name: 'secret_read_clients', function_name: 'hadron_secret_client_own_worker_immutable' },
   ]);
 });
-// cor:sec:070:01 Exceptions (Proposed): protected secrets retain signed auto-delete.
-it.each(['last-read', 'window-end'] as const)('cor:sec:070:01 Proposed exception: protected auto-delete at %s is signed, audited and clears staged requests', async (mode) => {
+// #5335: the cor:sec:070:01 auto-delete exception is REFUSED (Decided, #5217 Q6). A protected secret is deleted after use only once
+// it carries deleteAfterUse (cor:sec:060:03 arming rule); the exception's good properties stay: signed, audited, clears staged requests.
+it.each(['last-read', 'window-end'] as const)('#5335: protected auto-delete at %s is refused without deleteAfterUse; armed, it is signed, audited and clears staged requests', async (mode) => {
   await db.secret.update({ where: { id: secretId }, data: { protected: true } });
   expect((await db.secret.findUniqueOrThrow({ where: { id: secretId } })).protected).toBe(true);
-  const a = await resolvers.Mutation.issueSecretReadClient({}, { input: { secretRef: secretId, holderKind: 'WORKER', holderRef: workerId, autoDelete: true,
-      maxReads: mode === 'last-read' ? 1 : null, expiresAt: mode === 'window-end' ? (await dbDeadline(10)).toISOString() : null, reason: 'protected auto-delete exception' } }, ctx());
+  const issueMarked = async () => resolvers.Mutation.issueSecretReadClient({}, { input: { secretRef: secretId, holderKind: 'WORKER', holderRef: workerId, autoDelete: true,
+      maxReads: mode === 'last-read' ? 1 : null, expiresAt: mode === 'window-end' ? (await dbDeadline(10)).toISOString() : null, reason: 'protected auto-delete' } }, ctx());
+  expect(await failure(issueMarked())).toBe('SECRET_AUTO_DELETE_NOT_ALLOWED');
+  expect(await db.grant.count()).toBe(0);
+  await db.secret.update({ where: { id: secretId }, data: { deleteAfterUse: true } });
+  const a = await issueMarked();
   await sign(a.grantId);
   const staged = await resolvers.Mutation.updateSecret({}, { ref: secretId, value: 'staged-uncommitted' }, ctx()).then(() => {
     throw new Error('staging refusal expected');
