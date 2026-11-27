@@ -14,7 +14,7 @@
 --
 -- Expected rows: the entries of organizations and persons soft-deleted before #5340's deploy (c228e939); zero on a database
 -- where none exist (a fresh one, and every run after the first). Idempotent: a re-run finds no row naming a deleted owner and
--- changes nothing. No table rewrite and no row can fail the trigger, so there is no preflight and no HDPRF refusal.
+-- changes nothing. No table rewrite and no row can fail the trigger, so there is no preflight and no refusal on data.
 -- Production: deploying this migration needs its own register grant (the standing production-database rule); the gate does not
 -- authorize it.
 UPDATE credit_ledger_entries e
