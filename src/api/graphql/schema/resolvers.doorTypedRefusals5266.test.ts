@@ -55,8 +55,7 @@ describe('#5266 revokeAppKey keeps its posture for a key that EXISTS (blind P2-1
     const foreign = await refusal(M.revokeAppKey({}, { id: key.id }, ctx()));
     const missing = await refusal(M.revokeAppKey({}, { id: generateId() }, ctx()));
     expect(codeOf(missing)).toBe('APP_KEY_NOT_FOUND');
-    expect(codeOf(foreign)).not.toBe('APP_KEY_NOT_FOUND');
-    expect(codeOf(foreign)).not.toBe('INTERNAL_SERVER_ERROR');
+    expect(codeOf(foreign)).toBe('FORBIDDEN'); // the refusal it had before this change, byte for byte
     expect((await db.appKey.findUniqueOrThrow({ where: { id: key.id } })).revokedAt).toBeNull();
     // and the App's own manager still revokes it
     expect(await M.revokeAppKey({}, { id: key.id }, ctx(otherId))).toBe(true);
@@ -68,6 +67,9 @@ describe('#5266 the startSession write-fault mapping, on synthetic Prisma-shaped
   const run = (e: unknown) => answerStartSessionWriteFaults(Promise.reject(e)).then(() => 'ok', (err) => err);
   it('P2002 on the SESSION table id is SESSION_ID_TAKEN', async () => {
     expect((await run(fault('P2002', { modelName: 'Session', target: ['id'] }))).extensions.code).toBe('SESSION_ID_TAKEN');
+  });
+  it('P2002 on the Session table by its constraint name (the string form of the target) is SESSION_ID_TAKEN too', async () => {
+    expect((await run(fault('P2002', { modelName: 'Session', target: 'sessions_pkey' }))).extensions.code).toBe('SESSION_ID_TAKEN');
   });
   it('P2002 on another table\'s id, or with no model name, passes through untouched (never answered as a taken session id)', async () => {
     for (const meta of [{ modelName: 'User', target: ['id'] }, { target: ['id'] }, { modelName: 'Session', target: ['worker_id'] }]) {
