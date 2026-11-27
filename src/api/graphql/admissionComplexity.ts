@@ -161,9 +161,17 @@ export const APP_SELF_JOIN_COST = 8;
  * #5267: `App.viewerAppUserMemoryClasses` (#5218) is priced here, not batched, because the licence step is the door's own
  * judgement (`cor:dmo:060:20`) and is not copied. The weight is the statements the field adds for one member App in the worst
  * shape the test fixture prices: three installed Agents, none licensed, so the licence loop runs to its end (the membership
- * read, the install listing, a licence check per Agent, the held-class read). An App with more unlicensed installed Agents
- * costs more than this; the tail is named in the issue. Measured per member App: 7 with no Agent, 14 with one licensed Agent,
- * 24 with three unlicensed ones (the Prisma query-event count of the field alone, `resolvers.appUserMemoryClassesCost5267.test.ts`).
+ * read, the install listing, a licence check per Agent, the held-class read).
+ *
+ * KNOWN UNDER-ESTIMATE, stated here and not only in the issue: this is NOT an upper bound. The licence loop costs about five
+ * statements per installed Agent that does not pass, so an App with more than three unlicensed installed Agents costs more than
+ * this weight. Closing it means capping the licence scan in the shared licence check the door uses too (the field's answer is the
+ * door's own judgement, `cor:dmo:060:20`), which changes the door's answer and needs a ruling; #5267 does neither.
+ *
+ * Measured per member App when set (0.50.0): 7 with no Agent, 14 with one licensed Agent, 24 with three unlicensed ones, as
+ * the Prisma query events the field alone adds (`resolvers.appUserMemoryClassesCost5267.test.ts`, which pins this constant to
+ * the worst shape EXACTLY on purpose: if a shared read gate or the Prisma version changes the count, that test fails and the
+ * constant is re-measured by running it, not guessed). The viewer is a member in every shape; a non-member costs one statement.
  */
 export const APP_VIEWER_USER_MEMORY_CLASSES_COST = 24;
 

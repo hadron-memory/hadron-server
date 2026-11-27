@@ -59,6 +59,7 @@ beforeAll(async () => {
     }
   }
   const { PrismaClient } = await import('../../../generated/prisma/index.js');
+  expect(process.env.DATABASE_URL, 'the counting client must use the same database as db').toBeTruthy();
   logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
   (logged as any).$on('query', () => { statements += 1; });
 });
@@ -76,7 +77,10 @@ describe('#5267 the weight is what the field costs', () => {
     const per = { A: [] as number[], B: [] as number[], C: [] as number[] };
     for (const shape of ['A', 'B', 'C'] as const) for (const id of apps[shape]) per[shape].push(await fieldStatements(id));
     const worst = (s: 'A' | 'B' | 'C') => Math.max(...per[s]);
-    console.log('5267 statements per App', { A: worst('A'), B: worst('B'), C: worst('C') });
+    // Every App of a shape costs the same: the count has no per-App variance, so the max over 10 samples is the shape's cost.
+    for (const s of ['A', 'B', 'C'] as const) expect(new Set(per[s]).size, `shape ${s} statements per App: ${per[s]}`).toBe(1);
+    // The doc comment's figures are pinned too, so it cannot drift from what the field issues.
+    expect([worst('A'), worst('B'), worst('C')]).toEqual([7, 14, 24]);
     for (const s of ['A', 'B', 'C'] as const) expect(worst(s)).toBeLessThanOrEqual(APP_VIEWER_USER_MEMORY_CLASSES_COST);
     expect(worst('C')).toBe(APP_VIEWER_USER_MEMORY_CLASSES_COST);
   });
@@ -95,6 +99,19 @@ describe('#5267 admission sees the field', () => {
 
   it('prices 30 Apps at 30 times the constant more than the same list without the field', () => {
     expect(cost('viewerAppUserMemoryClasses') - cost('')).toBe(30 * APP_VIEWER_USER_MEMORY_CLASSES_COST);
+  });
+
+  it('first-party selections stay far under the real default ceiling (GRAPHQL_MAX_COST 200000)', async () => {
+    const { GRAPHQL_ADMISSION_DEFAULTS } = await import('../admission.js');
+    const ceiling = GRAPHQL_ADMISSION_DEFAULTS.maxCost;
+    const one = getComplexity({ schema, variables: {}, query: parse('{ app(ref: "x") { id viewerAppUserMemoryClasses } }'),
+      estimators: [hadronListEstimator({ maxCost: ceiling, listFactor: 10 }), simpleEstimator({ defaultComplexity: 1 })] });
+    // The portal's create form asks for one App (hadron-portal#2634): the weight is all it adds.
+    expect(one).toBeLessThan(APP_VIEWER_USER_MEMORY_CLASSES_COST + 20);
+    // A full default page of Apps with the field is admitted, with a wide margin.
+    const page = getComplexity({ schema, variables: {}, query: parse('{ apps(limit: 100) { items { id viewerAppUserMemoryClasses } } }'),
+      estimators: [hadronListEstimator({ maxCost: ceiling, listFactor: 10 }), simpleEstimator({ defaultComplexity: 1 })] });
+    expect(page).toBeLessThan(ceiling / 10);
   });
 
   it('puts a list over the ceiling that the same list without the field is under', () => {
