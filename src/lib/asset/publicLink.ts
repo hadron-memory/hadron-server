@@ -161,7 +161,10 @@ async function canManageNonAppMemory(ctx: Context, memory: PublicLinkMemory): Pr
  */
 async function mayRevokeHoldingLink(ctx: Context, memory: PublicLinkMemory): Promise<boolean> {
   if (!isUserHolding(memory) || !ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return false;
-  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return true;
+  // The platform role is read from the user row, never from the token's `ctx.roles`: this runs again inside the transaction
+  // under a share lock on that row (see lockDecidingMemberships), so a demotion that won the race wins.
+  const user = await ctx.db.user.findFirst({ where: { id: ctx.userId, deletedAt: null }, select: { roles: true } });
+  if (user?.roles.some((r) => r === 'ADMIN' || r === 'OWNER')) return true;
   if (!memory.organizationId) return false;
   const member = await ctx.db.orgMember.findFirst({
     where: { organizationId: memory.organizationId, userId: ctx.userId, role: { in: ['ADMIN', 'OWNER'] }, ...LIVE_ORG_MEMBERSHIP },
@@ -170,16 +173,45 @@ async function mayRevokeHoldingLink(ctx: Context, memory: PublicLinkMemory): Pro
   return member !== null;
 }
 
-/** The success shape of an admin's revoke: nothing that names or describes the file or its memory (the Asset type's non-null fields get neutral values). */
+/**
+ * The success shape of an admin's revoke: built from an explicit allow-list (the id and the flag just written), never by spreading the
+ * row, so no column (present or added later) reaches the Asset field resolvers. The non-null fields get neutral values: an empty
+ * `memoryId` makes `Asset.urn` answer its memory-less shape, `publicUrl` and `canManagePublicLink` answer null and false.
+ */
 function redactedRevokeResult(asset: Asset): Asset {
-  return { ...asset, filename: '', mimeType: 'application/octet-stream', sizeBytes: 0, description: null, uploadedBy: null, scanSignature: null };
+  return {
+    id: asset.id,
+    publicLinkEnabled: asset.publicLinkEnabled,
+    memoryId: '',
+    filename: '',
+    mimeType: 'application/octet-stream',
+    sizeBytes: 0,
+    scanStatus: 'PENDING',
+    uploadedAt: new Date(0),
+    scanSignature: null,
+    description: null,
+    uploadedBy: null,
+    deletedAt: null,
+  } as unknown as Asset;
 }
+
+const revokeAdmissions = new WeakSet<object>();
+/** A marker, kept apart from the union: an admin's revoke is judged as a person's act but is recognisable, so it is never replayed as `expected`. */
+function REVOKE_ADMISSION(c: Context): ActAdmission {
+  const a: ActAdmission = { kind: 'person', userId: c.userId! };
+  revokeAdmissions.add(a);
+  return a;
+}
+function isRevokeAdmission(a: ActAdmission): boolean { return revokeAdmissions.has(a); }
 
 /** Lock the rows the manager decision reads, so a revocation queued behind us is seen or waits. */
 async function lockDecidingMemberships(txCtx: Context, memory: PublicLinkMemory): Promise<void> {
   const tx = txCtx.db;
   if (!txCtx.userId) return;
+  // The platform-role branch of an admin's revoke (#90) reads the caller's user row.
+  await tx.$queryRaw`SELECT id FROM users WHERE id = ${txCtx.userId} FOR SHARE`;
   if (memory.organizationId) {
+    // This also locks the caller's own org membership row, which the org-admin branch of an admin's revoke (#90) reads.
     await tx.$queryRaw`SELECT user_id FROM org_members WHERE organization_id = ${memory.organizationId} AND user_id = ${txCtx.userId} FOR SHARE`;
   }
   if (memory.class === 'group') {
@@ -224,11 +256,13 @@ export async function setAssetPublicLink(
   );
   // #90: a holding's link may be switched OFF (never ON) by an organisation or platform admin; that act needs no read of the asset or
   // the memory, and its result is redacted. Every other caller keeps the refusal of the admission above.
+  // The revoke route is its own decision, never an admission: it is never handed back as `expected`, and the result's
+  // redaction follows the route taken by the LAST judgement (the one under the locks).
   let viaRevoke = false;
   const admit = async (c: Context, m: PublicLinkMemory, expected?: ActAdmission): Promise<ActAdmission | null> => {
     const own = await assetPublicLinkAdmission(c, m, instruction, expected);
     if (own) { viaRevoke = false; return own; }
-    if (!enabled && await mayRevokeHoldingLink(c, m)) { viaRevoke = true; return { kind: 'person', userId: c.userId! }; }
+    if (!enabled && await mayRevokeHoldingLink(c, m)) { viaRevoke = true; return REVOKE_ADMISSION(c); }
     return null;
   };
   const first = await admit(ctx, observed);
@@ -251,7 +285,7 @@ export async function setAssetPublicLink(
       const memory = await txCtx.db.memory.findUnique({ where: { id: seen.memoryId! }, select: PUBLIC_LINK_MEMORY_SELECT });
       if (!memory) throw notFound();
       await lockDecidingMemberships(txCtx, memory);
-      admission = await admit(txCtx, memory, first ?? undefined);
+      admission = await admit(txCtx, memory, first && !isRevokeAdmission(first) ? first : undefined);
       if (!admission) throw await denied(txCtx);
     },
     async (tx, txCtx) => {

@@ -163,4 +163,41 @@ describe('an admin may switch a holding\'s public link OFF, never ON (hadron-int
     expect(await fields.publicUrl(row, {}, as('orgadmin'))).toBeNull();
     expect(await fields.canManagePublicLink(row, {}, as('orgadmin'))).toBe(false);
   });
+
+  it('the off result is an allow-list: no column but the id and the flag survives, and the Asset resolvers answer neutrally (BLIND P2-1)', async () => {
+    const asset = await assetOn(holdingId, true);
+    const out = (await sw(as('orgadmin'), asset, false)) as { ok: Record<string, unknown> };
+    expect(Object.keys(out.ok).sort()).toEqual(['deletedAt', 'description', 'filename', 'id', 'memoryId', 'mimeType', 'publicLinkEnabled', 'scanSignature', 'scanStatus', 'sizeBytes', 'uploadedAt', 'uploadedBy']);
+    expect(out.ok).toMatchObject({ memoryId: '' });
+    const fields = (resolvers as any).Asset;
+    const urn = await fields.urn(out.ok, {}, as('orgadmin'));
+    expect(urn).toBe(`hrn:asset:unknown:assets:${asset}`);
+    expect(await fields.publicUrl(out.ok, {}, as('orgadmin'))).toBeNull();
+    expect(await fields.canManagePublicLink(out.ok, {}, as('orgadmin'))).toBe(false);
+    const text = JSON.stringify(out) + urn;
+    for (const secret of [`k-${asset}`, holdingId, 'link90.test']) expect(text, secret).not.toContain(secret);
+  });
+
+  it('the platform role comes from the user row, not the token: a token claiming ADMIN over a READER row is refused; a demoted admin is refused (BLIND P2-2)', async () => {
+    const live = await assetOn(holdingId, true);
+    const claimed = { db, userId: u.outsider, roles: ['ADMIN'] } as unknown as Context;
+    expect(await sw(claimed, live, false)).not.toHaveProperty('ok');
+    expect(await flag(live)).toBe(true);
+    await db.user.update({ where: { id: u.platformadmin }, data: { roles: ['READER'] as never } });
+    expect(await sw(as('platformadmin'), live, false)).not.toHaveProperty('ok');
+    expect(await flag(live)).toBe(true);
+  });
+
+  it('a suspended or removed org admin is refused (BLIND P3-1)', async () => {
+    const live = await assetOn(holdingId, true);
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: u.orgadmin } }, data: { deletedAt: new Date() } });
+    expect(await sw(as('orgadmin'), live, false)).not.toHaveProperty('ok');
+    expect(await flag(live)).toBe(true);
+  });
+
+  it('the creator who is also an org admin still gets the full, unredacted result (BLIND P3-2)', async () => {
+    const asset = await assetOn(holdingId, true);
+    const off = (await sw(as('creator'), asset, false)) as { ok: Record<string, unknown> };
+    expect(off.ok).toMatchObject({ filename: FILENAME, memoryId: holdingId });
+  });
 });
