@@ -23,6 +23,8 @@
 import { loadFlowNode } from '../loadFlowNode.js';
 import { GithubReadError, takeGithubIssueSnapshot } from '../../githubIssueSnapshot.js';
 import type { RunToolDef } from './types.js';
+import { requireOwnerRefOf } from '../../owner.js';
+import { requireOrgTenantForTool } from './orgOnly.js';
 
 export const githubIssueSnapshot: RunToolDef = {
   name: 'github_issue_snapshot',
@@ -49,12 +51,14 @@ export const githubIssueSnapshot: RunToolDef = {
   },
   cost: 0,
   execute: async (ctx, args) => {
+    // #5077: organization-only (the GitHub App installation is an organization's); a person's run is refused first.
+    const runOrgId = requireOrgTenantForTool(requireOwnerRefOf(ctx.run), 'github_issue_snapshot');
     // Fail closed: without the executing node there is no allowlist to read,
     // and guessing (the run's entry node, say) could read another node's.
     if (!ctx.nodeUrn) throw new Error('github_issue_snapshot: the executing flow node is unknown.');
-    const { node } = await loadFlowNode(ctx.db, ctx.nodeUrn, ctx.run.organizationId, ctx.principal);
+    const { node } = await loadFlowNode(ctx.db, ctx.nodeUrn, { organizationId: runOrgId }, ctx.principal);
     const snapshot = await takeGithubIssueSnapshot(ctx.db, {
-      organizationId: ctx.run.organizationId,
+      organizationId: runOrgId,
       nodeData: node.data,
       args,
     });

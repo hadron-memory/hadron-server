@@ -72,7 +72,7 @@ async function loseLicence(loss: Loss) {
 }
 
 async function start(scope: 'private' | 'shared' = 'private') {
-  const started = await M.startChat({}, { agentRef: agentId, scope, conversationName: 'flow' }, ctx());
+  const started = await M.startChat({}, { agentRef: agentId, scope, conversationName: 'flow', appRef: appId }, ctx());
   expect(started.systemMessage).toContain('LICENSED STAGE');
   return started;
 }
@@ -148,6 +148,34 @@ async function refusedStart() {
   expect(seen.edgeReads).toBe(0);
   expect(await state()).toBe(before);
 }
+/** #5394: a start that names no App is refused CHAT_APP_NOT_IDENTIFIED before any definition read or write. */
+async function unidentifiedStartRefused() {
+  const before = await state();
+  const seen = await observeDefinitionReads(async () => {
+    try { await M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, ctx()); return null; }
+    catch (error) { return error as any; }
+  });
+  expect(seen.value?.code).toBe('CHAT_APP_NOT_IDENTIFIED');
+  expect(seen.systemReads).toEqual([]);
+  expect(seen.edgeReads).toBe(0);
+  expect(await state()).toBe(before);
+}
+/** #5394: a retained App-less home is never picked; the start runs in a home of the named App and leaves it untouched. */
+async function startsBesideRetainedAppLessHome(retainedMemoryId: string, run: () => Promise<any> = () => start()) {
+  const retained = JSON.stringify(await Promise.all([
+    db.memory.findUniqueOrThrow({ where: { id: retainedMemoryId } }),
+    db.node.findMany({ where: { memoryId: retainedMemoryId }, orderBy: { id: 'asc' } }),
+  ]));
+  const started = await run();
+  expect(started.systemMessage).toContain('LICENSED STAGE');
+  const home = (await chatNodeByLocOrThrow(db, started.chatId)).memoryId;
+  expect(home).not.toBe(retainedMemoryId);
+  expect((await db.memory.findUniqueOrThrow({ where: { id: home } })).appId).toBe(appId);
+  expect(JSON.stringify(await Promise.all([
+    db.memory.findUniqueOrThrow({ where: { id: retainedMemoryId } }),
+    db.node.findMany({ where: { memoryId: retainedMemoryId }, orderBy: { id: 'asc' } }),
+  ]))).toBe(retained);
+}
 for (const home of ['personal', 'knowledge'] as const) {
   for (const loss of ['uninstall', 'revoked', 'expired', 'inactive'] as const) {
     it(`retained ${home} refuses ${loss} before reads/writes, even for Agent manager`, async () => {
@@ -178,12 +206,16 @@ for (const kind of ['READER', 'CONTRIBUTOR', 'PUBLIC'] as const) {
     await refusedStart();
   });
 }
+// #5394: pinned a refusal when the start re-used the non-manager's retained app_id-null home. That home is never picked
+// now: with no App named the start is refused CHAT_APP_NOT_IDENTIFIED before any read or write, and naming the App starts
+// in a home of that App, leaving the retained App-less home untouched.
 it('retained no-App non-manager refuses before definition reads', async () => {
   const started = await start();
   const root = await chatNodeByLocOrThrow(db, started.chatId);
   await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
   await db.orgMember.updateMany({ where: { userId }, data: { role: 'READER' } });
-  await refusedStart();
+  await unidentifiedStartRefused();
+  await startsBesideRetainedAppLessHome(root.memoryId);
 });
 it('live licensed retained personal home still serves the real prompt', async () => {
   const first = await start();
@@ -194,13 +226,14 @@ it('live licensed retained personal home still serves the real prompt', async ()
   const b = await chatNodeByLocOrThrow(db, seen.value.chatId);
   expect(a.memoryId).toBe(b.memoryId);
 });
-it('no-App manager can still create and reuse a direct home', async () => {
+// #5394: pinned the Agent manager's direct route (with no installing App, a manager created and reused an app_id-null
+// home). The route is retired: no App named is CHAT_APP_NOT_IDENTIFIED, and an App that does not install the Agent is
+// the unknown-Agent refusal, both before any read or write.
+it('an Agent manager with no App installing the Agent gets no direct home: refused with or without an App named, nothing provisioned', async () => {
   await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
-  const a = await start();
-  const b = await start();
-  const root = await chatNodeByLocOrThrow(db, a.chatId);
-  expect((await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } })).appId).toBeNull();
-  expect(b.systemMessage).toContain('LICENSED STAGE');
+  await unidentifiedStartRefused();
+  await refusedStart();
+  expect(await db.memory.count({ where: { userMemoryOfAgentId: agentId } })).toBe(0);
 });
 it('licensed non-manager App start remains admitted', async () => {
   await db.orgMember.updateMany({ where: { userId }, data: { role: 'READER' } });
@@ -212,6 +245,19 @@ for (const route of ['app', 'manager'] as const) {
     if (route === 'manager') {
       await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
       await db.agent.update({ where: { id: agentId }, data: { visibility: 'PUBLIC' } });
+      // #5394: pinned the Agent manager's App-less route reaching the locked write. The route is retired: a manager
+      // whose named App does not install the Agent is refused as an unknown Agent before any transaction, read or write.
+      await unidentifiedStartRefused();
+      const prior = await state();
+      let transactions = 0;
+      const refused = await observeDefinitionReads(async () => {
+        try { await start(); return null; } catch (error) { return error as any; }
+      }, async () => { transactions++; });
+      expect(refused.value?.code).toBe('AGENT_NOT_FOUND');
+      expect(transactions).toBe(0);
+      expect(refused.systemReads).toEqual([]);
+      expect(await state()).toBe(prior);
+      return;
     }
     await start();
     const before = await state();
@@ -226,30 +272,39 @@ for (const route of ['app', 'manager'] as const) {
       return transaction(...args);
     }) as any);
     try {
-      await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, ctx())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+      await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: appId }, ctx())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
       expect(changed).toBe(true); // The test reaches the locked write, not just the early guard.
       expect(await state()).toBe(before);
     } finally { spy.mockRestore(); }
   });
 }
 
-it('retained App-less home admits the user-owned Agent owner', async () => {
+// #5394: pinned the user-owned Agent's owner re-using a retained app_id-null home. That home is never picked now: no
+// App named is CHAT_APP_NOT_IDENTIFIED, and the org App does not license the user-owned Agent, so naming it is the
+// unknown-Agent refusal; either way the retained home is untouched.
+it('a retained App-less home is never picked, even for the user-owned Agent owner: refused with or without an App named', async () => {
   const first = await start();
   const root = await chatNodeByLocOrThrow(db, first.chatId);
   await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
   await db.agent.update({ where: { id: agentId }, data: { organizationId: null, ownerUserId: userId } });
   await db.memory.update({ where: { id: systemId }, data: { organizationId: null, ownerUserId: userId } });
-  expect((await start()).systemMessage).toContain('LICENSED STAGE');
+  await unidentifiedStartRefused();
+  await refusedStart();
 });
-it('live platform admin can use a retained App-less home; a stale platform claim cannot', async () => {
+// #5394: pinned which platform claim could re-use a retained app_id-null home (stale: refused; live: served). That home
+// is never picked now, so the platform role decides nothing here: with no App named both claims are CHAT_APP_NOT_IDENTIFIED,
+// and naming the App starts each in a home of that App, the retained App-less home untouched.
+it('a retained App-less home is never picked for a platform admin, live or stale: no App named is refused, naming the App starts beside it', async () => {
   const first = await start();
   const root = await chatNodeByLocOrThrow(db, first.chatId);
   await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
   await db.orgMember.updateMany({ where: { userId }, data: { role: 'READER' } });
   const platformCtx = { ...ctx(), roles: ['ADMIN'] } as Context;
-  await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, platformCtx)).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+  await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, platformCtx)).rejects.toMatchObject({ code: 'CHAT_APP_NOT_IDENTIFIED' });
+  await startsBesideRetainedAppLessHome(root.memoryId, () => M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: appId }, platformCtx));
   await db.user.update({ where: { id: userId }, data: { roles: ['ADMIN'] } });
-  expect((await M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, platformCtx)).systemMessage).toContain('LICENSED STAGE');
+  await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, platformCtx)).rejects.toMatchObject({ code: 'CHAT_APP_NOT_IDENTIFIED' });
+  await startsBesideRetainedAppLessHome(root.memoryId, () => M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: appId }, platformCtx));
 });
 
 for (const route of ['app', 'manager'] as const) {
@@ -257,6 +312,19 @@ for (const route of ['app', 'manager'] as const) {
     if (route === 'manager') {
       await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
       await db.agent.update({ where: { id: agentId }, data: { visibility: 'PUBLIC' } });
+      // #5394: pinned the Agent manager's App-less route reaching the locked write. The route is retired: a manager
+      // whose named App does not install the Agent is refused as an unknown Agent before any transaction, read or write.
+      await unidentifiedStartRefused();
+      const prior = await state();
+      let transactions = 0;
+      const refused = await observeDefinitionReads(async () => {
+        try { await start(); return null; } catch (error) { return error as any; }
+      }, async () => { transactions++; });
+      expect(refused.value?.code).toBe('AGENT_NOT_FOUND');
+      expect(transactions).toBe(0);
+      expect(refused.systemReads).toEqual([]);
+      expect(await state()).toBe(prior);
+      return;
     }
     const before = await state();
     const transaction = db.$transaction.bind(db) as (...args: any[]) => Promise<any>;
@@ -270,7 +338,7 @@ for (const route of ['app', 'manager'] as const) {
       return transaction(...args);
     }) as any);
     try {
-      await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, ctx())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
+      await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: appId }, ctx())).rejects.toMatchObject({ code: 'AGENT_NOT_FOUND' });
       expect(changed).toBe(true);
       expect(await state()).toBe(before);
     } finally { spy.mockRestore(); }
@@ -348,7 +416,7 @@ it('shared admission stays on the selected App if the located home moves before 
   }) as any);
   try {
     const seen = await observeDefinitionReads(async () => {
-      try { await M.startChat({}, { agentRef: agentId, scope: 'shared', conversationName: 'flow' }, ctx()); return null; }
+      try { await M.startChat({}, { agentRef: agentId, scope: 'shared', conversationName: 'flow', appRef: appId }, ctx()); return null; }
       catch (error) { return error as any; }
     });
     expect(changed).toBe(true);
@@ -359,7 +427,7 @@ it('shared admission stays on the selected App if the located home moves before 
 });
 
 /** The only uncommitted revoker holds this named authority domain in our private test database. */
-async function assertHeldRefusal(anchor: { kind: 'app' | 'org' | 'user'; id: string }, revoke: (tx: any) => Promise<unknown>, scope: 'private' | 'shared' = 'private') {
+async function assertHeldRefusal(anchor: { kind: 'app' | 'org' | 'user'; id: string }, revoke: (tx: any) => Promise<unknown>, scope: 'private' | 'shared' = 'private', viaCredential = false) {
   const before = await state();
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
@@ -374,7 +442,9 @@ async function assertHeldRefusal(anchor: { kind: 'app' | 'org' | 'user'; id: str
   await ready;
   let completed = false;
   const request = observeDefinitionReads(async () => {
-    try { await M.startChat({}, { agentRef: agentId, scope, conversationName: 'flow' }, ctx()); return null; }
+    // viaCredential (#5394): the App is identified by the caller's credential (ctx.appId), which needs no participation.
+    const args = viaCredential ? { agentRef: agentId, scope, conversationName: 'flow' } : { agentRef: agentId, scope, conversationName: 'flow', appRef: appId };
+    try { await M.startChat({}, args, viaCredential ? { ...ctx(), appId } : ctx()); return null; }
     catch (error) { return error as any; }
   }).then(result => { completed = true; return result; });
   try {
@@ -387,21 +457,50 @@ async function assertHeldRefusal(anchor: { kind: 'app' | 'org' | 'user'; id: str
   expect(result.systemReads).toEqual([]);
   expect(await state()).toBe(before);
 }
+/**
+ * #5394: the three home-only anchor pins below held the retained home's App/org/owner domain and proved the start waited
+ * on it before refusing. A start now names its App, and appRef resolves only among the Apps the caller takes part in, so a
+ * caller who no longer takes part in the home's App is refused at once as an unknown Agent: before any anchor is read or
+ * locked, so it never waits on the held domain, with no definition read and no write.
+ */
+async function assertImmediateRefusal(anchor: { kind: 'app' | 'org' | 'user'; id: string }, revoke: (tx: any) => Promise<unknown>) {
+  const before = await state();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let held!: () => void;
+  const ready = new Promise<void>(resolve => { held = resolve; });
+  const holder = db.$transaction(async tx => {
+    await lockAuthorityAnchors(tx, [anchor], 'exclusive');
+    await revoke(tx);
+    held();
+    await gate;
+  }, { timeout: 20_000 });
+  await ready;
+  try {
+    const result = await observeDefinitionReads(async () => {
+      try { await M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: appId }, ctx()); return null; }
+      catch (error) { return error as any; }
+    });
+    expect(result.value?.code).toBe('AGENT_NOT_FOUND');
+    expect(result.systemReads).toEqual([]);
+    expect(await state()).toBe(before);
+  } finally { release(); await holder; }
+}
 async function retainedForeignHomeWithoutParticipation() {
   await foreignHome();
   await start();
   await db.appMember.deleteMany({ where: { appId, userId } });
   await db.orgMember.deleteMany({ where: { organizationId: foreignOrgId, userId } });
 }
-it('a home-only App anchor fences uninstall even when the Agent manager has no App participation', async () => {
+it('a retained home-only App with no participation left: the start is refused at once, not held behind an uninstall on the App anchor', async () => {
   await retainedForeignHomeWithoutParticipation();
-  await assertHeldRefusal({ kind: 'app', id: appId }, tx => tx.appAgent.delete({ where: { appId_agentId: { appId, agentId } } }));
+  await assertImmediateRefusal({ kind: 'app', id: appId }, tx => tx.appAgent.delete({ where: { appId_agentId: { appId, agentId } } }));
 }, 15_000);
-it('a home-only App org anchor fences tenant deletion independently of the Agent org', async () => {
+it('a retained home-only App with no participation left: the start is refused at once, not held behind a tenant deletion on the App org anchor', async () => {
   await retainedForeignHomeWithoutParticipation();
-  await assertHeldRefusal({ kind: 'org', id: foreignOrgId }, tx => tx.organization.update({ where: { id: foreignOrgId }, data: { deletedAt: new Date() } }));
+  await assertImmediateRefusal({ kind: 'org', id: foreignOrgId }, tx => tx.organization.update({ where: { id: foreignOrgId }, data: { deletedAt: new Date() } }));
 }, 15_000);
-it('a home-only user-App owner anchor fences owner licence revocation independently of the caller', async () => {
+it('a retained home-only user App with no participation left: the start is refused at once, not held behind an owner licence revocation on the owner anchor', async () => {
   const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
   const owner = await db.user.create({ data: { handle: 'home4046-owner' } });
   await db.orgMember.create({ data: { organizationId: agent.organizationId!, userId: owner.id, role: 'READER' } });
@@ -413,7 +512,33 @@ it('a home-only user-App owner anchor fences owner licence revocation independen
   await db.appMember.create({ data: { appId, userId, role: 'member' } });
   await start();
   await db.appMember.delete({ where: { appId_userId: { appId, userId } } });
-  await assertHeldRefusal({ kind: 'user', id: owner.id }, tx => tx.orgMember.update({ where: { organizationId_userId: { organizationId: agent.organizationId!, userId: owner.id } }, data: { deletedAt: new Date() } }));
+  await assertImmediateRefusal({ kind: 'user', id: owner.id }, tx => tx.orgMember.update({ where: { organizationId_userId: { organizationId: agent.organizationId!, userId: owner.id } }, data: { deletedAt: new Date() } }));
+}, 15_000);
+
+// #5394 (Bindi BLIND P2 on #5407): the held variants of the three pins above. A credential naming the home's App
+// identifies it without participation, so the non-participant reaches the retained home, and the start waits on the held
+// App, org or owner domain before refusing, with no definition read and no write (the #4046 home-only anchor fences).
+it('a credential-identified retained home-only App anchor fences uninstall when the caller has no App participation', async () => {
+  await retainedForeignHomeWithoutParticipation();
+  await assertHeldRefusal({ kind: 'app', id: appId }, tx => tx.appAgent.delete({ where: { appId_agentId: { appId, agentId } } }), 'private', true);
+}, 15_000);
+it('a credential-identified retained home-only App org anchor fences tenant deletion independently of the Agent org', async () => {
+  await retainedForeignHomeWithoutParticipation();
+  await assertHeldRefusal({ kind: 'org', id: foreignOrgId }, tx => tx.organization.update({ where: { id: foreignOrgId }, data: { deletedAt: new Date() } }), 'private', true);
+}, 15_000);
+it('a credential-identified retained home-only user-App owner anchor fences owner licence revocation independently of the caller', async () => {
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
+  const owner = await db.user.create({ data: { handle: 'home4046-owner-cred' } });
+  await db.orgMember.create({ data: { organizationId: agent.organizationId!, userId: owner.id, role: 'READER' } });
+  await db.agentSubscription.create({ data: { userId: owner.id, agentId, activatedAt: new Date('2020-01-01') } });
+  const app = await db.app.create({ data: { ownerUserId: owner.id, name: 'Owner licence cred', urn: '@home4046-owner-cred:app' } });
+  await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
+  appId = app.id;
+  await db.appAgent.create({ data: { appId, agentId } });
+  await db.appMember.create({ data: { appId, userId, role: 'member' } });
+  await start();
+  await db.appMember.delete({ where: { appId_userId: { appId, userId } } });
+  await assertHeldRefusal({ kind: 'user', id: owner.id }, tx => tx.orgMember.update({ where: { organizationId_userId: { organizationId: agent.organizationId!, userId: owner.id } }, data: { deletedAt: new Date() } }), 'private', true);
 }, 15_000);
 
 it('shared provisioning recovers an actual unique collision without poisoning the outer transaction', async () => {
@@ -470,7 +595,7 @@ it('failed savepoint recovery preserves the original provisioning error', async 
     } }));
   }, ...options)) as any);
   try {
-    await expect(M.startChat({}, { agentRef: agentId, scope: 'shared', conversationName: 'flow' }, ctx())).rejects.toBe(original);
+    await expect(M.startChat({}, { agentRef: agentId, scope: 'shared', conversationName: 'flow', appRef: appId }, ctx())).rejects.toBe(original);
     expect(reached).toBe(true);
     expect(await state()).toBe(before);
   } finally { spy.mockRestore(); }
@@ -497,7 +622,7 @@ it('a cold start rolls back its home when parent creation fails after provisioni
     } }));
   }, ...options)) as any);
   try {
-    await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, ctx())).rejects.toBe(original);
+    await expect(M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: appId }, ctx())).rejects.toBe(original);
     expect(reached).toBe(true);
     expect(await state()).toBe(before);
   } finally { spy.mockRestore(); }
@@ -522,7 +647,7 @@ it('an ineligible App-less start keeps the unknown-Agent answer even with an inv
   await db.orgMember.updateMany({ where: { userId }, data: { role: 'READER' } });
   const before = await state();
   const result = await observeDefinitionReads(async () => {
-    try { await M.startChat({}, { agentRef: agentId, conversationName: 'flow', aiConfigChoice: generateId() }, ctx()); return null; }
+    try { await M.startChat({}, { agentRef: agentId, conversationName: 'flow', aiConfigChoice: generateId(), appRef: appId }, ctx()); return null; }
     catch (error) { return error as any; }
   });
   expect(result.value?.code).toBe('AGENT_NOT_FOUND');
@@ -535,7 +660,7 @@ it('a replaced system pointer cannot read the old definition at locked admission
   const before = await state();
   let changed = false;
   const result = await observeDefinitionReads(async () => {
-    try { await M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, ctx()); return null; }
+    try { await M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: appId }, ctx()); return null; }
     catch (error) { return error as any; }
   }, async () => {
     if (!changed) {

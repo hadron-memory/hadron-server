@@ -12,6 +12,7 @@ import { resolveMemoryRef } from '../../entityRef/memoryRef.js';
 import { MemoryNotFoundError, AmbiguousLegacyUrnError } from '../../entityRef/errors.js';
 import { emitNodeUrnV2, emitEntityUrnV2 } from '../../urnEmit.js';
 import type { RunToolContext, RunToolDef } from './types.js';
+import { orgIdOf, ownedBy, requireOwnerRefOf } from '../../owner.js';
 
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 20;
@@ -96,12 +97,14 @@ export const hadronFindNodes: RunToolDef = {
     if (args.limit !== undefined && (typeof args.limit !== 'number' || !Number.isSafeInteger(args.limit))) throw invalidArguments();
     const limit = Math.max(1, Math.min(MAX_LIMIT, (args.limit as number | undefined) ?? DEFAULT_LIMIT));
     const { run } = ctx;
+    // #5077: the run's owner, read from the row; the principal of a person's run carries no organization (undefined).
+    const tenant = requireOwnerRefOf(run);
     if (!isRunPrincipal(ctx.principal) || ctx.principal.clientId !== `run:${run.id}` || ctx.principal.appId !== run.appId ||
-        ctx.principal.organizationId !== run.organizationId || (ctx.principal.userId ?? null) !== (run.userId ?? null)) {
+        ctx.principal.organizationId !== (orgIdOf(tenant) ?? undefined) || (ctx.principal.userId ?? null) !== (run.userId ?? null)) {
       throw new Error('hadron_find_nodes: invalid run principal.');
     }
     const principal = withoutRequestCaches(ctx.principal, ctx.db);
-    const fence = { organizationId: run.organizationId, isEncrypted: false, deletedAt: null };
+    const fence = { ...ownedBy(tenant), isEncrypted: false, deletedAt: null };
     let namedId: string | undefined;
     if (typeof args.memoryUrn === 'string') {
       const text = args.memoryUrn.trim();

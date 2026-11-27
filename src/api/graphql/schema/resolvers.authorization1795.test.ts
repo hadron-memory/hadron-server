@@ -51,8 +51,16 @@ beforeEach(async () => {
   await db.node.create({ data: { id: generateId(), memoryId: memories.definition, loc: 'conversations:default', name: 'Default', data: { stageOrder: ['start'] } } });
   await db.node.create({ data: { id: generateId(), memoryId: memories.definition, loc: 'conversations:default:start', name: 'Start', content: 'Hello' } });
   await serveEveryAgent(db); // #2712: the chat is served the Agent's boot prompt
-  // Provision through the shipped path, not a synthetic ownership shortcut.
-  await resolvers.Mutation.startChat({}, { agentRef: agentId }, ctx('owner'));
+  // #5394: this provisioned the no-App knowledge holding through the shipped path (the Agent manager's direct route).
+  // That route is retired: a start with no App identified refuses CHAT_APP_NOT_IDENTIFIED and writes nothing, so the
+  // holding is written in the exact shape the retired route wrote (such rows still exist and keep their write rules).
+  const refused = await resolvers.Mutation.startChat({}, { agentRef: agentId }, ctx('owner')).then(() => null, (e: { extensions?: { code?: string } }) => e);
+  expect(refused?.extensions?.code).toBe('CHAT_APP_NOT_IDENTIFIED');
+  expect(await db.memory.count({ where: { userMemoryOfAgentId: agentId } })).toBe(0);
+  await db.memory.create({ data: {
+    id: generateId(), organizationId: orgId, urn: `auth1795.example:${generateId().toLowerCase()}`, name: `Agent — ${users.owner}`,
+    userId: null, class: 'knowledge', visibility: 'ORGANIZATION', userMemoryOfAgentId: agentId, createdBy: users.owner,
+  } });
   memories.holding = (await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agentId, createdBy: users.owner } })).id;
   expect(await db.memory.findUniqueOrThrow({ where: { id: memories.holding } })).toMatchObject({ class: 'knowledge', appId: null, ownerUserId: null, userId: null });
   for (const memoryId of Object.values(memories)) {

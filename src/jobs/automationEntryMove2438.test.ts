@@ -35,7 +35,7 @@ async function fixture() {
   await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.');
   const ctx = { db, userId: user.id, roles: [] };
   const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, name: 'Mover', cron: '* * * * *', entryNodeUrn: 'hrn:node:pin.test:flow:entry', runAsSelf: true, agentRef: agent.id } }, ctx);
-  const run = () => mintAppRun(db, { appId: app.id, organizationId: org.id, userId: user.id, agentId: agent.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn });
+  const run = () => mintAppRun(db, { appId: app.id, owner: { organizationId: org.id }, userId: user.id, agentId: agent.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn });
   const llm = vi.fn(async () => ({ text: 'ok', tokensIn: 1, tokensOut: 1, provider: 'test', model: 'test' }));
   const deps: RunExecutionDeps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: {} }) as never), llm, writeOutput: vi.fn(async () => null) };
   return { user, org, app, memory, entry, next, edge, ctx, schedule, run, deps, llm };
@@ -95,7 +95,7 @@ describe('#2438 entry keyed by node id', () => {
     // anymore, so writing the crafted pin to the consent column is the
     // honest simulation of a trigger that predates the format change.
     const v3 = storedAutomationPin(await captureAutomationPin(db, f.app.id, f.user.id,
-      'hrn:node:pin.test:flow:entry', f.org.id, f.ctx, {}, { format: 'hadron-automation-pin-v3' }));
+      'hrn:node:pin.test:flow:entry', { organizationId: f.org.id }, f.ctx, {}, { format: 'hadron-automation-pin-v3' }));
     expect(v3.format).toBe('hadron-automation-pin-v3');
     // True legacy shape (Andi's BLIND note): clear the stamped id too — a
     // pre-#2438 row has neither a v4 pin nor an entryNodeId.
@@ -131,7 +131,7 @@ describe('#2438 entry keyed by node id', () => {
   it('a renamed legacy trigger with no stamped id answers CHANGED, not an error', async () => {
     const f = await fixture();
     const v3 = storedAutomationPin(await captureAutomationPin(db, f.app.id, f.user.id,
-      'hrn:node:pin.test:flow:entry', f.org.id, f.ctx, {}, { format: 'hadron-automation-pin-v3' }));
+      'hrn:node:pin.test:flow:entry', { organizationId: f.org.id }, f.ctx, {}, { format: 'hadron-automation-pin-v3' }));
     await db.agentSchedule.update({ where: { id: f.schedule.id }, data: { automationPin: v3 as never, entryNodeId: null } });
     const input = { triggerKind: 'SCHEDULE' as const, triggerRef: f.schedule.id };
     await renameEntry(f);
@@ -144,7 +144,7 @@ describe('#2438 entry keyed by node id', () => {
   const legacyRenamedAndEdited = async () => {
     const f = await fixture();
     const v3 = storedAutomationPin(await captureAutomationPin(db, f.app.id, f.user.id,
-      'hrn:node:pin.test:flow:entry', f.org.id, f.ctx, {}, { format: 'hadron-automation-pin-v3' }));
+      'hrn:node:pin.test:flow:entry', { organizationId: f.org.id }, f.ctx, {}, { format: 'hadron-automation-pin-v3' }));
     await db.agentSchedule.update({ where: { id: f.schedule.id }, data: { automationPin: v3 as never, entryNodeId: null } });
     await renameEntry(f);
     await appRunMutations.updateAgentSchedule({}, { id: f.schedule.id, input: { runAsSelf: true } }, f.ctx);
