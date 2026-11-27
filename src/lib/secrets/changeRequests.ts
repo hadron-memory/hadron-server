@@ -116,27 +116,78 @@ export const SECRET_CHANGE_SWEEP_MAX_BATCHES = 20;
 
 /**
  * Clear ONE batch of expired ciphertext; expiry remains enforced independently at every use. The row trigger nulls the ciphertext.
- * The outer UPDATE repeats the predicate as a backstop (the subquery's row locks already hold the rows).
+ * The UPDATE repeats the predicate as a backstop (the batch's row locks already hold the rows).
+ * #5348: the batch is a MATERIALIZED CTE, run once. As an `id IN (subquery)` a nested-loop plan rescanned the LIMIT ... SKIP LOCKED
+ * subquery per outer row, each rescan skipping the rows this statement had just updated and taking the next ones, so one batch
+ * could update the whole backlog (a LIMIT 1 batch cleared 300 rows on a table without statistics), past every row and time bound.
  */
 export async function sweepExpiredSecretChanges(tx: Prisma.TransactionClient, limit: number = SECRET_CHANGE_SWEEP_BATCH): Promise<number> {
- return tx.$executeRaw`UPDATE secret_change_requests SET state='expired',ended_at=(clock_timestamp() AT TIME ZONE 'UTC')
+ return tx.$executeRaw`WITH batch AS MATERIALIZED (SELECT id FROM secret_change_requests
  WHERE state='open' AND expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')
- AND id IN (SELECT id FROM secret_change_requests WHERE state='open' AND expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')
- ORDER BY expires_at, id LIMIT ${limit}::int FOR UPDATE SKIP LOCKED)`;
+ ORDER BY expires_at, id LIMIT ${limit}::int FOR UPDATE SKIP LOCKED)
+ UPDATE secret_change_requests s SET state='expired',ended_at=(clock_timestamp() AT TIME ZONE 'UTC')
+ FROM batch WHERE s.id = batch.id AND s.state='open' AND s.expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')`;
 }
 
-/** Drain expired requests in batches, each its own transaction (an earlier batch stays cleared if a later one fails). Returns the number cleared. */
+/**
+ * #5348: the time bounds of one drain batch (the Proposed sweep-backlog line of hrn:node:hadronmemory.com:specs:cor:sec:070:02;
+ * engineering bounds, like the row bounds above). Postgres cancels the batch statement after STATEMENT_TIMEOUT (a
+ * transaction-local `statement_timeout`, so it never reaches the pooled connection's session); the interactive transaction around
+ * it gets TX_TIMEOUT, the statement bound plus room for the rest, instead of Prisma's 5 s default, which a large backlog on a loaded
+ * database overran on every tick (the batch rolled back each time and the sweep never advanced, defeating S6); MAX_WAIT bounds the
+ * wait for a pooled connection.
+ */
+export const SECRET_CHANGE_SWEEP_STATEMENT_TIMEOUT_MS = 25_000;
+export const SECRET_CHANGE_SWEEP_TX_TIMEOUT_MS = 30_000;
+export const SECRET_CHANGE_SWEEP_TX_MAX_WAIT_MS = 10_000;
+const SWEEP_TX_HEADROOM_MS = SECRET_CHANGE_SWEEP_TX_TIMEOUT_MS - SECRET_CHANGE_SWEEP_STATEMENT_TIMEOUT_MS;
+
+/** Postgres 57014 however Prisma wraps it (a raw query's P2010 carries it in meta or in the message). */
+const isStatementTimeout = (e: unknown): boolean => {
+ if (!(e instanceof Error)) return false;
+ const meta = (e as { meta?: { code?: unknown } }).meta;
+ return String(meta?.code) === '57014' || /(?:Code:\s*`|SQLSTATE[\s:]*)57014\b|canceling statement due to statement timeout/i.test(e.message);
+};
+/**
+ * The batch ran past its bound: a statement timeout, or the interactive transaction expired (P2028). P2028 has a second arm, a
+ * transaction that could not START within maxWait (pool exhaustion): a smaller batch does not help there, so it is not an overrun.
+ */
+const isBatchOverrun = (e: unknown): boolean => isStatementTimeout(e)
+ || (e instanceof Error && (e as { code?: unknown }).code === 'P2028' && !/unable to start a transaction/i.test(e.message));
+
+/**
+ * Drain expired requests in batches, each its own transaction (an earlier batch stays cleared if a later one fails). Returns the
+ * number cleared. #5348: each batch runs under the time bounds above; a batch that overruns them rolls back (nothing cleared, the
+ * rows stay for a later batch) and the next batch of the same run asks for half as many rows, down to one, so a slow database
+ * still makes progress. An overrun spends a batch slot, so a run stays within maxBatches transactions. A single row that still
+ * overruns fails the run (the loop logs it and retries next tick); any other fault fails it at once, as before.
+ */
 export async function drainExpiredSecretChanges(
  db: Pick<PrismaClient, '$transaction'>,
- bounds: { batchSize?: number; maxBatches?: number; shouldStop?: () => boolean } = {},
+ bounds: { batchSize?: number; maxBatches?: number; shouldStop?: () => boolean; statementTimeoutMs?: number } = {},
 ): Promise<number> {
- const batchSize = bounds.batchSize ?? SECRET_CHANGE_SWEEP_BATCH, maxBatches = bounds.maxBatches ?? SECRET_CHANGE_SWEEP_MAX_BATCHES;
+ let batchSize = bounds.batchSize ?? SECRET_CHANGE_SWEEP_BATCH;
+ const maxBatches = bounds.maxBatches ?? SECRET_CHANGE_SWEEP_MAX_BATCHES;
+ const statementMs = bounds.statementTimeoutMs ?? SECRET_CHANGE_SWEEP_STATEMENT_TIMEOUT_MS;
+ const options = { timeout: statementMs + SWEEP_TX_HEADROOM_MS, maxWait: SECRET_CHANGE_SWEEP_TX_MAX_WAIT_MS };
  let total = 0;
  for (let i = 0; i < maxBatches; i++) {
   if (i > 0 && bounds.shouldStop?.()) break;
-  const n = await db.$transaction(tx => sweepExpiredSecretChanges(tx, batchSize));
+  const limit = batchSize;
+  let n: number;
+  try {
+   n = await db.$transaction(async tx => {
+    await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(statementMs)}, true)`;
+    return sweepExpiredSecretChanges(tx, limit);
+   }, options);
+  } catch (e) {
+   if (!isBatchOverrun(e) || limit <= 1) throw e;
+   batchSize = Math.max(1, Math.floor(limit / 2));
+   console.warn(`secret.change_sweep.batch_overrun limit=${limit} next=${batchSize}`);
+   continue;
+  }
   total += n;
-  if (n < batchSize) break;
+  if (n < limit) break;
  }
  return total;
 }
