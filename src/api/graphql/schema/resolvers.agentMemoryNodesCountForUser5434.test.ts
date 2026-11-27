@@ -275,6 +275,9 @@ describe('#5434 pin 5: the row-level rule and the SQL count are one rule', () =>
       ['per-Agent personal, organization Agent', { name: 's4', urn: `${orgUrn}:s4`, class: 'personal', userId: v, organizationId: orgId, userMemoryOfAgentId: agentId }],
       ['per-Agent private, organization Agent', { name: 's5', urn: `${orgUrn}:s5`, class: 'private', userId: v, organizationId: orgId, userMemoryOfAgentId: agentId2 }],
       ['per-Agent personal, person-owned Agent', { name: 's6', urn: `c5434-x:s6`, class: 'personal', userId: v, ownerUserId: x, userMemoryOfAgentId: userAgentId }],
+      // SEC10 survivor (per-Agent AND -> OR): an Agent is set but NO user, so the stored owner still decides (anonymous / legacy holding).
+      ['agent set, no user, organization-owned', { name: 's7', urn: `${orgUrn}:s7`, class: 'knowledge', organizationId: orgId, userMemoryOfAgentId: agentId }],
+      ['agent set, no user, person-owned', { name: 's8', urn: `c5434-x:s8`, class: 'knowledge', ownerUserId: x, userMemoryOfAgentId: userAgentId }],
     ];
     const owners: OwnerRef[] = [{ organizationId: orgId }, { userId: u }, { userId: v }, { userId: x }];
     for (const [label, data] of shapes) {
