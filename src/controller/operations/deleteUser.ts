@@ -359,9 +359,14 @@ async function runDeletionTxn(
       await tx.agentImport.deleteMany({
         where: { importedAgent: { ownerUserId: targetUserId } },
       });
+      // #5077 (cor:aut:020:03): the runs of the person's Apps go with the person. `app_runs` has no foreign key to `apps`, so
+      // the App delete below does not remove them, and the user row is kept as a tombstone, so the cascade on
+      // `app_runs.owner_user_id` never fires here. Usage events and ledger entries are not linked to a run by a foreign key
+      // and stay. The run's served prompt, manual pin, poll bindings and event receipts go by their own cascades.
+      await tx.appRun.deleteMany({ where: { ownerUserId: targetUserId } });
       // User-owned Apps: after foreign strict-owner holdings detach, the
       // App cascade removes the remaining app-scoped memories, keys,
-      // members, installs, runs, schedules, webhooks, pending setups — and
+      // members, installs, schedules, webhooks, pending setups — and
       // their Worker castings (Worker.appId cascades).
       await tx.app.deleteMany({ where: { ownerUserId: targetUserId } });
       // #5074: the person's own daily counters (`user` scope; no foreign key, so no cascade). Idempotent under retry.

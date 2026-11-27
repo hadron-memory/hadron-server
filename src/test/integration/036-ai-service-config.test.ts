@@ -1573,7 +1573,7 @@ describe('#1482 — an org-less personal Agent never falls back to the host conf
     // This config-path control now carries real adopted execution identity.
     const flow = await db.memory.create({ data: { name: 'Run config control', urn: 'acme-036:run-config-control', class: 'app', organizationId: org.id, appId: orgApp.id } });
     await db.node.create({ data: { memoryId: flow.id, loc: 'entry', name: 'Entry', content: 'Host fallback', isRunnable: true } });
-    const automationPin = await captureSetupConsent(db, orgApp.id, null, 'hrn:node:acme-036:run-config-control:entry', org.id, { appId: orgApp.id, organizationId: org.id }, { agentId: personalAgent.id });
+    const automationPin = await captureSetupConsent(db, orgApp.id, null, 'hrn:node:acme-036:run-config-control:entry', { organizationId: org.id }, { appId: orgApp.id, organizationId: org.id }, { agentId: personalAgent.id });
     const run = { appId: orgApp.id, agentId: personalAgent.id, organizationId: org.id, eventData: null, automationPin } as unknown as AppRun;
     expect((await makeProdRunDeps(db).resolveConfig(run)).ownerType).toBe('HADRON_SERVER');
     // An org Agent with no org config still falls back to the host, as before.

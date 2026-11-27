@@ -192,7 +192,7 @@ describe('#4689 an EXECUTED run resolves a foreign include as its run principal,
     for (const onBehalf of [true, false]) {
       for (const slot of SLOTS) {
         const entry = `hrn:node:${runMemUrn}:${taskOf(slot)}`;
-        const pin = await captureAutomationPin(db, appId, onBehalf ? ownerId : null, entry, orgId, principal(onBehalf));
+        const pin = await captureAutomationPin(db, appId, onBehalf ? ownerId : null, entry, { organizationId: orgId }, principal(onBehalf));
         const absent = pin.absentPartials.some((p) => p.urn === urnOf[slot]);
         const shown = segment(await runTask(taskOf(slot), principalCtx(onBehalf)), slot);
         expect(shown === NOTICE, `${slot} onBehalf=${onBehalf}`).toBe(absent);

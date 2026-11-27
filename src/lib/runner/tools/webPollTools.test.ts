@@ -228,7 +228,7 @@ describe('web poll run tools', () => {
       data: {
         jobId: 'poll-job-1',
         sourceRunId: ctx.run.id,
-        organizationId: ctx.run.organizationId,
+        organizationId: ctx.run.organizationId!,
         appId: ctx.run.appId,
         agentId: ctx.run.agentId,
         entryNodeUrn: ctx.run.entryNodeUrn,

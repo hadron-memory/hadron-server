@@ -66,7 +66,7 @@ describe('unknownHaToolNames', () => {
     await registerInstance({ opAllowlist: ['get_state', 'call_service'] });
     await registerInstance({ slug: 'disabled', enabled: false });
 
-    const unknown = await unknownHaToolNames(db, orgId, [
+    const unknown = await unknownHaToolNames(db, { organizationId: orgId }, [
       'ha__home__get_state', // OK
       'ha__home__fire_event', // not in allowlist
       'ha__home__reboot_house', // not in the closed catalog
@@ -97,7 +97,7 @@ describe('unknownHaToolNames', () => {
         tokenEncrypted: encryptToken('t'),
       },
     });
-    expect(await unknownHaToolNames(db, orgId, ['ha__home__get_state'])).toEqual(['ha__home__get_state']);
+    expect(await unknownHaToolNames(db, { organizationId: orgId }, ['ha__home__get_state'])).toEqual(['ha__home__get_state']);
   });
 });
 

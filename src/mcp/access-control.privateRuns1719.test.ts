@@ -210,7 +210,7 @@ it('a private channel contributes neither attention text nor a cursor advance to
   await db.node.update({ where: { id: f.node.id }, data: { loc: 'chats:team', nodeType: 'chat' } });
   const channel = await db.channel.create({ data: { memoryId: f.memory.id, loc: 'chats:team', name: 'Private channel name', chatRootNodeId: f.node.id, lastSeq: 5 } });
   const attention = await renderAttentionSection(db, { id: generateId(), agentId: f.agent.id, appId: f.app.id,
-    userId: f.owner.id, organizationId: f.org.id,
+    userId: f.owner.id, organizationId: f.org.id, ownerUserId: null,
     registerSnapshot: { attendee: { agentId: f.agent.id, appId: f.app.id }, rows: [{ channelId: channel.id, role: 'WATCH', mentionOnly: false }] } });
   expect(attention.text).toBe('');
   expect(attention.captured.size).toBe(0);

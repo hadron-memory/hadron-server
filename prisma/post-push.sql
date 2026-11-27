@@ -214,6 +214,13 @@ ALTER TABLE apps
 ALTER TABLE apps
   ADD CONSTRAINT chk_app_owner_xor
   CHECK ((organization_id IS NULL) <> (owner_user_id IS NULL));
+-- #5077 (Billing F3a): a run states exactly one owner, copied from its App. Synced with
+-- the 20261127120000 migration.
+ALTER TABLE app_runs
+  DROP CONSTRAINT IF EXISTS chk_app_run_owner_xor;
+ALTER TABLE app_runs
+  ADD CONSTRAINT chk_app_run_owner_xor
+  CHECK ((organization_id IS NULL) <> (owner_user_id IS NULL));
 -- Ruling DY-5: a dormancy threshold is a positive number of days. Synced with
 -- the 20261005010000 migration + src/test/globalSetup.ts.
 ALTER TABLE apps

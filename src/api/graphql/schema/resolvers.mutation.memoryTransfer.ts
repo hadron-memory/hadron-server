@@ -18,6 +18,7 @@ import {
   requireCallerIdentity,
 } from './resolvers.helpers.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { ownedBy, ownerRefOf } from '../../../lib/owner.js';
 
 type TransferClass = 'knowledge' | 'group' | 'personal' | 'private';
 type TransferDb = Prisma.TransactionClient;
@@ -207,8 +208,10 @@ async function transferPreview(
   add('Usage history', await tx.usageEvent.count({ where: { memoryId: id } }), 'CARRY');
   add('Server log history', await tx.serverLogEntry.count({ where: { memoryId: id } }), 'CARRY');
   add('App log history', await tx.appLogEntry.count({ where: { memoryId: id } }), 'CARRY');
-  add('Active runs', sourceOrgId ? await tx.appRun.count({ where: {
-    organizationId: sourceOrgId,
+  // #5077: a person's memory counts its owner's active runs too (a run of a person's App), by both owner columns.
+  const sourceOwner = ownerRefOf(memory);
+  add('Active runs', sourceOwner ? await tx.appRun.count({ where: {
+    ...ownedBy(sourceOwner),
     status: { in: ['PENDING', 'RUNNING'] },
     OR: [...entryRef.OR, ...entryPrefixes.map((prefix) => ({ curNodeUrn: { startsWith: prefix } }))],
   } }) : 0, 'REFUSE');

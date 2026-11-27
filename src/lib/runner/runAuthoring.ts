@@ -12,8 +12,9 @@ import type { AuthContext } from '../../middleware/auth.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../auth/publicKnowledgeRead.js';
 import { attestedAuthoring, type AuthoredWith, type AuthoringContext } from '../authoringAttestation.js';
 import { runHoldsReadGrant } from '../automationReadGrant.js';
+import { isOwnedBy, requireOwnerRefOf } from '../owner.js';
 
-type RunRef = Pick<AppRun, 'id' | 'organizationId'>;
+type RunRef = Pick<AppRun, 'id' | 'organizationId' | 'ownerUserId'>;
 
 /** Runs are unavailable on encrypted memories. In the run's org: the shared gate, then its grant. Elsewhere: PUBLIC knowledge for a run with no user, or its grant. */
 export async function runReadsNode(
@@ -24,12 +25,13 @@ export async function runReadsNode(
   loc: string,
 ): Promise<boolean> {
   const client = db as PrismaClient;
-  const memory = await client.memory.findFirst({ where: { id: memoryId, deletedAt: null }, select: { isEncrypted: true, organizationId: true } });
+  const memory = await client.memory.findFirst({ where: { id: memoryId, deletedAt: null }, select: { isEncrypted: true, organizationId: true, ownerUserId: true } });
   if (!memory || memory.isEncrypted) return false;
   const auth: AuthContext = {
     clientId: principal.clientId, userId: principal.userId, appId: principal.appId, organizationId: principal.organizationId,
   };
-  if (memory.organizationId === run.organizationId) {
+  // #5077: the run's own tenant by `isOwnedBy`; `===` would take this branch for another person's memory (two nulls).
+  if (isOwnedBy(memory, requireOwnerRefOf(run))) {
     if (await canReadMemory(client, auth, memoryId)) return true;
   } else if (readsPublicKnowledgeWithoutUser(auth) && (await publicKnowledgeAmong(client, [memoryId])).has(memoryId)) {
     return true;
