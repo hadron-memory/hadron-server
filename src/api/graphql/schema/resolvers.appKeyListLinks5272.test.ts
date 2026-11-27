@@ -145,9 +145,10 @@ describe('#5272 GraphQL memories for a pure App key lists what its links let it 
     const judged = await (await import('../../../lib/appMemoryLinks.js')).linkedReachFor(db as never, keyAuth(userApp.id));
     const record = await Q.memory(null, { ref: userKnowledge.id }, keyCtx(userApp.id)).then((m: unknown) => m != null, () => false);
     const listed = (await list(keyCtx(userApp.id))).ids.includes(userKnowledge.id);
-    // The judge admits it, but GraphQL's record gate refuses a user-owned non-personal memory to a key with no user
-    // (`canReadMemoryRecord`'s ownerUserId branch), so the list follows the record read, never the other way.
-    expect(judged.has(userKnowledge.id)).toBe(true);
+    // #5345 narrowed the judge to the record gate: a user-owned non-personal memory (`canReadMemoryRecord`'s ownerUserId
+    // branch refuses it to a key with no user) is inert for the key, so the judge, the list and the record read all refuse
+    // it together — the list follows the record read, never the other way.
+    expect(judged.has(userKnowledge.id)).toBe(false);
     expect(listed).toBe(record);
     expect(listed).toBe(false);
   });

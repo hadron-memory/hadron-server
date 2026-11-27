@@ -131,7 +131,7 @@ type Db = Pick<Prisma.TransactionClient, 'memory' | 'memoryConfig' | '$queryRaw'
 async function inAdminAudience(db: Db, principal: RoleWriterPrincipal, memoryId: string): Promise<boolean> {
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
-    select: { class: true, userId: true, organizationId: true, ownerUserId: true },
+    select: { class: true, userId: true, organizationId: true, ownerUserId: true, userMemoryOfAgentId: true, createdBy: true },
   });
   if (!memory) return false;
   try {
@@ -191,7 +191,7 @@ export async function appCarriesOwnersAgent(
 async function inOwnerAudience(db: Db, principal: RoleWriterPrincipal, memoryId: string, opts: { lock?: boolean } = {}): Promise<boolean> {
   const memory = await db.memory.findUnique({
     where: { id: memoryId },
-    select: { class: true, userId: true, organizationId: true, ownerUserId: true },
+    select: { class: true, userId: true, organizationId: true, ownerUserId: true, userMemoryOfAgentId: true, createdBy: true },
   });
   if (!memory) return false;
   // D23: a headless principal is the App service identity; the triggering user's own standing never counts.

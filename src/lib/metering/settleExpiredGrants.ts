@@ -21,6 +21,7 @@
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
 import { ownerColumns, ownerWhere, type OwnerRef } from '../owner.js';
+import { appendForLiveOwner } from './ledgerOwner.js';
 import {
   GRANT_EXPIRY_SOURCE_TYPE,
   replayLedger,
@@ -158,17 +159,21 @@ async function replayOwner(db: PrismaClient, owner: OwnerRef, now: Date): Promis
 }
 
 /**
- * Write settlement entries, skipping any pair already taken (never a throw, never an aborted transaction). Returns
- * how many rows were inserted. Internal: exported for the settlement pins, not for other callers.
+ * Write settlement entries, skipping any pair already taken (a taken pair never throws or aborts a transaction). Returns
+ * how many rows were inserted. Throws LedgerOwnerDeletedError, writing nothing, when the owner is deleted (#5352). Internal: exported for the settlement pins, not for other callers.
  */
 export async function writeSettlements(
   db: PrismaClient,
   owner: OwnerRef,
   settlements: readonly Settlement[],
   now: Date,
+  /** True when `db` is the caller's transaction (settleAndMeasure); otherwise the lock and the insert get one of their own. */
+  opts: { inTransaction?: boolean } = {},
 ): Promise<number> {
   if (settlements.length === 0) return 0;
-  const { count } = await db.creditLedgerEntry.createMany({
+  // #5352 (hrn:node:hadronmemory.com:specs:cor:dmo:170:08): a deleted owner is refused (LedgerOwnerDeletedError, nothing written).
+  // The sweep logs it as one owner's failure; a balance read answers from its read-only snapshot (ruling 10.4).
+  const { count } = await appendForLiveOwner(db, owner, (tx) => tx.creditLedgerEntry.createMany({
     data: settlements.map((s) => ({
       id: generateId(),
       ...ownerColumns(owner),
@@ -182,7 +187,7 @@ export async function writeSettlements(
       createdBy: CREDIT_EXPIRY_CREATED_BY,
     })),
     skipDuplicates: true,
-  });
+  }), opts);
   return count;
 }
 
@@ -253,7 +258,7 @@ export async function settleAndMeasure(
   const due = opts.write ? dueGrants(replay, now) : [];
   const dueIds = new Set(due.map((g) => g.grantId));
   const settled = due.map((g) => ({ grantId: g.grantId, amountMicroCents: -g.remaining }));
-  if (settled.length > 0) await writeSettlements(db, owner, settled, now);
+  if (settled.length > 0) await writeSettlements(db, owner, settled, now, { inTransaction: true });
   const unsettled = toSettle.filter((g) => !dueIds.has(g.grantId)).reduce((acc, g) => acc + g.remaining, 0n);
   return { settled, unsettled, replay };
 }

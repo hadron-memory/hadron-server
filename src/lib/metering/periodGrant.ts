@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { ownerId, ownerType, sameOwner, type OwnerRef, type OwnerType } from '../owner.js';
 import { safeErrorCode } from '../safeErrorCode.js';
-import { grantCredits, IdempotencyConflictError } from './index.js';
+import { grantCredits, IdempotencyConflictError, LedgerOwnerDeletedError } from './index.js';
 
 export const PERIOD_GRANT_SOURCE_TYPE = 'period-grant';
 /** Who wrote the grant (gate ruling 4; the `system:gc` and A4 `system:credit-expiry` precedent), never the reader. */
@@ -197,6 +197,9 @@ export async function ensurePeriodGrant(db: PrismaClient, owner: OwnerRef, now: 
       conflict();
       return;
     }
+    // #5352: the owner was deleted between the check above and the append, which refused and wrote nothing. Not a failure to
+    // retry, and not cached as done (as the deleted-owner return above).
+    if (err instanceof LedgerOwnerDeletedError) return;
     console.error('period_grant.failed', { ...logOwner(owner), code: safeErrorCode(err) });
   }
 }
