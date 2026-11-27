@@ -12,6 +12,7 @@ import { generateId } from '../../lib/id.js';
 const read = (p: string) => readFileSync(new URL(`../../../prisma/${p}`, import.meta.url), 'utf8');
 const MIGRATION = read('migrations/20261126080400_ai_model_prices_kept/migration.sql');
 const SOURCE = read('ai-model-price-invariants.sql');
+const MIGRATION_5213 = read('migrations/20261127230000_ai_model_prices_not_past_dated/migration.sql');
 
 let pg: Client;
 beforeAll(async () => { pg = new Client({ connectionString: process.env.DATABASE_URL }); await pg.connect(); });
@@ -66,8 +67,8 @@ describe('#5021 migration', () => {
     }
   });
 
-  it('pin 13: the migration ends with the shared invariants file, which post-push.sql includes', () => {
-    expect(MIGRATION.endsWith(SOURCE)).toBe(true);
+  it('pin 13: the latest migration ends with the shared invariants file, which post-push.sql includes', () => {
+    expect(MIGRATION_5213.endsWith(SOURCE)).toBe(true);
     expect(read('post-push.sql')).toContain('\\ir ai-model-price-invariants.sql');
   });
 
@@ -78,6 +79,7 @@ describe('#5021 migration', () => {
       { proname: 'hadron_ai_model_prices_kept', proconfig: ['search_path=public, pg_temp'] },
     ]);
     expect(MIGRATION.match(/SET search_path = public, pg_temp/g)).toHaveLength(2);
+    expect(MIGRATION_5213.match(/SET search_path = public, pg_temp/g)).toHaveLength(2);
   });
 
   it('pin 15: the new foreign keys restrict (price row) and set null (run), and are validated', async () => {
@@ -94,5 +96,63 @@ describe('#5021 migration', () => {
       const sql = read(`migrations/${dir}/migration.sql`).split('\n').filter((l) => !l.startsWith('--') && l.trim()).join('\n');
       expect(sql).toMatch(/^CREATE INDEX CONCURRENTLY IF NOT EXISTS "[a-z_]+" ON "usage_events"\("[a-z_]+"\);$/);
     }
+  });
+});
+
+/** #5213: the database refuses a price row dated in the past; the owner role alone may opt out. */
+describe('#5213 past-dated price rows', () => {
+  const ins = (at: string) => pg.query(
+    `INSERT INTO ai_model_prices (id, provider, model, tier, input_micro_cents_per_mtok, output_micro_cents_per_mtok, effective_at)
+     VALUES ($1, 'anthropic', 'claude-b', 1, 7, 9, ${at})`, [generateId()]);
+  const inTx = async (fn: () => Promise<void>) => {
+    await pg.query('BEGIN');
+    try { await fn(); } finally { await pg.query('ROLLBACK'); }
+  };
+  const refused = async (at: string) => {
+    await pg.query('SAVEPOINT s');
+    await expect(ins(at)).rejects.toMatchObject({ code: '23514' });
+    await pg.query('ROLLBACK TO SAVEPOINT s');
+  };
+
+  for (const tz of ['UTC', 'Pacific/Kiritimati', 'Pacific/Pago_Pago']) { // +14 h and -11 h from UTC
+    it(`B1/B2 under session TimeZone ${tz}: yesterday and one second ago are refused, one second ahead is accepted`, async () => {
+      await inTx(async () => {
+        await pg.query(`SET LOCAL TimeZone = '${tz}'`);
+        await refused(`(clock_timestamp() AT TIME ZONE 'UTC') - interval '1 day'`);
+        await refused(`(clock_timestamp() AT TIME ZONE 'UTC') - interval '1 second'`);
+        await ins(`(clock_timestamp() AT TIME ZONE 'UTC') + interval '1 second'`);
+      });
+    });
+  }
+
+  it('B3: the owner role, with the setting on inside its transaction, may insert a past row; the setting dies with the transaction', async () => {
+    await inTx(async () => {
+      await pg.query(`SET LOCAL hadron.allow_past_price_row = 'on'`);
+      await ins(`'2020-01-01'`);
+    });
+    await inTx(async () => { await refused(`'2020-01-01'`); });
+  });
+
+  it('B3b: any value but exactly on does not opt out', async () => {
+    await inTx(async () => {
+      await pg.query(`SET LOCAL hadron.allow_past_price_row = 'true'`);
+      await refused(`'2020-01-01'`);
+    });
+  });
+
+  it('B4: a role that does not own the table cannot opt out, setting or not; it can insert a future row', async () => {
+    await inTx(async () => {
+      await pg.query('CREATE ROLE hadron_b4_serve NOLOGIN');
+      await pg.query('GRANT INSERT, SELECT ON ai_model_prices TO hadron_b4_serve');
+      await pg.query('SET LOCAL ROLE hadron_b4_serve');
+      await pg.query(`SET LOCAL hadron.allow_past_price_row = 'on'`);
+      await refused(`'2020-01-01'`);
+      await ins(`(clock_timestamp() AT TIME ZONE 'UTC') + interval '1 minute'`);
+    });
+  });
+
+  it('B5: an UPDATE and a DELETE stay refused, and the trigger is BEFORE INSERT OR UPDATE OR DELETE', async () => {
+    const r = await pg.query(`SELECT pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgname = 'ai_model_prices_kept'`);
+    expect(r.rows[0].d).toContain('BEFORE INSERT OR DELETE OR UPDATE');
   });
 });

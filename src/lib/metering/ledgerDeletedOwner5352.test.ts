@@ -20,7 +20,7 @@
 import { Client } from 'pg';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb } from '../../test/helpers.js';
+import { cleanDb, createPriceRowForTest } from '../../test/helpers.js';
 import { waitForLockWaitersBlockedBy } from '../../test/lockWait.js';
 import { mergeUsers } from '../../test/mergeConsent.js';
 import { generateId } from '../id.js';
@@ -95,7 +95,7 @@ describe('A: an append for an owner already deleted is refused and writes nothin
 
   it('A3 a debit for a deleted person: the usage event is recorded and returned, no ledger entry', async () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
-    await db.aiModelPrice.create({
+    await createPriceRowForTest(db, {
       data: { id: generateId(), provider: 'anthropic', model: 'claude-l5352', tier: 1, inputMicroCentsPerMTok: 30_000_000n, outputMicroCentsPerMTok: 150_000_000n, effectiveAt: new Date('2026-01-01') },
     });
     await softDeleteUser(p);

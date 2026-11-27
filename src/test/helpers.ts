@@ -996,3 +996,18 @@ export async function walkOAuthDance(opts: {
   expect(tokenRes.status, 'token redemption').toBe(200);
   return ((await tokenRes.json()) as { access_token: string }).access_token;
 }
+
+/**
+ * #5213: the database refuses a price row dated in the past, so a fixture whose price must already be in force (and
+ * which pins that) inserts it as the owner role with the opt-out set for that one transaction. The serve role cannot
+ * (priceRowKept5021.test.ts B4); the tests run single-role as the owner.
+ */
+export async function createPriceRowForTest(
+  db: PrismaClient,
+  args: Parameters<PrismaClient['aiModelPrice']['create']>[0],
+) {
+  return db.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL hadron.allow_past_price_row = 'on'`);
+    return tx.aiModelPrice.create(args);
+  });
+}

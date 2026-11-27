@@ -4,6 +4,12 @@
 -- migration 20261126080400_ai_model_prices_kept (pinned by src/test/migrations/priceRowKept5021.test.ts), applied by
 -- post-push.sql and the test globalSetup.
 --
+-- INSERT (#5213, cor:dmo:170:06): a row dated in the past is refused (23514). effective_at is TIMESTAMP(3) without time zone
+--   and holds UTC, so it is compared with clock_timestamp() AT TIME ZONE 'UTC', never a bare clock_timestamp() (which follows
+--   the session's TimeZone). The database guards the Decided rule only; the 60 s lead stays in the setAiModelPrice mutation
+--   (PRICE_CACHE_TTL_MS), restated nowhere here. The one opt-out is for the OWNER role (the migrating role, and the single
+--   role of local dev and tests): SET LOCAL hadron.allow_past_price_row = 'on' inside a transaction. A setting any role can
+--   set is not a gate, so the trigger honours it only when current_user owns ai_model_prices; the serve role never does.
 -- DELETE: always refused.
 -- UPDATE: refused unless only these change, and each only as follows:
 --   * created_by, updated_by, deleted_by: may move only from a user to the user it was merged into, along a user_merges
@@ -21,6 +27,15 @@ $$;
 CREATE OR REPLACE FUNCTION hadron_ai_model_prices_kept() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.effective_at < (clock_timestamp() AT TIME ZONE 'UTC')
+       AND NOT (coalesce(current_setting('hadron.allow_past_price_row', true), '') = 'on'
+                AND current_user::text = (SELECT pg_catalog.pg_get_userbyid(c.relowner)::text FROM pg_catalog.pg_class c
+                                          WHERE c.oid = 'public.ai_model_prices'::pg_catalog.regclass)) THEN
+      RAISE EXCEPTION 'Price rows are never dated in the past: a new price takes effect from now on' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+  END IF;
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION 'Price rows are kept: a price row is never deleted' USING ERRCODE = '23514';
   END IF;
@@ -34,5 +49,5 @@ BEGIN
   RETURN NEW;
 END $$;
 DROP TRIGGER IF EXISTS ai_model_prices_kept ON ai_model_prices;
-CREATE TRIGGER ai_model_prices_kept BEFORE UPDATE OR DELETE ON ai_model_prices
+CREATE TRIGGER ai_model_prices_kept BEFORE INSERT OR UPDATE OR DELETE ON ai_model_prices
 FOR EACH ROW EXECUTE FUNCTION hadron_ai_model_prices_kept();

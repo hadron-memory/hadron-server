@@ -26,7 +26,9 @@ const LEAD_MS = 60_000;
 
 let admin: string;
 const adminCtx = (): Partial<Context> => ({ userId: admin, roles: ['ADMIN'] });
-const NOW = new Date('2026-11-25T12:00:00.000Z');
+// #5213: the database refuses a past-dated row by ITS clock, so the frozen app clock starts at the real now (a fixed
+// date would put every accepted row in the past).
+const NOW = new Date(Math.floor(Date.now() / 1000) * 1000);
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -88,4 +90,12 @@ describe('#5021 setAiModelPrice: strict ISO effectiveAt (gate ruling 7)', () => 
       expect([r.code, r.rows]).toEqual(['BAD_USER_INPUT', 0]);
     },
   );
+
+  it('pin 6 (#5213): a database clock more than the lead ahead of the app clock refuses a default insert as BAD_USER_INPUT, writing nothing', async () => {
+    vi.setSystemTime(new Date(NOW.getTime() - 2 * LEAD_MS)); // the app's clock runs two lead-lengths behind the database's
+    const res = await gql(SET_PRICE, adminCtx(), { input: priceInput });
+    expect(res.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(res.errors?.[0]?.message).toMatch(/past by the database's clock/);
+    expect(await db.aiModelPrice.count()).toBe(0);
+  });
 });

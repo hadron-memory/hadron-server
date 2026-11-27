@@ -10,7 +10,7 @@ import type { Server } from 'node:http';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { db } from '../integrations/db/client.js';
-import { cleanDb, createDbRunConsentPrincipal } from '../test/helpers.js';
+import { cleanDb, createDbRunConsentPrincipal, createPriceRowForTest } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
@@ -73,7 +73,7 @@ beforeEach(async () => {
   ] });
   void s;
   // a price row, and the platform's own default configuration (the walk reaches the platform level)
-  await db.aiModelPrice.create({ data: { id: generateId(), provider: 'anthropic', model: 'test', tier: 1, inputMicroCentsPerMTok: 30_000_000n, outputMicroCentsPerMTok: 150_000_000n, effectiveAt: new Date('2020-01-01') } });
+  await createPriceRowForTest(db, { data: { id: generateId(), provider: 'anthropic', model: 'test', tier: 1, inputMicroCentsPerMTok: 30_000_000n, outputMicroCentsPerMTok: 150_000_000n, effectiveAt: new Date('2020-01-01') } });
   hostId = (await db.hadronServer.create({ data: { id: generateId(), url: 'https://credit-gate.hadron.local' } })).id;
   await db.aiServiceConfig.create({ data: { name: 'default', provider: 'anthropic', model: 'test', hadronServerId: hostId } as never });
 });
