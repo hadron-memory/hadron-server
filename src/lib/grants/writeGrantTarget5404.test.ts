@@ -69,6 +69,13 @@ describe('memoryWriteTargetRefusal', () => {
     expect(memoryWriteTargetRefusal(app as never, mem({ class: 'system' }))).toBe('system');
     expect(memoryWriteTargetRefusal({ id: 'app1', organizationId: null, ownerUserId: 'u' } as never, mem({ class: 'system', organizationId: null }))).toBe('system');
   });
+  it('Q3 refuse list, the classes not covered above: a per-user chat holding and a user-owned group memory', () => {
+    expect(memoryWriteTargetRefusal(app as never, mem({ userMemoryOfAgentId: 'ag' }))).toBe('user-holding');
+    expect(memoryWriteTargetRefusal(app as never, mem({ class: 'group', userMemoryOfAgentId: 'ag' }))).toBe('user-holding');
+    expect(memoryWriteTargetRefusal(app as never, mem({ class: 'group', organizationId: null, ownerUserId: 'u' }))).toBe('user-owned');
+    expect(memoryWriteTargetRefusal(app as never, mem({ class: 'group' }))).toBeNull();
+    expect(memoryWriteTargetRefusal(app as never, mem({ class: 'group', organizationId: 'org2' }))).toBe('tenancy');
+  });
   it('a personal or private memory needs an owner', () => {
     expect(memoryWriteTargetRefusal(app as never, mem({ class: 'personal', userId: 'u', organizationId: null }))).toBeNull();
     expect(memoryWriteTargetRefusal(app as never, mem({ class: 'private', userId: 'u', organizationId: 'org2' }))).toBeNull();

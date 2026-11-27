@@ -273,3 +273,70 @@ describe('5. the retired doors answer DOOR_RETIRED (Q2, until a CLI release carr
     if (approval) expect(approval.readGrants).toEqual([]);
   });
 });
+
+describe('6. Q3 (gate amendment 7228432741): memory.write takes the 0083 target rule, judged at every write, for userless runs only', () => {
+  const teamSpace = () => db.memory.create({ data: { name: 'team', urn: `${f.org.urn}:team`, class: 'app', appId: f.app.id, organizationId: f.org.id } as never });
+  const personalOf = (userId: string) => db.memory.create({
+    data: { name: 'mine', urn: `${f.org.urn}:mine-${generateId().slice(-6).toLowerCase()}`, class: 'personal', userId, organizationId: f.org.id } as never,
+  });
+
+  it('admit: the App\'s own team space, which a userless run cannot write without the grant', async () => {
+    const team = await teamSpace();
+    await expect(write(team.id, LOC)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    await activeMemoryWriteGrant(f.app.id, team.id, { issuerUserId: f.mgr.id });
+    await write(team.id, LOC);
+    expect(await nodeAt(team.id, LOC)).not.toBeNull();
+  });
+
+  it('a person\'s run (a run carrying a user id) never uses the App\'s memory.write grant', async () => {
+    const team = await teamSpace();
+    await activeMemoryWriteGrant(f.app.id, [f.dest.id], { issuerUserId: f.mgr.id });
+    await activeMemoryWriteGrant(f.app.id, team.id, { issuerUserId: f.mgr.id });
+    // A person who cannot write either memory in their own right, so only the App's grant could admit the write.
+    const outsider = await db.user.create({ data: { handle: `po-${generateId().slice(-6).toLowerCase()}` } });
+    const userRun = { db, ...runAuthContext({ ...f.run, id: generateId(), userId: outsider.id } as never) } as never;
+    for (const m of [f.dest, team]) {
+      await expect(writeNodeCore(
+        { memoryId: m.id, loc: 'person:run', name: 'p', nodeType: 'record', content: 'x' } as never, userRun, 'create',
+        { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null) },
+      )).rejects.toBeTruthy();
+      expect(await nodeAt(m.id, 'person:run')).toBeNull();
+    }
+  });
+
+  it('admit: a personal memory only as its owner\'s grant; the same grant signed by anyone else writes nothing', async () => {
+    const mine = await personalOf(f.mgr.id);
+    const issuer = (userId: string) => requireActionIssuer({ db, userId, roles: [] } as never, 'memory.write', f.app.id, { memory: mine.id, prefix: '*' })
+      .then(() => 'OK', (e: any) => e?.extensions?.code ?? String(e));
+    expect(await issuer(f.mgr.id)).toBe('OK');
+    expect(await issuer(f.member.id)).not.toBe('OK');
+    const byOther = await activeMemoryWriteGrant(f.app.id, mine.id, { issuerUserId: f.member.id });
+    await expect(write(mine.id, LOC)).rejects.toBeTruthy();
+    expect(await nodeAt(mine.id, LOC)).toBeNull();
+    await revokeGrantRow(byOther, f.member.id);
+    await activeMemoryWriteGrant(f.app.id, mine.id, { issuerUserId: f.mgr.id });
+    await write(mine.id, LOC);
+    expect(await nodeAt(mine.id, LOC)).not.toBeNull();
+  });
+
+  it('refuse: another App\'s team space, at creation and at write (an active grant on one writes nothing)', async () => {
+    const other = await db.app.create({ data: { name: 'B', urn: `${f.org.urn}:appb`, organizationId: f.org.id } });
+    const theirs = await db.memory.create({ data: { name: 'tb', urn: `${f.org.urn}:teamb`, class: 'app', appId: other.id, organizationId: f.org.id } as never });
+    const code = await db.$transaction((tx) => createPendingGrant(tx, {
+      appId: f.app.id, requester: { userId: f.mgr.id, workerId: null, sessionId: null }, holder: { kind: 'app', id: f.app.id },
+      action: 'memory.write', values: { memory: theirs.id, prefix: '*' }, reason: 'r', canReadMemory: async () => true,
+    } as never)).then(() => 'OK', (e) => e instanceof GrantCreateRefusal ? e.code : String(e));
+    expect(code).toBe('GRANT_VALUES_INVALID');
+    await activeMemoryWriteGrant(f.app.id, theirs.id, { issuerUserId: f.mgr.id });
+    await expect(write(theirs.id, LOC)).rejects.toBeTruthy();
+    expect(await nodeAt(theirs.id, LOC)).toBeNull();
+  });
+
+  it('judged at every write: a memory that becomes encrypted after signing takes no further write', async () => {
+    await activeMemoryWriteGrant(f.app.id, f.dest.id, { issuerUserId: f.mgr.id });
+    await write(f.dest.id, LOC);
+    await db.memory.update({ where: { id: f.dest.id }, data: { isEncrypted: true } });
+    await expect(write(f.dest.id, `${LOC}:2`)).rejects.toBeTruthy();
+    expect(await nodeAt(f.dest.id, `${LOC}:2`)).toBeNull();
+  });
+});
