@@ -20,6 +20,7 @@ import { loadLaunchableFamilies } from '../../../lib/agentTasks/hosts.js';
 import { fenceHostDecision } from '../../../lib/hostOperations/launch.js';
 import { resolvers, type Context } from './resolvers.js';
 import { taskMatcherTick } from '../../../jobs/taskMatcher.js';
+import { ensureAgentTeamHost, joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -118,7 +119,9 @@ beforeEach(async () => {
   orca1 = await mkKey(app.id, 'orca1');
   orca2 = await mkKey(app.id, 'orca2');
   plainKey = await mkKey(app.id, 'plain');
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
+  await joinHostForKey(db, orca2.id, 'orca2');
   await M.grantAppKeyScope({}, { id: orca2.id, scope: 'host:operate', hostId: 'orca2' }, ctx(manager.id));
 });
 
@@ -207,6 +210,8 @@ describe('assignHostWorker: whoever manages the App states what a host runs', ()
 
   it('#5249: any model-family token is stored, normalised like a session family', async () => {
     expect(await assign({ family: 'deepseek' })).toMatchObject({ family: 'deepseek' });
+    // #5259: each host is joined to the App first.
+    for (const h of ['orca3', 'orca4', 'orca5']) await ensureAgentTeamHost(db, app.id, h);
     expect(await assign({ hostId: 'orca2', workdir: 'kit-home', family: 'Gemini-2.5' })).toMatchObject({ family: 'gemini-2.5' });
     expect(await assign({ hostId: 'orca3', workdir: 'kit-home', family: 'anthropic' })).toMatchObject({ family: 'claude' });
     expect(await assign({ hostId: 'orca4', workdir: 'kit-home', family: 'openai' })).toMatchObject({ family: 'codex' });

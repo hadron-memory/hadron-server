@@ -9,7 +9,7 @@ import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import { appendMemberRemovedEvent, appendMemberSetEvent, appendStaffingInstructionClaim, staffingActActor, staffingInstruction, eventActor } from '../../../lib/agentTasks/events.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
-import { requireAppKeyIssuer, lockAppKeyManagerMemberships } from './appKeyManagement.js';
+import { requireAppKeyIssuer, lockAppKeyManagerMemberships, newAppKeyMaterial, createAppKeyRow } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import {
@@ -1512,10 +1512,8 @@ export const appMutations = {
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       // #3277: minting is person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling 0098 A).
       await requireAppKeyIssuer(ctx, app, 'app-key.mint');
-      // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy)
-      const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
-      const keyHash = hashAppKey(rawKey);
-      const keyPreview = rawKey.slice(0, 12) + '...' + rawKey.slice(-4);
+      // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy); #5259: one writer, shared with joinAgentTeamHost.
+      const material = newAppKeyMaterial();
       const appKey = await withAuthorizedTx(
         ctx,
         [{ kind: 'app', id: resolvedAppId }, ...(app.organizationId
@@ -1528,20 +1526,12 @@ export const appMutations = {
           }
           await requireAppKeyIssuer(txCtx, current, 'app-key.mint');
         },
-        (tx) => tx.appKey.create({
-          data: {
-            appId: resolvedAppId,
-            keyHash,
-            keyPreview,
-            label: label ?? null,
-            createdBy: ctx.userId ?? null,
-          },
-        }),
+        (tx) => createAppKeyRow(tx, { appId: resolvedAppId, label: label ?? null, createdBy: ctx.userId ?? null, material }),
         { afterLock: async (tx) => {
           await lockAppKeyManagerMemberships(tx, ctx, app);
         } },
       );
-      return { key: appKey, rawKey };
+      return { key: appKey, rawKey: material.rawKey };
     },
 
     /**

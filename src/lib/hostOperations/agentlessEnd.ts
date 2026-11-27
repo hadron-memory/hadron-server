@@ -129,8 +129,9 @@ export async function endAgentlessSession(
  * Does the session run on `hostId`? A host-launched session: exactly when its launch host is this host. A hand-started
  * one: when this host is the worker's sole live registration in the App (refreshed within the lapse window, as
  * pickLiveHost and liveRegistrationsFor read it). The caller holds the lapse count and every registration FOR SHARE.
+ * #5259: also the one rule for "a worker of that host has an open session" when a host is removed (gate decision Q4).
  */
-async function sessionRunsOn(
+export async function sessionRunsOn(
   tx: Prisma.TransactionClient,
   at: { appId: string; workerId: string; hostId: string; now: Date; checkIns: number },
   session: { launchHostId: string | null },
@@ -140,6 +141,7 @@ async function sessionRunsOn(
     SELECT DISTINCT r.host_id AS "hostId" FROM host_registrations r
     JOIN host_registration_workers w ON w.registration_id = r.id AND w.worker_id = ${at.workerId}
     WHERE r.app_id = ${at.appId}
+      AND r.lost_at IS NULL
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * ${at.checkIns}) >= ${toNaiveUtc(at.now)}::timestamp`;
   return hosts.length === 1 && hosts[0]!.hostId === at.hostId;
 }

@@ -37,6 +37,16 @@ export function changeSnapshot(secret: { id: string; updatedAt: Date; protected:
 export function secretChangeCeremonyUrl(id: string): string {
  return `${getProjectBaseUrl()}${SECRET_CHANGE_PATH}/${id}`;
 }
+/**
+ * The checks every secret change request passes before it is staged (#3999; cor:sec:070:02): the signing surface is on, the caller
+ * is no App key, and it is a person acting as themselves (a worker session, a run and an impersonation are refused). One predicate:
+ * `stageSecretChange` and the silent no-op for a protection re-assert (#5299) both call it, so the no-op can never answer a caller
+ * the staging would refuse. Returns the person's user id; any miss is the one SECRET_PROTECTED_NEEDS_PASSKEY with no request id.
+ */
+export async function requireStagingPerson(tx: Prisma.TransactionClient, ctx: Context): Promise<string> {
+ if (!signingSurfacePolicy().signing || ctx.appKeyId) throw needsPasskey();
+ return requirePersonOnlyAct({ ...ctx, db: tx } as Context, 'secret.change', needsPasskey);
+}
 /** Open under the caller's App authority and secret/name lock. Return the refusal; throw it only AFTER transaction commit. */
 export async function stageSecretChange(tx: Prisma.TransactionClient, ctx: Context, a: {
  appId: string; secretId: string | null; name: string; kind: string; metadata: Prisma.JsonValue;
@@ -44,8 +54,7 @@ export async function stageSecretChange(tx: Prisma.TransactionClient, ctx: Conte
  /** #5245: a protected create is refused at staging when the App has no room (secrets plus open protected creates). */
  requireAppRoom?: boolean;
 }): Promise<GraphQLError> {
- if (!signingSurfacePolicy().signing || ctx.appKeyId) throw needsPasskey();
- const requester = await requirePersonOnlyAct({ ...ctx, db: tx } as Context, 'secret.change', needsPasskey);
+ const requester = await requireStagingPerson(tx, ctx);
  // A protected create has no secret row to lock: its name lock also serializes ordinary creates at completion.
  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`hadron:secret-change:${a.appId}:${a.name}`}))`;
  // #5245: the App-wide lock is the last staging lock before the count (two-int form, objsubid=2: it cannot collide with the

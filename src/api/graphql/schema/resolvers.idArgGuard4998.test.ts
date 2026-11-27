@@ -28,6 +28,7 @@ export const ALLOWED_ID_ARGS: Record<string, string> = {
   'Query.hostDesiredState.hostId': "a host's token within its App (what a key's host:operate scope names); no resolver",
   'Query.hostSweepRuns.hostId': "a host's token within its App (what a key's host:operate scope names); no resolver",
   'Query.hostSetup.hostId': "a host's token within its App (what a key's host:operate scope names); no resolver",
+  'Query.agentTeamHost.hostId': "#5259: a host's token within its App (what a key's host:operate scope names); no resolver",
   'Query.contextReset.resetId': 'a context reset has no URN or resolver',
   'Query.hostOperations.hostId': "a host's token within its App (what a key's host:operate scope names); no resolver",
   'Query.agentTasks.externalId': 'an external-system label, not a Hadron entity',

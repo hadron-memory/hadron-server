@@ -1,5 +1,7 @@
 /** #1744 / cor:dmo:050:05: App credential inventory and issuance share the manager predicate. */
+import { randomBytes } from 'node:crypto';
 import type { Prisma } from '../../../generated/prisma/index.js';
+import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { managesApp, lockAppManagerMemberships } from '../../../lib/auth/appManagement.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
@@ -36,7 +38,11 @@ export async function isAppKeyManager(ctx: Context, app: KeyApp): Promise<boolea
  * any shape (header binding, session row, ambiguous actor, refused binding), a run principal, an impersonation and an
  * App key are refused, with the same `Forbidden` as before; then the manager check.
  */
-export async function requireAppKeyIssuer(ctx: Context, app: KeyApp, act: 'app-key.mint' | 'app-key.rotate'): Promise<void> {
+export async function requireAppKeyIssuer(
+  ctx: Context, app: KeyApp,
+  /** #5259: removing a host of a team App revokes its keys under this same gate (hrn:node:hadronmemory.com:specs:cor:agt:070:07). */
+  act: 'app-key.mint' | 'app-key.rotate' | 'agent-team-host.remove',
+): Promise<void> {
   await requirePersonOnlyAct(ctx, act, authorizationDenied);
   await requireAppKeyManager(ctx, app);
 }
@@ -48,4 +54,23 @@ export async function requireAppKeyIssuer(ctx: Context, app: KeyApp, act: 'app-k
  */
 export async function lockAppKeyManagerMemberships(tx: Prisma.TransactionClient, ctx: Context, app: KeyApp): Promise<void> {
   await lockAppManagerMemberships(tx, ctx.userId, app);
+}
+
+/**
+ * #5259: the one writer of a new App key row, shared by `createAppKey` and `joinAgentTeamHost` (which issues a host's key
+ * under createAppKey's gate, hrn:node:hadronmemory.com:specs:cor:agt:070:07). The raw key is `hdr_app_` and 64 hex
+ * characters (256 bits); only its hash and a preview are stored. The caller returns the raw key once and never logs it.
+ */
+export function newAppKeyMaterial(): { rawKey: string; keyHash: string; keyPreview: string } {
+  const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
+  return { rawKey, keyHash: hashAppKey(rawKey), keyPreview: rawKey.slice(0, 12) + '...' + rawKey.slice(-4) };
+}
+
+export function createAppKeyRow(
+  tx: Prisma.TransactionClient,
+  a: { appId: string; label: string | null; createdBy: string | null; material: { keyHash: string; keyPreview: string } },
+) {
+  return tx.appKey.create({
+    data: { appId: a.appId, keyHash: a.material.keyHash, keyPreview: a.material.keyPreview, label: a.label, createdBy: a.createdBy },
+  });
 }

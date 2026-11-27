@@ -4,7 +4,8 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
  *  1. firstLiveWorkerSessionOf's overflow refusal: a full scanned page with nothing live in it is RESUME_AMBIGUOUS.
  *  2. The claim pick scope of the mismatch read (Rook's mutant M2): a pick that is not the caller's answers
  *     NOTHING_TO_RESUME even while one of the caller's own claims for another worker waits.
- *  3. A non-id expectedWorkerId (a URN or a name) refuses BAD_USER_INPUT before any read.
+ *  3. A non-id expectedWorkerId (a URN or a name) refuses BAD_USER_INPUT before any read. #5163 renamed the field
+ *     expectedWorkerRef: a worker URN now resolves, and a name refuses URN_NOT_QUALIFIED before any read.
  * Header of the file this was cut from, kept for the shared setup:
  * #3822 — resumeSession with an expected worker (cor:agt:020:03, Vera's FIT 6762455524 and ruling 6762811449).
  *
@@ -28,6 +29,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { OPEN_SESSION_SCAN_CAP } from '../../../lib/sessionActivity.js';
+import { UrnNotQualifiedError } from '../../../lib/urn.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -100,7 +102,7 @@ beforeEach(async () => {
 });
 
 
-describe('#3912 resumeSession(expectedWorkerId) gaps', () => {
+describe('#3912 resumeSession(expectedWorkerRef, was expectedWorkerId) gaps', () => {
   it('(1) nothing of A, the caller\'s B sessions fill the scanned page with non-live rows and a live one sits past it: RESUME_AMBIGUOUS, footprint unchanged', async () => {
     const now = Date.now();
     const day = 24 * 3600_000;
@@ -116,7 +118,7 @@ describe('#3912 resumeSession(expectedWorkerId) gaps', () => {
     const live = generateId();
     await db.session.create({ data: { id: live, userId: holder, appId: app.id, workerId: bea, type: 'DEVELOPER' as const, startedAt: new Date(now - 3 * day), updatedAt: new Date(now) } });
     const before = await footprint();
-    const g = await refusal(resume(ctx(holder), { expectedWorkerId: ada }));
+    const g = await refusal(resume(ctx(holder), { expectedWorkerRef: ada }));
     expect(g.extensions.code).toBe('RESUME_AMBIGUOUS');
     expect(await footprint()).toEqual(before);
   });
@@ -131,7 +133,7 @@ describe('#3912 resumeSession(expectedWorkerId) gaps', () => {
         startedAt: new Date(now - 48 * 3600_000), updatedAt: new Date(now), autoExpiredAt: new Date(now - 3600_000),
       })),
     });
-    expect(await envelope(resume(ctx(holder), { expectedWorkerId: ada }))).toBe(none);
+    expect(await envelope(resume(ctx(holder), { expectedWorkerRef: ada }))).toBe(none);
   });
 
   it('(2) a claim pick of another user\'s claim, while the caller\'s own B claim waits, expected A: NOTHING_TO_RESUME byte for byte, no claim consumed', async () => {
@@ -144,34 +146,45 @@ describe('#3912 resumeSession(expectedWorkerId) gaps', () => {
     await claim(other, theirs.id);
     await beaClaimOnly();
     const before = await footprint();
-    expect(await envelope(resume(ctx(holder), { expectedWorkerId: ada, session: theirs.id }))).toBe(none);
+    expect(await envelope(resume(ctx(holder), { expectedWorkerRef: ada, session: theirs.id }))).toBe(none);
     expect(await footprint()).toEqual(before);
     // The caller's own B claim still waits and is redeemable by naming B.
-    expect(await resume(ctx(holder), { expectedWorkerId: bea })).toMatchObject({ outcome: 'RESUMED' });
+    expect(await resume(ctx(holder), { expectedWorkerRef: bea })).toMatchObject({ outcome: 'RESUMED' });
   });
 
+  // #5163: the field is expectedWorkerRef and takes a worker URN too. A ref that is neither an id nor a fully qualified
+  // worker URN still refuses before any read, now with the boundary's typed URN_NOT_QUALIFIED (cor:api:140:01), and a
+  // well-formed URN naming nothing takes the mismatch path with no id and no name (resolvers.expectedWorkerRef5163).
   it.each([
-    ['a URN', 'hrn:worker:hadronmemory.com:team:ada'],
     ['a name', 'Ada'],
     ['an uppercase hex', '01A1CA12D23D770E90EC84B195A42D43'],
     ['a short hex', 'abc123'],
-  ])('(3) %s as expectedWorkerId refuses BAD_USER_INPUT before any read, even with Bea\'s claim waiting', async (_label, bad) => {
+  ])('(3) %s as expectedWorkerRef refuses URN_NOT_QUALIFIED before any read, even with Bea\'s claim waiting', async (_label, bad) => {
     await beaClaimOnly();
     const before = await footprint();
-    const g = await refusal(resume(ctx(holder), { expectedWorkerId: bad }));
-    expect(g.extensions.code).toBe('BAD_USER_INPUT');
-    expect(g.message).not.toContain('Bea');
+    const g = await resume(ctx(holder), { expectedWorkerRef: bad }).then(() => null, (e: unknown) => e);
+    expect(g).toBeInstanceOf(UrnNotQualifiedError);
+    expect((g as Error).message).not.toContain('Bea');
+    expect(await footprint()).toEqual(before);
+  });
+
+  it('(3) a well-formed worker URN naming nothing is no longer refused as input: it names no worker and nothing of Bea\'s is bound', async () => {
+    await beaClaimOnly();
+    const before = await footprint();
+    const g = await refusal(resume(ctx(holder), { expectedWorkerRef: 'hrn:worker:hadronmemory.com:team:ada' }));
+    expect(g.extensions).toMatchObject({ code: 'RESUME_REFUSED', reason: 'WORKER_MISMATCH', expectedWorkerId: null, expectedWorkerName: null });
     expect(await footprint()).toEqual(before);
   });
 
   it('(3) the refusal comes after the concealing answer: an App key learns nothing about the value, and a valid id is unchanged', async () => {
     const none = await nothingEnvelope();
-    expect(await envelope(resume({ db, appId: app.id, roles: [] } as unknown as Context, { expectedWorkerId: 'Ada' }))).toBe(none);
+    expect(await envelope(resume({ db, appId: app.id, roles: [] } as unknown as Context, { expectedWorkerRef: 'Ada' }))).toBe(none);
     const a = await start(holder, ada);
-    expect(await resume(ctx(holder), { expectedWorkerId: ada })).toMatchObject({ outcome: 'RESUMED', session: { id: a.id } });
+    expect(await resume(ctx(holder), { expectedWorkerRef: ada })).toMatchObject({ outcome: 'RESUMED', session: { id: a.id } });
   });
 
   it('(3) the published SDL states the refusal beside the blank one', () => {
-    expect(typeDefs.includes('Blank or not an id (a URN or a name): BAD_USER_INPUT')).toBe(true);
+    expect(typeDefs.includes('Blank: BAD_USER_INPUT')).toBe(true);
+    expect(typeDefs.includes('Neither an id nor a fully qualified worker\n    URN (a name, a relative URN, another type): URN_NOT_QUALIFIED, before any read.')).toBe(true);
   });
 });
