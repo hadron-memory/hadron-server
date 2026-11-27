@@ -32,7 +32,6 @@ beforeEach(async () => {
   const created = await M.createAgent({}, { orgRef: org.id, name: 'eval-agent', visibility: 'ORGANIZATION' }, ctx());
   agentId = created.id;
   const rows = [
-    { loc: 'conversations', data: null },
     { loc: 'conversations:a', data: { stageOrder: ['s'], entryCondition: { '<': [{ var: 'memory.age' }, 5] } }, seq: 1 },
     { loc: 'conversations:a:s', data: {}, content: 'p' },
     { loc: 'conversations:b', data: { stageOrder: ['s'] }, seq: 2 },

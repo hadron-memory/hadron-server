@@ -36,10 +36,8 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId, userId: consumerId, role: 'member' } });
   await db.appMember.create({ data: { appId, userId: managerId, role: 'member' } });
   for (const row of [
-    { loc: 'conversations', data: {} },
     { loc: 'conversations:flow', data: { stageOrder: ['step'], isSetup: false } },
     { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
-    { loc: 'prompts', data: {} },
     { loc: 'prompts:step', content: 'LICENSED STAGE', data: {} },
     { loc: 'conversations:next', data: { stageOrder: ['next'] } },
     { loc: 'conversations:next:next', data: { promptRef: 'prompts:step' } },

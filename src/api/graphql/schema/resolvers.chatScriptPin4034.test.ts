@@ -84,7 +84,6 @@ async function publish(): Promise<string> {
 /** main:check --rule--> alpha / beta (two target conversations). */
 async function seedScript(extra: Seed[] = []) {
   return seed([
-    { loc: 'conversations', name: 'conversations' },
     { loc: 'conversations:main', name: 'main', data: { stageOrder: ['check'], isSetup: false } },
     { loc: 'conversations:main:check', name: 'check', data: {} },
     { loc: 'conversations:alpha', name: 'alpha', data: { stageOrder: ['a1'], isSetup: false } },
@@ -180,7 +179,6 @@ describe('#4034 a pinned chat reads its script from the pinned revision', () => 
 
   it('pin 4: restoring a v2 revision brings back each rule condition and priority and each node seq', async () => {
     const ids = await seed([
-      { loc: 'conversations', name: 'conversations' },
       { loc: 'conversations:main', name: 'main', data: { stageOrder: ['check'] }, seq: 7 },
       { loc: 'conversations:main:check', name: 'check', data: {} },
       { loc: 'conversations:alpha', name: 'alpha', data: { stageOrder: ['a1'] }, seq: 3 },

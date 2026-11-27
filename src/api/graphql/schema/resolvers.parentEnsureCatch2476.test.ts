@@ -38,10 +38,8 @@ beforeEach(async () => {
   agentId = created.id;
   systemMemoryId = created.systemMemoryId!;
   for (const n of [
-    { loc: 'conversations' },
     { loc: 'conversations:hello', data: { stageOrder: ['greet'], isSetup: false } },
     { loc: 'conversations:hello:greet', data: { promptRef: 'prompts:hello:greet' } },
-    { loc: 'prompts' },
     { loc: 'prompts:hello' },
     { loc: 'prompts:hello:greet', content: 'Hello world!' },
   ] as Array<{ loc: string; data?: unknown; content?: string }>) {

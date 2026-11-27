@@ -89,7 +89,6 @@ async function engineState(chatId: string) {
 }
 
 const flow = (stages: string[]) => [
-  { loc: 'conversations', name: 'conversations' },
   { loc: 'conversations:flow', name: 'flow', data: { stageOrder: stages, isSetup: false } },
   ...stages.map((s) => ({ loc: `conversations:flow:${s}`, name: s, data: {} })),
 ];

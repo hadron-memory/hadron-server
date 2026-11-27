@@ -55,7 +55,7 @@ function conv(name: string, flags: Record<string, unknown> = {}, stages: string[
 
 /** Seed in the given order, as live rows or as one published snapshot (array order = given order). */
 async function seed(path: Path, seeds: Seed[]) {
-  const all: Seed[] = [{ loc: 'conversations', data: null }, ...seeds];
+  const all: Seed[] = [...seeds];
   if (path === 'live') {
     for (const s of all) {
       await db.node.create({ data: {

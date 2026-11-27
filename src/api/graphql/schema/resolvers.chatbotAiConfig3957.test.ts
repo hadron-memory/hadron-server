@@ -244,7 +244,6 @@ describe('the chat path', () => {
     const created = await M.createAgent({}, { orgRef: org.id, name: 'chat-agent', visibility: 'ORGANIZATION' }, ctx(admin, ['ADMIN']));
     chatAgent = { id: created.id, systemMemoryId: created.systemMemoryId! };
     for (const [loc, data, content] of [
-      ['conversations', null, null],
       ['conversations:main', { stageOrder: ['s1'] }, null],
       ['conversations:main:s1', {}, 'prompt main/s1'],
     ] as const) {
