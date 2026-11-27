@@ -3,6 +3,7 @@
  * door's own judgement, `cor:dmo:060:20`, and is not copied). The weight is the statements one member App costs in the worst
  * shape priced here: three installed Agents, none licensed, so the licence loop runs to its end.
  */
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { buildSchema, parse } from 'graphql';
@@ -22,26 +23,55 @@ const PER_SHAPE = 10;
 let viewer: string;
 const apps: Record<'A' | 'B' | 'C', string[]> = { A: [], B: [], C: [] };
 let logged: import('../../../generated/prisma/index.js').PrismaClient;
-let statements = 0;
 /**
- * #5397: the one statement the count must not see. Under CPU load a bare `SELECT 1` shows up on this client now and then
- * (seen +1 in 4 of 1200 repeated runs, in the with-field or the without-field run, so a per-App difference came out one off;
- * the failing CI run read 12 where 14 is the shape's cost). It is not a query the app or the field writes: it is what the
- * pool sends on its own (a connection check). So it is excluded BY TEXT, exactly: any other statement, however it arrives,
- * is still counted, and the per-App equality and the [7,14,24] pins stay exact (no tolerance).
+ * #5397: the measurement. Every statement the logging client sends is recorded, in the order its query event arrives, and a
+ * counted window is the events between two BARRIER statements: a unique `SELECT <n> AS barrier` sent before the work and one
+ * after it, each awaited until its own event has arrived. Prisma emits query events asynchronously, so under load a statement
+ * that belongs to one run can arrive after its call has returned and be counted in the NEXT run's window (seen: an
+ * `agent_org_grants` read and an `org_members` read crossing from one pair into the next). A barrier is ordered with the work
+ * around it (events arrive in the order the engine logs them), so none crosses: 0 deviations in 3600 repeated pairs under load,
+ * where 4 in 1200 (no fix) and 3 in 3600 (ping filter alone) had been seen.
+ *
+ * And the one statement the count must not see: under CPU load a bare `SELECT 1` shows up on this client now and then (seen +1
+ * in 4 of 1200 repeated runs; the failing CI run read 12 where 14 is the shape's cost). It is not a query the app or the field
+ * writes. What it is was not proven (the pool's own connection check is the likely source; only its text and that it appears under
+ * load were observed). It is excluded BY TEXT, exactly: any other statement,
+ * however it arrives, is counted, and the per-App equality and the [7,14,24] pins stay exact (no tolerance). THE LIMIT of an
+ * exact-text filter: a bare `SELECT 1` issued by app code would be invisible here; the only one in src is the /health probe,
+ * and a pin below keeps the field's own files free of one.
  */
+const events: string[] = [];
+let barrierSeq = 0;
 const isPoolPing = (query: string): boolean => query.trim() === 'SELECT 1';
 
-async function select(ref: string, withField: boolean): Promise<number> {
-  statements = 0;
+async function barrier(): Promise<number> {
+  const text = `SELECT ${900_000 + ++barrierSeq} AS barrier`;
+  await logged.$queryRawUnsafe(text);
+  const deadline = Date.now() + 10_000;
+  while (!events.includes(text)) {
+    if (Date.now() > deadline) throw new Error(`the query event of ${text} never arrived`);
+    await new Promise((r) => setTimeout(r, 2));
+  }
+  return events.indexOf(text);
+}
+/** The statements `fn` sent, between two barriers, without the pool's own ping. */
+async function counted(fn: () => Promise<unknown>): Promise<number> {
+  const from = await barrier();
+  await fn();
+  const to = await barrier();
+  return events.slice(from + 1, to).filter((q) => !isPoolPing(q)).length;
+}
+
+/** One selection of an App, with or without the field (not counted: `select` counts it). */
+async function run(ref: string, withField: boolean): Promise<void> {
   const ctx = { db: logged, userId: viewer, roles: ['READER'] } as unknown as Context;
   const res = await server.executeOperation(
     { query: `query ($ref: ID!) { app(ref: $ref) { id ${withField ? 'viewerAppUserMemoryClasses' : ''} } }`, variables: { ref } },
     { contextValue: ctx });
   if (res.body.kind !== 'single') throw new Error('unexpected incremental response');
   expect(res.body.singleResult.errors).toBeUndefined();
-  return statements;
 }
+const select = (ref: string, withField: boolean): Promise<number> => counted(() => run(ref, withField));
 /** The statements the field itself adds for one App: the same selection with and without it. */
 const fieldStatements = async (ref: string) => (await select(ref, true)) - (await select(ref, false));
 
@@ -69,20 +99,29 @@ beforeAll(async () => {
   const { PrismaClient } = await import('../../../generated/prisma/index.js');
   expect(process.env.DATABASE_URL, 'the counting client must use the same database as db').toBeTruthy();
   logged = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL, log: [{ emit: 'event', level: 'query' }] });
-  (logged as any).$on('query', (e: { query: string }) => { if (!isPoolPing(e.query)) statements += 1; });
+  (logged as any).$on('query', (e: { query: string }) => { events.push(e.query.trim()); });
 });
 afterAll(async () => { await logged?.$disconnect(); });
 
 describe('#5397 the statement counter counts the field\'s statements and only those', () => {
-  const count = async (fn: () => Promise<unknown>): Promise<number> => { statements = 0; await fn(); return statements; };
+  const count = counted;
 
-  it('a pool check-out ping inside a counted window is not counted, wherever it lands', async () => {
+  it('a ping inside a counted window is not counted: before, after and between real statements (each awaited inside the window)', async () => {
     expect(await count(() => logged.$queryRaw`SELECT 1`)).toBe(0);
-    // Interleaved with a real selection: the same count as without the ping.
+    expect(await count(async () => { await logged.$queryRaw`SELECT 1`; await logged.$queryRaw`SELECT 2`; })).toBe(1);
+    expect(await count(async () => { await logged.$queryRaw`SELECT 2`; await logged.$queryRaw`SELECT 1`; })).toBe(1);
+    expect(await count(async () => { await logged.$queryRaw`SELECT 1`; await logged.$queryRaw`SELECT 2`; await logged.$queryRaw`SELECT 1`; await logged.$queryRaw`SELECT 3`; })).toBe(2);
+    // A real selection counts the same with a ping awaited around it: the ping is inside the window, so a broken filter would add 2.
     const plain = await select(apps.A[0]!, true);
-    statements = 0;
-    const [withPing] = await Promise.all([select(apps.A[0]!, true), logged.$queryRaw`SELECT 1`]);
-    expect(withPing).toBe(plain);
+    expect(await count(async () => { await logged.$queryRaw`SELECT 1`; await run(apps.A[0]!, true); await logged.$queryRaw`SELECT 1`; })).toBe(plain);
+  });
+
+  it('the limit of an exact-text filter: nothing on the field\'s path issues a bare SELECT 1 of its own, so none is hidden', () => {
+    // A bare `SELECT 1` from app code would be invisible to this counter. The only one in src is the /health probe
+    // (src/api/health.ts); the field's own files must not issue one. Larger statements that contain "SELECT 1 FROM" are counted.
+    const files = ['./appUserMemoryEligibility.ts', '../../../lib/appAgent.ts', '../../../lib/appInstallations.ts']
+      .map((f) => readFileSync(new URL(f, import.meta.url), 'utf8').replace(/\/\/.*$/gm, ''));
+    for (const text of files) expect(text).not.toMatch(/`\s*SELECT 1\s*`/);
   });
 
   it('every other statement is still counted, so a real extra statement is not hidden', async () => {
