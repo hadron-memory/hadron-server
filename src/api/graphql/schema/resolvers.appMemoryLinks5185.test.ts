@@ -13,7 +13,7 @@ import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { getAccessibleMemoryIds, holdsContentReadIndependently } from './resolvers.helpers.js';
-import { registerOwnRightReader, linkedMemoryReach } from '../../../lib/appMemoryLinks.js';
+import { registerOwnRightReader, judgeAppLinks } from '../../../lib/appMemoryLinks.js';
 import { canReadMemory, canWriteToMemory, getMemoryAccess } from '../../../mcp/access-control.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { mergeUsers } from '../../../test/mergeConsent.js';
@@ -664,21 +664,23 @@ describe('App.attachedMemories', () => {
 });
 
 describe('the own-right reader is a registration, and a missing one fails closed', () => {
+  // #5321: a link's `active` is what AppAttachedMemory.active shows; it no longer gives the App any read.
+  const activeIds = async (appId: string) => (await judgeAppLinks(db as never, appId)).filter((l) => l.active).map((l) => l.memoryId);
   it('with no reader registered every link counts for nothing, and one warning is logged', async () => {
     const m = await memory({});
     await attach(asUser(alice), m.id, orgApp.id);
-    expect((await linkedMemoryReach(db as never, orgApp.id)).has(m.id)).toBe(true);
+    expect(await activeIds(orgApp.id)).toEqual([m.id]);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     registerOwnRightReader(null);
     try {
-      expect((await linkedMemoryReach(db as never, orgApp.id)).size).toBe(0);
-      expect((await linkedMemoryReach(db as never, orgApp.id)).size).toBe(0);
+      expect(await activeIds(orgApp.id)).toEqual([]);
+      expect(await activeIds(orgApp.id)).toEqual([]);
       expect(warn.mock.calls.filter((c) => String(c[0]).includes('no_own_right_reader'))).toHaveLength(1);
     } finally {
       registerOwnRightReader(holdsContentReadIndependently as never);
       warn.mockRestore();
     }
-    expect((await linkedMemoryReach(db as never, orgApp.id)).has(m.id)).toBe(true);
+    expect(await activeIds(orgApp.id)).toEqual([m.id]);
   });
 });
 

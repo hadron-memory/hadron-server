@@ -136,6 +136,19 @@ describe('memory.read: the App reads through its grant', () => {
     expect(await reachFor(keyAuth(app.id, keyId), m.id)).toEqual(BOTH);
   });
 
+  it('the scope doors: the App\'s manager gives grant:read and the key reads; revoking it ends the read at the key\'s next call', async () => {
+    const m = await alicesMemory();
+    await activeGrant(app.id, 'memory.read', { memory: m.id });
+    expect(await reachFor(keyAuth(app.id, keyId), m.id)).toEqual(NONE);
+    await M.grantAppKeyScope(null, { id: keyId, scope: 'grant:read' }, asUser(admin));
+    expect(await db.appKeyScope.count({ where: { appKeyId: keyId, scope: 'grant:read', revokedAt: null, hostId: null } })).toBe(1);
+    expect(await reachFor(keyAuth(app.id, keyId), m.id)).toEqual(BOTH);
+    // A host id is not taken: grant:read is not bound to a host.
+    await expect(M.grantAppKeyScope(null, { id: key2Id, scope: 'grant:read', hostId: 'orca1' }, asUser(admin))).rejects.toThrow(/grant:read is not granted for a host/);
+    await M.revokeAppKeyScope(null, { id: keyId, scope: 'grant:read' }, asUser(admin));
+    expect(await reachFor(keyAuth(app.id, keyId), m.id)).toEqual(NONE);
+  });
+
   it('reads only: the key cannot write the granted memory', async () => {
     const m = await alicesMemory();
     await activeGrant(app.id, 'memory.read', { memory: m.id });
@@ -203,6 +216,24 @@ describe('memory.read: the App reads through its grant', () => {
     for (const x of [m2, m3, m4]) expect(await reachFor(runAuth(app.id), x.id)).toEqual(NONE);
   });
 
+  it('the App must be live: an uninstalled or deleted App, or a deleted organization, reads nothing through its grant', async () => {
+    const m = await alicesMemory();
+    await activeGrant(app.id, 'memory.read', { memory: m.id });
+    await grantScope(keyId);
+    expect(await reachFor(runAuth(app.id), m.id)).toEqual(BOTH);
+    for (const [model, id, data, undo] of [
+      ['app', app.id, { uninstalledAt: new Date() }, { uninstalledAt: null }],
+      ['app', app.id, { deletedAt: new Date() }, { deletedAt: null }],
+      ['organization', org.id, { deletedAt: new Date() }, { deletedAt: null }],
+    ] as const) {
+      await (db as any)[model].update({ where: { id }, data });
+      expect({ model, data, run: await reachFor(runAuth(app.id), m.id), key: await reachFor(keyAuth(app.id, keyId), m.id) })
+        .toEqual({ model, data, run: NONE, key: NONE });
+      await (db as any)[model].update({ where: { id }, data: undo });
+    }
+    expect(await reachFor(runAuth(app.id), m.id)).toEqual(BOTH);
+  });
+
   it('judged at every read: allows nothing while its giver cannot read the memory, and again once they can (R4)', async () => {
     // An org knowledge memory the giver reads as an org member; removing her membership takes her read away.
     const m = await orgKnowledge(org.id, org.urn);
@@ -259,6 +290,24 @@ describe('memory.read, the organization form: a userless run reads its organizat
     // The control: the org's own ORGANIZATION knowledge.
     const k = await orgKnowledge(org.id, org.urn);
     expect(await reachFor(runAuth(app.id), k.id)).toEqual(BOTH);
+  });
+
+  it('only ORGANIZATION knowledge: a PUBLIC knowledge memory of the organization is not opened by the organization form', async () => {
+    await activeGrant(app.id, 'memory.read', { memory: org.id }, admin);
+    const pub = await orgKnowledge(org.id, org.urn, { visibility: 'PUBLIC' });
+    // A PUBLIC memory is read through its own visibility rule, so the surfaces cannot tell; the judge itself must not name it.
+    const { appReadGrantReach } = await import('../../../lib/grants/readGrant.js');
+    expect((await appReadGrantReach(db as never, app.id, { run: true, onlyMemoryIds: [pub.id] })).has(pub.id)).toBe(false);
+  });
+
+  it('the giver must still be a live member: a giver whose membership is removed opens nothing (an erased giver still counts)', async () => {
+    const k = await orgKnowledge(org.id, org.urn);
+    await activeGrant(app.id, 'memory.read', { memory: org.id }, admin);
+    expect(await reachFor(runAuth(app.id), k.id)).toEqual(BOTH);
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: org.id, userId: admin } }, data: { deletedAt: new Date() } });
+    expect(await reachFor(runAuth(app.id), k.id)).toEqual(NONE);
+    await db.user.update({ where: { id: admin }, data: { deletedAt: new Date() } });
+    expect(await reachFor(runAuth(app.id), k.id)).toEqual(BOTH); // cor:acl:140:08
   });
 
   it('a memory.read grant naming another organization opens nothing', async () => {
