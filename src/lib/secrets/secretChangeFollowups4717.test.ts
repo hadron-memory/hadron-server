@@ -112,7 +112,7 @@ describe('#4717 item 3: a protected create of a taken name refuses at staging', 
 
 describe('#4717 item 4: the change-request objects apply by either path, in either order, twice', () => {
   const read = (p: string) => readFileSync(new URL(`../../../prisma/${p}`, import.meta.url), 'utf8');
-  const MIGRATION = 'migrations/20261120180000_secret_change_requests/migration.sql';
+  const MIGRATION = 'migrations/20261127090000_secret_delete_after_use/migration.sql';
   it('the migration and post-push share one source for these objects', () => {
     const invariants = read('secret-change-requests-invariants.sql');
     expect(read(MIGRATION)).toContain(invariants);

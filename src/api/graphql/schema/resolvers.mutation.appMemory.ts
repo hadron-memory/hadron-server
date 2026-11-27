@@ -229,11 +229,12 @@ async function reclaimAllOrKeep(tx: Prisma.TransactionClient, ids: string[], use
 }
 
 /** A P2002 whose violated unique is the memory URN (Prisma reports the column list, or the index name, in meta.target). */
-function isUrnUniqueViolation(err: unknown): boolean {
+export function isUrnUniqueViolation(err: unknown): boolean {
   if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') return false;
   const target = err.meta?.target;
   const names = Array.isArray(target) ? target.map(String) : [String(target ?? '')];
-  return names.some((n) => n === 'urn' || n.includes('urn'));
+  // Exactly the memories.urn unique: the column list or its index name. A substring match would also take another constraint (e.g. a legacy_urn one).
+  return names.some((n) => n === 'urn' || n === 'memories_urn_key');
 }
 
 type UrnBlocker = { id: string; userId: string | null; appId: string | null; class: string; deletedAt: Date | null };
