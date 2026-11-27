@@ -347,7 +347,10 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // CHAT_APP_NOT_IDENTIFIED before any Agent lookup; the App is never searched for, and SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is
 // retired. A previously working signed-in start that names no App is now refused, so a client keys on this version before sending
 // `appRef` (hadron-portal#2683, hadron-cli#3310). (0.53.0 is #5416, merged first.)
-export const HADRON_SERVER_VERSION = '0.54.0';
+// 0.55.0 — BEHAVIOUR (no SDL change) (#5216, follow-ups to #5021): a usage unit whose run row was hard-deleted before it was written is
+// now recorded with no run (it was dropped, with its cost); a `CREDIT_MARKUP_PERCENT` whose basis points exceed 2147483647 falls back to 0
+// with one `credit_markup_percent_env_invalid` warn line (it dropped the unit). Answers and the SDL are unchanged. (0.54.0 is #5394, merged first.)
+export const HADRON_SERVER_VERSION = '0.55.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
