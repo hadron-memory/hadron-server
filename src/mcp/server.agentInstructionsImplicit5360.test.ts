@@ -8,9 +8,10 @@
  * The worker session is started through GraphQL (the CLI's path, startWorkerSessionGql) and PRESENTED per
  * request (#3082: MCP itself binds no worker).
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { resetEmbeddingClientForTests } from '../lib/embedding/index.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { serveEveryAgent } from '../test/servedBootPrompt.js';
@@ -36,9 +37,13 @@ beforeAll(async () => {
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 afterAll(async () => { await closeServerIfStarted(server); });
+// #5408 (Byron's F8): the stub alone does not reach an embedding client cached before it — reset alongside the
+// stub, and again after, so this file's "No task matches" shape never depends on the ambient env or a leak.
+afterEach(() => { vi.unstubAllEnvs(); resetEmbeddingClientForTests(); });
 
 beforeEach(async () => {
   vi.stubEnv('EMBEDDING_API_URL', ''); // no embeddings on this stack: the keyword fallback shapes the answer
+  resetEmbeddingClientForTests();
   await cleanDb(db);
   const s = generateId().toLowerCase();
   const org = await db.organization.create({ data: { id: generateId(), name: 'Implicit Org', urn: `implicit-${s}.example` } });
@@ -81,7 +86,11 @@ async function mcpCall(name: string, args: Record<string, unknown>, hadronSessio
     body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name, arguments: args } }),
   });
   expect(res.status).toBe(200);
-  return res.text();
+  const text = await res.text();
+  // #5408 (Byron's F8): close the transport this call opened — the registry keeps an unclosed session until the
+  // idle sweep, which never runs under NODE_ENV=test.
+  await fetch(`${baseUrl}/mcp`, { method: 'DELETE', headers: { ...base, 'mcp-session-id': sid } });
+  return text;
 }
 
 describe('#5360 B4: hadron_get_instructions with no agentRef, over the real transport', () => {
@@ -106,6 +115,7 @@ describe('#5360 B7 over MCP: hadron_agent_tasks validates before it reads', () =
   it('an over-long phrase is the 512 input refusal even for an unknown Agent (the check runs before the ref resolution)', async () => {
     const text = await mcpCall('hadron_agent_tasks', { agentRef: generateId(), phrase: 'x'.repeat(513) }, workerSessionId);
     expect(text, text).toContain('at most 512 characters'); // the input refusal's own text
+    expect(text).toContain('"isError":true'); // the refusal itself, not merely the absence of the not-found one
     // The tool renders a refusal's raw message, and the not-found message carries its code — its absence is
     // the proof the input check ran BEFORE the ref was resolved.
     expect(text).not.toContain('AGENT_NOT_FOUND');

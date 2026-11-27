@@ -11,6 +11,7 @@ describe('#5360 B6: TASK_MATCH_MIN_SCORE forms', () => {
   afterEach(() => vi.unstubAllEnvs());
 
   it('the default is 0.45 (the separating score of the re-cut S0 measurement, Holger 2026-11-25)', () => {
+    vi.stubEnv('TASK_MATCH_MIN_SCORE', undefined); // #5408 (Byron's F9): judge the default, not whatever the ambient env carries
     expect(TASK_MATCH_MIN_SCORE_DEFAULT).toBe(0.45);
     expect(taskMatchMinScore()).toBe(TASK_MATCH_MIN_SCORE_DEFAULT);
   });
@@ -22,7 +23,7 @@ describe('#5360 B6: TASK_MATCH_MIN_SCORE forms', () => {
     ['0.9999', 0.9999],
     [' 0.5 ', 0.5], // surrounding whitespace is trimmed before the form is judged
     ['0.5\n', 0.5],
-  ])('accepts %j as %d', async (raw, expected) => {
+  ])('accepts %j as %d', (raw, expected) => {
     vi.stubEnv('TASK_MATCH_MIN_SCORE', raw);
     expect(taskMatchMinScore()).toBe(expected);
   });

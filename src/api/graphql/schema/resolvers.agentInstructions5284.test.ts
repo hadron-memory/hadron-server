@@ -14,6 +14,7 @@ import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { requestActorStorage } from '../../../lib/requestActor.js';
 import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../../../lib/embedding/index.js';
+import * as lib from '../../../lib/agentDefinitionLists.js';
 import { upsertAbstractVector } from '../../../services/embedding/vectors.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
@@ -176,6 +177,11 @@ describe('#5284 agentInstructions: input', () => {
     ['neither phrase nor eventCode', { a: null, p: null }],
     ['an empty phrase', { ph: '   ' }],
     ['a phrase over 512 characters', { ph: 'x'.repeat(513) }], // #5360 B2: 512 for both (Holger, 2026-11-27)
+    // #5408 (Byron's F6, Baylor's F2): trimmed to nothing is refused like a blank phrase, alone or beside a
+    // valid phrase. Any non-empty appRef reaches the bound — it is judged before any read, so a placeholder id
+    // is exact here.
+    ['a blank eventCode', { p: 'app-any', c: '   ' }],
+    ['a blank eventCode beside a valid phrase', { ph: 'deploy failed', p: 'app-any', c: '   ' }],
     ['an eventCode without appRef', { c: 'task.finish.open-children' }],
   ])('%s is BAD_USER_INPUT', async (_n, vars) => {
     expect((await ask({ a: coder.id, ...vars })).refused?.code).toBe('BAD_USER_INPUT');
@@ -194,7 +200,11 @@ describe('#5360 input bounds: one shared 512 phrase bound, a trimmed and bounded
   });
   it('a 512-character phrase is answered and a 513-character one is BAD_USER_INPUT', async () => {
     expect((await ask({ a: coder.id, ph: 'x'.repeat(512) })).state).toBe('NO_MATCH');
-    expect((await ask({ a: coder.id, ph: 'x'.repeat(513) })).refused?.code).toBe('BAD_USER_INPUT');
+    const refused = (await ask({ a: coder.id, ph: 'x'.repeat(513) })).refused;
+    expect(refused?.code).toBe('BAD_USER_INPUT');
+    // #5408 (Byron's F4): ONE refusal — the over-long phrase gets assertQueryLength's own text, the same one
+    // agentTaskList serves (RED before the unification, which served a second, divergent message here).
+    expect(refused?.message).toContain('at most 512 characters');
   });
   it('an event code is trimmed before the register read', async () => {
     const r = await ask({ a: coder.id, p: app.id, c: '  task.finish.open-children  ' });
@@ -212,13 +222,13 @@ describe('#5360 input bounds: one shared 512 phrase bound, a trimmed and bounded
 });
 
 describe('#5360 a stale mapping: register MAPPED, task not in the asking Agent\'s list', () => {
-  it('answers NO_MATCH with register still MAPPED (cor:dmo:050:24 S1/S2 do not state otherwise; the answer is reported, the task is not invented)', async () => {
-    // The register resolves a loc through the asking Agent's own memory, where a pos-1 node is locatable whatever
-    // its node type (effectiveSystemMemory filters comments only on INHERITED positions), and it asks only
-    // runnable + live + readable. The task LIST excludes a comment unconditionally (agentDefinitionLists, #1935),
-    // so a runnable comment at a task loc in the Agent's own memory is the deterministic stale shape: the entry
-    // maps, yet the task is never in the list the answer is allowed to serve. Built by hand in one transaction
-    // (the comment invariants are deferred to commit): target, comment node, meta, anchor edge.
+  // The register resolves a loc through the asking Agent's own memory, where a pos-1 node is locatable whatever
+  // its node type (effectiveSystemMemory filters comments only on INHERITED positions), and it asks only
+  // runnable + live + readable. The task LIST excludes a comment unconditionally (agentDefinitionLists, #1935),
+  // so a runnable comment at a task loc in the Agent's own memory is the deterministic stale shape: the entry
+  // maps, yet the task is never in the list the answer is allowed to serve. Built by hand in one transaction
+  // (the comment invariants are deferred to commit): target, comment node, meta, anchor edge.
+  const buildStale = async () => {
     const target = await node(coder.memoryId, 'notes:stale-target');
     const retired = generateId();
     await db.$transaction(async (tx) => {
@@ -227,12 +237,39 @@ describe('#5360 a stale mapping: register MAPPED, task not in the asking Agent\'
       await tx.edge.create({ data: { memoryId: coder.memoryId, sourceId: retired, targetId: target.id, loc: `tasks:retired:anchor`, name: 'comment-anchor', governedKind: 'COMMENT_ANCHOR', anchorRevNo: 1, anchorApprovalHash: 'a'.repeat(64) } });
     });
     await entry(team.memoryId, 'task.stale.mapping', 'tasks:retired');
+  };
+
+  it('with no phrase: NO_MATCH with register still MAPPED (cor:dmo:050:24 S1/S2 do not state otherwise; the answer is reported, the task is not invented)', async () => {
+    await buildStale();
     const r = await ask({ a: coder.id, p: app.id, c: 'task.stale.mapping' });
     expect(r.register.state).toBe('MAPPED');
     expect([r.state, r.route]).toEqual(['NO_MATCH', null]);
     expect(r.candidates).toEqual([]);
     expect(r.instructions).toBeNull();
     expect(r.fallback.node.id).toBe(askCoordinator.id); // the instructions.no-match fallback still applies
+  });
+
+  // #5408 (Byron's F1): the stale mapping never matches by REGISTER — it FALLS THROUGH, so with a phrase the
+  // SEARCH arm decides exactly as it would without an eventCode, the stale mapping still reported in `register`.
+  // Pre-existing #5284 behaviour the three docs misstated; this pin is the contract, not a behaviour change.
+  it('with a phrase that matches: the search arm decides — MATCHED by SEARCH with the register still MAPPED', async () => {
+    await buildStale();
+    const r = await ask({ a: coder.id, p: app.id, c: 'task.stale.mapping', ph: 'deploy failed' });
+    expect(r.register.state).toBe('MAPPED');
+    expect(r.register.code).toBe('task.stale.mapping');
+    expect([r.state, r.route]).toEqual(['MATCHED', 'SEARCH']);
+    expect(locs(r.candidates)).toEqual(['tasks:deploy']);
+    expect(r.instructions).toContain('Deploy steps');
+    expect(r.fallback).toBeNull(); // a fallback is named on NO_MATCH only
+  });
+
+  it('with a phrase below the floor: NO_MATCH with the register still MAPPED and the near misses as nearest', async () => {
+    await buildStale();
+    const r = await ask({ a: coder.id, p: app.id, c: 'task.stale.mapping', ph: 'something weak' });
+    expect(r.register.state).toBe('MAPPED');
+    expect([r.state, r.route]).toEqual(['NO_MATCH', null]);
+    expect(locs(r.nearest)).toContain('tasks:weak');
+    expect(r.fallback.node.id).toBe(askCoordinator.id);
   });
 });
 
@@ -246,6 +283,13 @@ describe('#5360 the task list validates before it reads', () => {
   it('an over-long phrase is BAD_USER_INPUT before the read (512, the bound shared with agentInstructions)', async () => {
     expect(await refusalOf(generateId(), { ph: 'x'.repeat(513) })).toBe('BAD_USER_INPUT');
   });
+  // #5408 (Baylor's F1): the re-assert at the top of listAgentTasks covers DIRECT callers too — an invalid
+  // search is refused before the Agent row is read, so an unknown Agent never wins over the input refusal.
+  it('a DIRECT listAgentTasks call is refused on the search before the gate read', async () => {
+    const direct = (search: Record<string, unknown>) => (lib.listAgentTasks as any)(db, ctx(admin.id), generateId(), 'unknown-agent', search);
+    await expect(direct({ phrase: 'x'.repeat(513) })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    await expect(direct({ phrase: 'deploy failed', limit: 11 })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
   it('a valid ranked call still reads the gate first: an unknown Agent is AGENT_NOT_FOUND, as before', async () => {
     expect(await refusalOf(generateId(), { ph: 'deploy failed' })).toBe('AGENT_NOT_FOUND');
   });
@@ -255,7 +299,7 @@ describe('#5360 the keyword-only tail under a live embedding', () => {
   it('a keyword hit with no abstract vector follows every scored task, score null, matchedBy KEYWORD', async () => {
     // The keyword half is an AND over the phrase's words, so the manual task's abstract carries both ('deploy',
     // 'failed'); it has no abstract VECTOR, so under the live embedding it is the keyword-only tail.
-    const manual = await task(coder.memoryId, 'tasks:manual', 'Deploy the failed service by hand', null);
+    const manual = await task(coder.memoryId, 'tasks:manual', 'Deploy the failed service by hand', null /* no abstract vector */);
     const hits = await (resolvers.Query as any).agentTaskList({}, { ref: coder.id, phrase: 'deploy failed', limit: 10 }, ctx(admin.id));
     expect(hits[0].node.id).toBe(deploy.id);
     expect(hits[0].matchedBy).toBe('BOTH');
