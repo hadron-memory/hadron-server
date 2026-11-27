@@ -23,6 +23,7 @@ import { requireProtectedSecretHolder } from '../../../lib/secrets/protection.js
 import { autoDeleteLimitRefusal, deleteLockedAppSecret } from '../../../lib/secrets/autoDelete.js';
 export { autoDeleteLimitRefusal } from '../../../lib/secrets/autoDelete.js';
 import { GraphQLError } from 'graphql';
+import { isDeepStrictEqual } from 'node:util';
 import { assertOneRevealPerOperation, type RevealOperationInfo } from '../../../lib/secrets/revealOperationGuard.js';
 import { AUTHORIZATION_DENIED_CODE } from '../../../lib/auth/authorizationDenied.js';
 import { pageArgs, pageEnvelope, type Context } from './resolvers.helpers.js';
@@ -444,7 +445,11 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
       // #5299: the other direction. `protected: true` on a secret that is already protected, with no value and no metadata, asks for no change; staging it
       // spent a slot and a ceremony for a completion that does nothing. Unlike #4749 no gate runs before this transaction, so the silent answer is
       // given only to a caller who passes the very checks staging would make (`requireStagingPerson`); every other caller keeps the refusal it had.
-      if (secret.protected && requestedProtected === true && args.metadata === undefined && args.value === undefined) {
+      // #5331 item 6 (spec FIT 7209702827, cor:sec:070:01's Proposed edge): metadata identical to the live row's asks for no change either, so
+      // it is the same no-op under the same conditions. Judged on the normalized metadata against the row locked above (the proof's
+      // flag-only test uses the same equality); any difference, or a value, stages as before.
+      const metadataUnchanged = args.metadata === undefined || isDeepStrictEqual(metadata, secret.metadata);
+      if (secret.protected && requestedProtected === true && metadataUnchanged && args.value === undefined) {
         await requireStagingPerson(tx, ctx);
         return secret;
       }
