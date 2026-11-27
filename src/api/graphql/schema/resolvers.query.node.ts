@@ -2558,6 +2558,36 @@ export const nodeQueries = {
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
+        // #5268 — a wrong-type URN (`hrn:mem:…`, `hrn:app:…`) is a coercion
+        // bug, not a miss, and the refusal names the failing ref by its
+        // POSITION: the 0-based index in the caller's `refs` as sent, of the
+        // FIRST wrong-type ref in caller order (first occurrence). The screen
+        // runs as a synchronous PRE-PASS over the raw list, before any
+        // resolution (#5268 spec-FIT condition), so the index can never
+        // depend on which rejection `Promise.all` below surfaces first. An
+        // unqualified ref is NOT screened here (the spec-FIT left it out);
+        // since the screen covers the whole list first, a wrong-type ref is
+        // named even when an unqualified ref precedes it — the same
+        // precedence this resolver had before #5268, when the screen's
+        // rejection (thrown before any await) beat the per-ref
+        // UrnNotQualifiedError out of `Promise.all`. The position is not
+        // caller-typed, so the no-echo rule of #5168 / cor:api:140:01 holds;
+        // the shared parser reports only the URN KIND, never the value.
+        // Without this screen, resolveNodeRef reports a wrong-type prefix
+        // with the SAME NodeNotFoundError a genuinely absent node raises, so
+        // it would file a caller's type error under `unavailable`: the exact
+        // silence this surface just removed (matching the single-node
+        // node(ref:) read — PR #815 review, Codex P2).
+        for (let i = 0; i < refs!.length; i++) {
+          const ref = refs![i];
+          if (isId(ref)) continue;
+          const typeErr = validateUrnType(parseUrnInput(ref), 'node');
+          if (typeErr) {
+            throw new GraphQLError(`nodeBatch: ${typeErr} (the ref at index ${i})`, {
+              extensions: { code: 'BAD_USER_INPUT', index: i },
+            });
+          }
+        }
         // Dedup the raw input first (a repeated ref costs nothing to resolve
         // twice), then again on the RESOLVED id below — a PK and that node's
         // URN are different strings naming one node, and the single nodeById
@@ -2577,19 +2607,9 @@ export const nodeQueries = {
         const resolved = await Promise.all(
           uniqueRefs.map(async (ref) => {
             if (isId(ref)) return { ref, id: ref as string | null };
-            // A WRONG-TYPE URN (`hrn:mem:…`, `hrn:app:…`) is a coercion bug,
-            // not a miss — but resolveNodeRef reports it with the SAME
-            // NodeNotFoundError a genuinely absent node raises, so letting it
-            // reach the catch below would file a caller's type error under
-            // `unavailable`: the exact silence this surface just removed.
-            // Screen it here with the shared parser, matching what the
-            // single-node node(ref:) read does (PR #815 review, Codex P2).
-            const typeErr = validateUrnType(parseUrnInput(ref), 'node');
-            if (typeErr) {
-              throw new GraphQLError(`nodeBatch: ${typeErr} (one of the refs)`, {
-                extensions: { code: 'BAD_USER_INPUT' },
-              });
-            }
+            // A wrong-type URN never reaches here: the synchronous pre-pass
+            // above already refused it with the caller's index (#5268), so
+            // this map only resolves refs whose type screen passed.
             try {
               const { id } = await resolveNodeRefForCaller(ctx, ref);
               return { ref, id: id as string | null };

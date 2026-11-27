@@ -264,17 +264,22 @@ describe('pin 10: an account merge moves the merged-away person\'s entries to th
   });
 });
 
-describe('pin 13 and ruling 4: deleteUser keeps a person\'s entries, and only a platform admin can still read them', () => {
+describe('pin 13 and ruling 4: deleteUser keeps a person\'s entries without the person (#5302), and only a platform admin can still read', () => {
   const DELETE = `mutation($u: ID, $r: String) { deleteUser(userRef: $u, reason: $r) }`;
-  it('after deleteUser the entries and the balance are unchanged; an admin reads them, nobody else does', async () => {
+  it('after deleteUser the entry is kept without the person (#5302); an admin may still read, nobody else may', async () => {
     await gql(GRANT, adminCtx(), { input: grant({ userRef: q, sourceId: 'cs_q' }) });
+    const before = await db.creditLedgerEntry.findFirstOrThrow({ where: { ownerUserId: q } });
     const del = await gql(DELETE, adminCtx(), { u: q, r: 'pin 13' });
     expect(del.errors).toBeUndefined();
-    expect(await db.creditLedgerEntry.count({ where: { ownerUserId: q } })).toBe(1);
+    // #5302 (cor:dmo:170:08, Edge Cases: "kept without the person"): the entry stays, unchanged but for the owner link.
+    const kept = await db.creditLedgerEntry.findUniqueOrThrow({ where: { id: before.id } });
+    expect(kept).toEqual({ ...before, ownerUserId: null });
+    expect(await db.creditLedgerEntry.count({ where: { ownerUserId: q } })).toBe(0);
+    // Gate ruling 4 of #5014 (a platform admin may read a deleted person) still holds; what it finds no longer names the person.
     const byAdmin = await gql(BALANCE, adminCtx(), { userRef: q });
     expect(byAdmin.errors).toBeUndefined();
-    expect(byAdmin.data).toMatchObject({ creditBalance: { ownerUserId: q, balanceMicroCents: '1000' } });
-    expect((await gql(LEDGER, adminCtx(), { userRef: q })).data).toMatchObject({ creditLedgerEntries: { total: 1 } });
+    expect(byAdmin.data).toMatchObject({ creditBalance: { ownerUserId: q, balanceMicroCents: '0' } });
+    expect((await gql(LEDGER, adminCtx(), { userRef: q })).data).toMatchObject({ creditLedgerEntries: { total: 0 } });
     // an erased account is not found by anyone else, so the read is the same FORBIDDEN as for a person who never existed
     expect(code(await gql(BALANCE, ctxOf(p), { userRef: q }))).toBe('FORBIDDEN');
     expect(code(await gql(BALANCE, ctxOf(q), { userRef: q }))).toBe('FORBIDDEN');

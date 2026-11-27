@@ -2834,11 +2834,13 @@ export const typeDefs = `#graphql
     unresolvedFeedback: [UnresolvedFeedback!]!
   }
 
-  "#1610 — public identity of a Worker or Agent that wrote a node: never the full object, whose own read gate this does not pass."
+  "#1610, #5319 — public identity of a Worker, an Agent or a person (the owner of a ticker, the creator of a subscription): never the full object, whose own read gate this does not pass."
   type ActorRef {
     id: ID!
     name: String!
-    "The canonical hrn:worker:/hrn:agent: URN. Null when it cannot be composed."
+    "#5319 — the person's handle. Null for a Worker or an Agent, and for a person with no handle."
+    handle: String
+    "The canonical hrn:worker:/hrn:agent: URN, or hrn:user:<handle> for a person. Null when it cannot be composed, and for a person with no handle (such a person has no hrn:user: address)."
     urn: String
   }
 
@@ -7578,7 +7580,7 @@ export const typeDefs = `#graphql
     name: String!
     alias: String
     description: String
-    "Paragraph-length summary of this node — see Node.abstract for the surfacing contract (hadron_get_node opt-in via contentScope; hadron_find_nodes preview ships in US2). Optional. Omit to preserve; null to clear; string to replace. Empty + whitespace-only normalize to null. Cap is 2000 characters."
+    "Paragraph-length summary of this node — see Node.abstract for the surfacing contract (hadron_get_node opt-in via contentScope; hadron_find_nodes preview ships in US2). Optional. Omit to preserve; null to clear; string to replace. Empty + whitespace-only normalize to null. Cap is 2000 characters; for the long form use \`content\`."
     abstract: String
     content: String
     seq: Int
@@ -7685,7 +7687,7 @@ export const typeDefs = `#graphql
     role: String
     alias: String
     description: String
-    "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Optional. Empty + whitespace-only normalize to null. Cap is 2000 characters."
+    "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Optional. Empty + whitespace-only normalize to null. Cap is 2000 characters; for the long form use \`content\`."
     abstract: String
     content: String
     "MIME type of content (#476/#488, spec cor:cnv:010:01): 'text/markdown' (default) stores as-is; 'text/html' converts captured DOM to Markdown; 'application/pdf' extracts a PDF's text layer to Markdown (send 'content' as raw base64 — a PDF is binary; scanned/image-only PDFs error). The conversion runs before storage and fills properties.title from the extracted title when not supplied. Consumed at write time — never persisted. Any other value is rejected."
@@ -7750,7 +7752,7 @@ export const typeDefs = `#graphql
     role: String
     alias: String
     description: String
-    "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Omit to preserve; null to clear; string to replace. Empty + whitespace-only normalize to null. Cap is 2000 characters."
+    "Paragraph-length summary of this node — see Node.abstract for the surfacing contract. Omit to preserve; null to clear; string to replace. Empty + whitespace-only normalize to null. Cap is 2000 characters; for the long form use \`content\`."
     abstract: String
     content: String
     "MIME type of content (#476/#488, spec cor:cnv:010:01): 'text/markdown' (default) stores as-is; 'text/html' converts captured DOM to Markdown; 'application/pdf' extracts a PDF's text layer to Markdown (send 'content' as raw base64 — a PDF is binary; scanned/image-only PDFs error). The conversion runs before storage and fills properties.title from the extracted title when not supplied. Consumed at write time — never persisted. Any other value is rejected."
@@ -10795,7 +10797,10 @@ export const typeDefs = `#graphql
     ONE call instead of resolving each ref first. The split on a bad ref is by
     KIND, not by luck: a ref whose SHAPE is wrong errors the call — unqualified
     / relative (UrnNotQualifiedError) or a URN of the wrong entity type, e.g.
-    'hrn:mem:...' (BAD_USER_INPUT) — while a well-formed ref that names nothing
+    'hrn:mem:...' (BAD_USER_INPUT), which names the FIRST wrong-type entry by
+    its 0-based index in 'refs' — the message ends '(the ref at index N)' and
+    the error carries 'extensions.index' (an integer; first occurrence in the
+    order sent) — while a well-formed ref that names nothing
     the caller may read comes back in 'unavailable'. A caller mistake stays
     loud instead of hiding among denials. Per-node access is applied
     independently AFTER resolution: denied or missing refs come back in
