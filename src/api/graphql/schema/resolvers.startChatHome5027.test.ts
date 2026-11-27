@@ -94,14 +94,13 @@ const listed = async (userId: string, chatLoc: string) =>
 
 const HOSTS = [
   { klass: 'app', label: 'shared', make: sharedHome },
+  // R1 (Holger, 2026-11-27): a group memory made in the App is read and written through its MemoryMembers.
+  { klass: 'group', label: 'shared', make: () => groupHome('writer') },
   { klass: 'personal', label: 'private', make: () => appUserMemory('personal') },
   { klass: 'private', label: 'private', make: () => appUserMemory('private') },
 ] as const;
 
 describe('#5027 (a) a chat started with memoryRef lives in the named memory', () => {
-  // An App-scoped group row is readable to none of its MemoryMembers today (#653 parity), so a group home that must carry
-  // the chat's App cannot pass the read gate. Xan (#153780): the way out is a ruling for Holger; this pin stays unwritten.
-  it.todo('group: awaits the group-host ruling (chat #153776/#153780)');
   for (const host of HOSTS) {
     it(`${host.klass}: the chat and its next message are in that memory; it reads back the class, the URN and scope ${host.label}`, async () => {
       const memoryId = await host.make();
