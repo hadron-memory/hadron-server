@@ -223,9 +223,11 @@ describe('#5027 (d) CHAT_HOME_INVALID: one refusal, byte-identical, nothing prov
 });
 
 describe('#5027 (e) only the person creates a missing personal or private home', () => {
+  // READER on each so the start passes startChat's role check and reaches the home rule: the hybrid App-key shape carries
+  // the user's roles, and a real run principal (runAuthContext, roles: []) is refused earlier still, creating nothing.
   const principals: Array<[string, (u: string) => Context]> = [
-    ['App key', (u) => ({ db, userId: u, roles: [], appKeyId: 'k', appId } as Context)],
-    ['run principal carrying the user', (u) => ({ db, userId: u, roles: [], appId, clientId: `${RUN_CLIENT_PREFIX}${generateId()}` } as Context)],
+    ['App key', (u) => ({ db, userId: u, roles: ['READER'], appKeyId: 'k', appId } as Context)],
+    ['run principal carrying the user', (u) => ({ db, userId: u, roles: ['READER'], appId, clientId: `${RUN_CLIENT_PREFIX}${generateId()}` } as Context)],
     ['worker session', (u) => ({ db, userId: u, roles: ['READER'], sessionId: 'sess' } as Context)],
   ];
   for (const [name, ctxOf] of principals) {

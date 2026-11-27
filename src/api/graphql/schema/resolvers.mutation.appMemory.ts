@@ -204,7 +204,7 @@ async function requireAppMemoryCreator(ctx: Context, app: { organizationId: stri
 
 
 /** #5183: a collision answer for a personal/private memory carries no URN: the holder may not be the caller's. */
-function conflictWithoutUrn(): GraphQLError {
+export function conflictWithoutUrn(): GraphQLError {
   return new GraphQLError('That memory name is taken. Try again.', { extensions: { code: 'MEMORY_URN_CONFLICT' } });
 }
 
@@ -229,7 +229,7 @@ async function reclaimAllOrKeep(tx: Prisma.TransactionClient, ids: string[], use
 }
 
 /** A P2002 whose violated unique is the memory URN (Prisma reports the column list, or the index name, in meta.target). */
-function isUrnUniqueViolation(err: unknown): boolean {
+export function isUrnUniqueViolation(err: unknown): boolean {
   if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') return false;
   const target = err.meta?.target;
   const names = Array.isArray(target) ? target.map(String) : [String(target ?? '')];
@@ -255,6 +255,41 @@ async function findUrnBlockers(tx: Prisma.TransactionClient, urn: string): Promi
   const aliased = viaAlias.length > 0 ? await tx.memory.findMany({ where: { id: { in: viaAlias } }, select }) : [];
   // An alias whose memory row no longer exists (hard-deleted, e.g. reclaimed) resolves to nothing: it is not a holder.
   return [...direct, ...aliased];
+}
+
+/**
+ * #5183 (cor:dmo:060:20): the derived address of a person's personal or private memory in an App: the first free
+ * `<handle>:<app>-<handle>-<class>[-n]` whose only holders, if any, are the person's OWN soft-deleted memory of this App
+ * and class (reclaimed to make room, R6). Run inside the authority transaction after the caller's app_members row is
+ * locked and the one-per-class count is judged, so a handle or App rename that won the race is seen. Shared by
+ * createMemoryInApp and, #5027, startChat's Agent default home. No free tail is the URN-free conflict answer.
+ */
+export async function mintAppUserMemoryAddress(
+  tx: Prisma.TransactionClient,
+  appId: string,
+  userId: string,
+  klass: 'personal' | 'private',
+): Promise<{ urn: string; name: string }> {
+  const lockedApp = await tx.app.findUniqueOrThrow({ where: { id: appId }, select: { urn: true } });
+  const owner = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { handle: true } });
+  const appSlug = lockedApp.urn.split(':').pop()!;
+  for (let n = 1; n <= APP_USER_MEMORY_MAX_TAIL; n++) {
+    const candidate = appUserMemorySlug({ appSlug, handle: owner.handle, memoryClass: klass }, n);
+    const urn = `${owner.handle}:${candidate}`;
+    const blockers = await findUrnBlockers(tx, urn);
+    if (blockers.length > 0) {
+      // Taken, unless every holder is the caller's OWN soft-deleted memory of this App and class (R6): that row is
+      // removed to make room. Any other holder (another user's tombstone included) is taken, and nothing of it is touched.
+      const ownTombstones = blockers.filter((b) =>
+        b.deletedAt !== null && b.userId === userId && b.appId === appId && b.class === klass);
+      if (ownTombstones.length !== blockers.length) continue;
+      // A tombstone the reclaim refuses to remove keeps its address: that candidate is taken and the next tail is
+      // tried, so a name collision never refuses (R2).
+      if (!(await reclaimAllOrKeep(tx, ownTombstones.map((b) => b.id), userId))) continue;
+    }
+    return { urn, name: candidate };
+  }
+  throw conflictWithoutUrn();
 }
 
 export const appMemoryMutations = {
@@ -495,30 +530,8 @@ export const appMemoryMutations = {
                 { extensions: { code: 'APP_USER_MEMORY_ALREADY_EXISTS', memoryClass: klass } },
               );
             }
-            // After every wait: the App's slug and the caller's handle are both in the name and the URN root.
-            const lockedApp = await tx.app.findUniqueOrThrow({ where: { id: app.id }, select: { urn: true } });
-            const owner = await tx.user.findUniqueOrThrow({ where: { id: ctx.userId! }, select: { handle: true } });
-            const appSlug = lockedApp.urn.split(':').pop()!;
-            for (let n = 1; n <= APP_USER_MEMORY_MAX_TAIL; n++) {
-              const candidate = appUserMemorySlug({ appSlug, handle: owner.handle, memoryClass: memoryClass2 }, n);
-              const urn = `${owner.handle}:${candidate}`;
-              const blockers = await findUrnBlockers(tx, urn);
-              if (blockers.length > 0) {
-                // Taken, unless every holder is the caller's OWN soft-deleted memory of this App and class (R6):
-                // that row is removed to make room. Any other holder (another user's tombstone included) is
-                // taken, and nothing of it is touched.
-                const ownTombstones = blockers.filter((b) =>
-                  b.deletedAt !== null && b.userId === ctx.userId && b.appId === app.id && b.class === klass);
-                if (ownTombstones.length !== blockers.length) continue;
-                // A tombstone the reclaim refuses to remove keeps its address: that candidate is taken and the next
-                // tail is tried, so a name collision never refuses (R2).
-                if (!(await reclaimAllOrKeep(tx, ownTombstones.map((b) => b.id), ctx.userId!))) continue;
-              }
-              return createRow(tx, {
-                urn, name: candidate, organizationId: null, ownerUserId: ctx.userId!, appUserMemory: true,
-              });
-            }
-            throw conflictWithoutUrn();
+            const own = await mintAppUserMemoryAddress(tx, app.id, ctx.userId!, memoryClass2);
+            return createRow(tx, { ...own, organizationId: null, ownerUserId: ctx.userId!, appUserMemory: true });
           }));
         } catch (err) {
           // Only a collision on the URN is a name collision: any other unique violation is a real fault.
