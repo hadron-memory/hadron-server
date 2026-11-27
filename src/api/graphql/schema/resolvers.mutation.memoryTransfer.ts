@@ -47,7 +47,7 @@ function refusal(code: string, message: string): GraphQLError {
 async function authorizeSource(ctx: Context, memory: Memory, ref: string): Promise<void> {
   await concealUnreadableDenial(ctx, memory.id, ref, async () => {
     if (!ctx.userId || ctx.impersonation) throw forbiddenError();
-    // hadron-internal#89: a per-user chat holding is moved by its creator alone, acting as themselves. A platform or organisation role
+    // hadron-internal#89 (cor:cht:010:02): a per-user chat holding (the chat of the user it serves, recorded as its creator) is moved by that user alone, acting as themselves. Today even the creator's real move is refused by the dependents check (the Agent scope), so this gate is what keeps the PREVIEW and any future move from a role. A platform or organisation role
     // that could carry it into its own namespace would read it back (cor:cht:010:02, user only).
     if (isUserHolding(memory) && !userHoldingCreatorMayRead(ctx, memory)) throw forbiddenError();
     // personal/private's strict owner is separate from the tenant owner. An

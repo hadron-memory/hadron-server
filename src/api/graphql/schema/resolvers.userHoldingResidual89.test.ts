@@ -197,7 +197,8 @@ describe('task discovery and run-by-reference never surface a per-user chat hold
 
   it('control: the creator is not answered as for a missing node by GraphQL runTask', async () => {
     const urn = `hrn:node:${holdingUrn}:${nodeLoc}`;
-    expect(await code(M.runTask({}, { nodeRef: urn }, gql('creator')))).not.toEqual(await code(M.runTask({}, { nodeRef: `hrn:node:${missingUrn}:${nodeLoc}` }, gql('creator'))));
+    const creatorCode = await code(M.runTask({}, { nodeRef: urn }, gql('creator')));
+    expect(creatorCode).toBe('ok');
   });
 
   it('control: the creator reads the node by reference through run_action (the gate is the holding rule, not a broken fixture)', async () => {
@@ -216,7 +217,9 @@ describe('the subscription arm of the access map (hadron-internal#89)', () => {
       expect([who, await canReadMemory(db, mcpAuth(who) as never, holdingId)]).toEqual([who, false]);
       expect([who, await canWriteToMemory(db, mcpAuth(who) as never, holdingId)]).toEqual([who, false]);
       expect([who, [...(await filterReadableMemoryIds(db, mcpAuth(who) as never, [holdingId]))]]).toEqual([who, []]);
-      expect((await getAccessibleMemoryIds(gql(who))) ?? []).not.toContain(holdingId);
+      const ids = await getAccessibleMemoryIds(gql(who));
+      expect([who, ids]).not.toEqual([who, null]);
+      expect([who, ids]).toEqual([who, expect.not.arrayContaining([holdingId])]);
       expect([who, await code(requireMemoryWriteAccess(gql(who), holdingId))]).toEqual([who, 'FORBIDDEN']);
     }
     expect(await getAccessibleMemoryIds(gql('foreigner'))).toContain(plainId);
@@ -244,7 +247,10 @@ describe('copy-out and transfer doors do not carry a per-user chat holding to a 
     const out = await M.cloneMemory({}, { ref: holdingId, targetUrn: 'holding89.test::creator-copy' }, gql('creator'));
     expect(await db.node.count({ where: { memoryId: out.id, content: { contains: NEEDLE } } })).toBeGreaterThan(0);
     // Stated limit: the creator's own copy is an ordinary memory of the org, not a holding (the clone does not carry the marker).
-    expect(await db.memory.findUniqueOrThrow({ where: { id: out.id }, select: { class: true, userMemoryOfAgentId: true, createdBy: true } })).toEqual({ class: 'knowledge', userMemoryOfAgentId: null, createdBy: u.creator });
+    const copy = await db.memory.findUniqueOrThrow({ where: { id: out.id }, select: { class: true, userMemoryOfAgentId: true, createdBy: true, visibility: true } });
+    expect(copy).toEqual({ class: 'knowledge', userMemoryOfAgentId: null, createdBy: u.creator, visibility: 'ORGANIZATION' });
+    // Consequence of that limit, recorded: the org's members can read the creator's copy (the creator's own act; spec question on hadron-internal#89).
+    expect(await canReadMemory(db, mcpAuth('member') as never, out.id)).toBe(true);
     expect(await code(M.transferMemoryOwnership({}, { memoryRef: holdingId, userRef: u.creator, dryRun: true }, gql('creator')))).toBe('ok');
   });
 
@@ -275,12 +281,22 @@ describe('copy-out and transfer doors do not carry a per-user chat holding to a 
     expect(await before()).toEqual(row);
   });
 
-  it('control: a real transfer by the creator is refused by the existing Agent-scope dependency check, so a holding does not move today; a non-creator still reads nothing', async () => {
-    await expect(M.transferMemoryOwnership({}, { memoryRef: holdingId, userRef: u.creator, targetClass: 'private', dryRun: false }, gql('creator')))
-      .rejects.toThrow(/Agent scope/);
-    expect(await before()).toMatchObject({ class: 'knowledge', createdBy: u.creator, userMemoryOfAgentId: agentId });
-    for (const who of ['orgadmin', 'platformadmin', 'member'] as const) {
-      expect([who, await Q.node({}, { ref: nodeId }, gql(who))]).toEqual([who, null]);
+  it('a real transfer by the creator moves nothing in any shape (refused by the Agent-scope dependents check, the class and same-owner checks, not by the holding rule): the dry run says ok, the real call is refused by an existing check, and the row is unchanged', async () => {
+    // The creator also administers the other organisation, so the destination gate is not what refuses the cross-org shapes.
+    await db.orgMember.create({ data: { organizationId: otherOrgId, userId: u.creator, role: 'ADMIN' } });
+    const row = await before();
+    const shapes: Array<[string, Record<string, unknown>]> = [
+      ['user private', { userRef: u.creator, targetClass: 'private' }], ['user personal', { userRef: u.creator, targetClass: 'personal' }],
+      ['user no class', { userRef: u.creator }], ['same org', { orgRef: orgId }], ['same org knowledge', { orgRef: orgId, targetClass: 'knowledge' }],
+      ['other org', { orgRef: otherOrgId }], ['other org knowledge', { orgRef: otherOrgId, targetClass: 'knowledge' }],
+      ['other org private', { orgRef: otherOrgId, targetClass: 'private' }], ['another user', { userRef: u.member, targetClass: 'private' }],
+    ];
+    const outcomes: Record<string, string> = {};
+    for (const [label, args] of shapes) {
+      outcomes[label] = await code(M.transferMemoryOwnership({}, { memoryRef: holdingId, ...args, dryRun: false }, gql('creator')));
+      expect([label, await before()]).toEqual([label, row]);
     }
+    expect(outcomes).toEqual({ 'user private': 'MEMORY_TRANSFER_DEPENDENTS', 'user personal': 'MEMORY_TRANSFER_DEPENDENTS', 'user no class': 'MEMORY_TRANSFER_CLASS_REQUIRED', 'same org': 'MEMORY_TRANSFER_SAME_OWNER', 'same org knowledge': 'MEMORY_TRANSFER_SAME_OWNER', 'other org': 'MEMORY_TRANSFER_DEPENDENTS', 'other org knowledge': 'MEMORY_TRANSFER_DEPENDENTS', 'other org private': 'MEMORY_TRANSFER_CLASS_REQUIRED', 'another user': 'FORBIDDEN' });
+    for (const who of ['orgadmin', 'platformadmin', 'member'] as const) expect([who, await Q.node({}, { ref: nodeId }, gql(who))]).toEqual([who, null]);
   });
 });
