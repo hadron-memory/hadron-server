@@ -229,7 +229,7 @@ it('live licensed retained personal home still serves the real prompt', async ()
 // #5394: pinned the Agent manager's direct route (with no installing App, a manager created and reused an app_id-null
 // home). The route is retired: no App named is CHAT_APP_NOT_IDENTIFIED, and an App that does not install the Agent is
 // the unknown-Agent refusal, both before any read or write.
-it('no-App manager can still create and reuse a direct home', async () => {
+it('an Agent manager with no App installing the Agent gets no direct home: refused with or without an App named, nothing provisioned', async () => {
   await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
   await unidentifiedStartRefused();
   await refusedStart();
@@ -282,7 +282,7 @@ for (const route of ['app', 'manager'] as const) {
 // #5394: pinned the user-owned Agent's owner re-using a retained app_id-null home. That home is never picked now: no
 // App named is CHAT_APP_NOT_IDENTIFIED, and the org App does not license the user-owned Agent, so naming it is the
 // unknown-Agent refusal; either way the retained home is untouched.
-it('retained App-less home admits the user-owned Agent owner', async () => {
+it('a retained App-less home is never picked, even for the user-owned Agent owner: refused with or without an App named', async () => {
   const first = await start();
   const root = await chatNodeByLocOrThrow(db, first.chatId);
   await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
@@ -294,7 +294,7 @@ it('retained App-less home admits the user-owned Agent owner', async () => {
 // #5394: pinned which platform claim could re-use a retained app_id-null home (stale: refused; live: served). That home
 // is never picked now, so the platform role decides nothing here: with no App named both claims are CHAT_APP_NOT_IDENTIFIED,
 // and naming the App starts each in a home of that App, the retained App-less home untouched.
-it('live platform admin can use a retained App-less home; a stale platform claim cannot', async () => {
+it('a retained App-less home is never picked for a platform admin, live or stale: no App named is refused, naming the App starts beside it', async () => {
   const first = await start();
   const root = await chatNodeByLocOrThrow(db, first.chatId);
   await db.memory.update({ where: { id: root.memoryId }, data: { appId: null } });
@@ -427,7 +427,7 @@ it('shared admission stays on the selected App if the located home moves before 
 });
 
 /** The only uncommitted revoker holds this named authority domain in our private test database. */
-async function assertHeldRefusal(anchor: { kind: 'app' | 'org' | 'user'; id: string }, revoke: (tx: any) => Promise<unknown>, scope: 'private' | 'shared' = 'private') {
+async function assertHeldRefusal(anchor: { kind: 'app' | 'org' | 'user'; id: string }, revoke: (tx: any) => Promise<unknown>, scope: 'private' | 'shared' = 'private', viaCredential = false) {
   const before = await state();
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
@@ -442,7 +442,9 @@ async function assertHeldRefusal(anchor: { kind: 'app' | 'org' | 'user'; id: str
   await ready;
   let completed = false;
   const request = observeDefinitionReads(async () => {
-    try { await M.startChat({}, { agentRef: agentId, scope, conversationName: 'flow', appRef: appId }, ctx()); return null; }
+    // viaCredential (#5394): the App is identified by the caller's credential (ctx.appId), which needs no participation.
+    const args = viaCredential ? { agentRef: agentId, scope, conversationName: 'flow' } : { agentRef: agentId, scope, conversationName: 'flow', appRef: appId };
+    try { await M.startChat({}, args, viaCredential ? { ...ctx(), appId } : ctx()); return null; }
     catch (error) { return error as any; }
   }).then(result => { completed = true; return result; });
   try {
@@ -511,6 +513,32 @@ it('a retained home-only user App with no participation left: the start is refus
   await start();
   await db.appMember.delete({ where: { appId_userId: { appId, userId } } });
   await assertImmediateRefusal({ kind: 'user', id: owner.id }, tx => tx.orgMember.update({ where: { organizationId_userId: { organizationId: agent.organizationId!, userId: owner.id } }, data: { deletedAt: new Date() } }));
+}, 15_000);
+
+// #5394 (Bindi BLIND P2 on #5407): the held variants of the three pins above. A credential naming the home's App
+// identifies it without participation, so the non-participant reaches the retained home, and the start waits on the held
+// App, org or owner domain before refusing, with no definition read and no write (the #4046 home-only anchor fences).
+it('a credential-identified retained home-only App anchor fences uninstall when the caller has no App participation', async () => {
+  await retainedForeignHomeWithoutParticipation();
+  await assertHeldRefusal({ kind: 'app', id: appId }, tx => tx.appAgent.delete({ where: { appId_agentId: { appId, agentId } } }), 'private', true);
+}, 15_000);
+it('a credential-identified retained home-only App org anchor fences tenant deletion independently of the Agent org', async () => {
+  await retainedForeignHomeWithoutParticipation();
+  await assertHeldRefusal({ kind: 'org', id: foreignOrgId }, tx => tx.organization.update({ where: { id: foreignOrgId }, data: { deletedAt: new Date() } }), 'private', true);
+}, 15_000);
+it('a credential-identified retained home-only user-App owner anchor fences owner licence revocation independently of the caller', async () => {
+  const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
+  const owner = await db.user.create({ data: { handle: 'home4046-owner-cred' } });
+  await db.orgMember.create({ data: { organizationId: agent.organizationId!, userId: owner.id, role: 'READER' } });
+  await db.agentSubscription.create({ data: { userId: owner.id, agentId, activatedAt: new Date('2020-01-01') } });
+  const app = await db.app.create({ data: { ownerUserId: owner.id, name: 'Owner licence cred', urn: '@home4046-owner-cred:app' } });
+  await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
+  appId = app.id;
+  await db.appAgent.create({ data: { appId, agentId } });
+  await db.appMember.create({ data: { appId, userId, role: 'member' } });
+  await start();
+  await db.appMember.delete({ where: { appId_userId: { appId, userId } } });
+  await assertHeldRefusal({ kind: 'user', id: owner.id }, tx => tx.orgMember.update({ where: { organizationId_userId: { organizationId: agent.organizationId!, userId: owner.id } }, data: { deletedAt: new Date() } }), 'private', true);
 }, 15_000);
 
 it('shared provisioning recovers an actual unique collision without poisoning the outer transaction', async () => {

@@ -368,13 +368,11 @@ export const chatMutations = {
       // ── Target memory selection ──────────────────────────────────────
       // The chat (and its future messages + extracted data) get stored
       // in a user-scoped memory. Four auth paths:
-      //   0. (Spec 017) `scope: 'shared'` → app-class memory for the App
-      //      the caller is an AppMember of (and whose agentId matches).
-      //      JWT-user only in v1; App-key sessions stay private-only per
-      //      research.md Q-R2.
+      //   0. (Spec 017) `scope: 'shared'` → app-class memory of the identified App (#5394), which must install the
+      //      Agent; a signed-in caller must be its AppMember, a pure App key starts it for the user it may act for.
       //   1. App Key session with an active sessionId → use session.memoryId
-      //   2. JWT user → find-or-create a per-user memory for (agent, ctx.userId)
-      //   3. Legacy fallback → first writable memory attached to the agent
+      //   2. JWT user → find-or-create a per-user memory of the identified App for (agent, ctx.userId)
+      //   3. Anything else (a userless principal outside a session) → no home (#5394 removed the legacy fallback)
       /** #4046: eligible cold homes follow live participation, within the stamped start-route limits. */
       const coldAppWhere = async (client: Context['db'], principal: Context): Promise<Prisma.AppWhereInput | null> => {
         if (!principal.userId) return null;

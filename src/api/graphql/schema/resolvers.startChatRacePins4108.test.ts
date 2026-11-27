@@ -149,10 +149,10 @@ describe('#4108 item 1: the selected App owner changes after anchor discovery', 
     const first = await startChat();
     const home = (await chatNodeByLocOrThrow(db, first.chatId)).memoryId;
     expect((await db.memory.findUniqueOrThrow({ where: { id: home } })).appId).toBe(appId);
-    // #5394: this pin removed the caller's membership here, so the home App was no carrier and only the selected-App
-    // completeness check saw its owner. A start now names its App (appRef), which resolves only among the Apps the caller
-    // takes part in, so a non-participant is refused before any anchor is read. The membership stays; the pin still
-    // proves the stale attempt aborts on the owner change and the retry waits on the NEW owner's domain.
+    // Not a participant: the home App is not a carrier, so only the selected-App completeness check sees its owner.
+    // #5394: a named appRef resolves only among the Apps the caller takes part in, so the racing start identifies the
+    // App through its credential (ctx.appId), which needs no participation, and reuses the existing home.
+    await db.appMember.delete({ where: { appId_userId: { appId, userId } } });
 
     let holder: Awaited<ReturnType<typeof holdAnchors>> | null = null;
     let transactions = 0;
@@ -164,7 +164,8 @@ describe('#4108 item 1: the selected App owner changes after anchor discovery', 
       holder = await holdAnchors([{ kind: 'user', id: ownerB }]);
     });
     let completed = false;
-    const run = settle(startChat()).then((r) => { completed = true; return r; });
+    const credentialStart = () => M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, { ...ctx(), appId });
+    const run = settle(credentialStart()).then((r) => { completed = true; return r; });
     try {
       const writesBefore = await startWrites();
       await waitForLockWaitersOfType(db, 'advisory', 1);

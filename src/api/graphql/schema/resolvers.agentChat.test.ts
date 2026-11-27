@@ -1128,9 +1128,6 @@ describe('spec 017 — chat scope (US2 shared path)', () => {
   });
 
   it("an MCP App-key session's shared start runs under its own App (#5394; was refused with a distinct code)", async () => {
-    // research.md Q-R2: App-key sessions are private-only in v1. The
-    // rejection message must distinguish this from the no-AppMember case
-    // so SC-005 callers see something actionable.
     const app = await db.app.findFirstOrThrow({
       where: { urn: `${orgA.urn}:research-app` },
     });

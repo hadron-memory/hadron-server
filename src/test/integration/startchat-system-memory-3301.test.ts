@@ -145,11 +145,11 @@ describe('#3301 — an Agent\'s system memory is refused as a startChat target o
     expect(await db.node.count({ where: { memoryId: knowledge.id } })).toBe(0);
   });
 
-  it('refusal is byte-identical across branches and to the unreadable-target answer', async () => {
+  it('a userless run principal outside a session has no target, refused byte-identically to the unreadable-target answer', async () => {
     const a = await fixture();
-    // #5394: the user branch no longer reaches a system row (see the user-branch pins above), so the branch compared
-    // here is the legacy run-principal one, whose system-memory refusal is unchanged.
-    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: a.agentId, memoryId: a.systemId, role: 'read-write' } as never });
+    // #5394: the user branch no longer reaches a system row (see the user-branch pins above), and the legacy "first
+    // writable attached memory" lookup is gone, so a userless principal outside a session has no target at all. This
+    // pins that its refusal is the same answer as an unreadable session target.
     const branchRefusal = await start(a.agentId, { appId: a.appId, clientId: `run:${generateId()}` });
     const b = await fixture();
     // an unreadable target: a session naming a memory outside the session's verified reach

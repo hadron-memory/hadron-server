@@ -146,8 +146,10 @@ describe('#1581: startChat gates the Agent before reading or licensing anything'
 
   it('a chat that fails after the gate leaves no license (provisioned in the chat transaction)', async () => {
     // The Agent is reachable, but it has no conversation of this name.
-    await expect(M.startChat(null, { agentRef: agent.id, appRef: app.id, conversationName: 'nope' }, userCtx(member.id)))
-      .rejects.toThrow();
+    // #5407 review (Bindi P3): an App member (endUser), so the start passes identification and the gate and fails only
+    // at the conversation lookup; an org READER with no App membership would be refused before the gate.
+    await expect(M.startChat(null, { agentRef: agent.id, appRef: app.id, conversationName: 'nope' }, userCtx(endUser.id)))
+      .rejects.toThrow("Conversation not found in agent's system memory.");
     expect(await subsFor(agent.id)).toEqual([]);
   });
 });

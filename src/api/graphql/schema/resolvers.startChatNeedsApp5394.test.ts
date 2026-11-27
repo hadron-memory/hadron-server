@@ -22,6 +22,7 @@ import { cleanDb, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { formatGraphQLError } from '../formatError.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -205,9 +206,14 @@ describe('#5394 a named App the caller cannot use answers the participation refu
   it('an appRef that differs from the credential\'s App is refused the same way', async () => {
     const r = await refusal(M.startChat({}, { agentRef: agentId, appRef: appB }, as(ann, { appId: appA })));
     expect(r.code).toBe('CHAT_APP_NOT_IDENTIFIED');
-    // naming the credential's own App is fine
+    // naming the credential's own App is fine, by id or by URN
     const ok = await M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: appA }, as(ann, { appId: appA }));
     expect((await db.memory.findUniqueOrThrow({ where: { id: await homeOf(ok.chatId) } })).appId).toBe(appA);
+    const byUrn = await M.startChat({}, { agentRef: agentId, conversationName: 'flow', appRef: appAUrn }, as(ann, { appId: appA }));
+    expect((await db.memory.findUniqueOrThrow({ where: { id: await homeOf(byUrn.chatId) } })).appId).toBe(appA);
+    // and another App's URN is refused like its id
+    const otherUrn = await refusal(M.startChat({}, { agentRef: agentId, appRef: appBUrn }, as(ann, { appId: appA })));
+    expect(otherUrn).toEqual(r);
   });
 });
 
@@ -295,6 +301,33 @@ describe('#5394 shared chats run under the identified App', () => {
     const r = await refusal(M.startChat({}, { agentRef: agentId, scope: 'shared', appRef: bare.id }, as(ann)));
     expect(r.code).toBe('SHARED_CHAT_REQUIRES_APP_CONTEXT');
     expect(await counts()).toEqual(before);
+  });
+});
+
+// #5407 review (Bindi P3): the #5168 ref-echo harness fills only required arguments, so with no appRef its startChat
+// probes now stop at CHAT_APP_NOT_IDENTIFIED. This keeps its agentRef and userId cover on the same wire (formatGraphQLError):
+// past identification, a malformed or unknown ref is still never quoted back.
+describe('#5394 past identification, a bad agentRef or userId is still not echoed on the wire (#5168)', () => {
+  it('agentRef (App named) and userId (App key) refusals carry no canary', async () => {
+    const api = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
+    const canary = 'hdr_user_CANARY_5394_0123456789abcdef';
+    const wire = async (variables: Record<string, unknown>, contextValue: Context) => {
+      const r = await api.executeOperation({
+        query: 'mutation($agentRef: ID!, $appRef: ID, $userId: ID) { startChat(agentRef: $agentRef, conversationName: "flow", appRef: $appRef, userId: $userId) { chatId } }',
+        variables,
+      }, { contextValue });
+      const errors = r.body.kind === 'single' ? r.body.singleResult.errors ?? [] : [];
+      expect(errors.length, 'expected a refusal').toBeGreaterThan(0);
+      return errors[0];
+    };
+    for (const v of [canary, `  ${canary}  `, `${orgUrn}:canary-5394-unknown`]) {
+      const a = await wire({ agentRef: v, appRef: appA }, as(ann));
+      const u = await wire({ agentRef: agentId, userId: v }, { db, appId: appB, roles: [] } as unknown as Context);
+      for (const e of [a, u]) {
+        expect(e.extensions?.code).not.toBe('CHAT_APP_NOT_IDENTIFIED');
+        expect(JSON.stringify({ message: e.message, extensions: e.extensions })).not.toMatch(/canary[_-]5394/i);
+      }
+    }
   });
 });
 
