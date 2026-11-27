@@ -54,11 +54,10 @@ beforeEach(async () => {
   otherAgentId = (await M.createAgent({}, { orgRef: orgId, name: 'Other agent', visibility: 'ORGANIZATION' }, as(ann))).id;
   await db.appAgent.create({ data: { appId, agentId: otherAgentId } });
   for (const u of [ann, bob]) await db.appMember.create({ data: { appId, userId: u, role: 'member' } });
+  // The Agent skeleton seeds the `conversations` and `prompts` roots (#5390), so only the flow's own nodes are made here.
   for (const row of [
-    { loc: 'conversations', data: {} },
     { loc: 'conversations:flow', data: { stageOrder: ['step'], isSetup: false } },
     { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
-    { loc: 'prompts', data: {} },
     { loc: 'prompts:step', content: 'HOME STAGE', data: {} },
   ]) await db.node.create({ data: { memoryId: systemId, name: row.loc, nodeType: 'system', ...row } });
   await serveEveryAgent(db);
