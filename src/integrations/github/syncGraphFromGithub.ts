@@ -47,6 +47,7 @@ import { execGit } from './execGit.js';
 import { validateMemorySource } from '../../lib/gitSource.js';
 import { wakeEmbeddingQueue } from '../../services/embedding/enqueue.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
+import { createChatbotContainers, missingChatbotContainers } from '../../lib/chatbotAncestors.js';
 import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
@@ -1835,6 +1836,13 @@ const syncGraphFromGithubAsSystem = async (
           }
         }
         await reconcilePendingEdgeCount(tx, graph.id);
+        // #5390 — the container parents (`conversations`, `prompts`, `prompts:<name>`) of the conversation, stage and prompt
+        // nodes this sync wrote, when an Agent system memory lacks them. After the cleanup, so a parent the repo no longer
+        // carries is put back; under the ancestor keys taken for every written loc. No `ownerRepo`: the repo does not own
+        // them, so a later sync's cleanup leaves them, as it leaves a parent made by hand. Counted in the net below.
+        const containers = await missingChatbotContainers(tx, graph.id, writtenNodes.map((w) => w.loc));
+        await createChatbotContainers(tx, graph.id, containers, 'system:github-sync');
+        liveNodesAdded += BigInt(containers.length);
         // #5015 (cor:acl:150:04, gate ruling 7) — a sync is judged once, on its NET: the live nodes it added less those its
         // cleanup removed. The net is known only now (the loop's skips decide which files insert), so the judgement is the
         // last thing before the outcome is recorded; the memory row has been held FOR SHARE since the start, so the owner
