@@ -4660,8 +4660,6 @@ export function createMcpServerInstance(
               ...upsertArgs.update, content,
             });
             if (changes.length === 0) return current.id;
-            // #5019 (cor:dmo:060:19) — the section stores its description as its body too, so both count.
-            assertNodeContentSize(() => resultingNodeContent({ content, description: description ?? null }, currentForDiff));
             sectionChanged = authoredContentChanged(changes);
             // #1328 — a re-save is an update whatever the tool is called
             // (`findings:parent-node-upsert-is-authoring`).
@@ -4669,6 +4667,10 @@ export function createMcpServerInstance(
               priorRole: current.role, priorRunnable: current.isRunnable,
               role: current.role, runnable: current.isRunnable, mintHuman: true, authoredChange: sectionChanged,
             }, attestedAuthoring(recoveryCtx(), authoredWith));
+            // #5019 (cor:dmo:060:19) — the section stores its description as its body too, so both count. #5223: after
+            // the authoring gate — a size refusal counts stored fields, so a writer that gate refuses must not learn
+            // the over/under bit.
+            assertNodeContentSize(() => resultingNodeContent({ content, description: description ?? null }, currentForDiff));
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
