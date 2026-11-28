@@ -5,7 +5,7 @@
 // **Provider: Hetzner Object Storage** (Holger's call, 2026-08-06) —
 // the same provider the hourly Postgres backups already use, so assets
 // do not introduce a second storage vendor. The code serves any
-// S3-compatible API; MinIO covers local dev. Call sites import the
+// S3-compatible API; SeaweedFS covers local dev and QA (#5167). Call sites import the
 // scaffold (`objectstore/index.js`), never this module — CI enforces
 // that boundary.
 //
@@ -32,8 +32,8 @@
 // somewhere unexpected — it reads like a bad key. Default stays `auto`;
 // set it explicitly on Hetzner.
 //
-// Path-style addressing is the default because Hetzner and MinIO both
-// require it. R2 wants virtual-hosted style, so it needs
+// Path-style addressing is the default because Hetzner requires it, and
+// SeaweedFS (local dev and QA, #5167) serves it. R2 wants virtual-hosted style, so it needs
 // ASSET_STORAGE_FORCE_PATH_STYLE=false plus its full endpoint. (This
 // replaces an earlier rule that inferred path-style from whether the
 // endpoint was explicit — the endpoint is now always explicit, so the
@@ -76,12 +76,12 @@ export function getObjectStoreClient(): S3Client {
   cached = new S3Client({
     region: env('ASSET_STORAGE_REGION') || 'auto',
     endpoint,
-    // Hetzner and MinIO both require path-style; R2 is the exception and
+    // Hetzner requires path-style and SeaweedFS serves it; R2 is the exception and
     // opts out explicitly.
     forcePathStyle: env('ASSET_STORAGE_FORCE_PATH_STYLE') !== 'false',
     credentials: { accessKeyId, secretAccessKey },
     // AWS SDK v3 adds flexible-checksum headers by default
-    // (x-amz-checksum-crc32 etc.) that MinIO and some R2 path-style
+    // (x-amz-checksum-crc32 etc.) that MinIO (the former dev store) and some R2 path-style
     // configurations reject with ERR_CONNECTION_RESET on presigned PUT.
     // Compute checksums only when the operation actually requires them.
     requestChecksumCalculation: 'WHEN_REQUIRED',

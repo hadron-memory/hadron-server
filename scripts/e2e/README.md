@@ -71,11 +71,33 @@ that can still dangle; appending through it fails with `Directory nonexistent`).
 If the write fails it says so on stderr, and the run stops with `DNS not
 answering` unless a later probe succeeds. Only the disposable instance is touched.
 
-The first slice includes server and DB. Run a local portal as described below;
-MinIO, NATS, external-provider mocks, git-source fixtures and automated browser
-suites are not part of this slice. Mail and LLM spend are off, and so are the headless workers unless you opt in (see
+The first slice includes server, DB and an object store (see "Object store" below). Run a local portal as described
+below; NATS, external-provider mocks, git-source fixtures and automated browser suites are not part of this slice. Mail and LLM spend are off, and so are the headless workers unless you opt in (see
 "Run worker and the script-node fixture" below).
 No CI wiring or production snapshots are used.
+
+## Object store
+
+Every stack runs its own SeaweedFS (#5167; the same pinned image as local dev): the `s3` service, with the bucket
+`hadron-assets-e2e` created by the one-shot `s3-init` service, whose CORS rule allows the stack's own portal origin
+(`http://localhost:<portal-port>`). The app's `ASSET_STORAGE_*` point at `http://s3:8333` with dev-only credentials
+(`scripts/objectstore/seaweedfs-s3.json`). The stack has no scanner, so `HADRON_ASSET_SCAN_AUTO_CLEAN=true` makes an
+upload born CLEAN, and a download works straight after `completeAssetUpload`.
+
+Nothing is published: a presigned URL names the host `s3:8333`, which resolves only on the stack's network, and its
+SigV4 signature covers that host. So run the QA leg's `curl` inside the `s3` container (the image ships curl), with
+the URLs from `beginAssetUpload`'s `putUrl` and `assetDownloadUrl`'s `url`:
+
+```bash
+# Incus backend (the default here); on the Docker backend drop the `incus exec ... --` prefix.
+s3() { incus exec "hadron-e2e-<worker>" -- docker exec -i "hadron-e2e-<worker>-s3-1" "$@"; }
+s3 curl -sS -X PUT -H 'Content-Type: text/plain' --data-binary @- "<putUrl>" < ./upload.txt   # 200
+s3 curl -sS "<download url>"                                                                   # the bytes back
+```
+
+Between them, `completeAssetUpload(input: { uploadId })` promotes the staging object (server-side copy, then delete) and
+returns the asset CLEAN. Real-store checks of the client itself live in
+`src/integrations/objectstore/s3/realStore5167.test.ts`.
 
 ## Run worker and the script-node fixture
 
