@@ -24,8 +24,9 @@ const RENDERERS: Record<string, (md: string) => string> = {
   marked: (md) => marked.parse(md, { async: false }),
 };
 const NAMES = Object.keys(RENDERERS);
-const RAW_SELECTOR = 'textarea,script,style,title,xmp,iframe,noembed,noframes,noscript,plaintext,template';
 const RAW = new Set(['textarea', 'script', 'style', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext']);
+// linkedom has no template content of its own, so the anchor inside a `template` counts as not live there as it does in raw text.
+const RAW_SELECTOR = [...RAW, 'template'].join(',');
 
 interface TreeNode { nodeName: string; tagName?: string; value?: string; attrs?: { name: string; value: string }[]; childNodes?: TreeNode[]; content?: TreeNode }
 /** The anchor in parse5's tree, and whether it is live (not in raw text, not in a template's content). */
@@ -65,6 +66,8 @@ describe('#5384 a raw-text start behind a bare `<![` is escaped', () => {
     ['an xmp after an indented line', '<![1.\n    x\n§<xmp>'],
     // The same reading with more between: a later paragraph line, a second `<![`, a textarea.
     ['a textarea two lines on', '<![\nx\n§<textarea>'],
+    // #5473: a `template` after a blank line (the regex lists it; parse5 puts what follows into its content, so it is lost as raw text is).
+    ['a template after a blank line', '<![\n\n§<template>'],
     ['a second bare `<![` on its own line', '<![\n<![\n\n§<style>'],
     // A `<![` within a line whose `>` lies past the paragraph is escaped as any such `<!` is (main's rule), with the start after it.
     ['a second bare `<![` within the line', '<![ §<![\n\n§<style>'],
@@ -101,8 +104,9 @@ describe('#5384 a raw-text start behind a bare `<![` is escaped', () => {
 
   it('the walk reads past a `<![` only when the `>` it would jump to ends a raw-text start at a line head', () => {
     // Reading past any bare `<![` exposed what the jump used to hide, and the later constructs then met escapes of their own that lose the
-    // anchor where main kept it (fuzz at f27a59aa: 87 regressing pairs). Each body below is left as main leaves it; with the `<![` replaced by
-    // plain text, main loses the same readers, so those losses belong to other classes, not to this one.
+    // anchor where main kept it (fuzz at f27a59aa: 87 regressing pairs). Each body below is left as main leaves it. With the `<![` replaced by
+    // plain text, the body as written loses the same readers (and main's own escape of it loses more), so those losses belong to other classes,
+    // not to this one.
     for (const [body, lost] of [
       // A `<?` on the next line (a processing instruction to CommonMark and markdown-it), and no raw-text start at a line head.
       ['<![\n<?<<!>\t> q\n</ ``<title>\n\n<script><b</script>', ['marked']],
